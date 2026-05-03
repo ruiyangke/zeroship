@@ -1,7 +1,7 @@
 # Native Node.js `node:crypto` design
 
-**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review)
-**Status:** Draft v2 (post-review) — implementation pending
+**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review) · 2026-05-02 (v3 round-3 audit)
+**Status:** Draft v3 (round-3 audit) — implementation pending
 **Spec:** Node.js `node:crypto` API reference — https://nodejs.org/api/crypto.html
 **Companion specs:**
 - Node.js `crypto.webcrypto` — https://nodejs.org/api/webcrypto.html (Node's bridge between node:crypto and WHATWG WebCrypto; instructive for our bridging design)
@@ -52,6 +52,60 @@
 - A `KeyObject ↔ CryptoKey` bridge (the spec-mandated `KeyObject.from(cryptoKey)` and `crypto.subtle.importKey('jwk', keyObject.export(...))`) so creator apps using JOSE libraries (Web Crypto handle) can interop with apps using `jsonwebtoken` (Node KeyObject handle).
 
 ## Revision history
+
+- **v3 (2026-05-02 round-3 audit)** — Addresses 4 CRITICAL + 25 MAJOR + 15 MINOR findings from `/tmp/zeroship-reviews/node-crypto-review-v2.md`. The v2 critic verified 16/18 sampled v1 fixes were honestly applied; v3 closes the remaining audit gaps (invented error codes, invented aws-lc-rs algorithm constants, prose-only encrypted-PKCS#8 spec). v3 is a **narrow audit pass** — no architectural changes; the kernel/native/node split, Arc<KeyMaterial> share, AEAD state machine, sentinel translation, and deprecation-warning helper from v2 stand. Net effect:
+
+  **CRITICAL fixes (round-2 C2-1 through C2-4):**
+  - **Error code audit (C2-1, C2-2)** — every `ERR_CRYPTO_*` and `ERR_OSSL_*` code in §VII.3 / §V.4 / §IV.4a / §III.x is now verified against Node's authoritative registry: `lib/internal/errors.js` (https://github.com/nodejs/node/blob/main/lib/internal/errors.js, ~30 ERR_CRYPTO_* + 1 ERR_OSSL_*) and `src/node_errors.h` (https://github.com/nodejs/node/blob/main/src/node_errors.h, the C++ V(...) macro list with the rest of the ERR_CRYPTO_* family — including `ERR_CRYPTO_INVALID_AUTH_TAG`, `ERR_CRYPTO_INVALID_IV`, `ERR_CRYPTO_INVALID_TAG_LENGTH`, `ERR_CRYPTO_UNKNOWN_CIPHER`, `ERR_CRYPTO_INVALID_KEYLEN`, `ERR_OSSL_EVP_INVALID_DIGEST`). Renamed v2's invented codes:
+    - `ERR_CRYPTO_INVALID_IV_LENGTH` → `ERR_CRYPTO_INVALID_IV` (v2's `_LENGTH` suffix doesn't exist in Node).
+    - `ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH` → `ERR_CRYPTO_INVALID_AUTH_TAG` (TypeError, per `node_errors.h`).
+    - `ERR_CRYPTO_AUTH_TAG_LENGTH_INVALID` → `ERR_CRYPTO_INVALID_TAG_LENGTH` (RangeError, real per `node_errors.h`).
+    - `ERR_CRYPTO_INVALID_LENGTH` → `ERR_CRYPTO_INVALID_KEYLEN` (for symmetric mismatch) or `ERR_CRYPTO_INVALID_TAG_LENGTH` (for tag).
+    - `ERR_CRYPTO_DEPRECATED_API` → either generic `Error` (no code) or `ERR_CRYPTO_UNSUPPORTED_OPERATION` (for hard-blocked deprecated APIs); real Node behaviour for legacy crypto.createCipher is `process.emitWarning(..., 'DeprecationWarning', 'DEP0106')` + proceed, NOT throwing with a code.
+    - `ERR_CRYPTO_INVALID_DH_PRIME` → marked **zeroship extension** (no Node equivalent; we keep it but flag clearly in §VII.3a); fallback path uses `ERR_CRYPTO_OPERATION_FAILED`.
+    - `ERR_OSSL_EVP_BAD_DECRYPT`, `ERR_OSSL_EVP_SIGN`, `ERR_OSSL_EVP_VERIFY`, `ERR_OSSL_HMAC_KEY_TOO_SHORT`, `ERR_OSSL_PEM_NO_START_LINE`, `ERR_OSSL_ASN1_VALUE_ERROR`, `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`, `ERR_OSSL_EVP_UNSUPPORTED` — Node generates these dynamically from OpenSSL's ERR_PACK pipeline (per `node/src/crypto/crypto_util.cc::ThrowCryptoError`); Node does NOT define them as static codes. **v3 marks every `ERR_OSSL_*` we emit (except the real `ERR_OSSL_EVP_INVALID_DIGEST`) as a zeroship extension** in §VII.3a, with explicit policy: aws-lc errors are bridged through a single `ERR_CRYPTO_OPERATION_FAILED` envelope by default, with the OpenSSL-style `ERR_OSSL_<library>_<reason>` shape preserved verbatim ONLY when the upstream package observed Node's dynamic-build path (e.g., authentication-failed in GCM). Real Node behaviour matched.
+    - `ERR_MISSING_OPTION` retained — it IS a real Node code (verified, `lib/internal/errors.js` line ≈ 1610). v2's worry was unfounded; the critic was wrong on this one. Counter-cited.
+    - `ERR_MISSING_PASSPHRASE` retained — also verified real (`lib/internal/errors.js`).
+    - `ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED` retained — real per `lib/internal/errors.js`.
+  - **aws-lc-rs algorithm-existence audit (C2-3)** — every claimed `aws_lc_rs::*` constant in §III.2 + §IX.1 verified against the live docs.rs surface:
+    - `aws_lc_rs::digest` (https://docs.rs/aws-lc-rs/latest/aws_lc_rs/digest/index.html) exposes ONLY `SHA1_FOR_LEGACY_USE_ONLY`, `SHA224`, `SHA256`, `SHA384`, `SHA512`, `SHA512_256`, `SHA3_256`, `SHA3_384`, `SHA3_512`. **No MD5. No SHA512_224. No SHA3_224. No SHAKE128/256.**
+    - `aws_lc_rs::aead` (https://docs.rs/aws-lc-rs/latest/aws_lc_rs/aead/index.html) exposes ONLY `AES_128_GCM`, `AES_128_GCM_SIV`, `AES_192_GCM`, `AES_256_GCM`, `AES_256_GCM_SIV`, `CHACHA20_POLY1305`. **No OCB. No CCM.**
+    - `aws_lc_rs::cipher` (https://docs.rs/aws-lc-rs/latest/aws_lc_rs/cipher/index.html) exposes ONLY `AES_128`, `AES_192`, `AES_256` plus CBC/CTR/CFB128 modes. **No XTS. No ECB-as-mode. No OFB.**
+    - For each missing algorithm, v3 picks one of: (a) drop to `aws-lc-sys` raw FFI with explicit `EVP_*` call sequence in the algorithm-row "Backing path" column (D-N37), (b) defer to Stage E with rationale, or (c) DEFER PERMANENTLY (RIPEMD-160, IDEA — neither aws-lc-rs nor aws-lc has them). Effort estimates revised: Stage B grows from 60 industry-h to 90 industry-h (~2.25 agent-h) for MD5/SHA-512-224 FFI; Stage C grows from 90 to 110 industry-h (~2.75 agent-h) for AES-CCM FFI; Stage E budget grows by ~80 LOC for AES-OCB and ~120 LOC for AES-XTS. (See §III.2a Stage B FFI inventory and §IX.1a.)
+  - **Encrypted PKCS#8 EVP_* sequence (C2-4, D-N33 → D-N33b)** — §IV.4a previously prose-only; v3 adds full function-signature-level spec. Uses `aws-lc` PKCS8_encrypt + PKCS8_marshal_encrypted_private_key + PKCS8_decrypt + PKCS8_parse_encrypted_private_key (verified against https://github.com/aws/aws-lc/blob/main/include/openssl/pkcs8.h). Includes: PBES2 OID list, PBKDF2 PRF OID dispatch, IV-handling policy for AES-CBC inner ciphers, error mapping (PassphraseMismatch → `ERR_CRYPTO_OPERATION_FAILED` with "bad decrypt" message because Node's actual `ERR_OSSL_EVP_BAD_DECRYPT` is dynamic-built — see C2-2). New D-N37 records the FFI sequence. New D-N38 covers the algorithm-routing matrix (which algorithms ship via `aws-lc-rs` high-level vs `aws-lc-sys` raw FFI vs deferred).
+
+  **MAJOR fixes (round-2 M2-1 through M2-25):** mostly clarifications. Highlights:
+  - PSS saltLength=0 sign-vs-verify asymmetry documented (§V.5, M2-17).
+  - `ERR_INVALID_ARG_VALUE` on PSS bad sentinel → re-routed to RangeError per Node spec (M2-9, §V.5).
+  - PBES2-on-ECB explicitly rejected per RFC 8018 §6.2 (M2-10, §IV.4a).
+  - `ScryptMemoryExceeded` → `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` (was `ERR_CRYPTO_SCRYPT_NOT_SUPPORTED`; M2-14, §VII.3).
+  - GCM tag-length whitelist `[4, 8, 12, 13, 14, 15, 16]` enumerated (M2-21, §IX.2).
+  - Encrypted-PKCS#8 cipher whitelist expanded from 7 to 12 entries to match Node (M2-22, §IV.4a).
+  - AES-XTS removed from CIPHER_NAMES (M2-23) — XTS requires tweak parameter that the generic cipher state can't carry; DEFER PERMANENTLY to a future XTS-aware spec.
+  - `canonicalise_hash_name` documented as case-folding to lowercase before phf::Map lookup (M2-24).
+  - `setAutoPadding` flag duplication eliminated — single source of truth in `CipherContext` (M2-25, §V.4).
+  - Coverage math re-rolled: Stage 1 = 92/127 = 72%; Stage 1+2 = 121/127 = 95% (M2-1, §II.14).
+  - `crypto.encapsulate` shape spec'd: `{ ciphertext: Buffer, sharedKey: Buffer }` (M2-3, missing concept #1, §II.15).
+  - Transform mixin back-pressure + dual-API coexistence documented (M2-2, §V.6).
+  - `process.noDeprecation` reader plumbed via the existing process-shim (M2-4, §V.4).
+  - X509Certificate constructor stage labeling now consistently Stage E (M2-7, §II.11).
+  - `crypto.sign(callback?)` clarified: callback path uses `process.nextTick` for sub-millisecond ops, `spawn_blocking` only for RSA-4096 / ML-DSA / similar (M2-8, §II.4).
+  - PSS `modulus_bits % 8 != 0` rounding explicitly documented (M2-6, §V.5, footnote in `normalise_pss_salt_length`).
+  - `KeyObject.toCryptoKey` PSS lossy-bridging note (M2-12, §II.15).
+  - `KeyObject.equals` comment-vs-impl alignment (M2-15, m2-15, §II.8).
+  - `extractable` propagation reconciled with JWK round-trip docs (M2-15, §I.4 + XVII.9).
+  - `parse_sign_key_input` cold-PEM-decode budget documented (M2-16, §V.5).
+  - `randomInt` boundary comment cleaned up (M2-18, §VI.5).
+  - `crypto.signal` strikethrough cleanup so `getCipherInfo`/`getHashes` filtering excludes it (M2-19, §II.13).
+  - GCM tag whitelist enumerated (M2-21, §IX.2).
+  - Encrypted-PKCS#8 cipher whitelist matches Node exactly (M2-22, §IV.4a).
+  - `Cipher` `setAutoPadding` flag dedup (M2-25, §V.4).
+
+  **MINOR (m2-1 through m2-15):** Transform mixin / native-class export documentation (m2-1); NIST SP 800-22 added to test plan (m2-2); aws-lc-rs version pin (m2-3, §XVIII); coverage methodology footnote (m2-4); Zeroizing acquisition timing (m2-5); D-8 cross-ref quoted (m2-6); RuntimeFlags struct reality-check (m2-7); `emit_deprecation_warning_once` definition site (m2-8); verify-result vs verify-failure differentiation (m2-9); WPT setup-script for node:crypto vendoring (m2-10); LOC estimate adjusted up (m2-11); deprecation gating note (m2-12); `createSign` options shape (m2-13); m2-14 absorbed into C2-1; equals-comment alignment (m2-15).
+
+  **Decisions added in v3:** D-N37 (encrypted-PKCS#8 EVP_* FFI sequence at signature level — addresses C2-4); D-N38 (algorithm-routing matrix: aws-lc-rs high-level vs aws-lc-sys raw FFI vs deferred — addresses C2-3); D-N39 (zeroship-extension error-code policy: any `ERR_OSSL_*` code we emit that is not in Node's static registry is documented as a zeroship extension and SHOULD be paired with the closest real Node code in cross-platform code paths — addresses C2-1, C2-2).
+
+  No architectural changes. Doc grew from ~4,000 to ~4,400 LOC. The implementation is unblocked: every algorithm has a backing path, every error code is either real-Node or marked zeroship-extension, and D-N33b spells out the encrypted-PKCS#8 EVP_* sequence at signature level.
 
 - **v2 (2026-05-02 post-review)** — Addresses 14 CRITICAL + 30 MAJOR + 25 missing-concept findings from `/tmp/zeroship-reviews/node-crypto-review.md`. Net effect:
   - AEAD semantics rewritten to be CCM-correct: `createCipheriv` `authTagLength`, `setAAD` `plaintextLength`/`encoding`, `setAuthTag` ordering distinct per mode (CCM pre-update; GCM/OCB/ChaCha20 pre-final; GCM-only post-final tag inspection on Cipher).
