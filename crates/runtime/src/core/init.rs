@@ -696,6 +696,15 @@ pub fn load_polyfills_and_modules(
         crate::crypto_native::install_globals(scope, global);
     }
 
+    // Native node:crypto — `globalThis.__zeroship_node_crypto` (D-N26).
+    // Per docs/proposals/node-crypto-native.md §XI; the Vite-side
+    // synthetic module re-exports each property of this object as a
+    // named ESM export.
+    {
+        let global = scope.get_current_context().global(scope);
+        crate::crypto_node::install_globals(scope, global);
+    }
+
     {
         let code = v8::String::new(scope, NODE_GLOBALS_JS).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
@@ -1441,16 +1450,13 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // the WHATWG `Crypto` class as `globalThis.crypto` instead. The plain
     // object install + its 10 dead `__cryptoXxx` ops have been removed.)
 
-    // Native sync hash/HMAC for node:crypto polyfill
-    {
-        let f = v8::Function::new(scope, crate::crypto::crypto_hash_sync_callback).unwrap();
-        let key = v8::String::new(scope, "__cryptoHashSync").unwrap();
-        global.set(scope, key.into(), f.into());
-
-        let f = v8::Function::new(scope, crate::crypto::crypto_hmac_sync_callback).unwrap();
-        let key = v8::String::new(scope, "__cryptoHmacSync").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
+    // (`__cryptoHashSync` / `__cryptoHmacSync` were the v1 sync hash/HMAC
+    // ad-hoc V8 callbacks consumed by the JS shim at
+    // `sdks/vite-plugin/src/node-compat.ts`. After Stage B of
+    // `docs/proposals/node-crypto-native.md` the node:crypto shim
+    // delegates to `globalThis.__zeroship_node_crypto.createHash` /
+    // `createHmac` — the per-call thunks are dead code and have been
+    // removed alongside the JS shim's inline implementation.)
 
     // (`__streams.{create,read,enqueue,close,error}` was the native
     // backing for the JS pump in `__zsBeginStreamForward` from the

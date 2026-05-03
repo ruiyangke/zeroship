@@ -65,65 +65,107 @@ const CUSTOM_PREFIX = "\0zeroship-node:";
 
 /** Custom polyfill code for modules unenv doesn't implement well for V8. */
 const customPolyfills: Record<string, string> = {
-  // node:crypto — uses native Rust __cryptoHashSync/__cryptoHmacSync.
-  // unenv@2's crypto is a JS-only stub; ours bridges to Rust ops which
-  // are ~30× faster on the hot password/jwt path.
+  // node:crypto — Stage B native implementation. Per
+  // docs/proposals/node-crypto-native.md §XI (D-N26). The Rust runtime
+  // installs globalThis.__zeroship_node_crypto with createHash, createHmac,
+  // random helpers, KDFs, timingSafeEqual, getHashes, the WebCrypto bridge,
+  // etc. This shim re-exports each property as a named ESM export and wraps
+  // Hash.update / Hmac.update with a thin closure that supplies `return this`
+  // so npm packages can chain `.update(x).update(y).digest()`.
+  //
+  // Stage C will land KeyObject + Sign / Verify + Cipher / Decipher + the
+  // create*Key factories (currently absent — packages that need them will
+  // fall back to npm-package alternatives or fail with a clear error).
   "node:crypto": `
-function createHash(algorithm) {
-  const chunks = [];
-  return {
-    update(data) { chunks.push(typeof data === "string" ? data : new TextDecoder().decode(data)); return this; },
-    digest(encoding) {
-      const hex = __cryptoHashSync(algorithm, chunks.join(""));
-      if (!encoding || encoding === "hex") return hex;
-      if (encoding === "base64") { const b = new Uint8Array(hex.match(/.{2}/g).map(x => parseInt(x, 16))); return btoa(String.fromCharCode(...b)); }
-      if (encoding === "base64url") { const b = new Uint8Array(hex.match(/.{2}/g).map(x => parseInt(x, 16))); return btoa(String.fromCharCode(...b)).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,""); }
-      return new Uint8Array(hex.match(/.{2}/g).map(x => parseInt(x, 16)));
-    },
-    copy() { const c = createHash(algorithm); chunks.forEach(ch => c.update(ch)); return c; },
+const N = globalThis.__zeroship_node_crypto;
+if (!N) throw new Error("node:crypto: native install missing — runtime not initialised");
+
+// Wrap Hash / Hmac so update() returns this (the native method returns
+// undefined; chainability is supplied here per design §V.2 wrapper note).
+function _wrapStreamingHash(h) {
+  const origUpdate = h.update.bind(h);
+  h.update = function(data, enc) { origUpdate(data, enc); return h; };
+  return h;
+}
+
+function createHash(algorithm, options) {
+  return _wrapStreamingHash(N.createHash(algorithm, options));
+}
+function createHmac(algorithm, key, options) {
+  return _wrapStreamingHash(N.createHmac(algorithm, key, options));
+}
+
+// Stage B exports — direct re-exports.
+const randomBytes = N.randomBytes;
+const randomFillSync = N.randomFillSync;
+const randomFill = N.randomFill;
+const randomInt = N.randomInt;
+const randomUUID = N.randomUUID;
+const getRandomValues = N.getRandomValues;
+const pbkdf2 = N.pbkdf2;
+const pbkdf2Sync = N.pbkdf2Sync;
+const hkdf = N.hkdf;
+const hkdfSync = N.hkdfSync;
+const scrypt = N.scrypt;
+const scryptSync = N.scryptSync;
+const timingSafeEqual = N.timingSafeEqual;
+const getHashes = N.getHashes;
+const getCiphers = N.getCiphers;
+const getCurves = N.getCurves;
+const getFips = N.getFips;
+const setFips = N.setFips;
+const secureHeapUsed = N.secureHeapUsed;
+const webcrypto = N.webcrypto;
+const subtle = N.subtle;
+const fips = N.fips;
+const constants = N.constants;
+
+// Stage C placeholders — throw a clear error directing creators to file
+// an issue if they need cipher / sign / KeyObject (rare in Stage B's
+// target package set).
+function _stageC(name) {
+  return function() {
+    const err = new Error(name + " is not yet implemented (Stage C of node:crypto)");
+    err.code = "ERR_CRYPTO_UNSUPPORTED_OPERATION";
+    throw err;
   };
 }
+const createCipher = _stageC("crypto.createCipher");
+const createCipheriv = _stageC("crypto.createCipheriv");
+const createDecipheriv = _stageC("crypto.createDecipheriv");
+const createSign = _stageC("crypto.createSign");
+const createVerify = _stageC("crypto.createVerify");
+const createSecretKey = _stageC("crypto.createSecretKey");
+const createPublicKey = _stageC("crypto.createPublicKey");
+const createPrivateKey = _stageC("crypto.createPrivateKey");
+const createDiffieHellman = _stageC("crypto.createDiffieHellman");
+const createECDH = _stageC("crypto.createECDH");
+const generateKeyPair = _stageC("crypto.generateKeyPair");
+const generateKeyPairSync = _stageC("crypto.generateKeyPairSync");
+const generateKey = _stageC("crypto.generateKey");
+const generateKeySync = _stageC("crypto.generateKeySync");
+const sign = _stageC("crypto.sign");
+const verify = _stageC("crypto.verify");
+const publicEncrypt = _stageC("crypto.publicEncrypt");
+const privateDecrypt = _stageC("crypto.privateDecrypt");
+const diffieHellman = _stageC("crypto.diffieHellman");
 
-function createHmac(algorithm, key) {
-  const keyStr = typeof key === "string" ? key : Array.from(new Uint8Array(key.buffer || key)).map(b => b.toString(16).padStart(2, "0")).join("");
-  const chunks = [];
-  return {
-    update(data) { chunks.push(typeof data === "string" ? data : new TextDecoder().decode(data)); return this; },
-    digest(encoding) {
-      const hex = __cryptoHmacSync(algorithm, keyStr, chunks.join(""));
-      if (!encoding || encoding === "hex") return hex;
-      if (encoding === "base64") { const b = new Uint8Array(hex.match(/.{2}/g).map(x => parseInt(x, 16))); return btoa(String.fromCharCode(...b)); }
-      return hex;
-    },
-    copy() { return createHmac(algorithm, keyStr); },
-  };
-}
+const _default = {
+  createHash, createHmac,
+  randomBytes, randomFillSync, randomFill, randomInt, randomUUID, getRandomValues,
+  pbkdf2, pbkdf2Sync, hkdf, hkdfSync, scrypt, scryptSync,
+  timingSafeEqual, getHashes, getCiphers, getCurves, getFips, setFips, secureHeapUsed,
+  webcrypto, subtle, fips, constants,
+  // Stage C placeholders
+  createCipher, createCipheriv, createDecipheriv,
+  createSign, createVerify,
+  createSecretKey, createPublicKey, createPrivateKey,
+  createDiffieHellman, createECDH,
+  generateKeyPair, generateKeyPairSync, generateKey, generateKeySync,
+  sign, verify, publicEncrypt, privateDecrypt, diffieHellman,
+};
 
-function randomUUID() { return crypto.randomUUID(); }
-function randomBytes(size) { const b = new Uint8Array(size); crypto.getRandomValues(b); return b; }
-function randomFillSync(buf) { crypto.getRandomValues(buf); return buf; }
-function randomFill(buf, ...args) { const cb = args[args.length-1]; crypto.getRandomValues(buf); cb(null, buf); }
-function randomInt(min, max) {
-  if (max === undefined) { max = min; min = 0; }
-  const range = max - min;
-  if (range <= 0) throw new RangeError("max must be greater than min");
-  const limit = Math.floor(0x100000000 / range) * range;
-  let val;
-  do {
-    const a = new Uint32Array(1);
-    crypto.getRandomValues(a);
-    val = a[0];
-  } while (val >= limit);
-  return min + (val % range);
-}
-function getRandomValues(buf) { return crypto.getRandomValues(buf); }
-const webcrypto = crypto;
-const subtle = crypto.subtle;
-const fips = false;
-const constants = {};
-const _default = { createHash, createHmac, randomUUID, randomBytes, randomFillSync, randomFill, randomInt, getRandomValues, webcrypto, subtle, fips, constants };
-
-Object.assign(__vite_ssr_exports__, { createHash, createHmac, randomUUID, randomBytes, randomFillSync, randomFill, randomInt, getRandomValues, webcrypto, subtle, fips, constants, default: _default });
+Object.assign(__vite_ssr_exports__, _default, { default: _default });
 `,
 
   // node:timers/promises — unenv's setInterval is a Promise, not an async

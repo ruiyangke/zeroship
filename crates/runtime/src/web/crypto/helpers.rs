@@ -236,7 +236,7 @@ pub fn reject_now<'s>(
 }
 
 /// Materialise an OpError as a V8 exception value (TypeError /
-/// RangeError / DOMException / Error per kind).
+/// RangeError / DOMException / NodeError / Error per kind).
 pub fn op_error_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     err: OpError,
@@ -248,6 +248,9 @@ pub fn op_error_to_v8<'s>(
         crate::state::OpErrorKind::Error => v8::Exception::error(scope, msg),
         crate::state::OpErrorKind::DomException(name) => {
             crate::dom::exception::build(scope, &err.message, name).into()
+        }
+        crate::state::OpErrorKind::NodeError(code) => {
+            crate::node_error::build_node_exception(scope, code, &err.message)
         }
     }
 }

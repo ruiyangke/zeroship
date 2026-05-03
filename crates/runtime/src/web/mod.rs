@@ -9,6 +9,7 @@ pub mod base64;
 pub mod blob;
 pub mod codec;
 pub mod crypto;
+pub mod crypto_node;
 pub mod dom;
 pub mod encoding;
 pub mod fetch;
