@@ -1,7 +1,7 @@
 # Native Node.js `node:crypto` design
 
-**Date:** 2026-05-02
-**Status:** Draft v1 — implementation pending
+**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review)
+**Status:** Draft v2 (post-review) — implementation pending
 **Spec:** Node.js `node:crypto` API reference — https://nodejs.org/api/crypto.html
 **Companion specs:**
 - Node.js `crypto.webcrypto` — https://nodejs.org/api/webcrypto.html (Node's bridge between node:crypto and WHATWG WebCrypto; instructive for our bridging design)
@@ -53,6 +53,20 @@
 
 ## Revision history
 
+- **v2 (2026-05-02 post-review)** — Addresses 14 CRITICAL + 30 MAJOR + 25 missing-concept findings from `/tmp/zeroship-reviews/node-crypto-review.md`. Net effect:
+  - AEAD semantics rewritten to be CCM-correct: `createCipheriv` `authTagLength`, `setAAD` `plaintextLength`/`encoding`, `setAuthTag` ordering distinct per mode (CCM pre-update; GCM/OCB/ChaCha20 pre-final; GCM-only post-final tag inspection on Cipher).
+  - aws-lc-rs API audit: `secp256k1` is `signature::ECDSA_P256K1_SHA256_*` not `ECDSA_K256` (rename in §III.2). Encrypted PKCS#8 export/import drops to `aws-lc-sys` raw FFI (PKCS8_decrypt + PBES2 ASN.1 by hand) — documented as ~250 LOC in `kernel/pkcs8_enc.rs`; new D-N33 records the gap.
+  - RSA-PSS sentinel translation: `RSA_PSS_SALTLEN_DIGEST=-1`, `RSA_PSS_SALTLEN_MAX_SIGN=-2`, `RSA_PSS_SALTLEN_AUTO=-2` are now translated to concrete byte counts in `parse_sign_key_input` BEFORE the kernel call. New D-N34 records the policy.
+  - Missing post-quantum surface added (Stage E placeholder): ML-DSA, ML-KEM, SLH-DSA `asymmetricKeyType` values; `crypto.encapsulate` / `crypto.decapsulate` (Node v22+ KEM API).
+  - Stream `Transform` inheritance documented for Hash / Hmac / Cipher / Decipher / Sign / Verify (Node ships them as `stream.Transform` subclasses; `pipeline(...)` must work).
+  - `update(data, encoding)` encoding-ignore-for-non-string rule wired into `buffer::extract_input`.
+  - `Hmac.copy()` re-confirmed absent in Node (critic mistake; counter-cited against `node/lib/internal/crypto/hash.js`).
+  - `ECDH.setPublicKey` is shipped (deprecated, with warning) — not thrown.
+  - 25 missing concepts (argon2 status, `Certificate` SPKAC, `KeyObject.toCryptoKey`, X509 `checkEmail` / `checkIP` / `toJSON`, `randomFillSync` validation, etc.) tracked in §II / §X / new §II.15.
+  - Decision register updated: D-N6 contradiction resolved (always sync; threshold concept dropped from decisions table); D-N10 reaffirmed (Hmac has no copy in Node); D-N33 (encrypted PKCS#8 via aws-lc-sys raw FFI); D-N34 (PSS saltLength sentinels normalised pre-kernel); D-N35 (stream.Transform inheritance); D-N36 (post-quantum stub registry).
+
+  Each fix carries a "(addresses critic CRITICAL #N)" / "(MAJOR #N)" tag inline so the next review can grep coverage. Doc grew from 3,261 to ~4,000 LOC.
+
 - **v1 (2026-05-02)** — Initial design. Replaces the JS shim at `sdks/vite-plugin/src/node-compat.ts:67-127` (60 LOC) and the two ad-hoc `__cryptoHashSync` / `__cryptoHmacSync` V8 callbacks at `crates/runtime/src/crypto.rs:121-212` (92 LOC). Adds ~5,800 native Rust LOC across `crypto_node/` (the new node:crypto surface) + `crypto_kernel/` (the shared backend extracted from `crypto_native/`'s per-algorithm files). The first-class native node:crypto surface ships in two stages: Stage 1 covers the Tier-1 calls every npm package makes (hash, HMAC, randomBytes, KDFs, KeyObject + import/export, sign/verify, cipher/decipher, webcrypto bridge); Stage 2 fills the long tail (DH groups, X.509, prime generation, FIPS controls, legacy ciphers).
 
   Decisions D-N1 through D-N32 cover: dual-surface coexistence with shared kernel (D-N1, D-N2); class layout (D-N3); `KeyObject` ↔ `CryptoKey` bridge via shared `Arc<KeyMaterial>` (D-N4); sync vs async dispatch (D-N5, D-N6); buffer integration (D-N7); error mapping (D-N8); Hash / Hmac / Cipher / Decipher / Sign / Verify class shape (D-N9 through D-N14); KDF dispatch (D-N15); webcrypto bridge identity (D-N16); randomness ops (D-N17); algorithm-name canonicalisation across surfaces (D-N18); KeyObject import accept / export emit (D-N19); X.509 deferred to Stage 2 (D-N20); DH deferred policy (D-N21); legacy cipher policy (D-N22); ChaCha20-Poly1305 ship-now (D-N23); scrypt parameters + memory cap (D-N24); FIPS controls (D-N25); the synthetic ESM module install path (D-N26); module-shim cutover cadence (D-N27); algorithm registry (D-N28); the `getCipherInfo` / `getCipherInfo` static surface (D-N29); zeroize on Drop for secret material (D-N30); `timingSafeEqual` policy (D-N31); the macro-extension list (D-N32).
@@ -97,11 +111,11 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N3** | Class layout for node:crypto: 17 v8 classes — `Hash`, `Hmac`, `Cipher`, `Decipher`, `Sign`, `Verify`, `Hkdf` (Stage 2 internal), `Pbkdf2` (internal helper), `Scrypt` (internal helper), `KeyObject` (the parent), `PublicKeyObject`, `PrivateKeyObject`, `SecretKeyObject` (the three subclasses), `DiffieHellman` (Stage 2), `DiffieHellmanGroup` (Stage 2), `ECDH` (Stage 2), `X509Certificate` (Stage 2). Each is a `#[v8_class]` with a `Box<{Class}State>` in internal field 0. The `*KeyObject` subclasses use `#[v8_inherit(KeyObject)]`. | Node's own type model is `KeyObject` parent + three subclasses; the subclasses are used by typeof-checks in npm packages (e.g. `jose` checks `key instanceof PrivateKeyObject`). Mirroring exactly avoids surprise breakage. | §IV |
 | **D-N4** | `KeyObject` ↔ `CryptoKey` bridge via shared `Arc<KeyMaterial>`. Both `CryptoKey` (the existing WebCrypto wrapper) and `KeyObject` (the new node:crypto wrapper) hold an `Arc<KeyMaterial>` in their boxed state. `KeyObject.from(cryptoKey)` clones the Arc into a new `KeyObjectState`; `crypto.subtle.importKey('jwk', keyObject.export({format:'jwk'}))` round-trips through JWK (slow but spec-correct). The existing `crypto_native/key_material.rs::KeyMaterial` enum is wrapped in `Arc` (a one-line refactor at the storage site). | Node's spec mandates `KeyObject.from(CryptoKey)` works (https://nodejs.org/api/crypto.html#static-method-keyobjectfromkey). The Arc share avoids re-encoding key bytes; `keyObject.export(...)` still re-walks PKCS#8/SPKI from the Arc material on demand. workerd uses the same bridge (shared `KeyContext` in `api/crypto/keys.h`). | §IV.5 |
 | **D-N5** | Sync-on-V8-thread for all `*Sync` Node APIs and all "small" data-path streaming APIs (Hash/Hmac under any size; Cipher/Decipher under a 64 KB threshold; Sign/Verify under any size — RSA verify of a 100-byte sig is microseconds). Async (Promise or callback) for all `pbkdf2`, `scrypt`, `generateKeyPair`, `generatePrime`, and the `hkdf` async variant. Async dispatch goes through `state.spawned_ops` (the existing fetch / kv compio-blocking-pool pattern). | Mirrors WebCrypto's D-29 deferral with the difference that node:crypto explicitly distinguishes sync from async: the user picked the API, so we honour the contract. KDFs with adversary-tunable iteration count (PBKDF2's `iterations: 1_000_000` for password hashing) MUST go to a thread pool, otherwise a single password check pins the V8 thread for ~500 ms. | §VI |
-| **D-N6** | Cipher/Decipher block-mode `final()` runs sync on V8 thread always — `final()` is a single block of crypto work (one AES block + tag verify on GCM); even at 256 MB stream, the per-`update()` cost dominates and `final()` is cheap. `update()` runs sync below the 64 KB threshold (encrypts in place from a pre-allocated buffer) and offloads to a blocking pool above. The threshold is empirical (AES-GCM at 64 KB ≈ 50 µs on Skylake; above that the V8 thread visibly stalls). | Same reasoning as WebCrypto's D-29 v2 plan. The spawned-ops queue exists; the only new piece is the size-threshold gate. Documented separately because Cipher specifically has the streaming-update vs. final-tag asymmetry. | §VI.4 |
+| **D-N6** | Cipher/Decipher `update()` and `final()` both run sync on the V8 thread, always. Node's `cipher.update()` is documented sync-returning (https://nodejs.org/api/crypto.html#cipherupdatedata-inputencoding-outputencoding) — making it sometimes-async would change the API shape. We document the "chunk via TransformStream + per-chunk update" pattern for bulk-encryption workloads and rely on the `Cipher`/`Decipher` classes implementing `stream.Transform` (D-N35) for the natural pipe-based path. (addresses critic CRITICAL #1 — v1's "sync below 64 KB / async above" was internally contradicted by §VI.3 and contradicted Node's documented sync contract.) | Same reasoning as WebCrypto's D-29. Spec parity with Node. | §VI.3, §VI.4 |
 | **D-N7** | Buffer integration: accept inputs as a union of `Buffer | Uint8Array | DataView | ArrayBuffer | TypedArray | string`, materialise to `Vec<u8>` (or `&[u8]` when the lifetime works) at the entry point. Return `Buffer` from APIs Node specifies as returning Buffer (almost everything binary), `string` from APIs Node specifies as returning string (`digest('hex')`, `Sign.sign(privateKey, 'base64')`). The Buffer materialisation calls into unenv's Buffer (`new Buffer(arrayBuffer, byteOffset, byteLength)` via the `Buffer.from` static — same as the JS shim does today, but lifted into a single Rust helper). Buffer detection is loose: any Uint8Array works as a Buffer for input purposes (matches Node's behaviour — Node never type-checks input shapes; any TypedArray with the right bytes is fine). For OUTPUT, we mint Buffer instances by calling `Buffer.from(uint8Array)` via the V8 boundary. | Native-implementing Buffer ourselves would be a 600 LOC project (Buffer is a bigger surface than CryptoKey: alloc/allocUnsafe, write/writeBigInt64BE/writeUInt8/.., readDoubleBE/.., toString with 7 encodings, equals/compare/indexOf, subarray, slice, swap16/32/64, the encoding registry...). unenv's Buffer is correct enough that npm packages don't crash on it. The cost of a `Buffer.from(...)` round-trip per crypto call is ~100 ns — invisible next to a 5 µs hash. We document this as the v1 trade; a future Buffer-native ADR may revisit. | §III |
 | **D-N8** | Error mapping: a single `OpError` enum (the existing one, extended with a `NodeError(code: &'static str)` variant) routes to the right surface at throw time. The macro's `gen_throw_error` arm checks the variant: `NodeError(code)` constructs a JS Error / TypeError / RangeError (per a small table) and sets `error.code = code`; the existing `DomException(name)` arm stays for the WebCrypto surface. The kernel returns `KernelError`, which is mapped to either `OpError::DomException` (when called from `crypto_native/`) or `OpError::NodeError` (when called from `crypto_node/`) at the surface boundary. | Node's `e.code` is the contract npm packages check (`if (e.code === "ERR_CRYPTO_OPERATION_FAILED") retry()`). Throwing a generic Error breaks them. The kernel can't decide which surface to throw for — the surface knows. So map at the boundary. workerd does the same shape (`KJ_REQUIRE(...)` + per-surface adapter). | §VII |
 | **D-N9** | `Hash` class: `update(data, inputEncoding?)` returns `this` for chaining; `digest(outputEncoding?)` returns `Buffer` if no encoding else string in the requested encoding (`hex` / `base64` / `base64url` / `latin1` / `binary`). `copy(options?)` returns a fresh Hash with the same in-progress state. Throws `ERR_CRYPTO_HASH_FINALIZED` on any post-`digest()` update. Backed by `kernel::DigestContext`. | Direct Node parity. The encoding registry is small (5 named output encodings + 6 named input encodings = 11 strings); a phf::Map keyed on encoding string drives the conversion. | §V.2 |
-| **D-N10** | `Hmac` class: `update(data, inputEncoding?)` and `digest(outputEncoding?)` mirror Hash; `copy(options?)` is intentionally absent on Hmac in Node (hmac.copy doesn't exist) — we match. Backed by `kernel::HmacContext`. | Node has Hash.copy but not Hmac.copy (a quirk of OpenSSL EVP_MD_CTX vs HMAC_CTX). Some npm packages (older `passport-jwt` versions) crash if Hmac has a `.copy` method that throws when called the way Hash.copy works — they assume same shape. We match Node's omission exactly. | §V.3 |
+| **D-N10** | `Hmac` class: `update(data, inputEncoding?)` and `digest(outputEncoding?)` mirror Hash; `copy(options?)` is intentionally absent on Hmac in Node (`hmac.copy` doesn't exist) — we match. Backed by `kernel::HmacContext`. (**counter-citation against critic CRITICAL #10**: critic claimed Node v17+ added `Hmac.prototype.copy`. Verified against https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js — only `Hash.prototype.copy` is defined; the `Hmac` class extends `Hash` for `update` / `digest` / `_transform` / `_flush` via prototype assignment but `copy` is NOT among the inherited methods. Verified against https://nodejs.org/api/crypto.html#class-hmac — the documented method list is `digest`, `update`. v1's omission was correct; we keep it.) | Node has Hash.copy but not Hmac.copy (a quirk of OpenSSL EVP_MD_CTX vs HMAC_CTX). Some npm packages (older `passport-jwt` versions) crash if Hmac has a `.copy` method that throws when called the way Hash.copy works — they assume same shape. We match Node's omission exactly. | §V.3 |
 | **D-N11** | `Cipher` / `Decipher` classes: `update(data, inputEncoding?, outputEncoding?)` returns Buffer (or string if outputEncoding); `final(outputEncoding?)` flushes the last block + tag; `setAAD(buffer, options?)` for GCM/CCM AAD; `setAuthTag(buffer)` for Decipher post-data tag inject; `getAuthTag()` for Cipher post-final tag emit; `setAutoPadding(boolean)` for CBC PKCS#7 control. Backed by `kernel::CipherContext`. The class is created via `crypto.createCipheriv(algorithm, key, iv, options?)` factories — `createCipher` (deprecated, derives key from password) is intentionally NOT shipped (Node deprecated it because the KDF is broken; a creator app calling `createCipher` deserves the failure). | Direct Node parity for `createCipheriv`. Skipping `createCipher` is the workerd / Deno consensus — the deprecated API has weak KDF properties (EVP_BytesToKey single-iteration MD5). Throwing `ERR_CRYPTO_DEPRECATED_API` with a doc URL to switch to `createCipheriv` is the right move. | §V.4 |
 | **D-N12** | `Sign` / `Verify` classes: `update(data, inputEncoding?)` and `sign(privateKey, outputEncoding?)` / `verify(publicKey, signature, signatureEncoding?)`. Internally compute the digest streaming-style, then run the asymmetric op once at finalisation. Accept `privateKey` / `publicKey` as `KeyObject`, `CryptoKey`, PEM string, DER Buffer, or `{ key, format, type, passphrase }` options object — Node's union type. The encoding helper at the boundary materialises any of these to a kernel-friendly key handle. | Sign / Verify are the "DigestSign" pattern in OpenSSL (EVP_DigestSignInit + Update + Final). The streaming API saves the user from buffering the message; the kernel's `SignContext` mirrors EVP_DigestSignContext. | §V.5 |
 | **D-N13** | `KeyObject` / `PublicKeyObject` / `PrivateKeyObject` / `SecretKeyObject`: parent + three subclasses (`#[v8_inherit]`). Parent has `.type` (returns "secret" / "public" / "private"), `.asymmetricKeyType` (returns null for secret), `.asymmetricKeyDetails` (algorithm-specific dict), `.symmetricKeySize` (bytes for secret; null for asymmetric), `.export(options) -> Buffer | string | object`, `.equals(other)`. Subclasses add nothing functional — they exist for `instanceof` discrimination. Internal-field 0 holds `Box<KeyObjectState>` carrying an `Arc<KeyMaterial>`. The static `KeyObject.from(cryptoKey)` constructor accepts a `CryptoKey` and clones the Arc. | Node's type model verbatim. Some npm packages (older `jose`, `node-forge`) check `instanceof PrivateKeyObject` to distinguish privates; missing the subclass means those checks fail. | §IV |
@@ -110,7 +124,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N16** | webcrypto bridge — object identity. `import("node:crypto")` yields an exports object whose `.webcrypto` property IS the same `Crypto` instance that's installed at `globalThis.crypto`. The synthetic module's installer code reads `globalThis.crypto` once at module-evaluate time and assigns the reference directly; subsequent reads return the same `Crypto` instance. `subtle` is `globalThis.crypto.subtle`. `getRandomValues` is `globalThis.crypto.getRandomValues.bind(globalThis.crypto)` (Node binds; we follow). | Node's `crypto.webcrypto === globalThis.crypto` is a cross-codebase invariant — JOSE libraries assume it. Returning a copy would silently break `WeakMap`-based key tracking (libraries that keep a `WeakMap<CryptoKey, ...>` would lose entries on the boundary). | §VIII |
 | **D-N17** | Random: `randomBytes(size, callback?) -> Buffer | void` (callback variant returns Buffer to callback async; sync variant returns Buffer). `randomFillSync(buffer, offset?, size?) -> Buffer`. `randomFill(buffer, offset?, size?, callback) -> void` (always callback). `randomInt(min, max, callback?) -> number` (uniform distribution via rejection sampling, not the JS-shim's modulo bias). `randomUUID(options?)` — same as `globalThis.crypto.randomUUID`. `getRandomValues` re-export. All sync; `randomBytes(N)` for very large N (e.g. > 1 MB) goes async via callback if present, sync otherwise — matches Node. | The randomInt rejection-sampling fix corrects a subtle bias in the JS shim (line 109-117 of node-compat.ts: `range > 2^32` causes silent bias). Node uses the same rejection-sampling technique we will. | §VI.5 |
 | **D-N18** | Algorithm name canonicalisation: node:crypto names are case-insensitive but inconsistent ("sha256" vs "SHA-256" vs "RSA-SHA256"). The kernel uses spec-canonical names ("SHA-256", "RSA-PSS"); the surface adapter maps node:crypto inputs via a phf::Map: `"sha256" -> SHA-256`, `"sha-256" -> SHA-256`, `"sha384" -> SHA-384`, ..., `"rsa-sha256" -> SignAlg::RsaPkcs1Sha256`, etc. Names not in the table → `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`. | Node's getHashes() returns ~50 names (because OpenSSL aliases everything). We support the 4 SHA digests + their aliases + ChaCha20-Poly1305 + the 11 cipher modes + 6 sign algorithms — total ~25 algorithm names. The map is small. | §IX |
-| **D-N19** | `KeyObject.export(options)` accepts `{ format: 'pem' | 'der' | 'jwk', type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', cipher?: string, passphrase?: Buffer }`. PEM emission uses the kernel's PEM emitter (the inverse of D-N14's parser). `cipher` + `passphrase` for encrypted PKCS#8 export uses aws-lc-rs's `EncryptedPrivateKeyInfo::serialize_with_password`. JWK export reuses `crypto_native/jwk.rs::export_*`. | Direct Node parity. The cipher options matrix (`{ cipher: 'aes-256-cbc', passphrase: Buffer.from('...') }`) is what passport / saml / openid-client libraries use to round-trip encrypted private keys. | §IV.6 |
+| **D-N19** | `KeyObject.export(options)` accepts `{ format: 'pem' \| 'der' \| 'jwk', type: 'pkcs1' \| 'pkcs8' \| 'spki' \| 'sec1', cipher?: string, passphrase?: Buffer }`. PEM emission uses the kernel's PEM emitter (the inverse of D-N14's parser). `cipher` + `passphrase` for encrypted PKCS#8 export goes through `crypto_kernel/pkcs8_enc.rs` (D-N33 — drop to `aws-lc-sys` because high-level `aws-lc-rs` does not expose this surface). JWK export reuses `crypto_native/jwk.rs::export_*`. | Direct Node parity. The cipher options matrix (`{ cipher: 'aes-256-cbc', passphrase: Buffer.from('...') }`) is what passport / saml / openid-client libraries use to round-trip encrypted private keys. (addresses critic MAJOR #16: v1 cited an invented `EncryptedPrivateKeyInfo::serialize_with_password` API; corrected.) | §IV.6, §IV.4a |
 | **D-N20** | X.509: Stage 1 ships a stub class that throws `ERR_CRYPTO_UNSUPPORTED_OPERATION` on construction, with a clear message pointing at the Stage 2 ADR. Stage 2 ships parsing-only (constructor + readonly properties). Full chain verification defers to a future `@zeroship/x509-verify` npm package wrapping BoringSSL's `X509_verify_cert`. | Most npm packages that touch X509 (jsonwebtoken's JWKS endpoints, Apple Sign-In, Google's JWT checking) do their own verify on top of `X509Certificate.publicKey` — they don't call `.verify()` directly. Stage 2 parsing-only covers ~80% of usage. | §X |
 | **D-N21** | DH: Stage 1 ships only the named groups (`crypto.getDiffieHellman('modp14')` etc.). Stage 2 adds `crypto.createDiffieHellman(prime, generator)` via aws-lc-sys's lower FFI (`DH_set0_pqg`). Stage 1 errors on the unnamed-group factory with `ERR_CRYPTO_UNSUPPORTED_OPERATION`. `crypto.createECDH` ships in Stage 1 (aws-lc-rs's `agreement::*` has the curves). | DH (vs ECDH) is rare in modern apps — TLS 1.3 deprecated DHE in favour of ECDHE. Most uses we'll see in npm are SCRAM / SSH-key-exchange, both of which use named groups. Generic DH is the long tail. | §X |
 | **D-N22** | Legacy ciphers (DES, 3DES, Blowfish, Cast5, RC4, IDEA): NOT in Stage 1. Stage 2 ships them under the `--legacy-crypto` runtime flag (off by default). Without the flag, `createCipheriv('des-cbc', ...)` errors with `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` and a message pointing at the flag. Node ships these unconditionally (they're behind OpenSSL's `OPENSSL_NO_LEGACY` macro, which Node defines off). aws-lc-rs has DES via `cipher::TDES_*` but not Blowfish / Cast5 / RC4 / IDEA. We'd need aws-lc-sys raw for those. | Most modern apps don't touch these. The few that do are interfacing with truly legacy systems (POS terminals, ancient SAML providers); a runtime flag rather than blanket support reduces our attack surface. | §X |
@@ -124,6 +138,10 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N30** | Zeroize on Drop for KeyObjectState's secret material. Wrap the `KeyMaterial::Symmetric(Vec<u8>)` and `*Private` PKCS#8 / raw-d / private-component vectors in `zeroize::Zeroizing<Vec<u8>>` — same as WebCrypto's open-question XIV.8 working answer. The Arc share means zeroization happens when the LAST KeyObject + CryptoKey wrapper drops. | Defense-in-depth. zeroize is already a transitive dep via aws-lc-rs. ~5 LOC of wrapper. Aligns the two surfaces. | §IV.7 |
 | **D-N31** | `timingSafeEqual(a, b)` ships as a native Rust call — `aws_lc_rs::constant_time::verify_slices_are_equal`. Throws `ERR_INVALID_ARG_TYPE` if the inputs are different lengths or non-buffer-shaped. Returns boolean. | Node spec parity. The constant-time guarantee comes from aws-lc-rs (compiler-fence + byte-by-byte XOR + accumulator). Critical for HMAC-tag verify in jwt libraries. | §X.2 |
 | **D-N32** | Macro extensions needed: ONE — a `NodeError(code: &'static str)` variant on `OpErrorKind`, with a corresponding `gen_throw_error` arm that constructs Error / TypeError / RangeError per a per-code table and assigns the `code` property. The `Buffer` extraction is NOT a new macro feature — it's a library helper at `crypto_node/buffer.rs::extract_input` called from each method. Streaming `Context` types are NOT a macro feature — they're plain Rust state in the boxed instance. `KeyObject` is a regular `#[v8_class]` with a regular Box; no macro work. | Mirrors webcrypto-native's D-30 in spirit. The macro change is a one-variant addition + a ~20 LOC arm. The rest is library code. | §XIII |
+| **D-N33** (v2) | Encrypted PKCS#8 import / export drops to `aws-lc-sys` raw FFI in `crypto_kernel/pkcs8_enc.rs` (~250 LOC). High-level `aws-lc-rs` does not expose `EncryptedPrivateKeyInfo` or any `decrypt(passphrase)` / `serialize_with_password` method (verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html — only `Pkcs8V1Der` / `Pkcs8V2Der` byte wrappers, no encryption). The bespoke walker handles PBES2/PBKDF2 ASN.1 envelope build/parse and dispatches the inner cipher work via the kernel's existing `CipherContext`. (addresses critic CRITICAL #7, MAJOR #12, MAJOR #16) | §IV.4a |
+| **D-N34** (v2) | RSA-PSS `saltLength` sentinels (-1 = `RSA_PSS_SALTLEN_DIGEST`, -2 = `RSA_PSS_SALTLEN_MAX_SIGN` / `RSA_PSS_SALTLEN_AUTO`) are normalised to absolute byte counts in `parse_sign_key_input` BEFORE the kernel boundary, via `normalise_pss_salt_length()`. The kernel never sees negative sentinels. (addresses critic CRITICAL #8) | §V.5 |
+| **D-N35** (v2) | Hash, Hmac, Cipher, Decipher, Sign, Verify all extend `stream.Transform` (Node's documented behaviour — see https://nodejs.org/api/crypto.html#class-hash). The classes expose `_transform(chunk, encoding, callback)` and `_flush(callback)` so `pipeline(readable, hash, writable)` works. The Transform shape is layered on top of the existing #[v8_class] via a JS-side mixin in `node-crypto.gen.ts` (the synthetic module's Hash export wraps the native class with a small Transform-prototype shim). (addresses critic missing concept #21) | §V.6 |
+| **D-N36** (v2) | Post-quantum key types (ML-DSA, ML-KEM, SLH-DSA — Node v25+) and `crypto.encapsulate` / `crypto.decapsulate` (Node v22+ KEM API) are listed in the export surface as Stage E placeholders. The implementation depends on aws-lc-rs's PQC support which is in active development (NIST FIPS 203/204/205 — kyber/dilithium/sphincs+). Stage E ships parsing-only `asymmetricKeyType` recognition; full key generation defers to a future ADR when aws-lc-rs's PQC API stabilises. (addresses critic missing concepts #2, #3) | §II.15 |
 
 ## I. Architecture overview
 
@@ -227,11 +245,11 @@ The `#[v8_inherit]` mechanism is the existing one used by `AbortSignal extends E
 |---|---|---|---|---|
 | `createHash()` `.update()` `.digest()` | sync | n/a | n/a | always sync |
 | `createHmac()` `.update()` `.digest()` | sync | n/a | n/a | always sync |
-| `createCipheriv()` `.update()` `.final()` | sync (small data) / async (>64 KB chunks) | n/a | n/a | always sync below threshold |
+| `createCipheriv()` `.update()` `.final()` | always sync — see §VI.3 (addresses critic CRITICAL #1) | n/a | n/a | always sync (Node's `cipher.update()` is documented sync per https://nodejs.org/api/crypto.html#cipherupdatedata-inputencoding-outputencoding) |
 | `createSign()` `.sign()` | sync | n/a | n/a | always sync |
 | `createVerify()` `.verify()` | sync | n/a | n/a | always sync |
 | `randomBytes(n)` | sync | async | n/a | sync (no Sync suffix needed; the no-callback form IS sync) |
-| `randomFill(buf, ...)` | n/a | async (always callback) | n/a | `randomFillSync(buf)` |
+| `randomFill(buf, ...)` | n/a | async (always callback) | n/a | `randomFillSync(buf)`. (addresses critic MAJOR #21): for very small fills (<= 1024 bytes), Node fires the callback synchronously after queueing on `process.nextTick`. v2 mirrors that by branching at the entry point: `if size <= 1024 { sync_path; queueMicrotask(callback) } else { spawn_blocking }`. Avoids a ~10 µs spawn_blocking overhead for small fills (the common case for `randomBytes(16)` token-style usage) without breaking the documented async-callback contract. |
 | `pbkdf2(...)` | n/a | async | promise | `pbkdf2Sync(...)` |
 | `scrypt(...)` | n/a | async | promise | `scryptSync(...)` |
 | `hkdf(...)` | n/a | async | promise | `hkdfSync(...)` |
@@ -402,7 +420,7 @@ Same shape for Hmac / Cipher / Sign / Verify. The Cipher context has additional 
 
 Node's APIs accept and return `Buffer` (a `Uint8Array` subclass with extra methods). WebCrypto returns `ArrayBuffer`. The two classes' instances are NOT interchangeable in instanceof checks but ARE interchangeable as input types (any `Uint8Array` works as a Buffer for input — Node never type-checks input shape).
 
-**Input-coercion policy:**
+**Input-coercion policy** (addresses critic CRITICAL #2): the `inputEncoding` argument is **ignored when `data` is a Buffer / TypedArray / DataView / ArrayBuffer** — Node's documented behaviour, e.g. `hash.update(buf, 'hex')` does NOT hex-decode `buf`, it consumes the raw bytes. Per https://nodejs.org/api/crypto.html#hashupdatedata-inputencoding: "If `data` is a Buffer, TypedArray, or DataView, then `inputEncoding` is ignored." The same rule holds for every method following this shape: `Hmac.prototype.update`, `Cipher.prototype.update` (input encoding), `Decipher.prototype.update` (input encoding), `Sign.prototype.update`, `Verify.prototype.update`. Only when `data` is a `string` does the `inputEncoding` argument apply (default `'utf8'`).
 
 ```rust
 // crypto_node/buffer.rs
@@ -412,19 +430,23 @@ pub fn extract_input(
     encoding: Option<&str>,
 ) -> Result<Vec<u8>, OpError> {
     // 1. ArrayBufferView (Uint8Array, Buffer, Int8Array, ...) → copy bytes.
+    //    Per Node spec, `encoding` is IGNORED for non-string input — we silently
+    //    discard the parameter rather than rejecting it (matches Node).
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
         let mut buf = vec![0u8; view.byte_length()];
         view.copy_contents(&mut buf);
         return Ok(buf);
     }
-    // 2. ArrayBuffer → copy bytes.
+    // 2. ArrayBuffer → copy bytes.  `encoding` is ignored here too.
     if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
         let store = ab.get_backing_store();
         let mut buf = vec![0u8; ab.byte_length()];
         for (i, b) in buf.iter_mut().enumerate() { *b = store[i].get(); }
         return Ok(buf);
     }
-    // 3. String + encoding → decode per the named encoding.
+    // 3. String → encoding APPLIES; default 'utf8' if not provided.
+    //    Per Node v15+, default is 'utf8' (older versions used 'binary'/latin1;
+    //    we follow current spec).
     if value.is_string() {
         let s = value.to_rust_string_lossy(scope);
         return encoding::decode(&s, encoding.unwrap_or("utf8"));
@@ -438,19 +460,43 @@ pub fn emit_output<'s>(
     bytes: &[u8],
     encoding: Option<&str>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    match encoding {
+    // Encoding canonicalisation (addresses critic MAJOR encoding list — utf16le
+    // and ascii were missing in v1). Per https://nodejs.org/api/buffer.html#buffers-and-character-encodings.
+    match encoding.map(canonical_encoding) {
         None => Ok(emit_buffer(scope, bytes).into()),       // default: Buffer
-        Some("hex") => Ok(emit_string(scope, &hex_encode(bytes)).into()),
-        Some("base64") => Ok(emit_string(scope, &base64::encode(bytes)).into()),
-        Some("base64url") => Ok(emit_string(scope, &base64url::encode(bytes)).into()),
-        Some("latin1") | Some("binary") => Ok(emit_string(scope, &latin1_encode(bytes)).into()),
-        Some("utf8") | Some("utf-8") => {
-            // Errors on invalid UTF-8 boundaries — Node lossily decodes.
-            // We match Node by using to_rust_string_lossy.
+        Some(Encoding::Hex) => Ok(emit_string(scope, &hex_encode(bytes)).into()),
+        Some(Encoding::Base64) => Ok(emit_string(scope, &base64::encode(bytes)).into()),
+        Some(Encoding::Base64Url) => Ok(emit_string(scope, &base64url::encode(bytes)).into()),
+        Some(Encoding::Latin1) => Ok(emit_string(scope, &latin1_encode(bytes)).into()),  // also "binary"
+        Some(Encoding::Ascii) => Ok(emit_string(scope, &ascii_encode(bytes)).into()),    // bytes & 0x7F per Node
+        Some(Encoding::Utf8) => {
+            // (addresses critic CRITICAL #9): Node's `digest('utf8')` is well-defined as
+            // LOSSY for binary digest output — invalid UTF-8 byte sequences are replaced
+            // with U+FFFD per https://nodejs.org/api/buffer.html#buffers-and-character-encodings.
+            // The v1 comment ("Errors on invalid UTF-8 boundaries — Node lossily decodes")
+            // contradicted the implementation; fixed: comment + impl now agree it is lossy.
             Ok(emit_string(scope, &String::from_utf8_lossy(bytes)).into())
         }
-        Some(other) => Err(OpError::node("ERR_UNKNOWN_ENCODING",
-            format!("Unknown encoding: {}", other))),
+        Some(Encoding::Utf16Le) => Ok(emit_string(scope, &utf16le_encode(bytes)).into()),  // alias 'ucs2', 'ucs-2'
+        Some(Encoding::Unknown(name)) => Err(OpError::node("ERR_UNKNOWN_ENCODING",
+            format!("Unknown encoding: {}", name))),
+    }
+}
+
+/// Canonicalises Node's encoding aliases to the underlying form. Per
+/// https://nodejs.org/api/buffer.html#buffers-and-character-encodings.
+/// `binary` is an alias for `latin1`; `ucs2`/`ucs-2`/`utf-16le`/`utf16le`
+/// are all aliases for UTF-16 LE; `utf8`/`utf-8` are aliases.
+fn canonical_encoding(name: &str) -> Encoding {
+    match name.to_ascii_lowercase().as_str() {
+        "hex" => Encoding::Hex,
+        "base64" => Encoding::Base64,
+        "base64url" => Encoding::Base64Url,
+        "latin1" | "binary" => Encoding::Latin1,
+        "ascii" => Encoding::Ascii,
+        "utf8" | "utf-8" => Encoding::Utf8,
+        "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => Encoding::Utf16Le,
+        other => Encoding::Unknown(other.to_string()),
     }
 }
 
@@ -568,6 +614,21 @@ fn error_class_for_code(code: &str) -> ErrorClass {
 
 The macro sees `OpErrorKind::NodeError("ERR_CRYPTO_HASH_FINALIZED")`, looks up the class as `Error`, calls `v8::Exception::error(...)`, then sets the `.code` property to the static string `"ERR_CRYPTO_HASH_FINALIZED"`.
 
+**`error.errno` field (addresses critic missing concept #15):** Node's OSSL-stack errors (e.g. `ERR_OSSL_*`) ALSO carry a numeric `.errno` field — the underlying OpenSSL `ERR_PACK` integer. Some packages (notably older OpenSSL-aware logging libraries) match on `if (err.errno === -7)`. v2 extends `OpErrorKind::NodeError(code: &'static str)` to optionally carry a `Some(errno: i32)` payload:
+
+```rust
+pub enum OpErrorKind {
+    NodeError(&'static str, Option<i32>),    // code + optional errno
+    /* ... */
+}
+impl OpError {
+    pub fn node(code: &'static str, msg: impl Into<String>) -> Self { /* errno = None */ }
+    pub fn node_with_errno(code: &'static str, errno: i32, msg: impl Into<String>) -> Self { /* errno = Some */ }
+}
+```
+
+The OSSL-stack errors in `KernelError` carry the BoringSSL error code through to the macro arm; the macro arm sets `.errno` when the variant has Some. Most v2 callsites don't have a useful errno (kernel errors are semantic, not OSSL packs); the few that do — `KernelError::OsslError { errno, code }` — propagate it.
+
 ## II. Full node:crypto export surface
 
 The complete table of every node:crypto top-level export, with this design's plan. "Tier" reflects observed npm-package usage:
@@ -607,15 +668,15 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `createCipher(algorithm, password, options?)` (deprecated) | 3 | n/a | n/a | NEVER (D-N11 — throws `ERR_CRYPTO_DEPRECATED_API`) |
-| `createCipheriv(algorithm, key, iv, options?) -> Cipher` | 1 | `kernel::CipherContext::new(encrypt=true)` | sync | C |
-| `createDecipheriv(algorithm, key, iv, options?) -> Decipher` | 1 | `kernel::CipherContext::new(encrypt=false)` | sync | C |
+| `createCipher(algorithm, password, options?)` (deprecated, addresses critic MAJOR #18) | 2 | EVP_BytesToKey + createCipheriv (only when `--legacy-crypto` is on; throws `ERR_CRYPTO_DEPRECATED_API` otherwise) | sync | E |
+| `createCipheriv(algorithm, key, iv, options?)` (options: `{ authTagLength }` — REQUIRED for CCM, optional default 16 for GCM/OCB/ChaCha20-Poly1305; addresses critic CRITICAL #3) | 1 | `kernel::CipherContext::new(encrypt=true)` | sync | C |
+| `createDecipheriv(algorithm, key, iv, options?)` (same options shape) | 1 | `kernel::CipherContext::new(encrypt=false)` | sync | C |
 | `Cipher` / `Decipher` (classes) | 1 | `crypto_node/cipher.rs` | sync streaming + async-above-threshold | C |
 | `Cipher.prototype.update(data, inputEncoding?, outputEncoding?)` | 1 | `kernel::CipherContext::update` | sync (always) | C |
 | `Cipher.prototype.final(outputEncoding?)` | 1 | `kernel::CipherContext::finalize` | sync | C |
-| `Cipher.prototype.setAAD(buffer, options?)` | 1 | `kernel::CipherContext::set_aad` | sync | C |
+| `Cipher.prototype.setAAD(buffer, options?)` (options: `{ plaintextLength, encoding }` — plaintextLength REQUIRED for CCM, addresses critic CRITICAL #4) | 1 | `kernel::CipherContext::set_aad` | sync | C |
 | `Cipher.prototype.getAuthTag()` | 1 | `kernel::CipherContext::get_auth_tag` | sync | C |
-| `Decipher.prototype.setAuthTag(buffer)` | 1 | `kernel::CipherContext::set_auth_tag` | sync | C |
+| `Decipher.prototype.setAuthTag(buffer, encoding?)` (mode-aware ordering: CCM pre-update, GCM/OCB/ChaCha20 pre-final, addresses critic CRITICAL #5) | 1 | `kernel::CipherContext::set_auth_tag` | sync | C |
 | `Cipher.prototype.setAutoPadding(boolean)` | 1 | `kernel::CipherContext::set_auto_padding` | sync | C |
 | `getCiphers() -> string[]` | 1 | iterate registry | sync | C |
 | `getCipherInfo(name | nid, options?)` | 1 | registry metadata lookup | sync | C |
@@ -636,8 +697,8 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `Sign.prototype.update(data, encoding?)` | 1 | `kernel::SignContext::update` | sync | C |
 | `Sign.prototype.sign(privateKey, encoding?)` | 1 | `kernel::SignContext::sign` | sync | C |
 | `Verify.prototype.verify(publicKey, signature, encoding?)` | 1 | `kernel::VerifyContext::verify` | sync | C |
-| `crypto.sign(algorithm, data, key)` (one-shot) | 1 | `kernel::sign_one_shot` | sync | C |
-| `crypto.verify(algorithm, data, key, sig)` (one-shot) | 1 | `kernel::verify_one_shot` | sync | C |
+| `crypto.sign(algorithm, data, key, callback?)` (one-shot; addresses critic MAJOR #15: callback variant accepted, dispatches via `state.spawned_ops` exactly like the other async APIs) | 1 | `kernel::sign_one_shot` (sync) or `sign_one_shot_async` (callback path) | sync **and** async with callback | C |
+| `crypto.verify(algorithm, data, key, sig, callback?)` (one-shot; addresses critic MAJOR #15) | 1 | `kernel::verify_one_shot` / `verify_one_shot_async` | sync **and** async with callback | C |
 
 **Algorithms supported:**
 - `rsa-sha1`, `rsa-sha256`, `rsa-sha384`, `rsa-sha512` (RSASSA-PKCS1-v1_5)
@@ -654,11 +715,11 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `crypto.publicEncrypt(keyOrOptions, buffer)` | 1 | `kernel::rsa_oaep_encrypt` | sync | C |
-| `crypto.privateDecrypt(keyOrOptions, buffer)` | 1 | `kernel::rsa_oaep_decrypt` | sync | C |
+| `crypto.publicEncrypt(keyOrOptions, buffer)` (addresses critic MAJOR #1, MAJOR #28: `keyOrOptions` accepts a key or an object `{ key, padding, oaepHash, oaepLabel, encoding }` — default padding is `RSA_PKCS1_OAEP_PADDING` per https://nodejs.org/api/crypto.html#cryptopublicencryptkey-buffer; default `oaepHash` is `'sha1'` (legacy footgun — modern apps SHOULD pass `'sha256'`)) | 1 | `kernel::rsa_oaep_encrypt` | sync | C |
+| `crypto.privateDecrypt(keyOrOptions, buffer)` (same options as publicEncrypt; addresses MAJOR #1, MAJOR #28) | 1 | `kernel::rsa_oaep_decrypt` | sync | C |
 | `crypto.publicDecrypt(keyOrOptions, buffer)` | 2 | aws-lc-rs raw FFI (low-level) | sync | C |
 | `crypto.privateEncrypt(keyOrOptions, buffer)` | 2 | aws-lc-rs raw FFI (low-level) | sync | C |
-| `crypto.diffieHellman({ privateKey, publicKey })` (one-shot) | 1 | `kernel::dh_agree` (ECDH path) | sync | C |
+| `crypto.diffieHellman({ privateKey, publicKey })` (one-shot; addresses critic missing concept #8: shape per https://nodejs.org/api/crypto.html#cryptodiffiehellmanoptions — both keys must be KeyObject with matching `asymmetricKeyType` of `'ec'`, `'x25519'`, `'x448'`, or `'dh'`. Returns the shared secret as Buffer. Also used internally by WebCrypto's `subtle.deriveBits({ name: 'ECDH', public: ... })` bridge.) | 1 | `kernel::dh_agree` (ECDH path) | sync | C |
 
 **`publicDecrypt` / `privateEncrypt`:** these are the inverse of the natural RSA flow (encrypting with private = signing-without-hash; decrypting with public = signature-verify-style). Used by old PKCS1 v1.5 signature schemes that pre-date PSS. aws-lc-rs's high-level API doesn't expose them; we drop to `aws_lc_sys::RSA_public_decrypt` / `RSA_private_encrypt`. Niche; defer to Stage 2.
 
@@ -678,11 +739,25 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `ECDH.prototype.getPrivateKey(encoding?)` | 1 | `kernel::ecdh::private_key` | sync | C |
 | `ECDH.prototype.getPublicKey(encoding?, format?)` | 1 | `kernel::ecdh::public_key` | sync | C |
 | `ECDH.prototype.setPrivateKey(privateKey, encoding?)` | 1 | `kernel::ecdh::set_private` | sync | C |
-| `ECDH.prototype.setPublicKey(publicKey, encoding?)` (deprecated) | 3 | n/a | n/a | NEVER (deprecated in Node v5 — throws) |
+| `ECDH.prototype.setPublicKey(publicKey, encoding?)` (deprecated, **shipped — addresses critic CRITICAL #6**) | 2 | `kernel::ecdh::set_public` + one-time deprecation warning | sync | C |
 | `ECDH.convertKey(...)` (static) | 2 | aws-lc-sys raw FFI for compressed-point | sync | E |
 | `getCurves() -> string[]` | 1 | iterate registry | sync | C |
 
 **Named DH groups:** RFC 3526 (`modp1` = 768-bit, ..., `modp18` = 8192-bit) and RFC 7919 (`ffdhe2048`, `ffdhe3072`, `ffdhe4096`, `ffdhe6144`, `ffdhe8192`). The 768/1024-bit groups (modp1, modp2) are blocked by default (insecure); creator apps that need them get a runtime flag opt-in.
+
+**`ECDH.setPublicKey` deprecation handling (addresses critic CRITICAL #6):** Per https://nodejs.org/api/crypto.html#ecdhsetpublickeypublickey-encoding, this method is **deprecated since Node v5.2.0 but still functional**. v1's "throw" was wrong (broke `tweetnacl-util` and the StrongSwan-style ECDH session-reuse pattern). v2 ships it with a one-shot per-isolate `process.emitWarning` call on first invocation, mirroring Node's behaviour:
+
+```rust
+// crypto_node/dh.rs (Stage C)
+fn set_public_key<'s>(&mut self, /* ... */) -> Result<(), OpError> {
+    emit_deprecation_warning_once(scope, "DEP0031",
+        "crypto.ECDH.prototype.setPublicKey is deprecated; \
+         use ECDH.convertKey or generate a fresh ECDH instance.");
+    self.ctx.set_public(&pk_bytes).map_err(KernelError::to_node)
+}
+```
+
+The `emit_deprecation_warning_once` helper memoises per (isolate, deprecation-code) so repeated calls warn once, matching Node's `--no-deprecation` / `process.noDeprecation` semantics (which we honour by reading the global flag).
 
 ### II.7. Key generation
 
@@ -690,16 +765,16 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 |---|---|---|---|---|
 | `generateKeyPair(type, options, callback)` | 1 | `kernel::generate_key_pair_async` | async (callback) | C |
 | `generateKeyPairSync(type, options) -> { publicKey, privateKey }` | 1 | `kernel::generate_key_pair` | sync | C |
-| `generateKey(type, options, callback)` | 1 | `kernel::generate_key_async` | async | C |
+| `generateKey(type, options, callback)` (addresses critic minor m-14: yes, `subtle.generateKey` produces a CryptoKey — but `generateKey('hmac', ...)` here returns a **KeyObject** with no algorithm tie. The two are not redundant: WebCrypto bakes algorithm + extractable + usages into the key; node:crypto's KeyObject is algorithm-agnostic at creation time. Different abstractions; both shipped.) | 1 | `kernel::generate_key_async` | async | C |
 | `generateKeySync(type, options) -> KeyObject` | 1 | `kernel::generate_key` | sync | C |
 | `generatePrime(size, options?, callback?)` | 3 | aws-lc-sys raw FFI | async | E (Stage 2) |
 | `generatePrimeSync(size, options?)` | 3 | aws-lc-sys raw FFI | sync | E |
 | `checkPrime(candidate, options?, callback)` | 3 | aws-lc-sys raw FFI | async | E |
 | `checkPrimeSync(candidate, options?)` | 3 | aws-lc-sys raw FFI | sync | E |
 
-**Types supported (Stage 1):** `'rsa'` (with `modulusLength`, `publicExponent` defaulting to 0x10001), `'ec'` (with `namedCurve`), `'ed25519'`, `'x25519'`, `'hmac'` (returns SecretKeyObject), `'aes'` (returns SecretKeyObject; `length` in bits).
+**Types supported (Stage 1):** `'rsa'` (with `modulusLength`, `publicExponent` defaulting to 0x10001), `'rsa-pss'` (with `hashAlgorithm`, `mgf1HashAlgorithm`, `saltLength`; addresses critic CRITICAL #12 — promoted from Stage 2 so the PSS sign/verify shipped in Stage C can be tested round-trip with PSS-typed keys, see https://nodejs.org/api/crypto.html#cryptogeneratekeypairtype-options-callback), `'ec'` (with `namedCurve`), `'ed25519'`, `'x25519'`, `'ed448'`, `'x448'`, `'hmac'` (returns SecretKeyObject), `'aes'` (returns SecretKeyObject; `length` in bits).
 
-**Types deferred to Stage 2:** `'rsa-pss'` (RSA with embedded PSS params — needs an OID-tagged SPKI), `'dsa'` (deprecated), `'dh'` (named-group DH).
+**Types deferred to Stage 2 (Stage E):** `'dsa'` (deprecated), `'dh'` (named-group DH), and the post-quantum types `'ml-dsa-44'` / `'ml-dsa-65'` / `'ml-dsa-87'`, `'ml-kem-512'` / `'ml-kem-768'` / `'ml-kem-1024'`, `'slh-dsa-*'` (Node v25+, addresses missing concept #3).
 
 **`encoding` option:** the publicKey/privateKey can be returned as `KeyObject` (default if no `encoding` specified) OR as Buffer/string per `{ type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', format: 'pem' | 'der' | 'jwk' }`. We support all combos in Stage 1.
 
@@ -713,7 +788,7 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `KeyObject` (class) | 1 | `crypto_node/key_object.rs::KeyObject` | sync | C |
 | `KeyObject.from(cryptoKey)` (static) | 1 | bridge to existing CryptoKey via Arc share (D-N4) | sync | C |
 | `KeyObject.prototype.export(options) -> Buffer | string | object` | 1 | `kernel::pem::emit` / `kernel::der::emit` / `kernel::jwk::export` | sync | C |
-| `KeyObject.prototype.equals(other) -> boolean` | 1 | constant-time compare of material via `aws_lc_rs::constant_time` | sync | C |
+| `KeyObject.prototype.equals(other) -> boolean` (addresses critic CRITICAL #13: `type` first, length pre-check non-CT, then constant-time material compare; rejects "same logical key, different stored encoding" mismatch consistently) | 1 | see §IV.7a | sync | C |
 | `KeyObject.prototype.type` (getter) | 1 | direct field read | sync | C |
 | `KeyObject.prototype.asymmetricKeyType` (getter) | 1 | derived from `KeyMaterial` enum variant | sync | C |
 | `KeyObject.prototype.asymmetricKeyDetails` (getter) | 1 | derived from `KeyMaterial` enum variant | sync | C |
@@ -751,7 +826,7 @@ PBKDF2 and HKDF call into the existing `crypto_native/derive.rs` paths (refactor
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `X509Certificate(input)` (constructor) | 2 | aws-lc-sys raw FFI (`X509_d2i`) | sync | E |
+| `X509Certificate(input)` (constructor — Stage 1 placeholder throws `ERR_CRYPTO_UNSUPPORTED_OPERATION`; Stage E parses for real. addresses critic minor m-12: the "Tier 2 / Stage E" labeling now reads consistently. The placeholder implementation lives in Stage C alongside the other Stage-2 placeholder classes.) | 2 | aws-lc-sys raw FFI (`X509_d2i`) | sync | E |
 | `X509Certificate.prototype.subject` | 2 | parsed certificate | sync | E |
 | `X509Certificate.prototype.issuer` | 2 | parsed certificate | sync | E |
 | `X509Certificate.prototype.publicKey` | 2 | parsed certificate | sync | E |
@@ -792,8 +867,8 @@ These are NOT separate code paths — they're literal property references to the
 | `setEngine(engine, flags?)` | 3 | n/a | n/a | NEVER (no engine support — D-N25) |
 | `secureHeapUsed()` | 3 | stub returning `{ total: 0, min: 0, used: 0, utilization: 0 }` | sync | B |
 | `constants` (object of OpenSSL constants) | 1 | small static dict | sync | B |
-| `crypto.signal` (Node ≥17) | 3 | not supported (used by experimental encryptStream API) | n/a | NEVER |
-| `crypto.subtle` (alias for `webcrypto.subtle`) | 1 | direct reference | n/a | D |
+| ~~`crypto.signal`~~ — does NOT exist in Node (addresses critic minor m-9: v1 invented this; Node's `node:crypto` has no `signal` export. The user was likely thinking of `AbortSignal` in `node:util` / global. Removed from the doc.) | — | — | — | — |
+| `crypto.subtle` (alias for `webcrypto.subtle`; addresses critic MAJOR #9: top-level `crypto.subtle` was added as an alias to `crypto.webcrypto.subtle` in Node v15+ per https://nodejs.org/api/webcrypto.html — older code uses `crypto.webcrypto.subtle`, newer uses `crypto.subtle`. We export both, identity-preserving via D-N16.) | 1 | direct reference | n/a | D |
 
 ### II.14. Coverage summary
 
@@ -813,8 +888,35 @@ Stage 1 (the node:crypto APIs landed by end of Stage D):
 - **WebCrypto bridge:** 3 / 3 exports (100%)
 - **Misc:** 11 / 12 exports (`crypto.signal` never)
 
-**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage.
-**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, `crypto.signal`, deprecated APIs.
+**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage. (addresses critic minor m-13 — counts include both the class constructors AND each prototype method; the % is best read as "API surface area" rather than "distinct features"; e.g. `Hash`, `Hash.prototype.update`, `Hash.prototype.digest`, `Hash.prototype.copy` count separately. m-17's accounting note: `setEngine` + the deprecated `createCipher` (now Stage E) + post-quantum stubs are the "deferred-forever" set.)
+**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, deprecated APIs (no `crypto.signal` per m-9), and PQC keygen until aws-lc-rs catches up.
+
+### II.15. Post-quantum + KEM + miscellaneous Node v22-v25 additions (addresses critic missing concepts #1, #2, #3, #4, #7, #16, #17, #18, #19, #21, #22, #23, #25)
+
+| Export | Tier | Backed by | Sync/async | Stage |
+|---|---|---|---|---|
+| `crypto.argon2(password, salt, options?)` (Node v22+, `crypto.hash`-shaped) | 3 | npm `argon2` (WASM via unenv) | sync/async | NEVER native — see open question XVII.4 + missing concept #1 |
+| `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API; addresses critic missing concept #2) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
+| `Certificate` (legacy SPKAC) — `Certificate.exportChallenge`, `Certificate.exportPublicKey`, `Certificate.verifySpkac` | 3 | aws-lc-sys raw FFI for `NETSCAPE_SPKI_b64_decode` (~80 LOC) | sync | E (rare; only browser keygen, missing concept #4) |
+| `KeyObject.toCryptoKey(algorithm, extractable, keyUsages)` (Node v18+) | 1 | bridge: `KeyObject` → fresh `CryptoKey` via the Arc share + the WebCrypto `importKey('jwk', ko.export({format:'jwk'}))` round-trip | sync | C (missing concept #7 + clarifies the bidirectional bridge in D-N4) |
+| `crypto.checkPrime(candidate, options?, callback)` / `checkPrimeSync` | 3 | aws-lc-sys raw FFI for `BN_is_prime_fasttest_ex` | sync/async | E (missing concepts #5, #11; can ship independently of generatePrime per the critic) |
+| `crypto.createDiffieHellman(primeLength)` (synthesise a fresh prime) | 3 | aws-lc-sys raw FFI for `DH_generate_parameters_ex` | async (Node v17+ defaults async; sync overload retained) | E (missing concept #6) |
+| `X509Certificate.prototype.toString()` returns PEM | 2 | reuses kernel PEM emitter | sync | E (missing concept #16) |
+| `X509Certificate.prototype.toJSON()` | 2 | object literal of public-property snapshot | sync | E (missing concept #16) |
+| `X509Certificate.prototype.toLegacyObject()` | 2 | the OpenSSL-flavoured shape some libraries still use | sync | E (missing concept #16) |
+| `X509Certificate.prototype.checkEmail(email, options?)` | 2 | aws-lc-sys raw FFI for `X509_check_email` | sync | E (missing concept #17) |
+| `X509Certificate.prototype.checkIP(ip)` | 2 | aws-lc-sys raw FFI for `X509_check_ip_asc` | sync | E (missing concept #17) |
+| `X509Certificate.prototype.issuerCertificate` (only set if chain provided) | 2 | populated when constructed from a multi-block PEM | sync | E (missing concept #18) |
+| `crypto.pseudoRandomBytes(size)` (deprecated alias) | 2 | alias to `randomBytes` (Node never differentiated post-v0.6) | sync | B (missing concept #19) |
+| `crypto.randomFillSync(buffer, offset?, size?)` with offset+size validation | 1 | extended validator | sync | B (missing concept #20) |
+| `crypto.scrypt` short-form options `{ N, r, p }` aliasing | 1 | option-aliasing in `parse_scrypt_options` (accepts both `cost`/`blockSize`/`parallelization` AND `N`/`r`/`p`) | sync/async | B (missing concept #22) |
+| `cipher.setAutoPadding(boolean)` returns Cipher (chainable) | 1 | already chainable in v1 design — corrects the v1 type signature; addresses critic missing concept #23 | sync | C |
+
+**Post-quantum notes (D-N36, missing concept #3):** Node v25 added these `asymmetricKeyType` values: `'ml-dsa-44'`, `'ml-dsa-65'`, `'ml-dsa-87'` (FIPS 204), `'ml-kem-512'`, `'ml-kem-768'`, `'ml-kem-1024'` (FIPS 203), `'slh-dsa-sha2-128f'` etc. (FIPS 205). Stage E ships PARSE-ONLY recognition: the `asymmetricKeyType` getter returns the right string, but `generateKeyPair('ml-dsa-65', ...)` errors with `ERR_CRYPTO_UNSUPPORTED_OPERATION` until aws-lc-rs's PQC API stabilises.
+
+**Argon2 (missing concept #1):** Node v22 did NOT add `crypto.argon2` as a standalone export — confirmed against https://nodejs.org/api/crypto.html (no `crypto.argon2` entry as of writing). The critic's claim was incorrect on the surface name; what Node v22 added was `crypto.hash` (a one-shot hashing convenience), not argon2. Argon2 remains npm-package territory (`argon2`, `@phc/argon2`). v2 corrects v1's "Node never shipped it" to "Node has not shipped argon2 in `node:crypto` as of v25; revisit if Node adds it post-cutoff."
+
+**Stream.Transform (missing concept #21):** addressed in §V.6 above.
 
 ## III. Algorithm coverage
 
@@ -862,7 +964,7 @@ That's 16 algorithms shared across both surfaces.
 | **DH (modp1..modp18, ffdhe2048..ffdhe8192)** | Named-group DH | aws-lc-sys raw FFI | E |
 | **DH arbitrary primes** | Generic DH | aws-lc-sys raw FFI | E |
 | **Brainpool curves** (`brainpoolP256r1`, `brainpoolP384r1`, `brainpoolP512r1`) | Niche EU / German banking | aws-lc-sys raw FFI | E |
-| **secp256k1** | Bitcoin / Ethereum signing | aws-lc-rs has it via `signature::ECDSA_K256_*` | C |
+| **secp256k1** | Bitcoin / Ethereum signing | aws-lc-rs `signature::ECDSA_P256K1_SHA256_{ASN1,FIXED}` (and `_SIGNING` variants) — note the actual constant name is `P256K1` not `K256`. (addresses critic CRITICAL #14: critic flagged the v1 `ECDSA_K256` as invented; the API exists but under the `P256K1` name.) | C |
 
 Stage 1 coverage: SHA family + AES-{CBC,CTR,GCM,KW,OCB} + ChaCha20-Poly1305 + RSA + ECDSA + Ed25519 + X25519 + ECDH + PBKDF2 + scrypt + HKDF + MD5 + secp256k1.
 
@@ -983,12 +1085,13 @@ Per https://nodejs.org/api/crypto.html#keyobjectasymmetrickeydetails — algorit
 
 | `asymmetricKeyType` | `asymmetricKeyDetails` shape |
 |---|---|
-| `"rsa"` | `{ modulusLength: number, publicExponent: bigint }` |
-| `"rsa-pss"` | `{ modulusLength, publicExponent, hashAlgorithm, mgf1HashAlgorithm, saltLength }` |
-| `"dsa"` | `{ modulusLength, divisorLength }` |
-| `"ec"` | `{ namedCurve: "P-256" | "P-384" | "P-521" | "secp256k1" }` |
+| `"rsa"` | `{ modulusLength: number, publicExponent: bigint }` (publicExponent is `bigint` per https://nodejs.org/api/crypto.html#keyobjectasymmetrickeydetails — addresses critic MAJOR #13: v1 implied `Buffer`) |
+| `"rsa-pss"` | `{ modulusLength, publicExponent, hashAlgorithm?, mgf1HashAlgorithm?, saltLength? }` — these PSS-specific fields are populated **only** when the SPKI/PKCS8 carries the `id-RSASSA-PSS` OID with embedded SaltedSignatureAlgorithms parameters (RFC 4055). For a plain RSA key signed with PSS at sign-time, the fields are `undefined`. (addresses critic MAJOR #13 + MAJOR #23) |
+| `"dsa"` | `{ modulusLength, divisorLength, hashAlgorithm }` — `hashAlgorithm` is the digest algorithm OID embedded in the DSA params; v1 missed it. (addresses critic MAJOR #22) |
+| `"ec"` | `{ namedCurve: "P-256" \| "P-384" \| "P-521" \| "secp256k1" \| "prime256v1" \| "secp384r1" \| "secp521r1" \| ... }` — Node returns the **OpenSSL canonical name** for the curve. P-256's OpenSSL name is `"prime256v1"`, NOT `"P-256"`. P-384 is `"secp384r1"`. We follow Node and emit OpenSSL names; spec-canonical names appear in the JWK / WebCrypto surface only. (addresses critic minor m-6 — `if (key.asymmetricKeyDetails.namedCurve === 'prime256v1')` checks now match.) |
 | `"dh"` | `{ generator, prime, primeLength: number }` |
 | `"ed25519"` / `"x25519"` / `"ed448"` / `"x448"` | `{}` (empty object) |
+| `"ml-dsa-*"` / `"ml-kem-*"` / `"slh-dsa-*"` (Node v25+) | per-algo shape — see D-N36 (Stage E, parse-only) |
 
 The getter is `[SameObject]` cached (D-N3 macro `#[v8_getter(same_object)]`).
 
@@ -1002,14 +1105,28 @@ pub fn create_secret_key<'s>(
     input: v8::Local<v8::Value>,
     encoding: Option<&str>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    // (addresses critic MAJOR #14): per https://nodejs.org/api/crypto.html#cryptocreatesecretkeykey-encoding
+    // when input is a string, encoding is REQUIRED and applies; when input is
+    // a Buffer / TypedArray, encoding is IGNORED. extract_input already
+    // implements this rule (CRITICAL #2 fix); we don't need to special-case
+    // here. The encoding parameter is passed through to extract_input which
+    // ignores it when input is a Buffer. v1's "Option<&str> always passed
+    // through" was correct in code but the docstring said "rejects a non-
+    // string with encoding"; the docstring was wrong.
     let bytes = buffer::extract_input(scope, input, encoding)?;
     if bytes.is_empty() {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
             "The value of \"key\" is out of range. It must be > 0"));
     }
+    // (addresses critic missing concept #14): we do NOT validate that
+    // bytes.len() matches an HMAC's expected algorithm-tied size — Node
+    // doesn't either (createSecretKey is algorithm-agnostic; the algorithm
+    // tie-in happens at createHmac time). Algorithm-aware validation is the
+    // caller's responsibility (e.g. AES key sizes are checked at
+    // createCipheriv time, not at createSecretKey time).
     let state = KeyObjectState {
         key_type: KeyType::Secret,
-        material: Arc::new(KeyMaterial::Symmetric(bytes)),
+        material: Arc::new(KeyMaterial::Symmetric(Zeroizing::new(bytes))),
     };
     Ok(SecretKeyObject::build(scope, state).into())
 }
@@ -1109,7 +1226,28 @@ pub fn encode(label: &str, bytes: &[u8]) -> String { /* emit RFC 7468 PEM */ }
 
 PEM decoding is ~80 LOC of Rust (RFC 7468 is a tiny spec; `-----BEGIN <label>-----`, base64 body, `-----END <label>-----`). No dependency added.
 
-For encrypted PKCS#8 (`{ passphrase: Buffer.from('hunter2') }`), the parser dispatches to aws-lc-rs's `EncryptedPrivateKeyInfo::from_bytes(der).decrypt(passphrase)` (returns plaintext PKCS#8), then re-runs the unencrypted parser.
+For encrypted PKCS#8 (`{ passphrase: Buffer.from('hunter2') }`), see §IV.4a (encrypted PKCS#8 path). v1 specified an `EncryptedPrivateKeyInfo::from_bytes(...).decrypt(passphrase)` call on `aws-lc-rs`; that API **does not exist in `aws-lc-rs` 1.x** (verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/ — the encoding module exposes only `Pkcs8V1Der` / `Pkcs8V2Der` byte wrappers, no encryption). v2 drops to `aws-lc-sys` raw FFI — see new D-N33 below.
+
+### IV.4a. Encrypted PKCS#8 import / export (D-N33, addresses critic CRITICAL #7, MAJOR #12, MAJOR #16)
+
+The high-level `aws-lc-rs` does not expose PBES2/PBKDF2-encrypted PKCS#8. We implement a thin `crypto_kernel/pkcs8_enc.rs` (~250 LOC) that:
+
+- **Decrypt path** (used by `createPrivateKey({ key, passphrase })`): parse the outer `EncryptedPrivateKeyInfo` (RFC 5958 §3) ASN.1 DER by hand to extract the PBES2 parameters (PBKDF2 salt, iteration count, prf OID) and the inner cipher OID + IV. Derive the KEK via `aws_lc_rs::pbkdf2`. Run the inner cipher in decrypt mode via `aws_lc_rs::cipher::DecryptingKey`. Return the plaintext PKCS#8 DER for re-parsing.
+- **Encrypt path** (used by `KeyObject.export({ format: 'pem'|'der', cipher, passphrase })`): build the PBES2 parameter ASN.1 by hand (salt = 16 random bytes; iter = 2048 by Node default; cipher per the user's `cipher` option). Run the chosen cipher in encrypt mode. Wrap the result in the `EncryptedPrivateKeyInfo` ASN.1 envelope.
+
+Total cost: ~250 LOC of bespoke ASN.1 DER walker + envelope builder. The DER walker reuses the existing `crypto_kernel/der.rs` (moved from `crypto_native/`).
+
+**Cipher whitelist for encrypted PKCS#8** (addresses critic MAJOR #17 — Node's actual list per https://nodejs.org/api/crypto.html#keyobjectexportoptions and OpenSSL's `PKCS8_encrypt` table):
+
+```
+aes-128-cbc, aes-192-cbc, aes-256-cbc       ← Stage C (default-on)
+aes-128-ecb, aes-256-ecb                    ← Stage E, gated on --legacy-crypto
+des-ede3-cbc, des-ede3-ecb                  ← Stage E, gated on --legacy-crypto
+```
+
+ECB ciphers as the inner cipher of an encrypted private key are particularly hairy (block-aligned padding ambiguity); we accept only when explicitly enabled.
+
+**Why not high-level aws-lc-rs?** Verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html: the module exposes `Pkcs8V1Der<'a>` and `Pkcs8V2Der<'a>` as serialized byte wrappers but does NOT expose any `EncryptedPrivateKeyInfo` type or `serialize_with_password` method. We've audited `aws-lc-sys` (the low-level binding) for `PKCS8_decrypt` / `PKCS8_encrypt_pbe` — both are present and stable. We use those.
 
 ### IV.5. `KeyObject.from(cryptoKey)` static (D-N4)
 
@@ -1217,6 +1355,22 @@ The `encode_to_der(state, type_)` function dispatches on the key's variant + the
 
 Most of these paths read `KeyMaterial`'s pre-stored `pkcs8_der` / `spki_der` fields and return them directly. PKCS#1 RSA encodings need a fresh DER walker call; SEC1 EC private needs the same. Both are ~30 LOC each in the kernel's DER emitter.
 
+### IV.6a. JWK kty mapping for OKP (Ed25519/X25519/Ed448/X448)
+
+(addresses critic missing concept #25): Node v18+ maps OKP keys with `kty: "OKP"` per RFC 8037 — the `crv` field carries the curve name (`"Ed25519"`, `"X25519"`, `"Ed448"`, `"X448"`). `keyObject.export({ format: "jwk" })` for an Ed25519 key returns `{ kty: "OKP", crv: "Ed25519", x: <base64url>, d?: <base64url> }`. The kernel JWK exporter at `crypto_kernel/jwk.rs::export` already supports this for the WebCrypto surface (see https://w3c.github.io/webcrypto/#sec-jwk-mapping-tables); v2 verifies that all 4 OKP curves round-trip via `KeyObject.export({ format: 'jwk' })` then `crypto.subtle.importKey('jwk', ...)`.
+
+Smoke test:
+
+```js
+const { publicKey } = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["verify"]);
+const ko = KeyObject.from(publicKey);
+const jwk = ko.export({ format: "jwk" });
+console.assert(jwk.kty === "OKP");
+console.assert(jwk.crv === "Ed25519");
+const ck = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["verify"]);
+console.assert(ck.algorithm.name === "Ed25519");
+```
+
 ### IV.7. Zeroize on Drop (D-N30)
 
 ```rust
@@ -1262,6 +1416,40 @@ pub struct RsaPrivateComponents {
 
 The Arc<KeyMaterial> share means zeroize fires when the LAST reference drops — which happens when both the CryptoKey and KeyObject wrappers are GC'd. Browser-side WeakRef-tracking libraries that hold references will keep the bytes alive; that's the documented contract of holding a key handle.
 
+### IV.7a. `keyObject.equals(other)` semantics (addresses critic CRITICAL #13, MAJOR #20)
+
+Per https://nodejs.org/api/crypto.html#keyobjectequalsotherkeyobject:
+> Returns: `<boolean>` `true` or `false` depending on whether the keys have **exactly the same type, value, and parameters**. This method is not constant time.
+
+Note Node's spec says "not constant time" for the OUTER equality check, but the byte compare itself uses constant-time primitives. The cited "exact type, value, parameters" implies three checks:
+
+1. **Type equality**: `this.type === other.type` (cheap, non-CT).
+2. **Algorithm-parameter equality**: e.g. for asymmetric keys, `asymmetricKeyType` plus relevant fields of `asymmetricKeyDetails`. For RSA: same modulus + same publicExponent. For EC: same namedCurve. For symmetric: same byte length.
+3. **Material byte equality**: the underlying bytes (for symmetric: raw bytes; for asymmetric: the canonical SPKI/PKCS8 DER form). Length pre-check is non-CT (MAJOR #20 — `aws_lc_rs::constant_time::verify_slices_are_equal` returns Err if lengths differ; we explicitly check first to avoid reaching the constant-time path with mismatched lengths).
+
+Implementation:
+
+```rust
+fn equals(&self, scope: &mut v8::PinScope, other: v8::Local<v8::Value>) -> Result<bool, OpError> {
+    let Some(other_state) = downcast_keyobject(scope, other) else { return Ok(false); };
+    if self.key_type != other_state.key_type { return Ok(false); }
+    // Compare algorithm-parameter equality (the asymmetricKeyType/details/symmetricKeySize).
+    if !same_algorithm_parameters(&self.material, &other_state.material) { return Ok(false); }
+    // Materialise both keys to a canonical byte form for constant-time compare.
+    // For symmetric: the raw bytes. For asymmetric: the canonical PKCS#8 (private)
+    // or SPKI (public) DER. Two RSA keys exported as PKCS1 vs PKCS8 of the same
+    // underlying material will compare equal because we compare their canonical form.
+    let a = canonical_bytes(&self.material);
+    let b = canonical_bytes(&other_state.material);
+    if a.len() != b.len() { return Ok(false); }      // length pre-check (non-CT)
+    Ok(aws_lc_rs::constant_time::verify_slices_are_equal(&a, &b).is_ok())
+}
+```
+
+The CRITICAL #13 concern that "two RSA keys exported as PKCS1 vs PKCS8 of the same key compare false" is resolved by canonicalising to PKCS#8/SPKI before comparing. Node does the same — `KeyObject` internally normalises so equality of "logical key material" works.
+
+For public-vs-private same-key-pair, Node's spec correctly returns false (they have different `type`), so step 1 catches that.
+
 ## V. Streaming primitives
 
 ### V.1. The kernel `Context` shape (D-N2)
@@ -1296,14 +1484,47 @@ impl HmacContext {
 }
 
 // crypto_kernel/cipher.rs
-pub struct CipherContext { /* state machine: pending block, AAD, tag, mode */ }
+//
+// State machine (addresses critic CRITICAL #5 — CCM ordering, MAJOR #8 final-
+// called-twice, AEAD ordering distinct per mode). The Context's `state` field
+// transitions linearly:
+//
+//                   ┌──────────── (CCM only) ───────────┐
+//                   │                                     ▼
+//   Created  ─→  Aad  ─→  Updating  ─→  Finalised  ─→  Done
+//      │           │         │              │
+//      └─→─ setAuthTag (CCM-Decipher only, BEFORE first update)
+//      │           │         └─→─ setAuthTag (GCM/OCB/ChaCha-Decipher; before final)
+//      └─→─ setAutoPadding (CBC only, before update)
+//
+// CCM REQUIRES setAuthTag *before* update; GCM/OCB/ChaCha require it *after*
+// update but *before* final. Kernel rejects late tags / out-of-order calls
+// with KernelError::AeadOrderingError {expected_state, actual_state}.
+
+pub enum CipherCtxState {
+    Created,
+    Aad,        // setAAD called or setAuthTag-on-CCM called
+    Updating,   // first update() observed
+    Finalised,  // final() returned
+    Done,       // any further call (update/final/getAuthTag) errors
+}
+
+pub struct CipherContext {
+    /* aws-lc-rs aead::SealingKey<NonceSeq> | aead::OpeningKey<NonceSeq> handle,
+       pending block bytes for CBC, AAD buffer for GCM, plaintextLength for CCM,
+       requested auth_tag_length, current state */
+}
 impl CipherContext {
-    pub fn new_encrypt(alg: CipherAlg, key: &[u8], iv: &[u8]) -> Result<Self, KernelError>;
-    pub fn new_decrypt(alg: CipherAlg, key: &[u8], iv: &[u8]) -> Result<Self, KernelError>;
-    pub fn set_aad(&mut self, aad: &[u8]) -> Result<(), KernelError>;
+    pub fn new_encrypt(alg: CipherAlg, key: &[u8], iv: &[u8], auth_tag_length: usize) -> Result<Self, KernelError>;
+    pub fn new_decrypt(alg: CipherAlg, key: &[u8], iv: &[u8], auth_tag_length: usize) -> Result<Self, KernelError>;
+    /// (addresses critic CRITICAL #4): plaintext_length is REQUIRED for CCM, optional/None otherwise.
+    pub fn set_aad(&mut self, aad: &[u8], plaintext_length: Option<usize>) -> Result<(), KernelError>;
+    /// (addresses critic CRITICAL #5): mode-aware ordering enforced inside.
     pub fn set_auth_tag(&mut self, tag: &[u8]) -> Result<(), KernelError>;    // Decipher only
     pub fn set_auto_padding(&mut self, on: bool) -> Result<(), KernelError>;  // CBC only
     pub fn update(&mut self, data: &[u8]) -> Result<Vec<u8>, KernelError>;
+    /// (addresses critic MAJOR #8): calling finalize twice errors with
+    /// `KernelError::AlreadyFinalised`, mapping to ERR_CRYPTO_INVALID_STATE.
     pub fn finalize(&mut self) -> Result<Vec<u8>, KernelError>;
     pub fn auth_tag(&self) -> Option<&[u8]>;     // Cipher only, post-finalize
 }
@@ -1427,17 +1648,39 @@ pub fn create_hmac<'s>(
         .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
             format!("Unknown hash: {}", algorithm)))?;
 
-    // Key may be a KeyObject, Buffer, or string.
-    let key_bytes = if is_key_object(scope, key) {
+    // (addresses critic MAJOR #5 + MAJOR #30): key may be a KeyObject, a
+    // CryptoKey (Node v15+ accepts CryptoKey for createHmac/createSign etc.,
+    // see https://nodejs.org/api/crypto.html#cryptocreatehmacalgorithm-key-options),
+    // a Buffer, or a string. We accept all four. The extracted bytes are
+    // wrapped in a Zeroizing<Vec<u8>> for the duration of the kernel call —
+    // v1's `b.clone()` on a `Zeroizing<Vec<u8>>` returned a plain Vec that
+    // outlived the function on the heap; v2 keeps everything Zeroizing.
+    let key_bytes: Zeroizing<Vec<u8>> = if is_key_object(scope, key) {
         let ko = KeyObject::state(scope, key);
         match &*ko.material {
-            KeyMaterial::Symmetric(b) => b.clone(),
+            KeyMaterial::Symmetric(b) => Zeroizing::new(b.to_vec()),
             _ => return Err(OpError::node("ERR_INVALID_ARG_TYPE",
                 "Hmac key must be a SecretKeyObject")),
         }
+    } else if crypto_native::crypto_key::is_crypto_key(scope, key) {
+        // (addresses critic MAJOR #30): bridge the CryptoKey via the Arc
+        // share; only HMAC-typed CryptoKeys are accepted.
+        let ck = crypto_native::crypto_key::state(scope, key);
+        match &*ck.material {
+            KeyMaterial::Symmetric(b) => Zeroizing::new(b.to_vec()),
+            _ => return Err(OpError::node("ERR_INVALID_ARG_TYPE",
+                "Hmac key (CryptoKey) must be a symmetric key")),
+        }
     } else {
-        buffer::extract_input(scope, key, None)?
+        Zeroizing::new(buffer::extract_input(scope, key, None)?)
     };
+
+    // (addresses critic MAJOR #29): Node v17+ throws ERR_OSSL_HMAC_KEY_TOO_SHORT
+    // for empty keys. We follow.
+    if key_bytes.is_empty() {
+        return Err(OpError::node("ERR_OSSL_HMAC_KEY_TOO_SHORT",
+            "HMAC key cannot be empty"));
+    }
 
     let state = HmacState { ctx: kernel::HmacContext::new(hash, &key_bytes) };
     Ok(Hmac::build(scope, state).into())
@@ -1482,16 +1725,28 @@ impl Cipher {
         buffer::emit_output(scope, &out, output_encoding.as_deref())
     }
 
-    /// `cipher.setAAD(buffer, options?)` — for GCM/CCM/OCB AEAD modes.
+    /// `cipher.setAAD(buffer, options?)` — for GCM/CCM/OCB/ChaCha20-Poly1305
+    /// AEAD modes. (addresses critic CRITICAL #4): the `options` object's
+    /// `plaintextLength` is REQUIRED for CCM mode; `encoding` applies when
+    /// `buffer` is a string. Per
+    /// https://nodejs.org/api/crypto.html#ciphersetaadbuffer-options.
     #[v8_method]
     fn set_aad<'s>(&mut self,
         scope: &mut v8::PinScope<'s, '_>,
         this: v8::Local<'s, v8::Object>,
         aad: v8::Local<v8::Value>,
-        _options: Option<v8::Local<v8::Value>>,
+        options: Option<v8::Local<v8::Value>>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let bytes = buffer::extract_input(scope, aad, None)?;
-        self.ctx.set_aad(&bytes).map_err(KernelError::to_node)?;
+        let opts = parse_set_aad_options(scope, options)?;
+        // `encoding` applies only when `aad` is a string (per Node spec).
+        let bytes = buffer::extract_input(scope, aad, opts.encoding.as_deref())?;
+        // CCM: plaintextLength MUST be supplied (kernel rejects otherwise so
+        // the eventual encrypt is not silently miscomputed).
+        if matches!(self.mode, CipherMode::Ccm) && opts.plaintext_length.is_none() {
+            return Err(OpError::node("ERR_MISSING_OPTION",
+                "options.plaintextLength is required for CCM mode setAAD"));
+        }
+        self.ctx.set_aad(&bytes, opts.plaintext_length).map_err(KernelError::to_node)?;
         Ok(this.into())
     }
 
@@ -1510,18 +1765,31 @@ impl Cipher {
         Ok(buffer::emit_buffer(scope, tag).into())
     }
 
-    /// `decipher.setAuthTag(tagBuffer)` — Decipher only, pre-final.
+    /// `decipher.setAuthTag(tagBuffer, encoding?)` — Decipher only.
+    /// (addresses critic CRITICAL #5): the ordering requirement DIFFERS by mode
+    /// per https://nodejs.org/api/crypto.html#deciphersetauthtagbuffer-encoding:
+    ///   * **CCM**: `setAuthTag` MUST be called BEFORE the first `update()`.
+    ///   * **GCM / OCB / chacha20-poly1305**: `setAuthTag` MUST be called BEFORE `final()`
+    ///     (it MAY come after `update()` calls, which is the common pattern
+    ///     because the tag is appended after the ciphertext on the wire).
+    /// The state machine in `CipherContext::set_auth_tag` enforces the mode-
+    /// specific check; v1 used the generic "pre-final" rule which silently
+    /// accepted late tags on CCM and produced undefined output.
     #[v8_method]
     fn set_auth_tag<'s>(&mut self,
         scope: &mut v8::PinScope<'s, '_>,
         this: v8::Local<'s, v8::Object>,
         tag: v8::Local<v8::Value>,
+        encoding: Option<String>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         if self.is_encrypt {
             return Err(OpError::node("ERR_CRYPTO_INVALID_STATE",
                 "Cannot call setAuthTag on a Cipher"));
         }
-        let bytes = buffer::extract_input(scope, tag, None)?;
+        let bytes = buffer::extract_input(scope, tag, encoding.as_deref())?;
+        // Mode-specific ordering enforced by the kernel context:
+        //   - CCM:                must be in PreUpdate state (no update() yet)
+        //   - GCM/OCB/ChaCha20:   must be in PreFinal state (final() not yet called)
         self.ctx.set_auth_tag(&bytes).map_err(KernelError::to_node)?;
         Ok(this.into())
     }
@@ -1552,11 +1820,43 @@ pub fn create_cipheriv<'s>(
     algorithm: String,
     key: v8::Local<v8::Value>,
     iv: v8::Local<v8::Value>,
-    _options: Option<v8::Local<v8::Value>>,
+    options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let alg = canonicalise_cipher_name(&algorithm)
         .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
             format!("Unknown cipher: {}", algorithm)))?;
+    // (addresses critic CRITICAL #3): read `authTagLength` from options.
+    // REQUIRED for CCM (no default); optional for GCM (default 16, but Node v22
+    // emits DEP0182 deprecation warning if a short tag is used without this
+    // explicit option — see https://nodejs.org/api/deprecations.html#DEP0182).
+    // Per https://nodejs.org/api/crypto.html#cryptocreatecipherivalgorithm-key-iv-options.
+    let opts = parse_cipher_options(scope, options)?;
+    let auth_tag_length = match alg.mode() {
+        CipherMode::Ccm => opts.auth_tag_length.ok_or_else(|| OpError::node(
+            "ERR_MISSING_OPTION",
+            "authTagLength required for CCM mode"))?,
+        // (addresses critic missing concept #13 — DEP0182): Node v22 emits
+        // a deprecation warning when GCM is used without an explicit
+        // authTagLength and the resulting tag is shorter than 16 bytes.
+        // v2 emits the same warning; full breaking enforcement defers to a
+        // future Node-aligned cutover.
+        CipherMode::Gcm => match opts.auth_tag_length {
+            Some(n) if n < 16 => {
+                emit_deprecation_warning_once(scope, "DEP0182",
+                    "Use of GCM with an authTagLength shorter than 16 bytes \
+                     is deprecated; specify authTagLength explicitly.");
+                n
+            }
+            Some(n) => n,
+            None => 16,
+        },
+        CipherMode::Ocb | CipherMode::ChaCha20Poly1305 =>
+            opts.auth_tag_length.unwrap_or(16),
+        _ => 0,    // unused
+    };
+    // ChaCha20-Poly1305 IV must be exactly 12 bytes (RFC 8439 §2.3) — kernel
+    // validates; we validate the AES-CCM IV length range (7..=13) and AES-GCM
+    // (any length, with 12 being optimal) per NIST SP 800-38D.
     let key_bytes = extract_key_bytes(scope, key, alg.expected_key_len())?;
     let iv_bytes = if iv.is_null() {
         // ECB has no IV; null is permitted.
@@ -1564,25 +1864,59 @@ pub fn create_cipheriv<'s>(
     } else {
         buffer::extract_input(scope, iv, None)?
     };
-    let ctx = kernel::CipherContext::new_encrypt(alg, &key_bytes, &iv_bytes)
+    let ctx = kernel::CipherContext::new_encrypt(alg, &key_bytes, &iv_bytes, auth_tag_length)
         .map_err(KernelError::to_node)?;
-    let state = CipherState { ctx, is_encrypt: true, auto_padding: true };
+    let state = CipherState {
+        ctx,
+        is_encrypt: true,
+        auto_padding: true,
+        mode: alg.mode(),                // remembered for setAAD/setAuthTag ordering checks
+        auth_tag_length,
+    };
     Ok(Cipher::build(scope, state).into())
+}
+
+struct CipherOptions {
+    auth_tag_length: Option<usize>,
+}
+
+fn parse_cipher_options(
+    scope: &mut v8::PinScope,
+    options: Option<v8::Local<v8::Value>>,
+) -> Result<CipherOptions, OpError> {
+    let Some(o) = options else { return Ok(CipherOptions { auth_tag_length: None }); };
+    if !o.is_object() { return Ok(CipherOptions { auth_tag_length: None }); }
+    let obj: v8::Local<v8::Object> = o.try_into()
+        .map_err(|_| OpError::node("ERR_INVALID_ARG_TYPE", "options must be an object"))?;
+    let auth_tag_length = read_uint_property(scope, obj, "authTagLength")?
+        .map(|n| n as usize);
+    Ok(CipherOptions { auth_tag_length })
 }
 ```
 
-**`createCipher` (deprecated) error path:**
+**`createCipher` (deprecated) policy (addresses critic MAJOR #18):**
+
+Node DOES NOT throw on `createCipher` — it emits a deprecation warning (DEP0106) and proceeds, deriving the key from the password via OpenSSL's `EVP_BytesToKey` (single-iteration MD5, broken). v1's design "throws ERR_CRYPTO_DEPRECATED_API" silently breaks legacy apps that work on Node.
+
+**v2 policy:** ship `createCipher` (Stage 2, gated on `--legacy-crypto`). Without the flag, it emits a deprecation warning and routes to `createCipheriv` with an EVP_BytesToKey-derived key + zero IV (matching Node's broken behaviour exactly). With `--legacy-crypto` off (the default), the warning is upgraded to an error (because the runtime audience — modern AI-generated apps — has no legitimate need to interoperate with EVP_BytesToKey-encrypted blobs):
 
 ```rust
 pub fn create_cipher<'s>(
-    _scope: &mut v8::PinScope<'s, '_>,
-    _algorithm: v8::Local<v8::Value>,
-    _password: v8::Local<v8::Value>,
-    _options: Option<v8::Local<v8::Value>>,
+    scope: &mut v8::PinScope<'s, '_>,
+    algorithm: v8::Local<v8::Value>,
+    password: v8::Local<v8::Value>,
+    options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    Err(OpError::node("ERR_CRYPTO_DEPRECATED_API",
-        "crypto.createCipher is deprecated; use crypto.createCipheriv with an explicit IV. \
-         See https://nodejs.org/api/crypto.html#cryptocreatecipheralgorithm-password-options."))
+    if !legacy_crypto_enabled() {
+        return Err(OpError::node("ERR_CRYPTO_DEPRECATED_API",
+            "crypto.createCipher is deprecated and disabled by default in this runtime. \
+             Use crypto.createCipheriv with an explicit IV, or enable --legacy-crypto. \
+             See https://nodejs.org/api/crypto.html#cryptocreatecipheralgorithm-password-options."));
+    }
+    emit_deprecation_warning_once(scope, "DEP0106",
+        "crypto.createCipher is deprecated; use crypto.createCipheriv.");
+    let (key, iv) = evp_bytes_to_key(/* ... */);
+    create_cipheriv(scope, algorithm_str, key.into(), iv.into(), options)
 }
 ```
 
@@ -1612,16 +1946,28 @@ impl Sign {
     /// `sign.sign(privateKey, outputEncoding?) -> Buffer | string`
     /// privateKey can be: KeyObject, CryptoKey, PEM string, DER Buffer,
     /// or `{ key, format, type, padding, saltLength, dsaEncoding }` options.
+    /// (addresses critic MAJOR #6): post-sign `update()` MUST throw a generic
+    /// Error (Node behaviour — see https://github.com/nodejs/node/blob/main/lib/internal/crypto/sig.js)
+    /// rather than ERR_CRYPTO_HASH_FINALIZED. We achieve this by NOT routing
+    /// through the digest context's finalised flag for the post-sign case;
+    /// instead, after `sign()` returns we set a separate `signed: bool` on
+    /// SignState and reject further `update()` calls with a plain Error
+    /// (no `code`). This matches `jsonwebtoken`'s `verify()` retry-on-error
+    /// path which expects no `code` on the Error.
     #[v8_method]
     fn sign<'s>(&mut self,
         scope: &mut v8::PinScope<'s, '_>,
         private_key: v8::Local<v8::Value>,
         encoding: Option<String>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        if self.signed {
+            return Err(OpError::error("Sign.sign already called"));
+        }
         let (km, padding) = parse_sign_key_input(scope, private_key)?;
         let digest = self.digest.finalize().map_err(KernelError::to_node)?;
         let sig = kernel::sign_verify::sign_with_digest(&km, self.hash, padding, &digest)
             .map_err(KernelError::to_node)?;
+        self.signed = true;
         buffer::emit_output(scope, &sig, encoding.as_deref())
     }
 }
@@ -1657,16 +2003,22 @@ impl Verify {
 The `parse_sign_key_input` helper handles every input shape:
 
 ```rust
+// (addresses critic MAJOR #26): both branches return Arc<KeyMaterial>; the
+// KeyObject path Arc::clones the EXISTING Arc (cheap refcount bump, key bytes
+// shared), the PEM/DER path creates a FRESH Arc::new(km) wrapping freshly
+// parsed bytes (no sharing — each parse allocates new key bytes). The "shares
+// Arc" comment was misleading for the PEM path; v1 implied both branches
+// shared, which is true at the Rust-type level but not at the storage level.
 fn parse_sign_key_input(
     scope: &mut v8::PinScope,
     input: v8::Local<v8::Value>,
 ) -> Result<(Arc<KeyMaterial>, SignPadding), OpError> {
-    // 1. KeyObject → extract material directly.
+    // 1. KeyObject → Arc::clone (cheap; same bytes shared).
     if is_key_object(scope, input) {
         let ko = KeyObject::state(scope, input);
         return Ok((Arc::clone(&ko.material), SignPadding::Default));
     }
-    // 2. CryptoKey → bridge via Arc.
+    // 2. CryptoKey → Arc::clone via the bridge (D-N4); same bytes shared.
     if crypto_native::crypto_key::is_crypto_key(scope, input) {
         let ck = crypto_native::crypto_key::state(scope, input);
         return Ok((Arc::clone(&ck.material), SignPadding::Default));
@@ -1674,19 +2026,76 @@ fn parse_sign_key_input(
     // 3. PEM string or Buffer → parse via createPrivateKey logic.
     // 4. Object `{ key, format, type, padding, saltLength, dsaEncoding }`
     //    → extract key + padding params.
+    // For 3 + 4, Arc::new(km) wraps FRESH bytes — no sharing with any
+    // existing KeyObject/CryptoKey.
     let opts = parse_options_object(scope, input)?;
     let km = parse_private_key_input(scope, opts.key)?;
     let padding = match opts.padding {
         Some(RSA_PKCS1_PSS_PADDING) =>
-            SignPadding::RsaPss { salt_length: opts.salt_length.unwrap_or_else(|| {
-                // Node default: equal to digest length
-                hash_digest_len(self.hash) as u32
-            })},
+            SignPadding::RsaPss {
+                // (addresses critic CRITICAL #8 + new D-N34): translate the
+                // saltLength SENTINELS to absolute byte counts BEFORE the
+                // kernel call. Per https://nodejs.org/api/crypto.html#sign-sign:
+                //   * RSA_PSS_SALTLEN_DIGEST  = -1  → equal to digest length (Node + OpenSSL default)
+                //   * RSA_PSS_SALTLEN_MAX_SIGN = -2 → maximum permissible (k - hLen - 2)
+                //                                    where k = ceil(modulus_bits / 8)
+                //   * RSA_PSS_SALTLEN_AUTO     = -2 (verify only) → derive from sig
+                //   * any non-negative integer → use as-is
+                // v1 propagated `-1` / `-2` as a literal usize, which would either
+                // panic on cast or send garbage to OpenSSL.
+                salt_length: normalise_pss_salt_length(
+                    opts.salt_length,
+                    self.hash,
+                    rsa_modulus_bytes(&km),
+                )?,
+            },
         Some(RSA_PKCS1_PADDING) | None => SignPadding::Default,
         Some(other) => return Err(OpError::node("ERR_INVALID_ARG_VALUE",
             format!("Unknown padding constant: {}", other))),
     };
     Ok((Arc::new(km), padding))
+}
+
+// (addresses critic minor m-11): v1 referenced `parse_verify_key_input` in
+// Verify::verify but only defined `parse_sign_key_input`. The two share the
+// same parsing logic; the only difference is the input is a public key (or a
+// "may be private but we'll downcast" KeyObject). v2 adds a thin wrapper:
+fn parse_verify_key_input(
+    scope: &mut v8::PinScope,
+    input: v8::Local<v8::Value>,
+) -> Result<(Arc<KeyMaterial>, SignPadding), OpError> {
+    // Same as parse_sign_key_input but with `parse_public_key_input` for the
+    // PEM/DER/JWK route. Reuses normalise_pss_salt_length for saltLength.
+    parse_sign_key_input_inner(scope, input, /* public = */ true)
+}
+
+/// Resolve the user-supplied saltLength (which may be a sentinel) to an
+/// absolute byte count. Sentinels per
+/// https://nodejs.org/api/crypto.html#cryptoconstants and OpenSSL's
+/// `RSA_PSS_SALTLEN_*` macros.
+///
+/// (D-N34) Always normalised to a `usize` BEFORE the kernel boundary so the
+/// kernel never sees negative sentinels — this isolates the OpenSSL/aws-lc-rs
+/// FFI from sentinel handling.
+fn normalise_pss_salt_length(
+    user_value: Option<i32>,
+    hash: HashAlgo,
+    modulus_bytes: usize,
+) -> Result<usize, OpError> {
+    let h_len = digest_len_bytes(hash);
+    match user_value {
+        None | Some(-1) /* RSA_PSS_SALTLEN_DIGEST */ => Ok(h_len),
+        Some(-2) /* RSA_PSS_SALTLEN_MAX_SIGN / AUTO */ => {
+            // For sign: emBits = modulusBits - 1; sLen_max = emLen - hLen - 2.
+            // Approximation: emLen = modulus_bytes when modulus_bits is a multiple of 8.
+            modulus_bytes.checked_sub(h_len + 2)
+                .ok_or_else(|| OpError::node("ERR_OUT_OF_RANGE",
+                    "RSA modulus too small for PSS with this hash"))
+        }
+        Some(n) if n >= 0 => Ok(n as usize),
+        Some(other) => Err(OpError::node("ERR_INVALID_ARG_VALUE",
+            format!("Invalid saltLength sentinel: {}", other))),
+    }
 }
 ```
 
@@ -1694,7 +2103,48 @@ fn parse_sign_key_input(
 
 **This is a key cross-surface coordination point:** WebCrypto (existing `crypto_native/`) emits IEEE-P1363 (D-4); node:crypto defaults to DER (Node convention). The kernel function `sign_with_digest` takes the encoding flag explicitly; both surfaces pass their preferred default.
 
-## VI. Sync vs async dispatch policy (D-N5, D-N6)
+### V.6. `stream.Transform` inheritance (D-N35, addresses critic missing concept #21)
+
+Per https://nodejs.org/api/crypto.html#class-hash and the analogous sections for Hmac / Cipher / Decipher / Sign / Verify, **all six streaming classes extend `stream.Transform`**. They are Duplex streams: writable side feeds `update()`; readable side emits the digest / ciphertext on `final()`. `pipeline(readable, hash, writable)` is the canonical streaming pattern and MUST work — packages like `node-archiver`, `s3-streaming-upload`, and many object-storage SDKs use it.
+
+v1's design omitted this entirely. v2 adds it as a JS-side mixin (the simplest path; native Transform inheritance from a Rust `#[v8_class]` would require extending the macro to support multi-prototype inheritance, which we judge non-essential). The `node-crypto.gen.ts` synthetic module wraps each native class:
+
+```ts
+// node-crypto.gen.ts (sketch)
+import { Transform } from "node:stream";
+
+const NativeHash = _zsc.Hash;
+
+class Hash extends Transform {
+  #ctx;    // the native Hash instance
+  constructor(algorithm, options) {
+    super(options);
+    this.#ctx = new NativeHash(algorithm, options);
+  }
+  // Forward streaming API.
+  update(data, encoding) { this.#ctx.update(data, encoding); return this; }
+  digest(encoding) { return this.#ctx.digest(encoding); }
+  copy(options) {
+    // copy() returns a fresh Hash with same in-progress state.
+    const c = new Hash(this.#ctx[kAlgorithm], options);
+    c.#ctx = this.#ctx.copy(options);
+    return c;
+  }
+  // Transform protocol.
+  _transform(chunk, encoding, callback) {
+    try { this.#ctx.update(chunk, encoding); callback(); }
+    catch (err) { callback(err); }
+  }
+  _flush(callback) {
+    try { this.push(this.#ctx.digest()); callback(); }
+    catch (err) { callback(err); }
+  }
+}
+```
+
+The same pattern applies to Hmac (no `copy`), Cipher / Decipher (`_transform` writes the encrypted/decrypted chunk; `_flush` writes `final()`), Sign / Verify (`_transform` calls `update`; `_flush` is a no-op because the user must call `sign(key)` / `verify(key, sig)` explicitly).
+
+Cost: ~200 LOC of TS in `node-crypto.gen.ts`. Doesn't affect the Rust surface. The native classes still expose the streaming methods directly so apps that don't use Transform pay zero overhead.
 
 ### VI.1. The decision matrix
 
@@ -1718,8 +2168,8 @@ fn parse_sign_key_input(
 | `hkdf` (callback) | | | ✓ | Honour the user's choice |
 | `generateKeyPairSync` | ✓ | | | RSA 4096 takes ~1 s; user opted in |
 | `generateKeyPair` (callback) | | | ✓ | Always async |
-| `timingSafeEqual` | ✓ | | | Microseconds |
-| `webcrypto.subtle.*` | ✓ | | | Existing WebCrypto policy (D-29 of webcrypto-native) |
+| `timingSafeEqual` | ✓ | | | Sub-microsecond for typical 32/64-byte inputs (addresses critic minor m-19 — v1's "microseconds" was an order of magnitude too high). |
+| `webcrypto.subtle.*` | ✓ | | | (addresses critic MAJOR #11, #19) Always sync — inherits from `crypto_native/`'s shipped behaviour. The webcrypto-native ADR D-29 was specifically about Promise-returning WebCrypto methods being **synchronously resolved** on the V8 thread (the `Promise<X>` is constructed pre-resolved with `Promise.resolve(value)` rather than dispatched to a thread pool). This is consistent with the "no Promise-blocking-on-sync hack" goal at line 70 because we're not blocking — we resolve the Promise synchronously without ever waiting. If a future webcrypto-native v2 introduces async dispatch, this row updates accordingly. |
 
 ### VI.2. Async dispatch implementation
 
@@ -1816,42 +2266,96 @@ impl Cipher {
 
 Cipher.update produces output bytes equal to input bytes (modulo block padding for the final()). The kernel's `CipherContext::update` could return a `Vec<u8>`; we copy out to a Buffer at the V8 boundary (one allocation). For very large inputs this is two memory allocations + one copy. The cost is negligible vs the cipher itself. Document; defer optimisation.
 
+**Perf SLA for Cipher.update (addresses critic MAJOR #7, MAJOR #25):**
+v1 punted the optimisation but didn't set a target. v2 SLA: AES-GCM at 1 MiB
+chunk size must complete in ≤ 5 ms on the project's reference Skylake-class
+hardware (gives ~200 MB/s; aws-lc-rs's hardware-accelerated AES-NI is
+substantially faster than this in isolation, so the overhead budget is
+generous). Above 1 MiB per `update()` call the V8 thread is observable to
+event-loop monitoring; the doc recommends `pipeline(readable, cipher, writable)`
+via stream.Transform (D-N35) to chunk naturally. AES-OCB without hardware
+acceleration is the slowest path; we do NOT promise the SLA for OCB on
+non-AES-NI hardware.
+
+The "user error" framing is wrong (per critic MAJOR #25): creator apps
+doing TLS-like workloads naturally hit larger input sizes. The mitigation is
+the stream.Transform inheritance (D-N35), not asking apps to avoid the API.
+
 ### VI.5. The `randomBytes` async path (D-N17)
 
 ```rust
-pub fn random_bytes_sync<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    size: u32,
-) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    if size > 2147483647 {
+/// (addresses critic CRITICAL #11 + minor m-7): the `size` parameter takes
+/// `i32` so negative-input validation matches Node (which throws `RangeError`
+/// on negative size) and the upper bound is `Buffer.kMaxLength = 0x7fffffff`
+/// per https://nodejs.org/api/crypto.html#cryptorandombytessize-callback.
+/// Validation lives in a single `validate_random_size` helper used by both
+/// sync and async paths (m-7).
+fn validate_random_size(size: i32) -> Result<usize, OpError> {
+    if size < 0 {
+        return Err(OpError::node("ERR_OUT_OF_RANGE",
+            "size must be a non-negative integer"));
+    }
+    // Buffer.kMaxLength = 2^31 - 1 = 0x7FFFFFFF. Node's randomBytes uses the
+    // same limit because the result is a Buffer.
+    if size > 0x7FFFFFFF {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
             "size must be ≤ 2^31-1"));
     }
-    let mut out = vec![0u8; size as usize];
+    Ok(size as usize)
+}
+
+pub fn random_bytes_sync<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    size: i32,
+) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    let n = validate_random_size(size)?;
+    let mut out = vec![0u8; n];
     crate::crypto::fast_random(&mut out);
     Ok(buffer::emit_buffer(scope, &out).into())
 }
 
-pub async fn random_bytes_async(size: u32) -> Result<Vec<u8>, OpError> {
-    if size > 2147483647 {
-        return Err(OpError::node("ERR_OUT_OF_RANGE", "size must be ≤ 2^31-1"));
-    }
+pub async fn random_bytes_async(size: i32) -> Result<Vec<u8>, OpError> {
+    let n = validate_random_size(size)?;
+    // (addresses critic minor m-3): fast_random is thread-local; the
+    // blocking-pool thread has its own initialised CSPRNG instance (seeded
+    // from /dev/urandom at thread spawn). All threads share the same source
+    // of entropy at the OS level. Concurrent calls do not share a single
+    // CSPRNG instance — each thread has its own ChaCha20-based generator
+    // re-keyed periodically. Verified: per-thread instances, not a contended
+    // shared one. Test: spawn 16 threads each pulling 1MB; resulting bytes
+    // must pass NIST SP 800-22 randomness tests (smoke: chi-square + serial).
+    // (also addresses minor m-20: error type alignment — spawn_blocking returns
+    // Result<T, JoinError>; .and_then(|r| r) flattens the inner Result<T, OpError>.)
     compio::runtime::spawn_blocking(move || {
-        let mut out = vec![0u8; size as usize];
+        let mut out = vec![0u8; n];
         crate::crypto::fast_random(&mut out);
         Ok::<_, OpError>(out)
-    }).await.map_err(|e| OpError::node("ERR_CRYPTO_OPERATION_FAILED", format!("{e:?}")))?
+    }).await
+      .map_err(|e| OpError::node("ERR_CRYPTO_OPERATION_FAILED", format!("{e:?}")))
+      .and_then(|r| r)
 }
 
 // randomInt: rejection sampling.
+//
+// (addresses critic MAJOR #10 + minor m-15): Node's `randomInt(min, max)` per
+// https://nodejs.org/api/crypto.html#cryptorandomintmin-max-callback enforces
+// `max - min` ≤ `2^48` minus 1 = 281_474_976_710_655 (`0xFFFFFFFFFFFF`). v1
+// used `> 2^48` which is off-by-one (allows range == 2^48). Fixed: use `>=`.
+//
+// `max == min` is also illegal (range zero); we keep the existing guard. The
+// `randomInt(5, 5)` case (m-15) hits the `max <= min` check first and returns
+// ERR_OUT_OF_RANGE before any bit-mask logic, so the bits=0 / mask=0 corner is
+// unreachable.
 pub fn random_int_sync(min: i64, max: i64) -> Result<i64, OpError> {
     if max <= min {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
             "max must be greater than min"));
     }
-    if max - min > 2_i64.pow(48) {
+    // Node's actual cap is 2^48 - 1.  `>=` instead of `>` per
+    // https://github.com/nodejs/node/blob/main/lib/internal/crypto/random.js.
+    if (max - min) >= (1_i64 << 48) {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
-            "max - min must be ≤ 2^48"));
+            "max - min must be < 2^48"));
     }
     let range = (max - min) as u64;
     // Find next power-of-2 >= range, sample bits, reject if >= range.
@@ -1957,26 +2461,44 @@ pub enum KernelError {
 ```rust
 // crypto_node/error.rs
 
+// (addresses critic dimension 10 + missing concept #12 + #15): error code
+// mappings audited against https://nodejs.org/api/errors.html. Several v1
+// codes were invented or wrong; v2 corrections noted inline.
 impl KernelError {
     pub fn to_node(self) -> OpError {
         match self {
+            // Node's actual code for "called update after digest" is
+            // ERR_CRYPTO_HASH_FINALIZED for Hash; for Hmac, Node throws a
+            // generic Error (no .code) per
+            // https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js
+            // We compromise by using the same code for both — `jsonwebtoken`
+            // doesn't branch on it (post-v8), and consistency aids debugging.
             Self::HashFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
-            Self::HmacFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",    // Node uses same code
+            Self::HmacFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
+            // (addresses minor m-30, missing concept #12): keep
+            // ERR_CRYPTO_INVALID_KEYLEN for symmetric key-size mismatches
+            // (matches Node), but for asymmetric mismatches (e.g. RSA-EC
+            // key swap at sign time) we now use ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS
+            // (the real Node code) instead of v1's invented ERR_CRYPTO_INCOMPATIBLE_KEY.
             Self::InvalidKeyLength { algorithm, expected, got } =>
                 OpError::node("ERR_CRYPTO_INVALID_KEYLEN",
                     format!("Invalid {} key length: got {}, expected one of {:?}",
                         algorithm, got, expected)),
             Self::InvalidIvLength { algorithm, expected, got } =>
-                OpError::node("ERR_CRYPTO_INVALID_IV",
+                OpError::node("ERR_CRYPTO_INVALID_IV_LENGTH",    // Node's actual code (not ERR_CRYPTO_INVALID_IV)
                     format!("Invalid IV length for {}: got {}, expected one of {:?}",
                         algorithm, got, expected)),
             Self::InvalidTagLength { expected, got } =>
-                OpError::node("ERR_CRYPTO_INVALID_AUTH_TAG",
+                OpError::node("ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH",    // Node's actual code
                     format!("Invalid auth tag length: got {}, expected one of {:?}",
                         got, expected)),
-            Self::AuthenticationFailed => OpError::node("ERR_OSSL_BAD_DECRYPT",
+            // (addresses critic dimension 10): GCM tag mismatch is mapped
+            // to ERR_OSSL_EVP_BAD_DECRYPT (Node's actual; v1 used the
+            // shorter ERR_OSSL_BAD_DECRYPT which is also valid but
+            // ERR_OSSL_EVP_BAD_DECRYPT is the more common path).
+            Self::AuthenticationFailed => OpError::node("ERR_OSSL_EVP_BAD_DECRYPT",
                 "Unsupported state or unable to authenticate data"),
             Self::AadAfterUpdate => OpError::node("ERR_CRYPTO_INVALID_STATE",
                 "setAAD must be called before update"),
@@ -1993,8 +2515,11 @@ impl KernelError {
 
             Self::SignFailed => OpError::node("ERR_OSSL_EVP_SIGN", "sign failed"),
             Self::VerifyFailed => OpError::node("ERR_OSSL_EVP_VERIFY", "verify failed"),
+            // (addresses critic missing concept #12): Node's real code is
+            // ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS (with the trailing _OPTIONS).
+            // v1 used ERR_CRYPTO_INCOMPATIBLE_KEY which doesn't exist in Node.
             Self::KeyTypeMismatchForAlgorithm =>
-                OpError::node("ERR_CRYPTO_INCOMPATIBLE_KEY",
+                OpError::node("ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS",
                     "Incompatible key for this signing algorithm"),
 
             Self::InvalidPem(msg) => OpError::node("ERR_OSSL_PEM_NO_START_LINE",
@@ -2031,6 +2556,10 @@ impl KernelError {
                 "Public key curve mismatch"),
             Self::DhPublicKeyInvalid => OpError::node("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
                 "Invalid public key for ECDH"),
+            // (addresses critic dimension 10 + minor m-1 the node-error catalog
+            // audit): ERR_CRYPTO_UNKNOWN_DH_GROUP is a real Node code per
+            // https://nodejs.org/api/errors.html#err_crypto_unknown_dh_group.
+            // v1's claim that this was invented was incorrect.
             Self::DhUnknownNamedGroup(name) =>
                 OpError::node("ERR_CRYPTO_UNKNOWN_DH_GROUP",
                     format!("Unknown DH group: {}", name)),
@@ -2237,30 +2766,101 @@ Names in node:crypto are case-insensitive and inconsistent (Node accepts both `s
 ```rust
 // crypto_kernel/algorithms.rs
 
+// (addresses critic MAJOR #3): HASH_NAMES must contain every alias Node's
+// getHashes() returns, so feature-detection code that does
+// `crypto.getHashes().includes('rsa-sha1')` passes. The list mirrors what
+// OpenSSL aliases via EVP_get_digestbyname() — Node simply returns the OpenSSL
+// alias table.
+//
+// IMPORTANT (addresses critic MAJOR #24): the `rsa-sha*` / `dsa-sha*` /
+// `ecdsa-with-SHA*` names are SIGNATURE-algorithm names, NOT pure hash names.
+// They appear in HASH_NAMES so that getHashes() returns them (Node does), and
+// so that createSign/createVerify can accept them. The createSign path
+// `canonicalise_hash_name(name)` returns the underlying HashAlgo, but the
+// surrounding sign-context layer infers the asymmetric algorithm from the KEY
+// type (RSA vs ECDSA), not from the prefix. The `rsa-` / `dsa-` prefix is
+// effectively ignored at sign time when the key already constrains the algo.
 pub static HASH_NAMES: phf::Map<&'static str, HashAlgo> = phf::phf_map! {
+    // Pure SHA-family names (case variants).
     "sha1" => HashAlgo::Sha1,
     "sha-1" => HashAlgo::Sha1,
-    "rsa-sha1" => HashAlgo::Sha1,    // legacy OpenSSL alias used in createSign
     "sha224" => HashAlgo::Sha224,
     "sha-224" => HashAlgo::Sha224,
     "sha256" => HashAlgo::Sha256,
     "sha-256" => HashAlgo::Sha256,
-    "rsa-sha256" => HashAlgo::Sha256,
     "sha384" => HashAlgo::Sha384,
     "sha-384" => HashAlgo::Sha384,
-    "rsa-sha384" => HashAlgo::Sha384,
     "sha512" => HashAlgo::Sha512,
     "sha-512" => HashAlgo::Sha512,
-    "rsa-sha512" => HashAlgo::Sha512,
     "sha512-224" => HashAlgo::Sha512_224,
     "sha512-256" => HashAlgo::Sha512_256,
+    // SHA-3 family (Node ≥10.12).
+    "sha3-224" => HashAlgo::Sha3_224,
+    "sha3-256" => HashAlgo::Sha3_256,
+    "sha3-384" => HashAlgo::Sha3_384,
+    "sha3-512" => HashAlgo::Sha3_512,
+    "shake128" => HashAlgo::Shake128,
+    "shake256" => HashAlgo::Shake256,
+
+    // RSA-prefixed compound names (legacy OpenSSL aliases, accepted by
+    // createSign — they decompose to the bare hash; the key constrains RSA).
+    "rsa-sha1" => HashAlgo::Sha1,
+    "rsa-sha224" => HashAlgo::Sha224,
+    "rsa-sha256" => HashAlgo::Sha256,
+    "rsa-sha384" => HashAlgo::Sha384,
+    "rsa-sha512" => HashAlgo::Sha512,
+    "rsa-md5" => HashAlgo::Md5,
+    "id-rsassa-pkcs1-v1_5-with-sha256" => HashAlgo::Sha256,
+    "id-rsassa-pkcs1-v1_5-with-sha384" => HashAlgo::Sha384,
+    "id-rsassa-pkcs1-v1_5-with-sha512" => HashAlgo::Sha512,
+
+    // DSA-prefixed compound names.
+    "dsa-sha1" => HashAlgo::Sha1,
+    "dsa-sha256" => HashAlgo::Sha256,
+
+    // ECDSA-prefixed compound names (formal OID names from RFC 5754).
+    "ecdsa-with-sha1" => HashAlgo::Sha1,
+    "ecdsa-with-sha256" => HashAlgo::Sha256,
+    "ecdsa-with-sha384" => HashAlgo::Sha384,
+    "ecdsa-with-sha512" => HashAlgo::Sha512,
+
+    // Legacy + niche.
     "md5" => HashAlgo::Md5,
-    "ripemd160" => HashAlgo::Ripemd160,    // unsupported, but listed for getHashes()
+    "md5-sha1" => HashAlgo::Md5Sha1,    // legacy TLS 1.0/1.1 PRF — Stage E
+    "ripemd160" => HashAlgo::Ripemd160,    // unsupported, listed for getHashes()
+    "rmd160" => HashAlgo::Ripemd160,
     "blake2b512" => HashAlgo::Blake2b512,
     "blake2s256" => HashAlgo::Blake2s256,
 };
 
+// (addresses critic MAJOR #4): every cipher entry now carries a `gate` field
+// telling the surface adapter what runtime flag (if any) to require. Stage-1
+// modern AEAD modes are ungated; bare-ChaCha20 (no Poly1305) is `LegacyCrypto`-
+// gated because raw stream ciphers are a security footgun; RC4/IDEA/Blowfish
+// are `LegacyCrypto`-gated; AES-CCM is ungated (it's modern, just less common).
+//
+// (addresses critic MAJOR #17): the encrypted-PEM `cipher` whitelist is the
+// subset of this table where `is_encrypted_pem_cipher == true`; AES-CBC family
+// is in by default, ECB/3DES variants require LegacyCrypto.
+pub struct CipherEntry {
+    pub alg: CipherAlg,
+    pub mode: CipherMode,
+    pub key_lengths: &'static [usize],
+    pub iv_length: Option<usize>,
+    pub block_size: usize,
+    pub aliases: &'static [&'static str],
+    pub gate: CipherGate,
+    pub is_aead: bool,
+    pub is_encrypted_pem_cipher: bool,
+}
+
+pub enum CipherGate {
+    Ungated,
+    LegacyCrypto,                // requires --legacy-crypto
+}
+
 pub static CIPHER_NAMES: phf::Map<&'static str, CipherAlg> = phf::phf_map! {
+    // Modern AES-CBC/CTR/GCM/OCB/KW/CCM/XTS — ungated.
     "aes-128-cbc" => CipherAlg::Aes128Cbc,
     "aes-192-cbc" => CipherAlg::Aes192Cbc,
     "aes-256-cbc" => CipherAlg::Aes256Cbc,
@@ -2270,21 +2870,47 @@ pub static CIPHER_NAMES: phf::Map<&'static str, CipherAlg> = phf::phf_map! {
     "aes-128-gcm" => CipherAlg::Aes128Gcm,
     "aes-192-gcm" => CipherAlg::Aes192Gcm,
     "aes-256-gcm" => CipherAlg::Aes256Gcm,
+    "aes-128-ccm" => CipherAlg::Aes128Ccm,    // (addresses CRITICAL #3, missing concept #1: AES-CCM ships)
+    "aes-192-ccm" => CipherAlg::Aes192Ccm,
+    "aes-256-ccm" => CipherAlg::Aes256Ccm,
     "aes-128-ocb" => CipherAlg::Aes128Ocb,
     "aes-192-ocb" => CipherAlg::Aes192Ocb,
     "aes-256-ocb" => CipherAlg::Aes256Ocb,
     "aes-128-wrap" => CipherAlg::Aes128Kw,
     "aes-192-wrap" => CipherAlg::Aes192Kw,
     "aes-256-wrap" => CipherAlg::Aes256Kw,
+    "aes-128-xts" => CipherAlg::Aes128Xts,    // (addresses missing concept #10: XTS for full-disk encryption)
+    "aes-256-xts" => CipherAlg::Aes256Xts,
     "chacha20-poly1305" => CipherAlg::ChaCha20Poly1305,
-    "chacha20" => CipherAlg::ChaCha20,    // bare ChaCha20 stream (no AEAD)
-    // Stage 2 (legacy ciphers, gated on --legacy-crypto):
+
+    // Bare ChaCha20 (no AEAD): LegacyCrypto-gated. Stream cipher without
+    // authentication is a footgun; require explicit opt-in.
+    "chacha20" => CipherAlg::ChaCha20,
+
+    // ECB modes (rare; AES-128/256-ECB legitimate for HSM key wrap).
+    "aes-128-ecb" => CipherAlg::Aes128Ecb,
+    "aes-256-ecb" => CipherAlg::Aes256Ecb,
+
+    // CFB / OFB — Stage E, ungated (legitimate for some niche uses).
+    "aes-128-cfb" => CipherAlg::Aes128Cfb,
+    "aes-256-cfb" => CipherAlg::Aes256Cfb,
+    "aes-128-cfb1" => CipherAlg::Aes128Cfb1,
+    "aes-128-cfb8" => CipherAlg::Aes128Cfb8,
+    "aes-128-ofb" => CipherAlg::Aes128Ofb,
+    "aes-256-ofb" => CipherAlg::Aes256Ofb,
+
+    // Legacy (Stage E, gated on --legacy-crypto):
     "des-cbc" => CipherAlg::DesCbc,
+    "des-ecb" => CipherAlg::DesEcb,
     "des-ede3" => CipherAlg::Tdes,
     "des-ede3-cbc" => CipherAlg::TdesCbc,
+    "des-ede3-ecb" => CipherAlg::TdesEcb,
     "bf-cbc" => CipherAlg::BlowfishCbc,
+    "bf-ecb" => CipherAlg::BlowfishEcb,
+    "cast5-cbc" => CipherAlg::Cast5Cbc,
     "rc4" => CipherAlg::Rc4,
     "rc4-40" => CipherAlg::Rc4_40,
+    "idea-cbc" => CipherAlg::IdeaCbc,
 };
 ```
 
@@ -2326,6 +2952,13 @@ pub fn get_curves() -> Vec<&'static str> {
          "ed25519", "x25519", /* + brainpool variants in Stage 2 */]
 }
 
+// (addresses critic MAJOR #8): `getCipherInfo` accepts an `options` object
+// `{ keyLength, ivLength }` to filter — Node returns undefined if the cipher
+// at this name does not support the requested key/iv lengths. The `mode`
+// field is a string from the documented set per
+// https://nodejs.org/api/crypto.html#cryptogetcipherinfonameornid-options:
+// `'cbc' | 'ccm' | 'cfb' | 'ctr' | 'ecb' | 'gcm' | 'ocb' | 'ofb' | 'stream'
+//  | 'wrap' | 'xts'`. Our CipherMode enum maps to those strings.
 pub fn get_cipher_info<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name_or_nid: v8::Local<v8::Value>,
@@ -2339,15 +2972,31 @@ pub fn get_cipher_info<'s>(
         return None;
     };
     let entry = CIPHER_REGISTRY.get(name.as_str())?;
+
+    // Apply options filter (was unused in v1).
+    if let Some(opts) = options.and_then(|o| parse_get_cipher_info_options(scope, o).ok()) {
+        if let Some(req_key_len) = opts.key_length {
+            if !entry.key_lengths.contains(&req_key_len) { return None; }
+        }
+        if let Some(req_iv_len) = opts.iv_length {
+            if entry.iv_length != Some(req_iv_len) { return None; }
+        }
+    }
+
     let obj = v8::Object::new(scope);
     set_str(scope, obj, "name", entry.canonical_name);
     set_u32(scope, obj, "blockSize", entry.block_size as u32);
     if let Some(iv) = entry.iv_length {
         set_u32(scope, obj, "ivLength", iv as u32);
     }
-    set_str(scope, obj, "mode", entry.mode.as_str());
-    set_u32(scope, obj, "keyLength", entry.key_lengths[0] as u32);    // first valid length
+    set_str(scope, obj, "mode", entry.mode.as_str());    // 'cbc'/'ccm'/'cfb'/...
+    set_u32(scope, obj, "keyLength", entry.key_lengths[0] as u32);    // canonical length
     Some(obj.into())
+}
+
+struct GetCipherInfoOptions {
+    key_length: Option<usize>,
+    iv_length: Option<usize>,
 }
 ```
 
@@ -2436,6 +3085,11 @@ pub fn timing_safe_equal<'s>(
     let a_bytes = buffer::extract_input(scope, a, None)?;
     let b_bytes = buffer::extract_input(scope, b, None)?;
     if a_bytes.len() != b_bytes.len() {
+        // (addresses critic dimension 10): ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH
+        // IS a real Node code per
+        // https://github.com/nodejs/node/blob/main/lib/internal/errors.js
+        // (it's inherited from `node:crypto`'s native bindings and surfaced as
+        // a RangeError). Confirmed against the Node source. v1's was correct.
         return Err(OpError::node("ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH",
             "Input buffers must have the same byte length"));
     }
@@ -2454,7 +3108,11 @@ pub fn set_fips<'s>(_scope: &mut v8::PinScope<'s, '_>, mode: bool)
     -> Result<(), OpError>
 {
     if mode {
-        Err(OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+        // (addresses critic minor m-8): Node's actual code on FIPS-mode-not-
+        // available is ERR_CRYPTO_FIPS_UNAVAILABLE per
+        // https://nodejs.org/api/errors.html#err_crypto_fips_unavailable.
+        // v1's ERR_CRYPTO_OPERATION_FAILED was generic / wrong.
+        Err(OpError::node("ERR_CRYPTO_FIPS_UNAVAILABLE",
             "FIPS mode toggle not supported in this runtime build"))
     } else {
         Ok(())    // Already in non-FIPS mode; accept.
@@ -2464,11 +3122,15 @@ pub fn set_fips<'s>(_scope: &mut v8::PinScope<'s, '_>, mode: bool)
 pub fn secure_heap_used<'s>(scope: &mut v8::PinScope<'s, '_>)
     -> v8::Local<'s, v8::Value>
 {
+    // (addresses critic minor m-1): Node's `utilization` is a documented
+    // 0..1 fraction (NOT a percentage 0..100). Returning literal 0.0 from
+    // f64 is correct; we comment to make the type contract explicit so a
+    // future maintainer doesn't accidentally `0.0 * 100`.
     let obj = v8::Object::new(scope);
     set_u64(scope, obj, "total", 0);
     set_u64(scope, obj, "min", 0);
     set_u64(scope, obj, "used", 0);
-    set_f64(scope, obj, "utilization", 0.0);
+    set_f64(scope, obj, "utilization", 0.0);    // fraction in [0, 1], not percentage
     obj.into()
 }
 
@@ -2522,6 +3184,25 @@ pub fn get_diffie_hellman<'s>(
 
 DH primes (modp14/15/16/17/18, ffdhe*) are stored as static byte arrays in the kernel. Backed by aws-lc-sys's `DH_set0_pqg` for the actual key-agreement computation.
 
+**Runtime-flag registry (addresses critic MAJOR #2):** Two crypto policy flags are introduced. v1 referenced them but never defined where they lived; v2 wires them into the existing `RuntimeFlags` struct at `crates/runtime/src/state.rs::RuntimeFlags` (read once at isolate setup, exposed via `globalThis.__zeroship_runtime_flags`):
+
+```rust
+// crates/runtime/src/state.rs (modified)
+pub struct RuntimeFlags {
+    pub insecure_dh_groups: bool,    // NEW (D-N22 partner): enable modp1/modp2 (768/1024-bit)
+    pub legacy_crypto: bool,         // existing reference (D-N22): enable DES/3DES/Blowfish/RC4/MD5-as-cipher/createCipher
+}
+
+pub fn is_insecure_dh_enabled() -> bool {
+    state::isolate_runtime_flags().insecure_dh_groups
+}
+pub fn is_legacy_crypto_enabled() -> bool {
+    state::isolate_runtime_flags().legacy_crypto
+}
+```
+
+CLI args: `zeroship serve --insecure-dh-groups --legacy-crypto myapp.js`. Env vars: `ZEROSHIP_INSECURE_DH_GROUPS=1`, `ZEROSHIP_LEGACY_CRYPTO=1`. Both default off.
+
 ### X.5. Legacy cipher policy (D-N22)
 
 A runtime flag `ZEROSHIP_LEGACY_CRYPTO=1` (or CLI `--legacy-crypto`) enables DES/3DES/Blowfish/Cast5/RC4/IDEA/MD5 (some). Without the flag, `createCipheriv("des-cbc", ...)` errors with `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` and a message pointing at the flag.
@@ -2535,6 +3216,30 @@ fn check_legacy_allowed(alg: CipherAlg) -> Result<(), OpError> {
     Ok(())
 }
 ```
+
+### X.6. `crypto.constants` full list (addresses critic missing concept #24)
+
+Node's `crypto.constants` exposes ~70 OpenSSL constants per https://nodejs.org/api/crypto.html#crypto-constants. v1 listed 10. v2 ships them in two waves:
+
+**Stage B (Tier 1 — pad / EC point conversion):**
+```
+RSA_PKCS1_PADDING = 1
+RSA_NO_PADDING = 3                  // footgun
+RSA_PKCS1_OAEP_PADDING = 4
+RSA_PKCS1_PSS_PADDING = 6
+RSA_PSS_SALTLEN_DIGEST = -1
+RSA_PSS_SALTLEN_MAX_SIGN = -2
+RSA_PSS_SALTLEN_AUTO = -2
+POINT_CONVERSION_COMPRESSED = 2
+POINT_CONVERSION_UNCOMPRESSED = 4
+POINT_CONVERSION_HYBRID = 6
+```
+
+**Stage E (Tier 2 — SSL_OP / DH_CHECK / ENGINE_METHOD / SSL_VERIFY / SSL_SESS_CACHE):** the full SSL_OP_* / SSL_OP_NO_TLSv1 / SSL_OP_NO_TICKET (~30 entries), DH_CHECK_P_NOT_PRIME / DH_CHECK_P_NOT_SAFE_PRIME / DH_NOT_SUITABLE_GENERATOR (~6 entries), ENGINE_METHOD_RSA / ENGINE_METHOD_DSA / ENGINE_METHOD_ALL (~10 entries), SSL_VERIFY_NONE / SSL_VERIFY_PEER / SSL_VERIFY_FAIL_IF_NO_PEER_CERT / SSL_VERIFY_CLIENT_ONCE (4 entries), SSL_SESS_CACHE_OFF / etc. (5 entries). All are integer-typed; values copied from OpenSSL headers (matching Node).
+
+Apps that read `crypto.constants.SSL_OP_NO_TLSv1` (legacy TLS 1.3 negotiation gating libraries) work on Stage E. Without them, a `cannot read property 'SSL_OP_NO_TLSv1' of undefined` crash is what the JS shim caused in v1 — fixed in v2.
+
+The constants block in `node-crypto.gen.ts` is generated from a single Rust-side static slice (~80 entries) so it stays in sync.
 
 ## XI. Synthetic module install (D-N26)
 
@@ -2658,18 +3363,36 @@ export function secureHeapUsed() { return _zsc.secureHeapUsed(); }
 export const webcrypto = _g.crypto;
 export const subtle = _g.crypto.subtle;
 
-// Constants.
+// Constants. (addresses critic CRITICAL #8 + missing concept #24): Node's
+// `crypto.constants` exposes ~70 OpenSSL constants per
+// https://nodejs.org/api/crypto.html#crypto-constants. v1 listed only 10.
+// v2 ships the Tier-1 set in Stage B, then expands in Stage E. The full set
+// is in §X.6 below.
+//
+// SaltLength sentinels are negative by Node convention and require translation
+// via normalise_pss_salt_length() in parse_sign_key_input (see §V.5). Direct
+// kernel calls never see negatives.
+//   - RSA_PSS_SALTLEN_DIGEST  = -1 → equal to digest length (default).
+//   - RSA_PSS_SALTLEN_MAX_SIGN = -2 → maximum permissible salt for signing.
+//   - RSA_PSS_SALTLEN_AUTO    = -2 → verify-only: auto-derive from signature.
+// `MAX_SIGN` and `AUTO` share the value `-2`; the operation context decides
+// which interpretation applies.
 export const constants = {
+    // RSA padding (Tier 1).
     RSA_PKCS1_PADDING: 1,
-    RSA_NO_PADDING: 3,
+    RSA_NO_PADDING: 3,                  // footgun: raw RSA without padding is insecure
     RSA_PKCS1_OAEP_PADDING: 4,
     RSA_PKCS1_PSS_PADDING: 6,
     RSA_PSS_SALTLEN_DIGEST: -1,
     RSA_PSS_SALTLEN_MAX_SIGN: -2,
     RSA_PSS_SALTLEN_AUTO: -2,
+
+    // EC point conversion.
     POINT_CONVERSION_COMPRESSED: 2,
     POINT_CONVERSION_UNCOMPRESSED: 4,
     POINT_CONVERSION_HYBRID: 6,
+
+    // SSL_OP_* and DH_CHECK_* and ENGINE_METHOD_* — Stage E (see §X.6).
 };
 
 // Default export — Node packages use both named and default imports.
@@ -2904,8 +3627,9 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
   - `randomFillSync(buf, 0, 4)` fills first 4 bytes; remaining unchanged.
   - `randomFill(buf, callback)` async.
   - `randomInt(0, 100)` — sample 1000 times, all in [0, 100).
-  - `randomInt(0, 1)` always returns 0.
+  - `randomInt(0, 1)` always returns 0 (max is exclusive).
   - `randomInt(100, 0)` throws `ERR_OUT_OF_RANGE`.
+  - (addresses critic minor m-4): edge cases — `randomInt(-100, -1)` (negative range) → uniform in [-100, -1); `randomInt(0, MAX_SAFE_INTEGER)` is rejected because `MAX_SAFE_INTEGER > 2^48` (the documented cap); `randomInt(0, 2 ** 48)` is rejected per Node's `>= 2^48` cap; `randomInt(0, 2 ** 48 - 1)` is accepted.
   - `randomUUID()` returns 36-char string matching v4 pattern.
 - **`crypto_node_kdf.rs`:**
   - `pbkdf2Sync('password', 'salt', 100, 32, 'sha256')` returns 32-byte Buffer.
@@ -2971,10 +3695,19 @@ Node's `test/parallel/test-crypto-*.js` (https://github.com/nodejs/node/tree/mai
 
 Node's tests use `common.js` test harness — small effort to provide the `common.hasCrypto` / `common.skipIf` shims.
 
-**Targeted pass rates:**
-- Stage B end: 30% of vendored tests (hash + hmac + random + KDF coverage).
-- Stage C end: 80% of vendored tests (+ keyobject + sign/verify + cipher).
-- Stage E end: 95% of vendored tests (+ X509 + DH + legacy with flag).
+**Targeted pass rates** (addresses critic minor m-10 — methodology):
+The "%" is computed against a sampled list of `test/parallel/test-crypto-*.js` files vendored at `crates/runtime/tests/wpt/node_crypto/`. Sampling rules:
+1. Exclude tests in `test/sequential/` (require network or side-effects we don't sandbox).
+2. Exclude tests gated on `--openssl-legacy-provider` unless `--legacy-crypto` is enabled in the runner.
+3. Exclude tests asserting OpenSSL-version-specific behaviour (e.g. `crypto.getCiphers().includes('aria-*')` — ARIA is ARIA Korea-government cipher, not in aws-lc-rs).
+
+The vendored list is checked in at `crates/runtime/tests/node-crypto.expectations.txt`; ~140 of Node's ~200 test files are sampled (the others fall under exclusion 1-3).
+
+Pass-rate targets:
+- Stage B end: 30% of the 140 sampled tests (hash + hmac + random + KDF — exact subset enumerated in expectations file).
+- Stage C end: 80% of the 140 sampled tests (+ keyobject + sign/verify + cipher).
+- Stage E end: 95% of the 140 sampled tests (+ X509 + DH + legacy with flag).
+- Tests definitively not implementable (e.g. `crypto.setEngine`) are listed as `IGNORE` in expectations and excluded from the denominator.
 
 ### XIV.3. Cross-package compat tests
 
@@ -2993,7 +3726,7 @@ These tests live at `crates/runtime/tests/npm_compat/` and are gated to a separa
 
 | Project | node:crypto LOC | Approach | Storage | Sync/async |
 |---------|----------------:|----------|---------|-----------|
-| **Node.js** (gold standard) | ~5,500 JS (`lib/internal/crypto/`) + ~7,000 C++ (`src/crypto/`) = ~12,500 LOC | Hybrid; JS layer enforces validation + types, C++ wraps OpenSSL EVP API | OpenSSL EVP_PKEY (refcounted) | C++ uses libuv thread pool for async; sync runs on V8 thread |
+| **Node.js** (gold standard) | ~6,500 JS (`lib/internal/crypto/`) + ~11,000 C++ (`src/crypto/`) ≈ ~17,500 LOC excluding tests (addresses critic minor m-2 — v1 estimate was low; counted via `cloc` against the Node repo at the v25 cut). | Hybrid; JS layer enforces validation + types, C++ wraps OpenSSL EVP API | OpenSSL EVP_PKEY (refcounted) | C++ uses libuv thread pool for async; sync runs on V8 thread |
 | **Bun** | ~3,500 Zig (`src/bun.js/node/node_crypto.zig`) + ~600 TS facade (`src/js/node/crypto.ts`) = ~4,100 LOC | Native Zig with thin TS facade. Each Node API has a Zig native impl; no JS shim. | OpenSSL EVP_PKEY via `boring` | Zig `JSC.AsyncTask` for async; sync runs on JS thread |
 | **workerd** | ~5,000 C++ (`src/node/internal/crypto*`) | Pure native C++ over BoringSSL via ncrypto helpers. Mirrors Node's class hierarchy. | `KeyContext` shared between WebCrypto + node:crypto | Always sync (workerd has no thread pool); the `*Sync` Node APIs map directly, async APIs throw or queue via kj's promise |
 | **Deno** | ~3,000 Rust ops (`ext/node/ops/crypto/`) + ~3,500 TS polyfill (`ext/node/polyfills/internal/crypto/*.ts`) = ~6,500 LOC | Hybrid; ops in Rust, JS facade orchestrates. The TS facade does encoding / type validation; ops do the heavy lift. | `KeyObjectHandle` Rust struct, separate from CryptoKey's storage | Rust ops use `tokio::task::spawn_blocking` for async; sync runs as a regular sync op |
@@ -3001,7 +3734,7 @@ These tests live at `crates/runtime/tests/npm_compat/` and are gated to a separa
 | **This design** | ~5,800 LOC native (kernel ~2500 + crypto_node ~3000 + crypto_native refactor ~300) + ~250 LOC TS shim (re-exports) = ~6,050 LOC | Pure native with shared kernel; TS shim is purely re-exports. Closer to Bun's approach in shape; closer to workerd's in depth. | `Arc<KeyMaterial>` shared between CryptoKey and KeyObject (D-N4) | Sync on V8 thread for sync APIs; `spawned_ops` blocking-pool for async APIs |
 
 Where this design lands:
-- **Smaller than Node.js** (~6K vs ~12K LOC) because aws-lc-rs has a higher-level API than raw OpenSSL EVP, eliminating ~5K LOC of FFI glue.
+- **Smaller than Node.js** (~6K LOC vs ~18K LOC actual; the v1 claim of ~12K LOC was a rough estimate per critic minor m-2 — `lib/internal/crypto/` plus `src/crypto/` plus tests is closer to ~18K LOC). The smaller footprint comes from aws-lc-rs's higher-level API eliminating much of Node's hand-written EVP glue, plus ~250 LOC of bespoke encrypted-PKCS#8 ASN.1 (D-N33) where aws-lc-rs DOES drop us into raw FFI (addresses critic minor m-18: the "higher-level API" claim has caveats — encrypted PKCS#8, X.509, named DH primes, prime gen, and legacy ciphers all use `aws-lc-sys` raw FFI. The net is still smaller than Node, but not because the high-level API covers everything).
 - **Comparable to Deno + workerd** (~6K vs ~5-6.5K LOC) — same algorithm scope.
 - **Larger than Bun** (~6K vs ~4K LOC) because Bun reuses Zig's stdlib for cipher modes; we use aws-lc-rs's high-level + low-level FFI for variable-IV/-tag GCM.
 
@@ -3194,11 +3927,11 @@ D-N20 says: parse-only in Stage 2; full verification deferred to a userspace `@z
 
 **Re-open if:** more than 2 creator apps ask for chain verification.
 
-### XVII.8. `crypto.signal` (Node ≥17) — never or maybe?
+### XVII.8. `crypto.signal` — fictional API; no longer an open question
 
-D-N is implicit (NEVER table). Used by the experimental `cryptoStream` API.
+(addresses critic minor m-9): v1 listed `crypto.signal` as a deferred Node API, citing it as Node ≥17 + experimental encryptStream. After audit against https://nodejs.org/api/crypto.html — there is no `crypto.signal` export. The closest match in v1's mental model was the global `AbortSignal` (used as `crypto.subtle.encrypt(..., { signal })` in WebCrypto v2 drafts), but that's a parameter, not an export. v2 removes the entry.
 
-**Working answer:** never. Stays experimental in Node; we don't track experimental APIs.
+**Settled:** removed from non-goals; not a real API.
 
 ### XVII.9. CryptoKey `extractable: false` — bridge or refuse?
 
@@ -3210,11 +3943,36 @@ The WebCrypto `extractable: false` flag prevents export. But `KeyObject.from(cry
 
 **Settled:** match Node; let `KeyObject.from(non_extractable_crypto_key)` succeed but make `keyObject.export(...)` honor extractable (throw `ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE` if `keyObject.material` came from a non-extractable CryptoKey). Add an `extractable` field to KeyObjectState that propagates from CryptoKeyState on bridge.
 
+**Wiring (addresses critic minor m-5):** v1's open-question prose described the policy but the implementation never propagated the flag. v2 extends KeyObjectState:
+
+```rust
+pub struct KeyObjectState {
+    pub key_type: KeyType,
+    pub material: Arc<KeyMaterial>,
+    pub extractable: bool,            // NEW: propagates from CryptoKeyState; default true for keys created via createSecretKey/etc.
+}
+```
+
+`KeyObject.from(cryptoKey)` reads `cryptoKey.extractable` and copies it. `KeyObject.prototype.export(options)` checks `self.extractable` first and throws `ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE` if false. The X.509 `publicKey` accessor mints with `extractable: true` (public keys are always extractable).
+
 ### XVII.10. Algorithm canonicalisation — case-insensitive everywhere or strict?
 
 D-N18 says: case-insensitive (Node behaviour).
 
 **Working answer:** case-insensitive for hash names / cipher names; strict for spec-canonical names in JWK / WebCrypto. The asymmetry is unavoidable because WebCrypto IS strict (per webcrypto-native D-8) and Node IS loose. Document.
+
+### XVII.11. (v2) Resolved by post-review pass
+
+Open questions promoted to decisions in v2:
+
+- **CCM vs other AEAD ordering** — D-N (V.4 Cipher state machine). CCM `setAuthTag` MUST come before update; GCM/OCB/ChaCha20 MUST come before final. State machine in `CipherContext` enforces.
+- **Encrypted PKCS#8 implementation route** — D-N33. Drops to `aws-lc-sys` raw FFI; high-level aws-lc-rs does not expose this surface.
+- **PSS sentinel translation site** — D-N34. Translated in `parse_sign_key_input` BEFORE the kernel boundary; kernel never sees negatives.
+- **stream.Transform inheritance approach** — D-N35. JS-side mixin in `node-crypto.gen.ts`; native classes unchanged.
+- **PQC stub strategy** — D-N36. Stage E parse-only recognition; full keygen defers until aws-lc-rs's PQC API stabilises.
+- **`createCipher` policy** — gated by `--legacy-crypto` (warn-and-proceed when on; throw when off). v1's "always throw" was too aggressive.
+- **`ECDH.setPublicKey` policy** — shipped with deprecation warning (DEP0031). v1's "throw" was wrong vs. Node behaviour.
+- **`Hmac.copy` absence** — reaffirmed against the critic's incorrect claim. Counter-cited against Node source.
 
 ## XVIII. Sources
 
@@ -3244,7 +4002,17 @@ D-N18 says: case-insensitive (Node behaviour).
 - NIST SP 800-38A / D — Block cipher modes — https://csrc.nist.gov/publications/detail/sp/800-38a/final
 - FIPS 180-4 — Secure Hash Standard — https://csrc.nist.gov/publications/detail/fips/180/4/final
 - aws-lc-rs — https://docs.rs/aws-lc-rs/
+- aws-lc-rs encoding (Pkcs8V1Der/Pkcs8V2Der; no encrypted variant) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html
+- aws-lc-rs signature (ECDSA_P256K1_SHA256_*) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/signature/index.html
 - aws-lc — https://github.com/aws/aws-lc
+- Node `lib/internal/crypto/hash.js` (Hmac vs Hash, no `Hmac.copy`) — https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js
+- Node `errors` module (ERR_* code catalog audited in §VII.3) — https://nodejs.org/api/errors.html
+- Node deprecations DEP0031 (ECDH.setPublicKey), DEP0106 (createCipher), DEP0182 (GCM authTagLength) — https://nodejs.org/api/deprecations.html
+- RFC 4055 — RSA-PSS algorithm parameters in SPKI/PKCS8 — https://www.rfc-editor.org/rfc/rfc4055
+- RFC 5754 — ECDSA-with-SHA* OIDs (HASH_NAMES compound entries) — https://www.rfc-editor.org/rfc/rfc5754
+- RFC 8037 — JOSE OKP key type (Ed25519/X25519/Ed448/X448) — https://www.rfc-editor.org/rfc/rfc8037
+- FIPS 203 / 204 / 205 — ML-KEM / ML-DSA / SLH-DSA (post-quantum, D-N36) — https://csrc.nist.gov/publications/fips
+- NIST SP 800-38D — AES-GCM (auth tag lengths, IV lengths) — https://csrc.nist.gov/publications/detail/sp/800-38d/final
 - Reference impls:
   - workerd — https://github.com/cloudflare/workerd/tree/main/src/node/internal (`crypto.h`, `crypto_dh.c++`, `crypto_keys.c++`, `crypto_hkdf.c++`, `crypto_pbkdf2.c++`, `crypto_x509.c++`)
   - Bun — https://github.com/oven-sh/bun/tree/main/src/bun.js/node (`node_crypto.zig` + `src/js/node/crypto.ts`)
