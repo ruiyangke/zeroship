@@ -1434,62 +1434,12 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // (URL parsing is now part of native URL — see install_url_native.
     // __urlParse / __urlCanParse callbacks are no longer needed.)
 
-    // crypto namespace (randomUUID + native helpers for SubtleCrypto)
-    {
-        let crypto = v8::Object::new(scope);
-
-        let uuid_fn = v8::Function::new(scope, crate::crypto::crypto_random_uuid_callback).unwrap();
-        let uuid_key = v8::String::new(scope, "randomUUID").unwrap();
-        crypto.set(scope, uuid_key.into(), uuid_fn.into());
-
-        // getRandomValues — direct TypedArray fill, no base64 (hand-written callback)
-        let grv_fn = v8::Function::new(scope, crate::crypto::crypto_get_random_values_callback).unwrap();
-        let grv_key = v8::String::new(scope, "getRandomValues").unwrap();
-        crypto.set(scope, grv_key.into(), grv_fn.into());
-
-        let digest_fn = v8::Function::new(scope, crate::crypto::crypto_digest_callback).unwrap();
-        let digest_key = v8::String::new(scope, "__cryptoDigest").unwrap();
-        crypto.set(scope, digest_key.into(), digest_fn.into());
-
-        let import_fn = v8::Function::new(scope, crate::crypto::crypto_import_key_callback).unwrap();
-        let import_key = v8::String::new(scope, "__cryptoImportKey").unwrap();
-        crypto.set(scope, import_key.into(), import_fn.into());
-
-        let export_fn = v8::Function::new(scope, crate::crypto::crypto_export_key_callback).unwrap();
-        let export_key = v8::String::new(scope, "__cryptoExportKey").unwrap();
-        crypto.set(scope, export_key.into(), export_fn.into());
-
-        let gen_fn = v8::Function::new(scope, crate::crypto::crypto_generate_key_callback).unwrap();
-        let gen_key = v8::String::new(scope, "__cryptoGenerateKey").unwrap();
-        crypto.set(scope, gen_key.into(), gen_fn.into());
-
-        let sign_fn = v8::Function::new(scope, crate::crypto::crypto_sign_callback).unwrap();
-        let sign_key = v8::String::new(scope, "__cryptoSign").unwrap();
-        crypto.set(scope, sign_key.into(), sign_fn.into());
-
-        let verify_fn = v8::Function::new(scope, crate::crypto::crypto_verify_callback).unwrap();
-        let verify_key = v8::String::new(scope, "__cryptoVerify").unwrap();
-        crypto.set(scope, verify_key.into(), verify_fn.into());
-
-        let encrypt_fn = v8::Function::new(scope, crate::crypto::crypto_encrypt_callback).unwrap();
-        let encrypt_key = v8::String::new(scope, "__cryptoEncrypt").unwrap();
-        crypto.set(scope, encrypt_key.into(), encrypt_fn.into());
-
-        let decrypt_fn = v8::Function::new(scope, crate::crypto::crypto_decrypt_callback).unwrap();
-        let decrypt_key = v8::String::new(scope, "__cryptoDecrypt").unwrap();
-        crypto.set(scope, decrypt_key.into(), decrypt_fn.into());
-
-        let derive_bits_fn = v8::Function::new(scope, crate::crypto::crypto_derive_bits_callback).unwrap();
-        let derive_bits_key = v8::String::new(scope, "__cryptoDeriveBits").unwrap();
-        crypto.set(scope, derive_bits_key.into(), derive_bits_fn.into());
-
-        let derive_key_fn = v8::Function::new(scope, crate::crypto::crypto_derive_key_callback).unwrap();
-        let derive_key_key = v8::String::new(scope, "__cryptoDeriveKey").unwrap();
-        crypto.set(scope, derive_key_key.into(), derive_key_fn.into());
-
-        let crypto_key = v8::String::new(scope, "crypto").unwrap();
-        global.set(scope, crypto_key.into(), crypto.into());
-    }
+    // (`globalThis.crypto` was previously a plain {randomUUID, getRandomValues,
+    // __cryptoXxx ops} object backing the embed/crypto.js polyfill. The
+    // polyfill was deleted in WebCrypto v2 landing 3 — `crate::crypto_native::
+    // install_globals` (called during load_polyfills_and_modules) now installs
+    // the WHATWG `Crypto` class as `globalThis.crypto` instead. The plain
+    // object install + its 10 dead `__cryptoXxx` ops have been removed.)
 
     // Native sync hash/HMAC for node:crypto polyfill
     {
