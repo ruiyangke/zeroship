@@ -902,18 +902,42 @@ async fn handle_websocket_upgrade(
         return false;
     }
 
-    // Find the server-side WebSocket ID (the peer of ws_id, which is the client side)
+    // The server-side WS is the peer of the client side. The native
+    // WebSocketPair allocates two consecutive ids (client = N,
+    // server = N+1).
+    #[cfg(feature = "runtime_native_websocket")]
+    let server_ws_id: u32 = ws_id + 1;
+    #[cfg(not(feature = "runtime_native_websocket"))]
     let server_ws_id = {
         let state = runtime.state();
         let s = state.borrow();
         s.websockets.get(&ws_id).and_then(|ws| ws.peer_id).unwrap_or(0)
     };
 
+    #[cfg(not(feature = "runtime_native_websocket"))]
     if server_ws_id == 0 {
         return false;
     }
 
-    // Grab the notification handles for this WebSocket's outgoing queue.
+    // Open the kernel-outbound channel on the CLIENT-side native WS:
+    // anything the JS server-side `socket.send()`s ends up here as
+    // a `WsEvent::MessageText` / `WsEvent::MessageBinary` / Close.
+    #[cfg(feature = "runtime_native_websocket")]
+    let mut kernel_rx = {
+        use futures::channel::mpsc;
+        use crate::websocket_native::network as nw;
+        let (tx, rx) = mpsc::unbounded::<nw::WsEvent>();
+        let state = runtime.state();
+        if let Some(ws) = nw::lookup_native_ws_state(&state, ws_id) {
+            ws.borrow_mut().kernel_outbound = Some(tx);
+        } else {
+            return false;
+        }
+        rx
+    };
+
+    // Polyfill-only: notification handles for this WebSocket's outgoing queue.
+    #[cfg(not(feature = "runtime_native_websocket"))]
     let (outgoing_ready, pump_waker) = {
         let state = runtime.state();
         let s = state.borrow();
@@ -928,59 +952,107 @@ async fn handle_websocket_upgrade(
     // Event-driven: select between TCP read and outgoing notification.
 
     loop {
-        // Drain any pending outgoing messages, one at a time. The previous
-        // version used `ws.outgoing.drain(..).collect::<Vec<_>>()` so it
-        // could release the borrow before awaiting TCP writes, but that
-        // allocated a fresh `Vec<WsMessage>` on every pump iteration —
-        // wasteful on chatty channels (LLM streaming, presence updates).
-        //
-        // Pattern now: re-acquire the borrow in each iteration of the
-        // drain loop, `pop_front` exactly one message, drop the borrow
-        // before the await. Allocations: zero.
-        outgoing_ready.set(false);
-        let mut got_close = false;
-        loop {
-            let msg = {
-                let state = runtime.state();
-                let mut s = state.borrow_mut();
-                match s.websockets.get_mut(&server_ws_id) {
-                    Some(ws) => ws.outgoing.pop_front(),
-                    None => return true,
-                }
-            };
-            let Some(msg) = msg else { break };
-            match msg {
-                crate::state::WsMessage::Text(text) => {
-                    if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
-                        return false;
+        // Drain pending outbound (server-side `socket.send()` results)
+        // before issuing the next TCP read.
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            use crate::websocket_native::network as nw;
+            use futures::stream::StreamExt;
+            // Try-poll the receiver: drain everything that's already
+            // queued without awaiting. We process up to N frames per
+            // iteration to keep latency low while not starving reads.
+            const MAX_DRAIN_PER_ITER: usize = 32;
+            for _ in 0..MAX_DRAIN_PER_ITER {
+                let next_frame = match kernel_rx.try_next() {
+                    Ok(Some(ev)) => ev,
+                    Ok(None) => return true, // channel closed
+                    Err(_) => break,         // empty for now
+                };
+                match next_frame {
+                    nw::WsEvent::MessageText(text) => {
+                        if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
+                            return false;
+                        }
                     }
-                }
-                crate::state::WsMessage::Binary(data) => {
-                    if !write_ws_frame(stream, 0x2, &data).await {
-                        return false;
+                    nw::WsEvent::MessageBinary(data) => {
+                        if !write_ws_frame(stream, 0x2, &data).await {
+                            return false;
+                        }
                     }
-                }
-                crate::state::WsMessage::Close(code, reason) => {
-                    let mut close_payload = Vec::with_capacity(2 + reason.len());
-                    close_payload.extend_from_slice(&code.to_be_bytes());
-                    close_payload.extend_from_slice(reason.as_bytes());
-                    let _ = write_ws_frame(stream, 0x8, &close_payload).await;
-                    got_close = true;
+                    nw::WsEvent::Close { code, reason, .. } => {
+                        let mut close_payload = Vec::with_capacity(2 + reason.len());
+                        close_payload.extend_from_slice(&code.to_be_bytes());
+                        close_payload.extend_from_slice(reason.as_bytes());
+                        let _ = write_ws_frame(stream, 0x8, &close_payload).await;
+                        return true;
+                    }
+                    nw::WsEvent::Open { .. } | nw::WsEvent::Error { .. } => {
+                        // Open: pair sockets fire this at accept(); we
+                        // don't propagate to TCP. Error: same.
+                    }
                 }
             }
         }
+        #[cfg(not(feature = "runtime_native_websocket"))]
+        {
+            outgoing_ready.set(false);
+            let mut got_close = false;
+            loop {
+                let msg = {
+                    let state = runtime.state();
+                    let mut s = state.borrow_mut();
+                    match s.websockets.get_mut(&server_ws_id) {
+                        Some(ws) => ws.outgoing.pop_front(),
+                        None => return true,
+                    }
+                };
+                let Some(msg) = msg else { break };
+                match msg {
+                    crate::state::WsMessage::Text(text) => {
+                        if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
+                            return false;
+                        }
+                    }
+                    crate::state::WsMessage::Binary(data) => {
+                        if !write_ws_frame(stream, 0x2, &data).await {
+                            return false;
+                        }
+                    }
+                    crate::state::WsMessage::Close(code, reason) => {
+                        let mut close_payload = Vec::with_capacity(2 + reason.len());
+                        close_payload.extend_from_slice(&code.to_be_bytes());
+                        close_payload.extend_from_slice(reason.as_bytes());
+                        let _ = write_ws_frame(stream, 0x8, &close_payload).await;
+                        got_close = true;
+                    }
+                }
+            }
 
-        if got_close {
-            return true;
+            if got_close {
+                return true;
+            }
         }
 
         // Wait for either: a TCP frame arrives, or JS queues an outgoing message.
-        // Hand-rolled poll avoids Fuse wrapper + waker clone/drop overhead (~9% CPU).
+        #[cfg(feature = "runtime_native_websocket")]
+        let event = {
+            use futures::future::{select, Either};
+            use futures::StreamExt;
+            let read_fut = std::pin::pin!(read_ws_frame(stream));
+            let recv_fut = std::pin::pin!(kernel_rx.next());
+            match select(read_fut, recv_fut).await {
+                Either::Left((frame, _)) => WsEvent::Frame(frame),
+                Either::Right((_, _)) => WsEvent::Outgoing,
+            }
+        };
+
+        #[cfg(not(feature = "runtime_native_websocket"))]
         let event = WsPollBoth::new(
             read_ws_frame(stream),
             outgoing_ready.clone(),
             pump_waker.clone(),
-        ).await;
+        )
+        .await;
 
         match event {
             WsEvent::Outgoing => {

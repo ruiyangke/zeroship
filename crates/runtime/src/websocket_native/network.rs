@@ -147,6 +147,13 @@ pub struct NativeWsState {
     /// because it's `RefCell<None>` by default and needs an explicit
     /// opt-in via `enable_event_log()` (called by test setup).
     pub event_log: Option<Vec<WsEvent>>,
+    /// Kernel-owned WebSocket outbound channel. When set, events that
+    /// would otherwise dispatch to a JS wrapper are siphoned to this
+    /// channel instead. Used by `serve.rs`'s dev-mode WS pump to
+    /// forward server-side `socket.send()` frames out to the TCP
+    /// client. The dispatch arm checks this BEFORE attempting V8
+    /// dispatch.
+    pub kernel_outbound: Option<mpsc::UnboundedSender<WsEvent>>,
 }
 
 impl NativeWsState {
@@ -162,6 +169,7 @@ impl NativeWsState {
             is_pair: false,
             send_tx: None,
             event_log: None,
+            kernel_outbound: None,
         }
     }
 
@@ -228,14 +236,31 @@ fn push_event(state: &SharedState, ws_id: u32, event: WsEvent) {
 /// Public test-facing event push: identical to `push_event` but
 /// callable from outside the crate. Used by the subscription test
 /// suite to simulate inbound frames on the server-side WS.
+///
+/// If the WS is kernel-owned (i.e. `kernel_outbound` is set —
+/// see `serve.rs`'s dev-mode WS pump), the event is routed to the
+/// kernel channel BYPASSING V8 dispatch, since the kernel-side
+/// wrapper has no JS listeners attached.
 pub fn push_event_pub(state: &SharedState, ws_id: u32, event: WsEvent) {
     let ws = match lookup_native_ws_state(state, ws_id) {
         Some(w) => w,
         None => return,
     };
+    let kernel_tx = {
+        let s = ws.borrow();
+        s.kernel_outbound.clone()
+    };
+    if let Some(tx) = kernel_tx {
+        // Mirror into log first (so tests still see the event).
+        if let Some(log) = ws.borrow_mut().event_log.as_mut() {
+            log.push(event.clone());
+        }
+        let _ = tx.unbounded_send(event);
+        return;
+    }
+
     {
         let mut s = ws.borrow_mut();
-        // Mirror into the cumulative event log if a test enabled it.
         if let Some(log) = s.event_log.as_mut() {
             log.push(event.clone());
         }
