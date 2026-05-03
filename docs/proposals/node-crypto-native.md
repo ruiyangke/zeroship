@@ -1,7 +1,7 @@
 # Native Node.js `node:crypto` design
 
-**Date:** 2026-05-02
-**Status:** Draft v1 — implementation pending
+**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review)
+**Status:** Draft v2 (post-review) — implementation pending
 **Spec:** Node.js `node:crypto` API reference — https://nodejs.org/api/crypto.html
 **Companion specs:**
 - Node.js `crypto.webcrypto` — https://nodejs.org/api/webcrypto.html (Node's bridge between node:crypto and WHATWG WebCrypto; instructive for our bridging design)
@@ -52,6 +52,20 @@
 - A `KeyObject ↔ CryptoKey` bridge (the spec-mandated `KeyObject.from(cryptoKey)` and `crypto.subtle.importKey('jwk', keyObject.export(...))`) so creator apps using JOSE libraries (Web Crypto handle) can interop with apps using `jsonwebtoken` (Node KeyObject handle).
 
 ## Revision history
+
+- **v2 (2026-05-02 post-review)** — Addresses 14 CRITICAL + 30 MAJOR + 25 missing-concept findings from `/tmp/zeroship-reviews/node-crypto-review.md`. Net effect:
+  - AEAD semantics rewritten to be CCM-correct: `createCipheriv` `authTagLength`, `setAAD` `plaintextLength`/`encoding`, `setAuthTag` ordering distinct per mode (CCM pre-update; GCM/OCB/ChaCha20 pre-final; GCM-only post-final tag inspection on Cipher).
+  - aws-lc-rs API audit: `secp256k1` is `signature::ECDSA_P256K1_SHA256_*` not `ECDSA_K256` (rename in §III.2). Encrypted PKCS#8 export/import drops to `aws-lc-sys` raw FFI (PKCS8_decrypt + PBES2 ASN.1 by hand) — documented as ~250 LOC in `kernel/pkcs8_enc.rs`; new D-N33 records the gap.
+  - RSA-PSS sentinel translation: `RSA_PSS_SALTLEN_DIGEST=-1`, `RSA_PSS_SALTLEN_MAX_SIGN=-2`, `RSA_PSS_SALTLEN_AUTO=-2` are now translated to concrete byte counts in `parse_sign_key_input` BEFORE the kernel call. New D-N34 records the policy.
+  - Missing post-quantum surface added (Stage E placeholder): ML-DSA, ML-KEM, SLH-DSA `asymmetricKeyType` values; `crypto.encapsulate` / `crypto.decapsulate` (Node v22+ KEM API).
+  - Stream `Transform` inheritance documented for Hash / Hmac / Cipher / Decipher / Sign / Verify (Node ships them as `stream.Transform` subclasses; `pipeline(...)` must work).
+  - `update(data, encoding)` encoding-ignore-for-non-string rule wired into `buffer::extract_input`.
+  - `Hmac.copy()` re-confirmed absent in Node (critic mistake; counter-cited against `node/lib/internal/crypto/hash.js`).
+  - `ECDH.setPublicKey` is shipped (deprecated, with warning) — not thrown.
+  - 25 missing concepts (argon2 status, `Certificate` SPKAC, `KeyObject.toCryptoKey`, X509 `checkEmail` / `checkIP` / `toJSON`, `randomFillSync` validation, etc.) tracked in §II / §X / new §II.15.
+  - Decision register updated: D-N6 contradiction resolved (always sync; threshold concept dropped from decisions table); D-N10 reaffirmed (Hmac has no copy in Node); D-N33 (encrypted PKCS#8 via aws-lc-sys raw FFI); D-N34 (PSS saltLength sentinels normalised pre-kernel); D-N35 (stream.Transform inheritance); D-N36 (post-quantum stub registry).
+
+  Each fix carries a "(addresses critic CRITICAL #N)" / "(MAJOR #N)" tag inline so the next review can grep coverage. Doc grew from 3,261 to ~4,000 LOC.
 
 - **v1 (2026-05-02)** — Initial design. Replaces the JS shim at `sdks/vite-plugin/src/node-compat.ts:67-127` (60 LOC) and the two ad-hoc `__cryptoHashSync` / `__cryptoHmacSync` V8 callbacks at `crates/runtime/src/crypto.rs:121-212` (92 LOC). Adds ~5,800 native Rust LOC across `crypto_node/` (the new node:crypto surface) + `crypto_kernel/` (the shared backend extracted from `crypto_native/`'s per-algorithm files). The first-class native node:crypto surface ships in two stages: Stage 1 covers the Tier-1 calls every npm package makes (hash, HMAC, randomBytes, KDFs, KeyObject + import/export, sign/verify, cipher/decipher, webcrypto bridge); Stage 2 fills the long tail (DH groups, X.509, prime generation, FIPS controls, legacy ciphers).
 
