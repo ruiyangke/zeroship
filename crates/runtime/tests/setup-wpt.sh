@@ -1,41 +1,26 @@
 #!/usr/bin/env bash
-# Initialize sparse-checkout for the crates/runtime/tests/wpt submodule.
+# Initialize the WPT submodule for runtime tests.
 #
 # Run once after a fresh clone:
 #   git clone --recurse-submodules --shallow-submodules <repo>
-#   ./crates/runtime/tests/setup-wpt.sh
 #
 # Or, if you cloned without --recurse-submodules:
 #   git submodule update --init --depth=1
-#   ./crates/runtime/tests/setup-wpt.sh
 #
-# This trims the working tree to ~9MB (vs the full WPT ~2GB) by checking
-# out only the suites our runtime exercises: fetch, streams, encoding
-# (excluding the legacy multi-byte fixtures we don't need), compression,
-# dom/{abort,events} (DOM EventTarget + AbortSignal), plus the testharness
-# in resources/ and common/.
+# Depth=1 alone (no sparse-checkout) — pack stays at ~119 MB compressed
+# regardless of which paths the working tree shows, so sparse-checkout
+# only complicates debugging without saving disk space. Working tree at
+# full depth=1 is ~930 MB.
 set -euo pipefail
 
 cd "$(dirname "$0")/wpt"
 
-git sparse-checkout init --no-cone
-git sparse-checkout set \
-    "/fetch/" \
-    "/streams/" \
-    "/encoding/*.js" \
-    "/encoding/*.html" \
-    "/encoding/resources/" \
-    "/encoding/streams/" \
-    "/compression/" \
-    "/dom/abort/" \
-    "/dom/events/" \
-    "/xhr/formdata/" \
-    "/FileAPI/" \
-    "/url/" \
-    "/websockets/" \
-    "/WebCryptoAPI/" \
-    "/resources/" \
-    "/common/"
+# If a previous setup ran sparse-checkout, disable it so the full
+# working tree is materialised. Idempotent on fresh checkouts.
+if git sparse-checkout list >/dev/null 2>&1 && \
+   [ -n "$(git sparse-checkout list 2>/dev/null)" ]; then
+    git sparse-checkout disable
+fi
 
-echo "crates/runtime/tests/wpt sparse-checkout configured. Working tree:"
+echo "crates/runtime/tests/wpt at depth=1. Working tree:"
 du -sh .
