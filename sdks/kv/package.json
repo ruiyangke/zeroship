@@ -20,9 +20,9 @@
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.0.0",
-    "zeroship": "file:../zeroship-stub"
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "zeroship": "workspace:*"
   }
 }

@@ -13,18 +13,18 @@
   "dependencies": {
     "@ai-sdk/openai": "^3.0.55",
     "@ai-sdk/react": "^3.0.174",
-    "@vitejs/plugin-react": "^6.0.1",
-    "@zeroship/rpc-client": "file:../../packages/zeroship-rpc-client",
-    "@zeroship/server": "file:../../packages/zeroship-server",
-    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/rpc-client": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
     "ai": "^6.0.172",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
   "devDependencies": {
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "typescript": "~5.9.3",
-    "vite": "^8.0.0"
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:"
   }
 }

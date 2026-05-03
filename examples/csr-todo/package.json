@@ -10,20 +10,20 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.96.1",
-    "@vitejs/plugin-react": "^6.0.1",
-    "@zeroship/rpc-client": "file:../../packages/zeroship-rpc-client",
-    "@zeroship/rpc-react": "file:../../packages/zeroship-rpc-react",
-    "@zeroship/server": "file:../../packages/zeroship-server",
-    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "zod": "^3.25.76"
+    "@tanstack/react-query": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/rpc-client": "workspace:*",
+    "@zeroship/rpc-react": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
+    "react": "catalog:react18",
+    "react-dom": "catalog:react18",
+    "zod": "catalog:"
   },
   "devDependencies": {
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "typescript": "~5.9.3",
-    "vite": "^8.0.0"
+    "@types/react": "catalog:react18",
+    "@types/react-dom": "catalog:react18",
+    "typescript": "catalog:",
+    "vite": "catalog:"
   }
 }

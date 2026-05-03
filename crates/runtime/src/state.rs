@@ -417,11 +417,6 @@ pub struct RuntimeState {
     /// every time — no new allocations, no map transitions.
     pub ctx_obj: Option<v8::Global<v8::Object>>,
 
-    /// WebCrypto key store, keyed by key-id.
-    pub key_store: HashMap<u32, crate::crypto::KeyData>,
-    /// Monotonically increasing key-id counter.
-    pub next_key_id: u32,
-
     /// WebSocket instances, keyed by ws_id.
     pub websockets: HashMap<u32, WebSocketState>,
     /// Monotonically increasing WebSocket ID counter (incremented by 2 for pairs).
@@ -498,8 +493,6 @@ impl RuntimeState {
             env_obj: None,
             ctx_obj: None,
 
-            key_store: HashMap::new(),
-            next_key_id: 1,
 
             websockets: HashMap::new(),
             next_ws_id: 1,

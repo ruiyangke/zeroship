@@ -11,16 +11,16 @@
     "@langchain/core": "^1.1.40",
     "@langchain/langgraph": "^1.2.8",
     "@langchain/openai": "^1.4.4",
-    "@vitejs/plugin-react": "^6.0.1",
-    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/vite-plugin": "workspace:*",
     "langchain": "^1.3.3",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5",
+    "react": "catalog:",
+    "react-dom": "catalog:",
     "unenv": "^1.10.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "typescript": "^5.9",
-    "vite": "^8"
+    "typescript": "catalog:",
+    "vite": "catalog:"
   }
 }

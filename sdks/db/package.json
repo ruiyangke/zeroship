@@ -26,11 +26,11 @@
     "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
-    "@zeroship/types": "file:../types"
+    "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
-    "tsx": "^4.0.0",
-    "typescript": "^5.0.0",
-    "zeroship": "file:../zeroship-stub"
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "zeroship": "workspace:*"
   }
 }
