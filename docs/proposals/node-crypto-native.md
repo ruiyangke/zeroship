@@ -682,8 +682,8 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `Sign.prototype.update(data, encoding?)` | 1 | `kernel::SignContext::update` | sync | C |
 | `Sign.prototype.sign(privateKey, encoding?)` | 1 | `kernel::SignContext::sign` | sync | C |
 | `Verify.prototype.verify(publicKey, signature, encoding?)` | 1 | `kernel::VerifyContext::verify` | sync | C |
-| `crypto.sign(algorithm, data, key)` (one-shot) | 1 | `kernel::sign_one_shot` | sync | C |
-| `crypto.verify(algorithm, data, key, sig)` (one-shot) | 1 | `kernel::verify_one_shot` | sync | C |
+| `crypto.sign(algorithm, data, key, callback?)` (one-shot; addresses critic MAJOR #15: callback variant accepted, dispatches via `state.spawned_ops` exactly like the other async APIs) | 1 | `kernel::sign_one_shot` (sync) or `sign_one_shot_async` (callback path) | sync **and** async with callback | C |
+| `crypto.verify(algorithm, data, key, sig, callback?)` (one-shot; addresses critic MAJOR #15) | 1 | `kernel::verify_one_shot` / `verify_one_shot_async` | sync **and** async with callback | C |
 
 **Algorithms supported:**
 - `rsa-sha1`, `rsa-sha256`, `rsa-sha384`, `rsa-sha512` (RSASSA-PKCS1-v1_5)
@@ -853,7 +853,7 @@ These are NOT separate code paths — they're literal property references to the
 | `secureHeapUsed()` | 3 | stub returning `{ total: 0, min: 0, used: 0, utilization: 0 }` | sync | B |
 | `constants` (object of OpenSSL constants) | 1 | small static dict | sync | B |
 | `crypto.signal` (Node ≥17) | 3 | not supported (used by experimental encryptStream API) | n/a | NEVER |
-| `crypto.subtle` (alias for `webcrypto.subtle`) | 1 | direct reference | n/a | D |
+| `crypto.subtle` (alias for `webcrypto.subtle`; addresses critic MAJOR #9: top-level `crypto.subtle` was added as an alias to `crypto.webcrypto.subtle` in Node v15+ per https://nodejs.org/api/webcrypto.html — older code uses `crypto.webcrypto.subtle`, newer uses `crypto.subtle`. We export both, identity-preserving via D-N16.) | 1 | direct reference | n/a | D |
 
 ### II.15. Post-quantum + KEM + miscellaneous Node v22-v25 additions (addresses critic missing concepts #1, #2, #3, #4, #7, #16, #17, #18, #19, #21, #22, #23, #25)
 
@@ -1070,12 +1070,13 @@ Per https://nodejs.org/api/crypto.html#keyobjectasymmetrickeydetails — algorit
 
 | `asymmetricKeyType` | `asymmetricKeyDetails` shape |
 |---|---|
-| `"rsa"` | `{ modulusLength: number, publicExponent: bigint }` |
-| `"rsa-pss"` | `{ modulusLength, publicExponent, hashAlgorithm, mgf1HashAlgorithm, saltLength }` |
-| `"dsa"` | `{ modulusLength, divisorLength }` |
-| `"ec"` | `{ namedCurve: "P-256" | "P-384" | "P-521" | "secp256k1" }` |
+| `"rsa"` | `{ modulusLength: number, publicExponent: bigint }` (publicExponent is `bigint` per https://nodejs.org/api/crypto.html#keyobjectasymmetrickeydetails — addresses critic MAJOR #13: v1 implied `Buffer`) |
+| `"rsa-pss"` | `{ modulusLength, publicExponent, hashAlgorithm?, mgf1HashAlgorithm?, saltLength? }` — these PSS-specific fields are populated **only** when the SPKI/PKCS8 carries the `id-RSASSA-PSS` OID with embedded SaltedSignatureAlgorithms parameters (RFC 4055). For a plain RSA key signed with PSS at sign-time, the fields are `undefined`. (addresses critic MAJOR #13 + MAJOR #23) |
+| `"dsa"` | `{ modulusLength, divisorLength, hashAlgorithm }` — `hashAlgorithm` is the digest algorithm OID embedded in the DSA params; v1 missed it. (addresses critic MAJOR #22) |
+| `"ec"` | `{ namedCurve: "P-256" \| "P-384" \| "P-521" \| "secp256k1" \| "prime256v1" \| "secp384r1" \| "secp521r1" \| ... }` — Node returns the **OpenSSL canonical name** for the curve. P-256's OpenSSL name is `"prime256v1"`, NOT `"P-256"`. P-384 is `"secp384r1"`. We follow Node and emit OpenSSL names; spec-canonical names appear in the JWK / WebCrypto surface only. (addresses critic minor m-6 — `if (key.asymmetricKeyDetails.namedCurve === 'prime256v1')` checks now match.) |
 | `"dh"` | `{ generator, prime, primeLength: number }` |
 | `"ed25519"` / `"x25519"` / `"ed448"` / `"x448"` | `{}` (empty object) |
+| `"ml-dsa-*"` / `"ml-kem-*"` / `"slh-dsa-*"` (Node v25+) | per-algo shape — see D-N36 (Stage E, parse-only) |
 
 The getter is `[SameObject]` cached (D-N3 macro `#[v8_getter(same_object)]`).
 
@@ -1089,14 +1090,28 @@ pub fn create_secret_key<'s>(
     input: v8::Local<v8::Value>,
     encoding: Option<&str>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+    // (addresses critic MAJOR #14): per https://nodejs.org/api/crypto.html#cryptocreatesecretkeykey-encoding
+    // when input is a string, encoding is REQUIRED and applies; when input is
+    // a Buffer / TypedArray, encoding is IGNORED. extract_input already
+    // implements this rule (CRITICAL #2 fix); we don't need to special-case
+    // here. The encoding parameter is passed through to extract_input which
+    // ignores it when input is a Buffer. v1's "Option<&str> always passed
+    // through" was correct in code but the docstring said "rejects a non-
+    // string with encoding"; the docstring was wrong.
     let bytes = buffer::extract_input(scope, input, encoding)?;
     if bytes.is_empty() {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
             "The value of \"key\" is out of range. It must be > 0"));
     }
+    // (addresses critic missing concept #14): we do NOT validate that
+    // bytes.len() matches an HMAC's expected algorithm-tied size — Node
+    // doesn't either (createSecretKey is algorithm-agnostic; the algorithm
+    // tie-in happens at createHmac time). Algorithm-aware validation is the
+    // caller's responsibility (e.g. AES key sizes are checked at
+    // createCipheriv time, not at createSecretKey time).
     let state = KeyObjectState {
         key_type: KeyType::Secret,
-        material: Arc::new(KeyMaterial::Symmetric(bytes)),
+        material: Arc::new(KeyMaterial::Symmetric(Zeroizing::new(bytes))),
     };
     Ok(SecretKeyObject::build(scope, state).into())
 }
@@ -1789,7 +1804,22 @@ pub fn create_cipheriv<'s>(
         CipherMode::Ccm => opts.auth_tag_length.ok_or_else(|| OpError::node(
             "ERR_MISSING_OPTION",
             "authTagLength required for CCM mode"))?,
-        CipherMode::Gcm | CipherMode::Ocb | CipherMode::ChaCha20Poly1305 =>
+        // (addresses critic missing concept #13 — DEP0182): Node v22 emits
+        // a deprecation warning when GCM is used without an explicit
+        // authTagLength and the resulting tag is shorter than 16 bytes.
+        // v2 emits the same warning; full breaking enforcement defers to a
+        // future Node-aligned cutover.
+        CipherMode::Gcm => match opts.auth_tag_length {
+            Some(n) if n < 16 => {
+                emit_deprecation_warning_once(scope, "DEP0182",
+                    "Use of GCM with an authTagLength shorter than 16 bytes \
+                     is deprecated; specify authTagLength explicitly.");
+                n
+            }
+            Some(n) => n,
+            None => 16,
+        },
+        CipherMode::Ocb | CipherMode::ChaCha20Poly1305 =>
             opts.auth_tag_length.unwrap_or(16),
         _ => 0,    // unused
     };
@@ -1942,16 +1972,22 @@ impl Verify {
 The `parse_sign_key_input` helper handles every input shape:
 
 ```rust
+// (addresses critic MAJOR #26): both branches return Arc<KeyMaterial>; the
+// KeyObject path Arc::clones the EXISTING Arc (cheap refcount bump, key bytes
+// shared), the PEM/DER path creates a FRESH Arc::new(km) wrapping freshly
+// parsed bytes (no sharing — each parse allocates new key bytes). The "shares
+// Arc" comment was misleading for the PEM path; v1 implied both branches
+// shared, which is true at the Rust-type level but not at the storage level.
 fn parse_sign_key_input(
     scope: &mut v8::PinScope,
     input: v8::Local<v8::Value>,
 ) -> Result<(Arc<KeyMaterial>, SignPadding), OpError> {
-    // 1. KeyObject → extract material directly.
+    // 1. KeyObject → Arc::clone (cheap; same bytes shared).
     if is_key_object(scope, input) {
         let ko = KeyObject::state(scope, input);
         return Ok((Arc::clone(&ko.material), SignPadding::Default));
     }
-    // 2. CryptoKey → bridge via Arc.
+    // 2. CryptoKey → Arc::clone via the bridge (D-N4); same bytes shared.
     if crypto_native::crypto_key::is_crypto_key(scope, input) {
         let ck = crypto_native::crypto_key::state(scope, input);
         return Ok((Arc::clone(&ck.material), SignPadding::Default));
@@ -1959,6 +1995,8 @@ fn parse_sign_key_input(
     // 3. PEM string or Buffer → parse via createPrivateKey logic.
     // 4. Object `{ key, format, type, padding, saltLength, dsaEncoding }`
     //    → extract key + padding params.
+    // For 3 + 4, Arc::new(km) wraps FRESH bytes — no sharing with any
+    // existing KeyObject/CryptoKey.
     let opts = parse_options_object(scope, input)?;
     let km = parse_private_key_input(scope, opts.key)?;
     let padding = match opts.padding {
@@ -1985,6 +2023,19 @@ fn parse_sign_key_input(
             format!("Unknown padding constant: {}", other))),
     };
     Ok((Arc::new(km), padding))
+}
+
+// (addresses critic minor m-11): v1 referenced `parse_verify_key_input` in
+// Verify::verify but only defined `parse_sign_key_input`. The two share the
+// same parsing logic; the only difference is the input is a public key (or a
+// "may be private but we'll downcast" KeyObject). v2 adds a thin wrapper:
+fn parse_verify_key_input(
+    scope: &mut v8::PinScope,
+    input: v8::Local<v8::Value>,
+) -> Result<(Arc<KeyMaterial>, SignPadding), OpError> {
+    // Same as parse_sign_key_input but with `parse_public_key_input` for the
+    // PEM/DER/JWK route. Reuses normalise_pss_salt_length for saltLength.
+    parse_sign_key_input_inner(scope, input, /* public = */ true)
 }
 
 /// Resolve the user-supplied saltLength (which may be a sentinel) to an
@@ -2369,26 +2420,44 @@ pub enum KernelError {
 ```rust
 // crypto_node/error.rs
 
+// (addresses critic dimension 10 + missing concept #12 + #15): error code
+// mappings audited against https://nodejs.org/api/errors.html. Several v1
+// codes were invented or wrong; v2 corrections noted inline.
 impl KernelError {
     pub fn to_node(self) -> OpError {
         match self {
+            // Node's actual code for "called update after digest" is
+            // ERR_CRYPTO_HASH_FINALIZED for Hash; for Hmac, Node throws a
+            // generic Error (no .code) per
+            // https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js
+            // We compromise by using the same code for both — `jsonwebtoken`
+            // doesn't branch on it (post-v8), and consistency aids debugging.
             Self::HashFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
-            Self::HmacFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",    // Node uses same code
+            Self::HmacFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
+            // (addresses minor m-30, missing concept #12): keep
+            // ERR_CRYPTO_INVALID_KEYLEN for symmetric key-size mismatches
+            // (matches Node), but for asymmetric mismatches (e.g. RSA-EC
+            // key swap at sign time) we now use ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS
+            // (the real Node code) instead of v1's invented ERR_CRYPTO_INCOMPATIBLE_KEY.
             Self::InvalidKeyLength { algorithm, expected, got } =>
                 OpError::node("ERR_CRYPTO_INVALID_KEYLEN",
                     format!("Invalid {} key length: got {}, expected one of {:?}",
                         algorithm, got, expected)),
             Self::InvalidIvLength { algorithm, expected, got } =>
-                OpError::node("ERR_CRYPTO_INVALID_IV",
+                OpError::node("ERR_CRYPTO_INVALID_IV_LENGTH",    // Node's actual code (not ERR_CRYPTO_INVALID_IV)
                     format!("Invalid IV length for {}: got {}, expected one of {:?}",
                         algorithm, got, expected)),
             Self::InvalidTagLength { expected, got } =>
-                OpError::node("ERR_CRYPTO_INVALID_AUTH_TAG",
+                OpError::node("ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH",    // Node's actual code
                     format!("Invalid auth tag length: got {}, expected one of {:?}",
                         got, expected)),
-            Self::AuthenticationFailed => OpError::node("ERR_OSSL_BAD_DECRYPT",
+            // (addresses critic dimension 10): GCM tag mismatch is mapped
+            // to ERR_OSSL_EVP_BAD_DECRYPT (Node's actual; v1 used the
+            // shorter ERR_OSSL_BAD_DECRYPT which is also valid but
+            // ERR_OSSL_EVP_BAD_DECRYPT is the more common path).
+            Self::AuthenticationFailed => OpError::node("ERR_OSSL_EVP_BAD_DECRYPT",
                 "Unsupported state or unable to authenticate data"),
             Self::AadAfterUpdate => OpError::node("ERR_CRYPTO_INVALID_STATE",
                 "setAAD must be called before update"),
@@ -2405,8 +2474,11 @@ impl KernelError {
 
             Self::SignFailed => OpError::node("ERR_OSSL_EVP_SIGN", "sign failed"),
             Self::VerifyFailed => OpError::node("ERR_OSSL_EVP_VERIFY", "verify failed"),
+            // (addresses critic missing concept #12): Node's real code is
+            // ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS (with the trailing _OPTIONS).
+            // v1 used ERR_CRYPTO_INCOMPATIBLE_KEY which doesn't exist in Node.
             Self::KeyTypeMismatchForAlgorithm =>
-                OpError::node("ERR_CRYPTO_INCOMPATIBLE_KEY",
+                OpError::node("ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS",
                     "Incompatible key for this signing algorithm"),
 
             Self::InvalidPem(msg) => OpError::node("ERR_OSSL_PEM_NO_START_LINE",
@@ -2443,6 +2515,10 @@ impl KernelError {
                 "Public key curve mismatch"),
             Self::DhPublicKeyInvalid => OpError::node("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
                 "Invalid public key for ECDH"),
+            // (addresses critic dimension 10 + minor m-1 the node-error catalog
+            // audit): ERR_CRYPTO_UNKNOWN_DH_GROUP is a real Node code per
+            // https://nodejs.org/api/errors.html#err_crypto_unknown_dh_group.
+            // v1's claim that this was invented was incorrect.
             Self::DhUnknownNamedGroup(name) =>
                 OpError::node("ERR_CRYPTO_UNKNOWN_DH_GROUP",
                     format!("Unknown DH group: {}", name)),
@@ -2835,6 +2911,13 @@ pub fn get_curves() -> Vec<&'static str> {
          "ed25519", "x25519", /* + brainpool variants in Stage 2 */]
 }
 
+// (addresses critic MAJOR #8): `getCipherInfo` accepts an `options` object
+// `{ keyLength, ivLength }` to filter — Node returns undefined if the cipher
+// at this name does not support the requested key/iv lengths. The `mode`
+// field is a string from the documented set per
+// https://nodejs.org/api/crypto.html#cryptogetcipherinfonameornid-options:
+// `'cbc' | 'ccm' | 'cfb' | 'ctr' | 'ecb' | 'gcm' | 'ocb' | 'ofb' | 'stream'
+//  | 'wrap' | 'xts'`. Our CipherMode enum maps to those strings.
 pub fn get_cipher_info<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name_or_nid: v8::Local<v8::Value>,
@@ -2848,15 +2931,31 @@ pub fn get_cipher_info<'s>(
         return None;
     };
     let entry = CIPHER_REGISTRY.get(name.as_str())?;
+
+    // Apply options filter (was unused in v1).
+    if let Some(opts) = options.and_then(|o| parse_get_cipher_info_options(scope, o).ok()) {
+        if let Some(req_key_len) = opts.key_length {
+            if !entry.key_lengths.contains(&req_key_len) { return None; }
+        }
+        if let Some(req_iv_len) = opts.iv_length {
+            if entry.iv_length != Some(req_iv_len) { return None; }
+        }
+    }
+
     let obj = v8::Object::new(scope);
     set_str(scope, obj, "name", entry.canonical_name);
     set_u32(scope, obj, "blockSize", entry.block_size as u32);
     if let Some(iv) = entry.iv_length {
         set_u32(scope, obj, "ivLength", iv as u32);
     }
-    set_str(scope, obj, "mode", entry.mode.as_str());
-    set_u32(scope, obj, "keyLength", entry.key_lengths[0] as u32);    // first valid length
+    set_str(scope, obj, "mode", entry.mode.as_str());    // 'cbc'/'ccm'/'cfb'/...
+    set_u32(scope, obj, "keyLength", entry.key_lengths[0] as u32);    // canonical length
     Some(obj.into())
+}
+
+struct GetCipherInfoOptions {
+    key_length: Option<usize>,
+    iv_length: Option<usize>,
 }
 ```
 
@@ -2945,6 +3044,11 @@ pub fn timing_safe_equal<'s>(
     let a_bytes = buffer::extract_input(scope, a, None)?;
     let b_bytes = buffer::extract_input(scope, b, None)?;
     if a_bytes.len() != b_bytes.len() {
+        // (addresses critic dimension 10): ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH
+        // IS a real Node code per
+        // https://github.com/nodejs/node/blob/main/lib/internal/errors.js
+        // (it's inherited from `node:crypto`'s native bindings and surfaced as
+        // a RangeError). Confirmed against the Node source. v1's was correct.
         return Err(OpError::node("ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH",
             "Input buffers must have the same byte length"));
     }
