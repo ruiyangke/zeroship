@@ -696,8 +696,8 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `crypto.publicEncrypt(keyOrOptions, buffer)` | 1 | `kernel::rsa_oaep_encrypt` | sync | C |
-| `crypto.privateDecrypt(keyOrOptions, buffer)` | 1 | `kernel::rsa_oaep_decrypt` | sync | C |
+| `crypto.publicEncrypt(keyOrOptions, buffer)` (addresses critic MAJOR #1, MAJOR #28: `keyOrOptions` accepts a key or an object `{ key, padding, oaepHash, oaepLabel, encoding }` — default padding is `RSA_PKCS1_OAEP_PADDING` per https://nodejs.org/api/crypto.html#cryptopublicencryptkey-buffer; default `oaepHash` is `'sha1'` (legacy footgun — modern apps SHOULD pass `'sha256'`)) | 1 | `kernel::rsa_oaep_encrypt` | sync | C |
+| `crypto.privateDecrypt(keyOrOptions, buffer)` (same options as publicEncrypt; addresses MAJOR #1, MAJOR #28) | 1 | `kernel::rsa_oaep_decrypt` | sync | C |
 | `crypto.publicDecrypt(keyOrOptions, buffer)` | 2 | aws-lc-rs raw FFI (low-level) | sync | C |
 | `crypto.privateEncrypt(keyOrOptions, buffer)` | 2 | aws-lc-rs raw FFI (low-level) | sync | C |
 | `crypto.diffieHellman({ privateKey, publicKey })` (one-shot) | 1 | `kernel::dh_agree` (ECDH path) | sync | C |
@@ -753,9 +753,9 @@ The `emit_deprecation_warning_once` helper memoises per (isolate, deprecation-co
 | `checkPrime(candidate, options?, callback)` | 3 | aws-lc-sys raw FFI | async | E |
 | `checkPrimeSync(candidate, options?)` | 3 | aws-lc-sys raw FFI | sync | E |
 
-**Types supported (Stage 1):** `'rsa'` (with `modulusLength`, `publicExponent` defaulting to 0x10001), `'ec'` (with `namedCurve`), `'ed25519'`, `'x25519'`, `'hmac'` (returns SecretKeyObject), `'aes'` (returns SecretKeyObject; `length` in bits).
+**Types supported (Stage 1):** `'rsa'` (with `modulusLength`, `publicExponent` defaulting to 0x10001), `'rsa-pss'` (with `hashAlgorithm`, `mgf1HashAlgorithm`, `saltLength`; addresses critic CRITICAL #12 — promoted from Stage 2 so the PSS sign/verify shipped in Stage C can be tested round-trip with PSS-typed keys, see https://nodejs.org/api/crypto.html#cryptogeneratekeypairtype-options-callback), `'ec'` (with `namedCurve`), `'ed25519'`, `'x25519'`, `'ed448'`, `'x448'`, `'hmac'` (returns SecretKeyObject), `'aes'` (returns SecretKeyObject; `length` in bits).
 
-**Types deferred to Stage 2:** `'rsa-pss'` (RSA with embedded PSS params — needs an OID-tagged SPKI), `'dsa'` (deprecated), `'dh'` (named-group DH).
+**Types deferred to Stage 2 (Stage E):** `'dsa'` (deprecated), `'dh'` (named-group DH), and the post-quantum types `'ml-dsa-44'` / `'ml-dsa-65'` / `'ml-dsa-87'`, `'ml-kem-512'` / `'ml-kem-768'` / `'ml-kem-1024'`, `'slh-dsa-*'` (Node v25+, addresses missing concept #3).
 
 **`encoding` option:** the publicKey/privateKey can be returned as `KeyObject` (default if no `encoding` specified) OR as Buffer/string per `{ type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', format: 'pem' | 'der' | 'jwk' }`. We support all combos in Stage 1.
 
@@ -1571,17 +1571,39 @@ pub fn create_hmac<'s>(
         .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
             format!("Unknown hash: {}", algorithm)))?;
 
-    // Key may be a KeyObject, Buffer, or string.
-    let key_bytes = if is_key_object(scope, key) {
+    // (addresses critic MAJOR #5 + MAJOR #30): key may be a KeyObject, a
+    // CryptoKey (Node v15+ accepts CryptoKey for createHmac/createSign etc.,
+    // see https://nodejs.org/api/crypto.html#cryptocreatehmacalgorithm-key-options),
+    // a Buffer, or a string. We accept all four. The extracted bytes are
+    // wrapped in a Zeroizing<Vec<u8>> for the duration of the kernel call —
+    // v1's `b.clone()` on a `Zeroizing<Vec<u8>>` returned a plain Vec that
+    // outlived the function on the heap; v2 keeps everything Zeroizing.
+    let key_bytes: Zeroizing<Vec<u8>> = if is_key_object(scope, key) {
         let ko = KeyObject::state(scope, key);
         match &*ko.material {
-            KeyMaterial::Symmetric(b) => b.clone(),
+            KeyMaterial::Symmetric(b) => Zeroizing::new(b.to_vec()),
             _ => return Err(OpError::node("ERR_INVALID_ARG_TYPE",
                 "Hmac key must be a SecretKeyObject")),
         }
+    } else if crypto_native::crypto_key::is_crypto_key(scope, key) {
+        // (addresses critic MAJOR #30): bridge the CryptoKey via the Arc
+        // share; only HMAC-typed CryptoKeys are accepted.
+        let ck = crypto_native::crypto_key::state(scope, key);
+        match &*ck.material {
+            KeyMaterial::Symmetric(b) => Zeroizing::new(b.to_vec()),
+            _ => return Err(OpError::node("ERR_INVALID_ARG_TYPE",
+                "Hmac key (CryptoKey) must be a symmetric key")),
+        }
     } else {
-        buffer::extract_input(scope, key, None)?
+        Zeroizing::new(buffer::extract_input(scope, key, None)?)
     };
+
+    // (addresses critic MAJOR #29): Node v17+ throws ERR_OSSL_HMAC_KEY_TOO_SHORT
+    // for empty keys. We follow.
+    if key_bytes.is_empty() {
+        return Err(OpError::node("ERR_OSSL_HMAC_KEY_TOO_SHORT",
+            "HMAC key cannot be empty"));
+    }
 
     let state = HmacState { ctx: kernel::HmacContext::new(hash, &key_bytes) };
     Ok(Hmac::build(scope, state).into())
@@ -2528,30 +2550,101 @@ Names in node:crypto are case-insensitive and inconsistent (Node accepts both `s
 ```rust
 // crypto_kernel/algorithms.rs
 
+// (addresses critic MAJOR #3): HASH_NAMES must contain every alias Node's
+// getHashes() returns, so feature-detection code that does
+// `crypto.getHashes().includes('rsa-sha1')` passes. The list mirrors what
+// OpenSSL aliases via EVP_get_digestbyname() — Node simply returns the OpenSSL
+// alias table.
+//
+// IMPORTANT (addresses critic MAJOR #24): the `rsa-sha*` / `dsa-sha*` /
+// `ecdsa-with-SHA*` names are SIGNATURE-algorithm names, NOT pure hash names.
+// They appear in HASH_NAMES so that getHashes() returns them (Node does), and
+// so that createSign/createVerify can accept them. The createSign path
+// `canonicalise_hash_name(name)` returns the underlying HashAlgo, but the
+// surrounding sign-context layer infers the asymmetric algorithm from the KEY
+// type (RSA vs ECDSA), not from the prefix. The `rsa-` / `dsa-` prefix is
+// effectively ignored at sign time when the key already constrains the algo.
 pub static HASH_NAMES: phf::Map<&'static str, HashAlgo> = phf::phf_map! {
+    // Pure SHA-family names (case variants).
     "sha1" => HashAlgo::Sha1,
     "sha-1" => HashAlgo::Sha1,
-    "rsa-sha1" => HashAlgo::Sha1,    // legacy OpenSSL alias used in createSign
     "sha224" => HashAlgo::Sha224,
     "sha-224" => HashAlgo::Sha224,
     "sha256" => HashAlgo::Sha256,
     "sha-256" => HashAlgo::Sha256,
-    "rsa-sha256" => HashAlgo::Sha256,
     "sha384" => HashAlgo::Sha384,
     "sha-384" => HashAlgo::Sha384,
-    "rsa-sha384" => HashAlgo::Sha384,
     "sha512" => HashAlgo::Sha512,
     "sha-512" => HashAlgo::Sha512,
-    "rsa-sha512" => HashAlgo::Sha512,
     "sha512-224" => HashAlgo::Sha512_224,
     "sha512-256" => HashAlgo::Sha512_256,
+    // SHA-3 family (Node ≥10.12).
+    "sha3-224" => HashAlgo::Sha3_224,
+    "sha3-256" => HashAlgo::Sha3_256,
+    "sha3-384" => HashAlgo::Sha3_384,
+    "sha3-512" => HashAlgo::Sha3_512,
+    "shake128" => HashAlgo::Shake128,
+    "shake256" => HashAlgo::Shake256,
+
+    // RSA-prefixed compound names (legacy OpenSSL aliases, accepted by
+    // createSign — they decompose to the bare hash; the key constrains RSA).
+    "rsa-sha1" => HashAlgo::Sha1,
+    "rsa-sha224" => HashAlgo::Sha224,
+    "rsa-sha256" => HashAlgo::Sha256,
+    "rsa-sha384" => HashAlgo::Sha384,
+    "rsa-sha512" => HashAlgo::Sha512,
+    "rsa-md5" => HashAlgo::Md5,
+    "id-rsassa-pkcs1-v1_5-with-sha256" => HashAlgo::Sha256,
+    "id-rsassa-pkcs1-v1_5-with-sha384" => HashAlgo::Sha384,
+    "id-rsassa-pkcs1-v1_5-with-sha512" => HashAlgo::Sha512,
+
+    // DSA-prefixed compound names.
+    "dsa-sha1" => HashAlgo::Sha1,
+    "dsa-sha256" => HashAlgo::Sha256,
+
+    // ECDSA-prefixed compound names (formal OID names from RFC 5754).
+    "ecdsa-with-sha1" => HashAlgo::Sha1,
+    "ecdsa-with-sha256" => HashAlgo::Sha256,
+    "ecdsa-with-sha384" => HashAlgo::Sha384,
+    "ecdsa-with-sha512" => HashAlgo::Sha512,
+
+    // Legacy + niche.
     "md5" => HashAlgo::Md5,
-    "ripemd160" => HashAlgo::Ripemd160,    // unsupported, but listed for getHashes()
+    "md5-sha1" => HashAlgo::Md5Sha1,    // legacy TLS 1.0/1.1 PRF — Stage E
+    "ripemd160" => HashAlgo::Ripemd160,    // unsupported, listed for getHashes()
+    "rmd160" => HashAlgo::Ripemd160,
     "blake2b512" => HashAlgo::Blake2b512,
     "blake2s256" => HashAlgo::Blake2s256,
 };
 
+// (addresses critic MAJOR #4): every cipher entry now carries a `gate` field
+// telling the surface adapter what runtime flag (if any) to require. Stage-1
+// modern AEAD modes are ungated; bare-ChaCha20 (no Poly1305) is `LegacyCrypto`-
+// gated because raw stream ciphers are a security footgun; RC4/IDEA/Blowfish
+// are `LegacyCrypto`-gated; AES-CCM is ungated (it's modern, just less common).
+//
+// (addresses critic MAJOR #17): the encrypted-PEM `cipher` whitelist is the
+// subset of this table where `is_encrypted_pem_cipher == true`; AES-CBC family
+// is in by default, ECB/3DES variants require LegacyCrypto.
+pub struct CipherEntry {
+    pub alg: CipherAlg,
+    pub mode: CipherMode,
+    pub key_lengths: &'static [usize],
+    pub iv_length: Option<usize>,
+    pub block_size: usize,
+    pub aliases: &'static [&'static str],
+    pub gate: CipherGate,
+    pub is_aead: bool,
+    pub is_encrypted_pem_cipher: bool,
+}
+
+pub enum CipherGate {
+    Ungated,
+    LegacyCrypto,                // requires --legacy-crypto
+}
+
 pub static CIPHER_NAMES: phf::Map<&'static str, CipherAlg> = phf::phf_map! {
+    // Modern AES-CBC/CTR/GCM/OCB/KW/CCM/XTS — ungated.
     "aes-128-cbc" => CipherAlg::Aes128Cbc,
     "aes-192-cbc" => CipherAlg::Aes192Cbc,
     "aes-256-cbc" => CipherAlg::Aes256Cbc,
@@ -2561,21 +2654,47 @@ pub static CIPHER_NAMES: phf::Map<&'static str, CipherAlg> = phf::phf_map! {
     "aes-128-gcm" => CipherAlg::Aes128Gcm,
     "aes-192-gcm" => CipherAlg::Aes192Gcm,
     "aes-256-gcm" => CipherAlg::Aes256Gcm,
+    "aes-128-ccm" => CipherAlg::Aes128Ccm,    // (addresses CRITICAL #3, missing concept #1: AES-CCM ships)
+    "aes-192-ccm" => CipherAlg::Aes192Ccm,
+    "aes-256-ccm" => CipherAlg::Aes256Ccm,
     "aes-128-ocb" => CipherAlg::Aes128Ocb,
     "aes-192-ocb" => CipherAlg::Aes192Ocb,
     "aes-256-ocb" => CipherAlg::Aes256Ocb,
     "aes-128-wrap" => CipherAlg::Aes128Kw,
     "aes-192-wrap" => CipherAlg::Aes192Kw,
     "aes-256-wrap" => CipherAlg::Aes256Kw,
+    "aes-128-xts" => CipherAlg::Aes128Xts,    // (addresses missing concept #10: XTS for full-disk encryption)
+    "aes-256-xts" => CipherAlg::Aes256Xts,
     "chacha20-poly1305" => CipherAlg::ChaCha20Poly1305,
-    "chacha20" => CipherAlg::ChaCha20,    // bare ChaCha20 stream (no AEAD)
-    // Stage 2 (legacy ciphers, gated on --legacy-crypto):
+
+    // Bare ChaCha20 (no AEAD): LegacyCrypto-gated. Stream cipher without
+    // authentication is a footgun; require explicit opt-in.
+    "chacha20" => CipherAlg::ChaCha20,
+
+    // ECB modes (rare; AES-128/256-ECB legitimate for HSM key wrap).
+    "aes-128-ecb" => CipherAlg::Aes128Ecb,
+    "aes-256-ecb" => CipherAlg::Aes256Ecb,
+
+    // CFB / OFB — Stage E, ungated (legitimate for some niche uses).
+    "aes-128-cfb" => CipherAlg::Aes128Cfb,
+    "aes-256-cfb" => CipherAlg::Aes256Cfb,
+    "aes-128-cfb1" => CipherAlg::Aes128Cfb1,
+    "aes-128-cfb8" => CipherAlg::Aes128Cfb8,
+    "aes-128-ofb" => CipherAlg::Aes128Ofb,
+    "aes-256-ofb" => CipherAlg::Aes256Ofb,
+
+    // Legacy (Stage E, gated on --legacy-crypto):
     "des-cbc" => CipherAlg::DesCbc,
+    "des-ecb" => CipherAlg::DesEcb,
     "des-ede3" => CipherAlg::Tdes,
     "des-ede3-cbc" => CipherAlg::TdesCbc,
+    "des-ede3-ecb" => CipherAlg::TdesEcb,
     "bf-cbc" => CipherAlg::BlowfishCbc,
+    "bf-ecb" => CipherAlg::BlowfishEcb,
+    "cast5-cbc" => CipherAlg::Cast5Cbc,
     "rc4" => CipherAlg::Rc4,
     "rc4-40" => CipherAlg::Rc4_40,
+    "idea-cbc" => CipherAlg::IdeaCbc,
 };
 ```
 
@@ -2812,6 +2931,25 @@ pub fn get_diffie_hellman<'s>(
 ```
 
 DH primes (modp14/15/16/17/18, ffdhe*) are stored as static byte arrays in the kernel. Backed by aws-lc-sys's `DH_set0_pqg` for the actual key-agreement computation.
+
+**Runtime-flag registry (addresses critic MAJOR #2):** Two crypto policy flags are introduced. v1 referenced them but never defined where they lived; v2 wires them into the existing `RuntimeFlags` struct at `crates/runtime/src/state.rs::RuntimeFlags` (read once at isolate setup, exposed via `globalThis.__zeroship_runtime_flags`):
+
+```rust
+// crates/runtime/src/state.rs (modified)
+pub struct RuntimeFlags {
+    pub insecure_dh_groups: bool,    // NEW (D-N22 partner): enable modp1/modp2 (768/1024-bit)
+    pub legacy_crypto: bool,         // existing reference (D-N22): enable DES/3DES/Blowfish/RC4/MD5-as-cipher/createCipher
+}
+
+pub fn is_insecure_dh_enabled() -> bool {
+    state::isolate_runtime_flags().insecure_dh_groups
+}
+pub fn is_legacy_crypto_enabled() -> bool {
+    state::isolate_runtime_flags().legacy_crypto
+}
+```
+
+CLI args: `zeroship serve --insecure-dh-groups --legacy-crypto myapp.js`. Env vars: `ZEROSHIP_INSECURE_DH_GROUPS=1`, `ZEROSHIP_LEGACY_CRYPTO=1`. Both default off.
 
 ### X.5. Legacy cipher policy (D-N22)
 
