@@ -63,6 +63,7 @@ pub mod ec;
 pub mod helpers;
 pub mod hmac;
 pub mod jwk;
+pub mod kernel;
 pub mod key_material;
 pub mod okp;
 pub mod ops;
