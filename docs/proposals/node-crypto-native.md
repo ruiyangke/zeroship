@@ -870,11 +870,32 @@ These are NOT separate code paths — they're literal property references to the
 | ~~`crypto.signal`~~ — does NOT exist in Node (addresses critic minor m-9: v1 invented this; Node's `node:crypto` has no `signal` export. The user was likely thinking of `AbortSignal` in `node:util` / global. Removed from the doc.) | — | — | — | — |
 | `crypto.subtle` (alias for `webcrypto.subtle`; addresses critic MAJOR #9: top-level `crypto.subtle` was added as an alias to `crypto.webcrypto.subtle` in Node v15+ per https://nodejs.org/api/webcrypto.html — older code uses `crypto.webcrypto.subtle`, newer uses `crypto.subtle`. We export both, identity-preserving via D-N16.) | 1 | direct reference | n/a | D |
 
+### II.14. Coverage summary
+
+Stage 1 (the node:crypto APIs landed by end of Stage D):
+
+- **Hashing:** 7 / 7 exports (100%)
+- **HMAC:** 4 / 4 exports (100%)
+- **Cipher / Decipher:** 11 / 12 exports (`createCipher` deprecated and never)
+- **Sign / Verify:** 9 / 9 exports (100%)
+- **Public-key:** 3 / 5 exports (`publicDecrypt` / `privateEncrypt` Stage 2)
+- **DH / ECDH:** 9 / 14 exports (ECDH 100%; named DH groups Stage 2; arbitrary DH Stage 2)
+- **Key generation:** 4 / 8 exports (basic kinds Stage 1; primes Stage 2)
+- **Key import/export:** 11 / 11 exports (100%)
+- **KDFs:** 6 / 6 exports (100%)
+- **Random:** 6 / 6 exports (100%)
+- **X.509:** 0 / 13 exports (Stage 2)
+- **WebCrypto bridge:** 3 / 3 exports (100%)
+- **Misc:** 11 / 12 exports (`crypto.signal` never)
+
+**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage. (addresses critic minor m-13 — counts include both the class constructors AND each prototype method; the % is best read as "API surface area" rather than "distinct features"; e.g. `Hash`, `Hash.prototype.update`, `Hash.prototype.digest`, `Hash.prototype.copy` count separately. m-17's accounting note: `setEngine` + the deprecated `createCipher` (now Stage E) + post-quantum stubs are the "deferred-forever" set.)
+**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, deprecated APIs (no `crypto.signal` per m-9), and PQC keygen until aws-lc-rs catches up.
+
 ### II.15. Post-quantum + KEM + miscellaneous Node v22-v25 additions (addresses critic missing concepts #1, #2, #3, #4, #7, #16, #17, #18, #19, #21, #22, #23, #25)
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `crypto.argon2(password, salt, options?)` (Node v22+, `crypto.hash`-shaped) | 3 | npm `argon2` (WASM via unenv) | sync/async | NEVER native — see D-N (open question XVII.4 + missing concept #1) |
+| `crypto.argon2(password, salt, options?)` (Node v22+, `crypto.hash`-shaped) | 3 | npm `argon2` (WASM via unenv) | sync/async | NEVER native — see open question XVII.4 + missing concept #1 |
 | `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
 | `Certificate` (legacy SPKAC) — `Certificate.exportChallenge`, `Certificate.exportPublicKey`, `Certificate.verifySpkac` | 3 | aws-lc-sys raw FFI for `NETSCAPE_SPKI_b64_decode` (~80 LOC) | sync | E (rare; only browser keygen, missing concept #4) |
 | `KeyObject.toCryptoKey(algorithm, extractable, keyUsages)` (Node v18+) | 1 | bridge: `KeyObject` → fresh `CryptoKey` via the Arc share + the WebCrypto `importKey('jwk', ko.export({format:'jwk'}))` round-trip | sync | C (missing concept #7 + clarifies the bidirectional bridge in D-N4) |
@@ -896,27 +917,6 @@ These are NOT separate code paths — they're literal property references to the
 **Argon2 (missing concept #1):** Node v22 did NOT add `crypto.argon2` as a standalone export — confirmed against https://nodejs.org/api/crypto.html (no `crypto.argon2` entry as of writing). The critic's claim was incorrect on the surface name; what Node v22 added was `crypto.hash` (a one-shot hashing convenience), not argon2. Argon2 remains npm-package territory (`argon2`, `@phc/argon2`). v2 corrects v1's "Node never shipped it" to "Node has not shipped argon2 in `node:crypto` as of v25; revisit if Node adds it post-cutoff."
 
 **Stream.Transform (missing concept #21):** addressed in §V.6 above.
-
-### II.14. Coverage summary
-
-Stage 1 (the node:crypto APIs landed by end of Stage D):
-
-- **Hashing:** 7 / 7 exports (100%)
-- **HMAC:** 4 / 4 exports (100%)
-- **Cipher / Decipher:** 11 / 12 exports (`createCipher` deprecated and never)
-- **Sign / Verify:** 9 / 9 exports (100%)
-- **Public-key:** 3 / 5 exports (`publicDecrypt` / `privateEncrypt` Stage 2)
-- **DH / ECDH:** 9 / 14 exports (ECDH 100%; named DH groups Stage 2; arbitrary DH Stage 2)
-- **Key generation:** 4 / 8 exports (basic kinds Stage 1; primes Stage 2)
-- **Key import/export:** 11 / 11 exports (100%)
-- **KDFs:** 6 / 6 exports (100%)
-- **Random:** 6 / 6 exports (100%)
-- **X.509:** 0 / 13 exports (Stage 2)
-- **WebCrypto bridge:** 3 / 3 exports (100%)
-- **Misc:** 11 / 12 exports (`crypto.signal` never)
-
-**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage. (addresses critic minor m-13 — counts include both the class constructors AND each prototype method; the % is best read as "API surface area" rather than "distinct features"; e.g. `Hash`, `Hash.prototype.update`, `Hash.prototype.digest`, `Hash.prototype.copy` count separately. m-17's accounting note: `setEngine` + the deprecated `createCipher` (now Stage E) + post-quantum stubs are the "deferred-forever" set.)
-**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, deprecated APIs (no `crypto.signal` per m-9), and PQC keygen until aws-lc-rs catches up.
 
 ## III. Algorithm coverage
 
@@ -3927,11 +3927,11 @@ D-N20 says: parse-only in Stage 2; full verification deferred to a userspace `@z
 
 **Re-open if:** more than 2 creator apps ask for chain verification.
 
-### XVII.8. `crypto.signal` (Node ≥17) — never or maybe?
+### XVII.8. `crypto.signal` — fictional API; no longer an open question
 
-D-N is implicit (NEVER table). Used by the experimental `cryptoStream` API.
+(addresses critic minor m-9): v1 listed `crypto.signal` as a deferred Node API, citing it as Node ≥17 + experimental encryptStream. After audit against https://nodejs.org/api/crypto.html — there is no `crypto.signal` export. The closest match in v1's mental model was the global `AbortSignal` (used as `crypto.subtle.encrypt(..., { signal })` in WebCrypto v2 drafts), but that's a parameter, not an export. v2 removes the entry.
 
-**Working answer:** never. Stays experimental in Node; we don't track experimental APIs.
+**Settled:** removed from non-goals; not a real API.
 
 ### XVII.9. CryptoKey `extractable: false` — bridge or refuse?
 
@@ -3961,6 +3961,19 @@ D-N18 says: case-insensitive (Node behaviour).
 
 **Working answer:** case-insensitive for hash names / cipher names; strict for spec-canonical names in JWK / WebCrypto. The asymmetry is unavoidable because WebCrypto IS strict (per webcrypto-native D-8) and Node IS loose. Document.
 
+### XVII.11. (v2) Resolved by post-review pass
+
+Open questions promoted to decisions in v2:
+
+- **CCM vs other AEAD ordering** — D-N (V.4 Cipher state machine). CCM `setAuthTag` MUST come before update; GCM/OCB/ChaCha20 MUST come before final. State machine in `CipherContext` enforces.
+- **Encrypted PKCS#8 implementation route** — D-N33. Drops to `aws-lc-sys` raw FFI; high-level aws-lc-rs does not expose this surface.
+- **PSS sentinel translation site** — D-N34. Translated in `parse_sign_key_input` BEFORE the kernel boundary; kernel never sees negatives.
+- **stream.Transform inheritance approach** — D-N35. JS-side mixin in `node-crypto.gen.ts`; native classes unchanged.
+- **PQC stub strategy** — D-N36. Stage E parse-only recognition; full keygen defers until aws-lc-rs's PQC API stabilises.
+- **`createCipher` policy** — gated by `--legacy-crypto` (warn-and-proceed when on; throw when off). v1's "always throw" was too aggressive.
+- **`ECDH.setPublicKey` policy** — shipped with deprecation warning (DEP0031). v1's "throw" was wrong vs. Node behaviour.
+- **`Hmac.copy` absence** — reaffirmed against the critic's incorrect claim. Counter-cited against Node source.
+
 ## XVIII. Sources
 
 - Node.js `node:crypto` reference — https://nodejs.org/api/crypto.html
@@ -3989,7 +4002,17 @@ D-N18 says: case-insensitive (Node behaviour).
 - NIST SP 800-38A / D — Block cipher modes — https://csrc.nist.gov/publications/detail/sp/800-38a/final
 - FIPS 180-4 — Secure Hash Standard — https://csrc.nist.gov/publications/detail/fips/180/4/final
 - aws-lc-rs — https://docs.rs/aws-lc-rs/
+- aws-lc-rs encoding (Pkcs8V1Der/Pkcs8V2Der; no encrypted variant) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html
+- aws-lc-rs signature (ECDSA_P256K1_SHA256_*) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/signature/index.html
 - aws-lc — https://github.com/aws/aws-lc
+- Node `lib/internal/crypto/hash.js` (Hmac vs Hash, no `Hmac.copy`) — https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js
+- Node `errors` module (ERR_* code catalog audited in §VII.3) — https://nodejs.org/api/errors.html
+- Node deprecations DEP0031 (ECDH.setPublicKey), DEP0106 (createCipher), DEP0182 (GCM authTagLength) — https://nodejs.org/api/deprecations.html
+- RFC 4055 — RSA-PSS algorithm parameters in SPKI/PKCS8 — https://www.rfc-editor.org/rfc/rfc4055
+- RFC 5754 — ECDSA-with-SHA* OIDs (HASH_NAMES compound entries) — https://www.rfc-editor.org/rfc/rfc5754
+- RFC 8037 — JOSE OKP key type (Ed25519/X25519/Ed448/X448) — https://www.rfc-editor.org/rfc/rfc8037
+- FIPS 203 / 204 / 205 — ML-KEM / ML-DSA / SLH-DSA (post-quantum, D-N36) — https://csrc.nist.gov/publications/fips
+- NIST SP 800-38D — AES-GCM (auth tag lengths, IV lengths) — https://csrc.nist.gov/publications/detail/sp/800-38d/final
 - Reference impls:
   - workerd — https://github.com/cloudflare/workerd/tree/main/src/node/internal (`crypto.h`, `crypto_dh.c++`, `crypto_keys.c++`, `crypto_hkdf.c++`, `crypto_pbkdf2.c++`, `crypto_x509.c++`)
   - Bun — https://github.com/oven-sh/bun/tree/main/src/bun.js/node (`node_crypto.zig` + `src/js/node/crypto.ts`)
