@@ -614,6 +614,21 @@ fn error_class_for_code(code: &str) -> ErrorClass {
 
 The macro sees `OpErrorKind::NodeError("ERR_CRYPTO_HASH_FINALIZED")`, looks up the class as `Error`, calls `v8::Exception::error(...)`, then sets the `.code` property to the static string `"ERR_CRYPTO_HASH_FINALIZED"`.
 
+**`error.errno` field (addresses critic missing concept #15):** Node's OSSL-stack errors (e.g. `ERR_OSSL_*`) ALSO carry a numeric `.errno` field — the underlying OpenSSL `ERR_PACK` integer. Some packages (notably older OpenSSL-aware logging libraries) match on `if (err.errno === -7)`. v2 extends `OpErrorKind::NodeError(code: &'static str)` to optionally carry a `Some(errno: i32)` payload:
+
+```rust
+pub enum OpErrorKind {
+    NodeError(&'static str, Option<i32>),    // code + optional errno
+    /* ... */
+}
+impl OpError {
+    pub fn node(code: &'static str, msg: impl Into<String>) -> Self { /* errno = None */ }
+    pub fn node_with_errno(code: &'static str, errno: i32, msg: impl Into<String>) -> Self { /* errno = Some */ }
+}
+```
+
+The OSSL-stack errors in `KernelError` carry the BoringSSL error code through to the macro arm; the macro arm sets `.errno` when the variant has Some. Most v2 callsites don't have a useful errno (kernel errors are semantic, not OSSL packs); the few that do — `KernelError::OsslError { errno, code }` — propagate it.
+
 ## II. Full node:crypto export surface
 
 The complete table of every node:crypto top-level export, with this design's plan. "Tier" reflects observed npm-package usage:
@@ -704,7 +719,7 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `crypto.privateDecrypt(keyOrOptions, buffer)` (same options as publicEncrypt; addresses MAJOR #1, MAJOR #28) | 1 | `kernel::rsa_oaep_decrypt` | sync | C |
 | `crypto.publicDecrypt(keyOrOptions, buffer)` | 2 | aws-lc-rs raw FFI (low-level) | sync | C |
 | `crypto.privateEncrypt(keyOrOptions, buffer)` | 2 | aws-lc-rs raw FFI (low-level) | sync | C |
-| `crypto.diffieHellman({ privateKey, publicKey })` (one-shot) | 1 | `kernel::dh_agree` (ECDH path) | sync | C |
+| `crypto.diffieHellman({ privateKey, publicKey })` (one-shot; addresses critic missing concept #8: shape per https://nodejs.org/api/crypto.html#cryptodiffiehellmanoptions — both keys must be KeyObject with matching `asymmetricKeyType` of `'ec'`, `'x25519'`, `'x448'`, or `'dh'`. Returns the shared secret as Buffer. Also used internally by WebCrypto's `subtle.deriveBits({ name: 'ECDH', public: ... })` bridge.) | 1 | `kernel::dh_agree` (ECDH path) | sync | C |
 
 **`publicDecrypt` / `privateEncrypt`:** these are the inverse of the natural RSA flow (encrypting with private = signing-without-hash; decrypting with public = signature-verify-style). Used by old PKCS1 v1.5 signature schemes that pre-date PSS. aws-lc-rs's high-level API doesn't expose them; we drop to `aws_lc_sys::RSA_public_decrypt` / `RSA_private_encrypt`. Niche; defer to Stage 2.
 
@@ -1339,6 +1354,22 @@ The `encode_to_der(state, type_)` function dispatches on the key's variant + the
 | Ed25519 / X25519 pub | `spki` (only) | SPKI |
 
 Most of these paths read `KeyMaterial`'s pre-stored `pkcs8_der` / `spki_der` fields and return them directly. PKCS#1 RSA encodings need a fresh DER walker call; SEC1 EC private needs the same. Both are ~30 LOC each in the kernel's DER emitter.
+
+### IV.6a. JWK kty mapping for OKP (Ed25519/X25519/Ed448/X448)
+
+(addresses critic missing concept #25): Node v18+ maps OKP keys with `kty: "OKP"` per RFC 8037 — the `crv` field carries the curve name (`"Ed25519"`, `"X25519"`, `"Ed448"`, `"X448"`). `keyObject.export({ format: "jwk" })` for an Ed25519 key returns `{ kty: "OKP", crv: "Ed25519", x: <base64url>, d?: <base64url> }`. The kernel JWK exporter at `crypto_kernel/jwk.rs::export` already supports this for the WebCrypto surface (see https://w3c.github.io/webcrypto/#sec-jwk-mapping-tables); v2 verifies that all 4 OKP curves round-trip via `KeyObject.export({ format: 'jwk' })` then `crypto.subtle.importKey('jwk', ...)`.
+
+Smoke test:
+
+```js
+const { publicKey } = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["verify"]);
+const ko = KeyObject.from(publicKey);
+const jwk = ko.export({ format: "jwk" });
+console.assert(jwk.kty === "OKP");
+console.assert(jwk.crv === "Ed25519");
+const ck = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["verify"]);
+console.assert(ck.algorithm.name === "Ed25519");
+```
 
 ### IV.7. Zeroize on Drop (D-N30)
 
@@ -3186,6 +3217,30 @@ fn check_legacy_allowed(alg: CipherAlg) -> Result<(), OpError> {
 }
 ```
 
+### X.6. `crypto.constants` full list (addresses critic missing concept #24)
+
+Node's `crypto.constants` exposes ~70 OpenSSL constants per https://nodejs.org/api/crypto.html#crypto-constants. v1 listed 10. v2 ships them in two waves:
+
+**Stage B (Tier 1 — pad / EC point conversion):**
+```
+RSA_PKCS1_PADDING = 1
+RSA_NO_PADDING = 3                  // footgun
+RSA_PKCS1_OAEP_PADDING = 4
+RSA_PKCS1_PSS_PADDING = 6
+RSA_PSS_SALTLEN_DIGEST = -1
+RSA_PSS_SALTLEN_MAX_SIGN = -2
+RSA_PSS_SALTLEN_AUTO = -2
+POINT_CONVERSION_COMPRESSED = 2
+POINT_CONVERSION_UNCOMPRESSED = 4
+POINT_CONVERSION_HYBRID = 6
+```
+
+**Stage E (Tier 2 — SSL_OP / DH_CHECK / ENGINE_METHOD / SSL_VERIFY / SSL_SESS_CACHE):** the full SSL_OP_* / SSL_OP_NO_TLSv1 / SSL_OP_NO_TICKET (~30 entries), DH_CHECK_P_NOT_PRIME / DH_CHECK_P_NOT_SAFE_PRIME / DH_NOT_SUITABLE_GENERATOR (~6 entries), ENGINE_METHOD_RSA / ENGINE_METHOD_DSA / ENGINE_METHOD_ALL (~10 entries), SSL_VERIFY_NONE / SSL_VERIFY_PEER / SSL_VERIFY_FAIL_IF_NO_PEER_CERT / SSL_VERIFY_CLIENT_ONCE (4 entries), SSL_SESS_CACHE_OFF / etc. (5 entries). All are integer-typed; values copied from OpenSSL headers (matching Node).
+
+Apps that read `crypto.constants.SSL_OP_NO_TLSv1` (legacy TLS 1.3 negotiation gating libraries) work on Stage E. Without them, a `cannot read property 'SSL_OP_NO_TLSv1' of undefined` crash is what the JS shim caused in v1 — fixed in v2.
+
+The constants block in `node-crypto.gen.ts` is generated from a single Rust-side static slice (~80 entries) so it stays in sync.
+
 ## XI. Synthetic module install (D-N26)
 
 ### XI.1. The install path
@@ -3887,6 +3942,18 @@ The WebCrypto `extractable: false` flag prevents export. But `KeyObject.from(cry
 **Counter-argument:** Node's `KeyObject.from(cryptoKey)` doesn't check; in Node, all CryptoKeys can be wrapped. The WebCrypto `extractable: false` is honoured by `subtle.exportKey` only.
 
 **Settled:** match Node; let `KeyObject.from(non_extractable_crypto_key)` succeed but make `keyObject.export(...)` honor extractable (throw `ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE` if `keyObject.material` came from a non-extractable CryptoKey). Add an `extractable` field to KeyObjectState that propagates from CryptoKeyState on bridge.
+
+**Wiring (addresses critic minor m-5):** v1's open-question prose described the policy but the implementation never propagated the flag. v2 extends KeyObjectState:
+
+```rust
+pub struct KeyObjectState {
+    pub key_type: KeyType,
+    pub material: Arc<KeyMaterial>,
+    pub extractable: bool,            // NEW: propagates from CryptoKeyState; default true for keys created via createSecretKey/etc.
+}
+```
+
+`KeyObject.from(cryptoKey)` reads `cryptoKey.extractable` and copies it. `KeyObject.prototype.export(options)` checks `self.extractable` first and throws `ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE` if false. The X.509 `publicKey` accessor mints with `extractable: true` (public keys are always extractable).
 
 ### XVII.10. Algorithm canonicalisation — case-insensitive everywhere or strict?
 
