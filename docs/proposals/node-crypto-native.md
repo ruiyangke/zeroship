@@ -1,7 +1,7 @@
 # Native Node.js `node:crypto` design
 
-**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review) · 2026-05-02 (v3 round-3 audit)
-**Status:** Draft v3 (round-3 audit) — implementation pending
+**Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review) · 2026-05-02 (v3 round-3 audit) · 2026-05-02 (v4 round-4 narrow audit)
+**Status:** Draft v4 (impl-ready) — narrow round-4 residuals closed; ready for impl agent
 **Spec:** Node.js `node:crypto` API reference — https://nodejs.org/api/crypto.html
 **Companion specs:**
 - Node.js `crypto.webcrypto` — https://nodejs.org/api/webcrypto.html (Node's bridge between node:crypto and WHATWG WebCrypto; instructive for our bridging design)
@@ -53,6 +53,21 @@
 
 ## Revision history
 
+- **v4 (2026-05-02 round-4 narrow audit)** — Closes the 3 CRITICAL + 5 MAJOR residuals from `/tmp/zeroship-reviews/node-crypto-review-v3.md` (round-3 critic score 86/100). No architectural changes; ~50 lines of narrow edits. After this pass: zero CRITICAL, zero blocking MAJOR — impl-ready.
+
+  **Changes from v3:**
+  - **C3-1 (ERR_MISSING_PASSPHRASE provenance + class):** §VII.3a row corrected from `JS (errors.js, Error)` to `C++ (node_errors.h, TypeError)` per https://github.com/nodejs/node/blob/main/src/node_errors.h line 115 (`V(ERR_MISSING_PASSPHRASE, TypeError)`); verified absent from `lib/internal/errors.js`. Macro arm (§VII.5 `gen_throw_error`) moved `ERR_MISSING_PASSPHRASE` from the default `_ => Error` fall-through to the `TypeError` branch. Inline kernel comment at `crypto_node/error.rs::PassphraseRequired` rewritten to cite the correct source.
+  - **C3-2 (§VII.3a missing 2 codes that are emitted):** Added rows for `ERR_CRYPTO_FIPS_UNAVAILABLE` (real per errors.js:1177, Error) and `ERR_UNKNOWN_ENCODING` (real per errors.js:1875, TypeError). Now §VII.3a covers every `OpError::node(...)` emission in the doc. Re-verified: zero ERR_* code is emitted outside the table. Plus added a row for `ERR_INVALID_BUFFER_SIZE` (referenced in the macro arm at §VII.5; real per errors.js:1480, RangeError).
+  - **C3-3 (Empty-HMAC-key rationale fabricated):** v3 claimed Node throws `ERR_OUT_OF_RANGE` on a `key.byteLength === 0` check in `lib/internal/crypto/hash.js`. Verified — NO such check exists in hash.js. Verified actual Node behaviour from `src/crypto/crypto_hmac.cc::Hmac::HmacInit` (lines 78-91 of upstream): Node SILENTLY ACCEPTS empty keys (it special-cases `key_len == 0` by re-binding `key = ""`) and forwards to `HMAC_Init_ex`; if init fails, the dynamic-OSSL `ThrowCryptoError` path emits an `ERR_OSSL_HMAC_*`-shaped code (not in the static registry). Rewrote the kernel comment, the §VII.3a footer, and the test plan at §XIV.crypto_node_hmac.rs to **explicitly tag this as a zeroship divergence**, not parity. New §XVII.13b "Zeroship-vs-Node behavioural divergence log" introduces a single source of truth for this and future divergences. Rationale (kept as the design choice): RFC 2104 §2 + defense-in-depth.
+  - **M3-1 (LOC claim wrong):** Updated v3 history line "Doc grew from ~4,000 to ~4,400 LOC" to the verified actual ~5,071 (after v3 audit).
+  - **M3-2 (subset of C3-2):** addressed above.
+  - **M3-3 (macro arm class misclassifications):** `ERR_INVALID_BUFFER_SIZE` moved from TypeError to RangeError (errors.js:1480 `E('ERR_INVALID_BUFFER_SIZE', '...', RangeError)`). `ERR_MISSING_PASSPHRASE` moved from default `Error` to TypeError (per C3-1).
+  - **M3-4 (two-tier error surface):** Added explicit "Operational warning — two-tier error surface" annotation at the §VII.3a footer documenting the contract that `e.code` is canonical (real Node code), `e.message` may contain legacy OSSL hint text. Cross-referenced to operational docs.
+  - **M3-5 (`ERR_OSSL_X509_PARSE` invented):** §X.1 reference replaced with `ERR_CRYPTO_OPERATION_FAILED` + `"X.509 parse error: ..."` message text per the §VII.3a / D-N39 fallback policy. Stage F's faithful-OSSL bridge can re-introduce the legacy name in `e.message` once XVII.12 lands.
+
+  **Deferred (with reasoning):**
+  - MINOR m3-1 through m3-15 (15 items) — These are stale-arithmetic and minor inconsistencies (cost summary roll-up §XII.1 still shows v2 numbers; Stage F LOC math; `crypto.createDiffieHellman(primeLength)` async-vs-sync mislabel; `ZEROSHIP_LEGACY_CRYPTO` env-reader wiring not shown; etc.). None are impl-blocking; the impl agent will catch them as it works. v4 is a CRITICAL/MAJOR-only narrow pass per the user's directive ("~50 lines of edit, no scope creep").
+
 - **v3 (2026-05-02 round-3 audit)** — Addresses 4 CRITICAL + 25 MAJOR + 15 MINOR findings from `/tmp/zeroship-reviews/node-crypto-review-v2.md`. The v2 critic verified 16/18 sampled v1 fixes were honestly applied; v3 closes the remaining audit gaps (invented error codes, invented aws-lc-rs algorithm constants, prose-only encrypted-PKCS#8 spec). v3 is a **narrow audit pass** — no architectural changes; the kernel/native/node split, Arc<KeyMaterial> share, AEAD state machine, sentinel translation, and deprecation-warning helper from v2 stand. Net effect:
 
   **CRITICAL fixes (round-2 C2-1 through C2-4):**
@@ -65,7 +80,7 @@
     - `ERR_CRYPTO_INVALID_DH_PRIME` → marked **zeroship extension** (no Node equivalent; we keep it but flag clearly in §VII.3a); fallback path uses `ERR_CRYPTO_OPERATION_FAILED`.
     - `ERR_OSSL_EVP_BAD_DECRYPT`, `ERR_OSSL_EVP_SIGN`, `ERR_OSSL_EVP_VERIFY`, `ERR_OSSL_HMAC_KEY_TOO_SHORT`, `ERR_OSSL_PEM_NO_START_LINE`, `ERR_OSSL_ASN1_VALUE_ERROR`, `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`, `ERR_OSSL_EVP_UNSUPPORTED` — Node generates these dynamically from OpenSSL's ERR_PACK pipeline (per `node/src/crypto/crypto_util.cc::ThrowCryptoError`); Node does NOT define them as static codes. **v3 marks every `ERR_OSSL_*` we emit (except the real `ERR_OSSL_EVP_INVALID_DIGEST`) as a zeroship extension** in §VII.3a, with explicit policy: aws-lc errors are bridged through a single `ERR_CRYPTO_OPERATION_FAILED` envelope by default, with the OpenSSL-style `ERR_OSSL_<library>_<reason>` shape preserved verbatim ONLY when the upstream package observed Node's dynamic-build path (e.g., authentication-failed in GCM). Real Node behaviour matched.
     - `ERR_MISSING_OPTION` retained — it IS a real Node code (verified, `lib/internal/errors.js` line ≈ 1610). v2's worry was unfounded; the critic was wrong on this one. Counter-cited.
-    - `ERR_MISSING_PASSPHRASE` retained — also verified real (`lib/internal/errors.js`).
+    - `ERR_MISSING_PASSPHRASE` retained — verified real, but in `src/node_errors.h:115` (NOT in `lib/internal/errors.js`); class is **TypeError**, not Error. <!-- Round 4: addressing CRITICAL C3-1 — v3 wrongly attributed this to errors.js / Error; provenance and class corrected. -->.
     - `ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED` retained — real per `lib/internal/errors.js`.
   - **aws-lc-rs algorithm-existence audit (C2-3)** — every claimed `aws_lc_rs::*` constant in §III.2 + §IX.1 verified against the live docs.rs surface:
     - `aws_lc_rs::digest` (https://docs.rs/aws-lc-rs/latest/aws_lc_rs/digest/index.html) exposes ONLY `SHA1_FOR_LEGACY_USE_ONLY`, `SHA224`, `SHA256`, `SHA384`, `SHA512`, `SHA512_256`, `SHA3_256`, `SHA3_384`, `SHA3_512`. **No MD5. No SHA512_224. No SHA3_224. No SHAKE128/256.**
@@ -105,7 +120,7 @@
 
   **Decisions added in v3:** D-N37 (encrypted-PKCS#8 EVP_* FFI sequence at signature level — addresses C2-4); D-N38 (algorithm-routing matrix: aws-lc-rs high-level vs aws-lc-sys raw FFI vs deferred — addresses C2-3); D-N39 (zeroship-extension error-code policy: any `ERR_OSSL_*` code we emit that is not in Node's static registry is documented as a zeroship extension and SHOULD be paired with the closest real Node code in cross-platform code paths — addresses C2-1, C2-2).
 
-  No architectural changes. Doc grew from ~4,000 to ~4,400 LOC. The implementation is unblocked: every algorithm has a backing path, every error code is either real-Node or marked zeroship-extension, and D-N33b spells out the encrypted-PKCS#8 EVP_* sequence at signature level.
+  No architectural changes. Doc grew from ~4,029 to ~5,071 LOC (round-3 audit). <!-- Round 4: addressing MAJOR M3-1 — v3 said "~4,400 LOC", actual was 5,071 (off by ~16%). Corrected. --> The implementation is unblocked: every algorithm has a backing path, every error code is either real-Node or marked zeroship-extension, and D-N33b spells out the encrypted-PKCS#8 EVP_* sequence at signature level.
 
 - **v2 (2026-05-02 post-review)** — Addresses 14 CRITICAL + 30 MAJOR + 25 missing-concept findings from `/tmp/zeroship-reviews/node-crypto-review.md`. Net effect:
   - AEAD semantics rewritten to be CCM-correct: `createCipheriv` `authTagLength`, `setAAD` `plaintextLength`/`encoding`, `setAuthTag` ordering distinct per mode (CCM pre-update; GCM/OCB/ChaCha20 pre-final; GCM-only post-final tag inspection on Cipher).
@@ -2162,15 +2177,44 @@ pub fn create_hmac<'s>(
         Zeroizing::new(buffer::extract_input(scope, key, None)?)
     };
 
-    // (v3, addresses C2-1, C2-2): v2 emitted ERR_OSSL_HMAC_KEY_TOO_SHORT, but
-    // that is a dynamic-OSSL code Node builds at throw time from
-    // ERR_PACK(ERR_LIB_HMAC, ...), not a static Node code (verified — not in
-    // errors.js, not in node_errors.h). For empty-HMAC-key, Node's real path
-    // is ERR_OUT_OF_RANGE (RangeError) on the `key.byteLength === 0` check
-    // in lib/internal/crypto/hash.js. We follow.
+    // (v4 fix, C3-3): The v3 rationale ("Node throws ERR_OUT_OF_RANGE on a
+    // `key.byteLength === 0` check in lib/internal/crypto/hash.js") was
+    // FABRICATED — no such check exists in hash.js. Verified actual Node
+    // behaviour against https://github.com/nodejs/node/blob/main/src/crypto/
+    // crypto_hmac.cc::Hmac::HmacInit (the C++ implementation called from
+    // hash.js's Hmac constructor):
+    //
+    //     if (key_len == 0) { key = ""; }
+    //     ctx_ = HMACCtxPointer::New();
+    //     if (!ctx_.init(key_buf, md)) {
+    //         ctx_.reset();
+    //         return ThrowCryptoError(env(), ERR_get_error());
+    //     }
+    //
+    // Node SILENTLY ACCEPTS empty keys (it even special-cases `key_len == 0`
+    // by re-binding `key = ""`), then forwards to the OpenSSL HMAC_Init_ex
+    // path. If init fails, the error surfaces through the dynamic-OSSL
+    // ThrowCryptoError pipeline (ERR_OSSL_HMAC_*-shaped, not in Node's
+    // static registry).
+    //
+    // **zeroship divergence (intentional):** we throw ERR_OUT_OF_RANGE
+    // (real Node code, RangeError) instead of accepting empty keys.
+    // Rationale:
+    //   1. RFC 2104 §2 requires the key length to be at least the hash output
+    //      size for full security; an empty key trivially defeats HMAC.
+    //   2. Defense-in-depth: silently accepting a zero-length key is a
+    //      cryptographic foot-gun npm code rarely guards against.
+    //   3. ERR_OUT_OF_RANGE is a real, stable Node code (errors.js); packages
+    //      that branch on `e.code` see a normal Node error class.
+    // Logged in §XVII.13b as an explicit zeroship-vs-Node behavioural
+    // divergence so users porting code that depends on the silent-accept
+    // path are aware. The test in §XIV.crypto_node_hmac.rs is updated to
+    // reflect this is a divergence, not parity.
     if key_bytes.is_empty() {
         return Err(OpError::node("ERR_OUT_OF_RANGE",
-            "HMAC key cannot be empty (key.byteLength must be > 0)"));
+            "HMAC key cannot be empty (zeroship divergence: Node would \
+             accept this and let OpenSSL emit a dynamic ERR_OSSL_* error; \
+             we reject up-front per RFC 2104 §2)"));
     }
 
     let state = HmacState { ctx: kernel::HmacContext::new(hash, &key_bytes) };
@@ -3248,10 +3292,11 @@ impl KernelError {
             // ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE — JS-side (errors.js).
             Self::InvalidKeyType => OpError::node("ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE",
                 "Invalid key object type"),
-            // ERR_MISSING_PASSPHRASE — JS-side (errors.js, real per
-            // E('ERR_MISSING_PASSPHRASE', '...', ...)). Counter-citation: v2
-            // critic claimed this was not a Node code; the audit confirms it
-            // IS in errors.js.
+            // (v4 fix, C3-1): ERR_MISSING_PASSPHRASE is C++-side, NOT JS-side.
+            // v3 wrongly attributed this to lib/internal/errors.js; verified
+            // ABSENT from errors.js, PRESENT in src/node_errors.h:115 as
+            // V(ERR_MISSING_PASSPHRASE, TypeError). The class is TypeError,
+            // not Error — the macro arm in §VII.5 routes accordingly.
             Self::PassphraseRequired => OpError::node("ERR_MISSING_PASSPHRASE",
                 "Passphrase required to decrypt private key"),
             // (v3 fix, C2-2): same dynamic-OSSL pattern. Use real
@@ -3376,13 +3421,19 @@ This section enumerates EVERY error code surfaced by `crypto_node/error.rs` with
 | `ERR_INVALID_ARG_VALUE` | JS (errors.js, TypeError) | Many | Bad value (negative size, wrong padding number, etc.). |
 | `ERR_OUT_OF_RANGE` | JS (errors.js, RangeError) | Many | Numeric range violation. |
 | `ERR_MISSING_OPTION` | JS (errors.js, TypeError) | Cipher | "X is required". |
-| `ERR_MISSING_PASSPHRASE` | JS (errors.js, Error) | KeyObject | Encrypted PKCS#8 import without passphrase. |
+| `ERR_MISSING_PASSPHRASE` | C++ (node_errors.h, TypeError) | KeyObject | Encrypted PKCS#8 import without passphrase. <!-- Round 4: addressing CRITICAL C3-1 — was wrongly attributed to errors.js / Error in v3; verified in node_errors.h:115 V(ERR_MISSING_PASSPHRASE, TypeError) at https://github.com/nodejs/node/blob/main/src/node_errors.h --> |
 | `ERR_MISSING_ARGS` | JS (errors.js, TypeError) | Many | Missing required positional argument. |
 | `ERR_BUFFER_OUT_OF_BOUNDS` | JS (errors.js, RangeError) | Random, randomFill | Offset+size out of buffer. |
 | `ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED` | JS (errors.js, Error) | setEngine | Always thrown — D-N25. |
+| `ERR_CRYPTO_FIPS_UNAVAILABLE` | JS (errors.js, Error) | setFips | Emitted when `setFips(true)` is called in a non-FIPS build (verified at https://github.com/nodejs/node/blob/main/lib/internal/errors.js line 1177 — `E('ERR_CRYPTO_FIPS_UNAVAILABLE', 'Cannot set FIPS mode in a non-FIPS build.', Error)`). <!-- Round 4: addressing CRITICAL C3-2 — was emitted at §X.3 line ~4050 but missing from this table. --> |
+| `ERR_UNKNOWN_ENCODING` | JS (errors.js, TypeError) | Many (encoding decode) | Emitted from the `extract_input` decoder when an unknown encoding string is passed (verified at https://github.com/nodejs/node/blob/main/lib/internal/errors.js line 1875 — `E('ERR_UNKNOWN_ENCODING', 'Unknown encoding: %s', TypeError)`). <!-- Round 4: addressing CRITICAL C3-2 — was emitted at §V.x line ~546 but missing from this table. --> |
+| `ERR_INVALID_BUFFER_SIZE` | JS (errors.js, RangeError) | Buffer / hex decode | Emitted on Buffer-size mismatch; class is **RangeError** per https://github.com/nodejs/node/blob/main/lib/internal/errors.js line 1480 — `E('ERR_INVALID_BUFFER_SIZE', 'Buffer size must be a multiple of %s', RangeError)`. <!-- Round 4: addressing MAJOR M3-3 — listed in macro arm at §VII.5 but missing from this table; class corrected from TypeError to RangeError. --> |
 
 **zeroship extensions** (we emit a code that is NOT in Node's static or dynamic catalog):
-- *(none in v3)* — every code in v3's mapping table above is verified against Node. v2's `ERR_CRYPTO_INVALID_DH_PRIME`, `ERR_CRYPTO_DEPRECATED_API`, `ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH`, `ERR_CRYPTO_INVALID_IV_LENGTH`, `ERR_CRYPTO_AUTH_TAG_LENGTH_INVALID`, `ERR_CRYPTO_INVALID_LENGTH` were all renamed to real Node codes (or, in the dynamic-OSSL case, replaced with `ERR_CRYPTO_OPERATION_FAILED` with the legacy name in the message text).
+- *(none in v4)* — every code in the mapping table above is a real Node code (verified against `errors.js` or `node_errors.h`). v2's `ERR_CRYPTO_INVALID_DH_PRIME`, `ERR_CRYPTO_DEPRECATED_API`, `ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH`, `ERR_CRYPTO_INVALID_IV_LENGTH`, `ERR_CRYPTO_AUTH_TAG_LENGTH_INVALID`, `ERR_CRYPTO_INVALID_LENGTH` were all renamed to real Node codes (or, in the dynamic-OSSL case, replaced with `ERR_CRYPTO_OPERATION_FAILED` with the legacy name in the message text).
+
+**zeroship behavioural divergences** (we emit a real Node code, but in a situation where Node would NOT throw — divergence is intentional and documented in §XVII.13b):
+- `ERR_OUT_OF_RANGE` on empty HMAC key. Node silently accepts (`crypto_hmac.cc::HmacInit` re-binds `key = ""` and forwards). zeroship rejects per RFC 2104 §2 — see kernel comment at `crypto_node/hmac.rs` and divergence log §XVII.13b. <!-- Round 4: addressing CRITICAL C3-3 — was rationalized as parity in v3; now correctly tagged as divergence. -->
 
 **Dynamic-OSSL codes preserved in message text** (for upstream-package compatibility — packages that branch on `e.message.includes('ERR_OSSL_X')`):
 - `ERR_OSSL_EVP_BAD_DECRYPT` — message text on AuthenticationFailed, InvalidPadding, PassphraseMismatch.
@@ -3390,6 +3441,13 @@ This section enumerates EVERY error code surfaced by `crypto_node/error.rs` with
 - `ERR_OSSL_ASN1_VALUE_ERROR` — message text on InvalidDer.
 
 These are documented as fallback hints; the `e.code` is always a real Node code. Node's dynamic-OSSL path is not faithfully reproducible because aws-lc-rs's `Unspecified` strips the underlying error reason — to recover this we would need to either (a) link aws-lc-sys directly and consume the BoringSSL ERR_PACK queue per call (cost: ~150 LOC of bridge code, doable in Stage F as a future enhancement; tracked as open question XVII.12 below) or (b) accept the lossy mapping. v3 picks (b) as the working answer; (a) is queued.
+
+<!-- Round 4: addressing MAJOR M3-4 — explicit user-visible warning about the two-tier system. -->
+**Operational warning — two-tier error surface.** This policy creates a deliberate two-tier system that the operational docs (`docs/reference/node-compat.md`) MUST document for users:
+1. `e.code` — always a real Node static code (e.g., `ERR_CRYPTO_OPERATION_FAILED`). Branch on this for stable behaviour.
+2. `e.message` — may contain a legacy OSSL hint (e.g., `"... (was: ERR_OSSL_EVP_BAD_DECRYPT in older Node)"`). DO NOT branch on this; it is informational only and may move to Stage F's faithful-OSSL bridge.
+
+Packages that copy-paste `e.message` into log lines, test fixtures, or assertions WILL see the legacy OSSL name. This is intentional: it preserves the visible behaviour creators expect from `console.log(err)` while the `e.code` channel stays canonical. Stage F (XVII.12) tightens this by bridging the OSSL queue if demand surfaces.
 
 ### VII.4. Mapping to WebCrypto DOMExceptions
 
@@ -3485,6 +3543,7 @@ Macro arm in `runtime-macros/src/lib.rs::gen_throw_error`:
         // errors.js `E('NAME', '...', RangeError)`).
         "ERR_OUT_OF_RANGE"
         | "ERR_BUFFER_OUT_OF_BOUNDS"
+        | "ERR_INVALID_BUFFER_SIZE"             // v4 fix, M3-3: errors.js:1480 says RangeError, not TypeError
         | "ERR_CRYPTO_INVALID_KEYLEN"
         | "ERR_CRYPTO_INVALID_TAG_LENGTH"
         | "ERR_CRYPTO_INVALID_KEYPAIR"
@@ -3496,10 +3555,10 @@ Macro arm in `runtime-macros/src/lib.rs::gen_throw_error`:
         // TypeError codes.
         "ERR_INVALID_ARG_TYPE"
         | "ERR_INVALID_ARG_VALUE"
-        | "ERR_INVALID_BUFFER_SIZE"
         | "ERR_INVALID_RETURN_VALUE"
         | "ERR_MISSING_ARGS"
         | "ERR_MISSING_OPTION"
+        | "ERR_MISSING_PASSPHRASE"              // v4 fix, C3-1 / M3-3: node_errors.h:115 V(ERR_MISSING_PASSPHRASE, TypeError) — moved from default Error
         | "ERR_UNKNOWN_ENCODING"
         | "ERR_CRYPTO_INVALID_AUTH_TAG"
         | "ERR_CRYPTO_INVALID_COUNTER"
@@ -3519,8 +3578,9 @@ Macro arm in `runtime-macros/src/lib.rs::gen_throw_error`:
         // ERR_CRYPTO_SIGN_KEY_REQUIRED, ERR_CRYPTO_KEM_NOT_SUPPORTED,
         // ERR_CRYPTO_ARGON2_NOT_SUPPORTED, ERR_CRYPTO_SCRYPT_NOT_SUPPORTED,
         // ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED, ERR_CRYPTO_ENGINE_UNKNOWN,
-        // ERR_MISSING_PASSPHRASE, ERR_OSSL_EVP_INVALID_DIGEST,
-        // ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY, etc.).
+        // ERR_OSSL_EVP_INVALID_DIGEST, ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY,
+        // etc.). v4 (C3-1): ERR_MISSING_PASSPHRASE removed from this list —
+        // moved to TypeError per node_errors.h:115.
         _ => v8::Exception::error(scope, __msg),
     };
     // Set .code property on the error instance.
@@ -4005,7 +4065,7 @@ impl X509Certificate {
 }
 ```
 
-The X.509 parser is the heavy lift — RFC 5280 v3 has many extensions. We implement a minimal subset (subject/issuer/sn/valid/keyusage/SAN/AKI/SKI), enough for the JWT JWKS use case. Anything else triggers `ERR_OSSL_X509_PARSE`.
+The X.509 parser is the heavy lift — RFC 5280 v3 has many extensions. We implement a minimal subset (subject/issuer/sn/valid/keyusage/SAN/AKI/SKI), enough for the JWT JWKS use case. Anything else triggers `ERR_CRYPTO_OPERATION_FAILED` with `"X.509 parse error: ..."` in the message text. <!-- Round 4: addressing MAJOR M3-5 — v3 used the invented code `ERR_OSSL_X509_PARSE` (not in errors.js, not in node_errors.h, not in §VII.3a). Replaced with the canonical real-Node fallback per the §VII.3a / D-N39 policy. The dynamic-OSSL `ERR_OSSL_X509_*` shape is dropped; if Stage F faithful-OSSL bridging lands (XVII.12) the legacy name can be preserved in the message text per the §VII.3a "Dynamic-OSSL codes preserved in message text" policy. -->
 
 **Stage 2 explicitly does NOT ship `verify(publicKey)` / `checkHost(name)` / `checkIssued(other)`.** Those require chain-walk logic; defer to a userspace `@zeroship/x509-verify` npm package backed by aws-lc-sys's `X509_verify_cert`.
 
@@ -4563,7 +4623,7 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
   - `createHash('SHA256')` (case-insensitive) works.
 - **`crypto_node_hmac.rs`:**
   - `createHmac('sha256', 'key').update('msg').digest('hex')` — basic.
-  - Empty key throws `ERR_OUT_OF_RANGE` (RFC 2104 forbids zero-length keys; v3, addresses C2-1: ERR_OSSL_HMAC_KEY_TOO_SHORT is dynamic-OSSL, not in Node's static registry).
+  - Empty key throws `ERR_OUT_OF_RANGE` — **zeroship divergence from Node**, NOT parity (v4, addresses C3-3 / m3-5). Node silently accepts empty keys (`crypto_hmac.cc::HmacInit` lines 78-91 re-binds `key = ""` then forwards to HMAC_Init_ex; if init fails the error reaches the dynamic-OSSL ERR_OSSL_HMAC_* path which is not in Node's static registry). zeroship rejects up-front per RFC 2104 §2 (defense-in-depth). The test must assert the divergent behaviour, not match real-Node.
   - Buffer key works.
   - SecretKeyObject key works.
   - `digest('base64url')` works.
@@ -4989,6 +5049,17 @@ Cost: ~150 LOC of bridge code in `crypto_kernel/error.rs`. Stage F (post-impl, d
 Per M2-12, `KeyObject.toCryptoKey` round-trips through JWK and loses RSA-PSS-specific algorithm parameters. Node has the same limitation; v3 picks Node parity.
 
 **Queued for Stage F:** if creator apps surface this as a friction point, bypass JWK by directly cloning `Arc<KeyMaterial>` into a fresh `CryptoKeyState` with the user-supplied algorithm AND the source KeyObject's PSS metadata (when the source is an RSA-PSS key). Cost: ~30 LOC in `crypto_native/crypto_key.rs`. Demand-driven.
+
+<!-- Round 4: addressing CRITICAL C3-3 — explicit log of zeroship-vs-Node behavioural divergences. -->
+### XVII.13b. (v4) Zeroship-vs-Node behavioural divergence log
+
+Cases where zeroship emits a real Node `e.code` BUT in a situation where Node itself would not throw, or would throw a different code via the dynamic-OSSL pipeline. Documented here so the impl agent has a single source of truth for divergences and downstream packages porting from Node know what to expect.
+
+| Case | Node behaviour | zeroship behaviour | Why we diverge |
+|---|---|---|---|
+| Empty HMAC key | `crypto_hmac.cc::HmacInit` re-binds `key = ""` and forwards to `HMAC_Init_ex` (https://github.com/nodejs/node/blob/main/src/crypto/crypto_hmac.cc lines 78-91); if init fails the error reaches `ThrowCryptoError` and surfaces as a dynamic-OSSL `ERR_OSSL_HMAC_*` code (not in static registry). | Reject up-front with `ERR_OUT_OF_RANGE` (real Node code, RangeError) and message tagging the divergence. | RFC 2104 §2 requires key length ≥ hash output size for security; an empty key trivially defeats HMAC. Defense-in-depth: silently accepting a zero-length key is a cryptographic foot-gun. |
+
+(Stage F will revisit if creator apps surface friction.)
 
 ### XVII.11. (v2) Resolved by post-review pass
 
