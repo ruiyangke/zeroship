@@ -14,7 +14,13 @@ exclude = [
 [workspace.dependencies]
 # Async / I/O
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
-compio-tls = { version = "0.9", features = ["native-tls"] }
+# Single TLS crypto provider end-to-end: rustls 0.23 + aws-lc-rs (FIPS-validated).
+# `compio-tls`'s `rustls` feature only toggles the dep + futures-rustls + futures-util;
+# the crypto provider (aws-lc-rs) is selected via `rustls/aws-lc-rs` directly in
+# `crates/runtime/Cargo.toml`, which is the unified provider for the workspace.
+# `default-features = false` is critical — compio-tls's default feature is
+# `native-tls`, which would otherwise pull OpenSSL into the tree alongside rustls.
+compio-tls = { version = "0.9", default-features = false, features = ["rustls"] }
 # WebSocket framer — wraps tungstenite over compio. Default features off
 # to keep `permessage-deflate` disabled (RSV1=1 frames hard-fail at the
 # framer layer per RFC 6455 §5.2; design §VII.1 / MAJOR #18). We pick

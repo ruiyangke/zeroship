@@ -768,15 +768,17 @@ async fn write_ws_handshake(
 /// Returns (opcode, payload) or None on error/EOF.
 ///
 /// Client-to-server frames are always masked (RFC 6455 section 5.1).
-async fn read_ws_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
-    // Read the first 2 bytes: FIN/opcode + MASK/payload-len
-    let mut header = vec![0u8; 2];
-    let BufResult(r, returned) = stream.read(header).await;
-    header = returned;
-    if r.is_err() || r.as_ref().is_ok_and(|&n| n < 2) {
-        return None;
-    }
-
+async fn read_ws_frame<R: AsyncRead + Unpin>(stream: &mut R) -> Option<(u8, Vec<u8>)> {
+    // Read header (2 bytes), payload-len extension, mask, and payload
+    // bytes via `read_exact` so partial reads don't corrupt the
+    // framing. Compio returns fewer bytes than requested when:
+    //   - the kernel TCP buffer holds less than the request size, OR
+    //   - the io_uring SQE was completed with a short result.
+    // Either way we have to keep reading until we've consumed the
+    // expected number of bytes. The previous design treated every
+    // `n < expected` short read as EOF, which silently discarded the
+    // rest of the frame *and* every frame pipelined behind it.
+    let header = read_exact(stream, 2).await?;
     let _fin = (header[0] & 0x80) != 0;
     let opcode = header[0] & 0x0F;
     let masked = (header[1] & 0x80) != 0;
@@ -784,31 +786,18 @@ async fn read_ws_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
 
     // Extended payload length
     if payload_len == 126 {
-        let mut ext = vec![0u8; 2];
-        let BufResult(r, returned) = stream.read(ext).await;
-        ext = returned;
-        if r.is_err() || r.as_ref().is_ok_and(|&n| n < 2) {
-            return None;
-        }
+        let ext = read_exact(stream, 2).await?;
         payload_len = u16::from_be_bytes([ext[0], ext[1]]) as u64;
     } else if payload_len == 127 {
-        let mut ext = vec![0u8; 8];
-        let BufResult(r, returned) = stream.read(ext).await;
-        ext = returned;
-        if r.is_err() || r.as_ref().is_ok_and(|&n| n < 8) {
-            return None;
-        }
-        payload_len = u64::from_be_bytes([ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7]]);
+        let ext = read_exact(stream, 8).await?;
+        payload_len = u64::from_be_bytes([
+            ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7],
+        ]);
     }
 
     // Masking key (4 bytes if masked)
     let mask_key = if masked {
-        let mut mk = vec![0u8; 4];
-        let BufResult(r, returned) = stream.read(mk).await;
-        mk = returned;
-        if r.is_err() || r.as_ref().is_ok_and(|&n| n < 4) {
-            return None;
-        }
+        let mk = read_exact(stream, 4).await?;
         Some([mk[0], mk[1], mk[2], mk[3]])
     } else {
         None
@@ -816,28 +805,11 @@ async fn read_ws_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
 
     // Read payload
     let len = payload_len as usize;
-    let mut payload = vec![0u8; len];
-    if len > 0 {
-        let BufResult(r, returned) = stream.read(payload).await;
-        payload = returned;
-        if r.is_err() {
-            return None;
-        }
-        // May need to read more if partial
-        let read_n = r.unwrap_or(0);
-        if read_n < len {
-            // compio may return partial reads — keep reading
-            let mut offset = read_n;
-            while offset < len {
-                let remaining = vec![0u8; len - offset];
-                let BufResult(r2, returned2) = stream.read(remaining).await;
-                let n2 = r2.unwrap_or(0);
-                if n2 == 0 { return None; }
-                payload[offset..offset + n2].copy_from_slice(&returned2[..n2]);
-                offset += n2;
-            }
-        }
-    }
+    let mut payload = if len > 0 {
+        read_exact(stream, len).await?
+    } else {
+        Vec::new()
+    };
 
     // Unmask
     if let Some(mk) = mask_key {
@@ -849,8 +821,27 @@ async fn read_ws_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
     Some((opcode, payload))
 }
 
+/// Read exactly `n` bytes from `stream`, looping over partial reads.
+/// Returns None on EOF or error before `n` bytes have been read.
+async fn read_exact<R: AsyncRead + Unpin>(stream: &mut R, n: usize) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    let mut offset = 0;
+    while offset < n {
+        let chunk = vec![0u8; n - offset];
+        let BufResult(r, returned) = stream.read(chunk).await;
+        let read_n = match r {
+            Ok(0) => return None, // EOF
+            Ok(k) => k,
+            Err(_) => return None,
+        };
+        buf[offset..offset + read_n].copy_from_slice(&returned[..read_n]);
+        offset += read_n;
+    }
+    Some(buf)
+}
+
 /// Write a WebSocket frame to the stream (server-to-client: unmasked).
-async fn write_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> bool {
+async fn write_ws_frame<W: compio::io::AsyncWrite + Unpin>(stream: &mut W, opcode: u8, payload: &[u8]) -> bool {
     let len = payload.len();
     let mut frame = Vec::with_capacity(10 + len);
 
@@ -875,6 +866,17 @@ async fn write_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> b
 }
 
 /// Handle a WebSocket upgrade: perform handshake, then run the bidirectional pump.
+///
+/// Native path (`runtime_native_websocket` feature): owns the `TcpStream`
+/// (passed by value because the inner pump splits read/write into two
+/// independent compio tasks sharing an `Rc<TcpStream>` — a single
+/// `&mut TcpStream` borrow can't be split). io_uring multiplexes
+/// concurrent submissions on the same fd, so reads and writes proceed
+/// without blocking each other.
+///
+/// Polyfill path: keeps the prior single-task design. The polyfill's
+/// outbound queue lives on the per-WS state, drained via the
+/// `outgoing_ready` flag — no channel cancellation hazard.
 async fn handle_websocket_upgrade(
     stream: &mut TcpStream,
     ws_id: u32,
@@ -923,7 +925,7 @@ async fn handle_websocket_upgrade(
     // anything the JS server-side `socket.send()`s ends up here as
     // a `WsEvent::MessageText` / `WsEvent::MessageBinary` / Close.
     #[cfg(feature = "runtime_native_websocket")]
-    let mut kernel_rx = {
+    let kernel_rx = {
         use futures::channel::mpsc;
         use crate::websocket_native::network as nw;
         let (tx, rx) = mpsc::unbounded::<nw::WsEvent>();
@@ -948,53 +950,21 @@ async fn handle_websocket_upgrade(
         }
     };
 
-    // Bidirectional pump: TCP <-> JS
-    // Event-driven: select between TCP read and outgoing notification.
+    // Native path: bidirectional pump implemented as two compio tasks
+    // sharing the TCP fd via `Rc<TcpStream>`. Reader runs `read_ws_frame`
+    // in a steady loop and dispatches frames to V8; writer drains
+    // `kernel_rx` and emits frames to TCP. Each task awaits only its
+    // own io_uring submissions — never select-cancel a partially-
+    // completed read, which on io_uring drops the buffer with bytes
+    // already in it (and shifts every subsequent frame's framing).
+    #[cfg(feature = "runtime_native_websocket")]
+    {
+        return native_ws_pump(stream, server_ws_id, kernel_rx, runtime).await;
+    }
 
-    loop {
-        // Drain pending outbound (server-side `socket.send()` results)
-        // before issuing the next TCP read.
-        #[cfg(feature = "runtime_native_websocket")]
-        {
-            use crate::websocket_native::network as nw;
-            use futures::stream::StreamExt;
-            // Try-poll the receiver: drain everything that's already
-            // queued without awaiting. We process up to N frames per
-            // iteration to keep latency low while not starving reads.
-            const MAX_DRAIN_PER_ITER: usize = 32;
-            for _ in 0..MAX_DRAIN_PER_ITER {
-                let next_frame = match kernel_rx.try_next() {
-                    Ok(Some(ev)) => ev,
-                    Ok(None) => return true, // channel closed
-                    Err(_) => break,         // empty for now
-                };
-                match next_frame {
-                    nw::WsEvent::MessageText(text) => {
-                        if !write_ws_frame(stream, 0x1, text.as_bytes()).await {
-                            return false;
-                        }
-                    }
-                    nw::WsEvent::MessageBinary(data) => {
-                        if !write_ws_frame(stream, 0x2, &data).await {
-                            return false;
-                        }
-                    }
-                    nw::WsEvent::Close { code, reason, .. } => {
-                        let mut close_payload = Vec::with_capacity(2 + reason.len());
-                        close_payload.extend_from_slice(&code.to_be_bytes());
-                        close_payload.extend_from_slice(reason.as_bytes());
-                        let _ = write_ws_frame(stream, 0x8, &close_payload).await;
-                        return true;
-                    }
-                    nw::WsEvent::Open { .. } | nw::WsEvent::Error { .. } => {
-                        // Open: pair sockets fire this at accept(); we
-                        // don't propagate to TCP. Error: same.
-                    }
-                }
-            }
-        }
-        #[cfg(not(feature = "runtime_native_websocket"))]
-        {
+    #[cfg(not(feature = "runtime_native_websocket"))]
+    {
+        loop {
             outgoing_ready.set(false);
             let mut got_close = false;
             loop {
@@ -1031,64 +1001,216 @@ async fn handle_websocket_upgrade(
             if got_close {
                 return true;
             }
-        }
 
-        // Wait for either: a TCP frame arrives, or JS queues an outgoing message.
-        #[cfg(feature = "runtime_native_websocket")]
-        let event = {
-            use futures::future::{select, Either};
-            use futures::StreamExt;
-            let read_fut = std::pin::pin!(read_ws_frame(stream));
-            let recv_fut = std::pin::pin!(kernel_rx.next());
-            match select(read_fut, recv_fut).await {
-                Either::Left((frame, _)) => WsEvent::Frame(frame),
-                Either::Right((_, _)) => WsEvent::Outgoing,
-            }
-        };
+            let event = WsPollBoth::new(
+                read_ws_frame(stream),
+                outgoing_ready.clone(),
+                pump_waker.clone(),
+            )
+            .await;
 
-        #[cfg(not(feature = "runtime_native_websocket"))]
-        let event = WsPollBoth::new(
-            read_ws_frame(stream),
-            outgoing_ready.clone(),
-            pump_waker.clone(),
-        )
-        .await;
-
-        match event {
-            WsEvent::Outgoing => {
-                continue;
+            match event {
+                WsEvent::Outgoing => {
+                    continue;
+                }
+                WsEvent::Frame(None) => {
+                    return true;
+                }
+                WsEvent::Frame(Some((0x1, payload))) | WsEvent::Frame(Some((0x2, payload))) => {
+                    let text = String::from_utf8(payload).unwrap_or_default();
+                    deliver_ws_message(runtime, server_ws_id, &text);
+                }
+                WsEvent::Frame(Some((0x8, payload))) => {
+                    let (code, reason) = if payload.len() >= 2 {
+                        let code = u16::from_be_bytes([payload[0], payload[1]]);
+                        let reason = String::from_utf8(payload[2..].to_vec()).unwrap_or_default();
+                        (code, reason)
+                    } else {
+                        (1000, String::new())
+                    };
+                    deliver_ws_close(runtime, server_ws_id, code, &reason);
+                    let mut close_payload = Vec::with_capacity(2 + reason.len());
+                    close_payload.extend_from_slice(&code.to_be_bytes());
+                    close_payload.extend_from_slice(reason.as_bytes());
+                    let _ = write_ws_frame(stream, 0x8, &close_payload).await;
+                    return true;
+                }
+                WsEvent::Frame(Some((0x9, payload))) => {
+                    let _ = write_ws_frame(stream, 0xA, &payload).await;
+                }
+                WsEvent::Frame(Some((0xA, _))) => {}
+                WsEvent::Frame(Some(_)) => {}
             }
-            WsEvent::Frame(None) => {
-                return true;
-            }
-            WsEvent::Frame(Some((0x1, payload))) | WsEvent::Frame(Some((0x2, payload))) => {
-                // RFC 6455: text frames must be valid UTF-8. Use from_utf8 (no lossy scan).
-                // Safety: if the client sends invalid UTF-8, we substitute rather than crash.
-                let text = String::from_utf8(payload).unwrap_or_default();
-                deliver_ws_message(runtime, server_ws_id, &text);
-            }
-            WsEvent::Frame(Some((0x8, payload))) => {
-                let (code, reason) = if payload.len() >= 2 {
-                    let code = u16::from_be_bytes([payload[0], payload[1]]);
-                    let reason = String::from_utf8(payload[2..].to_vec()).unwrap_or_default();
-                    (code, reason)
-                } else {
-                    (1000, String::new())
-                };
-                deliver_ws_close(runtime, server_ws_id, code, &reason);
-                let mut close_payload = Vec::with_capacity(2 + reason.len());
-                close_payload.extend_from_slice(&code.to_be_bytes());
-                close_payload.extend_from_slice(reason.as_bytes());
-                let _ = write_ws_frame(stream, 0x8, &close_payload).await;
-                return true;
-            }
-            WsEvent::Frame(Some((0x9, payload))) => {
-                let _ = write_ws_frame(stream, 0xA, &payload).await;
-            }
-            WsEvent::Frame(Some((0xA, _))) => {}
-            WsEvent::Frame(Some(_)) => {}
         }
     }
+}
+
+/// Write one kernel-side WebSocket event (the JS server's `socket.send()`
+/// or `socket.close()` output) to the wire. Returns false on TCP write
+/// failure; sets `got_close` to true when the event was a Close (the
+/// caller should return true after a clean close handshake).
+#[cfg(feature = "runtime_native_websocket")]
+async fn write_kernel_event<W: compio::io::AsyncWrite + Unpin>(
+    stream: &mut W,
+    ev: crate::websocket_native::network::WsEvent,
+    got_close: &mut bool,
+) -> bool {
+    use crate::websocket_native::network as nw;
+    match ev {
+        nw::WsEvent::MessageText(text) => {
+            write_ws_frame(stream, 0x1, text.as_bytes()).await
+        }
+        nw::WsEvent::MessageBinary(data) => {
+            write_ws_frame(stream, 0x2, &data).await
+        }
+        nw::WsEvent::Close { code, reason, .. } => {
+            let mut close_payload = Vec::with_capacity(2 + reason.len());
+            close_payload.extend_from_slice(&code.to_be_bytes());
+            close_payload.extend_from_slice(reason.as_bytes());
+            let ok = write_ws_frame(stream, 0x8, &close_payload).await;
+            *got_close = true;
+            ok
+        }
+        nw::WsEvent::Open { .. } | nw::WsEvent::Error { .. } => {
+            // Open: pair sockets fire this at accept(); we don't
+            // propagate to TCP. Error: same.
+            true
+        }
+    }
+}
+
+/// Native-WebSocket bidirectional pump.
+///
+/// Architecture: a single task runs the read loop; the writer is a
+/// concurrent future driven on the same task via `join`. Both halves
+/// borrow the TCP stream as `&TcpStream` (immutable) — compio's
+/// `impl AsyncRead/AsyncWrite for &TcpStream` issues independent
+/// io_uring submissions, so reads and writes proceed in parallel.
+///
+/// Why this design instead of the previous `select(read, recv)`:
+/// io_uring read submissions that have already completed (kernel
+/// filled the user buffer) but haven't been polled yet still LOSE
+/// their bytes when the future is dropped. A `select` arm that
+/// returns on `recv` resolution drops the surviving `read` future,
+/// which in turn drops the buffer with already-received bytes. The
+/// next `read` then returns from the middle of the previous frame
+/// (mask byte or payload), corrupting every subsequent frame's
+/// framing.
+///
+/// `join` polls both futures cooperatively until both complete; no
+/// future is cancelled mid-completion. The reader runs `read_ws_frame`
+/// in a steady loop and exits on EOF or peer Close. The writer drains
+/// `kernel_rx` (frames the JS server enqueued via `socket.send()`),
+/// plus a small close-echo channel the reader uses to forward peer
+/// Closes for an RFC 6455-clean handshake.
+#[cfg(feature = "runtime_native_websocket")]
+async fn native_ws_pump(
+    stream: &mut TcpStream,
+    server_ws_id: u32,
+    mut kernel_rx: futures::channel::mpsc::UnboundedReceiver<crate::websocket_native::network::WsEvent>,
+    runtime: &Runtime,
+) -> bool {
+    use futures::channel::mpsc;
+    use futures::stream::StreamExt;
+    use futures::FutureExt;
+
+    // Reader → writer channel for echoing the peer's Close.
+    let (close_tx, mut close_rx) = mpsc::unbounded::<(u16, String)>();
+
+    // Both halves use `&TcpStream` for AsyncRead/AsyncWrite — compio
+    // multiplexes simultaneous SQEs on the same fd.
+    let stream_shared: &TcpStream = stream;
+
+    // Reader: read TCP frames, dispatch to V8. Owns the close-echo
+    // sender; dropping it on return tells the writer there are no
+    // more close-echoes to wait for.
+    let reader = async move {
+        let mut s = stream_shared; // `&TcpStream`, takes `&mut &TcpStream` for reads
+        loop {
+            let frame = read_ws_frame(&mut s).await;
+            match frame {
+                None => return true, // EOF
+                Some((0x1, payload)) | Some((0x2, payload)) => {
+                    let text = String::from_utf8(payload).unwrap_or_default();
+                    deliver_ws_message(runtime, server_ws_id, &text);
+                }
+                Some((0x8, payload)) => {
+                    let (code, reason) = if payload.len() >= 2 {
+                        let code = u16::from_be_bytes([payload[0], payload[1]]);
+                        let reason = String::from_utf8(payload[2..].to_vec()).unwrap_or_default();
+                        (code, reason)
+                    } else {
+                        (1000, String::new())
+                    };
+                    deliver_ws_close(runtime, server_ws_id, code, &reason);
+                    let _ = close_tx.unbounded_send((code, reason));
+                    return true;
+                }
+                Some((0x9, _payload)) => {
+                    // Ping handling on this dev/bench path is a
+                    // no-op — there are no client-driven keepalive
+                    // pings on the bench scenarios. The
+                    // `network::run_plain_driver` (used by JS-side
+                    // `new WebSocket(url)`) handles RFC 6455 Pings
+                    // natively. Production traffic flows through
+                    // gateway → worker which uses that path.
+                }
+                Some((0xA, _)) => {}
+                Some(_) => {}
+            }
+        }
+    };
+
+    // Writer: drain kernel_rx + close_rx; write frames to TCP. Exits
+    // when both feeds close (reader dropped close_tx + JS dropped
+    // kernel_outbound), or after writing a Close.
+    let writer = async move {
+        let mut s = stream_shared;
+        loop {
+            futures::select! {
+                ev = kernel_rx.next().fuse() => {
+                    let Some(ev) = ev else {
+                        // kernel_outbound dropped — the WS state
+                        // was destroyed. Wait only on close_rx
+                        // from now on.
+                        if let Some((code, reason)) = close_rx.next().await {
+                            let mut close_payload = Vec::with_capacity(2 + reason.len());
+                            close_payload.extend_from_slice(&code.to_be_bytes());
+                            close_payload.extend_from_slice(reason.as_bytes());
+                            let _ = write_ws_frame(&mut s, 0x8, &close_payload).await;
+                        }
+                        return;
+                    };
+                    let mut got_close = false;
+                    if !write_kernel_event(&mut s, ev, &mut got_close).await {
+                        return;
+                    }
+                    if got_close {
+                        return;
+                    }
+                }
+                cz = close_rx.next().fuse() => {
+                    let Some((code, reason)) = cz else {
+                        // Reader exited without sending close —
+                        // remaining drain is from kernel_rx; loop.
+                        continue;
+                    };
+                    let mut close_payload = Vec::with_capacity(2 + reason.len());
+                    close_payload.extend_from_slice(&code.to_be_bytes());
+                    close_payload.extend_from_slice(reason.as_bytes());
+                    let _ = write_ws_frame(&mut s, 0x8, &close_payload).await;
+                    return;
+                }
+            }
+        }
+    };
+
+    // Run both halves cooperatively on this task. `join` polls both
+    // until both return — no cancellation, no dropped io_uring
+    // submissions. `select_biased`-style preference doesn't matter
+    // here: each future only awaits its own ops.
+    let (reader_result, _) = futures::future::join(reader, writer).await;
+    reader_result
 }
 
 enum WsEvent {
