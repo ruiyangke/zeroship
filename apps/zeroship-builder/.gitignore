@@ -5,3 +5,8 @@ dist
 .env
 .env.local
 .zeroship
+
+# Playwright artifacts (HTML reports, traces, screenshots)
+playwright-report/
+test-results/
+playwright/.cache/
