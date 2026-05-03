@@ -7,14 +7,14 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^6.0.1",
-    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/vite-plugin": "workspace:*",
     "openai": "^6.0.0",
-    "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
   "devDependencies": {
-    "typescript": "^5.9",
-    "vite": "^8"
+    "typescript": "catalog:",
+    "vite": "catalog:"
   }
 }

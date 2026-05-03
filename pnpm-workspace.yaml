@@ -1,0 +1,45 @@
+packages:
+  - "sdks/*"
+  - "apps/*"
+  - "examples/*"
+
+# Centralised dependency versions — referenced as "catalog:" in package.json.
+# Default catalog targets React 19; the `react18` named catalog is for the
+# RPC React adapter's dev/test deps that still pin React 18.
+catalog:
+  typescript: ~5.9.3
+  tsx: ^4.21.0
+  vite: ^8.0.0
+  "@vitejs/plugin-react": ^6.0.1
+  "@types/node": ^22.19.17
+  zod: ^3.25.76
+  "@tanstack/react-query": ^5.96.1
+  react: ^19.2.0
+  react-dom: ^19.2.0
+  "@types/react": ^19.2.0
+  "@types/react-dom": ^19.2.0
+  clsx: ^2.1.1
+  tailwind-merge: ^3.5.0
+  tailwindcss: ^4.2.2
+  "@tailwindcss/vite": ^4.2.2
+  react-router-dom: ^7.14.0
+
+catalogs:
+  react18:
+    react: ^18.3.1
+    react-dom: ^18.3.1
+    "@types/react": ^18.3.12
+    "@types/react-dom": ^18.3.1
+    react-test-renderer: ^18.3.1
+
+# Allowlist of packages permitted to run lifecycle scripts. pnpm 10 blocks
+# them by default; setting this now keeps the upgrade smooth.
+onlyBuiltDependencies:
+  - esbuild
+  - msw
+  - "@swc/core"
+  - playwright
+  - playwright-core
+  - "@playwright/browser-chromium"
+  - "@playwright/browser-firefox"
+  - "@playwright/browser-webkit"

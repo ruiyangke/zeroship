@@ -10,15 +10,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^6.0.1",
-    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/vite-plugin": "workspace:*",
+    "react": "catalog:react18",
+    "react-dom": "catalog:react18"
   },
   "devDependencies": {
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "typescript": "~5.9.3",
-    "vite": "^8.0.0"
+    "@types/react": "catalog:react18",
+    "@types/react-dom": "catalog:react18",
+    "typescript": "catalog:",
+    "vite": "catalog:"
   }
 }

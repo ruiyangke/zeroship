@@ -9,12 +9,12 @@
     "build:prod": "vite build --mode production"
   },
   "dependencies": {
-    "@zeroship/server": "file:../../packages/zeroship-server",
-    "@zeroship/vite-plugin": "file:../../sdks/vite-plugin",
-    "zod": "^3.25.76"
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
-    "typescript": "~5.9.3",
-    "vite": "^8.0.0"
+    "typescript": "catalog:",
+    "vite": "catalog:"
   }
 }

@@ -23,3 +23,7 @@ perf-compio.data
 # WPT is fetched on demand by crates/runtime/tests/setup-wpt.sh, not
 # tracked. Keeps .git small (the WPT depth=1 pack is ~140 MB).
 crates/runtime/tests/wpt/
+
+# Reject foreign package-manager lockfiles — pnpm-lock.yaml is the source of truth.
+package-lock.json
+yarn.lock

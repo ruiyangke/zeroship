@@ -29,13 +29,13 @@
   },
   "devDependencies": {
     "@types/mime": "^3.0.4",
-    "@types/node": "^22.0.0",
+    "@types/node": "catalog:",
     "@types/ws": "^8.18.1",
     "acorn": "^8.16.0",
     "esbuild": "^0.28.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.0.0",
-    "vite": "^8.0.0"
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:"
   },
   "license": "MIT",
   "engines": {
