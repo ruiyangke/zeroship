@@ -165,7 +165,7 @@ There is no previous-build state. WireIds are derived fresh from current source 
 
 ## 3. Ambient context
 
-The seamless model needs per-request context without threading it through every signature. Backed by `__zs_bind_request_ctx` / `__zs_get_request_ctx` (already present in `crates/runtime/src/init.rs`); the synthetic entry binds before invoking the user function.
+The seamless model needs per-request context without threading it through every signature. Backed by `__zs_bind_request_ctx` / `__zs_get_request_ctx` (already present in `crates/runtime/src/core/init.rs`); the synthetic entry binds before invoking the user function.
 
 ```ts
 import { user, request, env, log, waitUntil, idempotencyKey } from "@zeroship/server";

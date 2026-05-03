@@ -65,46 +65,63 @@
 extern crate self as zeroship_runtime;
 
 pub mod auth;
-pub mod base64;
-pub mod blob_native;
-pub mod byte_string;
-pub mod clamp;
-pub mod codec;
-pub mod dom;
-pub mod enforce_range;
-pub mod fetch_body;
-pub mod fetch_request;
-pub mod fetch_response;
-pub mod headers;
-pub mod state;
-pub mod text_encoding;
-pub mod dispatch;
-pub mod init;
-pub mod http;
-pub mod fetch;
-pub mod fetch_native;
+pub mod core;
 pub mod fetch_outcome;
-pub mod modules;
-pub mod crypto;
-pub mod crypto_native;
-pub mod streams;
-pub mod structured_clone;
-pub mod url_native;
-// `pub mod websocket;` (the polyfill V8 callback module — __wsCreatePair
-// / __wsLinkPair / __wsAccept / __wsSend / __wsClose) was deleted in
-// cutover landing 3 (D-25). All WebSocket traffic now flows through
-// the native class; see `websocket_native::pair` /
-// `websocket_native::network` for the replacements.
-pub mod websocket_native;
-pub mod channel;
-pub mod runtime;
 pub mod storage;
-pub mod serve;
-pub mod plugin;
-pub(crate) mod panic_util;
+pub mod transport;
+pub mod web;
+pub mod webidl;
+
+// Back-compat re-exports for the SSRF helper (was `crate::fetch`) and the
+// kernel HTTP bridge (was `crate::http`). Both moved under `transport/`.
+pub use transport::handler as http;
+pub use transport::ssrf as fetch;
+
+// Back-compat re-exports for modules now grouped under `web/`.
+// External crates (`worker`, `cli`, plugin-*, tests) import via top-level
+// paths; the impls live under `web::` but the old paths keep working.
+pub use web::base64;
+pub use web::blob as blob_native;
+pub use web::codec;
+pub use web::crypto as crypto_native;
+pub use web::dom;
+pub use web::encoding as text_encoding;
+pub use web::fetch as fetch_native;
+pub use web::fetch::body as fetch_body;
+pub use web::fetch::request as fetch_request;
+pub use web::fetch::response as fetch_response;
+pub use web::headers;
+pub use web::streams;
+pub use web::structured_clone;
+pub use web::url as url_native;
+pub use web::websocket as websocket_native;
+
+// `crypto.rs` (sync hash/HMAC + fast_random) moved to
+// `web::crypto::sync_helpers`. Re-export the module so internal
+// `crate::crypto::fast_random` etc. paths still resolve.
+pub use web::crypto::sync_helpers as crypto;
+
+// Back-compat re-exports for modules that have moved into `core/`.
+// External crates (`worker`, `cli`, plugin-*) import via `zeroship_runtime::state::...`,
+// `zeroship_runtime::runtime::...`, etc. The implementations now live in
+// `core::` but the old paths keep working.
+pub use core::channel;
+pub use core::dispatch;
+pub use core::init;
+pub use core::modules;
+pub(crate) use core::panic_util;
+pub use core::plugin;
+pub use core::runtime;
+pub use core::serve;
+pub use core::state;
+
+// Back-compat re-exports for the webidl/ types (formerly at root).
+pub use webidl::byte_string;
+pub use webidl::clamp;
+pub use webidl::enforce_range;
 
 #[cfg(target_os = "linux")]
-pub mod cpu_timer;
+pub use core::cpu_timer;
 
 // Convenience re-exports
 pub use clamp::{

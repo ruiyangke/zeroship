@@ -1123,9 +1123,9 @@ crates/runtime-macros/
    default stayed on the polyfill (flag still gated on
    `ZEROSHIP_NATIVE_HEADERS=1`), but with both modes green under
    `cargo test -p zeroship-runtime`. Sites refactored:
-   - `crates/runtime/src/http.rs::HTTP_CREATE_REQUEST_JS` — Request
+   - `crates/runtime/src/transport/handler.rs::HTTP_CREATE_REQUEST_JS` — Request
      build helper now uses `new Headers(arrayOfPairs)`.
-   - `crates/runtime/src/http.rs::extract_response_headers` — slow
+   - `crates/runtime/src/transport/handler.rs::extract_response_headers` — slow
      path walks `headers[Symbol.iterator]()` instead of `_map`.
    - `crates/runtime/src/embed/fetch.js` `Response.json` fast path —
      uses the constructor instead of `Object.create + _map`.
@@ -1137,7 +1137,7 @@ crates/runtime-macros/
    `474c69dd`. Deleted the JS Headers class block (~177 lines) from
    `crates/runtime/src/embed/fetch.js`, removed the
    `ZEROSHIP_NATIVE_HEADERS` env-var gate from
-   `crates/runtime/src/init.rs`, renamed the install hook from
+   `crates/runtime/src/core/init.rs`, renamed the install hook from
    `install_native_headers_post` to `install_headers`, and updated all
    doc comments. Native Headers is now the only Headers in the
    runtime. WPT remains 98/0/1.

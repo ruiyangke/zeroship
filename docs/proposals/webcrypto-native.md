@@ -35,11 +35,11 @@
 - AI-builder reliability: every JOSE / JWE / JWT library (`jose` on npm, `panva/jose`, `node-jose`) leans on `subtle.importKey("jwk", ...)` / `subtle.exportKey("jwk", ...)` for key bootstrapping. The polyfill rejects JWK wholesale; ~90% of npm-published JWE/JWT packages don't work today on zeroship.
 - Stripe Connect / OAuth 2.0 / OIDC: every JWT-issuing identity flow uses RS256 / ES256 / EdDSA which require `verify` to interop with Chrome/Firefox-issued signatures. The current ECDSA wire format is ASN.1/DER (workerd-incompat, Chrome-incompat); fixing this is the single most-impactful WPT change in this design.
 - WPT regression for `WebCryptoAPI/`: currently we run **zero** of those files because the polyfill is too far from spec to be worth harness work.
-- Deletion of `crates/runtime/src/embed/crypto.js` (313 LOC) and replacement of `crates/runtime/src/crypto.rs` (1308 LOC) with a `crates/runtime/src/crypto/` module of native `#[v8_class]` types backed by aws-lc-rs.
+- Deletion of `crates/runtime/src/embed/crypto.js` (313 LOC) and replacement of `crates/runtime/src/web/crypto/sync_helpers.rs` (1308 LOC) with a `crates/runtime/src/crypto/` module of native `#[v8_class]` types backed by aws-lc-rs.
 
 ## Revision history
 
-- **v1 (2026-05-02)** — Initial design, critic-driven from `/tmp/zeroship-reviews/crypto-review.md` (45 findings, overall 38/100). Replaces the JS polyfill at `crates/runtime/src/embed/crypto.js` (313 LOC) and the Rust ops shim at `crates/runtime/src/crypto.rs` (1308 LOC) — total 1621 LOC removed. The native design ships ~3700 Rust LOC + ~150 JS LOC (a thin algorithm-registry index, deletable when v8_class macro grows compile-time registry support). Targets the entire spec surface in one tier — no v1/v2 algorithm split. Designed pure-native on V8 + Rust + aws-lc-rs.
+- **v1 (2026-05-02)** — Initial design, critic-driven from `/tmp/zeroship-reviews/crypto-review.md` (45 findings, overall 38/100). Replaces the JS polyfill at `crates/runtime/src/embed/crypto.js` (313 LOC) and the Rust ops shim at `crates/runtime/src/web/crypto/sync_helpers.rs` (1308 LOC) — total 1621 LOC removed. The native design ships ~3700 Rust LOC + ~150 JS LOC (a thin algorithm-registry index, deletable when v8_class macro grows compile-time registry support). Targets the entire spec surface in one tier — no v1/v2 algorithm split. Designed pure-native on V8 + Rust + aws-lc-rs.
 
   Decisions D-1 through D-30 cover: native classes for Crypto / SubtleCrypto / CryptoKey (D-1, D-2); aws-lc-rs as the single provider (D-3); spec-correct ECDSA wire format (D-4); JWK round-trip across all algorithms (D-5); typed DOMException variants (D-6); key-usage validation (D-7); spec-faithful algorithm normalization (D-8); CryptoKey `[SameObject]` caching (D-9); `[[handle]]`-as-internal-field brand check (D-10); AES-CTR/AES-KW completion (D-11, D-12); ECDH derive (D-13); P-521 (D-14); RSA key generation (D-15); RSA-PSS variable salt length (D-16); AES-GCM variable IV / variable tag (D-17, D-18); HMAC default block-size (D-19); PBKDF2 [EnforceRange] (D-20); spec-correct getRandomValues type filter and quota (D-21); SecureContext as no-op (D-22); the JS-shim phase-out cadence (D-23); spec algorithm naming in Rust (D-24); the JOSE/JWE deferral (D-25); X25519/Ed25519 inclusion (D-26); FIPS / hardware key as out-forever (D-27); structuredClone deferral (D-28); thread-pool offload deferral (D-29); the macro extension list (D-30).
 
@@ -117,7 +117,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/`. The Decisi
 
 The native WebCrypto implementation is split into two layers:
 
-1. **Public IDL surface** — V8 classes installed on the global object: `Crypto` (the constructor for `globalThis.crypto`), `SubtleCrypto`, `CryptoKey`. Each class carries an internal-field 0 holding `Box<{Class}State>` per the existing `#[v8_class]` pattern (see `crates/runtime/src/headers.rs` for the canonical example, `crates/runtime/src/dom/abort_signal.rs` for the inheritance-shaped example).
+1. **Public IDL surface** — V8 classes installed on the global object: `Crypto` (the constructor for `globalThis.crypto`), `SubtleCrypto`, `CryptoKey`. Each class carries an internal-field 0 holding `Box<{Class}State>` per the existing `#[v8_class]` pattern (see `crates/runtime/src/web/headers.rs` for the canonical example, `crates/runtime/src/web/dom/abort_signal.rs` for the inheritance-shaped example).
 
 2. **Internal crypto engine** — a Rust-side cryptographic implementation that runs the spec algorithms (`normalize an algorithm`, per-algorithm `Sign` / `Verify` / `Encrypt` / `Decrypt` / `Generate Key` / `Import Key` / `Export Key` / `Derive Bits` / `Wrap Key` / `Unwrap Key`) over aws-lc-rs primitives. The engine never calls into JS during the cryptographic phase; it operates entirely on Rust-side state and resolves a `v8::PromiseResolver` (D-29: synchronously in v1) once the operation completes.
 
@@ -159,10 +159,10 @@ crates/runtime/src/crypto/
 └── enforce_range.rs             (new) EnforceRangeU32 newtype (companion to EnforceRangeU64)
 
 crates/runtime/src/lib.rs        (modified) +pub mod crypto;
-crates/runtime/src/init.rs       (modified) install Crypto / SubtleCrypto / CryptoKey
+crates/runtime/src/core/init.rs       (modified) install Crypto / SubtleCrypto / CryptoKey
                                             classes per-realm (replaces current
                                             ad-hoc op installs at lines 1408-1474)
-crates/runtime/src/state.rs      (modified) DELETE key_store + next_key_id fields
+crates/runtime/src/core/state.rs      (modified) DELETE key_store + next_key_id fields
                                             (D-2 makes them obsolete — keys live on
                                             JS wrappers via internal field)
                                             ADD OpErrorKind::DomException variant
@@ -1490,7 +1490,7 @@ Macro extension: `is_enforce_range_u32(ty)` predicate (mirrors `is_enforce_range
 ### VIII.2. `OpErrorKind::DomException(name)` variant
 
 ```rust
-// crates/runtime/src/state.rs
+// crates/runtime/src/core/state.rs
 pub enum OpErrorKind {
     TypeError,
     RangeError,
@@ -1566,7 +1566,7 @@ Updated D-30 list (final):
 4. ~~Recursive WebIDL dictionary parsing — handled in normalize_an_algorithm helper, NOT a macro feature~~
 5. `[SameObject]` cache — explicit getter helper pattern, NOT a macro feature
 
-**Final macro extension cost:** ~50 LOC across `runtime-macros/src/lib.rs` and `crates/runtime/src/state.rs`. The other "extensions" listed in D-30 above are not macro changes — they're library-level patterns the design uses (cache via private symbol, normalize via library function, etc.).
+**Final macro extension cost:** ~50 LOC across `runtime-macros/src/lib.rs` and `crates/runtime/src/core/state.rs`. The other "extensions" listed in D-30 above are not macro changes — they're library-level patterns the design uses (cache via private symbol, normalize via library function, etc.).
 
 ## IX. Async / threading model (D-29)
 
@@ -2069,7 +2069,7 @@ Tier 1 = WebCrypto Level 2 normative algorithms in scope for v1.
   - `docs/proposals/headers-native.md`
 - Project AGENTS.md — `/home/ruiyang/Projects/appbase/AGENTS.md`
 - Existing polyfill: `crates/runtime/src/embed/crypto.js` (313 LOC)
-- Existing ops shim: `crates/runtime/src/crypto.rs` (1308 LOC)
+- Existing ops shim: `crates/runtime/src/web/crypto/sync_helpers.rs` (1308 LOC)
 - Critic review: `/tmp/zeroship-reviews/crypto-review.md` (45 findings, overall 38/100)
 - Macro internals: `crates/runtime-macros/src/v8_class.rs`, `crates/runtime-macros/src/lib.rs`
 

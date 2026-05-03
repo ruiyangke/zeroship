@@ -110,7 +110,7 @@ Each file is a self-contained ES module using only Web APIs available in V8.
 
 ### Layer 3: Module Resolve Callback (Rust)
 
-In `crates/runtime/src/modules.rs`, extend the existing module resolve callback:
+In `crates/runtime/src/core/modules.rs`, extend the existing module resolve callback:
 
 ```rust
 // When V8 encounters: import { createHash } from "node:crypto"
