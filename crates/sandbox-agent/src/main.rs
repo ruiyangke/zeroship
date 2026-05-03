@@ -14,7 +14,8 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use zeroship_sandbox_agent::{
-    dropuser, handlers, reap, state_from_env, version, DEFAULT_PORT, DEFAULT_WORKSPACE,
+    dropuser, handlers, proxy, proxy_ws, reap, state_from_env, version, DEFAULT_PORT,
+    DEFAULT_WORKSPACE,
 };
 
 #[ntex::main]
@@ -86,6 +87,29 @@ async fn run() -> Result<(), String> {
     let bind = format!("0.0.0.0:{port}");
     info!(bind = %bind, workspace = %workspace.display(), "agent listening");
 
+    // WebSocket Upgrade handler — Phase 2. Bound on a separate port
+    // (default 7778; configurable via `SANDBOX_AGENT_WS_PORT`) and
+    // serves ONLY `/proxy/{port}/{path*}` Upgrade requests verified
+    // under the V1_1_Ws canonical (ED25519-V1.1-WS domain tag). The
+    // controller learns the port via the `proxy.ws-v1` capability.
+    //
+    // Implementation note: ntex's connection-hijack surface
+    // (`HttpRequest::head().take_io()`) doesn't compose cleanly with
+    // a compio TcpStream upstream splice; the proposal explicitly
+    // permits a separate compio listener for the WS path
+    // (`docs/proposals/sandbox-preview-urls.md` Phase 2 plan, "If
+    // ntex's surface is too awkward, fall back to a compio raw-socket
+    // path"). We take that path.
+    let ws_port = proxy_ws::ws_port_from_env();
+    let ws_state = state.clone();
+    compio::runtime::spawn(async move {
+        if let Err(e) = proxy_ws::serve(ws_state, ws_port).await {
+            tracing::error!(error = %e, ws_port, "[sandbox-agent] proxy_ws serve exited with error");
+        }
+    })
+    .detach();
+    info!(ws_port, "agent ws-upgrade listener");
+
     // Per-route payload caps — applied at the ntex extractor so
     // oversize bodies are rejected before handlers run (no
     // buffering huge requests just to fail). The previous global
@@ -105,6 +129,11 @@ async fn run() -> Result<(), String> {
     // generic cap protects miscellaneous unsigned probe routes
     // from being abused as a CPU sink.
     let small_limit: usize = 4 * 1024;
+    // /proxy/{port}/{path*} body cap: matches the proxy module's
+    // DEFAULT_MAX_BODY_BYTES (100 MiB) plus 1 MiB serialization slack.
+    // Larger requests are 413'd in the handler before the body is
+    // read to completion (see `proxy_http`'s leading body-cap check).
+    let proxy_limit: usize = proxy::DEFAULT_MAX_BODY_BYTES + 1024 * 1024;
 
     let proto = version::PROTOCOL_VERSION.to_string();
     // AppState is already cheap-clone (`Arc<Token>`, `Arc<Workspace>`,
@@ -145,6 +174,25 @@ async fn run() -> Result<(), String> {
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
+            )
+            // Sandbox preview proxy (preview-URL § II.1, Phase 1).
+            // ANY /proxy/{port}/{path*} forwards to 127.0.0.1:{port}
+            // inside the VM. Verify is via v1.1 canonical (path+query,
+            // ED25519-V1.1 domain tag); the dispatcher in
+            // `handlers::canonical_kind_for` keys off the `/proxy/`
+            // prefix. Body cap matches the proxy module's
+            // DEFAULT_MAX_BODY_BYTES (100 MiB).
+            //
+            // `{path}*` — tail-match for multi-segment paths
+            // (Vite-style `/assets/main-abc.js`). ntex's `{path:.*}`
+            // only matches a single segment.
+            .service(
+                web::resource("/proxy/{port}/{path}*")
+                    .state(
+                        web::types::PayloadConfig::default()
+                            .limit(proxy_limit),
+                    )
+                    .route(web::route().to(proxy::proxy_http)),
             )
             .default_service(web::route().to(|| async {
                 HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"}))

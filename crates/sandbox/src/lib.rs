@@ -13,13 +13,21 @@ pub mod backend;
 pub mod config;
 pub mod files;
 pub mod handlers;
+pub mod persist;
+pub mod preview;
+pub mod preview_share;
+pub mod preview_share_handlers;
+pub mod preview_ws;
 pub mod registry;
+pub mod restore;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
+use crate::persist::Persistence;
+use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
 
 /// Shared application state passed to every handler.
@@ -28,6 +36,10 @@ pub struct AppState {
     pub config: SandboxConfig,
     pub sandboxes: SandboxRegistry,
     pub backend: Backend,
+    /// Phase-3 mint-side rate limiter. `Some` in production; `None`
+    /// for tests that build `AppState` directly without
+    /// `from_config`. Handlers that consume it `expect()` on `Some`.
+    pub mint_rate_limiter: Option<MintRateLimiter>,
 }
 
 impl AppState {
@@ -38,7 +50,18 @@ impl AppState {
     /// only live in process memory; orphan Pods would 401 every
     /// signed request from the new controller forever).
     pub async fn from_config(config: SandboxConfig) -> Result<Arc<Self>, String> {
-        let backend = Backend::from_config(&config)?;
+        // Build the shared persistence handle FIRST so the same `Arc`
+        // can be cloned into both the backend (for seal-on-create /
+        // delete-on-stop) and the boot-restore loop below (for the
+        // initial directory walk). `from_env` returns `None` when
+        // `SANDBOX_PERSIST_AUTH` is not `1` — the disabled shape both
+        // for the backend and the restore call. Failures here are
+        // fail-fast: an operator who set the flag with a missing /
+        // wrong-mode key file wants to see that at boot, not silently
+        // run with persistence off.
+        let persist: Option<Arc<Persistence>> =
+            Persistence::from_env()?.map(Arc::new);
+        let backend = Backend::from_config_with_persist(&config, persist.clone())?;
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
         // Errors here are non-fatal — operators may want to keep
@@ -48,10 +71,50 @@ impl AppState {
             Ok(n) => eprintln!("[sandbox] startup cleanup: removed {n} orphan(s)"),
             Err(e) => eprintln!("[sandbox] startup cleanup failed (non-fatal): {e}"),
         }
+        let registry = SandboxRegistry::new();
+
+        // Sealed-record restore (preview-URL § II.0 §4 + § II.5).
+        // Reuses the shared `persist` handle built above so we don't
+        // re-open the AEAD key file or re-read the env. `None` is the
+        // disabled/no-op shape — feature-flagged behind
+        // `SANDBOX_PERSIST_AUTH=1`; default OFF.
+        if let Some(p) = &persist {
+            let dir = p.persist_dir();
+            eprintln!(
+                "[sandbox] persist: SANDBOX_PERSIST_AUTH=1; \
+                 restoring sealed records from {dir:?}"
+            );
+            match restore::restore_at_startup(
+                &dir,
+                p.aead_key(),
+                &backend,
+                &registry,
+                restore::DEFAULT_PROBE_TIMEOUT,
+            )
+            .await
+            {
+                Ok(s) => eprintln!(
+                    "[sandbox] persist: restore done seen={} \
+                     restored={} mismatched={} unreachable={} \
+                     corrupt={} unsupported={}",
+                    s.records_seen,
+                    s.restored,
+                    s.mismatched,
+                    s.unreachable,
+                    s.corrupt,
+                    s.unsupported,
+                ),
+                Err(e) => eprintln!(
+                    "[sandbox] persist: restore_at_startup IO failure \
+                     (non-fatal; sealed records left in place): {e}"
+                ),
+            }
+        }
         let state = Arc::new(Self {
             config,
-            sandboxes: SandboxRegistry::new(),
+            sandboxes: registry,
             backend,
+            mint_rate_limiter: Some(MintRateLimiter::new()),
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once

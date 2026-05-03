@@ -24,6 +24,8 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
+# Phase-3 share-token HMAC. base64url + sha2 are already pulled in.
+hmac = { workspace = true }
 # Wraps `SandboxConfig.token` so debug output is redacted and the
 # heap allocation is zeroed on drop (defense vs core-dump /
 # /proc/<pid>/mem post-mortem reads).
@@ -32,11 +34,19 @@ bytes = { workspace = true }
 # Ed25519 keypair generation for the K8s backend (controller-side
 # private key; only the public half ships to the Pod).
 ed25519-dalek = { workspace = true }
+# XChaCha20-Poly1305 AEAD for sealed-record persistence; see
+# crates/sandbox/src/persist.rs and the preview-URL design § II.0.
+chacha20poly1305 = { workspace = true }
 base64 = { workspace = true }
 # Sync HTTP client (blocking) for talking to the in-VM agent. Run
 # inside `compio::runtime::spawn_blocking` so the ntex runtime
 # never blocks on it.
 ureq = { version = "2", default-features = false, features = ["json"] }
+# WebSocket Upgrade parsing for the controller's preview-WS forwarder
+# (Phase 2). The forwarder is a tiny compio raw-TCP listener that
+# parses just the HTTP request-head with httparse, signs V1_1_Ws,
+# and splices to the agent's WS port. No frame parsing.
+httparse = { workspace = true }
 # `futures::FutureExt::catch_unwind` for the detached-cleanup task
 # instrumentation (M3) — local re-implementation of the runtime
 # crate's `panic_util::guard` helper, kept inside this crate so we

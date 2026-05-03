@@ -75,6 +75,10 @@ pub struct K8sBackend {
     /// optionally by a background re-probe. `false` = backend not
     /// usable; consumers can route around or page out.
     healthy: Arc<AtomicBool>,
+    /// Sealed-record persistence (preview-URL § II.0 §4). See
+    /// [`crate::persist::Persistence`]. `None` when
+    /// `SANDBOX_PERSIST_AUTH` is unset.
+    persist: Option<Arc<crate::persist::Persistence>>,
 }
 
 /// Free-list-backed port allocator for `kubectl port-forward`.
@@ -170,7 +174,10 @@ impl std::fmt::Debug for K8sSandbox {
 }
 
 impl K8sBackend {
-    pub fn new(cfg: SandboxConfig) -> Result<Self, String> {
+    pub fn new(
+        cfg: SandboxConfig,
+        persist: Option<Arc<crate::persist::Persistence>>,
+    ) -> Result<Self, String> {
         let ports = PortAllocator::new(cfg.k8s.port_forward_start);
         Ok(Self {
             cfg,
@@ -178,6 +185,7 @@ impl K8sBackend {
             ports: Arc::new(Mutex::new(ports)),
             creating_users: Arc::new(Mutex::new(HashSet::new())),
             healthy: Arc::new(AtomicBool::new(false)),
+            persist,
         })
     }
 
@@ -455,6 +463,8 @@ impl K8sBackend {
 
         // 7. Commit. Take the port-forward back out of the guard.
         let port_forward = guard.port_forward.take();
+        let agent_url_for_seal = agent_url.clone();
+        let signing_key_for_seal = signing_key.clone();
         let sandbox = K8sSandbox {
             user_id: user_id.to_string(),
             pod_name: pod_name.to_string(),
@@ -472,6 +482,38 @@ impl K8sBackend {
         self.state.write().unwrap().insert(sandbox_id, sandbox);
 
         let now = unix_now();
+
+        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // BEST-EFFORT: a seal failure does NOT fail create(). K8s
+        // records seal `agent_url` directly because it's not a
+        // deterministic function of any controller-side index — it's
+        // either the Pod IP (in-cluster) or a port-forward loopback
+        // address (dev). The restart-restore path (when implemented
+        // for k8s — see TODO in restore_from_sealed) reads it back.
+        if let Some(persist) = &self.persist {
+            let record = crate::persist::SealedAuth {
+                version: crate::persist::SEAL_VERSION,
+                sandbox_id: sandbox_id.to_string(),
+                user_id: user_id.to_string(),
+                project_id: project_id.to_string(),
+                backend: "k8s".to_string(),
+                signing_key_bytes: signing_key_for_seal.to_bytes(),
+                vm_index: None,
+                agent_url: Some(agent_url_for_seal),
+                pubkey_fp: key_fp.clone(),
+                created_at_secs: now,
+                preview_secrets: None,
+                preview_audit: Vec::new(),
+            };
+            if let Err(e) = persist.seal(sandbox_id, &record).await {
+                eprintln!(
+                    "[sandbox/k8s] persist.seal failed sandbox={sandbox_id} \
+                     pod={pod_name} (non-fatal; sandbox live, restart-restore \
+                     unavailable for this record): {e}"
+                );
+            }
+        }
+
         Ok(SandboxInfo {
             sandbox_id: sandbox_id.to_string(),
             user_id: user_id.to_string(),
@@ -539,6 +581,18 @@ impl K8sBackend {
         //    user races a Multi-Attach error. Best-effort: 30s.
         if let Err(e) = wait_for_pod_gone(&pod_name, &ns, Duration::from_secs(30)).await {
             errs.push(format!("wait_for_pod_gone({pod_name}): {e}"));
+        }
+
+        // 5. Delete the sealed record (preview-URL § II.0 §4).
+        //    BEST-EFFORT: delete failures are logged but never fail
+        //    stop().
+        if let Some(persist) = &self.persist {
+            if let Err(e) = persist.delete(sandbox_id).await {
+                eprintln!(
+                    "[sandbox/k8s] persist.delete failed sandbox={sandbox_id} \
+                     pod={pod_name} (non-fatal): {e}"
+                );
+            }
         }
 
         if errs.is_empty() {
@@ -663,6 +717,69 @@ impl K8sBackend {
         // the request (ed25519-dalek::SigningKey doesn't zeroize on
         // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
+    }
+
+    /// Lift the per-sandbox auth material into a backend-agnostic
+    /// envelope. See `super::SandboxAuth` for the contract.
+    pub async fn session_auth(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<super::SandboxAuth, String> {
+        let guard = self.state.read().unwrap();
+        let s = guard
+            .get(&sandbox_id)
+            .ok_or_else(|| "sandbox not found in k8s backend".to_string())?;
+        let pubkey_fp = sig::pubkey_fingerprint(&s.signing_key.verifying_key());
+        Ok(super::SandboxAuth {
+            signing_key: s.signing_key.clone(),
+            agent_url: s.agent_url.clone(),
+            pubkey_fp,
+        })
+    }
+
+    /// Persist-on-mint helper for the k8s backend. See
+    /// [`super::Backend::seal_with_preview_state`] for the contract.
+    /// Returns `Ok(false)` when persistence is disabled or the sandbox
+    /// is unknown to the backend.
+    pub async fn seal_with_preview_state(
+        &self,
+        sandbox_id: Uuid,
+        info: &super::SandboxInfo,
+        secrets: Option<crate::persist::SealedPreviewSecrets>,
+        audit: Vec<crate::persist::SealedAuditEntry>,
+    ) -> Result<bool, String> {
+        let Some(persist) = self.persist.clone() else {
+            return Ok(false);
+        };
+        let (sk_bytes, agent_url) = {
+            let guard = self.state.read().unwrap();
+            let Some(s) = guard.get(&sandbox_id) else {
+                return Ok(false);
+            };
+            (s.signing_key.to_bytes(), s.agent_url.clone())
+        };
+        let pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
+        );
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: sandbox_id.to_string(),
+            user_id: info.user_id.clone(),
+            project_id: info.project_id.clone(),
+            backend: "k8s".to_string(),
+            signing_key_bytes: sk_bytes,
+            vm_index: None,
+            agent_url: Some(agent_url),
+            pubkey_fp,
+            created_at_secs: info.created_at_secs,
+            preview_secrets: secrets,
+            preview_audit: audit,
+        };
+        persist
+            .seal(sandbox_id, &record)
+            .await
+            .map(|()| true)
+            .map_err(|e| format!("seal failed: {e}"))
     }
 }
 

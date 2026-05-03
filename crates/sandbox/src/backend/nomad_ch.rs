@@ -135,6 +135,10 @@ pub struct NomadCHBackend {
     /// because the only writer is the periodic probe and reads are
     /// rare; Mutex is simpler and the contention is irrelevant.
     last_probe_err: Arc<Mutex<Option<String>>>,
+    /// Sealed-record persistence (preview-URL § II.0 §4). See
+    /// [`crate::persist::Persistence`]. `None` when
+    /// `SANDBOX_PERSIST_AUTH` is unset.
+    persist: Option<Arc<crate::persist::Persistence>>,
 }
 
 /// Per-sandbox bookkeeping. Lives only in process memory; on
@@ -241,10 +245,40 @@ impl VmIndexAllocator {
             self.freed.insert(i);
         }
     }
+
+    /// Mark `i` as in-use without taking it from the free list. Used
+    /// by the controller's restart-restore path (preview-URL § II.0):
+    /// a sealed record's `vm_index` must be claimed in the allocator
+    /// before normal `alloc()` traffic resumes — otherwise a fresh
+    /// `create()` could hand the same index to a new sandbox while
+    /// the original VM is still alive.
+    ///
+    /// Returns `Err` if `i` is out of `[floor, ceil]`. Idempotent on
+    /// already-reserved indices (the second call is a no-op).
+    pub(crate) fn reserve(&mut self, i: u16) -> Result<(), String> {
+        if i < self.floor || i > self.ceil {
+            return Err(format!(
+                "vm-index {i} out of range [{}, {}]",
+                self.floor, self.ceil
+            ));
+        }
+        // Bump `next` past `i` so future first-time allocs don't
+        // hand it out, and remove `i` from the freed set if the
+        // pre-restart sandbox happened to land on a previously-
+        // released index.
+        if i >= self.next {
+            self.next = i.saturating_add(1);
+        }
+        self.freed.remove(&i);
+        Ok(())
+    }
 }
 
 impl NomadCHBackend {
-    pub fn new(cfg: SandboxConfig) -> Result<Self, String> {
+    pub fn new(
+        cfg: SandboxConfig,
+        persist: Option<Arc<crate::persist::Persistence>>,
+    ) -> Result<Self, String> {
         let alloc = VmIndexAllocator::new(
             cfg.nomad_ch.vm_index_floor,
             cfg.nomad_ch.vm_index_ceil,
@@ -256,6 +290,7 @@ impl NomadCHBackend {
             creating_users: Arc::new(Mutex::new(HashSet::new())),
             healthy: Arc::new(AtomicBool::new(false)),
             last_probe_err: Arc::new(Mutex::new(None)),
+            persist,
         })
     }
 
@@ -686,6 +721,40 @@ impl NomadCHBackend {
         }
 
         let now = unix_now();
+
+        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // BEST-EFFORT: a seal failure does NOT fail create() — the
+        // sandbox is live and usable; persistence is for restart
+        // resilience only. Log loudly so operators see when the
+        // restart-restore guarantee is degraded for this sandbox.
+        // nomad-ch records intentionally seal `agent_url = None`:
+        // it's deterministically derived from `vm_index` at restore
+        // time, which shrinks the AEAD plaintext + removes a
+        // migration hazard if the agent listen address ever changes.
+        if let Some(persist) = &self.persist {
+            let record = crate::persist::SealedAuth {
+                version: crate::persist::SEAL_VERSION,
+                sandbox_id: sandbox_id.to_string(),
+                user_id: user_id.to_string(),
+                project_id: project_id.to_string(),
+                backend: "nomad-ch".to_string(),
+                signing_key_bytes: sk_bytes,
+                vm_index: Some(vm_index),
+                agent_url: None,
+                pubkey_fp: key_fp.clone(),
+                created_at_secs: now,
+                preview_secrets: None,
+                preview_audit: Vec::new(),
+            };
+            if let Err(e) = persist.seal(sandbox_id, &record).await {
+                eprintln!(
+                    "[sandbox/nomad-ch] persist.seal failed sandbox={sandbox_id} \
+                     vm_index={vm_index} (non-fatal; sandbox live, \
+                     restart-restore unavailable for this record): {e}"
+                );
+            }
+        }
+
         Ok(SandboxInfo {
             sandbox_id: sandbox_id.to_string(),
             user_id: user_id.to_string(),
@@ -931,6 +1000,21 @@ impl NomadCHBackend {
             );
         }
 
+        // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
+        // a delete failure is logged but does NOT fail stop(). The next
+        // boot's restore loop probes the sandbox's `/version`, finds it
+        // unreachable (the VM is gone), and leaves the file in place
+        // for periodic prune (Phase 5) to mop up.
+        if let Some(persist) = &self.persist {
+            if let Err(e) = persist.delete(sandbox_id).await {
+                eprintln!(
+                    "[sandbox/nomad-ch] persist.delete failed sandbox={sandbox_id} \
+                     (non-fatal; sealed record will be cleaned by next-boot \
+                     unreachable-probe + Phase-5 prune): {e}"
+                );
+            }
+        }
+
         eprintln!(
             "[sandbox/nomad-ch] stop: complete sandbox={sandbox_id} \
              vm_index={} job={} errs={} job_confirmed_gone={job_confirmed_gone} \
@@ -1096,6 +1180,219 @@ impl NomadCHBackend {
         // the request (ed25519-dalek::SigningKey doesn't zeroize on
         // drop).
         Ok((s.signing_key.clone(), s.agent_url.clone()))
+    }
+
+    /// Lift the per-sandbox auth material into a backend-agnostic
+    /// envelope. See `super::SandboxAuth` for the contract.
+    pub async fn session_auth(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<super::SandboxAuth, String> {
+        let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+        let s = guard
+            .get(&sandbox_id)
+            .ok_or_else(|| "sandbox not found in nomad-ch backend".to_string())?;
+        let pubkey_fp = sig::pubkey_fingerprint(&s.signing_key.verifying_key());
+        Ok(super::SandboxAuth {
+            signing_key: s.signing_key.clone(),
+            agent_url: s.agent_url.clone(),
+            pubkey_fp,
+        })
+    }
+
+    /// Persist-on-mint helper: rebuild the on-disk `SealedAuth` for
+    /// `sandbox_id` carrying the caller-provided preview-share state
+    /// and seal it. See [`super::Backend::seal_with_preview_state`]
+    /// for the contract; this implementation reads the per-sandbox
+    /// `signing_key` + `vm_index` from the backend's own session map
+    /// and pulls `user_id` / `project_id` / `created_at_secs` from
+    /// the supplied [`super::SandboxInfo`] (the registry-side view).
+    ///
+    /// Nomad-CH records seal `agent_url = None` (it's deterministic
+    /// from `vm_index` at restore time; round-6 I3) — same as
+    /// [`Self::create`] writes at sandbox-create time.
+    pub async fn seal_with_preview_state(
+        &self,
+        sandbox_id: Uuid,
+        info: &super::SandboxInfo,
+        secrets: Option<crate::persist::SealedPreviewSecrets>,
+        audit: Vec<crate::persist::SealedAuditEntry>,
+    ) -> Result<bool, String> {
+        let Some(persist) = self.persist.clone() else {
+            return Ok(false);
+        };
+        let (sk_bytes, vm_index) = {
+            let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+            let Some(s) = guard.get(&sandbox_id) else {
+                return Ok(false);
+            };
+            (s.signing_key.to_bytes(), s.vm_index)
+        };
+        let pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
+        );
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: sandbox_id.to_string(),
+            user_id: info.user_id.clone(),
+            project_id: info.project_id.clone(),
+            backend: "nomad-ch".to_string(),
+            signing_key_bytes: sk_bytes,
+            vm_index: Some(vm_index),
+            agent_url: None,
+            pubkey_fp,
+            created_at_secs: info.created_at_secs,
+            preview_secrets: secrets,
+            preview_audit: audit,
+        };
+        persist
+            .seal(sandbox_id, &record)
+            .await
+            .map(|()| true)
+            .map_err(|e| format!("seal failed: {e}"))
+    }
+
+    /// **Test-only.** Inject a synthetic sandbox record with a
+    /// caller-supplied `agent_url`. Bypasses the full Nomad/CH
+    /// create flow + the `derive_agent_url` rule (which targets
+    /// `10.99.<100+idx>.2`). Used by the preview-proxy e2e tests
+    /// to point the controller at a fixture HTTP listener on
+    /// `127.0.0.1:<ephemeral>`.
+    ///
+    /// Marked `pub` rather than `pub(crate)` so integration tests
+    /// in `tests/` can call it; the `#[cfg(any(test, feature =
+    /// "test-support"))]` gate would be cleaner if we want to
+    /// strip it from production binaries — Phase 1 leaves it
+    /// unconditionally public with a "tests only" doc-comment
+    /// (the function name self-identifies as test scaffolding).
+    pub fn _test_inject_sandbox(
+        &self,
+        sandbox_id: Uuid,
+        user_id: &str,
+        signing_key: SigningKey,
+        agent_url: String,
+        vm_index: u16,
+    ) {
+        let job_id = Self::derive_job_id(sandbox_id);
+        let host_dir = self.derive_host_dir(sandbox_id);
+        let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
+        g.insert(
+            sandbox_id,
+            NomadChSandbox {
+                user_id: user_id.to_string(),
+                job_id,
+                vm_index,
+                host_dir,
+                agent_url,
+                signing_key: Arc::new(signing_key),
+            },
+        );
+    }
+
+    /// Re-derive the deterministic `agent_url` for a given vm_index.
+    /// `http://10.<subnet_second_octet>.<100+idx>.2:7777`. Public so
+    /// the controller's restart-restore path can recompute the URL
+    /// from a sealed record's `vm_index` without re-running create().
+    pub fn derive_agent_url(&self, vm_index: u16) -> String {
+        format!(
+            "http://10.{}.{}.2:{AGENT_PORT}",
+            self.cfg.nomad_ch.subnet_second_octet,
+            100u16 + vm_index
+        )
+    }
+
+    /// Re-derive the per-sandbox host directory: same layout the
+    /// `create()` path writes (`<host_state_dir>/<sandbox-id>/`).
+    fn derive_host_dir(&self, sandbox_id: Uuid) -> PathBuf {
+        self.cfg.nomad_ch.host_state_dir.join(sandbox_id.to_string())
+    }
+
+    /// Re-derive the deterministic Nomad job-id format used by the
+    /// create path: `zsbx-<sandbox-id-simple>`. Kept private (the
+    /// boot-restore code below is the sole caller); callers outside
+    /// the backend always look the job up by its sandbox-id key.
+    fn derive_job_id(sandbox_id: Uuid) -> String {
+        format!("zsbx-{}", sandbox_id.simple())
+    }
+
+    /// Restart-restore: re-install in-memory state for a sandbox the
+    /// controller minted before its previous lifetime ended. Caller
+    /// (the boot-path in `lib.rs`) is expected to have already
+    /// (a) read the sealed record from disk, (b) signed-`/version`
+    /// probed the agent, and (c) confirmed the agent's reported
+    /// `pubkey_fingerprint` byte-matches the sealed `pubkey_fp`.
+    ///
+    /// On success the backend's per-sandbox HashMap holds the same
+    /// shape as a fresh `create()` would have produced; `exec` /
+    /// `read_file` / etc. all dispatch normally. The vm_index is
+    /// reserved in the allocator so a concurrent fresh `create()`
+    /// can't hand the same tap subnet to a different tenant.
+    ///
+    /// Returns `Err` if the sealed record lacks `vm_index` (a
+    /// schema violation for a `backend = "nomad-ch"` record), if
+    /// the index is outside the configured pool, or if the
+    /// in-memory map already has an entry for `sandbox_id`.
+    pub async fn restore_from_sealed(
+        &self,
+        sandbox_id: Uuid,
+        sealed: &crate::persist::SealedAuth,
+    ) -> Result<super::SandboxAuth, String> {
+        if sealed.backend != "nomad-ch" {
+            return Err(format!(
+                "restore_from_sealed: backend mismatch (record says {:?}, this backend is nomad-ch)",
+                sealed.backend
+            ));
+        }
+        let vm_index = sealed.vm_index.ok_or_else(|| {
+            "restore_from_sealed: sealed nomad-ch record has no vm_index".to_string()
+        })?;
+        // Reserve the index BEFORE inserting state — a failure here
+        // (e.g. ceil-out-of-range after operator shrinks the pool)
+        // means the record can't be safely restored on this
+        // controller; the boot path quarantines it.
+        self.vm_index_allocator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .reserve(vm_index)
+            .map_err(|e| format!("restore_from_sealed: vm_index reserve: {e}"))?;
+
+        let signing_key = Arc::new(SigningKey::from_bytes(&sealed.signing_key_bytes));
+        let pubkey_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
+        if pubkey_fp != sealed.pubkey_fp {
+            return Err(format!(
+                "restore_from_sealed: derived pubkey_fp ({pubkey_fp}) != sealed pubkey_fp ({})",
+                sealed.pubkey_fp
+            ));
+        }
+        let agent_url = self.derive_agent_url(vm_index);
+        let host_dir = self.derive_host_dir(sandbox_id);
+        let job_id = Self::derive_job_id(sandbox_id);
+
+        {
+            let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
+            if g.contains_key(&sandbox_id) {
+                return Err(format!(
+                    "restore_from_sealed: sandbox {sandbox_id} already present in nomad-ch state"
+                ));
+            }
+            g.insert(
+                sandbox_id,
+                NomadChSandbox {
+                    user_id: sealed.user_id.clone(),
+                    job_id,
+                    vm_index,
+                    host_dir,
+                    agent_url: agent_url.clone(),
+                    signing_key: signing_key.clone(),
+                },
+            );
+        }
+
+        Ok(super::SandboxAuth {
+            signing_key,
+            agent_url,
+            pubkey_fp,
+        })
     }
 
     /// Build a short prefix for agent-error log lines so a fleet-
@@ -3316,6 +3613,50 @@ mod tests {
             err.contains("401") || err.contains("different controller pubkey"),
             "FM-A regression: persistent-401 timeout did not surface \
              'verifying with a different controller pubkey'; got {err:?}"
+        );
+    }
+
+    /// Phase-0 surface check (preview-URL design § II.0): the
+    /// nomad-ch backend's `session_auth` lifts `signing_key`,
+    /// `agent_url`, and a derived `pubkey_fp` into the
+    /// backend-agnostic `SandboxAuth` envelope. Missing-id surfaces
+    /// as `Err`. This is what the preview proxy + sealed-record
+    /// persistence layer call.
+    #[compio::test]
+    async fn session_auth_returns_lifted_record() {
+        let backend = NomadCHBackend::new(make_cfg(), None).expect("new");
+
+        // Hand-insert a sandbox record with a known signing key to
+        // bypass the full Nomad-create path (this is the standard
+        // unit-test trick used elsewhere in this module).
+        let sk = make_sk();
+        let expected_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        let id = Uuid::now_v7();
+        let agent_url = "http://10.99.107.2:7777".to_string();
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "alice".into(),
+                job_id: "zsbx-test".into(),
+                vm_index: 7,
+                host_dir: PathBuf::from("/tmp/zsbx-test"),
+                agent_url: agent_url.clone(),
+                signing_key: sk.clone(),
+            },
+        );
+
+        let auth = backend.session_auth(id).await.expect("session_auth");
+        assert_eq!(auth.agent_url, agent_url);
+        assert_eq!(auth.pubkey_fp, expected_fp);
+        // Pointer-equal Arc clone: no secret-bytes copy.
+        assert!(Arc::ptr_eq(&auth.signing_key, &sk));
+
+        // Unknown id surfaces a clear Err.
+        let other = Uuid::now_v7();
+        let err = backend.session_auth(other).await.expect_err("missing");
+        assert!(
+            err.contains("not found"),
+            "Err must mention not-found; got {err:?}"
         );
     }
 }

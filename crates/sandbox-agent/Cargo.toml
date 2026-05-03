@@ -14,6 +14,10 @@ name = "sandbox-agent"
 path = "src/main.rs"
 
 [dependencies]
+# Shared port allow/deny constants used by both the controller and the
+# agent (preview-URL § II.1 / I9 — defense-in-depth port deny).
+zeroship-core = { workspace = true }
+
 # Workspace runtime: compio (io_uring) + ntex (HTTP). Same stack as
 # the controller so the project has one async story end-to-end.
 compio = { workspace = true }
@@ -44,6 +48,23 @@ uuid = { workspace = true }
 # OS bits — signals (SIGCHLD reaper), waitpid, O_NOFOLLOW, killpg.
 nix = { version = "0.29", default-features = false, features = ["signal", "process", "fs", "dir"] }
 libc = { workspace = true }
+
+# HTTP/1.1 client for the preview proxy's agent→app forward leg
+# (zsbx-agent → 127.0.0.1:{port}). Sync; called inside
+# `compio::runtime::spawn_blocking` so the ntex worker stays
+# responsive. No TLS feature — loopback only.
+ureq = { version = "2", default-features = false, features = ["json"] }
+
+# WebSocket Upgrade parsing for the preview proxy (Phase 2). The WS
+# port runs a tiny compio raw-TCP listener that parses just the HTTP
+# request-head with httparse, verifies the V1_1_Ws canonical, and
+# splices the two TCP sockets after a 101. No frame parsing.
+httparse = { workspace = true }
+
+# `futures_util::future::{select, join}` — used by the WS Upgrade
+# splice loop (race the lifetime cap against the two splice halves).
+# `default-features = false` keeps it lean.
+futures-util = { version = "0.3", default-features = false }
 
 [lints]
 workspace = true

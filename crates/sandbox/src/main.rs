@@ -10,7 +10,9 @@
 //! for the full architecture.
 
 use ntex::web;
-use zeroship_sandbox::{handlers, registry, AppState};
+use zeroship_sandbox::{
+    handlers, preview, preview_share_handlers, preview_ws, registry, AppState,
+};
 use zeroship_sandbox::config::SandboxConfig;
 
 #[global_allocator]
@@ -113,6 +115,22 @@ async fn main() -> std::io::Result<()> {
     // Idle GC sweep — kills runtimes idle longer than `idle_timeout_secs`.
     registry::start_idle_gc(state.clone());
 
+    // Preview WebSocket-Upgrade forwarder (Phase 2). Bound on a
+    // separate port (default 9092; configurable via
+    // `SANDBOX_PREVIEW_WS_PORT`) per the proposal's Phase-2 fallback
+    // ("the controller listens on a separate port for Upgrade
+    // forwarding"). The HTTP path on `config.port` continues to handle
+    // /sandboxes/{id}/preview/{port}/{path*} non-Upgrade traffic.
+    let ws_port = preview_ws::ws_port_from_env();
+    let ws_state = state.clone();
+    compio::runtime::spawn(async move {
+        if let Err(e) = preview_ws::serve(ws_state, ws_port).await {
+            eprintln!("[sandbox] preview_ws serve exited: {e}");
+        }
+    })
+    .detach();
+    eprintln!("[sandbox] preview-ws listening on :{ws_port}");
+
     let bind = format!("0.0.0.0:{}", config.port);
     eprintln!("[sandbox] http://{bind}");
 
@@ -163,6 +181,40 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
+            )
+            // Phase-3 share-token mint/list/revoke (§ III). The
+            // `/share` resource is registered BEFORE the catch-all
+            // `/preview/{port}/{path}*` so ntex matches the more
+            // specific routes first.
+            .service(
+                web::resource("/sandboxes/{id}/preview/{port}/share")
+                    .route(web::post().to(preview_share_handlers::mint_share))
+                    .route(web::get().to(preview_share_handlers::list_share))
+                    .route(
+                        web::delete().to(preview_share_handlers::revoke_all_share),
+                    ),
+            )
+            .service(
+                web::resource(
+                    "/sandboxes/{id}/preview/{port}/share/{token_id}",
+                )
+                .route(web::delete().to(preview_share_handlers::revoke_one_share)),
+            )
+            // Preview proxy (§ II.2). Creator-authed; signed v1.1
+            // forward to the agent at /proxy/{port}/{path*}. Body cap
+            // matches the agent (100 MiB) plus 1 MiB serialization slack.
+            //
+            // NOTE: `{path}*` (tail-match) — NOT `{path:.*}`. ntex's
+            // regex constraint matches a single path segment only;
+            // `{tail}*` is the documented multi-segment tail-match
+            // syntax. See gateway/main.rs for the same pattern.
+            .service(
+                web::resource("/sandboxes/{id}/preview/{port}/{path}*")
+                    .state(
+                        web::types::PayloadConfig::default()
+                            .limit(preview::DEFAULT_MAX_BODY_BYTES + 1024 * 1024),
+                    )
+                    .route(web::route().to(preview::preview_proxy)),
             )
     })
     .bind(&bind)?
