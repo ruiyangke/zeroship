@@ -416,7 +416,7 @@ Same shape for Hmac / Cipher / Sign / Verify. The Cipher context has additional 
 
 Node's APIs accept and return `Buffer` (a `Uint8Array` subclass with extra methods). WebCrypto returns `ArrayBuffer`. The two classes' instances are NOT interchangeable in instanceof checks but ARE interchangeable as input types (any `Uint8Array` works as a Buffer for input — Node never type-checks input shape).
 
-**Input-coercion policy:**
+**Input-coercion policy** (addresses critic CRITICAL #2): the `inputEncoding` argument is **ignored when `data` is a Buffer / TypedArray / DataView / ArrayBuffer** — Node's documented behaviour, e.g. `hash.update(buf, 'hex')` does NOT hex-decode `buf`, it consumes the raw bytes. Per https://nodejs.org/api/crypto.html#hashupdatedata-inputencoding: "If `data` is a Buffer, TypedArray, or DataView, then `inputEncoding` is ignored." The same rule holds for every method following this shape: `Hmac.prototype.update`, `Cipher.prototype.update` (input encoding), `Decipher.prototype.update` (input encoding), `Sign.prototype.update`, `Verify.prototype.update`. Only when `data` is a `string` does the `inputEncoding` argument apply (default `'utf8'`).
 
 ```rust
 // crypto_node/buffer.rs
@@ -426,19 +426,23 @@ pub fn extract_input(
     encoding: Option<&str>,
 ) -> Result<Vec<u8>, OpError> {
     // 1. ArrayBufferView (Uint8Array, Buffer, Int8Array, ...) → copy bytes.
+    //    Per Node spec, `encoding` is IGNORED for non-string input — we silently
+    //    discard the parameter rather than rejecting it (matches Node).
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
         let mut buf = vec![0u8; view.byte_length()];
         view.copy_contents(&mut buf);
         return Ok(buf);
     }
-    // 2. ArrayBuffer → copy bytes.
+    // 2. ArrayBuffer → copy bytes.  `encoding` is ignored here too.
     if let Ok(ab) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
         let store = ab.get_backing_store();
         let mut buf = vec![0u8; ab.byte_length()];
         for (i, b) in buf.iter_mut().enumerate() { *b = store[i].get(); }
         return Ok(buf);
     }
-    // 3. String + encoding → decode per the named encoding.
+    // 3. String → encoding APPLIES; default 'utf8' if not provided.
+    //    Per Node v15+, default is 'utf8' (older versions used 'binary'/latin1;
+    //    we follow current spec).
     if value.is_string() {
         let s = value.to_rust_string_lossy(scope);
         return encoding::decode(&s, encoding.unwrap_or("utf8"));
@@ -452,19 +456,43 @@ pub fn emit_output<'s>(
     bytes: &[u8],
     encoding: Option<&str>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    match encoding {
+    // Encoding canonicalisation (addresses critic MAJOR encoding list — utf16le
+    // and ascii were missing in v1). Per https://nodejs.org/api/buffer.html#buffers-and-character-encodings.
+    match encoding.map(canonical_encoding) {
         None => Ok(emit_buffer(scope, bytes).into()),       // default: Buffer
-        Some("hex") => Ok(emit_string(scope, &hex_encode(bytes)).into()),
-        Some("base64") => Ok(emit_string(scope, &base64::encode(bytes)).into()),
-        Some("base64url") => Ok(emit_string(scope, &base64url::encode(bytes)).into()),
-        Some("latin1") | Some("binary") => Ok(emit_string(scope, &latin1_encode(bytes)).into()),
-        Some("utf8") | Some("utf-8") => {
-            // Errors on invalid UTF-8 boundaries — Node lossily decodes.
-            // We match Node by using to_rust_string_lossy.
+        Some(Encoding::Hex) => Ok(emit_string(scope, &hex_encode(bytes)).into()),
+        Some(Encoding::Base64) => Ok(emit_string(scope, &base64::encode(bytes)).into()),
+        Some(Encoding::Base64Url) => Ok(emit_string(scope, &base64url::encode(bytes)).into()),
+        Some(Encoding::Latin1) => Ok(emit_string(scope, &latin1_encode(bytes)).into()),  // also "binary"
+        Some(Encoding::Ascii) => Ok(emit_string(scope, &ascii_encode(bytes)).into()),    // bytes & 0x7F per Node
+        Some(Encoding::Utf8) => {
+            // (addresses critic CRITICAL #9): Node's `digest('utf8')` is well-defined as
+            // LOSSY for binary digest output — invalid UTF-8 byte sequences are replaced
+            // with U+FFFD per https://nodejs.org/api/buffer.html#buffers-and-character-encodings.
+            // The v1 comment ("Errors on invalid UTF-8 boundaries — Node lossily decodes")
+            // contradicted the implementation; fixed: comment + impl now agree it is lossy.
             Ok(emit_string(scope, &String::from_utf8_lossy(bytes)).into())
         }
-        Some(other) => Err(OpError::node("ERR_UNKNOWN_ENCODING",
-            format!("Unknown encoding: {}", other))),
+        Some(Encoding::Utf16Le) => Ok(emit_string(scope, &utf16le_encode(bytes)).into()),  // alias 'ucs2', 'ucs-2'
+        Some(Encoding::Unknown(name)) => Err(OpError::node("ERR_UNKNOWN_ENCODING",
+            format!("Unknown encoding: {}", name))),
+    }
+}
+
+/// Canonicalises Node's encoding aliases to the underlying form. Per
+/// https://nodejs.org/api/buffer.html#buffers-and-character-encodings.
+/// `binary` is an alias for `latin1`; `ucs2`/`ucs-2`/`utf-16le`/`utf16le`
+/// are all aliases for UTF-16 LE; `utf8`/`utf-8` are aliases.
+fn canonical_encoding(name: &str) -> Encoding {
+    match name.to_ascii_lowercase().as_str() {
+        "hex" => Encoding::Hex,
+        "base64" => Encoding::Base64,
+        "base64url" => Encoding::Base64Url,
+        "latin1" | "binary" => Encoding::Latin1,
+        "ascii" => Encoding::Ascii,
+        "utf8" | "utf-8" => Encoding::Utf8,
+        "utf16le" | "utf-16le" | "ucs2" | "ucs-2" => Encoding::Utf16Le,
+        other => Encoding::Unknown(other.to_string()),
     }
 }
 
