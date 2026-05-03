@@ -22,7 +22,7 @@
 
 #![allow(unsafe_code)]
 
-use super::{hash, hmac, kdf, misc, random};
+use super::{cipher, hash, hmac, kdf, key_object, keygen, misc, random, sign_verify};
 
 /// Install `globalThis.__zeroship_node_crypto`. Called from
 /// `core/init.rs::setup_globals` alongside the other native installs.
@@ -33,6 +33,13 @@ pub fn install_globals<'s>(
     // First install the Hash + Hmac classes so JS can `instanceof` them.
     let _hash_class = hash::Hash::install(scope);
     let _hmac_class = hmac::Hmac::install(scope);
+    let _ko_class = key_object::KeyObject::install(scope);
+    let _pub_class = key_object::PublicKeyObject::install(scope);
+    let _priv_class = key_object::PrivateKeyObject::install(scope);
+    let _sec_class = key_object::SecretKeyObject::install(scope);
+    let _sign_class = sign_verify::Sign::install(scope);
+    let _verify_class = sign_verify::Verify::install(scope);
+    let _cipher_class = cipher::Cipher::install(scope);
 
     // Build the boundary object.
     let obj = v8::Object::new(scope);
@@ -56,6 +63,60 @@ pub fn install_globals<'s>(
     set_fn(scope, obj, "hkdf", kdf::hkdf_callback);
     set_fn(scope, obj, "scryptSync", kdf::scrypt_sync_callback);
     set_fn(scope, obj, "scrypt", kdf::scrypt_callback);
+
+    // -- KeyObject + factories --
+    set_fn(scope, obj, "createSecretKey", key_object::create_secret_key_callback);
+    set_fn(scope, obj, "createPublicKey", key_object::create_public_key_callback);
+    set_fn(scope, obj, "createPrivateKey", key_object::create_private_key_callback);
+
+    // Expose the KeyObject class itself + the static `from` so the Node
+    // pattern `KeyObject.from(cryptoKey)` resolves.
+    {
+        let ko_tmpl = key_object::KeyObject::install(scope);
+        let ko_fn = ko_tmpl.get_function(scope).unwrap();
+        let from_key = v8::String::new(scope, "from").unwrap();
+        let from_fn = v8::Function::new(scope, key_object::key_object_from_callback).unwrap();
+        ko_fn.set(scope, from_key.into(), from_fn.into());
+        let k = v8::String::new(scope, "KeyObject").unwrap();
+        obj.set(scope, k.into(), ko_fn.into());
+    }
+    {
+        let pub_tmpl = key_object::PublicKeyObject::install(scope);
+        let pub_fn = pub_tmpl.get_function(scope).unwrap();
+        let k = v8::String::new(scope, "PublicKeyObject").unwrap();
+        obj.set(scope, k.into(), pub_fn.into());
+    }
+    {
+        let priv_tmpl = key_object::PrivateKeyObject::install(scope);
+        let priv_fn = priv_tmpl.get_function(scope).unwrap();
+        let k = v8::String::new(scope, "PrivateKeyObject").unwrap();
+        obj.set(scope, k.into(), priv_fn.into());
+    }
+    {
+        let sec_tmpl = key_object::SecretKeyObject::install(scope);
+        let sec_fn = sec_tmpl.get_function(scope).unwrap();
+        let k = v8::String::new(scope, "SecretKeyObject").unwrap();
+        obj.set(scope, k.into(), sec_fn.into());
+    }
+
+    // -- Sign / Verify --
+    set_fn(scope, obj, "createSign", sign_verify::create_sign_callback);
+    set_fn(scope, obj, "createVerify", sign_verify::create_verify_callback);
+    set_fn(scope, obj, "sign", sign_verify::sign_callback);
+    set_fn(scope, obj, "verify", sign_verify::verify_callback);
+    set_fn(scope, obj, "publicEncrypt", sign_verify::public_encrypt_callback);
+    set_fn(scope, obj, "privateDecrypt", sign_verify::private_decrypt_callback);
+
+    // -- Cipher / Decipher --
+    set_fn(scope, obj, "createCipheriv", cipher::create_cipheriv_callback);
+    set_fn(scope, obj, "createDecipheriv", cipher::create_decipheriv_callback);
+    set_fn(scope, obj, "createCipher", cipher::create_cipher_callback);
+    set_fn(scope, obj, "createDecipher", cipher::create_decipher_callback);
+    set_fn(scope, obj, "getCipherInfo", cipher::get_cipher_info_callback);
+
+    // -- Key generation --
+    set_fn(scope, obj, "generateKeySync", keygen::generate_key_sync_callback);
+    set_fn(scope, obj, "generateKeyPairSync", keygen::generate_key_pair_sync_callback);
 
     // -- Misc --
     set_fn(scope, obj, "timingSafeEqual", misc::timing_safe_equal_callback);
