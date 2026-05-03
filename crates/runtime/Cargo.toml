@@ -72,11 +72,11 @@ zeroship-runtime-macros = { workspace = true }
 
 [[bin]]
 name = "zeroship-bench-server"
-path = "src/server.rs"
+path = "src/core/server.rs"
 
 [[bin]]
 name = "echo-server"
-path = "src/echo_server.rs"
+path = "src/core/echo_server.rs"
 
 [features]
 # Cutover landing 2: the native WebSocket impl is on by default.

@@ -20,7 +20,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** | `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/` |
-| **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/init.rs` |
+| **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/core/init.rs` |
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
 | **Multi-node / Docker Compose** | `docs/runbooks/docker-compose.md` |

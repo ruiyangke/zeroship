@@ -28,10 +28,13 @@
 
 pub mod algorithms;
 pub mod bad_ports;
+pub mod body;
 pub mod content_encoding;
 pub mod data_url;
 pub mod http_network;
 pub mod redirect;
+pub mod request;
+pub mod response;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

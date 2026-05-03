@@ -115,7 +115,7 @@ pub struct HttpResult {
 /// `clearTimeout`. Loaded BEFORE any user module evaluates, so npm
 /// packages that read these as bare globals (no `node:*` import) find
 /// them present.
-pub const NODE_GLOBALS_JS: &str = include_str!("embed/node-globals.js");
+pub const NODE_GLOBALS_JS: &str = include_str!("../embed/node-globals.js");
 
 /// The `zeroship` user-facing ESM module. Exposes the request-scoped helpers
 /// that SDK packages lean on:

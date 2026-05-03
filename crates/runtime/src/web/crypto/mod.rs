@@ -70,6 +70,7 @@ pub mod registry;
 pub mod evp_ffi;
 pub mod rsa;
 pub mod subtle;
+pub mod sync_helpers;
 pub mod wrap;
 
 /// Install Crypto / SubtleCrypto / CryptoKey on `globalThis`. Replaces

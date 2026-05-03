@@ -1,120 +1,35 @@
 # runtime TODO
 
-Backlog ordered roughly by leverage. **DO NOT start the reorg while in-flight
-agents are working** — wait for fetch-js-delete, url-reviser, websocket-design,
-and crypto-review to merge first; otherwise merge conflicts dominate.
+Backlog ordered roughly by leverage.
 
-## Reorg the source tree
+## Done
 
-Today `crates/runtime/src/` has 30+ top-level files with inconsistent grouping:
-- Web APIs sprawl across the root (`headers.rs`, `codec.rs`, `crypto.rs`,
-  `byte_string.rs`, `enforce_range.rs`, `websocket.rs`, `fetch_request.rs`,
-  `fetch_response.rs`) AND in subdirs (`dom/`, `streams/`, `fetch_native/`,
-  `fetch_body/`, `url_native/`, `blob_native/`, `text_encoding/`)
-- `fetch_request.rs` and `fetch_response.rs` are top-level even though
-  `fetch_body/` and `fetch_native/` are subdirs
-- Macro-support utilities (`enforce_range.rs`, `byte_string.rs`) live at root
-- `fetch.rs` is half legacy SSRF and half live cyper plumbing — name no longer fits
-- `embed/` mixes JS shims with native install code
+### Reorg the source tree (`feature/runtime-reorg`)
 
-### Proposed layout
+`crates/runtime/src/` is now grouped into four roots:
 
 ```
-crates/runtime/src/
-├── lib.rs
-├── core/                       runtime infra
-│   ├── runtime.rs              the V8 pump
-│   ├── state.rs
-│   ├── dispatch.rs
-│   ├── init.rs
-│   ├── channel.rs
-│   ├── modules.rs
-│   ├── panic_util.rs
-│   ├── plugin.rs
-│   ├── cpu_timer.rs
-│   ├── server.rs
-│   └── serve.rs
-│
-├── webidl/                     shared boundary types
-│   ├── byte_string.rs
-│   ├── usv_string.rs           (currently inside url_native/helpers.rs)
-│   └── enforce_range.rs
-│
-├── web/                        Web APIs
-│   ├── encoding/               TextEncoder + TextDecoder + streams
-│   ├── streams/                unchanged
-│   ├── url/                    was url_native — drop the _native suffix
-│   ├── blob/                   was blob_native
-│   ├── headers.rs
-│   ├── dom/                    Event / EventTarget / CustomEvent /
-│   │                           AbortController / AbortSignal / FormData
-│   ├── fetch/                  consolidate everything fetch
-│   │   ├── algorithms.rs       was fetch_native/algorithms.rs
-│   │   ├── http_network.rs
-│   │   ├── redirect.rs
-│   │   ├── content_encoding.rs
-│   │   ├── data_url.rs
-│   │   ├── bad_ports.rs
-│   │   ├── body/               was fetch_body/
-│   │   ├── request.rs          was fetch_request.rs
-│   │   └── response.rs         was fetch_response.rs
-│   ├── codec.rs                used by fetch + future CompressionStream
-│   ├── crypto.rs               stays until subtle goes native
-│   └── websocket.rs            native framing
-│
-├── transport/                  Rust HTTP plumbing
-│   ├── ssrf.rs                 was fetch.rs's SSRF guard
-│   ├── client.rs               was fetch.rs's cyper Client + admission
-│   └── handler.rs              was http.rs (kernel bridge)
-│
-├── storage.rs                  stays (different concern)
-├── auth.rs                     stays
-└── embed/                      shrinking JS shim set
-    ├── crypto.js               until subtle goes native
-    ├── websocket.js            until WebSocket goes native
-    └── node-globals.js
+core/      runtime/state/dispatch/init/channel/modules/panic_util/plugin/cpu_timer/server/serve
+webidl/    byte_string + clamp + enforce_range + usv_string
+web/       Web API surface — base64, blob/, codec, crypto/, dom/, encoding/,
+           fetch/{algorithms,body/,request,response,...}, headers, streams/,
+           structured_clone, url/, websocket/
+transport/ ssrf + client (per-thread cyper) + handler (kernel HTTP bridge)
 ```
 
-### Why
+Top-level survivors: `auth.rs`, `storage.rs`, `fetch_outcome.rs`, `embed/`
+(now just `node-globals.js`). All old paths (`crate::fetch_native::…`,
+`crate::dom::…`, `crate::state::…`, etc.) keep resolving via re-exports
+in `lib.rs`, so external crates and tests didn't need migration.
 
-1. All Web APIs under one tree — clear that they ship as part of the platform's
-   IDL surface
-2. Drop the `_native` suffix — every Web API is native by definition; the suffix
-   was a transitional name during cutover
-3. Fetch's three sibling areas (`fetch_native/`, `fetch_body/`,
-   `fetch_request.rs`, `fetch_response.rs`) collapse into one `web/fetch/`
-4. Runtime infra (`core/`) clearly separated from Web APIs (`web/`)
-5. Shared boundary types (`webidl/`) have a home — used by multiple classes
-6. `transport/` owns the wire (cyper client + SSRF + handler bridge) separately
-   from `web/fetch/` which owns the spec algorithms
-7. `embed/` shrinks to just remaining JS shims — once WebCrypto + WebSocket go
-   native, `embed/` disappears entirely
-
-### Cost
-
-- ~50 files renamed via `git mv`
-- Every `pub mod` in `lib.rs` updated
-- Every `crate::X::Y` import updated (~hundreds)
-- Re-exports in `lib.rs` adjusted
-- Mostly mechanical; `cargo check` guides
-
-### When
-
-After all in-flight agents merge:
-1. fetch-js-delete (touches `fetch_body/`, `fetch_native/`, `http.rs`, `fetch.rs`)
-2. url-reviser (touches `url_native/`)
-3. websocket-design (just writes a doc; no code)
-4. crypto-review (just produces a review; no code)
-
-Then: single dispatch, single PR, one big commit.
+Pure rename + import-rewrite — zero semantic changes. See commit message
+for diff stats.
 
 ## Smaller items
 
 - Per-class isolate-slot caching is per `__InstallSlot_X` types, but registration
   in `init.rs` happens via individual function calls. Could be unified via a
   `register_native_class!` macro — minor.
-- `fetch.rs` post-cleanup-rawfetch is ~600 LOC of SSRF + cyper Client + admission
-  cap. Split into `transport/ssrf.rs` + `transport/client.rs` as part of the reorg.
 - `legacy_bridge.rs` (in `streams/`) is named misleadingly — still alive via
   `__zsBeginStreamForward`. Rename to `stream_bridge.rs` OR delete entirely if
   the Rust-only forwarder lands via fetch-js-delete.

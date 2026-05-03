@@ -53,7 +53,7 @@ V8 has thread-local state (`Isolate::GetCurrent()`). Multiple isolates can live 
 
 `RuntimeInner` tracks `enter_depth: u32`. The custom `Drop` impl re-enters at depth 0 just-in-time so V8's `OwnedIsolate::Drop` assertion (`current == self`) passes when a cached isolate finally drops. Without this, the first cached isolate to drop would panic the worker.
 
-See `crates/runtime/src/runtime.rs:enter_isolate`/`exit_isolate`/`Drop for RuntimeInner`.
+See `crates/runtime/src/core/runtime.rs:enter_isolate`/`exit_isolate`/`Drop for RuntimeInner`.
 
 ### 2. The pump task
 
@@ -90,7 +90,7 @@ Modules come from a `Vec<ModuleEntry>` (specifier + source). Today every deploy 
 - WebCrypto subset
 - Node compat shims (`process.versions`, `process.nextTick`, `AbortSignal.any`, ICU data)
 
-Stream chunks moving onto an HTTP wire go through the Rust-side response forwarder in `crates/runtime/src/streams/response_forwarder.rs`: when `inspect_response` sees a Response with a stream body, `begin_forward` locks it via `getReader()` and drives `read()` in a Rust promise-reaction loop, pushing each chunk into a per-stream forwarder. The kernel attaches a `direct_writer` (StreamWriter to the TCP-bound channel) in `build_fetch_outcome`; from then on chunks pump straight to the wire. This used to be a JS shim (`__zsBeginStreamForward` + `__streams.{create,enqueue,close,error}` namespace) — both deleted.
+Stream chunks moving onto an HTTP wire go through the Rust-side response forwarder in `crates/runtime/src/web/streams/response_forwarder.rs`: when `inspect_response` sees a Response with a stream body, `begin_forward` locks it via `getReader()` and drives `read()` in a Rust promise-reaction loop, pushing each chunk into a per-stream forwarder. The kernel attaches a `direct_writer` (StreamWriter to the TCP-bound channel) in `build_fetch_outcome`; from then on chunks pump straight to the wire. This used to be a JS shim (`__zsBeginStreamForward` + `__streams.{create,enqueue,close,error}` namespace) — both deleted.
 
 ## Bench infrastructure
 
@@ -107,8 +107,8 @@ See `docs/reference/zerobench.md` for the tool.
 | Working on… | Read first |
 | --- | --- |
 | A new native primitive | `docs/reference/plugin-system.md`, then `crates/plugin-kv/src/lib.rs` (smallest existing example) |
-| Streams correctness | `crates/runtime/src/init.rs` (look for `streams.js` and the polyfill) |
-| Cold-start latency | `crates/runtime/src/runtime.rs::ensure_initialized`; consider V8 code-cache wiring (Tier 4 future) |
-| HTTP request shaping | `crates/runtime/src/http.rs` |
+| Streams correctness | `crates/runtime/src/core/init.rs` (look for `streams.js` and the polyfill) |
+| Cold-start latency | `crates/runtime/src/core/runtime.rs::ensure_initialized`; consider V8 code-cache wiring (Tier 4 future) |
+| HTTP request shaping | `crates/runtime/src/transport/handler.rs` |
 | Multi-tenant isolation | `crates/worker/src/cache.rs` (LRU, eviction); `runtime.rs` (`enter_depth`, `Drop`) |
-| Adding a Node compat shim | `crates/runtime/src/init.rs` (the polyfill prelude); `docs/reference/node-compat.md` |
+| Adding a Node compat shim | `crates/runtime/src/core/init.rs` (the polyfill prelude); `docs/reference/node-compat.md` |

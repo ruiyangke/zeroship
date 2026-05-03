@@ -52,7 +52,7 @@ pub async fn http_network_fetch(
     }
 
     // Build the cyper Client (per-thread pool with SsrfResolver).
-    let client = shared_cyper_client();
+    let client = crate::transport::client::shared_cyper_client();
 
     let method = parse_http_method(&request.method)?;
     let mut builder = client
@@ -171,29 +171,10 @@ fn parse_http_method(s: &str) -> Result<http::Method, String> {
     }
 }
 
-/// Per-thread cyper client.
-///
-/// **Must be thread-local**, NOT a process-wide static. cyper's connector
-/// wraps its I/O in `SendWrapper` (panics if dereferenced from a thread
-/// other than the one that created it). With V8 isolates per worker
-/// thread each driving `fetch()` calls, a process-wide `OnceLock<Client>`
-/// would cache pooled connections on whichever thread ran first, then
-/// panic the moment a different thread's isolate dispatched. Per-thread
-/// costs a small handful of idle connections per host — cheap and
-/// correct.
-fn shared_cyper_client() -> cyper::Client {
-    thread_local! {
-        static CLIENT: cyper::Client = {
-            let builder = cyper::Client::builder();
-            if std::env::var("ZEROSHIP_DEV").is_ok() {
-                builder.build()
-            } else {
-                builder.custom_resolver(crate::fetch::SsrfResolver).build()
-            }
-        };
-    }
-    CLIENT.with(|c| c.clone())
-}
+// `shared_cyper_client` lives in `crate::transport::client` — the
+// thread-local Client (per-isolate connection pool with SSRF resolver)
+// is now shared between `web::fetch` and any future direct transport
+// callers.
 
 #[cfg(test)]
 mod tests {

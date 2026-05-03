@@ -97,7 +97,7 @@ are sibling projects that must land first or alongside.
 This compression design reads, but does not own, the following surface:
 
 ```rust
-// crates/runtime/src/streams.rs — sibling project
+// crates/runtime/src/web/streams.rs — sibling project
 pub struct TransformStream { /* opaque */ }
 
 impl TransformStream {

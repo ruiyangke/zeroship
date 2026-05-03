@@ -71,7 +71,7 @@ addresses every CRITICAL and every MAJOR. The substantive deltas:
 8. **Two-phase SSRF resolution for the WS path.** v1 only checked the
    URL string (catching IP-literal hostnames). DNS rebinding attacks
    bypass that. v2 mirrors fetch's resolve-then-revalidate-then-bind
-   pattern from `crates/runtime/src/fetch.rs:36-163`. (CRITICAL #8)
+   pattern from `crates/runtime/src/transport/ssrf.rs:36-163`. (CRITICAL #8)
 9. **Sec-WebSocket-Protocol response is validated against the offered
    set.** Per RFC 6455 §4.1 step 6 of the response checks
    (https://datatracker.ietf.org/doc/html/rfc6455#section-4.1), the
@@ -122,16 +122,16 @@ items in §XVII are policy choices, not spec defects.
   the HTTP/1.1 GET — but the runtime takes a more direct path (see §V) to
   avoid pulling the full main-fetch / redirect / decompression chain into
   the upgrade hot path.
-- `crates/runtime/src/dom/event_target.rs` — landed; `WebSocket : EventTarget`
+- `crates/runtime/src/web/dom/event_target.rs` — landed; `WebSocket : EventTarget`
   reuses the same `#[v8_inherit(EventTarget)]` macro that AbortSignal uses
   (DOM §3.3 / fetch-native.md §X). Same dispatch pipeline, same listener
   storage model.
-- `crates/runtime/src/dom/event.rs` — landed; CloseEvent and MessageEvent
+- `crates/runtime/src/web/dom/event.rs` — landed; CloseEvent and MessageEvent
   inherit Event via the same `#[v8_inherit(Event)]` pattern that
   CustomEvent uses (`dom/custom_event.rs`). `#[repr(C)]` with `Event` as
   the first field, layout-compatible cast to `*mut Event` for inherited
   getters.
-- `crates/runtime/src/dom/abort_signal.rs` — landed; `WebSocket(url, { signal })`
+- `crates/runtime/src/web/dom/abort_signal.rs` — landed; `WebSocket(url, { signal })`
   is a workerd extension we ship in v1 (see Non-goals discussion +
   Open questions). The signal-cancellation hook reuses `add_abort_algorithm`
   from `dom::abort_signal`.
@@ -187,7 +187,7 @@ items in §XVII are policy choices, not spec defects.
    from a navigated document, multi-globals across realm-transferred
    ports — see Non-goals). For client-side functional WPT cases we
    ship an in-process echo server (modelled on
-   `crates/runtime/src/echo_server.rs`) so the constructor-success
+   `crates/runtime/src/core/echo_server.rs`) so the constructor-success
    tests can run in CI.
 2. **Replace the JS polyfill.** Delete `crates/runtime/src/embed/websocket.js`
    (166 LOC) and the five `__ws*` callbacks in `crates/runtime/src/websocket.rs`
@@ -203,7 +203,7 @@ items in §XVII are policy choices, not spec defects.
    `instanceof MessageEvent` / `instanceof CloseEvent` AND `instanceof Event`.
 4. **Client-side WebSocket.** `new WebSocket(url, protocols)` opens a real
    TCP/TLS connection to `url`, performs the RFC 6455 handshake (with
-   our SSRF resolver from `crates/runtime/src/fetch.rs:36-163`), and
+   our SSRF resolver from `crates/runtime/src/transport/ssrf.rs:36-163`), and
    begins reading frames. Frames arrive as MessageEvent dispatches on
    the user's listeners.
 5. **Server-side WebSocket (preserve `WebSocketPair`).** The Cloudflare-
@@ -273,7 +273,7 @@ items in §XVII are policy choices, not spec defects.
   fetch handler returns `Response { status: 101, webSocket: client }`
   with `client` being one half of a `WebSocketPair`, the runtime detects
   status 101 + a `webSocket` slot on the response (existing
-  `crates/runtime/src/http.rs:171-179`), the gateway accepts the inbound
+  `crates/runtime/src/transport/handler.rs:171-179`), the gateway accepts the inbound
   WebSocket via tungstenite (`compio_ws::accept_async`), and pumps
   messages bidirectionally between the WebSocketPair's "client" half
   and the inbound socket. The `WebSocketPair` machinery is tightly
@@ -314,9 +314,9 @@ is illustrative.
 | # | Decision | Rationale | Section |
 |---|----------|-----------|---------|
 | **D-1** | Pure native: `WebSocket`, `MessageEvent`, `CloseEvent` are `#[v8_class]` Rust types. The 166-LOC `embed/websocket.js` polyfill and the five `__ws*` callbacks in `crates/runtime/src/websocket.rs` are deleted in cutover landing 3. No JS polyfill fallback once shipped. | Single source of truth; eliminates the data-as-string duality that today forces every binary message through `String(data)` and silently corrupts UTF-8. | §I |
-| **D-2** | `WebSocket : EventTarget` via `#[v8_inherit(EventTarget)]` — same pattern AbortSignal uses (`crates/runtime/src/dom/abort_signal.rs:124`). The class wrapper holds `Box<WebSocketImpl>` in V8 internal field 0 (where `WebSocketImpl` is `#[repr(C)]` with `EventTarget` as the first field for layout-compatible casts via `event_target::listeners_of` — but EventTarget is empty, so this is a zero-byte field; the cast still works because `attach_listeners` hangs the listener Rc off the wrapper as a private symbol). All other slots live in the boxed Rust state. | Spec mandates `instanceof EventTarget`; existing macro extension covers it. | §V, §XIII |
-| **D-3** | `MessageEvent : Event` and `CloseEvent : Event` via `#[v8_inherit(Event)]` — same pattern CustomEvent uses today (`crates/runtime/src/dom/custom_event.rs:83`). Both new classes use `#[repr(C)]` with `Event` as the first field; the inherited Event getters (`event.type`, `event.target`, `event.bubbles`, …) cast `*mut MessageEvent`/`*mut CloseEvent` directly to `*mut Event` per the offset-zero layout. | Spec compliance: `messageEvent instanceof Event === true`, `closeEvent instanceof Event === true`. The polyfill's "plain Event with expandos" produces FALSE for `instanceof MessageEvent`, breaking duck-typed library code. | §III, §XIII |
-| **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock` anywhere. Inter-class references use `Rc<RefCell<…>>`. The compio + cyper transport is per-thread (`thread_local! CLIENT` in `crates/runtime/src/fetch.rs`); the WebSocket reuses that. | AGENTS.md "V8 per thread, one isolate per app". A `Send` constraint would force `Arc<Mutex<…>>` and serialise the receive fast-path. | §V, §VII |
+| **D-2** | `WebSocket : EventTarget` via `#[v8_inherit(EventTarget)]` — same pattern AbortSignal uses (`crates/runtime/src/web/dom/abort_signal.rs:124`). The class wrapper holds `Box<WebSocketImpl>` in V8 internal field 0 (where `WebSocketImpl` is `#[repr(C)]` with `EventTarget` as the first field for layout-compatible casts via `event_target::listeners_of` — but EventTarget is empty, so this is a zero-byte field; the cast still works because `attach_listeners` hangs the listener Rc off the wrapper as a private symbol). All other slots live in the boxed Rust state. | Spec mandates `instanceof EventTarget`; existing macro extension covers it. | §V, §XIII |
+| **D-3** | `MessageEvent : Event` and `CloseEvent : Event` via `#[v8_inherit(Event)]` — same pattern CustomEvent uses today (`crates/runtime/src/web/dom/custom_event.rs:83`). Both new classes use `#[repr(C)]` with `Event` as the first field; the inherited Event getters (`event.type`, `event.target`, `event.bubbles`, …) cast `*mut MessageEvent`/`*mut CloseEvent` directly to `*mut Event` per the offset-zero layout. | Spec compliance: `messageEvent instanceof Event === true`, `closeEvent instanceof Event === true`. The polyfill's "plain Event with expandos" produces FALSE for `instanceof MessageEvent`, breaking duck-typed library code. | §III, §XIII |
+| **D-4** | Single-threaded per isolate: every Rust struct is `!Send + !Sync`. No `Mutex`/`RwLock` anywhere. Inter-class references use `Rc<RefCell<…>>`. The compio + cyper transport is per-thread (`thread_local! CLIENT` in `crates/runtime/src/transport/ssrf.rs`); the WebSocket reuses that. | AGENTS.md "V8 per thread, one isolate per app". A `Send` constraint would force `Arc<Mutex<…>>` and serialise the receive fast-path. | §V, §VII |
 | **D-5** | Internal-slot storage rule (sharpened from streams D-2): each spec slot lives in EXACTLY ONE location. Numeric / Cell-flag slots live in the boxed Rust struct (`Box<WebSocketImpl>` in internal field 0); slots that need observable JS identity preservation (e.g. cached Headers, the once-built MessageEvent template) live in V8 private symbols. There is NO mirror; no shadow-copy. The ready-state slot lives ONLY in the Rust enum `Cell<ReadyState>` — not also in `[[readyState]]` getter cache. | Spec algorithms must be observably indistinguishable from "directly modify `[[…]]`". The single-source rule is the entire consistency model — same model that streams-native and fetch-native use. | §V, §XIII |
 | **D-6** | `bufferedAmount` is real, observable, and updated synchronously in `send()` and the send-pump. Held as `Cell<u64>` on the Rust state. The polyfill returns 0 always (it had no concept of "queued bytes"); v2 increments on every send-call by the byte count of the encoded frame payload (UTF-8 encoded for strings, raw byte length for binary, `blob.size` for Blobs), and decrements as the send-pump drains the wire. **Send-before-OPEN behaviour:** per current WHATWG §3.1 (https://websockets.spec.whatwg.org/#dom-websocket-send) "If this's ready state is CONNECTING, throw an InvalidStateError DOMException." v2 throws — matches the live spec, undici, and workerd. (v1's D-6 referenced WPT `Send-before-open.any.js` as a checks-the-increment-behaviour test; that test was updated upstream when the spec was amended to require the throw — the doc claim is now accurate with the throw, addresses critic MAJOR #26.) | Spec §3.1 attribute `bufferedAmount`; required for backpressure-aware uploads. | §V.4 |
 | **D-7** | `binaryType` defaults to `"blob"` per spec §3.1. The polyfill defaults to `"arraybuffer"` (likely a workerd-historical default; workerd had a `websocket_standard_binary_type` compat flag — `web-socket.h:421-422`). v2 ships the spec-correct default. WPT `Create-valid-url-binaryType-blob.any.js` checks the default value. **Setter behaviour:** silent-no-op on unknown values (matches undici, workerd, and the WPT expected-pass for `binaryType-wrong-value.any.js`); the strict-throws path lives behind a non-default Cargo feature for WPT-update tracking only. (addresses critic MAJOR #16) The polyfill cutover landings (§XIV) flip the default-value; one landing is dedicated to documenting the behaviour change in the upgrade notes (some apps may rely on `arraybuffer` default — they break loudly via `dataView.something is not a function`, which is the desired failure mode rather than silent bytes-→string drift). | Spec compliance + ecosystem-shipping behaviour. The "loudly break on default change" failure mode is preferable to silent silent-binary-corruption; the silent-no-op-on-unknown-set matches every shipping impl and the existing WPT test. | §V.4, §II.4 |
@@ -324,10 +324,10 @@ is illustrative.
 | **D-9** | URL parse uses the existing native URL class (ada-url backed). Scheme MUST normalise to `ws` or `wss` (`http`→`ws`, `https`→`wss`). Fragment MUST be empty (post-parse `urlRecord.hash === ""` AND the original input did not end with `#`). Both cases throw SyntaxError. The URL is stored as a `url::Url` (the parsed record) plus a separate `String` for the "input as serialized for `.url` getter" — per spec §3.1 the `url` attribute returns the URL "serialized" via the URL Standard's serializer, which is essentially the same as `urlRecord.href` for non-fragment-bearing URLs. | Spec; the URL parser path is shared with fetch (`fetch_native::dictionaries::parse_url`). | §V.1 |
 | **D-10** | Protocol validation per spec / RFC 6455: each `protocol` element must be a non-empty token whose codepoints are in U+0021..U+007E excluding the RFC 7230 separator characters (`"(),/:;<=>?@[\]{}` plus space and HT). Duplicates (case-insensitive) throw SyntaxError. The undici utility `isValidSubprotocol` (`undici/lib/web/websocket/util.js:101-141`) is the literal implementation; we port it 1:1 in Rust. | Spec; WPT `Create-protocols-repeated.any.js`, `Create-protocols-repeated-case-insensitive.any.js`, `Create-protocol-with-space.any.js`, `Create-asciiSep-protocol-string.any.js`, `Create-nonAscii-protocol-string.any.js`, `Create-extensions-empty.any.js` cover the validation. | §V.2 |
 | **D-11** | Construction kicks off the connection asynchronously ("in parallel" per spec §3.1 step 13). The constructor returns immediately with `readyState === CONNECTING (0)`. A compio task is spawned via `state.spawned_ops.push(...)` that performs the HTTP/1.1 GET upgrade and then runs the receive loop. The constructor synchronously installs the `signal_priv` slot (for the optional `signal: AbortSignal` extension) and the underlying connection-handle private symbol; the connection itself materialises later. | Spec; WPT `Create-valid-url.any.js` constructs many sockets and asserts they're `CONNECTING` synchronously. | §V.3, §VII |
-| **D-12** | The HTTP/1.1 client handshake reuses the existing `cyper::Client` thread-local from `crates/runtime/src/fetch.rs:316-335` (already SSRF-resolver-equipped, already TLS-enabled via rustls). The handshake builds a plain `http::Request` with method GET, the seven WebSocket headers (Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Protocol, Origin, Host), sends via cyper, validates the 101 response (RFC 6455 §4.1 steps 2-6), and on success extracts the Upgraded I/O object. **cyper 0.8 does NOT expose `Upgraded`** (not in its public API; verified docs.rs); the design therefore **bypasses cyper for the WebSocket path** and uses `compio_ws::client_async` (`compio-ws 0.3.1`, already in `Cargo.lock:608` as a transitive dep), which performs the handshake and frame phase end-to-end on a `compio::TcpStream` / `compio_tls::Stream` we open ourselves. SSRF + TLS verification are duplicated for the WS case (the resolver lives one level higher than cyper for this path; the `is_blocked_ip` blocklist in `fetch.rs:36` is shared verbatim). v2 may unify if cyper grows an `Upgraded` API. | Pragmatic — `compio-ws` is already a transitive workspace dep, has a tungstenite-based receiver, and exposes the framing as a `Stream<Item=Result<Message>>`. v1 doesn't reimplement the wire protocol in-tree. | §VII |
+| **D-12** | The HTTP/1.1 client handshake reuses the existing `cyper::Client` thread-local from `crates/runtime/src/transport/ssrf.rs:316-335` (already SSRF-resolver-equipped, already TLS-enabled via rustls). The handshake builds a plain `http::Request` with method GET, the seven WebSocket headers (Upgrade, Connection, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Protocol, Origin, Host), sends via cyper, validates the 101 response (RFC 6455 §4.1 steps 2-6), and on success extracts the Upgraded I/O object. **cyper 0.8 does NOT expose `Upgraded`** (not in its public API; verified docs.rs); the design therefore **bypasses cyper for the WebSocket path** and uses `compio_ws::client_async` (`compio-ws 0.3.1`, already in `Cargo.lock:608` as a transitive dep), which performs the handshake and frame phase end-to-end on a `compio::TcpStream` / `compio_tls::Stream` we open ourselves. SSRF + TLS verification are duplicated for the WS case (the resolver lives one level higher than cyper for this path; the `is_blocked_ip` blocklist in `fetch.rs:36` is shared verbatim). v2 may unify if cyper grows an `Upgraded` API. | Pragmatic — `compio-ws` is already a transitive workspace dep, has a tungstenite-based receiver, and exposes the framing as a `Stream<Item=Result<Message>>`. v1 doesn't reimplement the wire protocol in-tree. | §VII |
 | **D-13** | Receive loop architecture: a compio task per WebSocket. The task holds the `compio_ws::WebSocketStream` and reads frames. On each frame, it pushes an `OpResult::WebSocketEvent { ws_id, kind: WsEvent }` onto the runtime's event queue. The runtime loop dispatches the event by entering the V8 isolate, looking up the cached `WsCachedHandles { ws_obj, on_message, on_close }` from `WebSocketImpl`, building MessageEvent / CloseEvent / Event, and calling `dispatch_event`. The receive task exits when (a) it reads a Close frame, (b) the underlying TCP/TLS stream errors out, or (c) the runtime cancels the task on isolate teardown. | Mirrors fetch's `spawn_body_reader` pattern. The compio task is `!Send` (single-threaded), the receive-loop borrows the stream &mut without locks. | §VII.2, §VII.3 |
 | **D-14** | A new `OpResult::WebSocketEvent` variant carries `{ ws_id: u32, kind: WsEvent }` where `WsEvent` is one of `Open { protocol, extensions }`, `Message(WsMessage)`, `Close { code, reason, was_clean }`, `Error { reason }`. Three variants are needed (Open is separate from Message because it transitions state and updates two attributes; Close carries the wasClean flag computed from "did we receive a Close frame matching our sent code?"; Error is the abnormal-closure / handshake-failed path). The existing `OpResult::Completed { value: String }` cannot carry a binary `Vec<u8>`; the existing `OpResult::JsValue { resolver, value: ResolveValue }` is for class-method async returns and would need a fresh resolver per event. The dedicated variant is simpler. | Same justification as streams-native D-3 (existing OpResult variants are misshaped). The dispatch loop in `runtime.rs` already pattern-matches on OpResult; one new arm. | §V.5, §VII.3 |
-| **D-15** | Send queue: a `VecDeque<WsFrame>` on the boxed `WebSocketImpl`, drained by the send-pump. Adding a frame increments `bufferedAmount` by the encoded payload byte count; draining decrements by the same. The send-pump is woken via the `outgoing_ready: Rc<Cell<bool>>` flag + `pump_waker: Rc<RefCell<Option<Waker>>>` pair the existing `crates/runtime/src/state.rs:160-163` already carries; the same pump pattern works for client sockets and WebSocketPair-coupled sockets. | Reuses the existing waker plumbing for the WebSocketPair pump. | §V.5, §VII.4 |
+| **D-15** | Send queue: a `VecDeque<WsFrame>` on the boxed `WebSocketImpl`, drained by the send-pump. Adding a frame increments `bufferedAmount` by the encoded payload byte count; draining decrements by the same. The send-pump is woken via the `outgoing_ready: Rc<Cell<bool>>` flag + `pump_waker: Rc<RefCell<Option<Waker>>>` pair the existing `crates/runtime/src/core/state.rs:160-163` already carries; the same pump pattern works for client sockets and WebSocketPair-coupled sockets. | Reuses the existing waker plumbing for the WebSocketPair pump. | §V.5, §VII.4 |
 | **D-16** | Backpressure on receive: NO. The runtime delivers MessageEvents eagerly; user code that doesn't drain its message queue causes events to pile up in the JS handler's microtask queue, NOT in our Rust queue. This matches the polyfill's behaviour and undici's default (no auto-pause). workerd does pause the read loop on `pendingAutoResponseTimestamp` accumulation but only in the hibernation path. v2 may add a "max in-flight events" cap if AI-builder apps demonstrate a need. | The TCP backpressure is sufficient — V8's microtask queue is the natural buffer. Adding receive-side pause adds complexity for no observable spec benefit. | §VII.2 |
 | **D-17** | UTF-8 validation on text frames: enforced. Per RFC 6455 §8.1, a text frame whose payload is not valid UTF-8 MUST cause the connection to fail with code 1007 ("Invalid frame payload data"). `compio-ws` / tungstenite handle this internally (tungstenite returns `WebSocketError::Utf8` and yields a Close frame with code 1007 on the next poll); the receive task converts that into a `Close { code: 1007, reason: "Invalid UTF-8", was_clean: false }` event. JS observers see `error` event followed by `close` event with `wasClean: false`. | Spec §3.2 step 2.1 ("If the bytes are not a valid UTF-8 sequence: fail the WebSocket connection"); WPT covers this via the autobahn fuzzers in `websockets/autobahn/` (which we are NOT yet running in CI but may add as a separate job). | §V.4, §VII.2 |
 | **D-18** | `binaryType="blob"` builds a Blob via `crates/runtime/src/blob.rs::Blob::from_bytes` (already shipped). The MessageEvent's `data` is a `v8::Global<v8::Object>` pointing to the Blob wrapper. `binaryType="arraybuffer"` builds an ArrayBuffer via `v8::ArrayBuffer::new_backing_store_from_vec` (zero-copy where possible — same pattern as fetch's `Body.arrayBuffer()`). The choice is read at MessageEvent-construction time, NOT at frame-arrival time, so a JS user can flip `binaryType` between two binary frames and the SECOND frame uses the new value. | Spec §3.1 attribute `binaryType` ("on getting, must return the value to which it was last set"); the read-at-dispatch-time semantics is observable (and tested by WPT — `Send-binary-blob.any.js` and `Send-binary-arraybuffer.any.js`). | §V.4 |
@@ -430,7 +430,7 @@ on every fire).
 ### I.2. File layout
 
 ```
-crates/runtime/src/dom/                    [existing — append]
+crates/runtime/src/web/dom/                    [existing — append]
 ├── message_event.rs                  (new) MessageEvent class (~150 LOC)
 └── close_event.rs                    (new) CloseEvent class (~120 LOC)
 
@@ -459,11 +459,11 @@ crates/runtime/src/websocket/         (new directory; replaces flat websocket.rs
 crates/runtime/src/lib.rs             (modified) +pub mod websocket; rename old websocket
                                                   module to websocket::legacy on landing 2.
 
-crates/runtime/src/init.rs            (modified) install WebSocket / MessageEvent / CloseEvent
+crates/runtime/src/core/init.rs            (modified) install WebSocket / MessageEvent / CloseEvent
                                                   classes; route the existing __ws* callback
                                                   installers behind the feature flag.
 
-crates/runtime/src/state.rs           (modified) add OpResult::WebSocketEvent variant (D-14).
+crates/runtime/src/core/state.rs           (modified) add OpResult::WebSocketEvent variant (D-14).
                                                   WebSocketState fields evolve in place — additive
                                                   changes only, the existing gateway pump keeps
                                                   reading the same fields.
@@ -471,7 +471,7 @@ crates/runtime/src/state.rs           (modified) add OpResult::WebSocketEvent va
 crates/runtime/src/embed/websocket.js (deleted in landing 3)
 crates/runtime/src/websocket.rs       (deleted in landing 3 — replaced by crates/runtime/src/websocket/)
 
-crates/runtime/src/runtime.rs         (modified) dispatch OpResult::WebSocketEvent variant.
+crates/runtime/src/core/runtime.rs         (modified) dispatch OpResult::WebSocketEvent variant.
 
 crates/runtime/Cargo.toml             (modified) explicit
                                                   `compio-ws = { version = "0.3", default-features = false, features = ["client", "tls"] }`
@@ -555,7 +555,7 @@ entirely.
 | typed_id everywhere | N/A (a WebSocket isn't a typed entity in the platform sense; the per-isolate `ws_id: u32` is a runtime-internal identifier). |
 | Wire formats are immutable contracts | OK — `WebSocket` IDL is the wire format and we match the WHATWG spec exactly. The internal `WebSocketImpl` struct is a private contract between the V8 callback path and the runtime pump; changes freely. |
 | Native primitives are the kernel | OK — `WebSocket` / `MessageEvent` / `CloseEvent` are spec-mandated DOM/HTML primitives, not platform-specific zeroship globals. They live alongside Event / EventTarget / AbortSignal in the existing kernel surface. |
-| The gateway is dumb | OK — the gateway-side WebSocketPair coupling continues to live in the worker, not the gateway. The gateway's existing 101-detection logic (`crates/runtime/src/http.rs:171-179`) is unchanged. |
+| The gateway is dumb | OK — the gateway-side WebSocketPair coupling continues to live in the worker, not the gateway. The gateway's existing 101-detection logic (`crates/runtime/src/transport/handler.rs:171-179`) is unchanged. |
 
 ## II. IDL surface — exhaustive
 
@@ -682,7 +682,7 @@ pub struct WebSocketImpl {
 
     /// Cached V8 handles — resolved once at first `dispatchEvent`,
     /// reused for every subsequent event. Same pattern the polyfill
-    /// uses today (`crates/runtime/src/state.rs:127-141`,
+    /// uses today (`crates/runtime/src/core/state.rs:127-141`,
     /// `crates/runtime/src/websocket.rs:90-118`). Native version caches
     /// the WebSocket wrapper Global (for the `dispatchEvent` `this`
     /// arg) plus optionally the `onmessage`/`onclose`/`onopen`/`onerror`
@@ -765,7 +765,7 @@ pub enum WsFrame {
 }
 ```
 
-The existing `WebSocketState` in `crates/runtime/src/state.rs:145-166`
+The existing `WebSocketState` in `crates/runtime/src/core/state.rs:145-166`
 is renamed to `WebSocketImpl` and grows the new fields above. The rename
 is wire-format-internal (no on-disk format depends on it); the existing
 `websockets: HashMap<u32, WebSocketState>` (state.rs:401) keeps its
@@ -823,7 +823,7 @@ typedef (WindowProxy or MessagePort or ServiceWorker) MessageEventSource;
 pub struct MessageEventState {
     /// Embedded Event — Event must be at offset 0 for the inherited
     /// Event getters to cast `*mut MessageEventState as *mut Event`.
-    /// Same #[repr(C)] discipline as CustomEvent (`crates/runtime/src/dom/custom_event.rs`).
+    /// Same #[repr(C)] discipline as CustomEvent (`crates/runtime/src/web/dom/custom_event.rs`).
     pub event: crate::dom::event::Event,
 
     /// `data` — `any` per IDL, default null. Held as a Global so the
@@ -2196,7 +2196,7 @@ function). v1 matches that.
 
 ### VI.4. The gateway-side coupling
 
-The existing flow in `crates/runtime/src/http.rs:171-179` reads
+The existing flow in `crates/runtime/src/transport/handler.rs:171-179` reads
 `Response.webSocket` (a Global<WebSocket>) and extracts its `ws_id`.
 The runtime-up path (gateway) then accepts the inbound TCP socket via
 `compio_ws::accept_async` and creates two pumps:
@@ -2351,7 +2351,7 @@ The framer handles:
   §5.2. v2's `Cargo.toml` line:
   `compio-ws = { version = "0.3", default-features = false, features = ["client", "tls"] }`
   — explicitly NO `deflate`. The runtime startup check in
-  `crates/runtime/src/init.rs` asserts that
+  `crates/runtime/src/core/init.rs` asserts that
   `compio_ws::WebSocketConfig::default().compression == None` so a
   feature-flag mistake fails loud at boot. (addresses critic MAJOR #18)
 
@@ -2430,7 +2430,7 @@ When the runtime pump pulls an `OpResult::WebSocketEvent` off the
 `spawned_ops` queue, it enters V8 and dispatches:
 
 ```rust
-// crates/runtime/src/runtime.rs — handle_op_result match arm
+// crates/runtime/src/core/runtime.rs — handle_op_result match arm
 OpResult::WebSocketEvent { ws_id, kind } => {
     let state = state_clone.borrow();
     let Some(impl_) = state.websockets.get(&ws_id) else { return; };
@@ -2731,7 +2731,7 @@ pub async fn run_client_handshake(
     config: tungstenite::protocol::WebSocketConfig,
 ) -> Result<Established<impl compio::buf::IoBuf>, HandshakeError> {
     // SSRF: TWO-PHASE check, mirroring fetch's discipline at
-    // crates/runtime/src/fetch.rs:36-163.
+    // crates/runtime/src/transport/ssrf.rs:36-163.
     //
     // Phase 1 — URL string check: reject IP-literal hostnames in the
     //   blocklist (loopback, link-local, private, multicast, …).
@@ -3164,7 +3164,7 @@ Audit of `crates/runtime-macros/src/v8_class.rs` against this design.
 | 4 | `#[v8_method]` returning `Result<(), OpError>` | Already shipped |
 | 5 | `#[v8_getter] / #[v8_setter] / #[v8_name]` | Already shipped |
 | 6 | EventHandler IDL attributes (onopen/onmessage/...) | NO new macro work — implemented as plain getter+setter pairs that delegate to the EventTarget listener list. Same pattern AbortSignal's `onabort` uses today. |
-| 7 | `static` constants on the constructor (CONNECTING/OPEN/CLOSING/CLOSED) | NEW — small extension. Currently `Event` installs constants via a hand-rolled `install_event_constants` (`crates/runtime/src/dom/event.rs:409-434`). Either follow that pattern (hand-roll) OR add an `#[v8_constant]` attribute to the macro. Picking hand-roll for v1 (10 LOC; matches Event's pattern). |
+| 7 | `static` constants on the constructor (CONNECTING/OPEN/CLOSING/CLOSED) | NEW — small extension. Currently `Event` installs constants via a hand-rolled `install_event_constants` (`crates/runtime/src/web/dom/event.rs:409-434`). Either follow that pattern (hand-roll) OR add an `#[v8_constant]` attribute to the macro. Picking hand-roll for v1 (10 LOC; matches Event's pattern). |
 | 8 | `Rc<RefCell<…>>` field access on boxed state | Pattern, not macro work — same as streams. |
 
 **Summary: NO new macro extensions are required.** The hand-rolled
@@ -3233,7 +3233,7 @@ post-merge populates the directory.
 ### XII.3. In-process echo server
 
 Functional WPT tests need a real WebSocket server. The runtime already
-ships `echo-server` (`crates/runtime/src/echo_server.rs`, declared in
+ships `echo-server` (`crates/runtime/src/core/echo_server.rs`, declared in
 `crates/runtime/Cargo.toml`). v2 extends it with WebSocket echo support
 via `compio_ws::accept_async` — ~80 LOC addition.
 
@@ -3292,7 +3292,7 @@ Three landings:
 ### Landing 1 — feature-flagged native, polyfill default
 
 - Add `crates/runtime/src/websocket/` module + `MessageEvent` /
-  `CloseEvent` in `crates/runtime/src/dom/`.
+  `CloseEvent` in `crates/runtime/src/web/dom/`.
 - Behind `#[cfg(feature = "runtime_native_websocket")]` (default off):
   install native classes; route the gateway 101-handshake to the native
   WebSocketImpl.
@@ -3308,7 +3308,7 @@ Three landings:
 - Rename `crates/runtime/src/websocket.rs` → `crates/runtime/src/websocket/legacy.rs`
   to mark it deprecated. Both modules coexist during this window.
 - Refactor any callsite that depends on polyfill semantics (the gateway
-  pump in particular — verify `crates/runtime/src/http.rs:171-179`
+  pump in particular — verify `crates/runtime/src/transport/handler.rs:171-179`
   still extracts `ws_id` correctly from the new native Response).
 - Update `docs/reference/websocket-design.md` with a note pointing to
   this ADR.
@@ -3318,7 +3318,7 @@ Three landings:
 - Delete `crates/runtime/src/embed/websocket.js` (166 LOC).
 - Delete `crates/runtime/src/websocket/legacy.rs` (the old `websocket.rs`,
   ~180 LOC).
-- Delete the five `__ws*` callbacks from `crates/runtime/src/init.rs`
+- Delete the five `__ws*` callbacks from `crates/runtime/src/core/init.rs`
   install code.
 - Remove the feature flag — native is the only implementation.
 - File the ADR under `docs/decisions/`.
@@ -3391,8 +3391,8 @@ than streams or fetch.
   `Blob.stream()` is needed for `binaryType="blob"` interop with user
   code that wants to consume the blob as a ReadableStream. Already
   shipped in streams-native + blob-native.
-- **EventTarget native:** shipped (`crates/runtime/src/dom/event_target.rs`).
-- **Event native:** shipped (`crates/runtime/src/dom/event.rs`).
+- **EventTarget native:** shipped (`crates/runtime/src/web/dom/event_target.rs`).
+- **Event native:** shipped (`crates/runtime/src/web/dom/event.rs`).
 - **`#[v8_inherit(EventTarget)]` macro:** shipped (used by AbortSignal).
 - **`#[v8_inherit(Event)]` macro:** shipped (used by CustomEvent).
 - **AbortSignal native:** shipped — used for D-24 `signal` extension.

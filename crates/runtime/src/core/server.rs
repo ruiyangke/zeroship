@@ -13,7 +13,7 @@ use zeroship_runtime::serve::{start_server, ServerOptions};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Default JS loaded when no --js flag is provided.
-const SERVER_JS: &str = include_str!("../benches/scenarios.js");
+const SERVER_JS: &str = include_str!("../../benches/scenarios.js");
 
 fn server_modules() -> Vec<ModuleEntry> {
     vec![ModuleEntry {
