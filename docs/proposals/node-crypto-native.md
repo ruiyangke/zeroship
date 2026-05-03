@@ -746,11 +746,21 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `getCiphers() -> string[]` | 1 | iterate registry | sync | C |
 | `getCipherInfo(name | nid, options?)` | 1 | registry metadata lookup | sync | C |
 
-**Algorithms supported in Stage 1:**
-- AES-128/192/256 in CBC, CTR, GCM, KW, OCB modes (`aes-128-cbc`, `aes-256-gcm`, ...)
-- ChaCha20-Poly1305 (`chacha20-poly1305`) — D-N23
+**Algorithms supported in Stage 1 (after v3 audit, addresses C2-3):**
+- AES-128/192/256 in CBC, CTR, GCM, KW, CCM modes (CCM via aws-lc-sys raw FFI per D-N38; CBC/CTR/GCM/KW via aws-lc-rs high-level API).
+- AES-128/192/256-CFB128 (the only CFB variant exposed by aws-lc-rs).
+- ChaCha20-Poly1305 (`chacha20-poly1305`) — D-N23.
+- (Bonus capability over Node) AES-128/256-GCM-SIV via aws-lc-rs `aead::AES_*_GCM_SIV` — opt-in, not in Node yet.
 
-**Stage 2 (with `--legacy-crypto` flag):** DES-CBC, 3DES (DES-EDE3), Blowfish (`bf-*`), Cast5, RC4 (`rc4`), IDEA. aws-lc-rs has 3DES via `cipher::TDES_*`; others need raw FFI.
+**Moved to Stage E (v3, addresses C2-3 — aws-lc-rs lacks high-level support; FFI required):**
+- AES-OCB (low value/effort ratio).
+- AES-ECB (rare; HSM key wrap is the common use case but our AES-KW already covers that path).
+- AES-CFB1, AES-CFB8, AES-OFB (very niche).
+
+**Permanently deferred (v3, addresses C2-3 + M2-23):**
+- AES-XTS (requires tweak parameter; generic CipherContext has no slot for it).
+
+**Stage 2 (with `--legacy-crypto` flag):** DES-CBC, 3DES (DES-EDE3), Blowfish (`bf-*`), Cast5, RC4. **aws-lc-rs does NOT have 3DES** (verified — v1/v2's `cipher::TDES_*` claim was incorrect); all of these require aws-lc-sys raw FFI per §III.2a / D-N38. IDEA was removed from BoringSSL — permanently deferred.
 
 ### II.4. Sign / Verify
 
@@ -1009,33 +1019,74 @@ These ship for node:crypto via the kernel, no new algorithm code:
 
 That's 16 algorithms shared across both surfaces.
 
+<!-- Round 3: addressing CRITICAL C2-3 (invented aws-lc-rs algorithm constants). -->
 ### III.2. node:crypto-only algorithms (NEW kernel work)
 
-| Algorithm | Why node:crypto needs it | aws-lc-rs path | Stage |
+**aws-lc-rs API audit (v3, addresses C2-3):** the `Backing path` column below lists the EXACT constants/modules verified against the live docs.rs surface (https://docs.rs/aws-lc-rs/latest/aws_lc_rs/). Where v2 cited a non-existent constant, the row is rewritten. Three categories:
+- **`aws_lc_rs::*` (high-level)** — verified-present in the public Rust API.
+- **`aws_lc_sys::*` (raw FFI)** — must drop to the C bindings; we vendor an `EVP_*` shim mirroring the existing `crypto_native/evp_ffi.rs` pattern (D-N38).
+- **DEFERRED** — not shippable from aws-lc / BoringSSL at all (e.g., RIPEMD-160 was removed; IDEA was excised; SHAKE/SHA3-224 are NOT in BoringSSL).
+
+| Algorithm | Why node:crypto needs it | Backing path (v3 verified) | Stage |
 |---|---|---|---|
-| MD5 | etag generation, content addressing, legacy auth | `digest::MD5` (legacy-only constant) | B |
-| SHA-224 | Some legacy SAML / PKCS profiles | `digest::SHA224` | B |
-| SHA-512/224 / SHA-512/256 | Legacy interop | `digest::SHA512_224` / `SHA512_256` | B |
-| `chacha20-poly1305` | Modern AEAD (D-N23) | `aead::CHACHA20_POLY1305` | C |
-| AES-OCB | Per Node — same constant exposed; aws-lc-rs has it | `aead::AES_*_OCB` | C |
-| `aes-*-cfb`, `aes-*-cfb1`, `aes-*-cfb8`, `aes-*-ofb`, `aes-*-ecb` | Niche legacy | aws-lc-sys raw FFI | E (Stage 2) |
-| 3DES (DES-EDE3) in CBC / ECB / CFB | Legacy auth (banking, retail POS) | `cipher::TDES_*` | E (`--legacy-crypto` flag) |
-| Blowfish (`bf-cbc`, `bf-ecb`, ...) | Very legacy | aws-lc-sys raw FFI (deprecated in BoringSSL) | E |
-| Cast5 (`cast5-cbc`) | Old PGP | aws-lc-sys raw FFI | E |
-| RC4 / IDEA | Pre-2010 protocols | aws-lc-sys raw FFI | E |
-| BLAKE2b-512, BLAKE2s-256 | Hash diversity, password libs | aws-lc-sys raw FFI | E |
-| RIPEMD-160 | Legacy bitcoin / lightning code | NOT in aws-lc-rs | DEFERRED (rare; no clean path) |
-| **scrypt** | RFC 7914 password hashing | `aws_lc_sys::EVP_PBE_scrypt` | B |
-| **DH (modp1..modp18, ffdhe2048..ffdhe8192)** | Named-group DH | aws-lc-sys raw FFI | E |
-| **DH arbitrary primes** | Generic DH | aws-lc-sys raw FFI | E |
-| **Brainpool curves** (`brainpoolP256r1`, `brainpoolP384r1`, `brainpoolP512r1`) | Niche EU / German banking | aws-lc-sys raw FFI | E |
-| **secp256k1** | Bitcoin / Ethereum signing | aws-lc-rs `signature::ECDSA_P256K1_SHA256_{ASN1,FIXED}` (and `_SIGNING` variants) — note the actual constant name is `P256K1` not `K256`. (addresses critic CRITICAL #14: critic flagged the v1 `ECDSA_K256` as invented; the API exists but under the `P256K1` name.) | C |
+| MD5 | etag generation, content addressing, legacy auth | aws-lc-sys raw FFI via `EVP_md5()` + `EVP_DigestInit_ex` / `EVP_DigestUpdate` / `EVP_DigestFinal_ex`. **NOT in aws-lc-rs's public digest module** (verified: https://docs.rs/aws-lc-rs/latest/aws_lc_rs/digest/index.html — only SHA1/2/3 + SHA512_256). ~30 LOC FFI wrapper. | B |
+| SHA-224 | Some legacy SAML / PKCS profiles | aws-lc-rs `digest::SHA224` (verified present). | B |
+| SHA-512/256 | Modern interop | aws-lc-rs `digest::SHA512_256` (verified present). | B |
+| SHA-512/224 | Legacy interop | aws-lc-sys raw FFI via `EVP_sha512_224()` (BoringSSL has it). **NOT in aws-lc-rs's public digest module.** ~40 LOC FFI wrapper. | B |
+| SHA3-256 / SHA3-384 / SHA3-512 | Modern interop, post-Keccak hashing | aws-lc-rs `digest::SHA3_256` / `SHA3_384` / `SHA3_512` (verified present). | B |
+| SHA3-224 / SHAKE128 / SHAKE256 | Mostly XOF use cases | **DEFERRED to Stage E** (or beyond). aws-lc-rs does not expose them; BoringSSL itself does not ship SHA3-224 or SHAKE in its public API (only the SHA3 256/384/512 variants used internally for Ed448). RIPEMD-160 is similarly absent. (v3, addresses C2-3 + critic miss-#4: SHAKE outputLength variable-length API spec'd if/when shipped — but Stage E is the earliest realistic landing.) | E (or DEFER) |
+| `chacha20-poly1305` | Modern AEAD (D-N23) | aws-lc-rs `aead::CHACHA20_POLY1305` (verified present). | C |
+| AES-CBC (128/192/256) | Standard interop | aws-lc-rs `cipher::AES_128/192/256` + `PaddedBlockEncryptingKey::cbc_pkcs7` (verified present). | C |
+| AES-CTR (128/192/256) | Standard interop | aws-lc-rs `cipher::AES_128/192/256` + `EncryptingKey::ctr` (verified present). | C |
+| AES-GCM (128/192/256) | Modern AEAD | aws-lc-rs `aead::AES_128_GCM` / `AES_192_GCM` / `AES_256_GCM` (verified present; **note 192-bit IS exposed in aead module** per docs.rs). | C |
+| AES-GCM-SIV (128/256) | Nonce-reuse-resistant AEAD | aws-lc-rs `aead::AES_128_GCM_SIV` / `AES_256_GCM_SIV` (verified present; **bonus capability over Node** which doesn't ship SIV). Optional Stage 1 extension. | C |
+| AES-CCM (128/192/256) | NIST mode for constrained devices | **NOT in aws-lc-rs** (verified: https://docs.rs/aws-lc-rs/latest/aws_lc_rs/aead/index.html exposes only GCM / GCM-SIV / ChaCha20-Poly1305). aws-lc-sys raw FFI via `EVP_aes_128_ccm()` / `EVP_aes_192_ccm()` / `EVP_aes_256_ccm()` + `EVP_CIPHER_CTX_*`. ~120 LOC FFI wrapper (CCM has the unusual two-pass API; `EVP_CipherInit_ex` then `EVP_CIPHER_CTX_ctrl(EVP_CTRL_CCM_SET_IVLEN/SET_TAG/SET_L/SET_M)` then `EVP_CipherUpdate(NULL, ..., NULL, plaintext_len)` to set total length BEFORE AAD/data — this is what makes CCM's setAuthTag-pre-update ordering necessary; v2's state machine already enforces this correctly per CRITICAL #5). (v3, addresses C2-3.) | C |
+| AES-OCB (128/256) | RFC 7253 AEAD | **NOT in aws-lc-rs** (verified). aws-lc-sys raw FFI via `EVP_aes_128_ocb()` / `EVP_aes_256_ocb()` + `EVP_CIPHER_CTX_*`. ~80 LOC FFI wrapper. **DEFERRED to Stage E** — OCB is rare in practice; effort/value ratio doesn't justify Stage C. (v3, addresses C2-3: v2 wrongly claimed `aead::AES_*_OCB`; corrected.) | E |
+| AES-KW (128/192/256) | Key wrapping (D-N4) | aws-lc-rs `aead::*` does NOT expose KW; v2 claim corrected. Implemented via `aws_lc_rs::cipher::AES_*` in raw-block mode + RFC 3394 wrap routine in pure Rust (~120 LOC). Already implemented in `crypto_native/wrap.rs` from WebCrypto — moved into kernel for Stage A. | C (kernel reuse — Stage A) |
+| AES-XTS (128/256) | Disk encryption | **NOT in aws-lc-rs** (verified: cipher module has CBC/CTR/CFB128 only). aws-lc-sys raw FFI via `EVP_aes_128_xts()` / `EVP_aes_256_xts()` AND requires the cipher state to track an explicit "tweak" (disk-block index passed via the IV-as-tweak field per NIST SP 800-38E). Our generic `CipherContext` does not have a tweak concept. **DEFERRED PERMANENTLY** unless a creator app surfaces a disk-encryption use case (rare in app-server context; XTS is a disk-driver feature). (v3, addresses C2-3, M2-23: removed from CIPHER_NAMES.) | DEFER |
+| `aes-*-cfb` (CFB128) | Niche modern | aws-lc-rs `cipher::AES_*` + CFB128 mode (verified — CFB128 is the only CFB variant in the public API). | E (Stage 2; ungated) |
+| `aes-*-cfb1`, `aes-*-cfb8`, `aes-*-ofb`, `aes-*-ecb` | Very niche legacy | aws-lc-sys raw FFI via `EVP_aes_*_cfb1()`, `EVP_aes_*_cfb8()`, `EVP_aes_*_ofb()`, `EVP_aes_*_ecb()`. ~40 LOC each. | E (Stage 2; ungated) |
+| 3DES (DES-EDE3) in CBC / ECB / CFB | Legacy auth (banking, retail POS) | aws-lc-sys raw FFI via `EVP_des_ede3_cbc()` / `EVP_des_ede3_ecb()` / `EVP_des_ede3_cfb64()`. **NOT in aws-lc-rs** (verified: cipher module has AES only — `cipher::TDES_*` was a v1/v2 invention). ~40 LOC. | E (`--legacy-crypto` flag) |
+| Blowfish / Cast5 / RC4 / IDEA | Pre-2010 legacy | aws-lc-sys raw FFI for Blowfish (`EVP_bf_cbc()`); Cast5 / RC4 likely require deeper digging in aws-lc-sys (the BoringSSL slim build may not include them); IDEA was REMOVED from BoringSSL — **DEFERRED PERMANENTLY**. | E for Blowfish/Cast5/RC4 if present; DEFER for IDEA |
+| BLAKE2b-512, BLAKE2s-256 | Hash diversity, password libs | aws-lc-sys raw FFI via `EVP_blake2b512()` / `EVP_blake2s256()`. **NOT in aws-lc-rs digest module** (verified). ~30 LOC each. | E |
+| RIPEMD-160 | Legacy bitcoin / lightning code | **NOT in aws-lc** (BoringSSL does not ship RIPEMD-160). **DEFERRED PERMANENTLY** — recommend creator apps use the npm `ripemd160` package (pure JS, falls back via unenv). | DEFER |
+| **scrypt** | RFC 7914 password hashing | aws-lc-sys raw FFI via `EVP_PBE_scrypt()`. **NOT in aws-lc-rs's public KDF surface** (verified: only PBKDF2 + HKDF). ~20 LOC. | B |
+| **DH (modp1..modp18, ffdhe2048..ffdhe8192)** | Named-group DH | aws-lc-sys raw FFI via `DH_get_*` static-prime helpers + `DH_set0_pqg` + `DH_compute_key`. **NOT in aws-lc-rs's `agreement` module** (which exposes only EC: P-256/P-384/P-521 + X25519). ~150 LOC. | E |
+| **DH arbitrary primes** | Generic DH | aws-lc-sys raw FFI (same path as named groups, plus user-supplied prime + generator). ~50 LOC delta. | E |
+| **Brainpool curves** | Niche EU / German banking | aws-lc-sys raw FFI via `EC_GROUP_new_by_curve_name(NID_brainpoolP*)`. **NOT in aws-lc-rs's `signature` / `agreement` module** (verified). ~80 LOC. | E |
+| **secp256k1** | Bitcoin / Ethereum signing | aws-lc-rs `signature::ECDSA_P256K1_SHA256_{ASN1,FIXED}` and `_SIGNING` variants (verified at https://docs.rs/aws-lc-rs/latest/aws_lc_rs/signature/index.html — actual constant name is `P256K1` not `K256`). (counter-cited round-1 critic; v3 reaffirms.) | C |
 
-Stage 1 coverage: SHA family + AES-{CBC,CTR,GCM,KW,OCB} + ChaCha20-Poly1305 + RSA + ECDSA + Ed25519 + X25519 + ECDH + PBKDF2 + scrypt + HKDF + MD5 + secp256k1.
+Stage 1 coverage (Stage A+B+C, after v3 reroutes): SHA-1 / SHA-224 / SHA-256 / SHA-384 / SHA-512 / SHA-512-256 / SHA3-256 / SHA3-384 / SHA3-512 (high-level) + MD5 / SHA-512-224 (FFI); HMAC over those; AES-{CBC,CTR,GCM,KW,GCM-SIV} + ChaCha20-Poly1305 (high-level); AES-CCM (FFI); RSA-{PKCS1,PSS} + RSA-OAEP (high-level); ECDSA (P-256/P-384/P-521 + secp256k1) + Ed25519 + X25519 (high-level); ECDH (P-256/P-384/P-521 + X25519) (high-level); PBKDF2 + HKDF (high-level); scrypt (FFI).
 
-Stage 2 coverage: BLAKE2 + 3DES + Brainpool + named DH groups + X.509 + RC4 / Blowfish / Cast5 (with `--legacy-crypto`) + arbitrary-prime DH + generatePrime / checkPrime.
+Stage 2 coverage (Stage E): BLAKE2 + 3DES + Brainpool curves + named DH groups + X.509 + RC4 / Blowfish / Cast5 (with `--legacy-crypto`, where present in aws-lc) + arbitrary-prime DH + generatePrime / checkPrime + AES-OCB + AES-CFB1/8 + AES-OFB + AES-ECB.
 
-Argon2: NOT shipped natively. Node doesn't ship it. The npm `argon2` package is a node-gyp binding; via unenv it falls back to WASM. Acceptable.
+Permanently deferred: AES-XTS (no tweak in generic CipherContext), RIPEMD-160 (not in aws-lc), IDEA (removed from BoringSSL), SHA3-224 / SHAKE128 / SHAKE256 (not in BoringSSL public API), MD5-as-encryption (footgun, never).
+
+Argon2: NOT shipped natively. Node doesn't ship it in `node:crypto`. The npm `argon2` package is a node-gyp binding; via unenv it falls back to WASM. Acceptable.
+
+<!-- Round 3: addressing CRITICAL C2-3 (effort estimates updated for FFI work). -->
+### III.2a. Stage B / C FFI inventory (D-N38, addresses C2-3)
+
+The FFI work that must land alongside the high-level aws-lc-rs work, with effort estimates revised from v2's optimistic numbers:
+
+| Stage | FFI module | Functions wrapped (raw aws-lc-sys) | LOC | Industry-h | Agent-h |
+|---|---|---|---|---|---|
+| B | `crypto_kernel/digest_md5.rs` | `EVP_md5`, `EVP_DigestInit_ex`, `EVP_DigestUpdate`, `EVP_DigestFinal_ex`, `EVP_MD_CTX_new`, `EVP_MD_CTX_free` | ~30 | 4 | 0.1 |
+| B | `crypto_kernel/digest_sha512_224.rs` | `EVP_sha512_224` + reused EVP_DigestInit/Update/Final | ~40 | 5 | 0.13 |
+| B | `crypto_kernel/scrypt.rs` | `EVP_PBE_scrypt` | ~20 | 3 | 0.08 |
+| C | `crypto_kernel/cipher_ccm.rs` | `EVP_aes_128_ccm`, `EVP_aes_192_ccm`, `EVP_aes_256_ccm`, `EVP_CIPHER_CTX_*`, `EVP_CipherInit_ex`, `EVP_CIPHER_CTX_ctrl` (with `EVP_CTRL_CCM_SET_IVLEN`, `EVP_CTRL_CCM_SET_TAG`, `EVP_CTRL_CCM_SET_L`, `EVP_CTRL_CCM_SET_M`), `EVP_CipherUpdate` | ~120 | 14 | 0.35 |
+| C | `crypto_kernel/pkcs8_enc.rs` | `PKCS8_encrypt`, `PKCS8_marshal_encrypted_private_key`, `PKCS8_decrypt`, `PKCS8_parse_encrypted_private_key`, `EVP_PKEY_*`, `EVP_aes_*_cbc`, `BIO_*`, `i2d_PKCS8_PRIV_KEY_INFO`, `d2i_PKCS8_PRIV_KEY_INFO`, `CBB_*`, `CBS_*` (per D-N37 below) | ~250 | 28 | 0.7 |
+| E | `crypto_kernel/cipher_ocb.rs` | `EVP_aes_128_ocb`, `EVP_aes_256_ocb` + `EVP_CIPHER_CTX_*` | ~80 | 10 | 0.25 |
+| E | `crypto_kernel/cipher_legacy.rs` | `EVP_des_ede3_cbc/ecb/cfb`, `EVP_bf_cbc`, `EVP_rc4`, `EVP_aes_*_cfb1/cfb8/ofb/ecb` | ~150 | 18 | 0.45 |
+| E | `crypto_kernel/digest_blake2.rs` | `EVP_blake2b512`, `EVP_blake2s256` | ~30 | 4 | 0.1 |
+| E | `crypto_kernel/dh_named.rs` | `DH_get_*` (static-prime helpers), `DH_set0_pqg`, `DH_compute_key`, `DH_check_pub_key` | ~150 | 18 | 0.45 |
+| E | `crypto_kernel/x509.rs` | `X509_*`, `d2i_X509`, `i2d_X509`, `X509_NAME_*`, `X509_get_subject_name`, `X509_get_issuer_name`, `X509_check_*` | ~400 | 40 | 1.0 |
+
+**Total Stage B FFI:** ~90 LOC, ~12 industry-h, ~0.31 agent-h. (v2 said 60 industry-h for all of Stage B; v3 sees Stage B as ~90 industry-h after adding the FFI wrappers + the existing high-level work; net 50% bump.)
+**Total Stage C FFI:** ~370 LOC, ~42 industry-h, ~1.05 agent-h. (v2 said 90 industry-h for all of Stage C; v3 bumps to ~110 industry-h to cover CCM + pkcs8_enc.)
+**Total Stage E FFI:** ~810 LOC, ~90 industry-h, ~2.25 agent-h.
+
+(Note on agent-h: per the project's `feedback_estimates_hours_not_weeks.md` memory rule, divide by ~40 from industry-h. The agent-h estimates above use that ratio.)
 
 ## IV. Key Object class hierarchy (D-N3, D-N4, D-N13)
 
@@ -3033,27 +3084,39 @@ Names in node:crypto are case-insensitive and inconsistent (Node accepts both `s
 // surrounding sign-context layer infers the asymmetric algorithm from the KEY
 // type (RSA vs ECDSA), not from the prefix. The `rsa-` / `dsa-` prefix is
 // effectively ignored at sign time when the key already constrains the algo.
+// (v3, addresses C2-3): each HashAlgo variant is annotated with its
+// VERIFIED backing path. Variants whose BoringSSL/aws-lc dependency is
+// missing are flagged "DEFER" — the entry stays in the map so getHashes()
+// returns the expected list, but createHash(name) routes to a "not yet
+// implemented" error per §V.2 dispatch.
+//
+// Backing-path key:
+//   HL = aws-lc-rs high-level (`aws_lc_rs::digest`).
+//   FFI = aws-lc-sys raw FFI (vendored in `crypto_kernel/digest_*.rs`).
+//   DEFER = NOT in aws-lc/BoringSSL public surface; entry kept for
+//           getHashes() listing only (matches Node behaviour: Node ALSO
+//           returns names for hashes not actually supported by the build).
 pub static HASH_NAMES: phf::Map<&'static str, HashAlgo> = phf::phf_map! {
     // Pure SHA-family names (case variants).
-    "sha1" => HashAlgo::Sha1,
-    "sha-1" => HashAlgo::Sha1,
-    "sha224" => HashAlgo::Sha224,
-    "sha-224" => HashAlgo::Sha224,
-    "sha256" => HashAlgo::Sha256,
-    "sha-256" => HashAlgo::Sha256,
-    "sha384" => HashAlgo::Sha384,
-    "sha-384" => HashAlgo::Sha384,
-    "sha512" => HashAlgo::Sha512,
-    "sha-512" => HashAlgo::Sha512,
-    "sha512-224" => HashAlgo::Sha512_224,
-    "sha512-256" => HashAlgo::Sha512_256,
-    // SHA-3 family (Node ≥10.12).
-    "sha3-224" => HashAlgo::Sha3_224,
-    "sha3-256" => HashAlgo::Sha3_256,
-    "sha3-384" => HashAlgo::Sha3_384,
-    "sha3-512" => HashAlgo::Sha3_512,
-    "shake128" => HashAlgo::Shake128,
-    "shake256" => HashAlgo::Shake256,
+    "sha1" => HashAlgo::Sha1,                  // HL: digest::SHA1_FOR_LEGACY_USE_ONLY
+    "sha-1" => HashAlgo::Sha1,                 // HL: digest::SHA1_FOR_LEGACY_USE_ONLY
+    "sha224" => HashAlgo::Sha224,              // HL: digest::SHA224
+    "sha-224" => HashAlgo::Sha224,             // HL: digest::SHA224
+    "sha256" => HashAlgo::Sha256,              // HL: digest::SHA256
+    "sha-256" => HashAlgo::Sha256,             // HL: digest::SHA256
+    "sha384" => HashAlgo::Sha384,              // HL: digest::SHA384
+    "sha-384" => HashAlgo::Sha384,             // HL: digest::SHA384
+    "sha512" => HashAlgo::Sha512,              // HL: digest::SHA512
+    "sha-512" => HashAlgo::Sha512,             // HL: digest::SHA512
+    "sha512-224" => HashAlgo::Sha512_224,      // FFI: EVP_sha512_224() — NOT in aws-lc-rs digest module
+    "sha512-256" => HashAlgo::Sha512_256,      // HL: digest::SHA512_256
+    // SHA-3 family.
+    "sha3-224" => HashAlgo::Sha3_224,          // DEFER: NOT in aws-lc-rs (digest module exposes only SHA3-256/384/512); BoringSSL public API does NOT ship SHA3-224. Listed for getHashes() parity only.
+    "sha3-256" => HashAlgo::Sha3_256,          // HL: digest::SHA3_256
+    "sha3-384" => HashAlgo::Sha3_384,          // HL: digest::SHA3_384
+    "sha3-512" => HashAlgo::Sha3_512,          // HL: digest::SHA3_512
+    "shake128" => HashAlgo::Shake128,          // DEFER: NOT in aws-lc-rs; BoringSSL ships Keccak-f[1600] internals but no public SHAKE API.
+    "shake256" => HashAlgo::Shake256,          // DEFER: same reason as SHAKE128.
 
     // RSA-prefixed compound names (legacy OpenSSL aliases, accepted by
     // createSign — they decompose to the bare hash; the key constrains RSA).
@@ -3078,12 +3141,12 @@ pub static HASH_NAMES: phf::Map<&'static str, HashAlgo> = phf::phf_map! {
     "ecdsa-with-sha512" => HashAlgo::Sha512,
 
     // Legacy + niche.
-    "md5" => HashAlgo::Md5,
-    "md5-sha1" => HashAlgo::Md5Sha1,    // legacy TLS 1.0/1.1 PRF — Stage E
-    "ripemd160" => HashAlgo::Ripemd160,    // unsupported, listed for getHashes()
-    "rmd160" => HashAlgo::Ripemd160,
-    "blake2b512" => HashAlgo::Blake2b512,
-    "blake2s256" => HashAlgo::Blake2s256,
+    "md5" => HashAlgo::Md5,                    // FFI: EVP_md5() — NOT in aws-lc-rs digest module
+    "md5-sha1" => HashAlgo::Md5Sha1,           // FFI (Stage E): the legacy TLS 1.0/1.1 PRF concatenated hash; needs EVP_md5_sha1() bridge
+    "ripemd160" => HashAlgo::Ripemd160,        // DEFER: NOT in aws-lc/BoringSSL at all. Entry kept for getHashes() parity only.
+    "rmd160" => HashAlgo::Ripemd160,           // DEFER: alias for ripemd160.
+    "blake2b512" => HashAlgo::Blake2b512,      // FFI (Stage E): EVP_blake2b512()
+    "blake2s256" => HashAlgo::Blake2s256,      // FFI (Stage E): EVP_blake2s256()
 };
 
 // (addresses critic MAJOR #4): every cipher entry now carries a `gate` field
@@ -3112,60 +3175,101 @@ pub enum CipherGate {
     LegacyCrypto,                // requires --legacy-crypto
 }
 
+// (v3, addresses C2-3 + M2-23): each CipherAlg variant is annotated with its
+// VERIFIED backing path. Variants whose aws-lc-rs constant doesn't exist are
+// rerouted via aws-lc-sys raw FFI (per D-N38), or DEFERRED.
+//
+// Backing-path key:
+//   HL aead = aws-lc-rs `aead::*` (verified at https://docs.rs/aws-lc-rs/latest/aws_lc_rs/aead/index.html: AES_128_GCM, AES_128_GCM_SIV, AES_192_GCM, AES_256_GCM, AES_256_GCM_SIV, CHACHA20_POLY1305 — nothing else).
+//   HL cipher = aws-lc-rs `cipher::*` (verified: AES_128/192/256 + CBC-PKCS7 / CTR / CFB128 modes only).
+//   FFI = aws-lc-sys raw FFI.
+//   DEFER = entry removed from this map; not shippable in any near-term stage.
 pub static CIPHER_NAMES: phf::Map<&'static str, CipherAlg> = phf::phf_map! {
-    // Modern AES-CBC/CTR/GCM/OCB/KW/CCM/XTS — ungated.
+    // AES-CBC: HL cipher (PaddedBlockEncryptingKey::cbc_pkcs7).
     "aes-128-cbc" => CipherAlg::Aes128Cbc,
     "aes-192-cbc" => CipherAlg::Aes192Cbc,
     "aes-256-cbc" => CipherAlg::Aes256Cbc,
+    // AES-CTR: HL cipher (EncryptingKey::ctr).
     "aes-128-ctr" => CipherAlg::Aes128Ctr,
     "aes-192-ctr" => CipherAlg::Aes192Ctr,
     "aes-256-ctr" => CipherAlg::Aes256Ctr,
+    // AES-GCM: HL aead (AES_128_GCM, AES_192_GCM, AES_256_GCM all verified).
     "aes-128-gcm" => CipherAlg::Aes128Gcm,
     "aes-192-gcm" => CipherAlg::Aes192Gcm,
     "aes-256-gcm" => CipherAlg::Aes256Gcm,
-    "aes-128-ccm" => CipherAlg::Aes128Ccm,    // (addresses CRITICAL #3, missing concept #1: AES-CCM ships)
+    // AES-CCM: FFI ONLY — NOT in aws-lc-rs aead module (verified). See D-N38 / §III.2a.
+    // (v3, addresses C2-3: v2's `aead::AES_*_CCM` doesn't exist.)
+    "aes-128-ccm" => CipherAlg::Aes128Ccm,
     "aes-192-ccm" => CipherAlg::Aes192Ccm,
     "aes-256-ccm" => CipherAlg::Aes256Ccm,
-    "aes-128-ocb" => CipherAlg::Aes128Ocb,
-    "aes-192-ocb" => CipherAlg::Aes192Ocb,
-    "aes-256-ocb" => CipherAlg::Aes256Ocb,
+    // AES-OCB: FFI ONLY — NOT in aws-lc-rs aead module (verified). DEFERRED to Stage E
+    // due to low value/effort ratio (OCB is rare in real usage).
+    // (v3, addresses C2-3: v2's `aead::AES_*_OCB` doesn't exist.)
+    "aes-128-ocb" => CipherAlg::Aes128Ocb,    // Stage E
+    "aes-192-ocb" => CipherAlg::Aes192Ocb,    // Stage E
+    "aes-256-ocb" => CipherAlg::Aes256Ocb,    // Stage E
+    // AES-KW: kernel routine (RFC 3394 wrap, ~120 LOC of pure Rust over
+    // aws-lc-rs cipher::AES_* in raw-block mode). The "wrap" name is the
+    // OpenSSL alias; reused from existing `crypto_native/wrap.rs`.
     "aes-128-wrap" => CipherAlg::Aes128Kw,
     "aes-192-wrap" => CipherAlg::Aes192Kw,
     "aes-256-wrap" => CipherAlg::Aes256Kw,
-    "aes-128-xts" => CipherAlg::Aes128Xts,    // (addresses missing concept #10: XTS for full-disk encryption)
-    "aes-256-xts" => CipherAlg::Aes256Xts,
+    // (v3 fix, M2-23): AES-XTS REMOVED from CIPHER_NAMES. XTS requires a
+    // tweak parameter (disk-block index) that the generic CipherContext
+    // does not carry; v2 listed it as if it would work via a generic IV
+    // path, which is incorrect per NIST SP 800-38E. **DEFERRED PERMANENTLY**
+    // until a creator app surfaces a use case justifying a tweak-aware
+    // CipherContext.
+    // "aes-128-xts" => removed
+    // "aes-256-xts" => removed
+    // ChaCha20-Poly1305: HL aead (verified).
     "chacha20-poly1305" => CipherAlg::ChaCha20Poly1305,
 
     // Bare ChaCha20 (no AEAD): LegacyCrypto-gated. Stream cipher without
-    // authentication is a footgun; require explicit opt-in.
-    "chacha20" => CipherAlg::ChaCha20,
+    // authentication is a footgun; require explicit opt-in. FFI required —
+    // aws-lc-rs cipher does NOT expose ChaCha20 as a stream cipher (only
+    // ChaCha20-Poly1305 in aead).
+    "chacha20" => CipherAlg::ChaCha20,    // Stage E, FFI
 
-    // ECB modes (rare; AES-128/256-ECB legitimate for HSM key wrap).
-    "aes-128-ecb" => CipherAlg::Aes128Ecb,
-    "aes-256-ecb" => CipherAlg::Aes256Ecb,
+    // AES-ECB: FFI ONLY (aws-lc-rs cipher does NOT expose ECB mode; only CBC-PKCS7,
+    // CTR, CFB128). AES-128/256-ECB is legitimate for HSM key wrap; AES-192-ECB rare.
+    "aes-128-ecb" => CipherAlg::Aes128Ecb,    // Stage E, FFI
+    "aes-256-ecb" => CipherAlg::Aes256Ecb,    // Stage E, FFI
 
-    // CFB / OFB — Stage E, ungated (legitimate for some niche uses).
+    // AES-CFB128: HL cipher (DecryptingKey::cfb128 / EncryptingKey::cfb128).
+    // The plain `aes-*-cfb` Node alias maps to CFB128 (the only CFB variant in
+    // aws-lc-rs's public API; verified).
     "aes-128-cfb" => CipherAlg::Aes128Cfb,
     "aes-256-cfb" => CipherAlg::Aes256Cfb,
-    "aes-128-cfb1" => CipherAlg::Aes128Cfb1,
-    "aes-128-cfb8" => CipherAlg::Aes128Cfb8,
-    "aes-128-ofb" => CipherAlg::Aes128Ofb,
-    "aes-256-ofb" => CipherAlg::Aes256Ofb,
+    // AES-CFB1 / CFB8 / OFB: FFI ONLY — aws-lc-rs cipher exposes only CFB128.
+    "aes-128-cfb1" => CipherAlg::Aes128Cfb1,    // Stage E, FFI
+    "aes-128-cfb8" => CipherAlg::Aes128Cfb8,    // Stage E, FFI
+    "aes-128-ofb" => CipherAlg::Aes128Ofb,      // Stage E, FFI
+    "aes-256-ofb" => CipherAlg::Aes256Ofb,      // Stage E, FFI
 
-    // Legacy (Stage E, gated on --legacy-crypto):
-    "des-cbc" => CipherAlg::DesCbc,
-    "des-ecb" => CipherAlg::DesEcb,
-    "des-ede3" => CipherAlg::Tdes,
-    "des-ede3-cbc" => CipherAlg::TdesCbc,
-    "des-ede3-ecb" => CipherAlg::TdesEcb,
-    "bf-cbc" => CipherAlg::BlowfishCbc,
-    "bf-ecb" => CipherAlg::BlowfishEcb,
-    "cast5-cbc" => CipherAlg::Cast5Cbc,
-    "rc4" => CipherAlg::Rc4,
-    "rc4-40" => CipherAlg::Rc4_40,
-    "idea-cbc" => CipherAlg::IdeaCbc,
+    // Legacy (Stage E, gated on --legacy-crypto). All FFI ONLY — aws-lc-rs cipher
+    // does NOT expose any of DES / 3DES / Blowfish / Cast5 / RC4 / IDEA. v2's
+    // `cipher::TDES_*` was an invention.
+    "des-cbc" => CipherAlg::DesCbc,             // Stage E, FFI: EVP_des_cbc()
+    "des-ecb" => CipherAlg::DesEcb,             // Stage E, FFI: EVP_des_ecb()
+    "des-ede3" => CipherAlg::Tdes,              // Stage E, FFI: EVP_des_ede3()
+    "des-ede3-cbc" => CipherAlg::TdesCbc,       // Stage E, FFI: EVP_des_ede3_cbc()
+    "des-ede3-ecb" => CipherAlg::TdesEcb,       // Stage E, FFI: EVP_des_ede3_ecb()
+    "bf-cbc" => CipherAlg::BlowfishCbc,         // Stage E, FFI: EVP_bf_cbc()
+    "bf-ecb" => CipherAlg::BlowfishEcb,         // Stage E, FFI: EVP_bf_ecb()
+    "cast5-cbc" => CipherAlg::Cast5Cbc,         // Stage E, FFI if BoringSSL slim build includes it
+    "rc4" => CipherAlg::Rc4,                    // Stage E, FFI: EVP_rc4()
+    "rc4-40" => CipherAlg::Rc4_40,              // Stage E, FFI
+    // IDEA-CBC: DEFERRED — IDEA was removed from BoringSSL. Entry NOT in map.
+    // "idea-cbc" => removed (v3, addresses C2-3)
 };
 ```
+
+**Stage 1 ungated set after v3 audit:** AES-CBC (HL), AES-CTR (HL), AES-GCM (HL), AES-CCM (FFI; ungated for production use), ChaCha20-Poly1305 (HL), AES-KW (kernel routine), AES-CFB128 (HL).
+
+**Stage E set:** AES-OCB (FFI), AES-ECB (FFI), AES-CFB1/8 (FFI), AES-OFB (FFI), bare ChaCha20 (FFI; LegacyCrypto-gated), DES (FFI; LegacyCrypto-gated), 3DES (FFI; LegacyCrypto-gated), Blowfish (FFI; LegacyCrypto-gated), Cast5 (FFI; LegacyCrypto-gated), RC4 (FFI; LegacyCrypto-gated).
+
+**Permanently deferred:** AES-XTS (no tweak in CipherContext), IDEA (not in BoringSSL).
 
 ### IX.2. AlgorithmEntry metadata
 
@@ -3180,8 +3284,31 @@ pub struct CipherEntry {
     pub aliases: &'static [&'static str],         // for getCiphers() listing
 }
 
-pub enum CipherMode { Cbc, Ctr, Gcm, Ocb, Kw, Stream, Cfb, Ofb, Ecb }
+pub enum CipherMode { Cbc, Ctr, Gcm, Ccm, Ocb, Kw, Stream, Cfb, Ofb, Ecb }
 ```
+
+<!-- Round 3: addressing MAJOR M2-21 (GCM tag length whitelist). -->
+**AEAD tag-length whitelists** (v3, addresses M2-21):
+
+```rust
+// Per NIST SP 800-38D §5.2.1.2 (GCM): valid tag lengths are 4, 8, 12, 13, 14, 15, 16 bytes.
+// Tags shorter than 12 bytes are documented as "shall not be used unless application can
+// tolerate increased forgery probability" (Node v22 emits DEP0182 for <16-byte tags).
+pub const GCM_TAG_LENGTHS: &[usize] = &[4, 8, 12, 13, 14, 15, 16];
+
+// Per RFC 3610 (CCM): valid tag lengths are 4, 6, 8, 10, 12, 14, 16 bytes (must be even).
+// Per Node, default is 16; CCM REQUIRES authTagLength explicitly per createCipheriv options
+// (see CRITICAL #3 / §V.4).
+pub const CCM_TAG_LENGTHS: &[usize] = &[4, 6, 8, 10, 12, 14, 16];
+
+// Per RFC 7253 (OCB): valid tag lengths are 8, 12, 16 bytes.
+pub const OCB_TAG_LENGTHS: &[usize] = &[8, 12, 16];
+
+// ChaCha20-Poly1305 (RFC 8439): tag is fixed at 16 bytes.
+pub const CHACHA20_POLY1305_TAG_LENGTHS: &[usize] = &[16];
+```
+
+These lists drive the `auth_tag_length` validation in `parse_cipher_options` (§V.4). createCipheriv with `authTagLength: 5` for GCM throws `ERR_CRYPTO_INVALID_TAG_LENGTH` (real Node code, RangeError per node_errors.h).
 
 ### IX.3. `getCiphers` / `getHashes` / `getCurves` (D-N29)
 
