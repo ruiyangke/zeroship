@@ -650,14 +650,14 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
 | `createCipher(algorithm, password, options?)` (deprecated) | 3 | n/a | n/a | NEVER (D-N11 — throws `ERR_CRYPTO_DEPRECATED_API`) |
-| `createCipheriv(algorithm, key, iv, options?) -> Cipher` | 1 | `kernel::CipherContext::new(encrypt=true)` | sync | C |
-| `createDecipheriv(algorithm, key, iv, options?) -> Decipher` | 1 | `kernel::CipherContext::new(encrypt=false)` | sync | C |
+| `createCipheriv(algorithm, key, iv, options?)` (options: `{ authTagLength }` — REQUIRED for CCM, optional default 16 for GCM/OCB/ChaCha20-Poly1305; addresses critic CRITICAL #3) | 1 | `kernel::CipherContext::new(encrypt=true)` | sync | C |
+| `createDecipheriv(algorithm, key, iv, options?)` (same options shape) | 1 | `kernel::CipherContext::new(encrypt=false)` | sync | C |
 | `Cipher` / `Decipher` (classes) | 1 | `crypto_node/cipher.rs` | sync streaming + async-above-threshold | C |
 | `Cipher.prototype.update(data, inputEncoding?, outputEncoding?)` | 1 | `kernel::CipherContext::update` | sync (always) | C |
 | `Cipher.prototype.final(outputEncoding?)` | 1 | `kernel::CipherContext::finalize` | sync | C |
-| `Cipher.prototype.setAAD(buffer, options?)` | 1 | `kernel::CipherContext::set_aad` | sync | C |
+| `Cipher.prototype.setAAD(buffer, options?)` (options: `{ plaintextLength, encoding }` — plaintextLength REQUIRED for CCM, addresses critic CRITICAL #4) | 1 | `kernel::CipherContext::set_aad` | sync | C |
 | `Cipher.prototype.getAuthTag()` | 1 | `kernel::CipherContext::get_auth_tag` | sync | C |
-| `Decipher.prototype.setAuthTag(buffer)` | 1 | `kernel::CipherContext::set_auth_tag` | sync | C |
+| `Decipher.prototype.setAuthTag(buffer, encoding?)` (mode-aware ordering: CCM pre-update, GCM/OCB/ChaCha20 pre-final, addresses critic CRITICAL #5) | 1 | `kernel::CipherContext::set_auth_tag` | sync | C |
 | `Cipher.prototype.setAutoPadding(boolean)` | 1 | `kernel::CipherContext::set_auto_padding` | sync | C |
 | `getCiphers() -> string[]` | 1 | iterate registry | sync | C |
 | `getCipherInfo(name | nid, options?)` | 1 | registry metadata lookup | sync | C |
@@ -1338,14 +1338,47 @@ impl HmacContext {
 }
 
 // crypto_kernel/cipher.rs
-pub struct CipherContext { /* state machine: pending block, AAD, tag, mode */ }
+//
+// State machine (addresses critic CRITICAL #5 — CCM ordering, MAJOR #8 final-
+// called-twice, AEAD ordering distinct per mode). The Context's `state` field
+// transitions linearly:
+//
+//                   ┌──────────── (CCM only) ───────────┐
+//                   │                                     ▼
+//   Created  ─→  Aad  ─→  Updating  ─→  Finalised  ─→  Done
+//      │           │         │              │
+//      └─→─ setAuthTag (CCM-Decipher only, BEFORE first update)
+//      │           │         └─→─ setAuthTag (GCM/OCB/ChaCha-Decipher; before final)
+//      └─→─ setAutoPadding (CBC only, before update)
+//
+// CCM REQUIRES setAuthTag *before* update; GCM/OCB/ChaCha require it *after*
+// update but *before* final. Kernel rejects late tags / out-of-order calls
+// with KernelError::AeadOrderingError {expected_state, actual_state}.
+
+pub enum CipherCtxState {
+    Created,
+    Aad,        // setAAD called or setAuthTag-on-CCM called
+    Updating,   // first update() observed
+    Finalised,  // final() returned
+    Done,       // any further call (update/final/getAuthTag) errors
+}
+
+pub struct CipherContext {
+    /* aws-lc-rs aead::SealingKey<NonceSeq> | aead::OpeningKey<NonceSeq> handle,
+       pending block bytes for CBC, AAD buffer for GCM, plaintextLength for CCM,
+       requested auth_tag_length, current state */
+}
 impl CipherContext {
-    pub fn new_encrypt(alg: CipherAlg, key: &[u8], iv: &[u8]) -> Result<Self, KernelError>;
-    pub fn new_decrypt(alg: CipherAlg, key: &[u8], iv: &[u8]) -> Result<Self, KernelError>;
-    pub fn set_aad(&mut self, aad: &[u8]) -> Result<(), KernelError>;
+    pub fn new_encrypt(alg: CipherAlg, key: &[u8], iv: &[u8], auth_tag_length: usize) -> Result<Self, KernelError>;
+    pub fn new_decrypt(alg: CipherAlg, key: &[u8], iv: &[u8], auth_tag_length: usize) -> Result<Self, KernelError>;
+    /// (addresses critic CRITICAL #4): plaintext_length is REQUIRED for CCM, optional/None otherwise.
+    pub fn set_aad(&mut self, aad: &[u8], plaintext_length: Option<usize>) -> Result<(), KernelError>;
+    /// (addresses critic CRITICAL #5): mode-aware ordering enforced inside.
     pub fn set_auth_tag(&mut self, tag: &[u8]) -> Result<(), KernelError>;    // Decipher only
     pub fn set_auto_padding(&mut self, on: bool) -> Result<(), KernelError>;  // CBC only
     pub fn update(&mut self, data: &[u8]) -> Result<Vec<u8>, KernelError>;
+    /// (addresses critic MAJOR #8): calling finalize twice errors with
+    /// `KernelError::AlreadyFinalised`, mapping to ERR_CRYPTO_INVALID_STATE.
     pub fn finalize(&mut self) -> Result<Vec<u8>, KernelError>;
     pub fn auth_tag(&self) -> Option<&[u8]>;     // Cipher only, post-finalize
 }
@@ -1524,16 +1557,28 @@ impl Cipher {
         buffer::emit_output(scope, &out, output_encoding.as_deref())
     }
 
-    /// `cipher.setAAD(buffer, options?)` — for GCM/CCM/OCB AEAD modes.
+    /// `cipher.setAAD(buffer, options?)` — for GCM/CCM/OCB/ChaCha20-Poly1305
+    /// AEAD modes. (addresses critic CRITICAL #4): the `options` object's
+    /// `plaintextLength` is REQUIRED for CCM mode; `encoding` applies when
+    /// `buffer` is a string. Per
+    /// https://nodejs.org/api/crypto.html#ciphersetaadbuffer-options.
     #[v8_method]
     fn set_aad<'s>(&mut self,
         scope: &mut v8::PinScope<'s, '_>,
         this: v8::Local<'s, v8::Object>,
         aad: v8::Local<v8::Value>,
-        _options: Option<v8::Local<v8::Value>>,
+        options: Option<v8::Local<v8::Value>>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let bytes = buffer::extract_input(scope, aad, None)?;
-        self.ctx.set_aad(&bytes).map_err(KernelError::to_node)?;
+        let opts = parse_set_aad_options(scope, options)?;
+        // `encoding` applies only when `aad` is a string (per Node spec).
+        let bytes = buffer::extract_input(scope, aad, opts.encoding.as_deref())?;
+        // CCM: plaintextLength MUST be supplied (kernel rejects otherwise so
+        // the eventual encrypt is not silently miscomputed).
+        if matches!(self.mode, CipherMode::Ccm) && opts.plaintext_length.is_none() {
+            return Err(OpError::node("ERR_MISSING_OPTION",
+                "options.plaintextLength is required for CCM mode setAAD"));
+        }
+        self.ctx.set_aad(&bytes, opts.plaintext_length).map_err(KernelError::to_node)?;
         Ok(this.into())
     }
 
@@ -1552,18 +1597,31 @@ impl Cipher {
         Ok(buffer::emit_buffer(scope, tag).into())
     }
 
-    /// `decipher.setAuthTag(tagBuffer)` — Decipher only, pre-final.
+    /// `decipher.setAuthTag(tagBuffer, encoding?)` — Decipher only.
+    /// (addresses critic CRITICAL #5): the ordering requirement DIFFERS by mode
+    /// per https://nodejs.org/api/crypto.html#deciphersetauthtagbuffer-encoding:
+    ///   * **CCM**: `setAuthTag` MUST be called BEFORE the first `update()`.
+    ///   * **GCM / OCB / chacha20-poly1305**: `setAuthTag` MUST be called BEFORE `final()`
+    ///     (it MAY come after `update()` calls, which is the common pattern
+    ///     because the tag is appended after the ciphertext on the wire).
+    /// The state machine in `CipherContext::set_auth_tag` enforces the mode-
+    /// specific check; v1 used the generic "pre-final" rule which silently
+    /// accepted late tags on CCM and produced undefined output.
     #[v8_method]
     fn set_auth_tag<'s>(&mut self,
         scope: &mut v8::PinScope<'s, '_>,
         this: v8::Local<'s, v8::Object>,
         tag: v8::Local<v8::Value>,
+        encoding: Option<String>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         if self.is_encrypt {
             return Err(OpError::node("ERR_CRYPTO_INVALID_STATE",
                 "Cannot call setAuthTag on a Cipher"));
         }
-        let bytes = buffer::extract_input(scope, tag, None)?;
+        let bytes = buffer::extract_input(scope, tag, encoding.as_deref())?;
+        // Mode-specific ordering enforced by the kernel context:
+        //   - CCM:                must be in PreUpdate state (no update() yet)
+        //   - GCM/OCB/ChaCha20:   must be in PreFinal state (final() not yet called)
         self.ctx.set_auth_tag(&bytes).map_err(KernelError::to_node)?;
         Ok(this.into())
     }
@@ -1594,11 +1652,28 @@ pub fn create_cipheriv<'s>(
     algorithm: String,
     key: v8::Local<v8::Value>,
     iv: v8::Local<v8::Value>,
-    _options: Option<v8::Local<v8::Value>>,
+    options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let alg = canonicalise_cipher_name(&algorithm)
         .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
             format!("Unknown cipher: {}", algorithm)))?;
+    // (addresses critic CRITICAL #3): read `authTagLength` from options.
+    // REQUIRED for CCM (no default); optional for GCM (default 16, but Node v22
+    // emits DEP0182 deprecation warning if a short tag is used without this
+    // explicit option — see https://nodejs.org/api/deprecations.html#DEP0182).
+    // Per https://nodejs.org/api/crypto.html#cryptocreatecipherivalgorithm-key-iv-options.
+    let opts = parse_cipher_options(scope, options)?;
+    let auth_tag_length = match alg.mode() {
+        CipherMode::Ccm => opts.auth_tag_length.ok_or_else(|| OpError::node(
+            "ERR_MISSING_OPTION",
+            "authTagLength required for CCM mode"))?,
+        CipherMode::Gcm | CipherMode::Ocb | CipherMode::ChaCha20Poly1305 =>
+            opts.auth_tag_length.unwrap_or(16),
+        _ => 0,    // unused
+    };
+    // ChaCha20-Poly1305 IV must be exactly 12 bytes (RFC 8439 §2.3) — kernel
+    // validates; we validate the AES-CCM IV length range (7..=13) and AES-GCM
+    // (any length, with 12 being optimal) per NIST SP 800-38D.
     let key_bytes = extract_key_bytes(scope, key, alg.expected_key_len())?;
     let iv_bytes = if iv.is_null() {
         // ECB has no IV; null is permitted.
@@ -1606,10 +1681,33 @@ pub fn create_cipheriv<'s>(
     } else {
         buffer::extract_input(scope, iv, None)?
     };
-    let ctx = kernel::CipherContext::new_encrypt(alg, &key_bytes, &iv_bytes)
+    let ctx = kernel::CipherContext::new_encrypt(alg, &key_bytes, &iv_bytes, auth_tag_length)
         .map_err(KernelError::to_node)?;
-    let state = CipherState { ctx, is_encrypt: true, auto_padding: true };
+    let state = CipherState {
+        ctx,
+        is_encrypt: true,
+        auto_padding: true,
+        mode: alg.mode(),                // remembered for setAAD/setAuthTag ordering checks
+        auth_tag_length,
+    };
     Ok(Cipher::build(scope, state).into())
+}
+
+struct CipherOptions {
+    auth_tag_length: Option<usize>,
+}
+
+fn parse_cipher_options(
+    scope: &mut v8::PinScope,
+    options: Option<v8::Local<v8::Value>>,
+) -> Result<CipherOptions, OpError> {
+    let Some(o) = options else { return Ok(CipherOptions { auth_tag_length: None }); };
+    if !o.is_object() { return Ok(CipherOptions { auth_tag_length: None }); }
+    let obj: v8::Local<v8::Object> = o.try_into()
+        .map_err(|_| OpError::node("ERR_INVALID_ARG_TYPE", "options must be an object"))?;
+    let auth_tag_length = read_uint_property(scope, obj, "authTagLength")?
+        .map(|n| n as usize);
+    Ok(CipherOptions { auth_tag_length })
 }
 ```
 
