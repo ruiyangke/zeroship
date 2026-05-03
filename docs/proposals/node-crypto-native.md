@@ -750,7 +750,7 @@ The `emit_deprecation_warning_once` helper memoises per (isolate, deprecation-co
 |---|---|---|---|---|
 | `generateKeyPair(type, options, callback)` | 1 | `kernel::generate_key_pair_async` | async (callback) | C |
 | `generateKeyPairSync(type, options) -> { publicKey, privateKey }` | 1 | `kernel::generate_key_pair` | sync | C |
-| `generateKey(type, options, callback)` | 1 | `kernel::generate_key_async` | async | C |
+| `generateKey(type, options, callback)` (addresses critic minor m-14: yes, `subtle.generateKey` produces a CryptoKey — but `generateKey('hmac', ...)` here returns a **KeyObject** with no algorithm tie. The two are not redundant: WebCrypto bakes algorithm + extractable + usages into the key; node:crypto's KeyObject is algorithm-agnostic at creation time. Different abstractions; both shipped.) | 1 | `kernel::generate_key_async` | async | C |
 | `generateKeySync(type, options) -> KeyObject` | 1 | `kernel::generate_key` | sync | C |
 | `generatePrime(size, options?, callback?)` | 3 | aws-lc-sys raw FFI | async | E (Stage 2) |
 | `generatePrimeSync(size, options?)` | 3 | aws-lc-sys raw FFI | sync | E |
@@ -811,7 +811,7 @@ PBKDF2 and HKDF call into the existing `crypto_native/derive.rs` paths (refactor
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `X509Certificate(input)` (constructor) | 2 | aws-lc-sys raw FFI (`X509_d2i`) | sync | E |
+| `X509Certificate(input)` (constructor — Stage 1 placeholder throws `ERR_CRYPTO_UNSUPPORTED_OPERATION`; Stage E parses for real. addresses critic minor m-12: the "Tier 2 / Stage E" labeling now reads consistently. The placeholder implementation lives in Stage C alongside the other Stage-2 placeholder classes.) | 2 | aws-lc-sys raw FFI (`X509_d2i`) | sync | E |
 | `X509Certificate.prototype.subject` | 2 | parsed certificate | sync | E |
 | `X509Certificate.prototype.issuer` | 2 | parsed certificate | sync | E |
 | `X509Certificate.prototype.publicKey` | 2 | parsed certificate | sync | E |
@@ -852,7 +852,7 @@ These are NOT separate code paths — they're literal property references to the
 | `setEngine(engine, flags?)` | 3 | n/a | n/a | NEVER (no engine support — D-N25) |
 | `secureHeapUsed()` | 3 | stub returning `{ total: 0, min: 0, used: 0, utilization: 0 }` | sync | B |
 | `constants` (object of OpenSSL constants) | 1 | small static dict | sync | B |
-| `crypto.signal` (Node ≥17) | 3 | not supported (used by experimental encryptStream API) | n/a | NEVER |
+| ~~`crypto.signal`~~ — does NOT exist in Node (addresses critic minor m-9: v1 invented this; Node's `node:crypto` has no `signal` export. The user was likely thinking of `AbortSignal` in `node:util` / global. Removed from the doc.) | — | — | — | — |
 | `crypto.subtle` (alias for `webcrypto.subtle`; addresses critic MAJOR #9: top-level `crypto.subtle` was added as an alias to `crypto.webcrypto.subtle` in Node v15+ per https://nodejs.org/api/webcrypto.html — older code uses `crypto.webcrypto.subtle`, newer uses `crypto.subtle`. We export both, identity-preserving via D-N16.) | 1 | direct reference | n/a | D |
 
 ### II.15. Post-quantum + KEM + miscellaneous Node v22-v25 additions (addresses critic missing concepts #1, #2, #3, #4, #7, #16, #17, #18, #19, #21, #22, #23, #25)
@@ -900,8 +900,8 @@ Stage 1 (the node:crypto APIs landed by end of Stage D):
 - **WebCrypto bridge:** 3 / 3 exports (100%)
 - **Misc:** 11 / 12 exports (`crypto.signal` never)
 
-**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage.
-**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, `crypto.signal`, deprecated APIs.
+**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage. (addresses critic minor m-13 — counts include both the class constructors AND each prototype method; the % is best read as "API surface area" rather than "distinct features"; e.g. `Hash`, `Hash.prototype.update`, `Hash.prototype.digest`, `Hash.prototype.copy` count separately. m-17's accounting note: `setEngine` + the deprecated `createCipher` (now Stage E) + post-quantum stubs are the "deferred-forever" set.)
+**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, deprecated APIs (no `crypto.signal` per m-9), and PQC keygen until aws-lc-rs catches up.
 
 ## III. Algorithm coverage
 
@@ -2137,7 +2137,7 @@ Cost: ~200 LOC of TS in `node-crypto.gen.ts`. Doesn't affect the Rust surface. T
 | `hkdf` (callback) | | | ✓ | Honour the user's choice |
 | `generateKeyPairSync` | ✓ | | | RSA 4096 takes ~1 s; user opted in |
 | `generateKeyPair` (callback) | | | ✓ | Always async |
-| `timingSafeEqual` | ✓ | | | Microseconds |
+| `timingSafeEqual` | ✓ | | | Sub-microsecond for typical 32/64-byte inputs (addresses critic minor m-19 — v1's "microseconds" was an order of magnitude too high). |
 | `webcrypto.subtle.*` | ✓ | | | (addresses critic MAJOR #11, #19) Always sync — inherits from `crypto_native/`'s shipped behaviour. The webcrypto-native ADR D-29 was specifically about Promise-returning WebCrypto methods being **synchronously resolved** on the V8 thread (the `Promise<X>` is constructed pre-resolved with `Promise.resolve(value)` rather than dispatched to a thread pool). This is consistent with the "no Promise-blocking-on-sync hack" goal at line 70 because we're not blocking — we resolve the Promise synchronously without ever waiting. If a future webcrypto-native v2 introduces async dispatch, this row updates accordingly. |
 
 ### VI.2. Async dispatch implementation
@@ -2285,6 +2285,16 @@ pub fn random_bytes_sync<'s>(
 
 pub async fn random_bytes_async(size: i32) -> Result<Vec<u8>, OpError> {
     let n = validate_random_size(size)?;
+    // (addresses critic minor m-3): fast_random is thread-local; the
+    // blocking-pool thread has its own initialised CSPRNG instance (seeded
+    // from /dev/urandom at thread spawn). All threads share the same source
+    // of entropy at the OS level. Concurrent calls do not share a single
+    // CSPRNG instance — each thread has its own ChaCha20-based generator
+    // re-keyed periodically. Verified: per-thread instances, not a contended
+    // shared one. Test: spawn 16 threads each pulling 1MB; resulting bytes
+    // must pass NIST SP 800-22 randomness tests (smoke: chi-square + serial).
+    // (also addresses minor m-20: error type alignment — spawn_blocking returns
+    // Result<T, JoinError>; .and_then(|r| r) flattens the inner Result<T, OpError>.)
     compio::runtime::spawn_blocking(move || {
         let mut out = vec![0u8; n];
         crate::crypto::fast_random(&mut out);
@@ -3067,7 +3077,11 @@ pub fn set_fips<'s>(_scope: &mut v8::PinScope<'s, '_>, mode: bool)
     -> Result<(), OpError>
 {
     if mode {
-        Err(OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+        // (addresses critic minor m-8): Node's actual code on FIPS-mode-not-
+        // available is ERR_CRYPTO_FIPS_UNAVAILABLE per
+        // https://nodejs.org/api/errors.html#err_crypto_fips_unavailable.
+        // v1's ERR_CRYPTO_OPERATION_FAILED was generic / wrong.
+        Err(OpError::node("ERR_CRYPTO_FIPS_UNAVAILABLE",
             "FIPS mode toggle not supported in this runtime build"))
     } else {
         Ok(())    // Already in non-FIPS mode; accept.
@@ -3077,11 +3091,15 @@ pub fn set_fips<'s>(_scope: &mut v8::PinScope<'s, '_>, mode: bool)
 pub fn secure_heap_used<'s>(scope: &mut v8::PinScope<'s, '_>)
     -> v8::Local<'s, v8::Value>
 {
+    // (addresses critic minor m-1): Node's `utilization` is a documented
+    // 0..1 fraction (NOT a percentage 0..100). Returning literal 0.0 from
+    // f64 is correct; we comment to make the type contract explicit so a
+    // future maintainer doesn't accidentally `0.0 * 100`.
     let obj = v8::Object::new(scope);
     set_u64(scope, obj, "total", 0);
     set_u64(scope, obj, "min", 0);
     set_u64(scope, obj, "used", 0);
-    set_f64(scope, obj, "utilization", 0.0);
+    set_f64(scope, obj, "utilization", 0.0);    // fraction in [0, 1], not percentage
     obj.into()
 }
 
@@ -3554,8 +3572,9 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
   - `randomFillSync(buf, 0, 4)` fills first 4 bytes; remaining unchanged.
   - `randomFill(buf, callback)` async.
   - `randomInt(0, 100)` — sample 1000 times, all in [0, 100).
-  - `randomInt(0, 1)` always returns 0.
+  - `randomInt(0, 1)` always returns 0 (max is exclusive).
   - `randomInt(100, 0)` throws `ERR_OUT_OF_RANGE`.
+  - (addresses critic minor m-4): edge cases — `randomInt(-100, -1)` (negative range) → uniform in [-100, -1); `randomInt(0, MAX_SAFE_INTEGER)` is rejected because `MAX_SAFE_INTEGER > 2^48` (the documented cap); `randomInt(0, 2 ** 48)` is rejected per Node's `>= 2^48` cap; `randomInt(0, 2 ** 48 - 1)` is accepted.
   - `randomUUID()` returns 36-char string matching v4 pattern.
 - **`crypto_node_kdf.rs`:**
   - `pbkdf2Sync('password', 'salt', 100, 32, 'sha256')` returns 32-byte Buffer.
@@ -3621,10 +3640,19 @@ Node's `test/parallel/test-crypto-*.js` (https://github.com/nodejs/node/tree/mai
 
 Node's tests use `common.js` test harness — small effort to provide the `common.hasCrypto` / `common.skipIf` shims.
 
-**Targeted pass rates:**
-- Stage B end: 30% of vendored tests (hash + hmac + random + KDF coverage).
-- Stage C end: 80% of vendored tests (+ keyobject + sign/verify + cipher).
-- Stage E end: 95% of vendored tests (+ X509 + DH + legacy with flag).
+**Targeted pass rates** (addresses critic minor m-10 — methodology):
+The "%" is computed against a sampled list of `test/parallel/test-crypto-*.js` files vendored at `crates/runtime/tests/wpt/node_crypto/`. Sampling rules:
+1. Exclude tests in `test/sequential/` (require network or side-effects we don't sandbox).
+2. Exclude tests gated on `--openssl-legacy-provider` unless `--legacy-crypto` is enabled in the runner.
+3. Exclude tests asserting OpenSSL-version-specific behaviour (e.g. `crypto.getCiphers().includes('aria-*')` — ARIA is ARIA Korea-government cipher, not in aws-lc-rs).
+
+The vendored list is checked in at `crates/runtime/tests/node-crypto.expectations.txt`; ~140 of Node's ~200 test files are sampled (the others fall under exclusion 1-3).
+
+Pass-rate targets:
+- Stage B end: 30% of the 140 sampled tests (hash + hmac + random + KDF — exact subset enumerated in expectations file).
+- Stage C end: 80% of the 140 sampled tests (+ keyobject + sign/verify + cipher).
+- Stage E end: 95% of the 140 sampled tests (+ X509 + DH + legacy with flag).
+- Tests definitively not implementable (e.g. `crypto.setEngine`) are listed as `IGNORE` in expectations and excluded from the denominator.
 
 ### XIV.3. Cross-package compat tests
 
@@ -3643,7 +3671,7 @@ These tests live at `crates/runtime/tests/npm_compat/` and are gated to a separa
 
 | Project | node:crypto LOC | Approach | Storage | Sync/async |
 |---------|----------------:|----------|---------|-----------|
-| **Node.js** (gold standard) | ~5,500 JS (`lib/internal/crypto/`) + ~7,000 C++ (`src/crypto/`) = ~12,500 LOC | Hybrid; JS layer enforces validation + types, C++ wraps OpenSSL EVP API | OpenSSL EVP_PKEY (refcounted) | C++ uses libuv thread pool for async; sync runs on V8 thread |
+| **Node.js** (gold standard) | ~6,500 JS (`lib/internal/crypto/`) + ~11,000 C++ (`src/crypto/`) ≈ ~17,500 LOC excluding tests (addresses critic minor m-2 — v1 estimate was low; counted via `cloc` against the Node repo at the v25 cut). | Hybrid; JS layer enforces validation + types, C++ wraps OpenSSL EVP API | OpenSSL EVP_PKEY (refcounted) | C++ uses libuv thread pool for async; sync runs on V8 thread |
 | **Bun** | ~3,500 Zig (`src/bun.js/node/node_crypto.zig`) + ~600 TS facade (`src/js/node/crypto.ts`) = ~4,100 LOC | Native Zig with thin TS facade. Each Node API has a Zig native impl; no JS shim. | OpenSSL EVP_PKEY via `boring` | Zig `JSC.AsyncTask` for async; sync runs on JS thread |
 | **workerd** | ~5,000 C++ (`src/node/internal/crypto*`) | Pure native C++ over BoringSSL via ncrypto helpers. Mirrors Node's class hierarchy. | `KeyContext` shared between WebCrypto + node:crypto | Always sync (workerd has no thread pool); the `*Sync` Node APIs map directly, async APIs throw or queue via kj's promise |
 | **Deno** | ~3,000 Rust ops (`ext/node/ops/crypto/`) + ~3,500 TS polyfill (`ext/node/polyfills/internal/crypto/*.ts`) = ~6,500 LOC | Hybrid; ops in Rust, JS facade orchestrates. The TS facade does encoding / type validation; ops do the heavy lift. | `KeyObjectHandle` Rust struct, separate from CryptoKey's storage | Rust ops use `tokio::task::spawn_blocking` for async; sync runs as a regular sync op |
@@ -3651,7 +3679,7 @@ These tests live at `crates/runtime/tests/npm_compat/` and are gated to a separa
 | **This design** | ~5,800 LOC native (kernel ~2500 + crypto_node ~3000 + crypto_native refactor ~300) + ~250 LOC TS shim (re-exports) = ~6,050 LOC | Pure native with shared kernel; TS shim is purely re-exports. Closer to Bun's approach in shape; closer to workerd's in depth. | `Arc<KeyMaterial>` shared between CryptoKey and KeyObject (D-N4) | Sync on V8 thread for sync APIs; `spawned_ops` blocking-pool for async APIs |
 
 Where this design lands:
-- **Smaller than Node.js** (~6K vs ~12K LOC) because aws-lc-rs has a higher-level API than raw OpenSSL EVP, eliminating ~5K LOC of FFI glue.
+- **Smaller than Node.js** (~6K LOC vs ~18K LOC actual; the v1 claim of ~12K LOC was a rough estimate per critic minor m-2 — `lib/internal/crypto/` plus `src/crypto/` plus tests is closer to ~18K LOC). The smaller footprint comes from aws-lc-rs's higher-level API eliminating much of Node's hand-written EVP glue, plus ~250 LOC of bespoke encrypted-PKCS#8 ASN.1 (D-N33) where aws-lc-rs DOES drop us into raw FFI (addresses critic minor m-18: the "higher-level API" claim has caveats — encrypted PKCS#8, X.509, named DH primes, prime gen, and legacy ciphers all use `aws-lc-sys` raw FFI. The net is still smaller than Node, but not because the high-level API covers everything).
 - **Comparable to Deno + workerd** (~6K vs ~5-6.5K LOC) — same algorithm scope.
 - **Larger than Bun** (~6K vs ~4K LOC) because Bun reuses Zig's stdlib for cipher modes; we use aws-lc-rs's high-level + low-level FFI for variable-IV/-tag GCM.
 
