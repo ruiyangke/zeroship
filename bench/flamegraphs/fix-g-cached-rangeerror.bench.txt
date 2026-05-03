@@ -1,8 +1,0 @@
-target         saturate (300 tasks) (8 threads)
-duration       15.00s  |  total 711,445 requests
-throughput     47,430 req/s · ↑ 8.0 MB/s  ↓ 6.7 MB/s
-transfer       ↑ 120.2 MB sent  ↓ 99.9 MB received
-latency      p50=4.5ms  p90=13ms  p99=18ms  p99.9=26ms  max=1.03s
-errors         connect 0  read 0  write 0  timeout 0  keepup 0
-               status 2xx=136,199  4xx=0  5xx=575,246
-assertions     status==200: 136,199/711,445 FAIL
