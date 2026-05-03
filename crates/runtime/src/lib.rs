@@ -109,6 +109,7 @@ pub use core::channel;
 pub use core::dispatch;
 pub use core::init;
 pub use core::modules;
+pub use core::node_error;
 pub(crate) use core::panic_util;
 pub use core::plugin;
 pub use core::runtime;

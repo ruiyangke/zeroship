@@ -1604,7 +1604,10 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
                         ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
                             ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
                         }
-                        _ => v8::Exception::error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                            ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+                        }
+                        ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
                     };
                     scope.throw_exception(__exc);
                     return;

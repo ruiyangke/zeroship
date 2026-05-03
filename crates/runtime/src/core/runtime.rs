@@ -1733,6 +1733,9 @@ impl RuntimeInner {
                                 crate::state::OpErrorKind::DomException(name) => {
                                     crate::dom::exception::build(scope, &e.message, name).into()
                                 }
+                                crate::state::OpErrorKind::NodeError(code) => {
+                                    crate::node_error::build_node_exception(scope, code, &e.message)
+                                }
                             };
                             r.reject(scope, exc);
                         }

@@ -46,6 +46,15 @@ pub enum OpErrorKind {
     ///
     /// Per `docs/proposals/webcrypto-native.md` D-6.
     DomException(&'static str),
+    /// A Node.js-style error code (e.g. `"ERR_CRYPTO_HASH_FINALIZED"`,
+    /// `"ERR_INVALID_ARG_TYPE"`). The macro's `gen_throw_error` arm
+    /// constructs a JS `Error`, `TypeError`, or `RangeError` per the
+    /// per-code class table (see `core/error.rs::node_error_class_for`)
+    /// and assigns the `code` property as a static string. npm packages
+    /// branch on `e.code === "ERR_..."`.
+    ///
+    /// Per `docs/proposals/node-crypto-native.md` D-N32 / §VII.3a.
+    NodeError(&'static str),
 }
 
 /// An error from a V8 op.
@@ -86,6 +95,19 @@ impl OpError {
     pub fn dom(name: &'static str, msg: impl Into<String>) -> Self {
         Self {
             kind: OpErrorKind::DomException(name),
+            message: msg.into(),
+        }
+    }
+
+    /// Construct a Node.js-style error with the given `code`. The macro
+    /// arm picks Error / TypeError / RangeError per the per-code table
+    /// at `crate::node_error::class_for(code)` and sets `e.code = code`
+    /// on the resulting JS exception.
+    ///
+    /// Per `docs/proposals/node-crypto-native.md` D-N32.
+    pub fn node(code: &'static str, msg: impl Into<String>) -> Self {
+        Self {
+            kind: OpErrorKind::NodeError(code),
             message: msg.into(),
         }
     }

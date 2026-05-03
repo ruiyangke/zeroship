@@ -758,13 +758,18 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 
 /// Generate error throw from `OpError`.
 ///
-/// `OpErrorKind::DomException(name)` constructs a real DOMException
-/// instance via `new globalThis.DOMException(message, name)`. The
-/// native DOMException class is installed during `setup_globals` (see
-/// `crates/runtime/src/dom/exception.rs`); the constructor lookup is
-/// per-throw because callers of this codegen don't always have the
-/// active class function in scope. Per `docs/proposals/webcrypto-native.md`
-/// D-6.
+/// - `OpErrorKind::DomException(name)` constructs a real DOMException
+///   instance via `new globalThis.DOMException(message, name)`. The
+///   native DOMException class is installed during `setup_globals` (see
+///   `crates/runtime/src/dom/exception.rs`); the constructor lookup is
+///   per-throw because callers of this codegen don't always have the
+///   active class function in scope. Per `docs/proposals/webcrypto-native.md`
+///   D-6.
+/// - `OpErrorKind::NodeError(code)` constructs a JS Error / TypeError /
+///   RangeError per the per-code class table (see
+///   `core/node_error.rs::class_for`) and assigns the `code` property
+///   for `if (e.code === "ERR_...")` branching. Per
+///   `docs/proposals/node-crypto-native.md` D-N32.
 fn gen_throw_error() -> TokenStream2 {
     quote! {
         let __msg = v8::String::new(scope, &__err.message).unwrap();
@@ -774,7 +779,10 @@ fn gen_throw_error() -> TokenStream2 {
             ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
                 ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
             }
-            _ => v8::Exception::error(scope, __msg),
+            ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+            }
+            ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
         };
         scope.throw_exception(__exc);
     }
