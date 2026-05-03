@@ -649,7 +649,7 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `createCipher(algorithm, password, options?)` (deprecated) | 3 | n/a | n/a | NEVER (D-N11 — throws `ERR_CRYPTO_DEPRECATED_API`) |
+| `createCipher(algorithm, password, options?)` (deprecated, addresses critic MAJOR #18) | 2 | EVP_BytesToKey + createCipheriv (only when `--legacy-crypto` is on; throws `ERR_CRYPTO_DEPRECATED_API` otherwise) | sync | E |
 | `createCipheriv(algorithm, key, iv, options?)` (options: `{ authTagLength }` — REQUIRED for CCM, optional default 16 for GCM/OCB/ChaCha20-Poly1305; addresses critic CRITICAL #3) | 1 | `kernel::CipherContext::new(encrypt=true)` | sync | C |
 | `createDecipheriv(algorithm, key, iv, options?)` (same options shape) | 1 | `kernel::CipherContext::new(encrypt=false)` | sync | C |
 | `Cipher` / `Decipher` (classes) | 1 | `crypto_node/cipher.rs` | sync streaming + async-above-threshold | C |
@@ -720,11 +720,25 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `ECDH.prototype.getPrivateKey(encoding?)` | 1 | `kernel::ecdh::private_key` | sync | C |
 | `ECDH.prototype.getPublicKey(encoding?, format?)` | 1 | `kernel::ecdh::public_key` | sync | C |
 | `ECDH.prototype.setPrivateKey(privateKey, encoding?)` | 1 | `kernel::ecdh::set_private` | sync | C |
-| `ECDH.prototype.setPublicKey(publicKey, encoding?)` (deprecated) | 3 | n/a | n/a | NEVER (deprecated in Node v5 — throws) |
+| `ECDH.prototype.setPublicKey(publicKey, encoding?)` (deprecated, **shipped — addresses critic CRITICAL #6**) | 2 | `kernel::ecdh::set_public` + one-time deprecation warning | sync | C |
 | `ECDH.convertKey(...)` (static) | 2 | aws-lc-sys raw FFI for compressed-point | sync | E |
 | `getCurves() -> string[]` | 1 | iterate registry | sync | C |
 
 **Named DH groups:** RFC 3526 (`modp1` = 768-bit, ..., `modp18` = 8192-bit) and RFC 7919 (`ffdhe2048`, `ffdhe3072`, `ffdhe4096`, `ffdhe6144`, `ffdhe8192`). The 768/1024-bit groups (modp1, modp2) are blocked by default (insecure); creator apps that need them get a runtime flag opt-in.
+
+**`ECDH.setPublicKey` deprecation handling (addresses critic CRITICAL #6):** Per https://nodejs.org/api/crypto.html#ecdhsetpublickeypublickey-encoding, this method is **deprecated since Node v5.2.0 but still functional**. v1's "throw" was wrong (broke `tweetnacl-util` and the StrongSwan-style ECDH session-reuse pattern). v2 ships it with a one-shot per-isolate `process.emitWarning` call on first invocation, mirroring Node's behaviour:
+
+```rust
+// crypto_node/dh.rs (Stage C)
+fn set_public_key<'s>(&mut self, /* ... */) -> Result<(), OpError> {
+    emit_deprecation_warning_once(scope, "DEP0031",
+        "crypto.ECDH.prototype.setPublicKey is deprecated; \
+         use ECDH.convertKey or generate a fresh ECDH instance.");
+    self.ctx.set_public(&pk_bytes).map_err(KernelError::to_node)
+}
+```
+
+The `emit_deprecation_warning_once` helper memoises per (isolate, deprecation-code) so repeated calls warn once, matching Node's `--no-deprecation` / `process.noDeprecation` semantics (which we honour by reading the global flag).
 
 ### II.7. Key generation
 
@@ -1711,18 +1725,29 @@ fn parse_cipher_options(
 }
 ```
 
-**`createCipher` (deprecated) error path:**
+**`createCipher` (deprecated) policy (addresses critic MAJOR #18):**
+
+Node DOES NOT throw on `createCipher` — it emits a deprecation warning (DEP0106) and proceeds, deriving the key from the password via OpenSSL's `EVP_BytesToKey` (single-iteration MD5, broken). v1's design "throws ERR_CRYPTO_DEPRECATED_API" silently breaks legacy apps that work on Node.
+
+**v2 policy:** ship `createCipher` (Stage 2, gated on `--legacy-crypto`). Without the flag, it emits a deprecation warning and routes to `createCipheriv` with an EVP_BytesToKey-derived key + zero IV (matching Node's broken behaviour exactly). With `--legacy-crypto` off (the default), the warning is upgraded to an error (because the runtime audience — modern AI-generated apps — has no legitimate need to interoperate with EVP_BytesToKey-encrypted blobs):
 
 ```rust
 pub fn create_cipher<'s>(
-    _scope: &mut v8::PinScope<'s, '_>,
-    _algorithm: v8::Local<v8::Value>,
-    _password: v8::Local<v8::Value>,
-    _options: Option<v8::Local<v8::Value>>,
+    scope: &mut v8::PinScope<'s, '_>,
+    algorithm: v8::Local<v8::Value>,
+    password: v8::Local<v8::Value>,
+    options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-    Err(OpError::node("ERR_CRYPTO_DEPRECATED_API",
-        "crypto.createCipher is deprecated; use crypto.createCipheriv with an explicit IV. \
-         See https://nodejs.org/api/crypto.html#cryptocreatecipheralgorithm-password-options."))
+    if !legacy_crypto_enabled() {
+        return Err(OpError::node("ERR_CRYPTO_DEPRECATED_API",
+            "crypto.createCipher is deprecated and disabled by default in this runtime. \
+             Use crypto.createCipheriv with an explicit IV, or enable --legacy-crypto. \
+             See https://nodejs.org/api/crypto.html#cryptocreatecipheralgorithm-password-options."));
+    }
+    emit_deprecation_warning_once(scope, "DEP0106",
+        "crypto.createCipher is deprecated; use crypto.createCipheriv.");
+    let (key, iv) = evp_bytes_to_key(/* ... */);
+    create_cipheriv(scope, algorithm_str, key.into(), iv.into(), options)
 }
 ```
 
