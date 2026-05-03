@@ -14,6 +14,12 @@ perf-compio.data
 .worktrees/
 .superpowers/
 
+# Never commit dotenv files — only the .example templates
+.env
+.env.*
+!.env.example
+!.env.*.example
+
 # WPT is fetched on demand by crates/runtime/tests/setup-wpt.sh, not
 # tracked. Keeps .git small (the WPT depth=1 pack is ~140 MB).
 crates/runtime/tests/wpt/
