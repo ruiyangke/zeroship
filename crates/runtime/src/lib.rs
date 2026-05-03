@@ -84,6 +84,7 @@ pub use web::base64;
 pub use web::blob as blob_native;
 pub use web::codec;
 pub use web::crypto as crypto_native;
+pub use web::crypto_node;
 pub use web::dom;
 pub use web::encoding as text_encoding;
 pub use web::fetch as fetch_native;

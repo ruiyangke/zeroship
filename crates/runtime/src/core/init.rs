@@ -696,6 +696,15 @@ pub fn load_polyfills_and_modules(
         crate::crypto_native::install_globals(scope, global);
     }
 
+    // Native node:crypto — `globalThis.__zeroship_node_crypto` (D-N26).
+    // Per docs/proposals/node-crypto-native.md §XI; the Vite-side
+    // synthetic module re-exports each property of this object as a
+    // named ESM export.
+    {
+        let global = scope.get_current_context().global(scope);
+        crate::crypto_node::install_globals(scope, global);
+    }
+
     {
         let code = v8::String::new(scope, NODE_GLOBALS_JS).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
