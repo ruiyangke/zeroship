@@ -138,6 +138,10 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N30** | Zeroize on Drop for KeyObjectState's secret material. Wrap the `KeyMaterial::Symmetric(Vec<u8>)` and `*Private` PKCS#8 / raw-d / private-component vectors in `zeroize::Zeroizing<Vec<u8>>` — same as WebCrypto's open-question XIV.8 working answer. The Arc share means zeroization happens when the LAST KeyObject + CryptoKey wrapper drops. | Defense-in-depth. zeroize is already a transitive dep via aws-lc-rs. ~5 LOC of wrapper. Aligns the two surfaces. | §IV.7 |
 | **D-N31** | `timingSafeEqual(a, b)` ships as a native Rust call — `aws_lc_rs::constant_time::verify_slices_are_equal`. Throws `ERR_INVALID_ARG_TYPE` if the inputs are different lengths or non-buffer-shaped. Returns boolean. | Node spec parity. The constant-time guarantee comes from aws-lc-rs (compiler-fence + byte-by-byte XOR + accumulator). Critical for HMAC-tag verify in jwt libraries. | §X.2 |
 | **D-N32** | Macro extensions needed: ONE — a `NodeError(code: &'static str)` variant on `OpErrorKind`, with a corresponding `gen_throw_error` arm that constructs Error / TypeError / RangeError per a per-code table and assigns the `code` property. The `Buffer` extraction is NOT a new macro feature — it's a library helper at `crypto_node/buffer.rs::extract_input` called from each method. Streaming `Context` types are NOT a macro feature — they're plain Rust state in the boxed instance. `KeyObject` is a regular `#[v8_class]` with a regular Box; no macro work. | Mirrors webcrypto-native's D-30 in spirit. The macro change is a one-variant addition + a ~20 LOC arm. The rest is library code. | §XIII |
+| **D-N33** (v2) | Encrypted PKCS#8 import / export drops to `aws-lc-sys` raw FFI in `crypto_kernel/pkcs8_enc.rs` (~250 LOC). High-level `aws-lc-rs` does not expose `EncryptedPrivateKeyInfo` or any `decrypt(passphrase)` / `serialize_with_password` method (verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html — only `Pkcs8V1Der` / `Pkcs8V2Der` byte wrappers, no encryption). The bespoke walker handles PBES2/PBKDF2 ASN.1 envelope build/parse and dispatches the inner cipher work via the kernel's existing `CipherContext`. (addresses critic CRITICAL #7, MAJOR #12, MAJOR #16) | §IV.4a |
+| **D-N34** (v2) | RSA-PSS `saltLength` sentinels (-1 = `RSA_PSS_SALTLEN_DIGEST`, -2 = `RSA_PSS_SALTLEN_MAX_SIGN` / `RSA_PSS_SALTLEN_AUTO`) are normalised to absolute byte counts in `parse_sign_key_input` BEFORE the kernel boundary, via `normalise_pss_salt_length()`. The kernel never sees negative sentinels. (addresses critic CRITICAL #8) | §V.5 |
+| **D-N35** (v2) | Hash, Hmac, Cipher, Decipher, Sign, Verify all extend `stream.Transform` (Node's documented behaviour — see https://nodejs.org/api/crypto.html#class-hash). The classes expose `_transform(chunk, encoding, callback)` and `_flush(callback)` so `pipeline(readable, hash, writable)` works. The Transform shape is layered on top of the existing #[v8_class] via a JS-side mixin in `node-crypto.gen.ts` (the synthetic module's Hash export wraps the native class with a small Transform-prototype shim). (addresses critic missing concept #21) | §V.6 |
+| **D-N36** (v2) | Post-quantum key types (ML-DSA, ML-KEM, SLH-DSA — Node v25+) and `crypto.encapsulate` / `crypto.decapsulate` (Node v22+ KEM API) are listed in the export surface as Stage E placeholders. The implementation depends on aws-lc-rs's PQC support which is in active development (NIST FIPS 203/204/205 — kyber/dilithium/sphincs+). Stage E ships parsing-only `asymmetricKeyType` recognition; full key generation defers to a future ADR when aws-lc-rs's PQC API stabilises. (addresses critic missing concepts #2, #3) | §II.15 |
 
 ## I. Architecture overview
 
@@ -245,7 +249,7 @@ The `#[v8_inherit]` mechanism is the existing one used by `AbortSignal extends E
 | `createSign()` `.sign()` | sync | n/a | n/a | always sync |
 | `createVerify()` `.verify()` | sync | n/a | n/a | always sync |
 | `randomBytes(n)` | sync | async | n/a | sync (no Sync suffix needed; the no-callback form IS sync) |
-| `randomFill(buf, ...)` | n/a | async (always callback) | n/a | `randomFillSync(buf)` |
+| `randomFill(buf, ...)` | n/a | async (always callback) | n/a | `randomFillSync(buf)`. (addresses critic MAJOR #21): for very small fills (<= 1024 bytes), Node fires the callback synchronously after queueing on `process.nextTick`. v2 mirrors that by branching at the entry point: `if size <= 1024 { sync_path; queueMicrotask(callback) } else { spawn_blocking }`. Avoids a ~10 µs spawn_blocking overhead for small fills (the common case for `randomBytes(16)` token-style usage) without breaking the documented async-callback contract. |
 | `pbkdf2(...)` | n/a | async | promise | `pbkdf2Sync(...)` |
 | `scrypt(...)` | n/a | async | promise | `scryptSync(...)` |
 | `hkdf(...)` | n/a | async | promise | `hkdfSync(...)` |
@@ -850,6 +854,33 @@ These are NOT separate code paths — they're literal property references to the
 | `constants` (object of OpenSSL constants) | 1 | small static dict | sync | B |
 | `crypto.signal` (Node ≥17) | 3 | not supported (used by experimental encryptStream API) | n/a | NEVER |
 | `crypto.subtle` (alias for `webcrypto.subtle`) | 1 | direct reference | n/a | D |
+
+### II.15. Post-quantum + KEM + miscellaneous Node v22-v25 additions (addresses critic missing concepts #1, #2, #3, #4, #7, #16, #17, #18, #19, #21, #22, #23, #25)
+
+| Export | Tier | Backed by | Sync/async | Stage |
+|---|---|---|---|---|
+| `crypto.argon2(password, salt, options?)` (Node v22+, `crypto.hash`-shaped) | 3 | npm `argon2` (WASM via unenv) | sync/async | NEVER native — see D-N (open question XVII.4 + missing concept #1) |
+| `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
+| `Certificate` (legacy SPKAC) — `Certificate.exportChallenge`, `Certificate.exportPublicKey`, `Certificate.verifySpkac` | 3 | aws-lc-sys raw FFI for `NETSCAPE_SPKI_b64_decode` (~80 LOC) | sync | E (rare; only browser keygen, missing concept #4) |
+| `KeyObject.toCryptoKey(algorithm, extractable, keyUsages)` (Node v18+) | 1 | bridge: `KeyObject` → fresh `CryptoKey` via the Arc share + the WebCrypto `importKey('jwk', ko.export({format:'jwk'}))` round-trip | sync | C (missing concept #7 + clarifies the bidirectional bridge in D-N4) |
+| `crypto.checkPrime(candidate, options?, callback)` / `checkPrimeSync` | 3 | aws-lc-sys raw FFI for `BN_is_prime_fasttest_ex` | sync/async | E (missing concepts #5, #11; can ship independently of generatePrime per the critic) |
+| `crypto.createDiffieHellman(primeLength)` (synthesise a fresh prime) | 3 | aws-lc-sys raw FFI for `DH_generate_parameters_ex` | async (Node v17+ defaults async; sync overload retained) | E (missing concept #6) |
+| `X509Certificate.prototype.toString()` returns PEM | 2 | reuses kernel PEM emitter | sync | E (missing concept #16) |
+| `X509Certificate.prototype.toJSON()` | 2 | object literal of public-property snapshot | sync | E (missing concept #16) |
+| `X509Certificate.prototype.toLegacyObject()` | 2 | the OpenSSL-flavoured shape some libraries still use | sync | E (missing concept #16) |
+| `X509Certificate.prototype.checkEmail(email, options?)` | 2 | aws-lc-sys raw FFI for `X509_check_email` | sync | E (missing concept #17) |
+| `X509Certificate.prototype.checkIP(ip)` | 2 | aws-lc-sys raw FFI for `X509_check_ip_asc` | sync | E (missing concept #17) |
+| `X509Certificate.prototype.issuerCertificate` (only set if chain provided) | 2 | populated when constructed from a multi-block PEM | sync | E (missing concept #18) |
+| `crypto.pseudoRandomBytes(size)` (deprecated alias) | 2 | alias to `randomBytes` (Node never differentiated post-v0.6) | sync | B (missing concept #19) |
+| `crypto.randomFillSync(buffer, offset?, size?)` with offset+size validation | 1 | extended validator | sync | B (missing concept #20) |
+| `crypto.scrypt` short-form options `{ N, r, p }` aliasing | 1 | option-aliasing in `parse_scrypt_options` (accepts both `cost`/`blockSize`/`parallelization` AND `N`/`r`/`p`) | sync/async | B (missing concept #22) |
+| `cipher.setAutoPadding(boolean)` returns Cipher (chainable) | 1 | already chainable in v1 design — corrects the v1 type signature; addresses critic missing concept #23 | sync | C |
+
+**Post-quantum notes (D-N36, missing concept #3):** Node v25 added these `asymmetricKeyType` values: `'ml-dsa-44'`, `'ml-dsa-65'`, `'ml-dsa-87'` (FIPS 204), `'ml-kem-512'`, `'ml-kem-768'`, `'ml-kem-1024'` (FIPS 203), `'slh-dsa-sha2-128f'` etc. (FIPS 205). Stage E ships PARSE-ONLY recognition: the `asymmetricKeyType` getter returns the right string, but `generateKeyPair('ml-dsa-65', ...)` errors with `ERR_CRYPTO_UNSUPPORTED_OPERATION` until aws-lc-rs's PQC API stabilises.
+
+**Argon2 (missing concept #1):** Node v22 did NOT add `crypto.argon2` as a standalone export — confirmed against https://nodejs.org/api/crypto.html (no `crypto.argon2` entry as of writing). The critic's claim was incorrect on the surface name; what Node v22 added was `crypto.hash` (a one-shot hashing convenience), not argon2. Argon2 remains npm-package territory (`argon2`, `@phc/argon2`). v2 corrects v1's "Node never shipped it" to "Node has not shipped argon2 in `node:crypto` as of v25; revisit if Node adds it post-cutoff."
+
+**Stream.Transform (missing concept #21):** addressed in §V.6 above.
 
 ### II.14. Coverage summary
 
@@ -1854,16 +1885,28 @@ impl Sign {
     /// `sign.sign(privateKey, outputEncoding?) -> Buffer | string`
     /// privateKey can be: KeyObject, CryptoKey, PEM string, DER Buffer,
     /// or `{ key, format, type, padding, saltLength, dsaEncoding }` options.
+    /// (addresses critic MAJOR #6): post-sign `update()` MUST throw a generic
+    /// Error (Node behaviour — see https://github.com/nodejs/node/blob/main/lib/internal/crypto/sig.js)
+    /// rather than ERR_CRYPTO_HASH_FINALIZED. We achieve this by NOT routing
+    /// through the digest context's finalised flag for the post-sign case;
+    /// instead, after `sign()` returns we set a separate `signed: bool` on
+    /// SignState and reject further `update()` calls with a plain Error
+    /// (no `code`). This matches `jsonwebtoken`'s `verify()` retry-on-error
+    /// path which expects no `code` on the Error.
     #[v8_method]
     fn sign<'s>(&mut self,
         scope: &mut v8::PinScope<'s, '_>,
         private_key: v8::Local<v8::Value>,
         encoding: Option<String>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        if self.signed {
+            return Err(OpError::error("Sign.sign already called"));
+        }
         let (km, padding) = parse_sign_key_input(scope, private_key)?;
         let digest = self.digest.finalize().map_err(KernelError::to_node)?;
         let sig = kernel::sign_verify::sign_with_digest(&km, self.hash, padding, &digest)
             .map_err(KernelError::to_node)?;
+        self.signed = true;
         buffer::emit_output(scope, &sig, encoding.as_deref())
     }
 }
@@ -1978,7 +2021,48 @@ fn normalise_pss_salt_length(
 
 **This is a key cross-surface coordination point:** WebCrypto (existing `crypto_native/`) emits IEEE-P1363 (D-4); node:crypto defaults to DER (Node convention). The kernel function `sign_with_digest` takes the encoding flag explicitly; both surfaces pass their preferred default.
 
-## VI. Sync vs async dispatch policy (D-N5, D-N6)
+### V.6. `stream.Transform` inheritance (D-N35, addresses critic missing concept #21)
+
+Per https://nodejs.org/api/crypto.html#class-hash and the analogous sections for Hmac / Cipher / Decipher / Sign / Verify, **all six streaming classes extend `stream.Transform`**. They are Duplex streams: writable side feeds `update()`; readable side emits the digest / ciphertext on `final()`. `pipeline(readable, hash, writable)` is the canonical streaming pattern and MUST work — packages like `node-archiver`, `s3-streaming-upload`, and many object-storage SDKs use it.
+
+v1's design omitted this entirely. v2 adds it as a JS-side mixin (the simplest path; native Transform inheritance from a Rust `#[v8_class]` would require extending the macro to support multi-prototype inheritance, which we judge non-essential). The `node-crypto.gen.ts` synthetic module wraps each native class:
+
+```ts
+// node-crypto.gen.ts (sketch)
+import { Transform } from "node:stream";
+
+const NativeHash = _zsc.Hash;
+
+class Hash extends Transform {
+  #ctx;    // the native Hash instance
+  constructor(algorithm, options) {
+    super(options);
+    this.#ctx = new NativeHash(algorithm, options);
+  }
+  // Forward streaming API.
+  update(data, encoding) { this.#ctx.update(data, encoding); return this; }
+  digest(encoding) { return this.#ctx.digest(encoding); }
+  copy(options) {
+    // copy() returns a fresh Hash with same in-progress state.
+    const c = new Hash(this.#ctx[kAlgorithm], options);
+    c.#ctx = this.#ctx.copy(options);
+    return c;
+  }
+  // Transform protocol.
+  _transform(chunk, encoding, callback) {
+    try { this.#ctx.update(chunk, encoding); callback(); }
+    catch (err) { callback(err); }
+  }
+  _flush(callback) {
+    try { this.push(this.#ctx.digest()); callback(); }
+    catch (err) { callback(err); }
+  }
+}
+```
+
+The same pattern applies to Hmac (no `copy`), Cipher / Decipher (`_transform` writes the encrypted/decrypted chunk; `_flush` writes `final()`), Sign / Verify (`_transform` calls `update`; `_flush` is a no-op because the user must call `sign(key)` / `verify(key, sig)` explicitly).
+
+Cost: ~200 LOC of TS in `node-crypto.gen.ts`. Doesn't affect the Rust surface. The native classes still expose the streaming methods directly so apps that don't use Transform pay zero overhead.
 
 ### VI.1. The decision matrix
 
@@ -2003,7 +2087,7 @@ fn normalise_pss_salt_length(
 | `generateKeyPairSync` | ✓ | | | RSA 4096 takes ~1 s; user opted in |
 | `generateKeyPair` (callback) | | | ✓ | Always async |
 | `timingSafeEqual` | ✓ | | | Microseconds |
-| `webcrypto.subtle.*` | ✓ | | | Existing WebCrypto policy (D-29 of webcrypto-native) |
+| `webcrypto.subtle.*` | ✓ | | | (addresses critic MAJOR #11, #19) Always sync — inherits from `crypto_native/`'s shipped behaviour. The webcrypto-native ADR D-29 was specifically about Promise-returning WebCrypto methods being **synchronously resolved** on the V8 thread (the `Promise<X>` is constructed pre-resolved with `Promise.resolve(value)` rather than dispatched to a thread pool). This is consistent with the "no Promise-blocking-on-sync hack" goal at line 70 because we're not blocking — we resolve the Promise synchronously without ever waiting. If a future webcrypto-native v2 introduces async dispatch, this row updates accordingly. |
 
 ### VI.2. Async dispatch implementation
 
@@ -2099,6 +2183,21 @@ impl Cipher {
 ### VI.4. Cipher.update zero-copy possibility
 
 Cipher.update produces output bytes equal to input bytes (modulo block padding for the final()). The kernel's `CipherContext::update` could return a `Vec<u8>`; we copy out to a Buffer at the V8 boundary (one allocation). For very large inputs this is two memory allocations + one copy. The cost is negligible vs the cipher itself. Document; defer optimisation.
+
+**Perf SLA for Cipher.update (addresses critic MAJOR #7, MAJOR #25):**
+v1 punted the optimisation but didn't set a target. v2 SLA: AES-GCM at 1 MiB
+chunk size must complete in ≤ 5 ms on the project's reference Skylake-class
+hardware (gives ~200 MB/s; aws-lc-rs's hardware-accelerated AES-NI is
+substantially faster than this in isolation, so the overhead budget is
+generous). Above 1 MiB per `update()` call the V8 thread is observable to
+event-loop monitoring; the doc recommends `pipeline(readable, cipher, writable)`
+via stream.Transform (D-N35) to chunk naturally. AES-OCB without hardware
+acceleration is the slowest path; we do NOT promise the SLA for OCB on
+non-AES-NI hardware.
+
+The "user error" framing is wrong (per critic MAJOR #25): creator apps
+doing TLS-like workloads naturally hit larger input sizes. The mitigation is
+the stream.Transform inheritance (D-N35), not asking apps to avoid the API.
 
 ### VI.5. The `randomBytes` async path (D-N17)
 
