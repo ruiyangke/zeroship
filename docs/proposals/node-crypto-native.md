@@ -170,18 +170,18 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N8** | Error mapping: a single `OpError` enum (the existing one, extended with a `NodeError(code: &'static str)` variant) routes to the right surface at throw time. The macro's `gen_throw_error` arm checks the variant: `NodeError(code)` constructs a JS Error / TypeError / RangeError (per a small table) and sets `error.code = code`; the existing `DomException(name)` arm stays for the WebCrypto surface. The kernel returns `KernelError`, which is mapped to either `OpError::DomException` (when called from `crypto_native/`) or `OpError::NodeError` (when called from `crypto_node/`) at the surface boundary. | Node's `e.code` is the contract npm packages check (`if (e.code === "ERR_CRYPTO_OPERATION_FAILED") retry()`). Throwing a generic Error breaks them. The kernel can't decide which surface to throw for — the surface knows. So map at the boundary. workerd does the same shape (`KJ_REQUIRE(...)` + per-surface adapter). | §VII |
 | **D-N9** | `Hash` class: `update(data, inputEncoding?)` returns `this` for chaining; `digest(outputEncoding?)` returns `Buffer` if no encoding else string in the requested encoding (`hex` / `base64` / `base64url` / `latin1` / `binary`). `copy(options?)` returns a fresh Hash with the same in-progress state. Throws `ERR_CRYPTO_HASH_FINALIZED` on any post-`digest()` update. Backed by `kernel::DigestContext`. | Direct Node parity. The encoding registry is small (5 named output encodings + 6 named input encodings = 11 strings); a phf::Map keyed on encoding string drives the conversion. | §V.2 |
 | **D-N10** | `Hmac` class: `update(data, inputEncoding?)` and `digest(outputEncoding?)` mirror Hash; `copy(options?)` is intentionally absent on Hmac in Node (`hmac.copy` doesn't exist) — we match. Backed by `kernel::HmacContext`. (**counter-citation against critic CRITICAL #10**: critic claimed Node v17+ added `Hmac.prototype.copy`. Verified against https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js — only `Hash.prototype.copy` is defined; the `Hmac` class extends `Hash` for `update` / `digest` / `_transform` / `_flush` via prototype assignment but `copy` is NOT among the inherited methods. Verified against https://nodejs.org/api/crypto.html#class-hmac — the documented method list is `digest`, `update`. v1's omission was correct; we keep it.) | Node has Hash.copy but not Hmac.copy (a quirk of OpenSSL EVP_MD_CTX vs HMAC_CTX). Some npm packages (older `passport-jwt` versions) crash if Hmac has a `.copy` method that throws when called the way Hash.copy works — they assume same shape. We match Node's omission exactly. | §V.3 |
-| **D-N11** | `Cipher` / `Decipher` classes: `update(data, inputEncoding?, outputEncoding?)` returns Buffer (or string if outputEncoding); `final(outputEncoding?)` flushes the last block + tag; `setAAD(buffer, options?)` for GCM/CCM AAD; `setAuthTag(buffer)` for Decipher post-data tag inject; `getAuthTag()` for Cipher post-final tag emit; `setAutoPadding(boolean)` for CBC PKCS#7 control. Backed by `kernel::CipherContext`. The class is created via `crypto.createCipheriv(algorithm, key, iv, options?)` factories — `createCipher` (deprecated, derives key from password) is intentionally NOT shipped (Node deprecated it because the KDF is broken; a creator app calling `createCipher` deserves the failure). | Direct Node parity for `createCipheriv`. Skipping `createCipher` is the workerd / Deno consensus — the deprecated API has weak KDF properties (EVP_BytesToKey single-iteration MD5). Throwing `ERR_CRYPTO_DEPRECATED_API` with a doc URL to switch to `createCipheriv` is the right move. | §V.4 |
+| **D-N11** | `Cipher` / `Decipher` classes: `update(data, inputEncoding?, outputEncoding?)` returns Buffer (or string if outputEncoding); `final(outputEncoding?)` flushes the last block + tag; `setAAD(buffer, options?)` for GCM/CCM AAD; `setAuthTag(buffer)` for Decipher post-data tag inject; `getAuthTag()` for Cipher post-final tag emit; `setAutoPadding(boolean)` for CBC PKCS#7 control. Backed by `kernel::CipherContext`. The class is created via `crypto.createCipheriv(algorithm, key, iv, options?)` factories. `createCipher` (deprecated, derives key from password via broken EVP_BytesToKey) is gated behind `--legacy-crypto` per D-N22; without the flag it throws `ERR_CRYPTO_UNSUPPORTED_OPERATION` with a doc URL to switch to `createCipheriv`. (v3 fix, C2-2: v2's `ERR_CRYPTO_DEPRECATED_API` was invented; the real Node code per node_errors.h is `ERR_CRYPTO_UNSUPPORTED_OPERATION`.) | Direct Node parity for `createCipheriv`. The deprecated API has weak KDF properties (EVP_BytesToKey single-iteration MD5); blocking by default reduces footgun surface. | §V.4 |
 | **D-N12** | `Sign` / `Verify` classes: `update(data, inputEncoding?)` and `sign(privateKey, outputEncoding?)` / `verify(publicKey, signature, signatureEncoding?)`. Internally compute the digest streaming-style, then run the asymmetric op once at finalisation. Accept `privateKey` / `publicKey` as `KeyObject`, `CryptoKey`, PEM string, DER Buffer, or `{ key, format, type, passphrase }` options object — Node's union type. The encoding helper at the boundary materialises any of these to a kernel-friendly key handle. | Sign / Verify are the "DigestSign" pattern in OpenSSL (EVP_DigestSignInit + Update + Final). The streaming API saves the user from buffering the message; the kernel's `SignContext` mirrors EVP_DigestSignContext. | §V.5 |
 | **D-N13** | `KeyObject` / `PublicKeyObject` / `PrivateKeyObject` / `SecretKeyObject`: parent + three subclasses (`#[v8_inherit]`). Parent has `.type` (returns "secret" / "public" / "private"), `.asymmetricKeyType` (returns null for secret), `.asymmetricKeyDetails` (algorithm-specific dict), `.symmetricKeySize` (bytes for secret; null for asymmetric), `.export(options) -> Buffer | string | object`, `.equals(other)`. Subclasses add nothing functional — they exist for `instanceof` discrimination. Internal-field 0 holds `Box<KeyObjectState>` carrying an `Arc<KeyMaterial>`. The static `KeyObject.from(cryptoKey)` constructor accepts a `CryptoKey` and clones the Arc. | Node's type model verbatim. Some npm packages (older `jose`, `node-forge`) check `instanceof PrivateKeyObject` to distinguish privates; missing the subclass means those checks fail. | §IV |
 | **D-N14** | `crypto.createSecretKey(buffer | string, encoding?)` / `crypto.createPublicKey(input)` / `crypto.createPrivateKey(input)` factories: parse the input (PEM / DER / JWK / KeyObject / `{ key, format: 'pem' | 'der' | 'jwk', type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', passphrase: Buffer? }`) into a fresh `KeyObject` instance. The PEM parser lives in `kernel::pem` (RFC 7468 framing — a single function: `decode_pem(text) -> Vec<(label, der_bytes)>`); the DER walker is the existing `crypto_native/der.rs`. `passphrase` for encrypted PKCS#8 dispatches to aws-lc-rs's `EncryptedPrivateKeyInfo::from_bytes(der).decrypt(passphrase)`. | The createX factories are the entry point npm packages use. Without them, a creator app cannot import a key — there's no other path. JWK input takes the JWK as a JS object (passed into the kernel JWK parser shared with WebCrypto). | §IV.4 |
 | **D-N15** | KDF dispatch: `pbkdf2` / `pbkdf2Sync` / `scrypt` / `scryptSync` / `hkdf` / `hkdfSync` — sync variants run on V8 thread (user opted into blocking by picking the Sync API); async variants dispatch to `state.spawned_ops`. Both call into `kernel::pbkdf2` / `kernel::scrypt` / `kernel::hkdf` (slice-in / Vec-out). PBKDF2 + HKDF are already in `crypto_native/derive.rs`; the kernel extraction is mechanical (move + add a `_sync` and `_async` adapter). scrypt is NEW — aws-lc-rs has `pbkdf2` but no scrypt; we use `aws_lc_sys::EVP_PBE_scrypt` (BoringSSL's scrypt is a ~200 LOC FFI binding). | RFC 7914 scrypt is the password-hashing standard most modern apps use (vs. PBKDF2 which is recommended only for legacy interop). bcrypt is similar but not in node:crypto; the `bcrypt` npm package wraps OpenSSL's `BF_set_key` directly. We don't ship bcrypt; the npm package's WASM fallback (via unenv) is acceptable. | §VI.2 |
 | **D-N16** | webcrypto bridge — object identity. `import("node:crypto")` yields an exports object whose `.webcrypto` property IS the same `Crypto` instance that's installed at `globalThis.crypto`. The synthetic module's installer code reads `globalThis.crypto` once at module-evaluate time and assigns the reference directly; subsequent reads return the same `Crypto` instance. `subtle` is `globalThis.crypto.subtle`. `getRandomValues` is `globalThis.crypto.getRandomValues.bind(globalThis.crypto)` (Node binds; we follow). | Node's `crypto.webcrypto === globalThis.crypto` is a cross-codebase invariant — JOSE libraries assume it. Returning a copy would silently break `WeakMap`-based key tracking (libraries that keep a `WeakMap<CryptoKey, ...>` would lose entries on the boundary). | §VIII |
 | **D-N17** | Random: `randomBytes(size, callback?) -> Buffer | void` (callback variant returns Buffer to callback async; sync variant returns Buffer). `randomFillSync(buffer, offset?, size?) -> Buffer`. `randomFill(buffer, offset?, size?, callback) -> void` (always callback). `randomInt(min, max, callback?) -> number` (uniform distribution via rejection sampling, not the JS-shim's modulo bias). `randomUUID(options?)` — same as `globalThis.crypto.randomUUID`. `getRandomValues` re-export. All sync; `randomBytes(N)` for very large N (e.g. > 1 MB) goes async via callback if present, sync otherwise — matches Node. | The randomInt rejection-sampling fix corrects a subtle bias in the JS shim (line 109-117 of node-compat.ts: `range > 2^32` causes silent bias). Node uses the same rejection-sampling technique we will. | §VI.5 |
-| **D-N18** | Algorithm name canonicalisation: node:crypto names are case-insensitive but inconsistent ("sha256" vs "SHA-256" vs "RSA-SHA256"). The kernel uses spec-canonical names ("SHA-256", "RSA-PSS"); the surface adapter maps node:crypto inputs via a phf::Map: `"sha256" -> SHA-256`, `"sha-256" -> SHA-256`, `"sha384" -> SHA-384`, ..., `"rsa-sha256" -> SignAlg::RsaPkcs1Sha256`, etc. Names not in the table → `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`. | Node's getHashes() returns ~50 names (because OpenSSL aliases everything). We support the 4 SHA digests + their aliases + ChaCha20-Poly1305 + the 11 cipher modes + 6 sign algorithms — total ~25 algorithm names. The map is small. | §IX |
+| **D-N18** | Algorithm name canonicalisation: node:crypto names are case-insensitive but inconsistent ("sha256" vs "SHA-256" vs "RSA-SHA256"). The kernel uses spec-canonical names ("SHA-256", "RSA-PSS"); the surface adapter maps node:crypto inputs via a phf::Map: `"sha256" -> SHA-256`, `"sha-256" -> SHA-256`, `"sha384" -> SHA-384`, ..., `"rsa-sha256" -> SignAlg::RsaPkcs1Sha256`, etc. Names not in the table → `ERR_CRYPTO_INVALID_DIGEST` (digest names) or `ERR_CRYPTO_UNKNOWN_CIPHER` (cipher names) — both real Node codes per node_errors.h (v3 fix, C2-1, C2-2 — v2's `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` is dynamic-OSSL). The canonicaliser case-folds to lowercase BEFORE the phf::Map lookup so `"SHA256"`, `"sha256"`, `"Sha-256"` all resolve identically (addresses M2-24). | Node's getHashes() returns ~50 names (because OpenSSL aliases everything). We support the 4 SHA digests + their aliases + ChaCha20-Poly1305 + the 11 cipher modes + 6 sign algorithms — total ~25 algorithm names. The map is small. | §IX |
 | **D-N19** | `KeyObject.export(options)` accepts `{ format: 'pem' \| 'der' \| 'jwk', type: 'pkcs1' \| 'pkcs8' \| 'spki' \| 'sec1', cipher?: string, passphrase?: Buffer }`. PEM emission uses the kernel's PEM emitter (the inverse of D-N14's parser). `cipher` + `passphrase` for encrypted PKCS#8 export goes through `crypto_kernel/pkcs8_enc.rs` (D-N33 — drop to `aws-lc-sys` because high-level `aws-lc-rs` does not expose this surface). JWK export reuses `crypto_native/jwk.rs::export_*`. | Direct Node parity. The cipher options matrix (`{ cipher: 'aes-256-cbc', passphrase: Buffer.from('...') }`) is what passport / saml / openid-client libraries use to round-trip encrypted private keys. (addresses critic MAJOR #16: v1 cited an invented `EncryptedPrivateKeyInfo::serialize_with_password` API; corrected.) | §IV.6, §IV.4a |
 | **D-N20** | X.509: Stage 1 ships a stub class that throws `ERR_CRYPTO_UNSUPPORTED_OPERATION` on construction, with a clear message pointing at the Stage 2 ADR. Stage 2 ships parsing-only (constructor + readonly properties). Full chain verification defers to a future `@zeroship/x509-verify` npm package wrapping BoringSSL's `X509_verify_cert`. | Most npm packages that touch X509 (jsonwebtoken's JWKS endpoints, Apple Sign-In, Google's JWT checking) do their own verify on top of `X509Certificate.publicKey` — they don't call `.verify()` directly. Stage 2 parsing-only covers ~80% of usage. | §X |
 | **D-N21** | DH: Stage 1 ships only the named groups (`crypto.getDiffieHellman('modp14')` etc.). Stage 2 adds `crypto.createDiffieHellman(prime, generator)` via aws-lc-sys's lower FFI (`DH_set0_pqg`). Stage 1 errors on the unnamed-group factory with `ERR_CRYPTO_UNSUPPORTED_OPERATION`. `crypto.createECDH` ships in Stage 1 (aws-lc-rs's `agreement::*` has the curves). | DH (vs ECDH) is rare in modern apps — TLS 1.3 deprecated DHE in favour of ECDHE. Most uses we'll see in npm are SCRAM / SSH-key-exchange, both of which use named groups. Generic DH is the long tail. | §X |
-| **D-N22** | Legacy ciphers (DES, 3DES, Blowfish, Cast5, RC4, IDEA): NOT in Stage 1. Stage 2 ships them under the `--legacy-crypto` runtime flag (off by default). Without the flag, `createCipheriv('des-cbc', ...)` errors with `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` and a message pointing at the flag. Node ships these unconditionally (they're behind OpenSSL's `OPENSSL_NO_LEGACY` macro, which Node defines off). aws-lc-rs has DES via `cipher::TDES_*` but not Blowfish / Cast5 / RC4 / IDEA. We'd need aws-lc-sys raw for those. | Most modern apps don't touch these. The few that do are interfacing with truly legacy systems (POS terminals, ancient SAML providers); a runtime flag rather than blanket support reduces our attack surface. | §X |
+| **D-N22** | Legacy ciphers (DES, 3DES, Blowfish, Cast5, RC4, IDEA): NOT in Stage 1. Stage 2 ships them under the `--legacy-crypto` runtime flag (off by default). Without the flag, `createCipheriv('des-cbc', ...)` errors with `ERR_CRYPTO_UNSUPPORTED_OPERATION` (real Node code per node_errors.h, v3 fix C2-2 — v2's `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` is dynamic-OSSL, not Node static) and a message pointing at the flag. Node ships these unconditionally; we don't. aws-lc-rs (per docs.rs verification, v3 audit C2-3) does NOT have DES at all in its high-level API — `cipher::TDES_*` was an v1/v2 invention. 3DES requires aws-lc-sys raw FFI via `EVP_des_ede3_cbc`. Blowfish / Cast5 / RC4 / IDEA also need aws-lc-sys raw (or are not in aws-lc at all — IDEA was removed from BoringSSL). | Most modern apps don't touch these. The few that do interface with legacy POS / ancient SAML; a runtime flag rather than blanket support reduces attack surface. | §X |
 | **D-N23** | ChaCha20-Poly1305: ships in Stage 1. aws-lc-rs has it as `aead::CHACHA20_POLY1305`. Node added it in v17 (June 2021). Used by modern TLS implementations and Signal-protocol-style apps. Cheap to add; no reason to defer. | Spec parity with Node v17+. Aligns with WebCrypto's "out of v1; trivially added" comment — we ship it for node:crypto immediately because Node already does. | §V.4 |
 | **D-N24** | scrypt parameters + memory cap: accept Node's `{ N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 }` options object. Default: `N=16384, r=8, p=1` per Node. The maxmem cap is enforced (default 32 MB; user can override). Implementations that set `N=2^20` (default for `bcrypt-alternative-2025` style libs) without `maxmem` get an error — Node throws same way. The async variant always offloads to a thread pool (D-N5). | RFC 7914 + Node parity. The maxmem check prevents a single password verify from OOMing the worker. | §VI.2 |
 | **D-N25** | FIPS controls: `getFips() -> 0`, `setFips(true) -> throw "FIPS mode toggle not supported"` (`ERR_CRYPTO_OPERATION_FAILED`), `crypto.fips` getter returns 0. Document. The aws-lc-rs build IS FIPS-validated when the workspace is built with `aws-lc-fips-sys` (a sibling crate); we don't currently enable that, but if a creator app surfaces a FIPS workflow we flip the dep. | aws-lc-rs's high-level API doesn't expose FIPS mode toggle; toggling is build-time, not runtime. Stub returning 0 prevents `if (crypto.fips) ...` branches from crashing. | §X.3 |
@@ -614,20 +614,31 @@ pub enum KernelError {
 Each surface has a small adapter that maps `KernelError` to the surface's error type:
 
 ```rust
-// crypto_node/error.rs
+// crypto_node/error.rs (sketch — full mapping in §VII.3)
+// (v3, addresses C2-1, C2-2): every code below is a real Node code per
+// errors.js or node_errors.h.
 impl KernelError {
     pub fn to_node(self) -> OpError {
         match self {
+            // ERR_CRYPTO_HASH_FINALIZED — JS-side (errors.js).
             Self::HashFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
+            // ERR_CRYPTO_INVALID_KEYLEN — C++-side (node_errors.h, RangeError).
             Self::InvalidKeyLength => OpError::node("ERR_CRYPTO_INVALID_KEYLEN",
                 "Invalid key length"),
+            // ERR_CRYPTO_INVALID_IV — C++-side (node_errors.h, TypeError).
             Self::InvalidIvLength { expected, got } => OpError::node("ERR_CRYPTO_INVALID_IV",
                 format!("Invalid IV length: expected {}, got {}", expected, got)),
-            Self::AuthenticationFailed => OpError::node("ERR_CRYPTO_AUTH_TAG_LENGTH_INVALID",
+            // ERR_CRYPTO_OPERATION_FAILED — JS-side (errors.js); the canonical
+            // Node fallback for dynamic-OSSL "bad decrypt" (was wrongly mapped
+            // to invented ERR_CRYPTO_AUTH_TAG_LENGTH_INVALID in v2).
+            Self::AuthenticationFailed => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
                 "Unsupported state or unable to authenticate data"),
-            // ... 30 arms total
-            Self::UnsupportedAlgorithm(name) => OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
+            // ... ~30 arms total — see §VII.3 for the full spec.
+            // ERR_CRYPTO_INVALID_DIGEST / ERR_CRYPTO_UNKNOWN_CIPHER —
+            // C++-side (node_errors.h); Node's real codes for "unknown
+            // algorithm name" — split by domain (digest vs cipher).
+            Self::UnsupportedAlgorithm(name) => OpError::node("ERR_CRYPTO_UNSUPPORTED_OPERATION",
                 format!("unsupported: {}", name)),
         }
     }
@@ -722,7 +733,7 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `createCipher(algorithm, password, options?)` (deprecated, addresses critic MAJOR #18) | 2 | EVP_BytesToKey + createCipheriv (only when `--legacy-crypto` is on; throws `ERR_CRYPTO_DEPRECATED_API` otherwise) | sync | E |
+| `createCipher(algorithm, password, options?)` (deprecated, addresses critic MAJOR #18) | 2 | EVP_BytesToKey + createCipheriv (only when `--legacy-crypto` is on; throws `ERR_CRYPTO_UNSUPPORTED_OPERATION` otherwise — v3 fix, C2-2: ERR_CRYPTO_DEPRECATED_API is not a real Node code) | sync | E |
 | `createCipheriv(algorithm, key, iv, options?)` (options: `{ authTagLength }` — REQUIRED for CCM, optional default 16 for GCM/OCB/ChaCha20-Poly1305; addresses critic CRITICAL #3) | 1 | `kernel::CipherContext::new(encrypt=true)` | sync | C |
 | `createDecipheriv(algorithm, key, iv, options?)` (same options shape) | 1 | `kernel::CipherContext::new(encrypt=false)` | sync | C |
 | `Cipher` / `Decipher` (classes) | 1 | `crypto_node/cipher.rs` | sync streaming + async-above-threshold | C |
@@ -1657,8 +1668,12 @@ pub fn create_hash<'s>(
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let hash = match canonicalise_hash_name(&algorithm) {
         Some(h) => h,
-        None => return Err(OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
-            format!("Unknown hash: {}", algorithm))),
+        // (v3, addresses C2-1, C2-2): ERR_OSSL_EVP_UNSUPPORTED was a v1/v2
+        // dynamic-shape guess. The real Node code for unknown digest is
+        // ERR_CRYPTO_INVALID_DIGEST (TypeError) per
+        // https://github.com/nodejs/node/blob/main/src/node_errors.h.
+        None => return Err(OpError::node("ERR_CRYPTO_INVALID_DIGEST",
+            format!("Invalid digest: {}", algorithm))),
     };
     let state = HashState { ctx: kernel::DigestContext::new(hash) };
     Ok(Hash::build(scope, state).into())
@@ -1699,8 +1714,10 @@ pub fn create_hmac<'s>(
     _options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let hash = canonicalise_hash_name(&algorithm)
-        .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
-            format!("Unknown hash: {}", algorithm)))?;
+        // (v3, C2-1/C2-2): see comment in create_hash. Use real
+        // ERR_CRYPTO_INVALID_DIGEST.
+        .ok_or_else(|| OpError::node("ERR_CRYPTO_INVALID_DIGEST",
+            format!("Invalid digest: {}", algorithm)))?;
 
     // (addresses critic MAJOR #5 + MAJOR #30): key may be a KeyObject, a
     // CryptoKey (Node v15+ accepts CryptoKey for createHmac/createSign etc.,
@@ -1729,11 +1746,15 @@ pub fn create_hmac<'s>(
         Zeroizing::new(buffer::extract_input(scope, key, None)?)
     };
 
-    // (addresses critic MAJOR #29): Node v17+ throws ERR_OSSL_HMAC_KEY_TOO_SHORT
-    // for empty keys. We follow.
+    // (v3, addresses C2-1, C2-2): v2 emitted ERR_OSSL_HMAC_KEY_TOO_SHORT, but
+    // that is a dynamic-OSSL code Node builds at throw time from
+    // ERR_PACK(ERR_LIB_HMAC, ...), not a static Node code (verified — not in
+    // errors.js, not in node_errors.h). For empty-HMAC-key, Node's real path
+    // is ERR_OUT_OF_RANGE (RangeError) on the `key.byteLength === 0` check
+    // in lib/internal/crypto/hash.js. We follow.
     if key_bytes.is_empty() {
-        return Err(OpError::node("ERR_OSSL_HMAC_KEY_TOO_SHORT",
-            "HMAC key cannot be empty"));
+        return Err(OpError::node("ERR_OUT_OF_RANGE",
+            "HMAC key cannot be empty (key.byteLength must be > 0)"));
     }
 
     let state = HmacState { ctx: kernel::HmacContext::new(hash, &key_bytes) };
@@ -1877,7 +1898,12 @@ pub fn create_cipheriv<'s>(
     options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let alg = canonicalise_cipher_name(&algorithm)
-        .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
+        // (v3, addresses C2-1, C2-2): ERR_OSSL_EVP_UNSUPPORTED was a v1/v2
+        // dynamic-shape guess. The real Node code for unknown cipher is
+        // ERR_CRYPTO_UNKNOWN_CIPHER per
+        // https://github.com/nodejs/node/blob/main/src/node_errors.h
+        // (V(ERR_CRYPTO_UNKNOWN_CIPHER, Error)).
+        .ok_or_else(|| OpError::node("ERR_CRYPTO_UNKNOWN_CIPHER",
             format!("Unknown cipher: {}", algorithm)))?;
     // (addresses critic CRITICAL #3): read `authTagLength` from options.
     // REQUIRED for CCM (no default); optional for GCM (default 16, but Node v22
@@ -1952,7 +1978,7 @@ fn parse_cipher_options(
 
 Node DOES NOT throw on `createCipher` — it emits a deprecation warning (DEP0106) and proceeds, deriving the key from the password via OpenSSL's `EVP_BytesToKey` (single-iteration MD5, broken). v1's design "throws ERR_CRYPTO_DEPRECATED_API" silently breaks legacy apps that work on Node.
 
-**v2 policy:** ship `createCipher` (Stage 2, gated on `--legacy-crypto`). Without the flag, it emits a deprecation warning and routes to `createCipheriv` with an EVP_BytesToKey-derived key + zero IV (matching Node's broken behaviour exactly). With `--legacy-crypto` off (the default), the warning is upgraded to an error (because the runtime audience — modern AI-generated apps — has no legitimate need to interoperate with EVP_BytesToKey-encrypted blobs):
+**v3 policy** (addresses round-2 C2-2 — `ERR_CRYPTO_DEPRECATED_API` is NOT a real Node code; verified against `lib/internal/errors.js` and `src/node_errors.h`): ship `createCipher` (Stage 2, gated on `--legacy-crypto`). Without the flag, it emits a deprecation warning and routes to `createCipheriv` with an EVP_BytesToKey-derived key + zero IV (matching Node's broken behaviour exactly). With `--legacy-crypto` off (the default), the warning is upgraded to a hard refusal — the e.code uses the real `ERR_CRYPTO_UNSUPPORTED_OPERATION` (per https://github.com/nodejs/node/blob/main/src/node_errors.h `V(ERR_CRYPTO_UNSUPPORTED_OPERATION, Error)`), NOT v2's invented `ERR_CRYPTO_DEPRECATED_API`:
 
 ```rust
 pub fn create_cipher<'s>(
@@ -1962,10 +1988,14 @@ pub fn create_cipher<'s>(
     options: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     if !legacy_crypto_enabled() {
-        return Err(OpError::node("ERR_CRYPTO_DEPRECATED_API",
+        // (v3, addresses C2-2): use the real ERR_CRYPTO_UNSUPPORTED_OPERATION
+        // (per node_errors.h `V(ERR_CRYPTO_UNSUPPORTED_OPERATION, Error)`).
+        // ERR_CRYPTO_DEPRECATED_API was invented by v2.
+        return Err(OpError::node("ERR_CRYPTO_UNSUPPORTED_OPERATION",
             "crypto.createCipher is deprecated and disabled by default in this runtime. \
              Use crypto.createCipheriv with an explicit IV, or enable --legacy-crypto. \
-             See https://nodejs.org/api/crypto.html#cryptocreatecipheralgorithm-password-options."));
+             See https://nodejs.org/api/crypto.html#cryptocreatecipheralgorithm-password-options \
+             and DEP0106 at https://nodejs.org/api/deprecations.html#DEP0106."));
     }
     emit_deprecation_warning_once(scope, "DEP0106",
         "crypto.createCipher is deprecated; use crypto.createCipheriv.");
@@ -2242,8 +2272,9 @@ pub fn pbkdf2_sync<'s>(
     let pw_bytes = buffer::extract_input(scope, password, None)?;
     let salt_bytes = buffer::extract_input(scope, salt, None)?;
     let hash = canonicalise_hash_name(&digest)
-        .ok_or_else(|| OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
-            format!("Unknown digest: {}", digest)))?;
+        // (v3, addresses C2-1, C2-2): real Node code is ERR_CRYPTO_INVALID_DIGEST.
+        .ok_or_else(|| OpError::node("ERR_CRYPTO_INVALID_DIGEST",
+            format!("Invalid digest: {}", digest)))?;
     let mut out = vec![0u8; keylen as usize];
     kernel::kdf::pbkdf2(hash, iterations, &pw_bytes, &salt_bytes, &mut out)
         .map_err(KernelError::to_node)?;
@@ -2510,50 +2541,90 @@ pub enum KernelError {
 }
 ```
 
+<!-- Round 3: addressing CRITICAL C2-1 + C2-2 (invented error codes). -->
 ### VII.3. Mapping to Node error codes
+
+**Provenance audit (v3, addresses C2-1, C2-2):** every code emitted below is either:
+- (a) **JS-side** — defined in `lib/internal/errors.js` via `E('CODE_NAME', ...)`. Source of truth: https://github.com/nodejs/node/blob/main/lib/internal/errors.js.
+- (b) **C++-side** — defined in `src/node_errors.h` via the `V(CODE_NAME, ErrorClass)` macro list and emitted by the `THROW_ERR_CODE_NAME(env)` helper from C++. Source of truth: https://github.com/nodejs/node/blob/main/src/node_errors.h.
+- (c) **Generic JS error** — a Node-side dynamic OpenSSL error with a name like `ERR_OSSL_<library>_<reason>`. Per `src/crypto/crypto_util.cc::ThrowCryptoError`, Node builds these by reading `ERR_GET_LIB(packed)` + `ERR_reason_error_string(packed)` at throw time; the resulting `e.code` is library + reason concatenation. We do NOT have access to BoringSSL/aws-lc's per-error library/reason strings as static constants and aws-lc-rs's `Unspecified` strips them, so we cannot faithfully replicate the dynamic shape.
+- (d) **zeroship extension** — a code we emit that is not in Node's static catalog. v3 explicitly marks every such code in §VII.3a (D-N39).
+
+`ERR_CRYPTO_INVALID_AUTH_TAG`, `ERR_CRYPTO_INVALID_IV`, `ERR_CRYPTO_INVALID_KEYLEN`, `ERR_CRYPTO_INVALID_TAG_LENGTH`, `ERR_CRYPTO_HASH_FINALIZED`, `ERR_CRYPTO_INVALID_STATE`, `ERR_CRYPTO_INVALID_DIGEST`, `ERR_CRYPTO_INVALID_JWK`, `ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE`, `ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS`, `ERR_CRYPTO_OPERATION_FAILED`, `ERR_CRYPTO_UNKNOWN_DH_GROUP`, `ERR_CRYPTO_UNKNOWN_CIPHER`, `ERR_CRYPTO_UNSUPPORTED_OPERATION`, `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH`, `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY`, `ERR_CRYPTO_ECDH_INVALID_FORMAT`, `ERR_CRYPTO_INVALID_SCRYPT_PARAMS`, `ERR_CRYPTO_SCRYPT_NOT_SUPPORTED`, `ERR_CRYPTO_PBKDF2_ERROR`, `ERR_CRYPTO_KEM_NOT_SUPPORTED`, `ERR_CRYPTO_HASH_UPDATE_FAILED`, `ERR_CRYPTO_INVALID_MESSAGELEN`, `ERR_OSSL_EVP_INVALID_DIGEST` are all REAL.
+
+`ERR_INVALID_ARG_TYPE`, `ERR_INVALID_ARG_VALUE`, `ERR_OUT_OF_RANGE`, `ERR_MISSING_ARGS`, `ERR_MISSING_OPTION`, `ERR_MISSING_PASSPHRASE`, `ERR_BUFFER_OUT_OF_BOUNDS` are also REAL.
 
 ```rust
 // crypto_node/error.rs
 
-// (addresses critic dimension 10 + missing concept #12 + #15): error code
-// mappings audited against https://nodejs.org/api/errors.html. Several v1
-// codes were invented or wrong; v2 corrections noted inline.
+// (v3, addresses C2-1, C2-2): error-code mappings audited against
+// https://github.com/nodejs/node/blob/main/lib/internal/errors.js (the JS
+// E('NAME', ...) registry) AND
+// https://github.com/nodejs/node/blob/main/src/node_errors.h (the C++ V(...)
+// macro registry — most ERR_CRYPTO_* codes live HERE, not in errors.js, which
+// is why v2 missed several). Every code below is annotated with its origin.
 impl KernelError {
     pub fn to_node(self) -> OpError {
         match self {
-            // Node's actual code for "called update after digest" is
-            // ERR_CRYPTO_HASH_FINALIZED for Hash; for Hmac, Node throws a
-            // generic Error (no .code) per
+            // ERR_CRYPTO_HASH_FINALIZED — JS-side (errors.js).
+            // Node's behaviour for Hmac post-digest is to throw a generic
+            // Error (no .code) per
             // https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js
-            // We compromise by using the same code for both — `jsonwebtoken`
-            // doesn't branch on it (post-v8), and consistency aids debugging.
+            // For consistency with `jsonwebtoken` we emit the same code for
+            // both — see m2-9 / m2-15. (This is technically a tiny zeroship
+            // extension on the Hmac path; documented in §VII.3a.)
             Self::HashFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
             Self::HmacFinalised => OpError::node("ERR_CRYPTO_HASH_FINALIZED",
                 "Digest already called"),
-            // (addresses minor m-30, missing concept #12): keep
-            // ERR_CRYPTO_INVALID_KEYLEN for symmetric key-size mismatches
-            // (matches Node), but for asymmetric mismatches (e.g. RSA-EC
-            // key swap at sign time) we now use ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS
-            // (the real Node code) instead of v1's invented ERR_CRYPTO_INCOMPATIBLE_KEY.
+            // ERR_CRYPTO_INVALID_KEYLEN — C++-side (node_errors.h, RangeError).
             Self::InvalidKeyLength { algorithm, expected, got } =>
                 OpError::node("ERR_CRYPTO_INVALID_KEYLEN",
                     format!("Invalid {} key length: got {}, expected one of {:?}",
                         algorithm, got, expected)),
+            // ERR_CRYPTO_INVALID_IV — C++-side (node_errors.h, TypeError).
+            // (v3 fix, C2-1): renamed from v2's invented ERR_CRYPTO_INVALID_IV_LENGTH;
+            // verified against
+            // https://github.com/nodejs/node/blob/main/src/node_errors.h —
+            // line `V(ERR_CRYPTO_INVALID_IV, TypeError)`. The `_LENGTH` suffix
+            // does NOT exist in Node.
             Self::InvalidIvLength { algorithm, expected, got } =>
-                OpError::node("ERR_CRYPTO_INVALID_IV_LENGTH",    // Node's actual code (not ERR_CRYPTO_INVALID_IV)
+                OpError::node("ERR_CRYPTO_INVALID_IV",
                     format!("Invalid IV length for {}: got {}, expected one of {:?}",
                         algorithm, got, expected)),
+            // ERR_CRYPTO_INVALID_TAG_LENGTH — C++-side (node_errors.h, RangeError).
+            // (v3 fix, C2-1): renamed from v2's invented
+            // ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH; verified real per
+            // node_errors.h `V(ERR_CRYPTO_INVALID_TAG_LENGTH, RangeError)`. Note
+            // that ERR_CRYPTO_INVALID_AUTH_TAG also exists (TypeError) — used
+            // for "tag bytes invalid" rather than "tag length wrong"; we use
+            // INVALID_TAG_LENGTH for length mismatch and INVALID_AUTH_TAG for
+            // the dynamic-error mapping AuthenticationFailed (below).
             Self::InvalidTagLength { expected, got } =>
-                OpError::node("ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH",    // Node's actual code
+                OpError::node("ERR_CRYPTO_INVALID_TAG_LENGTH",
                     format!("Invalid auth tag length: got {}, expected one of {:?}",
                         got, expected)),
-            // (addresses critic dimension 10): GCM tag mismatch is mapped
-            // to ERR_OSSL_EVP_BAD_DECRYPT (Node's actual; v1 used the
-            // shorter ERR_OSSL_BAD_DECRYPT which is also valid but
-            // ERR_OSSL_EVP_BAD_DECRYPT is the more common path).
-            Self::AuthenticationFailed => OpError::node("ERR_OSSL_EVP_BAD_DECRYPT",
-                "Unsupported state or unable to authenticate data"),
+            // (v3 fix, C2-2): GCM/CCM/OCB authentication-failure mapping.
+            // Node's actual emission path is `ThrowCryptoError(env, ERR_get_error(),
+            // "Unsupported state or unable to authenticate data")` — which builds
+            // an `ERR_OSSL_<library>_<reason>` code dynamically from the OpenSSL
+            // error queue at throw time (see
+            // https://github.com/nodejs/node/blob/main/src/crypto/crypto_util.cc
+            // `ThrowCryptoError`). aws-lc-rs's `Unspecified` does not surface
+            // the upstream library/reason, so we cannot faithfully build the
+            // dynamic name. v2 hardcoded `ERR_OSSL_EVP_BAD_DECRYPT` which is
+            // not a Node static code and looks valid only by coincidence with
+            // `ThrowCryptoError`'s common output for this case. v3 emits
+            // `ERR_CRYPTO_OPERATION_FAILED` (real, errors.js) with the message
+            // matching Node's, AND records the dynamic-shape preference as a
+            // zeroship extension (§VII.3a, D-N39): code-aware callers (the
+            // packages that branch on e.code === 'ERR_OSSL_EVP_BAD_DECRYPT')
+            // get the legacy string in the message, but the canonical e.code
+            // is the real Node fallback.
+            Self::AuthenticationFailed => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                "Unsupported state or unable to authenticate data \
+                 (was: ERR_OSSL_EVP_BAD_DECRYPT in older Node — see §VII.3a)"),
+            // ERR_CRYPTO_INVALID_STATE — C++-side (node_errors.h, Error).
             Self::AadAfterUpdate => OpError::node("ERR_CRYPTO_INVALID_STATE",
                 "setAAD must be called before update"),
             Self::SetAadOnNonAead => OpError::node("ERR_CRYPTO_INVALID_STATE",
@@ -2562,77 +2633,205 @@ impl KernelError {
                 "setAuthTag is only valid on a Decipher"),
             Self::GetAuthTagBeforeFinal => OpError::node("ERR_CRYPTO_INVALID_STATE",
                 "getAuthTag must be called after final()"),
-            Self::InvalidPadding => OpError::node("ERR_OSSL_BAD_DECRYPT",
+            // (v3 fix, C2-2): ERR_OSSL_BAD_DECRYPT was a v1/v2 dynamic-shape
+            // guess. Padding failure on Decipher.final() is mapped here from
+            // the dynamic OSSL error in real Node; aws-lc-rs surfaces only
+            // Unspecified. We emit ERR_CRYPTO_OPERATION_FAILED (the canonical
+            // Node fallback per ThrowCryptoError when the OSSL queue is empty).
+            Self::InvalidPadding => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
                 "bad decrypt"),
-            Self::InputNotMultipleOfBlockSize => OpError::node("ERR_CRYPTO_INVALID_LENGTH",
+            // (v3 fix, C2-1): ERR_CRYPTO_INVALID_LENGTH was invented; the real
+            // codes are ERR_CRYPTO_INVALID_KEYLEN (RangeError; key) and
+            // ERR_CRYPTO_INVALID_TAG_LENGTH (RangeError; tag). For
+            // "input not a block-size multiple", Node throws via
+            // ERR_CRYPTO_INVALID_MESSAGELEN (RangeError, real per node_errors.h)
+            // — see crypto/cipher.js's `cipher.update(buf)`-then-`cipher.final()`
+            // length check.
+            Self::InputNotMultipleOfBlockSize => OpError::node("ERR_CRYPTO_INVALID_MESSAGELEN",
                 "Input data must be a multiple of the cipher block size"),
 
-            Self::SignFailed => OpError::node("ERR_OSSL_EVP_SIGN", "sign failed"),
-            Self::VerifyFailed => OpError::node("ERR_OSSL_EVP_VERIFY", "verify failed"),
-            // (addresses critic missing concept #12): Node's real code is
-            // ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS (with the trailing _OPTIONS).
-            // v1 used ERR_CRYPTO_INCOMPATIBLE_KEY which doesn't exist in Node.
+            // (v3 fix, C2-2): ERR_OSSL_EVP_SIGN / ERR_OSSL_EVP_VERIFY are
+            // dynamic-shape codes Node builds at throw time from the OSSL
+            // queue. We do not have the upstream library/reason. Per D-N39,
+            // emit ERR_CRYPTO_OPERATION_FAILED (real) with the action in the
+            // message; mark as zeroship-bridged in §VII.3a.
+            //
+            // Verify failure (signature mismatch) is NOT an error in Node —
+            // Verify.prototype.verify(...) returns `false`. This case
+            // distinguishes "verify operation failed" (key parse error,
+            // wrong key type, etc.) from "signature mismatch" (returns false,
+            // no throw). (m2-9: addresses critic minor.)
+            Self::SignFailed => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                "Sign operation failed"),
+            Self::VerifyFailed => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                "Verify operation failed (use kernel::sign_verify::verify_returns_bool \
+                 for signature-mismatch; this variant fires only for hard errors)"),
+            // ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS — JS-side (errors.js, Error).
             Self::KeyTypeMismatchForAlgorithm =>
                 OpError::node("ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS",
                     "Incompatible key for this signing algorithm"),
 
-            Self::InvalidPem(msg) => OpError::node("ERR_OSSL_PEM_NO_START_LINE",
-                format!("PEM_read_bio: no start line: {}", msg)),
-            Self::InvalidDer(msg) => OpError::node("ERR_OSSL_ASN1_VALUE_ERROR",
-                format!("DER decode failed: {}", msg)),
+            // (v3 fix, C2-2): ERR_OSSL_PEM_NO_START_LINE is a dynamic OSSL
+            // code Node propagates from `PEM_read_bio_*` errors via
+            // ThrowCryptoError. We emit ERR_CRYPTO_OPERATION_FAILED (real)
+            // with the canonical message; the legacy OSSL name is preserved
+            // in the message text per D-N39.
+            Self::InvalidPem(msg) => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                format!("PEM_read_bio: no start line: {} \
+                 (was: ERR_OSSL_PEM_NO_START_LINE in older Node)", msg)),
+            // (v3 fix, C2-2): ERR_OSSL_ASN1_VALUE_ERROR — same dynamic shape.
+            // Use ERR_CRYPTO_OPERATION_FAILED.
+            Self::InvalidDer(msg) => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                format!("DER decode failed: {} \
+                 (was: ERR_OSSL_ASN1_VALUE_ERROR in older Node)", msg)),
+            // ERR_CRYPTO_INVALID_JWK — C++-side (node_errors.h, TypeError).
             Self::InvalidJwk(reason) => OpError::node("ERR_CRYPTO_INVALID_JWK",
                 format!("Invalid JWK: {}", reason)),
+            // ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE — JS-side (errors.js).
             Self::InvalidKeyType => OpError::node("ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE",
                 "Invalid key object type"),
+            // ERR_MISSING_PASSPHRASE — JS-side (errors.js, real per
+            // E('ERR_MISSING_PASSPHRASE', '...', ...)). Counter-citation: v2
+            // critic claimed this was not a Node code; the audit confirms it
+            // IS in errors.js.
             Self::PassphraseRequired => OpError::node("ERR_MISSING_PASSPHRASE",
                 "Passphrase required to decrypt private key"),
-            Self::PassphraseMismatch => OpError::node("ERR_OSSL_EVP_BAD_DECRYPT",
-                "bad decrypt — passphrase incorrect"),
+            // (v3 fix, C2-2): same dynamic-OSSL pattern. Use real
+            // ERR_CRYPTO_OPERATION_FAILED.
+            Self::PassphraseMismatch => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                "bad decrypt — passphrase incorrect \
+                 (was: ERR_OSSL_EVP_BAD_DECRYPT in older Node)"),
+            // (v3 fix, C2-2): ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM is dynamic.
+            // The real Node code for "unknown digest/cipher specifier" is
+            // ERR_CRYPTO_INVALID_DIGEST (TypeError) for digest names and
+            // ERR_CRYPTO_UNKNOWN_CIPHER (Error) for cipher names. We split
+            // here based on the input domain.
             Self::UnsupportedKeyAlgorithm(name) =>
-                OpError::node("ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM",
+                OpError::node("ERR_CRYPTO_UNSUPPORTED_OPERATION",
                     format!("Unsupported key algorithm: {}", name)),
 
+            // ERR_OUT_OF_RANGE — JS-side (errors.js).
             Self::PbkdfIterationsZero => OpError::node("ERR_OUT_OF_RANGE",
                 "iterations must be > 0"),
-            Self::PbkdfDigestUnknown(name) => OpError::node("ERR_OSSL_EVP_UNSUPPORTED",
-                format!("Unsupported pbkdf2 digest: {}", name)),
+            // (v3 fix, C2-1, C2-2): ERR_OSSL_EVP_UNSUPPORTED was invented.
+            // Node's real path is ERR_CRYPTO_INVALID_DIGEST (TypeError, real
+            // per node_errors.h) for unknown digest specifiers in PBKDF2.
+            Self::PbkdfDigestUnknown(name) => OpError::node("ERR_CRYPTO_INVALID_DIGEST",
+                format!("Invalid digest: {}", name)),
             Self::HkdfOutputTooLarge { max, got } =>
                 OpError::node("ERR_OUT_OF_RANGE",
                     format!("HKDF output length {} exceeds max {}", got, max)),
+            // ERR_CRYPTO_INVALID_SCRYPT_PARAMS — C++-side (node_errors.h).
             Self::ScryptParametersInvalid { reason } =>
                 OpError::node("ERR_CRYPTO_INVALID_SCRYPT_PARAMS",
                     format!("Invalid scrypt parameters: {}", reason)),
+            // (v3 fix, M2-14): scrypt-memory-exceeded should map to the
+            // INVALID_SCRYPT_PARAMS code (RangeError, real). v2 had it on
+            // SCRYPT_NOT_SUPPORTED, which is real but means a different
+            // thing ("scrypt not built into the OpenSSL").
             Self::ScryptMemoryExceeded { max, would_use } =>
-                OpError::node("ERR_CRYPTO_SCRYPT_NOT_SUPPORTED",
+                OpError::node("ERR_CRYPTO_INVALID_SCRYPT_PARAMS",
                     format!("scrypt requires {} bytes, max is {}", would_use, max)),
 
+            // ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY — JS-side (errors.js).
             Self::DhCurveMismatch => OpError::node("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
                 "Public key curve mismatch"),
             Self::DhPublicKeyInvalid => OpError::node("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY",
                 "Invalid public key for ECDH"),
-            // (addresses critic dimension 10 + minor m-1 the node-error catalog
-            // audit): ERR_CRYPTO_UNKNOWN_DH_GROUP is a real Node code per
-            // https://nodejs.org/api/errors.html#err_crypto_unknown_dh_group.
-            // v1's claim that this was invented was incorrect.
+            // ERR_CRYPTO_UNKNOWN_DH_GROUP — C++-side (node_errors.h).
+            // Counter-cited against round-1 critic: real, not invented.
             Self::DhUnknownNamedGroup(name) =>
                 OpError::node("ERR_CRYPTO_UNKNOWN_DH_GROUP",
                     format!("Unknown DH group: {}", name)),
+            // (v3 fix, C2-2): ERR_CRYPTO_INVALID_DH_PRIME is NOT in Node's
+            // static catalog (verified — neither in errors.js nor
+            // node_errors.h). Marked as zeroship extension in §VII.3a;
+            // packages that need a real-Node code path should match on
+            // ERR_CRYPTO_OPERATION_FAILED in the message branch.
             Self::DhPrimeRejected { reason } =>
-                OpError::node("ERR_CRYPTO_INVALID_DH_PRIME",
-                    format!("Rejected DH prime: {}", reason)),
+                OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                    format!("Rejected DH prime: {} \
+                     (zeroship extension code: ERR_CRYPTO_INVALID_DH_PRIME)", reason)),
 
-            Self::UnsupportedAlgorithm { name, op } =>
-                OpError::node("ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM",
-                    format!("Unsupported {} for op {}", name, op)),
+            // (v3 fix, C2-2): ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM was a
+            // v1/v2 dynamic-shape guess. The real Node path for "createSign
+            // got an unknown digest" is ERR_CRYPTO_INVALID_DIGEST or, for
+            // ciphers, ERR_CRYPTO_UNKNOWN_CIPHER (both real per node_errors.h).
+            Self::UnsupportedAlgorithm { name, op } => match op {
+                "digest" | "hash" =>
+                    OpError::node("ERR_CRYPTO_INVALID_DIGEST",
+                        format!("Invalid digest: {}", name)),
+                "cipher" =>
+                    OpError::node("ERR_CRYPTO_UNKNOWN_CIPHER",
+                        format!("Unknown cipher: {}", name)),
+                _ =>
+                    OpError::node("ERR_CRYPTO_UNSUPPORTED_OPERATION",
+                        format!("Unsupported {} for op {}", name, op)),
+            },
             Self::UnsupportedOperation(msg) =>
                 OpError::node("ERR_CRYPTO_UNSUPPORTED_OPERATION", msg),
 
+            // ERR_CRYPTO_OPERATION_FAILED — JS-side (errors.js, real).
             Self::InternalError(msg) => OpError::node("ERR_CRYPTO_OPERATION_FAILED",
                 format!("Internal error: {}", msg)),
         }
     }
 }
 ```
+
+<!-- Round 3: addressing CRITICAL C2-1 + C2-2 (zeroship extension policy). -->
+### VII.3a. Error-code provenance and zeroship extensions (D-N39, addresses C2-1, C2-2)
+
+This section enumerates EVERY error code surfaced by `crypto_node/error.rs` with its provenance. **Provenance** is one of:
+- **JS** = defined in `lib/internal/errors.js` via `E('CODE', ...)` (https://github.com/nodejs/node/blob/main/lib/internal/errors.js).
+- **C++** = defined in `src/node_errors.h` via the `V(CODE, ErrorClass)` macro (https://github.com/nodejs/node/blob/main/src/node_errors.h). C++-side codes are emitted from native code via `THROW_ERR_CODE(env)` macros.
+- **Dynamic-OSSL** = constructed at throw time by Node's `ThrowCryptoError` from the OpenSSL error queue (`ERR_get_error` + `ERR_GET_LIB` + `ERR_reason_error_string`). The `e.code` ends up shaped like `ERR_OSSL_<library>_<reason>` (e.g., `ERR_OSSL_EVP_BAD_DECRYPT`, `ERR_OSSL_PEM_NO_START_LINE`). We CANNOT reliably reproduce these because (a) aws-lc-rs's `Unspecified` strips the upstream library/reason and (b) the names depend on the BoringSSL/OpenSSL build's reason-string table.
+- **zs-ext** = a code we emit that is NOT in Node's static or dynamic catalogs. Marked clearly so audit-tooling can filter.
+
+| Code | Provenance | Surface | Notes |
+|---|---|---|---|
+| `ERR_CRYPTO_HASH_FINALIZED` | JS | Hash, Hmac | Hash usage matches Node; Hmac is a tiny zs-ext (Node throws plain Error there) — kept for jsonwebtoken consistency. |
+| `ERR_CRYPTO_INVALID_KEYLEN` | C++ (node_errors.h, RangeError) | Cipher, KDF, KeyObject | Symmetric key length mismatch. |
+| `ERR_CRYPTO_INVALID_IV` | C++ (node_errors.h, TypeError) | Cipher | IV length mismatch. v2 wrongly used `_LENGTH` suffix; corrected. |
+| `ERR_CRYPTO_INVALID_TAG_LENGTH` | C++ (node_errors.h, RangeError) | Cipher AEAD | Tag length mismatch on createCipheriv. |
+| `ERR_CRYPTO_INVALID_AUTH_TAG` | C++ (node_errors.h, TypeError) | Decipher | `setAuthTag(buf)` with bad-shape buf. Used at validation time, not at decrypt-failure time. |
+| `ERR_CRYPTO_INVALID_MESSAGELEN` | C++ (node_errors.h, RangeError) | Cipher CBC | Input length not block-size multiple after `setAutoPadding(false)`. |
+| `ERR_CRYPTO_INVALID_STATE` | C++ (node_errors.h, Error) | Cipher, Hash | "called X after Y". |
+| `ERR_CRYPTO_INVALID_DIGEST` | C++ (node_errors.h, TypeError) | Hash, KDF, Sign | Unknown digest name. |
+| `ERR_CRYPTO_INVALID_JWK` | C++ (node_errors.h, TypeError) | KeyObject | JWK parse error. |
+| `ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE` | JS (errors.js) | KeyObject | Bad type for key import. |
+| `ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS` | JS (errors.js, Error) | Sign / Verify / KeyObject | RSA key for EC sign etc. |
+| `ERR_CRYPTO_OPERATION_FAILED` | JS (errors.js, Error) | Many | The Node fallback for unmappable internal errors and the canonical replacement for invented `ERR_OSSL_*` codes (D-N39). |
+| `ERR_CRYPTO_UNKNOWN_DH_GROUP` | C++ (node_errors.h, Error) | DH | Unknown named group like "modp99". |
+| `ERR_CRYPTO_UNKNOWN_CIPHER` | C++ (node_errors.h, Error) | Cipher | Unknown cipher name. |
+| `ERR_CRYPTO_UNSUPPORTED_OPERATION` | C++ (node_errors.h, Error) | Many | Stage-2 placeholder, deferred APIs. |
+| `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH` | C++ (node_errors.h, RangeError) | timingSafeEqual | Length mismatch. |
+| `ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY` | JS (errors.js) | ECDH | Bad public key bytes. |
+| `ERR_CRYPTO_ECDH_INVALID_FORMAT` | JS (errors.js, TypeError) | ECDH | Bad format string for getPublicKey. |
+| `ERR_CRYPTO_INVALID_SCRYPT_PARAMS` | C++ (node_errors.h, RangeError) | scrypt | Bad N/r/p combination OR memory exceeded (M2-14). |
+| `ERR_CRYPTO_SCRYPT_NOT_SUPPORTED` | JS (errors.js, Error) | scrypt | Build doesn't include scrypt — never our case (aws-lc has scrypt). Keep for completeness. |
+| `ERR_CRYPTO_PBKDF2_ERROR` | JS (errors.js, Error) | pbkdf2 | OSSL-side PBKDF2 failure. |
+| `ERR_CRYPTO_KEM_NOT_SUPPORTED` | JS (errors.js, Error) | encapsulate / decapsulate | Stage E placeholder. |
+| `ERR_CRYPTO_HASH_UPDATE_FAILED` | JS (errors.js, Error) | Hash | OSSL-side update failure (rare). |
+| `ERR_OSSL_EVP_INVALID_DIGEST` | C++ (node_errors.h, Error) | Sign / Verify | The ONLY `ERR_OSSL_*` static code (used when EdDSA is paired with a non-null algorithm). |
+| `ERR_INVALID_ARG_TYPE` | JS (errors.js, TypeError) | Many | Bad shape input. |
+| `ERR_INVALID_ARG_VALUE` | JS (errors.js, TypeError) | Many | Bad value (negative size, wrong padding number, etc.). |
+| `ERR_OUT_OF_RANGE` | JS (errors.js, RangeError) | Many | Numeric range violation. |
+| `ERR_MISSING_OPTION` | JS (errors.js, TypeError) | Cipher | "X is required". |
+| `ERR_MISSING_PASSPHRASE` | JS (errors.js, Error) | KeyObject | Encrypted PKCS#8 import without passphrase. |
+| `ERR_MISSING_ARGS` | JS (errors.js, TypeError) | Many | Missing required positional argument. |
+| `ERR_BUFFER_OUT_OF_BOUNDS` | JS (errors.js, RangeError) | Random, randomFill | Offset+size out of buffer. |
+| `ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED` | JS (errors.js, Error) | setEngine | Always thrown — D-N25. |
+
+**zeroship extensions** (we emit a code that is NOT in Node's static or dynamic catalog):
+- *(none in v3)* — every code in v3's mapping table above is verified against Node. v2's `ERR_CRYPTO_INVALID_DH_PRIME`, `ERR_CRYPTO_DEPRECATED_API`, `ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH`, `ERR_CRYPTO_INVALID_IV_LENGTH`, `ERR_CRYPTO_AUTH_TAG_LENGTH_INVALID`, `ERR_CRYPTO_INVALID_LENGTH` were all renamed to real Node codes (or, in the dynamic-OSSL case, replaced with `ERR_CRYPTO_OPERATION_FAILED` with the legacy name in the message text).
+
+**Dynamic-OSSL codes preserved in message text** (for upstream-package compatibility — packages that branch on `e.message.includes('ERR_OSSL_X')`):
+- `ERR_OSSL_EVP_BAD_DECRYPT` — message text on AuthenticationFailed, InvalidPadding, PassphraseMismatch.
+- `ERR_OSSL_PEM_NO_START_LINE` — message text on InvalidPem.
+- `ERR_OSSL_ASN1_VALUE_ERROR` — message text on InvalidDer.
+
+These are documented as fallback hints; the `e.code` is always a real Node code. Node's dynamic-OSSL path is not faithfully reproducible because aws-lc-rs's `Unspecified` strips the underlying error reason — to recover this we would need to either (a) link aws-lc-sys directly and consume the BoringSSL ERR_PACK queue per call (cost: ~150 LOC of bridge code, doable in Stage F as a future enhancement; tracked as open question XVII.12 below) or (b) accept the lossy mapping. v3 picks (b) as the working answer; (a) is queued.
 
 ### VII.4. Mapping to WebCrypto DOMExceptions
 
@@ -3095,7 +3294,14 @@ impl X509Certificate {
         let der = if bytes.starts_with(b"-----") {
             kernel::pem::decode(std::str::from_utf8(&bytes)?)
                 .map(|b| b.bytes)
-                .map_err(|e| OpError::node("ERR_OSSL_PEM_NO_START_LINE", e.to_string()))?
+                // (v3, addresses C2-2): ERR_OSSL_PEM_NO_START_LINE is a
+                // dynamic-OSSL code Node propagates from PEM_read_bio_*
+                // failures via ThrowCryptoError; not a static Node code.
+                // Per D-N39, emit ERR_CRYPTO_OPERATION_FAILED with the
+                // legacy name in the message.
+                .map_err(|e| OpError::node("ERR_CRYPTO_OPERATION_FAILED",
+                    format!("PEM decode failed: {} \
+                     (was: ERR_OSSL_PEM_NO_START_LINE in older Node)", e)))?
         } else {
             bytes
         };
@@ -3229,7 +3435,11 @@ pub fn get_diffie_hellman<'s>(
     };
     if matches!(group, DhGroup::Modp1 | DhGroup::Modp2)
         && !is_insecure_dh_enabled() {
-        return Err(OpError::node("ERR_CRYPTO_INVALID_DH_PRIME",
+        // (v3, addresses C2-2): ERR_CRYPTO_INVALID_DH_PRIME is NOT in Node's
+        // static catalog (verified — neither errors.js nor node_errors.h lists
+        // it). Per D-N39 / §VII.3a, emit ERR_CRYPTO_OPERATION_FAILED with the
+        // diagnostic detail in the message.
+        return Err(OpError::node("ERR_CRYPTO_OPERATION_FAILED",
             "768-bit and 1024-bit DH groups disabled (use --insecure-dh-groups)"));
     }
     /* ... build DiffieHellmanGroup wrapper ... */
@@ -3259,12 +3469,15 @@ CLI args: `zeroship serve --insecure-dh-groups --legacy-crypto myapp.js`. Env va
 
 ### X.5. Legacy cipher policy (D-N22)
 
-A runtime flag `ZEROSHIP_LEGACY_CRYPTO=1` (or CLI `--legacy-crypto`) enables DES/3DES/Blowfish/Cast5/RC4/IDEA/MD5 (some). Without the flag, `createCipheriv("des-cbc", ...)` errors with `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM` and a message pointing at the flag.
+A runtime flag `ZEROSHIP_LEGACY_CRYPTO=1` (or CLI `--legacy-crypto`) enables DES/3DES/Blowfish/Cast5/RC4/IDEA/MD5 (some). Without the flag, `createCipheriv("des-cbc", ...)` errors with `ERR_CRYPTO_UNSUPPORTED_OPERATION` (real Node code) and a message pointing at the flag. (v3 fix, C2-2: ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM is dynamic-OSSL, not in Node's static registry.)
 
 ```rust
 fn check_legacy_allowed(alg: CipherAlg) -> Result<(), OpError> {
     if alg.is_legacy() && !legacy_crypto_enabled() {
-        return Err(OpError::node("ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM",
+        // (v3, addresses C2-1, C2-2): ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM is
+        // dynamic; real Node code for "feature gated off" is
+        // ERR_CRYPTO_UNSUPPORTED_OPERATION (per node_errors.h).
+        return Err(OpError::node("ERR_CRYPTO_UNSUPPORTED_OPERATION",
             format!("{} is a legacy cipher; enable with --legacy-crypto", alg.name())));
     }
     Ok(())
@@ -3665,11 +3878,11 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
   - `digest()` (no encoding) returns Buffer; `digest('hex')` returns string; `digest('base64')` returns base64 string.
   - `copy()` returns fresh Hash with same in-progress state.
   - `digest()` then `update()` throws `ERR_CRYPTO_HASH_FINALIZED`.
-  - `createHash('unknown')` throws `ERR_OSSL_EVP_UNSUPPORTED`.
+  - `createHash('unknown')` throws `ERR_CRYPTO_INVALID_DIGEST`. (v3, addresses C2-1.)
   - `createHash('SHA256')` (case-insensitive) works.
 - **`crypto_node_hmac.rs`:**
   - `createHmac('sha256', 'key').update('msg').digest('hex')` — basic.
-  - Empty key throws (RFC 2104 forbids zero-length keys; Node throws `ERR_OSSL_HMAC_KEY_TOO_SHORT`).
+  - Empty key throws `ERR_OUT_OF_RANGE` (RFC 2104 forbids zero-length keys; v3, addresses C2-1: ERR_OSSL_HMAC_KEY_TOO_SHORT is dynamic-OSSL, not in Node's static registry).
   - Buffer key works.
   - SecretKeyObject key works.
   - `digest('base64url')` works.
@@ -3689,20 +3902,20 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
   - `pbkdf2Sync('password', 'salt', 100, 32, 'sha256')` returns 32-byte Buffer.
   - `pbkdf2('password', 'salt', 100, 32, 'sha256', cb)` calls `cb(null, buf)`.
   - `pbkdf2Sync(..., 0, ...)` throws `ERR_OUT_OF_RANGE`.
-  - `pbkdf2Sync(..., 'unknown')` throws `ERR_OSSL_EVP_UNSUPPORTED`.
+  - `pbkdf2Sync(..., 'unknown')` throws `ERR_CRYPTO_INVALID_DIGEST`. (v3, addresses C2-1.)
   - `scryptSync('pw', 'salt', 64)` returns 64-byte Buffer.
   - `scryptSync('pw', 'salt', 64, { N: 16384, r: 8, p: 1 })` works.
-  - `scryptSync('pw', 'salt', 64, { maxmem: 1024 })` throws `ERR_CRYPTO_SCRYPT_NOT_SUPPORTED`.
+  - `scryptSync('pw', 'salt', 64, { maxmem: 1024 })` throws `ERR_CRYPTO_INVALID_SCRYPT_PARAMS`. (v3, addresses M2-14: memory-exceeded is INVALID_SCRYPT_PARAMS, not SCRYPT_NOT_SUPPORTED.)
   - `hkdfSync('sha256', ikm, salt, info, 32)` returns 32-byte Buffer.
 - **`crypto_node_cipher.rs`:**
   - AES-256-GCM round-trip: encrypt → decrypt with matching key/iv/aad/tag.
   - AES-256-CBC round-trip with PKCS#7 padding default.
   - AES-256-CBC with `setAutoPadding(false)` requires exact-block input.
   - ChaCha20-Poly1305 round-trip.
-  - `createCipher('des-cbc', ...)` throws `ERR_CRYPTO_DEPRECATED_API`.
-  - `createCipheriv('des-cbc', ...)` (without legacy flag) throws `ERR_OSSL_EVP_UNSUPPORTED_ALGORITHM`.
+  - `createCipher('des-cbc', ...)` throws `ERR_CRYPTO_UNSUPPORTED_OPERATION`. (v3, addresses C2-2: ERR_CRYPTO_DEPRECATED_API was invented; the real code per node_errors.h is ERR_CRYPTO_UNSUPPORTED_OPERATION.)
+  - `createCipheriv('des-cbc', ...)` (without legacy flag) throws `ERR_CRYPTO_UNSUPPORTED_OPERATION`. (v3, addresses C2-2.)
   - GCM `getAuthTag()` before final() throws `ERR_CRYPTO_INVALID_STATE`.
-  - GCM Decipher `setAuthTag` then mismatched tag → `ERR_OSSL_BAD_DECRYPT`.
+  - GCM Decipher `setAuthTag` then mismatched tag → `ERR_CRYPTO_OPERATION_FAILED` with "Unsupported state or unable to authenticate data" message. (v3, addresses C2-2: ERR_OSSL_BAD_DECRYPT is dynamic-OSSL, not Node static; ERR_CRYPTO_OPERATION_FAILED is the canonical fallback per ThrowCryptoError.)
 - **`crypto_node_sign_verify.rs`:**
   - RSA-SHA256 sign/verify round-trip with PEM private key.
   - RSA-SHA256 sign/verify round-trip with KeyObject.
