@@ -381,10 +381,18 @@ pub struct KeyObjectState {
 
 The bridge ops:
 
-- `KeyObject.from(cryptoKey)` (static) → reads cryptoKey.[[handle]].material (the Arc), clones it into a new KeyObjectState, returns a fresh KeyObject wrapper.
+- `KeyObject.from(cryptoKey)` (static) → reads cryptoKey.[[handle]].material (the Arc), clones it into a new KeyObjectState along with the source's `extractable` flag (M2-15), returns a fresh KeyObject wrapper.
 - `crypto.subtle.importKey('jwk', keyObject.export({format:'jwk'}))` → takes the KeyObject's exported JWK, runs the existing WebCrypto JWK importer; the result is a fresh CryptoKey with its OWN Arc<KeyMaterial> (the JWK round-trip materialises a new Arc — slower but spec-correct).
 
-The Arc share avoids re-encoding on the common `KeyObject.from(...)` path. The JWK round-trip path is unavoidable when the user wants a CryptoKey from a KeyObject with WebCrypto-specific algorithm settings (the algorithm + extractable + usages don't have a node:crypto equivalent and must come from the JWK importKey call).
+The Arc share avoids re-encoding on the common `KeyObject.from(...)` path. The JWK round-trip path covers the inverse (CryptoKey from KeyObject); the user supplies the WebCrypto algorithm + usages + extractable explicitly because those don't exist on the source KeyObject.
+
+<!-- Round 3: addressing MAJOR M2-15 (extractable propagation alignment). -->
+**Extractable propagation reconciliation (v3, addresses M2-15):** v2 had two contradictory statements: (a) "JWK round-trip materialises a fresh Arc — slower but spec-correct because the WebCrypto algorithm + extractable + usages have no node:crypto equivalent and must come from the JWK importKey call" (line ~387) and (b) XVII.9 "we DO add an extractable field to KeyObjectState that propagates from CryptoKeyState" (line ~3946). v3 reconciles:
+
+- `KeyObject.from(cryptoKey)` (the FORWARD bridge — Arc clone): DOES propagate `extractable` from CryptoKeyState into the new KeyObjectState. The flag is a field on KeyObjectState (visible to `keyObject.export(...)` which checks it before extracting bytes). This is the "fast path" — same key bytes, same refcount.
+- `subtle.importKey('jwk', keyObject.export(...))` (the REVERSE bridge — JWK round-trip): does NOT propagate the source's KeyObject `extractable` because KeyObject doesn't carry one (KeyObjects in Node are conceptually always extractable; only the WebCrypto wrapping enforces extractability). The user supplies the WebCrypto-side `extractable` parameter to `importKey`. The resulting CryptoKey gets a fresh Arc<KeyMaterial> AND a user-supplied extractable flag.
+
+So both statements are correct after the reconciliation: the forward bridge DOES propagate (M2-15), the reverse bridge DOES require the user to supply (the JWK lossy comment). v3 makes this explicit; v2 read as contradictory.
 
 ### I.5. Streaming via incremental contexts (D-N2)
 
@@ -775,8 +783,15 @@ Algorithms supported: same SHA family + key length validation per RFC 2104 (any 
 | `Sign.prototype.update(data, encoding?)` | 1 | `kernel::SignContext::update` | sync | C |
 | `Sign.prototype.sign(privateKey, encoding?)` | 1 | `kernel::SignContext::sign` | sync | C |
 | `Verify.prototype.verify(publicKey, signature, encoding?)` | 1 | `kernel::VerifyContext::verify` | sync | C |
-| `crypto.sign(algorithm, data, key, callback?)` (one-shot; addresses critic MAJOR #15: callback variant accepted, dispatches via `state.spawned_ops` exactly like the other async APIs) | 1 | `kernel::sign_one_shot` (sync) or `sign_one_shot_async` (callback path) | sync **and** async with callback | C |
+| `crypto.sign(algorithm, data, key, callback?)` (one-shot; addresses critic MAJOR #15: callback variant accepted) | 1 | `kernel::sign_one_shot` (sync) or `sign_one_shot_async` (callback path; see M2-8 dispatch policy below) | sync **and** async with callback | C |
 | `crypto.verify(algorithm, data, key, sig, callback?)` (one-shot; addresses critic MAJOR #15) | 1 | `kernel::verify_one_shot` / `verify_one_shot_async` | sync **and** async with callback | C |
+
+**`crypto.sign` / `crypto.verify` callback dispatch policy (v3, addresses M2-8):** Node's actual behaviour for cheap asymmetric ops is to fire the callback async via `process.nextTick` rather than via a thread pool. Spawning a blocking task via `compio::runtime::spawn_blocking` adds ~10µs of overhead — measurable on RSA-2048 verify (which itself takes ~50µs). v3 splits the dispatch policy by op cost:
+
+- **Cheap ops** (RSA-2048 verify, ECDSA-P256 sign/verify, Ed25519 sign/verify): the kernel runs the op SYNCHRONOUSLY on the V8 thread, then fires the callback via `process.nextTick` — matching Node's `process.nextTick(callback, null, result)` dispatch. Total overhead ~1µs vs ~10µs for spawn_blocking.
+- **Expensive ops** (RSA-4096 sign, RSA-8192 sign, future ML-DSA-87): spawn_blocking via `state.spawned_ops`. Threshold: any op estimated >100µs CPU time goes async.
+
+The threshold is hard-coded by algorithm (no runtime measurement; we know RSA-4096 sign is ~5ms and RSA-2048 verify is ~50µs). The dispatch decision is a `match` on `(SignAlg, key_size_bits, op)` returning `DispatchKind::NextTick | DispatchKind::SpawnBlocking`. ~30 LOC.
 
 **Algorithms supported:**
 - `rsa-sha1`, `rsa-sha256`, `rsa-sha384`, `rsa-sha512` (RSASSA-PKCS1-v1_5)
@@ -904,7 +919,7 @@ PBKDF2 and HKDF call into the existing `crypto_native/derive.rs` paths (refactor
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
-| `X509Certificate(input)` (constructor — Stage 1 placeholder throws `ERR_CRYPTO_UNSUPPORTED_OPERATION`; Stage E parses for real. addresses critic minor m-12: the "Tier 2 / Stage E" labeling now reads consistently. The placeholder implementation lives in Stage C alongside the other Stage-2 placeholder classes.) | 2 | aws-lc-sys raw FFI (`X509_d2i`) | sync | E |
+| `X509Certificate(input)` (constructor — Stage E for real parsing. v3 fix, M2-7: consistently labeled Stage E throughout — v2 had inconsistent "placeholder lives in Stage C" prose contradicting the table. v3 places BOTH the placeholder (which throws `ERR_CRYPTO_UNSUPPORTED_OPERATION`) AND the real parser in Stage E. Stage C does NOT ship X509Certificate at all.) | 2 | aws-lc-sys raw FFI (`X509_d2i`) | sync | E |
 | `X509Certificate.prototype.subject` | 2 | parsed certificate | sync | E |
 | `X509Certificate.prototype.issuer` | 2 | parsed certificate | sync | E |
 | `X509Certificate.prototype.publicKey` | 2 | parsed certificate | sync | E |
@@ -945,38 +960,45 @@ These are NOT separate code paths — they're literal property references to the
 | `setEngine(engine, flags?)` | 3 | n/a | n/a | NEVER (no engine support — D-N25) |
 | `secureHeapUsed()` | 3 | stub returning `{ total: 0, min: 0, used: 0, utilization: 0 }` | sync | B |
 | `constants` (object of OpenSSL constants) | 1 | small static dict | sync | B |
-| ~~`crypto.signal`~~ — does NOT exist in Node (addresses critic minor m-9: v1 invented this; Node's `node:crypto` has no `signal` export. The user was likely thinking of `AbortSignal` in `node:util` / global. Removed from the doc.) | — | — | — | — |
+| ~~`crypto.signal`~~ — REMOVED from the design (addresses critic minor m-9, M2-19): v1 invented this; Node's `node:crypto` has no `signal` export. The crossed-out row is documentation-only — the entry is NOT generated into the synthetic module exports, NOT included in `getCipherInfo` / `getHashes` filters, and NOT counted in the §II.14 coverage rollup. (v3 explicit fix: removed any code-side reference; the strikethrough is purely an audit trail for the v1 invention.) | — | — | — | — |
 | `crypto.subtle` (alias for `webcrypto.subtle`; addresses critic MAJOR #9: top-level `crypto.subtle` was added as an alias to `crypto.webcrypto.subtle` in Node v15+ per https://nodejs.org/api/webcrypto.html — older code uses `crypto.webcrypto.subtle`, newer uses `crypto.subtle`. We export both, identity-preserving via D-N16.) | 1 | direct reference | n/a | D |
 
+<!-- Round 3: addressing MAJOR M2-1 (coverage math out of sync with §II rollup). -->
 ### II.14. Coverage summary
+
+(v3, addresses M2-1, m2-4 — denominator re-rolled after §II.15 additions.) The denominator counts every distinct export named in §II.1 through §II.15: each constructor, each prototype method, each free function, each static method. Counted: ~127 entries (v2 said 110; the discrepancy was §II.15's PQC + KEM + miscellaneous additions that v2 didn't roll into the rollup).
 
 Stage 1 (the node:crypto APIs landed by end of Stage D):
 
 - **Hashing:** 7 / 7 exports (100%)
 - **HMAC:** 4 / 4 exports (100%)
-- **Cipher / Decipher:** 11 / 12 exports (`createCipher` deprecated and never)
-- **Sign / Verify:** 9 / 9 exports (100%)
-- **Public-key:** 3 / 5 exports (`publicDecrypt` / `privateEncrypt` Stage 2)
-- **DH / ECDH:** 9 / 14 exports (ECDH 100%; named DH groups Stage 2; arbitrary DH Stage 2)
-- **Key generation:** 4 / 8 exports (basic kinds Stage 1; primes Stage 2)
-- **Key import/export:** 11 / 11 exports (100%)
+- **Cipher / Decipher:** 12 / 13 exports (gain: `setAutoPadding` chainable per missing concept #23; `createCipher` is Stage E with --legacy-crypto flag).
+- **Sign / Verify:** 11 / 11 exports (gain: `crypto.sign(callback)` + `crypto.verify(callback)` per MAJOR #15)
+- **Public-key:** 4 / 5 exports (`publicDecrypt` / `privateEncrypt` Stage 2; gain: `crypto.diffieHellman(options)` per missing concept #8)
+- **DH / ECDH:** 9 / 16 exports (ECDH 100%; named DH groups Stage 2; arbitrary DH Stage 2; `createDiffieHellman(primeLength)` Stage 2 per missing concept #6)
+- **Key generation:** 5 / 10 exports (basic kinds Stage 1; primes Stage 2; PQC keygen Stage E)
+- **Key import/export:** 12 / 12 exports (100%; gain: `KeyObject.toCryptoKey` per missing concept #7)
 - **KDFs:** 6 / 6 exports (100%)
-- **Random:** 6 / 6 exports (100%)
-- **X.509:** 0 / 13 exports (Stage 2)
+- **Random:** 7 / 7 exports (100%; gain: `pseudoRandomBytes` deprecated alias per missing concept #19)
+- **X.509:** 0 / 17 exports (Stage 2; +4 from §II.15: `toString`, `toJSON`, `toLegacyObject`, `checkEmail`, `checkIP`, `issuerCertificate`)
 - **WebCrypto bridge:** 3 / 3 exports (100%)
-- **Misc:** 11 / 12 exports (`crypto.signal` never)
+- **Misc:** 12 / 13 exports (gain: `crypto.subtle` top-level alias per MAJOR #9; `crypto.signal` removed per m-9)
+- **PQC + KEM:** 0 / 7 exports (Stage E placeholders: `encapsulate`, `decapsulate`, 3× ML-DSA, 3× ML-KEM, SLH-DSA — all currently throw `ERR_CRYPTO_UNSUPPORTED_OPERATION` / `ERR_CRYPTO_KEM_NOT_SUPPORTED`)
 
-**Total Stage 1: 84 / 110 exports (76%)** — covers ~95% of npm-package usage. (addresses critic minor m-13 — counts include both the class constructors AND each prototype method; the % is best read as "API surface area" rather than "distinct features"; e.g. `Hash`, `Hash.prototype.update`, `Hash.prototype.digest`, `Hash.prototype.copy` count separately. m-17's accounting note: `setEngine` + the deprecated `createCipher` (now Stage E) + post-quantum stubs are the "deferred-forever" set.)
-**Total Stage 1 + Stage 2: 105 / 110 exports (95%)** — long tail in `setEngine`, deprecated APIs (no `crypto.signal` per m-9), and PQC keygen until aws-lc-rs catches up.
+**Total Stage 1: 92 / 127 exports (72%)** — covers ~95% of npm-package usage. (addresses critic minor m-13: the count is API surface area, not distinct features; method-per-row counting matches Node's documentation tree.)
+
+**Total Stage 1 + Stage 2: 121 / 127 exports (95%)** — long tail in `setEngine` (NEVER), deprecated APIs (no `crypto.signal`), and PQC keygen until aws-lc-rs catches up.
+
+**Counting methodology** (m2-4): each numbered row in §II.1 through §II.15 is one entry. Constructors and their `prototype.X` methods are separate entries (e.g., `Hash` constructor + `Hash.prototype.update` + `Hash.prototype.digest` + `Hash.prototype.copy` = 4 entries). Static methods (`KeyObject.from`) are separate from instance methods. Getters (`KeyObject.prototype.type`) count as one entry each. The "deferred-forever" set: `setEngine`, `createCipher` without --legacy-crypto, IDEA-CBC, AES-XTS, RIPEMD-160, SHAKE128/256, SHA3-224 (totals ~6 entries; everything else is deferable to Stage E or beyond).
 
 ### II.15. Post-quantum + KEM + miscellaneous Node v22-v25 additions (addresses critic missing concepts #1, #2, #3, #4, #7, #16, #17, #18, #19, #21, #22, #23, #25)
 
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
 | `crypto.argon2(password, salt, options?)` (Node v22+, `crypto.hash`-shaped) | 3 | npm `argon2` (WASM via unenv) | sync/async | NEVER native — see open question XVII.4 + missing concept #1 |
-| `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API; addresses critic missing concept #2) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
+| `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API; addresses critic missing concept #2; v3 spec'd shape per M2-3 below) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
 | `Certificate` (legacy SPKAC) — `Certificate.exportChallenge`, `Certificate.exportPublicKey`, `Certificate.verifySpkac` | 3 | aws-lc-sys raw FFI for `NETSCAPE_SPKI_b64_decode` (~80 LOC) | sync | E (rare; only browser keygen, missing concept #4) |
-| `KeyObject.toCryptoKey(algorithm, extractable, keyUsages)` (Node v18+) | 1 | bridge: `KeyObject` → fresh `CryptoKey` via the Arc share + the WebCrypto `importKey('jwk', ko.export({format:'jwk'}))` round-trip | sync | C (missing concept #7 + clarifies the bidirectional bridge in D-N4) |
+| `KeyObject.toCryptoKey(algorithm, extractable, keyUsages)` (Node v18+; v3 lossy-bridge note per M2-12 below) | 1 | bridge: `KeyObject` → fresh `CryptoKey` via the Arc share + the WebCrypto `importKey('jwk', ko.export({format:'jwk'}))` round-trip | sync | C (missing concept #7 + clarifies the bidirectional bridge in D-N4) |
 | `crypto.checkPrime(candidate, options?, callback)` / `checkPrimeSync` | 3 | aws-lc-sys raw FFI for `BN_is_prime_fasttest_ex` | sync/async | E (missing concepts #5, #11; can ship independently of generatePrime per the critic) |
 | `crypto.createDiffieHellman(primeLength)` (synthesise a fresh prime) | 3 | aws-lc-sys raw FFI for `DH_generate_parameters_ex` | async (Node v17+ defaults async; sync overload retained) | E (missing concept #6) |
 | `X509Certificate.prototype.toString()` returns PEM | 2 | reuses kernel PEM emitter | sync | E (missing concept #16) |
@@ -992,7 +1014,32 @@ Stage 1 (the node:crypto APIs landed by end of Stage D):
 
 **Post-quantum notes (D-N36, missing concept #3):** Node v25 added these `asymmetricKeyType` values: `'ml-dsa-44'`, `'ml-dsa-65'`, `'ml-dsa-87'` (FIPS 204), `'ml-kem-512'`, `'ml-kem-768'`, `'ml-kem-1024'` (FIPS 203), `'slh-dsa-sha2-128f'` etc. (FIPS 205). Stage E ships PARSE-ONLY recognition: the `asymmetricKeyType` getter returns the right string, but `generateKeyPair('ml-dsa-65', ...)` errors with `ERR_CRYPTO_UNSUPPORTED_OPERATION` until aws-lc-rs's PQC API stabilises.
 
+<!-- Round 3: addressing MAJOR M2-3 (encapsulate/decapsulate shape). -->
+**`crypto.encapsulate` / `crypto.decapsulate` shape (v3, addresses M2-3):** Per https://nodejs.org/api/crypto.html#cryptoencapsulatepublickey:
+
+```ts
+// Stage E placeholder; full impl arrives when aws-lc-rs's ML-KEM API ships.
+crypto.encapsulate(publicKey: KeyObject | CryptoKey): {
+    sharedKey: Buffer,    // the symmetric key the encapsulator + decapsulator agree on
+    ciphertext: Buffer,   // the encapsulation, which decapsulator uses to recover sharedKey
+}
+
+crypto.decapsulate(
+    privateKey: KeyObject | CryptoKey,
+    ciphertext: Buffer | Uint8Array,
+): Buffer    // the recovered sharedKey
+```
+
+The keys must be `asymmetricKeyType` of `'ml-kem-512'`, `'ml-kem-768'`, or `'ml-kem-1024'` (the only PQC KEMs Node v22+ accepts). Sync API; no async variant in Node yet. Stage E placeholder throws `ERR_CRYPTO_KEM_NOT_SUPPORTED` (real per `lib/internal/errors.js`).
+
 **Argon2 (missing concept #1):** Node v22 did NOT add `crypto.argon2` as a standalone export — confirmed against https://nodejs.org/api/crypto.html (no `crypto.argon2` entry as of writing). The critic's claim was incorrect on the surface name; what Node v22 added was `crypto.hash` (a one-shot hashing convenience), not argon2. Argon2 remains npm-package territory (`argon2`, `@phc/argon2`). v2 corrects v1's "Node never shipped it" to "Node has not shipped argon2 in `node:crypto` as of v25; revisit if Node adds it post-cutoff."
+
+<!-- Round 3: addressing MAJOR M2-12 (KeyObject.toCryptoKey PSS lossy bridge). -->
+**`KeyObject.toCryptoKey` lossiness for RSA-PSS (v3, addresses M2-12):** the bridge currently round-trips through JWK (`subtle.importKey('jwk', ko.export({format:'jwk'}))`). For symmetric (`SecretKeyObject`) and standard asymmetric (RSA-PKCS1, ECDSA, Ed25519, X25519) keys this is lossless. **For RSA-PSS-typed private keys, JWK loses the PSS-specific algorithm parameters** — RFC 7518 doesn't define a `kty: 'RSA'` JWK that distinguishes PSS from PKCS1, and the `alg` claim (`'PS256'`/`'PS384'`/`'PS512'`) only carries the hash, not `mgf1HashAlgorithm` or `saltLength`. After the JWK round-trip, the resulting CryptoKey has its WebCrypto algorithm set from the user-supplied `algorithm` parameter, NOT preserved from the source KeyObject's `asymmetricKeyDetails`.
+
+v3 documents this as an accepted trade-off: the user MUST supply the matching `{ name: 'RSA-PSS', hash, saltLength?, ... }` algorithm dict to `toCryptoKey` for PSS keys. If the supplied algorithm parameters disagree with the source KeyObject's PSS parameters (e.g., source has `saltLength: 32`, `algorithm.saltLength: 16`), the resulting CryptoKey uses the user-supplied values, NOT the source's. This matches Node's behaviour (Node has the same JWK-bridging limitation in `KeyObject.toCryptoKey`).
+
+**Future fix path** (XVII.13 below, queued): bypass the JWK round-trip by directly cloning the `Arc<KeyMaterial>` into a new `CryptoKeyState` with the user-supplied algorithm — this requires the WebCrypto algorithm-validation logic to accept any `KeyMaterial` variant the source KeyObject can hold. ~30 LOC change in `crypto_native/crypto_key.rs`. Deferred to Stage F.
 
 **Stream.Transform (missing concept #21):** addressed in §V.6 above.
 
@@ -2133,10 +2180,13 @@ pub fn create_hmac<'s>(
 Cipher and Decipher are nearly identical; we model them as a single `Cipher` impl that internally tracks an `encrypt: bool` flag, with `Decipher` being a thin alias class.
 
 ```rust
+// (v3, addresses M2-25): auto_padding field removed; single source of truth
+// is the kernel CipherContext.
 pub struct CipherState {
     ctx: kernel::CipherContext,
     is_encrypt: bool,
-    auto_padding: bool,
+    mode: CipherMode,         // for setAAD/setAuthTag ordering checks
+    auth_tag_length: usize,   // captured at create_cipheriv for AEAD modes
 }
 
 #[v8_class]
@@ -2236,6 +2286,14 @@ impl Cipher {
     }
 
     /// `cipher.setAutoPadding(boolean)` — for CBC mode PKCS#7 padding control.
+    /// Returns `this` so the call is chainable per Node spec.
+    /// (v3, addresses M2-25): the auto_padding flag lives ONLY on the kernel
+    /// `CipherContext`. v2 stored a duplicate `auto_padding: bool` on
+    /// `CipherState` which could drift from the kernel value (e.g., if a
+    /// future refactor wired in implicit padding-disable for AEAD). v3
+    /// removes the duplicate; the surface-side flag is read via
+    /// `self.ctx.is_auto_padding_on()` whenever needed (e.g., for diagnostic
+    /// messages on InputNotMultipleOfBlockSize errors).
     #[v8_method]
     fn set_auto_padding<'s>(&mut self,
         this: v8::Local<'s, v8::Object>,
@@ -2243,7 +2301,8 @@ impl Cipher {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let on = on.unwrap_or(true);    // Node default
         self.ctx.set_auto_padding(on).map_err(KernelError::to_node)?;
-        self.auto_padding = on;
+        // No `self.auto_padding = on;` — single source of truth on the kernel
+        // context.
         Ok(this.into())
     }
 }
@@ -2312,11 +2371,13 @@ pub fn create_cipheriv<'s>(
     };
     let ctx = kernel::CipherContext::new_encrypt(alg, &key_bytes, &iv_bytes, auth_tag_length)
         .map_err(KernelError::to_node)?;
+    // (v3, addresses M2-25): no auto_padding field — kernel context is the
+    // single source of truth. Defaults to true (PKCS#7 on); user calls
+    // setAutoPadding(false) to disable.
     let state = CipherState {
         ctx,
         is_encrypt: true,
-        auto_padding: true,
-        mode: alg.mode(),                // remembered for setAAD/setAuthTag ordering checks
+        mode: alg.mode(),                // for setAAD/setAuthTag ordering checks (V.4)
         auth_tag_length,
     };
     Ok(Cipher::build(scope, state).into())
@@ -2459,6 +2520,24 @@ The `parse_sign_key_input` helper handles every input shape:
 // parsed bytes (no sharing — each parse allocates new key bytes). The "shares
 // Arc" comment was misleading for the PEM path; v1 implied both branches
 // shared, which is true at the Rust-type level but not at the storage level.
+//
+// (v3, addresses M2-16): cost budget for the cold-PEM path. When the user
+// passes a PEM string directly to crypto.sign() instead of pre-parsing into
+// a KeyObject, we pay (per call):
+//   ~30 µs   PEM base64 decode + RFC 7468 framing parse (kernel::pem::decode)
+//   ~50 µs   PKCS#8 / PKCS#1 / SPKI / SEC1 ASN.1 walk (crypto_kernel::der)
+//   ~10 µs   Arc allocation + KeyMaterial enum boxing
+//   ~5 µs    aws-lc-rs key-handle init from raw bytes
+//   --------
+//   ~95 µs total
+// vs. ~5 µs for the KeyObject path (Arc::clone).
+//
+// Best practice: creator apps doing high-throughput signing should hoist
+// `createPrivateKey(pem)` once at startup and reuse the resulting KeyObject.
+// The Sign / Verify class APIs already encourage this (the user constructs
+// the Sign once, calls update() many times, then sign(key) once). The cold
+// path applies only to crypto.sign() one-shot calls with a PEM string —
+// which is uncommon enough that we don't budget further optimisation.
 fn parse_sign_key_input(
     scope: &mut v8::PinScope,
     input: v8::Local<v8::Value>,
@@ -2527,6 +2606,30 @@ fn parse_verify_key_input(
 /// (D-N34) Always normalised to a `usize` BEFORE the kernel boundary so the
 /// kernel never sees negative sentinels — this isolates the OpenSSL/aws-lc-rs
 /// FFI from sentinel handling.
+///
+/// (v3, addresses M2-6, M2-9, M2-17): notes on edge cases.
+///   * modulus_bits % 8 != 0: For non-byte-aligned moduli (rare; standard RSA
+///     keys are 2048/3072/4096 bits, all multiples of 8), `rsa_modulus_bytes`
+///     rounds UP via `(modulus_bits + 7) / 8`. The PSS salt-length max formula
+///     `emLen - hLen - 2` is exact when `modulus_bits = 8k`; for the rare
+///     non-aligned case, `emLen = ceil((modulus_bits - 1) / 8)` per RFC 8017
+///     §9.1.1 — which differs from `rsa_modulus_bytes` by at most 1 byte for
+///     a 1023-bit modulus. v3 picks the conservative reading: `emLen =
+///     rsa_modulus_bytes(km)`. Sub-byte precision matters only at the 1023/
+///     1535/3071-bit edges; commodity keys are unaffected.
+///
+///   * saltLength = 0: Per RFC 8017 §9.1.1, deterministic PSS (sLen=0) IS
+///     valid for both sign AND verify. Node's behaviour matches: `crypto.sign`
+///     with `saltLength: 0` accepts and produces deterministic output. We
+///     ALLOW this (returns `Ok(0)`); the round-2 critic (M2-17) was incorrect
+///     about sign-vs-verify asymmetry — there is none. Documented for clarity.
+///
+///   * saltLength = unrecognised negative (e.g., -3): Node throws RangeError
+///     with code `ERR_OUT_OF_RANGE` per
+///     https://nodejs.org/api/crypto.html#sign-sign at `options.saltLength`.
+///     v2 emitted ERR_INVALID_ARG_VALUE which the macro maps to TypeError —
+///     wrong class. v3 emits ERR_OUT_OF_RANGE which the macro maps to
+///     RangeError. (addresses M2-9.)
 fn normalise_pss_salt_length(
     user_value: Option<i32>,
     hash: HashAlgo,
@@ -2543,8 +2646,12 @@ fn normalise_pss_salt_length(
                     "RSA modulus too small for PSS with this hash"))
         }
         Some(n) if n >= 0 => Ok(n as usize),
-        Some(other) => Err(OpError::node("ERR_INVALID_ARG_VALUE",
-            format!("Invalid saltLength sentinel: {}", other))),
+        // (v3, addresses M2-9): use ERR_OUT_OF_RANGE so the macro emits
+        // RangeError per Node spec (the v2 path used ERR_INVALID_ARG_VALUE
+        // which yielded TypeError).
+        Some(other) => Err(OpError::node("ERR_OUT_OF_RANGE",
+            format!("saltLength sentinel out of range: got {}, expected -2 (MAX), \
+                     -1 (DIGEST), or any non-negative value", other))),
     }
 }
 ```
@@ -2565,27 +2672,60 @@ import { Transform } from "node:stream";
 
 const NativeHash = _zsc.Hash;
 
+// (v3, addresses M2-2): Transform mixin properly addresses back-pressure +
+// dual-API coexistence + objectMode/decodeStrings + highWaterMark.
 class Hash extends Transform {
-  #ctx;    // the native Hash instance
+  #ctx;             // the native Hash instance
+  #directApiUsed;   // if true, _transform/_flush become no-ops (user opted into direct API)
   constructor(algorithm, options) {
-    super(options);
+    // (M2-2) Pass through user's options so they can override highWaterMark.
+    // Force decodeStrings: false so binary chunks pass through unchanged
+    // (default Transform decodes strings to Buffer using utf-8, which would
+    // double-encode binary data).
+    super({
+      ...options,
+      decodeStrings: false,
+      objectMode: false,
+    });
     this.#ctx = new NativeHash(algorithm, options);
+    this.#directApiUsed = false;
   }
-  // Forward streaming API.
-  update(data, encoding) { this.#ctx.update(data, encoding); return this; }
-  digest(encoding) { return this.#ctx.digest(encoding); }
+  // Forward streaming API. update() is chainable per Node spec.
+  update(data, encoding) {
+    this.#directApiUsed = true;
+    this.#ctx.update(data, encoding);
+    return this;
+  }
+  digest(encoding) {
+    this.#directApiUsed = true;
+    return this.#ctx.digest(encoding);
+  }
   copy(options) {
     // copy() returns a fresh Hash with same in-progress state.
     const c = new Hash(this.#ctx[kAlgorithm], options);
     c.#ctx = this.#ctx.copy(options);
     return c;
   }
-  // Transform protocol.
+  // Transform protocol. (M2-2) If the user mixed direct API + Transform, _flush
+  // must NOT call digest() again — that would throw ERR_CRYPTO_HASH_FINALIZED
+  // and break pipeline error handling.
   _transform(chunk, encoding, callback) {
+    if (this.#directApiUsed) {
+      // User already called update()/digest() directly; pipeline should
+      // pass through silently (and effectively no-op), matching Node's
+      // behaviour where the stream side simply propagates whatever the
+      // direct calls left in the context.
+      callback();
+      return;
+    }
     try { this.#ctx.update(chunk, encoding); callback(); }
     catch (err) { callback(err); }
   }
   _flush(callback) {
+    if (this.#directApiUsed) {
+      callback();
+      return;
+    }
     try { this.push(this.#ctx.digest()); callback(); }
     catch (err) { callback(err); }
   }
@@ -2594,7 +2734,56 @@ class Hash extends Transform {
 
 The same pattern applies to Hmac (no `copy`), Cipher / Decipher (`_transform` writes the encrypted/decrypted chunk; `_flush` writes `final()`), Sign / Verify (`_transform` calls `update`; `_flush` is a no-op because the user must call `sign(key)` / `verify(key, sig)` explicitly).
 
-Cost: ~200 LOC of TS in `node-crypto.gen.ts`. Doesn't affect the Rust surface. The native classes still expose the streaming methods directly so apps that don't use Transform pay zero overhead.
+**Back-pressure** (M2-2): the underlying `Transform` super-class handles back-pressure via its `highWaterMark`. The mixin honors the user-supplied `options.highWaterMark` (defaults to 16384 bytes for byte streams). When the readable side is drained slowly, `_transform` is paused naturally by the Transform machinery — the synchronous `this.#ctx.update(chunk)` call is fast (microseconds), so back-pressure rarely backs up here.
+
+**Dual API + native class export** (m2-1): the `Hash` symbol exported from the synthetic `"node:crypto"` module is the JS-mixin'd class above. The raw native `__zeroship_node_crypto.Hash` is internal-only — it's NOT re-exported. Tests that need to bypass the mixin (e.g., to verify per-call latency) reach into `__zeroship_node_crypto` directly.
+
+Cost: ~250 LOC of TS in `node-crypto.gen.ts` (v3 includes the back-pressure + dual-API guards on top of v2's basic mixin). Doesn't affect the Rust surface. The native classes still expose the streaming methods directly so apps that don't use Transform pay zero overhead.
+
+<!-- Round 3: addressing MAJOR M2-4 (process.noDeprecation reader). -->
+**`emit_deprecation_warning_once` definition (v3, addresses M2-4, m2-8):**
+
+```rust
+// crypto_node/deprecation.rs (NEW in Stage A)
+//
+// One-shot per-isolate deprecation warning emitter. Memoises (isolate, code)
+// pairs so repeated DEP0031 invocations from the same app warn exactly once.
+//
+// Honours `--no-deprecation` and `process.noDeprecation`:
+//   * --no-deprecation: read once at isolate startup from RuntimeFlags
+//     (added per M2-4); when set, ALL deprecation calls are no-ops.
+//   * process.noDeprecation: a JS-side mutable flag (per Node's behaviour at
+//     https://nodejs.org/api/process.html#processnodeprecation). Read at
+//     emit time from `globalThis.process.noDeprecation`. Our process shim
+//     already exposes a `process` object via unenv; v3 wires a getter on it
+//     that reflects the runtime flag default + JS-side overrides.
+pub fn emit_deprecation_warning_once(
+    scope: &mut v8::PinScope,
+    code: &'static str,        // e.g., "DEP0031"
+    message: &str,
+) {
+    // Static one-shot table per isolate.
+    let already_warned = state::isolate_state(scope).deprecations_emitted.borrow_mut();
+    if !already_warned.insert(code) {
+        return;
+    }
+    // Check global suppression.
+    if state::isolate_runtime_flags().no_deprecation {
+        return;
+    }
+    // Check process.noDeprecation (JS-side override).
+    if let Some(process) = scope.get_global().get(scope, "process") {
+        if let Some(no_dep) = process.get(scope, "noDeprecation") {
+            if no_dep.boolean_value(scope) { return; }
+        }
+    }
+    // Emit via process.emitWarning(message, { code, type: 'DeprecationWarning' }).
+    // The unenv-shipped process object exposes emitWarning per Node API.
+    process::emit_warning(scope, message, code, "DeprecationWarning");
+}
+```
+
+This helper lives at `crates/runtime/src/crypto_node/deprecation.rs` (~40 LOC). The `state::isolate_state` / `state::isolate_runtime_flags` helpers already exist (per the existing `crates/runtime/src/state.rs`, plus the round-1 RuntimeFlags addition). The `process::emit_warning` shim is a thin wrapper over the existing unenv-backed `process` global.
 
 ### VI.1. The decision matrix
 
@@ -3890,13 +4079,14 @@ pub fn get_diffie_hellman<'s>(
 
 DH primes (modp14/15/16/17/18, ffdhe*) are stored as static byte arrays in the kernel. Backed by aws-lc-sys's `DH_set0_pqg` for the actual key-agreement computation.
 
-**Runtime-flag registry (addresses critic MAJOR #2):** Two crypto policy flags are introduced. v1 referenced them but never defined where they lived; v2 wires them into the existing `RuntimeFlags` struct at `crates/runtime/src/state.rs::RuntimeFlags` (read once at isolate setup, exposed via `globalThis.__zeroship_runtime_flags`):
+**Runtime-flag registry (addresses critic MAJOR #2; v3 m2-7 reality check):** crypto policy flags are introduced. v1 referenced them but never defined where they lived; v2 wired them into the existing `RuntimeFlags` struct. **v3 (m2-7) verifies:** at the worktree's HEAD (`main` at v2 merge), `crates/runtime/src/state.rs` does NOT YET contain a `RuntimeFlags` struct. The Stage A PR introduces it as a NEW struct alongside the existing `IsolateState`. Three flags total (post-v3, post-M2-4):
 
 ```rust
-// crates/runtime/src/state.rs (modified)
+// crates/runtime/src/state.rs (NEW in Stage A)
 pub struct RuntimeFlags {
-    pub insecure_dh_groups: bool,    // NEW (D-N22 partner): enable modp1/modp2 (768/1024-bit)
-    pub legacy_crypto: bool,         // existing reference (D-N22): enable DES/3DES/Blowfish/RC4/MD5-as-cipher/createCipher
+    pub insecure_dh_groups: bool,    // D-N22 partner: enable modp1/modp2 (768/1024-bit)
+    pub legacy_crypto: bool,         // D-N22: enable DES/3DES/Blowfish/RC4/MD5-as-cipher/createCipher
+    pub no_deprecation: bool,        // M2-4: --no-deprecation suppresses ALL DEP* warnings (matches Node)
 }
 
 pub fn is_insecure_dh_enabled() -> bool {
@@ -3905,9 +4095,14 @@ pub fn is_insecure_dh_enabled() -> bool {
 pub fn is_legacy_crypto_enabled() -> bool {
     state::isolate_runtime_flags().legacy_crypto
 }
+pub fn is_deprecation_suppressed() -> bool {
+    state::isolate_runtime_flags().no_deprecation
+}
 ```
 
-CLI args: `zeroship serve --insecure-dh-groups --legacy-crypto myapp.js`. Env vars: `ZEROSHIP_INSECURE_DH_GROUPS=1`, `ZEROSHIP_LEGACY_CRYPTO=1`. Both default off.
+CLI args: `zeroship serve --insecure-dh-groups --legacy-crypto --no-deprecation myapp.js`. Env vars: `ZEROSHIP_INSECURE_DH_GROUPS=1`, `ZEROSHIP_LEGACY_CRYPTO=1`, `ZEROSHIP_NO_DEPRECATION=1`. All default off.
+
+The struct lives at module level in `state.rs`; instances are stored on the per-isolate state. The `state::isolate_runtime_flags()` accessor reads from the current isolate's slot. Stage A PR introduces both the struct AND the accessor (~25 LOC).
 
 ### X.5. Legacy cipher policy (D-N22)
 
@@ -4398,11 +4593,63 @@ Lives in `crates/runtime/tests/`. Mirrors the patterns from `crypto_native.rs` /
 Node's `test/parallel/test-crypto-*.js` (https://github.com/nodejs/node/tree/main/test/parallel) is the comprehensive test suite. Approach:
 
 1. **Identify Tier 1 fixtures.** ~80 of the ~200 test files are relevant (the others test legacy ciphers, FIPS internals, OpenSSL-specific quirks).
-2. **Vendor a curated subset** at `crates/runtime/tests/wpt/node_crypto/` (sparse-checkout from a pinned Node commit; setup script update similar to setup-wpt.sh).
+2. **Vendor a curated subset** at `crates/runtime/tests/node_crypto_fixtures/` via a NEW setup script `crates/runtime/tests/setup-node-crypto-fixtures.sh` (modeled on the existing `setup-wpt.sh`). v3 (m2-10) specifies the exact commands:
+
+   ```bash
+   #!/usr/bin/env bash
+   # crates/runtime/tests/setup-node-crypto-fixtures.sh
+   # Sparse-checkout of Node's test/parallel/test-crypto-*.js subset at a pinned commit.
+   set -euo pipefail
+   PINNED_COMMIT="${NODE_COMMIT:-v22.13.0}"   # bump in sync with our supported Node version
+   DEST="$(dirname "$0")/node_crypto_fixtures"
+   mkdir -p "$DEST"
+   cd "$DEST"
+   if [ ! -d .git ]; then
+     git init
+     git remote add origin https://github.com/nodejs/node.git
+     git config core.sparseCheckout true
+     # Sparse-checkout pattern: just the crypto test files + common harness.
+     {
+       echo 'test/parallel/test-crypto-*.js'
+       echo 'test/common/index.js'
+       echo 'test/common/index.mjs'
+       echo 'test/fixtures/keys/*.pem'
+       echo 'test/fixtures/keys/*.crt'
+     } > .git/info/sparse-checkout
+   fi
+   git fetch --depth 1 origin "$PINNED_COMMIT"
+   git checkout FETCH_HEAD
+   echo "Checked out $(git rev-parse HEAD) — $(ls test/parallel/test-crypto-*.js | wc -l) crypto test files."
+   ```
+
+   Total checkout: ~200 KB. Pinned commit bumped in sync with the platform's officially-supported Node version.
 3. **Write a runner** at `crates/runtime/tests/node_crypto_compat.rs` that boots the runtime and runs each `test-crypto-*.js` file. Most files use Node's `assert` module (which we'd need to provide via unenv as a Tier 1 dep — already supported).
 4. **Track expectations** at `crates/runtime/tests/node-crypto.expectations` (mirrors `crypto_native/`'s WPT expectations file). List which test files pass / known-failing-with-reason.
 
 Node's tests use `common.js` test harness — small effort to provide the `common.hasCrypto` / `common.skipIf` shims.
+
+**Randomness quality test (v3, addresses m2-2):** add to `crates/runtime/tests/crypto_node_random.rs`:
+
+```rust
+#[test]
+fn test_random_bytes_quality_nist_sp_800_22() {
+    // Smoke-tests against NIST SP 800-22 randomness tests (chi-square + serial
+    // + monobit). Spawn 16 threads each pulling 1 MB from `randomBytes` and
+    // assert all 16 buffers pass:
+    //   - Monobit: |sum_of_bits / N - 0.5| < 0.01.
+    //   - Serial: chi-square over 8-bit windows < critical-value @ 0.01.
+    // Full SP 800-22 is a big test suite; we ship the two cheapest tests as
+    // a regression guard against entropy-source corruption.
+    use std::thread;
+    let handles: Vec<_> = (0..16).map(|_| thread::spawn(|| {
+        let buf = exec_js(r#"crypto.randomBytes(1024 * 1024)"#).unwrap();
+        nist_sp_800_22_smoke(&buf)
+    })).collect();
+    for h in handles { assert!(h.join().unwrap()); }
+}
+```
+
+The `nist_sp_800_22_smoke` helper lives at `crates/runtime/tests/test_helpers/nist_random.rs` (~80 LOC; references the published critical values for chi-square and monobit at 99% confidence per NIST SP 800-22 §2.1 + §2.2). This test is also the regression guard for D-N17's "rejection sampling, not modulo bias" claim in `randomInt`.
 
 **Targeted pass rates** (addresses critic minor m-10 — methodology):
 The "%" is computed against a sampled list of `test/parallel/test-crypto-*.js` files vendored at `crates/runtime/tests/wpt/node_crypto/`. Sampling rules:
@@ -4443,7 +4690,16 @@ These tests live at `crates/runtime/tests/npm_compat/` and are gated to a separa
 | **This design** | ~5,800 LOC native (kernel ~2500 + crypto_node ~3000 + crypto_native refactor ~300) + ~250 LOC TS shim (re-exports) = ~6,050 LOC | Pure native with shared kernel; TS shim is purely re-exports. Closer to Bun's approach in shape; closer to workerd's in depth. | `Arc<KeyMaterial>` shared between CryptoKey and KeyObject (D-N4) | Sync on V8 thread for sync APIs; `spawned_ops` blocking-pool for async APIs |
 
 Where this design lands:
-- **Smaller than Node.js** (~6K LOC vs ~18K LOC actual; the v1 claim of ~12K LOC was a rough estimate per critic minor m-2 — `lib/internal/crypto/` plus `src/crypto/` plus tests is closer to ~18K LOC). The smaller footprint comes from aws-lc-rs's higher-level API eliminating much of Node's hand-written EVP glue, plus ~250 LOC of bespoke encrypted-PKCS#8 ASN.1 (D-N33) where aws-lc-rs DOES drop us into raw FFI (addresses critic minor m-18: the "higher-level API" claim has caveats — encrypted PKCS#8, X.509, named DH primes, prime gen, and legacy ciphers all use `aws-lc-sys` raw FFI. The net is still smaller than Node, but not because the high-level API covers everything).
+- **Smaller than Node.js** (v3 estimate: ~7,500-8,500 LOC vs ~18K LOC actual Node `lib/internal/crypto/` plus `src/crypto/` plus tests; the v2 claim of ~5,800 LOC was too low — m2-11 audit). Revised by stage:
+  - Stage A (kernel extraction): ~600 LOC (refactor existing crypto_native to call kernel; net add ~600).
+  - Stage B (hash + hmac + KDFs + random + scrypt): ~1,000 LOC, of which ~90 LOC is aws-lc-sys FFI per §III.2a (MD5 ~30 + SHA-512/224 ~40 + scrypt ~20).
+  - Stage C (KeyObject + sign + verify + cipher + decipher): ~2,000 LOC, of which ~370 LOC is aws-lc-sys FFI (CCM ~120 + encrypted-PKCS#8 ~250).
+  - Stage D (webcrypto bridge + module install): ~400 LOC of TS + ~200 LOC of Rust.
+  - Stage E (X.509 + DH + ECDH + legacy ciphers + PQC stubs + remaining FFI): ~3,000 LOC, of which ~810 LOC is aws-lc-sys FFI (OCB + DES/3DES + Blowfish + DH-named-groups + X.509 + BLAKE2 + AES-OFB/CFB1/CFB8/ECB).
+  - Stage F (queued: faithful dynamic-OSSL bridging, XVII.12): ~150 LOC.
+  - Total: ~7,500 LOC for Stages A-E; bumps to ~8,500 with Stage F.
+
+  The smaller footprint vs Node (~18K) comes from aws-lc-rs's higher-level API eliminating much of Node's hand-written EVP glue PLUS the kernel extraction sharing code between WebCrypto and node:crypto. We still drop to aws-lc-sys raw FFI for ~1,270 LOC across all stages — encrypted PKCS#8, X.509, named DH primes, CCM, OCB, MD5, SHA-512/224, BLAKE2, legacy ciphers, AES-OFB/CFB1/CFB8/ECB, DES/3DES (addresses critic minor m-18: the "higher-level API" claim has caveats; v3 audited each algorithm row). The net is still smaller than Node, but not because the high-level API covers everything — kernel sharing is the bigger lever.
 - **Comparable to Deno + workerd** (~6K vs ~5-6.5K LOC) — same algorithm scope.
 - **Larger than Bun** (~6K vs ~4K LOC) because Bun reuses Zig's stdlib for cipher modes; we use aws-lc-rs's high-level + low-level FFI for variable-IV/-tag GCM.
 
@@ -4710,10 +4966,17 @@ Open questions promoted to decisions in v2:
 - RFC 7919 — Negotiated FFDHE groups — https://www.rfc-editor.org/rfc/rfc7919
 - NIST SP 800-38A / D — Block cipher modes — https://csrc.nist.gov/publications/detail/sp/800-38a/final
 - FIPS 180-4 — Secure Hash Standard — https://csrc.nist.gov/publications/detail/fips/180/4/final
-- aws-lc-rs — https://docs.rs/aws-lc-rs/
+- aws-lc-rs — https://docs.rs/aws-lc-rs/ (v3 audited 2026-05-02; concrete claims about specific algorithm constants in §III.2 / §IX.1 are pinned to the docs.rs URL of the workspace's currently-pinned aws-lc-rs version — see `crates/runtime/Cargo.toml:16`. m2-3: replace `latest` with the exact pinned version when the workspace dep changes.)
 - aws-lc-rs encoding (Pkcs8V1Der/Pkcs8V2Der; no encrypted variant) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html
+- aws-lc-rs digest (audit basis for §III.2 / §IX.1 hash algorithms) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/digest/index.html
+- aws-lc-rs aead (audit basis for AEAD modes — confirmed AES-GCM, AES-GCM-SIV, ChaCha20-Poly1305 ONLY; no OCB or CCM) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/aead/index.html
+- aws-lc-rs cipher (audit basis for symmetric modes — confirmed CBC-PKCS7, CTR, CFB128 ONLY; no XTS, no ECB-as-mode) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/cipher/index.html
 - aws-lc-rs signature (ECDSA_P256K1_SHA256_*) — https://docs.rs/aws-lc-rs/latest/aws_lc_rs/signature/index.html
 - aws-lc — https://github.com/aws/aws-lc
+- aws-lc PKCS8 header (audit basis for D-N37 FFI sequence) — https://github.com/aws/aws-lc/blob/main/include/openssl/pkcs8.h
+- Node `lib/internal/errors.js` — https://github.com/nodejs/node/blob/main/lib/internal/errors.js (audit basis for §VII.3a JS-side error codes)
+- Node `src/node_errors.h` — https://github.com/nodejs/node/blob/main/src/node_errors.h (audit basis for §VII.3a C++-side error codes)
+- Node `src/crypto/crypto_util.cc` (ThrowCryptoError dynamic-OSSL builder) — https://github.com/nodejs/node/blob/main/src/crypto/crypto_util.cc
 - Node `lib/internal/crypto/hash.js` (Hmac vs Hash, no `Hmac.copy`) — https://github.com/nodejs/node/blob/main/lib/internal/crypto/hash.js
 - Node `errors` module (ERR_* code catalog audited in §VII.3) — https://nodejs.org/api/errors.html
 - Node deprecations DEP0031 (ECDH.setPublicKey), DEP0106 (createCipher), DEP0182 (GCM authTagLength) — https://nodejs.org/api/deprecations.html
