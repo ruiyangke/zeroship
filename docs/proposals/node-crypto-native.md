@@ -896,7 +896,7 @@ Stage 1 (the node:crypto APIs landed by end of Stage D):
 | Export | Tier | Backed by | Sync/async | Stage |
 |---|---|---|---|---|
 | `crypto.argon2(password, salt, options?)` (Node v22+, `crypto.hash`-shaped) | 3 | npm `argon2` (WASM via unenv) | sync/async | NEVER native — see open question XVII.4 + missing concept #1 |
-| `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
+| `crypto.encapsulate(publicKey)` / `crypto.decapsulate(privateKey, ciphertext)` (Node v22+ KEM API; addresses critic missing concept #2) | 3 | aws-lc-rs PQC (when stable; ML-KEM via aws-lc-sys raw FFI) | sync | E (D-N36) |
 | `Certificate` (legacy SPKAC) — `Certificate.exportChallenge`, `Certificate.exportPublicKey`, `Certificate.verifySpkac` | 3 | aws-lc-sys raw FFI for `NETSCAPE_SPKI_b64_decode` (~80 LOC) | sync | E (rare; only browser keygen, missing concept #4) |
 | `KeyObject.toCryptoKey(algorithm, extractable, keyUsages)` (Node v18+) | 1 | bridge: `KeyObject` → fresh `CryptoKey` via the Arc share + the WebCrypto `importKey('jwk', ko.export({format:'jwk'}))` round-trip | sync | C (missing concept #7 + clarifies the bidirectional bridge in D-N4) |
 | `crypto.checkPrime(candidate, options?, callback)` / `checkPrimeSync` | 3 | aws-lc-sys raw FFI for `BN_is_prime_fasttest_ex` | sync/async | E (missing concepts #5, #11; can ship independently of generatePrime per the critic) |
