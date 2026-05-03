@@ -203,6 +203,18 @@ fn state_ptr(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<*mu
 // Hand-rolled constructor + install
 // ---------------------------------------------------------------------------
 
+/// Per-isolate cache of the Request FunctionTemplate + its prototype.
+///
+/// Set from `install_global` (run once per isolate during init) and read
+/// by `build_kernel_request` (the kernel-side fast-path Request builder
+/// in `runtime.rs::call_fetch_handler`). Stashing the template lets the
+/// dispatch path skip the JS `HTTP_CREATE_REQUEST_JS` helper — see
+/// `build_kernel_request` for the rationale.
+pub struct RequestTemplateSlot {
+    pub class_tmpl: v8::Global<v8::FunctionTemplate>,
+    pub prototype: v8::Global<v8::Object>,
+}
+
 /// Install Request on globalThis with hand-rolled getters
 /// (method/url/headers/signal/...) and the shared Body methods
 /// (text/json/...).
@@ -234,6 +246,16 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
 
     let key = v8::String::new(scope, "Request").unwrap();
     global.set(scope, key.into(), class_fn.into());
+
+    // Stash the template + prototype for the kernel fast-path Request
+    // builder. Avoids re-resolving `globalThis.Request` and re-reading
+    // `Request.prototype` on every dispatch.
+    let class_tmpl_g = v8::Global::new(scope, class_tmpl);
+    let proto_g = v8::Global::new(scope, our_proto);
+    scope.set_slot(RequestTemplateSlot {
+        class_tmpl: class_tmpl_g,
+        prototype: proto_g,
+    });
 }
 
 fn install_method(
@@ -718,6 +740,105 @@ fn request_constructor_callback(
     std::mem::forget(weak);
 }
 
+// ---------------------------------------------------------------------------
+// Kernel fast-path Request builder
+// ---------------------------------------------------------------------------
+
+/// Build a Request directly from raw HTTP wire data — bypasses the
+/// WebIDL §5.4 constructor entirely. Used by the kernel's fetch
+/// dispatch (`runtime.rs::call_fetch_handler`) instead of the JS
+/// helper `HTTP_CREATE_REQUEST_JS`.
+///
+/// What we skip relative to `request_constructor_callback`:
+///   - `globalThis.Request` lookup (template + prototype come from a
+///     per-isolate slot set during `install_global`).
+///   - URL re-parse (the upstream gateway already gave us a clean URL).
+///     We trust it verbatim; the Request's `url` getter reads it back.
+///   - WebIDL union dispatch on `init` (we know exactly what we have).
+///   - Method normalization (already done by the HTTP parser).
+///   - Body extraction (`extract_body` walks every accepted body type
+///     for the public surface — Blob / FormData / URLSearchParams /
+///     ReadableStream — none of which apply for raw HTTP wire data).
+///   - AbortSignal minting (the kernel's fetch dispatch doesn't need
+///     a signal on the request; we lazy-mint on first `request.signal`
+///     read by storing `None`. Per Fetch §5.4 a fresh signal MUST be
+///     returned, so the `signal_getter` falls back to building one on
+///     demand — see `signal_getter`).
+///   - JSON-marshaled headers (the kernel hands us the list directly).
+///
+/// What we keep:
+///   - The same wrapper shape (internal field 0 = Box<RequestState>),
+///     so all downstream code (getters, `inspect_response`, `Body`
+///     trait dispatch) stays unchanged.
+///   - The same finalizer wiring.
+pub fn build_kernel_request<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+) -> Option<v8::Local<'s, v8::Object>> {
+    // 1. Allocate the Request wrapper via the cached instance template.
+    let (req_tmpl_g, req_proto_g) = {
+        let slot = scope.get_slot::<RequestTemplateSlot>()?;
+        (slot.class_tmpl.clone(), slot.prototype.clone())
+    };
+    let req_tmpl = v8::Local::new(scope, req_tmpl_g);
+    let inst_tmpl = req_tmpl.instance_template(scope);
+    let this_obj = inst_tmpl.new_instance(scope)?;
+    let req_proto = v8::Local::new(scope, req_proto_g);
+    this_obj.set_prototype(scope, req_proto.into());
+
+    // 2. Build the Headers wrapper directly from the (name,value) list.
+    let headers_obj = crate::headers::build_kernel_headers(scope, headers)?;
+    let headers_g = v8::Global::new(scope, headers_obj);
+
+    // 3. Build the body. For wire HTTP: GET/HEAD have no body; for
+    // other methods, treat the body string as bytes. We use the
+    // BodySource::Bytes path so consumer methods (`text` / `json` /
+    // etc.) can short-circuit without materializing a stream.
+    let body_impl = if body.is_empty() || method == "GET" || method == "HEAD" {
+        crate::fetch_body::body::BodyImpl::null()
+    } else {
+        let bytes = std::rc::Rc::new(body.as_bytes().to_vec());
+        let length = Some(bytes.len() as u64);
+        crate::fetch_body::body::BodyImpl {
+            stream: std::cell::RefCell::new(None),
+            source: Some(crate::fetch_body::body::BodySource::Bytes(bytes)),
+            length,
+        }
+    };
+
+    // 4. Build the RequestState. Method/URL go in verbatim; all other
+    // fields keep their spec defaults from RequestState::default().
+    let state = RequestState {
+        body: RefCell::new(body_impl),
+        method: RefCell::new(method.to_string()),
+        url: RefCell::new(url.to_string()),
+        headers: RefCell::new(Some(headers_g)),
+        signal: RefCell::new(None),
+        ..RequestState::default()
+    };
+
+    // 5. Box, install in internal field 0, register finalizer.
+    let boxed = Box::new(state);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    this_obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        this_obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut RequestState));
+        }),
+    );
+    std::mem::forget(weak);
+
+    Some(this_obj)
+}
+
 fn is_request_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
     let global = scope.get_current_context().global(scope);
     let key = v8::String::new(scope, "Request").unwrap();
@@ -1068,15 +1189,24 @@ fn signal_getter(
 ) {
     let Some(raw) = brand_check(scope, args.this()) else { return };
     let state: &RequestState = unsafe { &*raw };
-    match state.signal.borrow().as_ref() {
-        Some(g) => {
+    // Fast path: signal already minted.
+    {
+        if let Some(g) = state.signal.borrow().as_ref() {
             let v = v8::Local::new(scope, g.clone());
             rv.set(v.into());
-        }
-        None => {
-            rv.set(v8::null(scope).into());
+            return;
         }
     }
+    // Lazy-mint per Fetch §5.4: `request.signal` MUST always return a
+    // non-null AbortSignal, even when the kernel-side fast-path Request
+    // builder didn't supply one (most server-side requests don't have
+    // an upstream cancellation signal — minting on demand is observably
+    // identical to constructor-minting).
+    let signal_obj = build_request_signal(scope, None);
+    let signal_g = v8::Global::new(scope, signal_obj);
+    *state.signal.borrow_mut() = Some(signal_g.clone());
+    let local = v8::Local::new(scope, signal_g);
+    rv.set(local.into());
 }
 
 // ---------------------------------------------------------------------------

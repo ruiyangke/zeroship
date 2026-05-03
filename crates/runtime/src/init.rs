@@ -3,7 +3,7 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`CRYPTO_JS`, `NODE_GLOBALS_JS`)
+//! - Polyfill constants (`NODE_GLOBALS_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
 use std::time::Duration;
@@ -98,9 +98,6 @@ pub struct HttpResult {
 // atob/btoa via `base64::install_global`, structuredClone via
 // `structured_clone::install_global`, and the response-body
 // forwarder via `streams::response_forwarder`. The file is gone.)
-
-/// Embedded crypto polyfill (getRandomValues, SubtleCrypto.digest, base64 helpers).
-pub const CRYPTO_JS: &str = include_str!("embed/crypto.js");
 
 /// Embedded WebSocket/WebSocketPair polyfill (depends on the native
 /// EventTarget installed by `install_dom`).
@@ -675,13 +672,11 @@ pub fn load_polyfills_and_modules(
     // Order matters here:
     //
     //   1. Native URL (ada-url backed) — installed before any other
-    //      polyfill so other JS code that may reference it (crypto.js,
-    //      websocket.js) sees the native class.
-    //   2. CRYPTO_JS + NODE_GLOBALS_JS polyfills run next. The
-    //      previously-coexisting `fetch.js` polyfill (DOMException /
-    //      atob / btoa / structuredClone / __zsBeginStreamForward) was
-    //      retired in favour of native installs in `setup_globals` +
-    //      `dom::install_globals` + `streams::response_forwarder`.
+    //      polyfill so other JS code that may reference it (websocket.js)
+    //      sees the native class.
+    //   2. Native Crypto / SubtleCrypto / CryptoKey — D-23 landing 3
+    //      retired the old `crypto.js` polyfill; native is the only
+    //      path now. Then NODE_GLOBALS_JS runs.
     //   3. Native Headers / Streams / Blob / TextEncoderStream — must
     //      install before WEBSOCKET_JS so the latter's
     //      `Object.create(EventTarget.prototype)` captures the native
@@ -694,8 +689,15 @@ pub fn load_polyfills_and_modules(
     //      EventTarget prototype (not the now-deleted polyfill's).
     install_url_native(scope);
 
-    for polyfill in [CRYPTO_JS, NODE_GLOBALS_JS] {
-        let code = v8::String::new(scope, polyfill).unwrap();
+    // Native WebCrypto (D-23 landing 3: native is the only path).
+    // The `embed/crypto.js` polyfill has been removed.
+    {
+        let global = scope.get_current_context().global(scope);
+        crate::crypto_native::install_globals(scope, global);
+    }
+
+    {
+        let code = v8::String::new(scope, NODE_GLOBALS_JS).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
     }

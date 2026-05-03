@@ -98,7 +98,7 @@ thread_local! {
     static ENTROPY: RefCell<EntropyBuf> = RefCell::new(EntropyBuf::new());
 }
 
-fn fast_random(out: &mut [u8]) {
+pub(crate) fn fast_random(out: &mut [u8]) {
     ENTROPY.with(|e| e.borrow_mut().fill(out));
 }
 

@@ -33,6 +33,7 @@ git sparse-checkout set \
     "/FileAPI/" \
     "/url/" \
     "/websockets/" \
+    "/WebCryptoAPI/" \
     "/resources/" \
     "/common/"
 

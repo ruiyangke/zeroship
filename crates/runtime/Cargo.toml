@@ -14,6 +14,11 @@ serde_json = { workspace = true }
 
 # Crypto
 aws-lc-rs = { workspace = true }
+# Direct aws-lc-sys for the few raw EVP_* calls we need that aws-lc-rs's
+# high-level API doesn't expose (e.g. RSA-PSS variable saltLength —
+# `aws_lc_rs::signature::RSA_PSS_*` fixes salt length to digest length).
+# Keep the call sites tiny + behind safe Rust wrappers.
+aws-lc-sys = { version = "0.39" }
 base64 = { workspace = true }
 
 # Encoding (WHATWG-spec UTF-8 decoder backing TextDecoder)
