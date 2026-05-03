@@ -151,6 +151,7 @@ impl Cipher {
     }
 
     #[v8_method]
+    #[v8_name = "setAAD"]
     fn set_aad(
         &mut self,
         scope: &mut v8::PinScope,
@@ -169,6 +170,7 @@ impl Cipher {
     }
 
     #[v8_method]
+    #[v8_name = "getAuthTag"]
     fn get_auth_tag<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -189,6 +191,7 @@ impl Cipher {
     }
 
     #[v8_method]
+    #[v8_name = "setAuthTag"]
     fn set_auth_tag(
         &mut self,
         scope: &mut v8::PinScope,
@@ -207,6 +210,7 @@ impl Cipher {
     }
 
     #[v8_method]
+    #[v8_name = "setAutoPadding"]
     fn set_auto_padding(
         &mut self,
         scope: &mut v8::PinScope,

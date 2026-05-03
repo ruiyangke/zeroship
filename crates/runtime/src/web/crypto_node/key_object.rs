@@ -144,16 +144,19 @@ impl KeyObject {
     }
 
     #[v8_getter]
+    #[v8_name = "asymmetricKeyType"]
     fn asymmetric_key_type(&self) -> Option<String> {
         self.state.asymmetric_key_type().map(String::from)
     }
 
     #[v8_getter]
+    #[v8_name = "symmetricKeySize"]
     fn symmetric_key_size(&self) -> Option<u32> {
         self.state.symmetric_key_size()
     }
 
     #[v8_getter]
+    #[v8_name = "asymmetricKeyDetails"]
     fn asymmetric_key_details<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -187,6 +190,7 @@ impl KeyObject {
     }
 
     #[v8_method]
+    #[v8_name = "toCryptoKey"]
     fn to_crypto_key<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,

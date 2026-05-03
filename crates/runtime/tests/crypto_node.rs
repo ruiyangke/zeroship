@@ -622,3 +622,522 @@ fn err_code_is_string_literal_match() {
     );
     assert!(result);
 }
+
+// =============================================================================
+// Stage C — KeyObject + Sign/Verify + Cipher/Decipher + keygen
+// =============================================================================
+
+#[test]
+fn create_secret_key_returns_secret_key_object() {
+    let result = run_js_string(
+        r#"
+        const k = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3,4,5,6,7,8]));
+        k.type;
+    "#,
+    );
+    assert_eq!(result, "secret");
+}
+
+#[test]
+fn create_secret_key_symmetric_key_size() {
+    let result = run_js_number(
+        r#"
+        const k = __zeroship_node_crypto.createSecretKey(new Uint8Array(32));
+        k.symmetricKeySize;
+    "#,
+    );
+    assert_eq!(result as u32, 32);
+}
+
+#[test]
+fn create_secret_key_export_jwk() {
+    let result = run_js_string(
+        r#"
+        const k = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3]));
+        const jwk = k.export({ format: 'jwk' });
+        jwk.kty;
+    "#,
+    );
+    assert_eq!(result, "oct");
+}
+
+#[test]
+fn key_object_equals_same_bytes_returns_true() {
+    let result = run_js_bool(
+        r#"
+        const a = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3,4]));
+        const b = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3,4]));
+        a.equals(b);
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn key_object_equals_different_bytes_returns_false() {
+    let result = run_js_bool(
+        r#"
+        const a = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3,4]));
+        const b = __zeroship_node_crypto.createSecretKey(new Uint8Array([5,6,7,8]));
+        a.equals(b);
+    "#,
+    );
+    assert!(!result);
+}
+
+#[test]
+fn key_object_equals_different_lengths_returns_false() {
+    let result = run_js_bool(
+        r#"
+        const a = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3,4]));
+        const b = __zeroship_node_crypto.createSecretKey(new Uint8Array([1,2,3,4,5]));
+        a.equals(b);
+    "#,
+    );
+    assert!(!result);
+}
+
+#[test]
+fn generate_key_pair_sync_rsa_2048() {
+    let result = run_js_string(
+        r#"
+        const { publicKey, privateKey } = __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        privateKey.type + ',' + publicKey.type + ',' + privateKey.asymmetricKeyType;
+    "#,
+    );
+    assert_eq!(result, "private,public,rsa");
+}
+
+#[test]
+fn generate_key_pair_sync_ec_p256() {
+    let result = run_js_string(
+        r#"
+        const { publicKey, privateKey } = __zeroship_node_crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+        privateKey.type + ',' + publicKey.asymmetricKeyType;
+    "#,
+    );
+    assert_eq!(result, "private,ec");
+}
+
+#[test]
+fn generate_key_pair_sync_ed25519() {
+    let result = run_js_string(
+        r#"
+        const { publicKey, privateKey } = __zeroship_node_crypto.generateKeyPairSync('ed25519');
+        privateKey.asymmetricKeyType + ',' + publicKey.asymmetricKeyType;
+    "#,
+    );
+    assert_eq!(result, "ed25519,ed25519");
+}
+
+#[test]
+fn generate_key_sync_hmac_returns_secret() {
+    let result = run_js_string(
+        r#"
+        const k = __zeroship_node_crypto.generateKeySync('hmac', { length: 256 });
+        k.type + ',' + k.symmetricKeySize;
+    "#,
+    );
+    assert_eq!(result, "secret,32");
+}
+
+#[test]
+fn rsa_pkcs1_sign_verify_round_trip() {
+    let result = run_js_bool(
+        r#"
+        const { publicKey, privateKey } =
+            __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const data = new Uint8Array([1,2,3,4,5,6,7,8]);
+        const s = __zeroship_node_crypto.createSign('SHA256');
+        s.update(data);
+        const sig = s.sign(privateKey);
+        const v = __zeroship_node_crypto.createVerify('SHA256');
+        v.update(data);
+        v.verify(publicKey, sig);
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn rsa_pkcs1_verify_returns_false_on_modified_data() {
+    let result = run_js_bool(
+        r#"
+        const { publicKey, privateKey } =
+            __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const data = new Uint8Array([1,2,3]);
+        const tampered = new Uint8Array([9,9,9]);
+        const s = __zeroship_node_crypto.createSign('SHA256');
+        s.update(data);
+        const sig = s.sign(privateKey);
+        const v = __zeroship_node_crypto.createVerify('SHA256');
+        v.update(tampered);
+        v.verify(publicKey, sig) === false;
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn ecdsa_p256_sign_verify_round_trip() {
+    let result = run_js_bool(
+        r#"
+        const { publicKey, privateKey } =
+            __zeroship_node_crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+        const data = new Uint8Array([10,20,30,40]);
+        const s = __zeroship_node_crypto.createSign('SHA256');
+        s.update(data);
+        const sig = s.sign(privateKey);
+        const v = __zeroship_node_crypto.createVerify('SHA256');
+        v.update(data);
+        v.verify(publicKey, sig);
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn ed25519_sign_verify_round_trip() {
+    let result = run_js_bool(
+        r#"
+        const { publicKey, privateKey } = __zeroship_node_crypto.generateKeyPairSync('ed25519');
+        const data = new Uint8Array([1,2,3,4]);
+        // Ed25519: must use crypto.sign / crypto.verify (the createSign path
+        // expects an explicit hash, but Ed25519 is null-hash).
+        const sig = __zeroship_node_crypto.sign(null, data, privateKey);
+        __zeroship_node_crypto.verify(null, data, publicKey, sig);
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn one_shot_sign_verify_rsa() {
+    let result = run_js_bool(
+        r#"
+        const { publicKey, privateKey } =
+            __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const data = new Uint8Array([7,7,7]);
+        const sig = __zeroship_node_crypto.sign('SHA256', data, privateKey);
+        __zeroship_node_crypto.verify('SHA256', data, publicKey, sig);
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn aes_256_gcm_round_trip_with_aad() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            for (let i = 0; i < 32; i++) key[i] = i;
+            const iv = new Uint8Array(12);
+            const aad = new Uint8Array([1,2,3]);
+            const plaintext = new Uint8Array([10,20,30,40,50]);
+
+            const cipher = __zeroship_node_crypto.createCipheriv('aes-256-gcm', key, iv);
+            cipher.setAAD(aad);
+            cipher.update(plaintext);
+            const ct = cipher.final();
+            const tag = cipher.getAuthTag();
+
+            const decipher = __zeroship_node_crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAAD(aad);
+            decipher.setAuthTag(tag);
+            decipher.update(ct);
+            const pt = decipher.final();
+
+            if (pt.length !== plaintext.length) return false;
+            for (let i = 0; i < pt.length; i++) {
+                if (pt[i] !== plaintext[i]) return false;
+            }
+            return true;
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn aes_256_cbc_round_trip() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            for (let i = 0; i < 32; i++) key[i] = i;
+            const iv = new Uint8Array(16);
+            const plaintext = new Uint8Array([1,2,3,4,5,6,7,8,9,10]);
+
+            const cipher = __zeroship_node_crypto.createCipheriv('aes-256-cbc', key, iv);
+            cipher.update(plaintext);
+            const ct = cipher.final();
+
+            const decipher = __zeroship_node_crypto.createDecipheriv('aes-256-cbc', key, iv);
+            decipher.update(ct);
+            const pt = decipher.final();
+
+            if (pt.length !== plaintext.length) return false;
+            for (let i = 0; i < pt.length; i++) {
+                if (pt[i] !== plaintext[i]) return false;
+            }
+            return true;
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn aes_256_ctr_round_trip() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            for (let i = 0; i < 32; i++) key[i] = i;
+            const iv = new Uint8Array(16);
+            const plaintext = new Uint8Array([100, 101, 102, 103]);
+
+            const cipher = __zeroship_node_crypto.createCipheriv('aes-256-ctr', key, iv);
+            cipher.update(plaintext);
+            const ct = cipher.final();
+
+            const decipher = __zeroship_node_crypto.createDecipheriv('aes-256-ctr', key, iv);
+            decipher.update(ct);
+            const pt = decipher.final();
+
+            if (pt.length !== plaintext.length) return false;
+            for (let i = 0; i < pt.length; i++) {
+                if (pt[i] !== plaintext[i]) return false;
+            }
+            return true;
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn chacha20_poly1305_round_trip() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const key = new Uint8Array(32);
+            for (let i = 0; i < 32; i++) key[i] = i;
+            const iv = new Uint8Array(12);
+            const plaintext = new Uint8Array([1,2,3,4,5]);
+
+            const cipher = __zeroship_node_crypto.createCipheriv('chacha20-poly1305', key, iv);
+            cipher.update(plaintext);
+            const ct = cipher.final();
+            const tag = cipher.getAuthTag();
+
+            const decipher = __zeroship_node_crypto.createDecipheriv('chacha20-poly1305', key, iv);
+            decipher.setAuthTag(tag);
+            decipher.update(ct);
+            const pt = decipher.final();
+
+            if (pt.length !== plaintext.length) return false;
+            for (let i = 0; i < pt.length; i++) {
+                if (pt[i] !== plaintext[i]) return false;
+            }
+            return true;
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn create_cipher_throws_unsupported_operation() {
+    let result = run_js_string(
+        r#"
+        try {
+            __zeroship_node_crypto.createCipher('aes-256-cbc', 'password');
+            'no error';
+        } catch (e) {
+            e.code || 'no code';
+        }
+    "#,
+    );
+    assert_eq!(result, "ERR_CRYPTO_UNSUPPORTED_OPERATION");
+}
+
+#[test]
+fn get_cipher_info_aes_256_gcm() {
+    let result = run_js_string(
+        r#"
+        const info = __zeroship_node_crypto.getCipherInfo('aes-256-gcm');
+        info.name + ',' + info.keyLength + ',' + info.ivLength + ',' + info.mode;
+    "#,
+    );
+    assert_eq!(result, "aes-256-gcm,32,12,gcm");
+}
+
+#[test]
+fn get_cipher_info_unknown_returns_undefined() {
+    let result = run_js_bool(
+        r#"
+        __zeroship_node_crypto.getCipherInfo('aes-999-xxx') === undefined;
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn rsa_public_encrypt_private_decrypt_oaep() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const { publicKey, privateKey } =
+                __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+            const plaintext = new Uint8Array([1,2,3,4,5]);
+            const ct = __zeroship_node_crypto.publicEncrypt(
+                { key: publicKey, oaepHash: 'SHA-256' }, plaintext);
+            const pt = __zeroship_node_crypto.privateDecrypt(
+                { key: privateKey, oaepHash: 'SHA-256' }, ct);
+            if (pt.length !== plaintext.length) return false;
+            for (let i = 0; i < pt.length; i++) {
+                if (pt[i] !== plaintext[i]) return false;
+            }
+            return true;
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn key_object_export_pem_pkcs8() {
+    let result = run_js_bool(
+        r#"
+        const { privateKey } =
+            __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const pem = privateKey.export({ format: 'pem', type: 'pkcs8' });
+        typeof pem === 'string' && pem.includes('-----BEGIN PRIVATE KEY-----');
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn key_object_export_pem_spki() {
+    let result = run_js_bool(
+        r#"
+        const { publicKey } =
+            __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const pem = publicKey.export({ format: 'pem', type: 'spki' });
+        typeof pem === 'string' && pem.includes('-----BEGIN PUBLIC KEY-----');
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn key_object_round_trip_pem_pkcs8() {
+    let result = run_js_bool(
+        r#"
+        const { privateKey } =
+            __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+        const pem = privateKey.export({ format: 'pem', type: 'pkcs8' });
+        const reimported = __zeroship_node_crypto.createPrivateKey(pem);
+        reimported.type === 'private' && reimported.asymmetricKeyType === 'rsa';
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn create_public_key_from_pem_then_verify() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const { publicKey, privateKey } =
+                __zeroship_node_crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+            const pubPem = publicKey.export({ format: 'pem', type: 'spki' });
+            const reimported = __zeroship_node_crypto.createPublicKey(pubPem);
+            const data = new Uint8Array([1,2,3,4]);
+            const s = __zeroship_node_crypto.createSign('SHA256');
+            s.update(data);
+            const sig = s.sign(privateKey);
+            const v = __zeroship_node_crypto.createVerify('SHA256');
+            v.update(data);
+            return v.verify(reimported, sig);
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn ec_p256_export_import_round_trip() {
+    let result = run_js_bool(
+        r#"
+        (() => {
+            const { publicKey, privateKey } =
+                __zeroship_node_crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+            const data = new Uint8Array([5,6,7,8]);
+            const s = __zeroship_node_crypto.createSign('SHA256');
+            s.update(data);
+            const sig = s.sign(privateKey);
+            const pem = publicKey.export({ format: 'pem', type: 'spki' });
+            const reimported = __zeroship_node_crypto.createPublicKey(pem);
+            const v = __zeroship_node_crypto.createVerify('SHA256');
+            v.update(data);
+            return v.verify(reimported, sig);
+        })();
+    "#,
+    );
+    assert!(result);
+}
+
+#[test]
+fn cipher_setaad_on_non_aead_throws() {
+    let result = run_js_string(
+        r#"
+        const key = new Uint8Array(32);
+        const iv = new Uint8Array(16);
+        const cipher = __zeroship_node_crypto.createCipheriv('aes-256-cbc', key, iv);
+        try {
+            cipher.setAAD(new Uint8Array([1]));
+            'no error';
+        } catch (e) {
+            e.code || 'no code';
+        }
+    "#,
+    );
+    assert_eq!(result, "ERR_CRYPTO_INVALID_STATE");
+}
+
+#[test]
+fn cipher_invalid_key_length_throws() {
+    let result = run_js_string(
+        r#"
+        try {
+            __zeroship_node_crypto.createCipheriv('aes-256-gcm',
+                new Uint8Array(8),  // wrong size
+                new Uint8Array(12));
+            'no error';
+        } catch (e) {
+            e.code || 'no code';
+        }
+    "#,
+    );
+    assert_eq!(result, "ERR_CRYPTO_INVALID_KEYLEN");
+}
+
+#[test]
+fn unknown_cipher_throws_err_crypto_unknown_cipher() {
+    let result = run_js_string(
+        r#"
+        try {
+            __zeroship_node_crypto.createCipheriv('aes-999-xxx',
+                new Uint8Array(32), new Uint8Array(16));
+            'no error';
+        } catch (e) {
+            e.code || 'no code';
+        }
+    "#,
+    );
+    assert_eq!(result, "ERR_CRYPTO_UNKNOWN_CIPHER");
+}
