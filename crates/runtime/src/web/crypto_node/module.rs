@@ -69,6 +69,36 @@ pub fn install_globals<'s>(
     set_fn(scope, obj, "createPublicKey", key_object::create_public_key_callback);
     set_fn(scope, obj, "createPrivateKey", key_object::create_private_key_callback);
 
+    // Expose the KeyObject class itself + the static `from` so the Node
+    // pattern `KeyObject.from(cryptoKey)` resolves.
+    {
+        let ko_tmpl = key_object::KeyObject::install(scope);
+        let ko_fn = ko_tmpl.get_function(scope).unwrap();
+        let from_key = v8::String::new(scope, "from").unwrap();
+        let from_fn = v8::Function::new(scope, key_object::key_object_from_callback).unwrap();
+        ko_fn.set(scope, from_key.into(), from_fn.into());
+        let k = v8::String::new(scope, "KeyObject").unwrap();
+        obj.set(scope, k.into(), ko_fn.into());
+    }
+    {
+        let pub_tmpl = key_object::PublicKeyObject::install(scope);
+        let pub_fn = pub_tmpl.get_function(scope).unwrap();
+        let k = v8::String::new(scope, "PublicKeyObject").unwrap();
+        obj.set(scope, k.into(), pub_fn.into());
+    }
+    {
+        let priv_tmpl = key_object::PrivateKeyObject::install(scope);
+        let priv_fn = priv_tmpl.get_function(scope).unwrap();
+        let k = v8::String::new(scope, "PrivateKeyObject").unwrap();
+        obj.set(scope, k.into(), priv_fn.into());
+    }
+    {
+        let sec_tmpl = key_object::SecretKeyObject::install(scope);
+        let sec_fn = sec_tmpl.get_function(scope).unwrap();
+        let k = v8::String::new(scope, "SecretKeyObject").unwrap();
+        obj.set(scope, k.into(), sec_fn.into());
+    }
+
     // -- Sign / Verify --
     set_fn(scope, obj, "createSign", sign_verify::create_sign_callback);
     set_fn(scope, obj, "createVerify", sign_verify::create_verify_callback);
