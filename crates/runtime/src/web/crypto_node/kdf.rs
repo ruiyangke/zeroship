@@ -246,3 +246,121 @@ fn run_hkdf(
     })? as usize;
     kdf::hkdf(algo, &ikm, &salt, &info, keylen).map_err(map_kdf_err)
 }
+
+/// `scryptSync(password, salt, keylen, options?) -> Buffer`.
+/// Per Node's signature (https://nodejs.org/api/crypto.html#cryptoscryptsyncpassword-salt-keylen-options).
+pub(crate) fn scrypt_sync_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if args.length() < 3 {
+        let exc = crate::node_error::build_node_exception(
+            scope,
+            "ERR_INVALID_ARG_TYPE",
+            "scryptSync: requires (password, salt, keylen, options?)",
+        );
+        scope.throw_exception(exc);
+        return;
+    }
+    let options = if args.length() >= 4 {
+        Some(args.get(3))
+    } else {
+        None
+    };
+    match run_scrypt(scope, args.get(0), args.get(1), args.get(2), options) {
+        Ok(out) => rv.set(buffer::emit_buffer(scope, &out)),
+        Err(err) => {
+            let exc = crate::web::crypto::helpers::op_error_to_v8(scope, err);
+            scope.throw_exception(exc);
+        }
+    }
+}
+
+/// `scrypt(password, salt, keylen, options?, callback) -> void`.
+pub(crate) fn scrypt_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let n = args.length();
+    if n < 4 {
+        let exc = crate::node_error::build_node_exception(
+            scope,
+            "ERR_INVALID_ARG_TYPE",
+            "scrypt: requires (password, salt, keylen, [options], callback)",
+        );
+        scope.throw_exception(exc);
+        return;
+    }
+    let cb_val = args.get(n - 1);
+    if !cb_val.is_function() {
+        let exc = crate::node_error::build_node_exception(
+            scope,
+            "ERR_INVALID_ARG_TYPE",
+            "callback must be a function",
+        );
+        scope.throw_exception(exc);
+        return;
+    }
+    // (password, salt, keylen, callback) — 4 args.
+    // (password, salt, keylen, options, callback) — 5 args.
+    let options = if n >= 5 { Some(args.get(3)) } else { None };
+    let result = run_scrypt(scope, args.get(0), args.get(1), args.get(2), options);
+    let cb: v8::Local<v8::Function> = cb_val.try_into().unwrap();
+    match result {
+        Ok(out) => {
+            let buf = buffer::emit_buffer(scope, &out);
+            super::random_callback_helpers::schedule_node_cb(scope, cb, None, Some(buf));
+        }
+        Err(err) => {
+            let exc = crate::web::crypto::helpers::op_error_to_v8(scope, err);
+            super::random_callback_helpers::schedule_node_cb(scope, cb, Some(exc), None);
+        }
+    }
+}
+
+fn run_scrypt(
+    scope: &mut v8::PinScope,
+    password_v: v8::Local<v8::Value>,
+    salt_v: v8::Local<v8::Value>,
+    keylen_v: v8::Local<v8::Value>,
+    options_v: Option<v8::Local<v8::Value>>,
+) -> Result<Vec<u8>, OpError> {
+    let password = buffer::extract_input(scope, password_v, Some("utf8"))?;
+    let salt = buffer::extract_input(scope, salt_v, Some("utf8"))?;
+    let keylen = keylen_v.uint32_value(scope).ok_or_else(|| {
+        OpError::node("ERR_INVALID_ARG_TYPE", "keylen must be a number")
+    })? as usize;
+    // Defaults per Node: N=16384, r=8, p=1, maxmem=32 MiB.
+    let mut n: u64 = 16384;
+    let mut r: u64 = 8;
+    let mut p: u64 = 1;
+    let mut max_mem: usize = 32 * 1024 * 1024;
+    if let Some(opt) = options_v {
+        if !opt.is_undefined() && !opt.is_null() {
+            if let Ok(obj) = v8::Local::<v8::Object>::try_from(opt) {
+                let read_u64 = |scope: &mut v8::PinScope, k: &str| -> Option<u64> {
+                    let key = v8::String::new(scope, k).unwrap();
+                    obj.get(scope, key.into())
+                        .and_then(|v| if v.is_undefined() { None } else { Some(v) })
+                        .and_then(|v| v.number_value(scope))
+                        .map(|f| f as u64)
+                };
+                if let Some(v) = read_u64(scope, "N").or_else(|| read_u64(scope, "cost")) {
+                    n = v;
+                }
+                if let Some(v) = read_u64(scope, "r").or_else(|| read_u64(scope, "blockSize")) {
+                    r = v;
+                }
+                if let Some(v) = read_u64(scope, "p").or_else(|| read_u64(scope, "parallelization")) {
+                    p = v;
+                }
+                if let Some(v) = read_u64(scope, "maxmem") {
+                    max_mem = v as usize;
+                }
+            }
+        }
+    }
+    kdf::scrypt(&password, &salt, n, r, p, max_mem, keylen).map_err(map_kdf_err)
+}

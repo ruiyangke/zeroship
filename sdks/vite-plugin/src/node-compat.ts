@@ -106,6 +106,8 @@ const pbkdf2 = N.pbkdf2;
 const pbkdf2Sync = N.pbkdf2Sync;
 const hkdf = N.hkdf;
 const hkdfSync = N.hkdfSync;
+const scrypt = N.scrypt;
+const scryptSync = N.scryptSync;
 const timingSafeEqual = N.timingSafeEqual;
 const getHashes = N.getHashes;
 const getCiphers = N.getCiphers;
@@ -151,7 +153,7 @@ const diffieHellman = _stageC("crypto.diffieHellman");
 const _default = {
   createHash, createHmac,
   randomBytes, randomFillSync, randomFill, randomInt, randomUUID, getRandomValues,
-  pbkdf2, pbkdf2Sync, hkdf, hkdfSync,
+  pbkdf2, pbkdf2Sync, hkdf, hkdfSync, scrypt, scryptSync,
   timingSafeEqual, getHashes, getCiphers, getCurves, getFips, setFips, secureHeapUsed,
   webcrypto, subtle, fips, constants,
   // Stage C placeholders

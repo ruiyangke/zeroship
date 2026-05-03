@@ -490,6 +490,33 @@ fn hkdf_sync_returns_array_buffer() {
     assert_eq!(result, "32:[object ArrayBuffer]");
 }
 
+#[test]
+fn scrypt_sync_rfc7914_v1() {
+    // RFC 7914 §11 vector #1: empty p, empty salt, N=16, r=1, p=1, dkLen=64.
+    let result = run_js_string(
+        r#"
+        const out = __zeroship_node_crypto.scryptSync('', '', 64, { N: 16, r: 1, p: 1 });
+        Array.from(out).map(b => b.toString(16).padStart(2, '0')).join('');
+    "#,
+    );
+    assert_eq!(
+        result,
+        "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+    );
+}
+
+#[test]
+fn scrypt_sync_default_params() {
+    let result = run_js_number(
+        r#"
+        // No options → defaults N=16384, r=8, p=1, maxmem=32MiB.
+        const out = __zeroship_node_crypto.scryptSync('password', 'salt', 32);
+        out.byteLength;
+    "#,
+    );
+    assert_eq!(result, 32.0);
+}
+
 // =============================================================================
 // getHashes / getCurves / getFips
 // =============================================================================

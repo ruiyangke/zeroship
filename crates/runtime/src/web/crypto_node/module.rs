@@ -54,6 +54,8 @@ pub fn install_globals<'s>(
     set_fn(scope, obj, "pbkdf2", kdf::pbkdf2_callback);
     set_fn(scope, obj, "hkdfSync", kdf::hkdf_sync_callback);
     set_fn(scope, obj, "hkdf", kdf::hkdf_callback);
+    set_fn(scope, obj, "scryptSync", kdf::scrypt_sync_callback);
+    set_fn(scope, obj, "scrypt", kdf::scrypt_callback);
 
     // -- Misc --
     set_fn(scope, obj, "timingSafeEqual", misc::timing_safe_equal_callback);
