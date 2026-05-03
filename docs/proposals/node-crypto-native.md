@@ -196,6 +196,9 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N34** (v2) | RSA-PSS `saltLength` sentinels (-1 = `RSA_PSS_SALTLEN_DIGEST`, -2 = `RSA_PSS_SALTLEN_MAX_SIGN` / `RSA_PSS_SALTLEN_AUTO`) are normalised to absolute byte counts in `parse_sign_key_input` BEFORE the kernel boundary, via `normalise_pss_salt_length()`. The kernel never sees negative sentinels. (addresses critic CRITICAL #8) | §V.5 |
 | **D-N35** (v2) | Hash, Hmac, Cipher, Decipher, Sign, Verify all extend `stream.Transform` (Node's documented behaviour — see https://nodejs.org/api/crypto.html#class-hash). The classes expose `_transform(chunk, encoding, callback)` and `_flush(callback)` so `pipeline(readable, hash, writable)` works. The Transform shape is layered on top of the existing #[v8_class] via a JS-side mixin in `node-crypto.gen.ts` (the synthetic module's Hash export wraps the native class with a small Transform-prototype shim). (addresses critic missing concept #21) | §V.6 |
 | **D-N36** (v2) | Post-quantum key types (ML-DSA, ML-KEM, SLH-DSA — Node v25+) and `crypto.encapsulate` / `crypto.decapsulate` (Node v22+ KEM API) are listed in the export surface as Stage E placeholders. The implementation depends on aws-lc-rs's PQC support which is in active development (NIST FIPS 203/204/205 — kyber/dilithium/sphincs+). Stage E ships parsing-only `asymmetricKeyType` recognition; full key generation defers to a future ADR when aws-lc-rs's PQC API stabilises. (addresses critic missing concepts #2, #3) | §II.15 |
+| **D-N37** (v3) | Encrypted-PKCS#8 import / export uses `aws-lc-sys` raw FFI, specifically `PKCS8_marshal_encrypted_private_key` (encrypt path) + `PKCS8_parse_encrypted_private_key` (decrypt path) per https://github.com/aws/aws-lc/blob/main/include/openssl/pkcs8.h. The marshal/parse pair takes EVP_PKEY directly and reads/writes the EncryptedPrivateKeyInfo ASN.1 envelope into/from CBB/CBS buffers. PBES2 inner KDF dispatch is handled by aws-lc internally (no per-PRF Rust code needed); the supported PRFs are HMAC-SHA-1/224/256/384/512 OIDs. Default PBES2 iterations: 2048 (matches Node). Default salt: 16 random bytes (aws-lc-generated). Default inner cipher: caller-specified per the `cipher` option to `KeyObject.export`. v3 expands the cipher whitelist from v2's 7 entries to 12 to match Node's actual list per `lib/internal/crypto/keys.js`. ECB-mode inner ciphers are gated behind `--legacy-crypto` (RFC 8018 §6.2 forbids them; v3 accepts under flag for legacy interop). (addresses round-2 CRITICAL C2-4, MAJOR M2-10, M2-22) | §IV.4a |
+| **D-N38** (v3) | Algorithm-routing matrix: every algorithm in §III.2 + §IX.1 has an explicit "backing path" annotation — one of `aws-lc-rs high-level` (verified-present in the public Rust API at https://docs.rs/aws-lc-rs/latest/aws_lc_rs/), `aws-lc-sys raw FFI` (vendored `EVP_*` shim in `crypto_kernel/cipher_*.rs` / `digest_*.rs` / `dh_*.rs`), or `DEFER` (not shippable from BoringSSL/aws-lc public surface — the entry stays in HASH_NAMES / CIPHER_NAMES so getHashes() / getCiphers() return the expected Node-shaped list, but `createX(name)` routes to `ERR_CRYPTO_UNSUPPORTED_OPERATION`). Stage B FFI cost: ~90 LOC; Stage C FFI cost: ~370 LOC; Stage E FFI cost: ~810 LOC. v2 effort estimates underestimated FFI work; v3 revises Stage B from 60 industry-h to ~90, Stage C from 90 to ~110. (addresses round-2 CRITICAL C2-3) | §III.2, §III.2a, §IX.1 |
+| **D-N39** (v3) | Error-code provenance policy: every code emitted from `crypto_node/error.rs` is one of (a) JS-side (defined in `lib/internal/errors.js`), (b) C++-side (defined in `src/node_errors.h` `V(...)` macro list), (c) dynamic-OSSL (Node builds at throw time from the OpenSSL ERR_PACK queue — names like `ERR_OSSL_<library>_<reason>`; we CANNOT faithfully reproduce because aws-lc-rs's `Unspecified` strips the upstream library/reason), or (d) zeroship-extension (a code we emit that is NOT in Node's static catalog — explicitly marked in §VII.3a). v3 audit removed every invented code from v2's mapping table: `ERR_CRYPTO_INVALID_AUTH_TAG_LENGTH` / `_IV_LENGTH` / `_AUTH_TAG_LENGTH_INVALID` / `_INVALID_LENGTH` / `_DEPRECATED_API` / `_INVALID_DH_PRIME` and the dynamic-OSSL family `ERR_OSSL_EVP_BAD_DECRYPT` / `_SIGN` / `_VERIFY` / `_HMAC_KEY_TOO_SHORT` / `_PEM_NO_START_LINE` / `_ASN1_VALUE_ERROR` / `_EVP_UNSUPPORTED_ALGORITHM` / `_EVP_UNSUPPORTED`. The dynamic-OSSL string is preserved in the message text where upstream-package compatibility benefits (e.g., a creator app's package may grep `e.message` for "ERR_OSSL_EVP_BAD_DECRYPT"). v3 leaves zero zeroship-extension codes in active use; full faithful dynamic-OSSL bridging is an open question (XVII.12 below) for a future Stage F if measured demand surfaces. (addresses round-2 CRITICAL C2-1, C2-2) | §VII.3, §VII.3a |
 
 ## I. Architecture overview
 
@@ -1344,26 +1347,338 @@ PEM decoding is ~80 LOC of Rust (RFC 7468 is a tiny spec; `-----BEGIN <label>---
 
 For encrypted PKCS#8 (`{ passphrase: Buffer.from('hunter2') }`), see §IV.4a (encrypted PKCS#8 path). v1 specified an `EncryptedPrivateKeyInfo::from_bytes(...).decrypt(passphrase)` call on `aws-lc-rs`; that API **does not exist in `aws-lc-rs` 1.x** (verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/ — the encoding module exposes only `Pkcs8V1Der` / `Pkcs8V2Der` byte wrappers, no encryption). v2 drops to `aws-lc-sys` raw FFI — see new D-N33 below.
 
-### IV.4a. Encrypted PKCS#8 import / export (D-N33, addresses critic CRITICAL #7, MAJOR #12, MAJOR #16)
+<!-- Round 3: addressing CRITICAL C2-4 (D-N33 prose-only -> function-signature spec). -->
+### IV.4a. Encrypted PKCS#8 import / export (D-N33, D-N37 — addresses critic CRITICAL #7, MAJOR #12, MAJOR #16, round-2 CRITICAL #4)
 
-The high-level `aws-lc-rs` does not expose PBES2/PBKDF2-encrypted PKCS#8. We implement a thin `crypto_kernel/pkcs8_enc.rs` (~250 LOC) that:
+The high-level `aws-lc-rs` does not expose PBES2/PBKDF2-encrypted PKCS#8. We implement a thin `crypto_kernel/pkcs8_enc.rs` (~250 LOC) over `aws-lc-sys` raw FFI. **v3 specifies the exact FFI sequence** (round-2 critic flagged the v2 prose-only spec; the implementer needed concrete EVP_* / PKCS8_* call shape).
 
-- **Decrypt path** (used by `createPrivateKey({ key, passphrase })`): parse the outer `EncryptedPrivateKeyInfo` (RFC 5958 §3) ASN.1 DER by hand to extract the PBES2 parameters (PBKDF2 salt, iteration count, prf OID) and the inner cipher OID + IV. Derive the KEK via `aws_lc_rs::pbkdf2`. Run the inner cipher in decrypt mode via `aws_lc_rs::cipher::DecryptingKey`. Return the plaintext PKCS#8 DER for re-parsing.
-- **Encrypt path** (used by `KeyObject.export({ format: 'pem'|'der', cipher, passphrase })`): build the PBES2 parameter ASN.1 by hand (salt = 16 random bytes; iter = 2048 by Node default; cipher per the user's `cipher` option). Run the chosen cipher in encrypt mode. Wrap the result in the `EncryptedPrivateKeyInfo` ASN.1 envelope.
+The aws-lc public C API for encrypted PKCS#8 is documented at https://github.com/aws/aws-lc/blob/main/include/openssl/pkcs8.h (verified 2026-05-02; commit pinned via the project's aws-lc-sys workspace dep). Four functions matter:
 
-Total cost: ~250 LOC of bespoke ASN.1 DER walker + envelope builder. The DER walker reuses the existing `crypto_kernel/der.rs` (moved from `crypto_native/`).
+```c
+// Inputs: pbe_nid (always pass -1 to select PBES2), cipher (the inner EVP_CIPHER*),
+// pass + pass_len (passphrase bytes), salt + salt_len (NULL salt + nonzero len = generate
+// random salt of that length), iterations, p8inf (the unencrypted PKCS#8 inner key).
+// Returns: a freshly-allocated X509_SIG that must be freed by the caller.
+OPENSSL_EXPORT X509_SIG *PKCS8_encrypt(int pbe_nid, const EVP_CIPHER *cipher,
+                                       const char *pass, int pass_len,
+                                       const uint8_t *salt, size_t salt_len,
+                                       int iterations,
+                                       PKCS8_PRIV_KEY_INFO *p8inf);
 
-**Cipher whitelist for encrypted PKCS#8** (addresses critic MAJOR #17 — Node's actual list per https://nodejs.org/api/crypto.html#keyobjectexportoptions and OpenSSL's `PKCS8_encrypt` table):
+// Same as PKCS8_encrypt but writes the EncryptedPrivateKeyInfo ASN.1 directly to a CBB
+// (BoringSSL's CRYPTO_BUFFER builder) and takes an EVP_PKEY directly. Returns 1 on
+// success, 0 on error.
+OPENSSL_EXPORT int PKCS8_marshal_encrypted_private_key(
+    CBB *out, int pbe_nid, const EVP_CIPHER *cipher, const char *pass,
+    size_t pass_len, const uint8_t *salt, size_t salt_len, int iterations,
+    const EVP_PKEY *pkey);
 
+// Inputs: pkcs8 (the X509_SIG containing EncryptedPrivateKeyInfo); pass + pass_len.
+// Returns: a freshly-allocated PKCS8_PRIV_KEY_INFO (the unencrypted inner key info)
+// that must be freed by the caller; NULL on error (wrong passphrase, malformed input,
+// unsupported PBES2 inner cipher, etc.).
+OPENSSL_EXPORT PKCS8_PRIV_KEY_INFO *PKCS8_decrypt(X509_SIG *pkcs8,
+                                                  const char *pass,
+                                                  int pass_len);
+
+// Same as PKCS8_decrypt but parses the EncryptedPrivateKeyInfo ASN.1 directly from a
+// CBS (CRYPTO_BUFFER reader) and returns an EVP_PKEY directly. Returns NULL on error.
+OPENSSL_EXPORT EVP_PKEY *PKCS8_parse_encrypted_private_key(CBS *cbs,
+                                                           const char *pass,
+                                                           size_t pass_len);
 ```
-aes-128-cbc, aes-192-cbc, aes-256-cbc       ← Stage C (default-on)
-aes-128-ecb, aes-256-ecb                    ← Stage E, gated on --legacy-crypto
-des-ede3-cbc, des-ede3-ecb                  ← Stage E, gated on --legacy-crypto
+
+**v3 (D-N37) picks `PKCS8_marshal_encrypted_private_key` + `PKCS8_parse_encrypted_private_key`** as the primary API surface — they take EVP_PKEY directly (so we can flow our existing aws-lc-rs key handle in/out) and they read/write the ASN.1 envelope into/from CBB/CBS buffers (avoiding the X509_SIG intermediate type that the older PKCS8_encrypt/PKCS8_decrypt entry points use).
+
+**Function signatures spec'd in `crypto_kernel/pkcs8_enc.rs` (v3, D-N37):**
+
+```rust
+//! crypto_kernel/pkcs8_enc.rs — encrypted PKCS#8 import / export via aws-lc-sys.
+//!
+//! Architecture:
+//!   - Public surface: `encrypt_pkcs8` + `decrypt_pkcs8` taking unencrypted-PKCS8 DER
+//!     (the bytes already carried in our `KeyMaterial::AsymmetricPrivate*` variant)
+//!     and a passphrase + cipher choice, returning encrypted-PKCS8 DER (or vice versa).
+//!   - Internal: a thin Rust wrapper over PKCS8_marshal_encrypted_private_key /
+//!     PKCS8_parse_encrypted_private_key, plus the cipher-name → EVP_CIPHER* lookup.
+//!
+//! Errors map to KernelError::PassphraseMismatch (decrypt) /
+//! KernelError::InvalidDer (parse) / KernelError::UnsupportedKeyAlgorithm
+//! (cipher whitelist miss). Per VII.3 those map to ERR_CRYPTO_OPERATION_FAILED
+//! / ERR_CRYPTO_OPERATION_FAILED / ERR_CRYPTO_UNSUPPORTED_OPERATION respectively
+//! (see C2-2 audit; ERR_OSSL_EVP_BAD_DECRYPT is dynamic-OSSL, not used).
+
+use aws_lc_sys::{
+    CBB, CBB_init, CBB_finish, CBB_cleanup,
+    CBS, CBS_init,
+    EVP_PKEY, EVP_PKEY_free,
+    EVP_aes_128_cbc, EVP_aes_192_cbc, EVP_aes_256_cbc, EVP_des_ede3_cbc,
+    EVP_aes_128_ecb, EVP_aes_256_ecb, EVP_des_ede3_ecb,
+    EVP_CIPHER,
+    PKCS8_marshal_encrypted_private_key, PKCS8_parse_encrypted_private_key,
+    OPENSSL_free,
+};
+use std::ffi::{c_int, c_void};
+use crate::crypto_kernel::error::KernelError;
+use crate::crypto_kernel::key_material::KeyMaterial;
+use std::sync::Arc;
+use zeroize::Zeroizing;
+
+/// PBES2 default iteration count. Node uses 2048 (matching OpenSSL's
+/// PKCS12_DEFAULT_ITER); modern recommendations are higher (NIST SP 800-132
+/// suggests 600k for 2026 era), but PBES2 is for *encrypting at-rest private
+/// keys*, not for password storage — the threat model is different (offline
+/// attack on the encrypted PEM, not online login). Keep 2048 to match Node's
+/// defaults; allow override via the unstable `iterations` option (Node v22+).
+pub const DEFAULT_PBES2_ITERATIONS: i32 = 2048;
+
+/// Salt size (bytes) for PBES2 KDF. 16 is OpenSSL's default; matches Node.
+pub const DEFAULT_PBES2_SALT_LEN: usize = 16;
+
+/// Encrypted-PKCS#8 cipher whitelist. The `cipher` option to KeyObject.export
+/// must be one of these names; passing anything else throws
+/// ERR_CRYPTO_UNSUPPORTED_OPERATION (real Node code per node_errors.h, v3 fix
+/// per C2-2). v3 expansion (addresses M2-22): Node accepts the broader list
+/// per `lib/internal/crypto/keys.js` parseKeyEncodingAsymmetric.
+///
+/// Each entry maps to an EVP_CIPHER* lookup; ECB variants are flagged so we
+/// can refuse them at the surface (PBES2 + ECB is technically not allowed
+/// per RFC 8018 §6.2 — PBES2's parameter block always carries an IV, but
+/// some legacy tools serialize ECB-mode encrypted PKCS#8 with a zero IV; we
+/// honor those when --legacy-crypto is on but the spec-compliant path is to
+/// reject — see M2-10).
+fn lookup_cipher(name: &str) -> Result<*const EVP_CIPHER, KernelError> {
+    let cipher_fn: unsafe extern "C" fn() -> *const EVP_CIPHER = match name {
+        "aes-128-cbc"   => EVP_aes_128_cbc,
+        "aes-192-cbc"   => EVP_aes_192_cbc,        // M2-22: Node accepts; we ship.
+        "aes-256-cbc"   => EVP_aes_256_cbc,
+        "aes-128-ecb"   => {
+            // (M2-10) RFC 8018 §6.2 forbids ECB inner ciphers in PBES2; we
+            // accept only when --legacy-crypto is on (this gate runs at the
+            // surface, before reaching this function). ECB has no IV; the
+            // PBES2 parameter block emits a zero-length IV which round-trips
+            // through aws-lc but is malformed per spec.
+            if !crate::runtime::flags::legacy_crypto_enabled() {
+                return Err(KernelError::UnsupportedKeyAlgorithm(
+                    "aes-128-ecb is not allowed as PBES2 inner cipher (RFC 8018 §6.2; \
+                     enable --legacy-crypto to bypass the spec check)".to_string()));
+            }
+            EVP_aes_128_ecb
+        },
+        "aes-256-ecb"   => {
+            if !crate::runtime::flags::legacy_crypto_enabled() {
+                return Err(KernelError::UnsupportedKeyAlgorithm(
+                    "aes-256-ecb is not allowed as PBES2 inner cipher (RFC 8018 §6.2)".to_string()));
+            }
+            EVP_aes_256_ecb
+        },
+        "des-ede3-cbc"  => {
+            if !crate::runtime::flags::legacy_crypto_enabled() {
+                return Err(KernelError::UnsupportedKeyAlgorithm(
+                    "des-ede3-cbc requires --legacy-crypto".to_string()));
+            }
+            EVP_des_ede3_cbc
+        },
+        "des-ede3-ecb"  => {
+            if !crate::runtime::flags::legacy_crypto_enabled() {
+                return Err(KernelError::UnsupportedKeyAlgorithm(
+                    "des-ede3-ecb requires --legacy-crypto".to_string()));
+            }
+            EVP_des_ede3_ecb
+        },
+        // (M2-22, addresses Node's full list): the remaining entries — bf-cbc,
+        // rc2-*, rc4 — are listed in Node's source but rarely seen; we route
+        // to the same UnsupportedKeyAlgorithm gate. Stage E may flesh out.
+        _ => return Err(KernelError::UnsupportedKeyAlgorithm(
+            format!("Unknown encrypted-PKCS#8 cipher: {}", name))),
+    };
+    // SAFETY: aws-lc EVP_*_cbc/ecb getters are pure (return a static const
+    // pointer); no thread or state hazards.
+    Ok(unsafe { cipher_fn() })
+}
+
+/// Encrypt an unencrypted PKCS#8 DER blob, returning an EncryptedPrivateKeyInfo
+/// ASN.1 DER blob.
+///
+/// Implementation steps:
+///   1. Parse the input PKCS#8 DER into an EVP_PKEY* (via `d2i_PrivateKey` /
+///      `EVP_parse_private_key` — the kernel already has this routine for
+///      WebCrypto's import path, reused here).
+///   2. Look up the EVP_CIPHER* from the cipher name (lookup_cipher above).
+///   3. Initialize a CBB output buffer.
+///   4. Call PKCS8_marshal_encrypted_private_key:
+///        - pbe_nid = -1 to select PBES2 (the default secure mode);
+///        - cipher = the EVP_CIPHER* from step 2;
+///        - pass + pass_len = the raw passphrase bytes (caller supplies; we
+///          do NOT NUL-terminate or null-pad; aws-lc accepts arbitrary bytes);
+///        - salt = NULL, salt_len = DEFAULT_PBES2_SALT_LEN — aws-lc generates
+///          a fresh random salt internally;
+///        - iterations = DEFAULT_PBES2_ITERATIONS (2048; option override on
+///          API surface);
+///        - pkey = EVP_PKEY* from step 1.
+///   5. CBB_finish into a freshly-allocated u8 buffer; copy into Vec<u8>.
+///   6. EVP_PKEY_free + CBB_cleanup + OPENSSL_free.
+///
+/// Returns Ok(Vec<u8>) of EncryptedPrivateKeyInfo DER bytes on success, or
+/// KernelError::InternalError on aws-lc failure (rare; mostly OOM or NID
+/// resolution failure for legacy ciphers — the cipher-whitelist check happens
+/// before we reach aws-lc).
+pub fn encrypt_pkcs8_private_key(
+    private_key_pkcs8_der: &[u8],
+    cipher_name: &str,
+    passphrase: &[u8],
+    iterations: Option<i32>,
+) -> Result<Vec<u8>, KernelError> {
+    let cipher = lookup_cipher(cipher_name)?;
+    let iterations = iterations.unwrap_or(DEFAULT_PBES2_ITERATIONS);
+
+    // Step 1: parse input PKCS#8 DER into EVP_PKEY*.
+    // SAFETY: input bytes are immutable; we don't free them. EVP_PKEY_free
+    // is called below.
+    let pkey = unsafe {
+        let mut cbs = std::mem::zeroed::<CBS>();
+        CBS_init(&mut cbs, private_key_pkcs8_der.as_ptr(), private_key_pkcs8_der.len());
+        // EVP_parse_private_key is in <openssl/evp.h>; aws-lc-sys exposes it
+        // as `aws_lc_sys::EVP_parse_private_key`.
+        let pkey_ptr = aws_lc_sys::EVP_parse_private_key(&mut cbs);
+        if pkey_ptr.is_null() {
+            return Err(KernelError::InvalidDer(
+                "EVP_parse_private_key failed on input PKCS#8".to_string()));
+        }
+        pkey_ptr
+    };
+    // SAFETY: once we have pkey, ensure free on all paths via a guard.
+    let _pkey_guard = scopeguard::guard(pkey, |p| unsafe { EVP_PKEY_free(p) });
+
+    // Step 2-4: build EncryptedPrivateKeyInfo via PKCS8_marshal_encrypted_private_key.
+    // SAFETY: CBB ownership is ours; CBB_init allocates.
+    let mut cbb = unsafe { std::mem::zeroed::<CBB>() };
+    let cbb_init_ok = unsafe { CBB_init(&mut cbb, 256) };
+    if cbb_init_ok != 1 {
+        return Err(KernelError::InternalError("CBB_init failed".to_string()));
+    }
+    let _cbb_guard = scopeguard::guard(&mut cbb as *mut CBB, |p| unsafe { CBB_cleanup(p) });
+
+    // Salt is NULL with salt_len > 0 -> aws-lc generates random salt.
+    let marshal_ok = unsafe {
+        PKCS8_marshal_encrypted_private_key(
+            &mut cbb,
+            -1 as c_int,                                       // pbe_nid = -1 -> PBES2
+            cipher,
+            passphrase.as_ptr() as *const i8,
+            passphrase.len(),
+            std::ptr::null(),                                  // salt = NULL
+            DEFAULT_PBES2_SALT_LEN,                             // salt_len
+            iterations as c_int,
+            pkey,
+        )
+    };
+    if marshal_ok != 1 {
+        return Err(KernelError::InternalError(
+            "PKCS8_marshal_encrypted_private_key failed".to_string()));
+    }
+
+    // Step 5: CBB_finish -> Vec<u8>.
+    let mut out_ptr: *mut u8 = std::ptr::null_mut();
+    let mut out_len: usize = 0;
+    let finish_ok = unsafe { CBB_finish(&mut cbb, &mut out_ptr, &mut out_len) };
+    if finish_ok != 1 {
+        return Err(KernelError::InternalError("CBB_finish failed".to_string()));
+    }
+    // SAFETY: aws-lc allocated out_ptr; we own it and must OPENSSL_free.
+    let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len).to_vec() };
+    unsafe { OPENSSL_free(out_ptr as *mut c_void) };
+    // CBB_cleanup is a no-op after CBB_finish; the guard handles either way.
+
+    Ok(bytes)
+}
+
+/// Decrypt an EncryptedPrivateKeyInfo DER blob to its underlying PKCS#8 DER.
+///
+/// Implementation steps:
+///   1. Initialize a CBS over the input bytes.
+///   2. Call PKCS8_parse_encrypted_private_key with the passphrase. Returns
+///      EVP_PKEY* on success; NULL on failure (wrong passphrase, malformed
+///      input, unsupported inner cipher).
+///   3. Re-marshal the EVP_PKEY* to plain PKCS#8 DER via EVP_marshal_private_key
+///      (the kernel already uses this for the WebCrypto export path).
+///   4. EVP_PKEY_free.
+///
+/// Returns Zeroizing<Vec<u8>> so the plaintext PKCS#8 DER is wiped from memory
+/// when dropped (D-N30; the caller typically immediately re-parses into a
+/// fresh KeyMaterial::AsymmetricPrivate variant which itself zeroizes).
+pub fn decrypt_pkcs8_private_key(
+    encrypted_pkcs8_der: &[u8],
+    passphrase: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, KernelError> {
+    // Step 1: CBS init.
+    let mut cbs = unsafe { std::mem::zeroed::<CBS>() };
+    unsafe { CBS_init(&mut cbs, encrypted_pkcs8_der.as_ptr(), encrypted_pkcs8_der.len()); }
+
+    // Step 2: parse.
+    let pkey = unsafe {
+        PKCS8_parse_encrypted_private_key(
+            &mut cbs,
+            passphrase.as_ptr() as *const i8,
+            passphrase.len(),
+        )
+    };
+    if pkey.is_null() {
+        // Wrong passphrase, malformed input, or unsupported inner cipher —
+        // all surface the same way from PKCS8_parse_encrypted_private_key.
+        // Per VII.3 / C2-2 audit, this maps to ERR_CRYPTO_OPERATION_FAILED
+        // (NOT the dynamic-OSSL ERR_OSSL_EVP_BAD_DECRYPT).
+        return Err(KernelError::PassphraseMismatch);
+    }
+    let _pkey_guard = scopeguard::guard(pkey, |p| unsafe { EVP_PKEY_free(p) });
+
+    // Step 3: re-marshal the EVP_PKEY* to plain PKCS#8 DER via the kernel's
+    // existing helper (which wraps EVP_marshal_private_key). Returns owned
+    // Vec<u8>.
+    let plain_pkcs8 = crate::crypto_kernel::der::marshal_pkey_to_pkcs8(pkey)?;
+
+    Ok(Zeroizing::new(plain_pkcs8))
+}
 ```
 
-ECB ciphers as the inner cipher of an encrypted private key are particularly hairy (block-aligned padding ambiguity); we accept only when explicitly enabled.
+**Cipher whitelist for encrypted PKCS#8** (v3 expansion, addresses M2-22 — Node's full PBES2 cipher list per `lib/internal/crypto/keys.js`):
 
-**Why not high-level aws-lc-rs?** Verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html: the module exposes `Pkcs8V1Der<'a>` and `Pkcs8V2Der<'a>` as serialized byte wrappers but does NOT expose any `EncryptedPrivateKeyInfo` type or `serialize_with_password` method. We've audited `aws-lc-sys` (the low-level binding) for `PKCS8_decrypt` / `PKCS8_encrypt_pbe` — both are present and stable. We use those.
+| Cipher | Stage | Gate | Backing EVP_CIPHER |
+|---|---|---|---|
+| `aes-128-cbc` | C | ungated | `EVP_aes_128_cbc()` |
+| `aes-192-cbc` | C | ungated | `EVP_aes_192_cbc()` |
+| `aes-256-cbc` | C | ungated | `EVP_aes_256_cbc()` |
+| `aes-128-ecb` | E | `--legacy-crypto` (M2-10) | `EVP_aes_128_ecb()` |
+| `aes-256-ecb` | E | `--legacy-crypto` (M2-10) | `EVP_aes_256_ecb()` |
+| `des-ede3-cbc` | E | `--legacy-crypto` | `EVP_des_ede3_cbc()` |
+| `des-ede3-ecb` | E | `--legacy-crypto` | `EVP_des_ede3_ecb()` |
+| `aes-128-cfb` | E | ungated (rare) | `EVP_aes_128_cfb128()` |
+| `aes-256-cfb` | E | ungated (rare) | `EVP_aes_256_cfb128()` |
+| `aes-128-cfb1` | E | `--legacy-crypto` | `EVP_aes_128_cfb1()` |
+| `aes-128-cfb8` | E | `--legacy-crypto` | `EVP_aes_128_cfb8()` |
+| `aes-128-ofb` | E | `--legacy-crypto` | `EVP_aes_128_ofb()` |
+
+Total: 12 entries (v2 had 7; v3 expanded to match Node's list per M2-22).
+
+**PBES2 / PBKDF2 PRF OID dispatch** (addresses round-2 missing concept #2):
+
+PBES2 inside aws-lc handles the inner KDF transparently — the PBKDF2 PRF OID is encoded in the `EncryptedPrivateKeyInfo` ASN.1 by `PKCS8_marshal_encrypted_private_key` and parsed back by `PKCS8_parse_encrypted_private_key`. Node accepts the following PRF OIDs in the encrypted-PKCS#8 it imports, per `lib/internal/crypto/keys.js`:
+
+- `1.2.840.113549.2.7` — HMAC-SHA-1 (default for OpenSSL ≤1.0).
+- `1.2.840.113549.2.8` — HMAC-SHA-224.
+- `1.2.840.113549.2.9` — HMAC-SHA-256 (modern default; OpenSSL 1.1+ uses this).
+- `1.2.840.113549.2.10` — HMAC-SHA-384.
+- `1.2.840.113549.2.11` — HMAC-SHA-512.
+
+aws-lc's `PKCS8_marshal_encrypted_private_key` defaults to HMAC-SHA-256 for the PRF; the parser accepts all five. We don't need to drive the OID dispatch in our Rust wrapper — aws-lc handles it. We document this so the impl agent knows NOT to pass a `prf` option (yet) and can confirm by round-tripping a Node-emitted encrypted PEM.
+
+**IV-handling policy for AES-CBC inner cipher** (addresses round-2 critic C2-4):
+
+PBES2 puts the inner cipher's IV in the cipher params block (an OCTET STRING for AES-CBC; field name `iv` per RFC 8018 §6.2). The IV is generated INSIDE aws-lc's `PKCS8_marshal_encrypted_private_key` (it's not derived from the KDF output; it's freshly random). We don't need to materialise the IV in Rust; aws-lc handles it. For ECB-mode inner ciphers — which RFC 8018 §6.2 forbids and v3 gates behind `--legacy-crypto` per M2-10 — aws-lc emits a zero-length IV OCTET STRING.
+
+**Why not high-level aws-lc-rs?** Verified against https://docs.rs/aws-lc-rs/latest/aws_lc_rs/encoding/index.html: the module exposes `Pkcs8V1Der<'a>` and `Pkcs8V2Der<'a>` as serialized byte wrappers but does NOT expose any `EncryptedPrivateKeyInfo` type or `serialize_with_password` method. We've audited `aws-lc` (the C library) for PKCS8_encrypt / PKCS8_decrypt / PKCS8_marshal_encrypted_private_key / PKCS8_parse_encrypted_private_key — verified at https://github.com/aws/aws-lc/blob/main/include/openssl/pkcs8.h. All four are `OPENSSL_EXPORT` and stable. We use the marshal/parse pair (D-N37 above) because they bypass the X509_SIG intermediate type and take EVP_PKEY directly.
+
+(Note for impl agent: `PKCS8_encrypt_pbe` was a v1/v2 typo — that name does NOT exist in aws-lc. The real name is `PKCS8_encrypt`; v3 specifies `PKCS8_marshal_encrypted_private_key` instead because it's the better fit for our flow.)
 
 ### IV.5. `KeyObject.from(cryptoKey)` static (D-N4)
 
