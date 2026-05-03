@@ -30,9 +30,14 @@ pub mod encoding;
 pub mod hash;
 pub mod hmac;
 pub mod kdf;
+pub mod key_object;
 pub mod misc;
 pub mod module;
 pub mod random;
 pub mod random_callback_helpers;
+pub mod sign_verify;
+pub mod cipher;
+pub mod keygen;
+pub mod pkcs8_enc;
 
 pub use module::install_globals;

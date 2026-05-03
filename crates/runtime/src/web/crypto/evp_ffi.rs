@@ -301,6 +301,72 @@ pub fn ecdsa_verify(
     }
 }
 
+/// ECDSA sign returning RAW DER (Node default wire format). Skips the
+/// `ecdsa_der_to_p1363` step that the WebCrypto path applies.
+pub fn ecdsa_sign_der(pkcs8_der: &[u8], hash: HashAlgo, data: &[u8]) -> Result<Vec<u8>, OpError> {
+    unsafe {
+        let pkey = parse_pkcs8(pkcs8_der)?;
+        let _guard = PkeyGuard(pkey);
+        let md = md_for(hash)?;
+        let md_ctx = sys::EVP_MD_CTX_new();
+        if md_ctx.is_null() {
+            return Err(op_err("EVP_MD_CTX_new"));
+        }
+        let _ctx_guard = MdCtxGuard(md_ctx);
+        let mut pctx: *mut sys::EVP_PKEY_CTX = std::ptr::null_mut();
+        if sys::EVP_DigestSignInit(md_ctx, &mut pctx, md, std::ptr::null_mut(), pkey) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignInit"));
+        }
+        if sys::EVP_DigestSignUpdate(md_ctx, data.as_ptr() as *const _, data.len()) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignUpdate"));
+        }
+        let mut sig_len: usize = 0;
+        if sys::EVP_DigestSignFinal(md_ctx, std::ptr::null_mut(), &mut sig_len) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignFinal(probe)"));
+        }
+        let mut der = vec![0u8; sig_len];
+        if sys::EVP_DigestSignFinal(md_ctx, der.as_mut_ptr(), &mut sig_len) != 1 {
+            return Err(op_err("ECDSA EVP_DigestSignFinal"));
+        }
+        der.truncate(sig_len);
+        Ok(der)
+    }
+}
+
+/// ECDSA verify accepting RAW DER signatures (Node default).
+pub fn ecdsa_verify_der(
+    spki_der: &[u8],
+    hash: HashAlgo,
+    data: &[u8],
+    sig: &[u8],
+) -> Result<bool, OpError> {
+    unsafe {
+        let pkey = parse_spki(spki_der)?;
+        let _guard = PkeyGuard(pkey);
+        let md = md_for(hash)?;
+        let md_ctx = sys::EVP_MD_CTX_new();
+        if md_ctx.is_null() {
+            return Err(op_err("EVP_MD_CTX_new"));
+        }
+        let _ctx_guard = MdCtxGuard(md_ctx);
+        let mut pctx: *mut sys::EVP_PKEY_CTX = std::ptr::null_mut();
+        if sys::EVP_DigestVerifyInit(md_ctx, &mut pctx, md, std::ptr::null_mut(), pkey) != 1 {
+            return Err(op_err("ECDSA EVP_DigestVerifyInit"));
+        }
+        if sys::EVP_DigestVerifyUpdate(md_ctx, data.as_ptr() as *const _, data.len()) != 1 {
+            return Err(op_err("ECDSA EVP_DigestVerifyUpdate"));
+        }
+        let r = sys::EVP_DigestVerifyFinal(md_ctx, sig.as_ptr(), sig.len());
+        if r == 1 {
+            Ok(true)
+        } else if r == 0 {
+            Ok(false)
+        } else {
+            Err(op_err("ECDSA EVP_DigestVerifyFinal"))
+        }
+    }
+}
+
 /// Convert DER `SEQUENCE { INTEGER r, INTEGER s }` -> r||s (each
 /// `coord_len` bytes, big-endian).
 fn ecdsa_der_to_p1363(der: &[u8], coord_len: usize) -> Result<Vec<u8>, OpError> {
