@@ -173,7 +173,7 @@ Post-completion: file as a date-prefixed ADR under `docs/decisions/` (mirroring 
 | **D-N11** | `Cipher` / `Decipher` classes: `update(data, inputEncoding?, outputEncoding?)` returns Buffer (or string if outputEncoding); `final(outputEncoding?)` flushes the last block + tag; `setAAD(buffer, options?)` for GCM/CCM AAD; `setAuthTag(buffer)` for Decipher post-data tag inject; `getAuthTag()` for Cipher post-final tag emit; `setAutoPadding(boolean)` for CBC PKCS#7 control. Backed by `kernel::CipherContext`. The class is created via `crypto.createCipheriv(algorithm, key, iv, options?)` factories. `createCipher` (deprecated, derives key from password via broken EVP_BytesToKey) is gated behind `--legacy-crypto` per D-N22; without the flag it throws `ERR_CRYPTO_UNSUPPORTED_OPERATION` with a doc URL to switch to `createCipheriv`. (v3 fix, C2-2: v2's `ERR_CRYPTO_DEPRECATED_API` was invented; the real Node code per node_errors.h is `ERR_CRYPTO_UNSUPPORTED_OPERATION`.) | Direct Node parity for `createCipheriv`. The deprecated API has weak KDF properties (EVP_BytesToKey single-iteration MD5); blocking by default reduces footgun surface. | §V.4 |
 | **D-N12** | `Sign` / `Verify` classes: `update(data, inputEncoding?)` and `sign(privateKey, outputEncoding?)` / `verify(publicKey, signature, signatureEncoding?)`. Internally compute the digest streaming-style, then run the asymmetric op once at finalisation. Accept `privateKey` / `publicKey` as `KeyObject`, `CryptoKey`, PEM string, DER Buffer, or `{ key, format, type, passphrase }` options object — Node's union type. The encoding helper at the boundary materialises any of these to a kernel-friendly key handle. | Sign / Verify are the "DigestSign" pattern in OpenSSL (EVP_DigestSignInit + Update + Final). The streaming API saves the user from buffering the message; the kernel's `SignContext` mirrors EVP_DigestSignContext. | §V.5 |
 | **D-N13** | `KeyObject` / `PublicKeyObject` / `PrivateKeyObject` / `SecretKeyObject`: parent + three subclasses (`#[v8_inherit]`). Parent has `.type` (returns "secret" / "public" / "private"), `.asymmetricKeyType` (returns null for secret), `.asymmetricKeyDetails` (algorithm-specific dict), `.symmetricKeySize` (bytes for secret; null for asymmetric), `.export(options) -> Buffer | string | object`, `.equals(other)`. Subclasses add nothing functional — they exist for `instanceof` discrimination. Internal-field 0 holds `Box<KeyObjectState>` carrying an `Arc<KeyMaterial>`. The static `KeyObject.from(cryptoKey)` constructor accepts a `CryptoKey` and clones the Arc. | Node's type model verbatim. Some npm packages (older `jose`, `node-forge`) check `instanceof PrivateKeyObject` to distinguish privates; missing the subclass means those checks fail. | §IV |
-| **D-N14** | `crypto.createSecretKey(buffer | string, encoding?)` / `crypto.createPublicKey(input)` / `crypto.createPrivateKey(input)` factories: parse the input (PEM / DER / JWK / KeyObject / `{ key, format: 'pem' | 'der' | 'jwk', type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', passphrase: Buffer? }`) into a fresh `KeyObject` instance. The PEM parser lives in `kernel::pem` (RFC 7468 framing — a single function: `decode_pem(text) -> Vec<(label, der_bytes)>`); the DER walker is the existing `crypto_native/der.rs`. `passphrase` for encrypted PKCS#8 dispatches to aws-lc-rs's `EncryptedPrivateKeyInfo::from_bytes(der).decrypt(passphrase)`. | The createX factories are the entry point npm packages use. Without them, a creator app cannot import a key — there's no other path. JWK input takes the JWK as a JS object (passed into the kernel JWK parser shared with WebCrypto). | §IV.4 |
+| **D-N14** | `crypto.createSecretKey(buffer | string, encoding?)` / `crypto.createPublicKey(input)` / `crypto.createPrivateKey(input)` factories: parse the input (PEM / DER / JWK / KeyObject / `{ key, format: 'pem' | 'der' | 'jwk', type: 'pkcs1' | 'pkcs8' | 'spki' | 'sec1', passphrase: Buffer? }`) into a fresh `KeyObject` instance. The PEM parser lives in `kernel::pem` (RFC 7468 framing — a single function: `decode_pem(text) -> Vec<(label, der_bytes)>`); the DER walker is the existing `crypto_native/der.rs`. `passphrase` for encrypted PKCS#8 dispatches to `crypto_kernel/pkcs8_enc.rs::decrypt_pkcs8_private_key` per D-N37 (uses `aws-lc-sys` raw FFI via `PKCS8_parse_encrypted_private_key` — **NOT** an aws-lc-rs high-level API; v1's `EncryptedPrivateKeyInfo::from_bytes(der).decrypt(passphrase)` was invented and corrected in v2). | The createX factories are the entry point npm packages use. Without them, a creator app cannot import a key — there's no other path. JWK input takes the JWK as a JS object (passed into the kernel JWK parser shared with WebCrypto). | §IV.4 |
 | **D-N15** | KDF dispatch: `pbkdf2` / `pbkdf2Sync` / `scrypt` / `scryptSync` / `hkdf` / `hkdfSync` — sync variants run on V8 thread (user opted into blocking by picking the Sync API); async variants dispatch to `state.spawned_ops`. Both call into `kernel::pbkdf2` / `kernel::scrypt` / `kernel::hkdf` (slice-in / Vec-out). PBKDF2 + HKDF are already in `crypto_native/derive.rs`; the kernel extraction is mechanical (move + add a `_sync` and `_async` adapter). scrypt is NEW — aws-lc-rs has `pbkdf2` but no scrypt; we use `aws_lc_sys::EVP_PBE_scrypt` (BoringSSL's scrypt is a ~200 LOC FFI binding). | RFC 7914 scrypt is the password-hashing standard most modern apps use (vs. PBKDF2 which is recommended only for legacy interop). bcrypt is similar but not in node:crypto; the `bcrypt` npm package wraps OpenSSL's `BF_set_key` directly. We don't ship bcrypt; the npm package's WASM fallback (via unenv) is acceptable. | §VI.2 |
 | **D-N16** | webcrypto bridge — object identity. `import("node:crypto")` yields an exports object whose `.webcrypto` property IS the same `Crypto` instance that's installed at `globalThis.crypto`. The synthetic module's installer code reads `globalThis.crypto` once at module-evaluate time and assigns the reference directly; subsequent reads return the same `Crypto` instance. `subtle` is `globalThis.crypto.subtle`. `getRandomValues` is `globalThis.crypto.getRandomValues.bind(globalThis.crypto)` (Node binds; we follow). | Node's `crypto.webcrypto === globalThis.crypto` is a cross-codebase invariant — JOSE libraries assume it. Returning a copy would silently break `WeakMap`-based key tracking (libraries that keep a `WeakMap<CryptoKey, ...>` would lose entries on the boundary). | §VIII |
 | **D-N17** | Random: `randomBytes(size, callback?) -> Buffer | void` (callback variant returns Buffer to callback async; sync variant returns Buffer). `randomFillSync(buffer, offset?, size?) -> Buffer`. `randomFill(buffer, offset?, size?, callback) -> void` (always callback). `randomInt(min, max, callback?) -> number` (uniform distribution via rejection sampling, not the JS-shim's modulo bias). `randomUUID(options?)` — same as `globalThis.crypto.randomUUID`. `getRandomValues` re-export. All sync; `randomBytes(N)` for very large N (e.g. > 1 MB) goes async via callback if present, sync otherwise — matches Node. | The randomInt rejection-sampling fix corrects a subtle bias in the JS shim (line 109-117 of node-compat.ts: `range > 2^32` causes silent bias). Node uses the same rejection-sampling technique we will. | §VI.5 |
@@ -1359,7 +1359,10 @@ fn parse_public_key_input(
             match der.label.as_str() {
                 "PUBLIC KEY" => parse_spki(&der.bytes),
                 "RSA PUBLIC KEY" => parse_pkcs1_rsa_public(&der.bytes),
-                _ => Err(OpError::node("ERR_OSSL_UNSUPPORTED",
+                // (v3, addresses C2-1, C2-2): ERR_OSSL_UNSUPPORTED is dynamic-OSSL,
+                // not in Node's static registry. Real Node emits ERR_INVALID_ARG_VALUE
+                // for unknown PEM labels per lib/internal/crypto/keys.js.
+                _ => Err(OpError::node("ERR_INVALID_ARG_VALUE",
                     format!("Unsupported PEM label: {}", der.label))),
             }
         }
@@ -3469,14 +3472,55 @@ impl OpError {
 Macro arm in `runtime-macros/src/lib.rs::gen_throw_error`:
 
 ```rust
+// (v3, addresses C2-1 + the per-code class mapping per node_errors.h):
+// the class of each Node error code is the V(...) macro's second
+// argument in https://github.com/nodejs/node/blob/main/src/node_errors.h
+// (for C++-side codes) or the third argument to E('NAME', '...', Class)
+// in lib/internal/errors.js (for JS-side codes). v3 makes the mapping
+// match Node's actual class assignment.
 ::zeroship_runtime::state::OpErrorKind::NodeError(code) => {
     let __msg = v8::String::new(scope, &__err.message).unwrap();
     let class = match code {
-        "ERR_OUT_OF_RANGE" | "ERR_BUFFER_OUT_OF_BOUNDS" =>
-            v8::Exception::range_error(scope, __msg),
-        "ERR_INVALID_ARG_TYPE" | "ERR_INVALID_ARG_VALUE" |
-        "ERR_INVALID_BUFFER_SIZE" | "ERR_INVALID_RETURN_VALUE" =>
-            v8::Exception::type_error(scope, __msg),
+        // RangeError codes (per node_errors.h `V(NAME, RangeError)` and
+        // errors.js `E('NAME', '...', RangeError)`).
+        "ERR_OUT_OF_RANGE"
+        | "ERR_BUFFER_OUT_OF_BOUNDS"
+        | "ERR_CRYPTO_INVALID_KEYLEN"
+        | "ERR_CRYPTO_INVALID_TAG_LENGTH"
+        | "ERR_CRYPTO_INVALID_KEYPAIR"
+        | "ERR_CRYPTO_INVALID_KEYTYPE"
+        | "ERR_CRYPTO_INVALID_MESSAGELEN"
+        | "ERR_CRYPTO_INVALID_SCRYPT_PARAMS"
+        | "ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH"
+            => v8::Exception::range_error(scope, __msg),
+        // TypeError codes.
+        "ERR_INVALID_ARG_TYPE"
+        | "ERR_INVALID_ARG_VALUE"
+        | "ERR_INVALID_BUFFER_SIZE"
+        | "ERR_INVALID_RETURN_VALUE"
+        | "ERR_MISSING_ARGS"
+        | "ERR_MISSING_OPTION"
+        | "ERR_UNKNOWN_ENCODING"
+        | "ERR_CRYPTO_INVALID_AUTH_TAG"
+        | "ERR_CRYPTO_INVALID_COUNTER"
+        | "ERR_CRYPTO_INVALID_CURVE"
+        | "ERR_CRYPTO_INVALID_DIGEST"
+        | "ERR_CRYPTO_INVALID_IV"
+        | "ERR_CRYPTO_INVALID_JWK"
+        | "ERR_CRYPTO_ECDH_INVALID_FORMAT"
+            => v8::Exception::type_error(scope, __msg),
+        // Default: plain Error (covers ERR_CRYPTO_HASH_FINALIZED,
+        // ERR_CRYPTO_INVALID_STATE, ERR_CRYPTO_OPERATION_FAILED,
+        // ERR_CRYPTO_UNKNOWN_DH_GROUP, ERR_CRYPTO_UNKNOWN_CIPHER,
+        // ERR_CRYPTO_UNSUPPORTED_OPERATION, ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE,
+        // ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS, ERR_CRYPTO_INCOMPATIBLE_KEY,
+        // ERR_CRYPTO_FIPS_FORCED, ERR_CRYPTO_FIPS_UNAVAILABLE,
+        // ERR_CRYPTO_HASH_UPDATE_FAILED, ERR_CRYPTO_PBKDF2_ERROR,
+        // ERR_CRYPTO_SIGN_KEY_REQUIRED, ERR_CRYPTO_KEM_NOT_SUPPORTED,
+        // ERR_CRYPTO_ARGON2_NOT_SUPPORTED, ERR_CRYPTO_SCRYPT_NOT_SUPPORTED,
+        // ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED, ERR_CRYPTO_ENGINE_UNKNOWN,
+        // ERR_MISSING_PASSPHRASE, ERR_OSSL_EVP_INVALID_DIGEST,
+        // ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY, etc.).
         _ => v8::Exception::error(scope, __msg),
     };
     // Set .code property on the error instance.
@@ -3488,7 +3532,7 @@ Macro arm in `runtime-macros/src/lib.rs::gen_throw_error`:
 }
 ```
 
-Total macro extension: ~25 LOC. The dispatch table at the top of `gen_throw_error` is the only routing logic.
+Total macro extension: ~50 LOC (v3 expanded the class-mapping table from v2's stub to cover every Node code we emit). The dispatch table at the top of `gen_throw_error` is the only routing logic.
 
 ## VIII. WebCrypto bridge (D-N16)
 
@@ -4926,6 +4970,26 @@ D-N18 says: case-insensitive (Node behaviour).
 
 **Working answer:** case-insensitive for hash names / cipher names; strict for spec-canonical names in JWK / WebCrypto. The asymmetry is unavoidable because WebCrypto IS strict (per webcrypto-native D-8) and Node IS loose. Document.
 
+<!-- Round 3: addressing CRITICAL C2-2 (queued: dynamic-OSSL bridging). -->
+### XVII.12. (v3) Faithful dynamic-OSSL error bridging
+
+Real Node generates `ERR_OSSL_<library>_<reason>` codes at throw time by reading the OpenSSL ERR_PACK queue (see `node/src/crypto/crypto_util.cc::ThrowCryptoError`). aws-lc-rs's `Unspecified` strips the upstream library/reason — we cannot reproduce these dynamically. v3 §VII.3 / §VII.3a / D-N39 picks the canonical-Node-fallback approach (`ERR_CRYPTO_OPERATION_FAILED` + the legacy OSSL name in the message text).
+
+**Queued for Stage F:** if/when measured demand surfaces (e.g., a creator app's package strictly requires `e.code === 'ERR_OSSL_EVP_BAD_DECRYPT'` and refuses message-text matching), add a faithful bridge:
+
+1. Link aws-lc-sys directly (already in workspace deps via aws-lc-rs).
+2. After every aws-lc-rs `Unspecified` Result, drain the BoringSSL ERR queue via `ERR_get_error()` + `ERR_GET_LIB(packed)` + `ERR_reason_error_string(packed)`.
+3. Reconstruct `ERR_OSSL_<LIBRARY>_<REASON>` per Node's pattern.
+4. Surface as a NEW `KernelError::DynamicOssl { library: &'static str, reason: &'static str }` variant.
+
+Cost: ~150 LOC of bridge code in `crypto_kernel/error.rs`. Stage F (post-impl, demand-driven).
+
+### XVII.13. (v3) RSA-PSS toCryptoKey lossiness bypass
+
+Per M2-12, `KeyObject.toCryptoKey` round-trips through JWK and loses RSA-PSS-specific algorithm parameters. Node has the same limitation; v3 picks Node parity.
+
+**Queued for Stage F:** if creator apps surface this as a friction point, bypass JWK by directly cloning `Arc<KeyMaterial>` into a fresh `CryptoKeyState` with the user-supplied algorithm AND the source KeyObject's PSS metadata (when the source is an RSA-PSS key). Cost: ~30 LOC in `crypto_native/crypto_key.rs`. Demand-driven.
+
 ### XVII.11. (v2) Resolved by post-review pass
 
 Open questions promoted to decisions in v2:
@@ -4935,9 +4999,15 @@ Open questions promoted to decisions in v2:
 - **PSS sentinel translation site** — D-N34. Translated in `parse_sign_key_input` BEFORE the kernel boundary; kernel never sees negatives.
 - **stream.Transform inheritance approach** — D-N35. JS-side mixin in `node-crypto.gen.ts`; native classes unchanged.
 - **PQC stub strategy** — D-N36. Stage E parse-only recognition; full keygen defers until aws-lc-rs's PQC API stabilises.
-- **`createCipher` policy** — gated by `--legacy-crypto` (warn-and-proceed when on; throw when off). v1's "always throw" was too aggressive.
+- **`createCipher` policy** — gated by `--legacy-crypto` (warn-and-proceed when on; refuse with `ERR_CRYPTO_UNSUPPORTED_OPERATION` when off). v1's "always throw" was too aggressive; v2's `ERR_CRYPTO_DEPRECATED_API` was an invented code (v3 fix per C2-2).
 - **`ECDH.setPublicKey` policy** — shipped with deprecation warning (DEP0031). v1's "throw" was wrong vs. Node behaviour.
 - **`Hmac.copy` absence** — reaffirmed against the critic's incorrect claim. Counter-cited against Node source.
+
+Open questions promoted to decisions in v3 (round 3 audit):
+
+- **Encrypted PKCS#8 EVP_* sequence** — D-N37. v2 left D-N33 prose-only; v3 specifies the exact `PKCS8_marshal_encrypted_private_key` + `PKCS8_parse_encrypted_private_key` calls + cipher whitelist + iteration count + salt-length policy at function-signature level.
+- **Algorithm-routing matrix (high-level vs FFI vs DEFER)** — D-N38. v2 conflated "ships in Stage 1" with "in aws-lc-rs's high-level API"; v3 audited every algorithm against docs.rs and assigned each one a backing path.
+- **Error-code provenance policy** — D-N39. v2 emitted invented codes mixed with Node-real codes; v3 audited every code against `lib/internal/errors.js` + `src/node_errors.h`, removed all invented codes, and documented zeroship-extension policy.
 
 ## XVIII. Sources
 
