@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use ntex::web;
-use ntex::util::Bytes;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -188,8 +187,11 @@ pub async fn deploy(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
     id: Path<String>,
-    body: Bytes,
+    mut body: web::types::Payload,
 ) -> web::HttpResponse {
+    // Auth + uuid + content-type rejections happen BEFORE any body byte
+    // is consumed — so an unauthenticated/malformed caller can't tie up
+    // tmp file slots without first satisfying these gates.
     if let Some(resp) = check_admin_auth(&req, &state) { return resp; }
     let uid = match id.parse::<Uuid>() {
         Ok(u) => u,
@@ -213,7 +215,127 @@ pub async fn deploy(
         }));
     }
 
-    match deploy::ingest(&state.blob_store, &uid, &body).await {
+    // Stream the request body to a tmp file under the system temp dir.
+    // Tmp files live for the duration of the deploy and are removed
+    // after ingest (success or error). Path includes a uuid so
+    // concurrent deploys don't trample each other.
+    let tmp_path = std::env::temp_dir()
+        .join(format!("zeroship-deploy-{}.zsapp", uuid::Uuid::new_v4().simple()));
+
+    // Write chunks via compio. Track compressed size; abort if it would
+    // exceed `MAX_COMPRESSED_BYTES`. The append happens via repeated
+    // `write_all_at(buf, offset).await`.
+    let write_result: Result<(), web::HttpResponse> = async {
+        use compio::io::AsyncWriteAtExt;
+
+        // create_new fails if a file already exists at that path —
+        // defensive against tmp uuid collisions (vanishingly rare).
+        let file = match compio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[deploy] tmp create failed for {tmp_path:?}: {e}");
+                return Err(web::HttpResponse::InternalServerError()
+                    .json(&serde_json::json!({"error":"deploy temp storage unavailable"})));
+            }
+        };
+
+        let mut written: u64 = 0;
+        loop {
+            match body.recv().await {
+                Some(Ok(chunk)) => {
+                    let chunk_len = chunk.len();
+                    let new_total = written + chunk_len as u64;
+                    if new_total > zeroship_bundle::MAX_COMPRESSED_BYTES as u64 {
+                        return Err(web::HttpResponse::PayloadTooLarge().json(
+                            &serde_json::json!({
+                                "error": "deploy too large",
+                                "cap_bytes": zeroship_bundle::MAX_COMPRESSED_BYTES,
+                                "observed_bytes": new_total,
+                            }),
+                        ));
+                    }
+                    // compio File::write_all_at takes ownership of the buffer.
+                    // ntex Bytes is a refcounted slice; copy into an owned Vec
+                    // so we can hand it to write_all_at. The to_vec() costs a
+                    // single chunk-sized alloc per chunk (typically 16-256 KiB).
+                    let owned: Vec<u8> = chunk.to_vec();
+                    let compio::BufResult(res, _returned) =
+                        (&file).write_all_at(owned, written).await;
+                    if let Err(e) = res {
+                        eprintln!("[deploy] tmp write failed at offset {written}: {e}");
+                        return Err(web::HttpResponse::InternalServerError().json(
+                            &serde_json::json!({"error":"deploy temp write failed"}),
+                        ));
+                    }
+                    written = new_total;
+                }
+                Some(Err(e)) => {
+                    eprintln!("[deploy] payload read error: {e}");
+                    return Err(web::HttpResponse::BadRequest().json(
+                        &serde_json::json!({"error":"payload error","detail":format!("{e}")}),
+                    ));
+                }
+                None => break,
+            }
+        }
+        // fsync so the bytes are durable before we mmap them. For tmp
+        // ingest this isn't strictly necessary (we'll unlink soon), but
+        // it ensures the read after this sees the writes completely.
+        if let Err(e) = file.sync_all().await {
+            eprintln!("[deploy] tmp sync_all failed: {e}");
+            return Err(web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"deploy temp sync failed"})));
+        }
+        Ok(())
+    }.await;
+
+    if let Err(resp) = write_result {
+        let _ = compio::fs::remove_file(&tmp_path).await;
+        return resp;
+    }
+
+    // mmap + ingest. The std::fs::File::open is sync but cheap (no I/O
+    // beyond opening a fd); Mmap::map sets up VM mappings without
+    // reading bytes. tar/zstd then page-fault through the slice, which
+    // the kernel services from page cache.
+    let file = match std::fs::File::open(&tmp_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[deploy] tmp re-open failed: {e}");
+            let _ = compio::fs::remove_file(&tmp_path).await;
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"deploy temp readback failed"}));
+        }
+    };
+    // SAFETY: tmp file is owned by this handler, written exclusively by
+    // us (create_new), fsynced before mapping, and not modified by any
+    // other process for the lifetime of `mmap`.
+    #[allow(unsafe_code)]
+    let mmap = match unsafe { memmap2::Mmap::map(&file) } {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[deploy] mmap failed: {e}");
+            drop(file);
+            let _ = compio::fs::remove_file(&tmp_path).await;
+            return web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"deploy temp mmap failed"}));
+        }
+    };
+
+    let result = deploy::ingest(&state.blob_store, &uid, &mmap[..]).await;
+
+    // Drop mmap + file before unlinking. On Linux unlink-while-mapped
+    // is fine, but explicit drop avoids edge cases on other platforms.
+    drop(mmap);
+    drop(file);
+    let _ = compio::fs::remove_file(&tmp_path).await;
+
+    match result {
         Ok(success) => {
             // Atomic UPDATE: deploy_hash + manifest_json land together
             // so the gateway never sees half-applied state.

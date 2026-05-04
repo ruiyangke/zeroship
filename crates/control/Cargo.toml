@@ -13,6 +13,7 @@ zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 compio-postgres = { workspace = true }
 compio = { workspace = true }
+memmap2 = { workspace = true }
 ntex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

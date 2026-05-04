@@ -5423,6 +5423,7 @@ dependencies = [
  "hmac 0.12.1",
  "http",
  "jsonwebtoken",
+ "memmap2",
  "mimalloc",
  "ntex",
  "rand 0.8.5",
