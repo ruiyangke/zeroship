@@ -115,10 +115,10 @@ async fn process_record(
     let (path, sealed) = match record.result {
         Ok(s) => (record.path, s),
         Err(e) => {
-            eprintln!(
-                "[sandbox/restore] corrupt sealed record {:?}: {e}; \
-                 leaving in place for operator verify-and-quarantine",
-                record.path
+            tracing::warn!(
+                path = ?record.path,
+                error = %e,
+                "sandbox/restore: corrupt sealed record; leaving in place for operator verify-and-quarantine"
             );
             return RestoreOutcome::Corrupt;
         }
@@ -128,10 +128,11 @@ async fn process_record(
     let sandbox_id: Uuid = match sealed.sandbox_id.parse() {
         Ok(id) => id,
         Err(e) => {
-            eprintln!(
-                "[sandbox/restore] sealed record {path:?} has unparseable \
-                 sandbox_id={:?}: {e}; quarantining",
-                sealed.sandbox_id
+            tracing::warn!(
+                path = ?path,
+                sandbox_id = ?sealed.sandbox_id,
+                error = %e,
+                "sandbox/restore: sealed record has unparseable sandbox_id; quarantining"
             );
             return RestoreOutcome::Corrupt;
         }
@@ -143,9 +144,9 @@ async fn process_record(
         "nomad-ch" => match (backend, sealed.vm_index) {
             (Backend::NomadCh(nb), Some(idx)) => nb.derive_agent_url(idx),
             (Backend::NomadCh(_), None) => {
-                eprintln!(
-                    "[sandbox/restore] sealed record {path:?} for nomad-ch \
-                     backend has no vm_index; quarantining (schema bug)"
+                tracing::warn!(
+                    path = ?path,
+                    "sandbox/restore: sealed record for nomad-ch backend has no vm_index; quarantining (schema bug)"
                 );
                 return RestoreOutcome::Corrupt;
             }
@@ -154,11 +155,11 @@ async fn process_record(
                 // controller is on a different backend. Operator
                 // changed `SANDBOX_BACKEND` between restarts;
                 // quarantine the record (no probe possible).
-                eprintln!(
-                    "[sandbox/restore] sealed record {path:?} backend={:?} \
-                     but running controller backend={:?}; not restoring",
-                    sealed.backend,
-                    backend.name(),
+                tracing::warn!(
+                    path = ?path,
+                    sealed_backend = %sealed.backend,
+                    running_backend = backend.name(),
+                    "sandbox/restore: sealed record backend mismatch; not restoring"
                 );
                 return RestoreOutcome::BackendUnsupported;
             }
@@ -166,17 +167,19 @@ async fn process_record(
         other => match sealed.agent_url.as_ref() {
             Some(url) if backend.name() == other => url.clone(),
             Some(_) => {
-                eprintln!(
-                    "[sandbox/restore] sealed record {path:?} backend={other:?} \
-                     but running controller backend={:?}; not restoring",
-                    backend.name(),
+                tracing::warn!(
+                    path = ?path,
+                    sealed_backend = other,
+                    running_backend = backend.name(),
+                    "sandbox/restore: sealed record backend mismatch; not restoring"
                 );
                 return RestoreOutcome::BackendUnsupported;
             }
             None => {
-                eprintln!(
-                    "[sandbox/restore] sealed record {path:?} backend={other:?} \
-                     missing agent_url; quarantining"
+                tracing::warn!(
+                    path = ?path,
+                    sealed_backend = other,
+                    "sandbox/restore: sealed record missing agent_url; quarantining"
                 );
                 return RestoreOutcome::Corrupt;
             }
@@ -189,10 +192,11 @@ async fn process_record(
     let signing_key = Arc::new(SigningKey::from_bytes(&sealed.signing_key_bytes));
     let derived_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
     if derived_fp != sealed.pubkey_fp {
-        eprintln!(
-            "[sandbox/restore] sealed record {path:?} corrupt: \
-             derived pubkey_fp ({derived_fp}) != sealed ({})",
-            sealed.pubkey_fp,
+        tracing::warn!(
+            path = ?path,
+            derived_fp = %derived_fp,
+            sealed_fp = %sealed.pubkey_fp,
+            "sandbox/restore: sealed record corrupt: derived pubkey_fp != sealed"
         );
         return RestoreOutcome::Corrupt;
     }
@@ -225,25 +229,30 @@ async fn process_record(
                         .map(crate::registry::PreviewAuditEntry::from_sealed)
                         .collect();
                     registry.restore_preview_state(sandbox_id, secrets, audit);
-                    eprintln!(
-                        "[sandbox/restore] restored sandbox={sandbox_id} \
-                         user={} project={} backend={} agent_url={}",
-                        sealed.user_id, sealed.project_id, sealed.backend, agent_url
+                    tracing::info!(
+                        sandbox_id = %sandbox_id,
+                        user_id = %sealed.user_id,
+                        project_id = %sealed.project_id,
+                        backend = %sealed.backend,
+                        agent_url = %agent_url,
+                        "sandbox/restore: restored sandbox"
                     );
                     RestoreOutcome::Restored
                 }
                 Err(e) if e.contains("doesn't yet support") => {
-                    eprintln!(
-                        "[sandbox/restore] backend {:?} doesn't support restore for \
-                         sandbox={sandbox_id}; sealed file kept for a future binary: {e}",
-                        backend.name()
+                    tracing::info!(
+                        sandbox_id = %sandbox_id,
+                        backend = backend.name(),
+                        error = %e,
+                        "sandbox/restore: backend doesn't support restore; sealed file kept for a future binary"
                     );
                     RestoreOutcome::BackendUnsupported
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[sandbox/restore] backend.restore_from_sealed({sandbox_id}) \
-                         failed: {e}"
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/restore: backend.restore_from_sealed failed"
                     );
                     RestoreOutcome::Corrupt
                 }
@@ -254,16 +263,15 @@ async fn process_record(
             // serving a different tenant. Delete the sealed file —
             // we don't trust this address for the original sandbox
             // anymore.
-            eprintln!(
-                "[sandbox/restore] sandbox={sandbox_id} agent_url={agent_url} \
-                 fp_mismatch: expected={} got={actual_fp}; deleting sealed record",
-                sealed.pubkey_fp
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                agent_url = %agent_url,
+                expected_fp = %sealed.pubkey_fp,
+                actual_fp = %actual_fp,
+                "sandbox/restore: fp_mismatch; deleting sealed record"
             );
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!(
-                    "[sandbox/restore] failed to delete mismatched sealed file \
-                     {path:?}: {e}"
-                );
+                tracing::warn!(path = ?path, error = %e, "sandbox/restore: failed to delete mismatched sealed file");
             }
             RestoreOutcome::Mismatched
         }
@@ -271,23 +279,22 @@ async fn process_record(
             // 401: agent is verifying with a different controller
             // pubkey. Same disposition as fp mismatch — the agent
             // at this address is no longer ours.
-            eprintln!(
-                "[sandbox/restore] sandbox={sandbox_id} agent_url={agent_url} \
-                 /version returned 401 (different controller pubkey); \
-                 deleting sealed record"
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                agent_url = %agent_url,
+                "sandbox/restore: /version returned 401 (different controller pubkey); deleting sealed record"
             );
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!(
-                    "[sandbox/restore] failed to delete unauth sealed file \
-                     {path:?}: {e}"
-                );
+                tracing::warn!(path = ?path, error = %e, "sandbox/restore: failed to delete unauth sealed file");
             }
             RestoreOutcome::Mismatched
         }
         ProbeOutcome::Unreachable(reason) => {
-            eprintln!(
-                "[sandbox/restore] sandbox={sandbox_id} agent_url={agent_url} \
-                 unreachable: {reason}; leaving sealed record in place"
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                agent_url = %agent_url,
+                reason = %reason,
+                "sandbox/restore: unreachable; leaving sealed record in place"
             );
             RestoreOutcome::Unreachable
         }

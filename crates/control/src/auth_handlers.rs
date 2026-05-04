@@ -295,7 +295,7 @@ pub async fn google_callback(
     let identity = match oauth::complete_callback(cfg, code, &stored_pkce).await {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("[control/auth] google callback failed: {e}");
+            tracing::warn!(error = %e, "control/auth: google callback failed");
             return bad_oauth("oauth exchange failed");
         }
     };
@@ -310,7 +310,7 @@ pub async fn google_callback(
     ).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[control/auth] oauth_login: {e}");
+            tracing::error!(error = %e, "control/auth: oauth_login failed");
             return web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({ "error": e }));
         }

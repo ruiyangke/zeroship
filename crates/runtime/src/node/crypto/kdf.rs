@@ -15,9 +15,9 @@
 //! aws-lc-sys raw FFI; not yet wired here.
 
 use super::buffer;
-use super::super::crypto::kernel::digest::KernelHashAlgo;
-use super::super::crypto::kernel::error::KernelError;
-use super::super::crypto::kernel::kdf;
+use crate::crypto_ops::digest::KernelHashAlgo;
+use crate::crypto_ops::error::KernelError;
+use crate::crypto_ops::kdf;
 use crate::state::OpError;
 
 fn map_kdf_err(err: KernelError) -> OpError {

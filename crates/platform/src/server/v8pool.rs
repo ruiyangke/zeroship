@@ -176,11 +176,11 @@ impl V8Pool {
         let entry = Arc::new(entry);
         isolates.insert(app_id.to_string(), entry.clone());
 
-        eprintln!(
-            "[pool] Started isolate for '{}' ({}/{} slots)",
-            app_id,
-            isolates.len(),
-            self.config.max
+        tracing::info!(
+            app_id = %app_id,
+            slots_used = isolates.len(),
+            slots_max = self.config.max,
+            "v8pool started isolate"
         );
 
         Ok(entry)
@@ -238,7 +238,7 @@ impl V8Pool {
             if let Some(_entry) = isolates.remove(&id) {
                 // Dropping the Sender half causes the compio worker to exit
                 // when it tries recv_async().
-                eprintln!("[pool] Evicted '{id}' (LRU, pool full)");
+                tracing::info!(app_id = %id, reason = "lru-pool-full", "v8pool evicted isolate");
             }
         }
     }
@@ -260,7 +260,12 @@ impl V8Pool {
 
         for id in idle {
             if let Some(_entry) = isolates.remove(&id) {
-                eprintln!("[pool] Evicted '{id}' (idle {}s)", self.config.idle_timeout_secs);
+                tracing::info!(
+                    app_id = %id,
+                    idle_timeout_secs = self.config.idle_timeout_secs,
+                    reason = "idle",
+                    "v8pool evicted isolate"
+                );
             }
         }
     }
@@ -269,7 +274,7 @@ impl V8Pool {
     pub fn evict_app(&self, app_id: &str) {
         let mut isolates = self.isolates.write().unwrap_or_else(|e| e.into_inner());
         if let Some(_entry) = isolates.remove(app_id) {
-            eprintln!("[pool] Evicted '{app_id}' (manual)");
+            tracing::info!(app_id = %app_id, reason = "manual", "v8pool evicted isolate");
         }
     }
 

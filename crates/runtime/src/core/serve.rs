@@ -104,9 +104,10 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
     };
 
     if options.cpu_limit.is_some() || options.wall_timeout.is_some() {
-        eprintln!(
-            "[zeroship] cpu_limit={:?} wall_timeout={:?}",
-            options.cpu_limit, options.wall_timeout
+        tracing::info!(
+            cpu_limit = ?options.cpu_limit,
+            wall_timeout = ?options.wall_timeout,
+            "runtime limits configured"
         );
     }
 
@@ -123,7 +124,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             options.plugins,
         );
     } else {
-        eprintln!("[zeroship] {num_workers} workers on port {}", options.port);
+        tracing::info!(workers = num_workers, port = options.port, "runtime spawning workers");
         let mut handles = Vec::new();
         for i in 0..num_workers {
             let worker_modules = modules.clone();
@@ -1326,9 +1327,9 @@ fn run_single_worker(
             };
 
             if let Some(id) = worker_id {
-                eprintln!("[zeroship] worker {id} ready on port {port}");
+                tracing::info!(worker_id = id, port, "runtime worker ready");
             } else {
-                eprintln!("[zeroship] http://0.0.0.0:{port}");
+                tracing::info!(port, addr = %format!("http://0.0.0.0:{port}"), "runtime listening");
             }
 
             let runtime = Runtime::builder()

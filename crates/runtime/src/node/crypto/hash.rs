@@ -11,8 +11,8 @@
 #![allow(unsafe_code)]
 
 use super::buffer;
-use super::super::crypto::kernel::digest::{DigestContext, KernelHashAlgo};
-use super::super::crypto::kernel::error::KernelError;
+use crate::crypto_ops::digest::{DigestContext, KernelHashAlgo};
+use crate::crypto_ops::error::KernelError;
 use crate::state::OpError;
 
 #[allow(unused_imports)]

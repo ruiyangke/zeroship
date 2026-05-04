@@ -12,9 +12,9 @@
 #![allow(unsafe_code)]
 
 use super::buffer;
-use super::super::crypto::kernel::digest::KernelHashAlgo;
-use super::super::crypto::kernel::error::KernelError;
-use super::super::crypto::kernel::hmac::HmacContext;
+use crate::crypto_ops::digest::KernelHashAlgo;
+use crate::crypto_ops::error::KernelError;
+use crate::crypto_ops::hmac::HmacContext;
 use crate::state::OpError;
 
 #[allow(unused_imports)]

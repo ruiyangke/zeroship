@@ -134,9 +134,9 @@ impl DockerBackend {
             ));
         }
         if self.cfg.auto_pull {
-            eprintln!("[sandbox/docker] pulling {}...", self.cfg.image);
+            tracing::info!(image = %self.cfg.image, "sandbox/docker pulling image");
             if let Err(e) = pull_image(&self.cfg.image).await {
-                eprintln!("[sandbox/docker] pull failed (continuing — image may be local): {e}");
+                tracing::warn!(error = %e, "sandbox/docker pull failed (continuing — image may be local)");
             }
         }
         // Ensure the workspace root exists.
@@ -213,10 +213,10 @@ impl DockerBackend {
                 // without an agent_url. Just log and leave the
                 // signed-RPC / preview surface unavailable; the
                 // session_auth lookup will surface a clean Err.
-                eprintln!(
-                    "[sandbox/docker] could not resolve container IP \
-                     for {container_name} (signed-RPC unavailable for \
-                     this sandbox): {e}"
+                tracing::warn!(
+                    container = %container_name,
+                    error = %e,
+                    "sandbox/docker: could not resolve container IP (signed-RPC unavailable for this sandbox)"
                 );
                 String::new()
             }
@@ -280,10 +280,11 @@ impl DockerBackend {
                 preview_audit: Vec::new(),
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
-                eprintln!(
-                    "[sandbox/docker] persist.seal failed sandbox={sandbox_id} \
-                     container={container_name} (non-fatal; sandbox live, \
-                     restart-restore unavailable for this record): {e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    container = %container_name,
+                    error = %e,
+                    "sandbox/docker persist.seal failed (non-fatal; sandbox live, restart-restore unavailable for this record)"
                 );
             }
         }
@@ -312,9 +313,10 @@ impl DockerBackend {
         if let Some(dir) = sandbox.host_keys_dir.as_ref() {
             if let Err(e) = std::fs::remove_dir_all(dir) {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "[sandbox/docker] stop: rm-rf keys dir {dir:?} \
-                         failed (non-fatal): {e}"
+                    tracing::warn!(
+                        dir = ?dir,
+                        error = %e,
+                        "sandbox/docker stop: rm-rf keys dir failed (non-fatal)"
                     );
                 }
             }
@@ -325,9 +327,10 @@ impl DockerBackend {
         // delete failures are logged but never fail stop().
         if let Some(persist) = &self.persist {
             if let Err(e) = persist.delete(sandbox_id).await {
-                eprintln!(
-                    "[sandbox/docker] persist.delete failed sandbox={sandbox_id} \
-                     (non-fatal): {e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "sandbox/docker persist.delete failed (non-fatal)"
                 );
             }
         }

@@ -28,11 +28,13 @@
 
 use std::cell::{Cell, RefCell};
 
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_inherit, v8_name};
+use zeroship_runtime_macros::{
+    v8_class, v8_constructor, v8_getter, v8_inherit, v8_name, WebIdlDict,
+};
 
 use crate::state::OpError;
 
-use super::event::{now_ms, read_event_init, Event};
+use super::event::{now_ms, Event};
 
 #[repr(C)]
 pub struct CloseEventState {
@@ -85,67 +87,25 @@ pub(crate) fn convert_unsigned_short_modulo(
     (as_i64 as u32 & 0xFFFF) as u16
 }
 
-struct ParsedCloseInit {
+/// `CloseEventInit` per WHATWG WebSockets §3.2. Inherits from EventInit
+/// per IDL; the macro doesn't support derive-with-inheritance, so the
+/// parent fields are inlined here.
+///
+/// `code` rides as a `Option<v8::Local<Value>>` because the spec
+/// `unsigned short` conversion (ConvertToInt default case — NaN → 0,
+/// truncate toward zero, modulo 2^16) doesn't match either of the
+/// macro's primitive integer impls (`u32` is ToUint32 modulo 2^32;
+/// `i32` is ToInt32 modulo 2^32 signed). The constructor applies
+/// `convert_unsigned_short_modulo` post-parse to honour the spec.
+#[derive(Default, Debug, WebIdlDict)]
+struct CloseEventInit<'s> {
     bubbles: bool,
     cancelable: bool,
     composed: bool,
+    #[webidl_name = "wasClean"]
     was_clean: bool,
-    code: u16,
+    code: Option<v8::Local<'s, v8::Value>>,
     reason: String,
-}
-
-fn parse_close_event_init(
-    scope: &mut v8::PinScope,
-    init: v8::Local<v8::Value>,
-) -> Result<ParsedCloseInit, OpError> {
-    let base = read_event_init(scope, init)?;
-    let mut parsed = ParsedCloseInit {
-        bubbles: base.bubbles,
-        cancelable: base.cancelable,
-        composed: base.composed,
-        was_clean: false,
-        code: 0,
-        reason: String::new(),
-    };
-
-    if init.is_undefined() || init.is_null() {
-        return Ok(parsed);
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(init) else {
-        return Err(OpError::type_error(
-            "CloseEvent eventInitDict must be an object",
-        ));
-    };
-
-    // `wasClean` — boolean.
-    let key =
-        v8::String::new(scope, "wasClean").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() {
-            parsed.was_clean = v.boolean_value(scope);
-        }
-    }
-
-    // `code` — unsigned short via ConvertToInt default case (modulo,
-    // NOT clamp).
-    let key =
-        v8::String::new(scope, "code").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() {
-            parsed.code = convert_unsigned_short_modulo(scope, v);
-        }
-    }
-
-    // `reason` — USVString.
-    let key =
-        v8::String::new(scope, "reason").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() {
-            parsed.reason = v.to_rust_string_lossy(scope);
-        }
-    }
-
-    Ok(parsed)
 }
 
 #[v8_class]
@@ -169,7 +129,11 @@ impl CloseEventState {
         };
         let type_rust = type_str.to_rust_string_lossy(scope);
 
-        let parsed = parse_close_event_init(scope, init)?;
+        let parsed = CloseEventInit::from_v8(scope, init)?;
+        let code_u16 = match parsed.code {
+            Some(v) => convert_unsigned_short_modulo(scope, v),
+            None => 0,
+        };
 
         let ce = CloseEventState::default();
         *ce.event.event_type.borrow_mut() = type_rust;
@@ -178,7 +142,7 @@ impl CloseEventState {
         ce.event.composed.set(parsed.composed);
         ce.event.time_stamp.set(now_ms());
         ce.was_clean.set(parsed.was_clean);
-        ce.code.set(parsed.code);
+        ce.code.set(code_u16);
         *ce.reason.borrow_mut() = parsed.reason;
         Ok(ce)
     }

@@ -8,5 +8,6 @@
 
 pub mod byte_string;
 pub mod clamp;
+pub mod convert;
 pub mod enforce_range;
 pub mod usv_string;

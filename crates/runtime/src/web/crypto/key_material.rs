@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+use zeroship_runtime_macros::WebIdlEnum;
+
 // ---------------------------------------------------------------------------
 // Branded box (D-10) — unspoofable instanceof check
 // ---------------------------------------------------------------------------
@@ -40,85 +42,51 @@ impl<T> BrandedBox<T> {
 // [[usages]] / [[handle]] slots.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Spec §13 `KeyType` enumeration. WebIDL names are kebab-cased from
+/// the variant identifier — `Public/Private/Secret` map cleanly to
+/// `public/private/secret` so no per-variant `#[webidl_name]` overrides
+/// are needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, WebIdlEnum)]
 pub enum KeyType {
     Public,
     Private,
     Secret,
 }
 
-impl KeyType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            KeyType::Public => "public",
-            KeyType::Private => "private",
-            KeyType::Secret => "secret",
-        }
-    }
-}
-
 /// Spec §13 `KeyUsage` enumeration. All eight values are valid for at
 /// least one algorithm; per-algorithm filters reject usages outside
 /// the relevant subset (e.g. AES-GCM rejects `sign`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// WebIDL names are camelCase per spec — the auto-kebab rule would
+/// produce `derive-key` etc., so multi-word variants get explicit
+/// `#[webidl_name = ...]` overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, WebIdlEnum)]
 pub enum KeyUsage {
     Encrypt,
     Decrypt,
     Sign,
     Verify,
+    #[webidl_name = "deriveKey"]
     DeriveKey,
+    #[webidl_name = "deriveBits"]
     DeriveBits,
+    #[webidl_name = "wrapKey"]
     WrapKey,
+    #[webidl_name = "unwrapKey"]
     UnwrapKey,
 }
 
-impl KeyUsage {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            KeyUsage::Encrypt => "encrypt",
-            KeyUsage::Decrypt => "decrypt",
-            KeyUsage::Sign => "sign",
-            KeyUsage::Verify => "verify",
-            KeyUsage::DeriveKey => "deriveKey",
-            KeyUsage::DeriveBits => "deriveBits",
-            KeyUsage::WrapKey => "wrapKey",
-            KeyUsage::UnwrapKey => "unwrapKey",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
-            "encrypt" => KeyUsage::Encrypt,
-            "decrypt" => KeyUsage::Decrypt,
-            "sign" => KeyUsage::Sign,
-            "verify" => KeyUsage::Verify,
-            "deriveKey" => KeyUsage::DeriveKey,
-            "deriveBits" => KeyUsage::DeriveBits,
-            "wrapKey" => KeyUsage::WrapKey,
-            "unwrapKey" => KeyUsage::UnwrapKey,
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Spec §13 `KeyFormat` enumeration. WebIDL names are kebab-cased
+/// from variant idents — single-word PascalCase produces single-word
+/// lowercase, and `Pkcs8` (digit between letters) stays `pkcs8` since
+/// the kebab rule only inserts a dash before an uppercase ASCII run
+/// that follows a lowercase or digit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, WebIdlEnum)]
 pub enum KeyFormat {
     Raw,
     Spki,
     Pkcs8,
     Jwk,
-}
-
-impl KeyFormat {
-    pub fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
-            "raw" => KeyFormat::Raw,
-            "spki" => KeyFormat::Spki,
-            "pkcs8" => KeyFormat::Pkcs8,
-            "jwk" => KeyFormat::Jwk,
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,31 +143,21 @@ impl HashAlgo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Spec §23.7 `NamedCurve` enumeration. Each variant carries an
+/// explicit `#[webidl_name]` because the auto-kebab rule produces
+/// `p256` etc., not the spec's `P-256` form (uppercase initial,
+/// hyphen-then-digits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, WebIdlEnum)]
 pub enum NamedCurve {
+    #[webidl_name = "P-256"]
     P256,
+    #[webidl_name = "P-384"]
     P384,
+    #[webidl_name = "P-521"]
     P521,
 }
 
 impl NamedCurve {
-    pub fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
-            "P-256" => NamedCurve::P256,
-            "P-384" => NamedCurve::P384,
-            "P-521" => NamedCurve::P521,
-            _ => return None,
-        })
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            NamedCurve::P256 => "P-256",
-            NamedCurve::P384 => "P-384",
-            NamedCurve::P521 => "P-521",
-        }
-    }
-
     /// Curve-order length in bytes (n in spec §23.7.1 step "Convert r
     /// to a byte sequence of length n").
     pub fn order_len(self) -> usize {

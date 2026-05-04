@@ -48,9 +48,11 @@ impl RouteCache {
             // with the rest of the platform's "always have a manifest"
             // invariant. Log so deploys with bad manifests are visible.
             let manifest = if let Err(e) = entry.manifest.validate() {
-                eprintln!(
-                    "[gate-sync] manifest validation failed for app {id} ({}): {e}",
-                    entry.name
+                tracing::warn!(
+                    app_id = %id,
+                    app_name = %entry.name,
+                    error = %e,
+                    "gateway-sync: manifest validation failed — falling back to passthrough"
                 );
                 Manifest::passthrough()
             } else {
@@ -83,7 +85,7 @@ pub fn start_sync(state: Arc<GateState>) {
         loop {
             compio::time::sleep(interval).await;
             if let Err(e) = sync_once(&state).await {
-                eprintln!("[gate-sync] error: {e}");
+                tracing::error!(error = %e, "gateway-sync: poll cycle failed");
             }
         }
     })

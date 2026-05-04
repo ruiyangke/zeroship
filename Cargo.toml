@@ -108,6 +108,19 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 
+# Logging / tracing — pluggable subscriber init lives in
+# `crates/core/src/observability.rs`. Format pluggable via
+# ZEROSHIP_LOG_FORMAT={pretty|compact|json|logfmt|bunyan}.
+tracing = "0.1"
+# `ansi` is required for the pretty + compact text formatters; the
+# subscriber strips ANSI codes automatically when stderr is not a TTY,
+# so safe in production. `tracing-log` integrates `log::*` -> tracing
+# at the layer level (`LogTracer::init` covers the rest).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "env-filter", "fmt", "ansi", "json", "tracing-log"] }
+tracing-log = "0.2"
+tracing-logfmt = "0.3"
+tracing-bunyan-formatter = "0.3"
+
 # Internal crates
 zeroship-core = { path = "crates/core" }
 zeroship-bundle = { path = "crates/bundle" }

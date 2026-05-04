@@ -384,9 +384,10 @@ async fn load_on_demand(
     if let Some(dh) = app_version.deploy_hash.clone() {
         cache::set_hash(*app_id, dh);
     }
-    eprintln!(
-        "[worker] on-demand loaded {app_id} (blob: {}...)",
-        &bundle_hash[..bundle_hash.len().min(8)]
+    tracing::info!(
+        app_id = %app_id,
+        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+        "worker: on-demand loaded app"
     );
     Ok(())
 }

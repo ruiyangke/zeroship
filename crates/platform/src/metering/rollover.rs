@@ -48,7 +48,11 @@ pub fn spawn_period_roller(
             tokio::time::sleep(Duration::from_secs(60)).await;
             let now_period = current_period_key();
             if now_period != last_period {
-                eprintln!("[rollover] Period boundary crossed: {last_period} → {now_period}");
+                tracing::info!(
+                    last_period = %last_period,
+                    now_period = %now_period,
+                    "rollover period boundary crossed"
+                );
                 rollover_all(&registry, store.as_ref(), &config).await;
                 last_period = now_period;
             }
@@ -103,7 +107,7 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
                 .collect();
             if !deltas.is_empty() {
                 if let Err(e) = store.flush(app_id, &deltas).await {
-                    eprintln!("[rollover] Failed to flush {app_id} before rollover: {e}");
+                    tracing::error!(app_id = %app_id, error = %e, "rollover flush failed before rollover");
                     continue; // skip archive for this app — data would be incomplete
                 }
                 old_meter.counters.commit_flush(&snapshot);
@@ -111,14 +115,17 @@ async fn rollover_all(registry: &MeterRegistry, store: &dyn MeterStore, config: 
 
             // Now archive and reset warm tier
             if let Err(e) = store.rollover(app_id).await {
-                eprintln!("[rollover] Failed to rollover {app_id} in store: {e}");
+                tracing::error!(app_id = %app_id, error = %e, "rollover store call failed");
             }
 
             let requests = final_deltas.get("requests").copied().unwrap_or(0);
             let cpu_us = final_deltas.get("cpu_us").copied().unwrap_or(0);
             let cpu_ms = cpu_us as f64 / 1000.0;
-            eprintln!(
-                "[rollover] {app_id}: {requests} requests, {cpu_ms:.1}ms CPU archived",
+            tracing::info!(
+                app_id = %app_id,
+                requests,
+                cpu_ms,
+                "rollover archived",
             );
         }
 

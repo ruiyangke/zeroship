@@ -17,6 +17,12 @@ use zeroship_runtime::{ModuleEntry, NativePlugin};
 mod secrets;
 
 fn main() {
+    // CLI's stdout/stderr is the user's product (e.g. `zeroship deploy`
+    // prints the deploy hash for scripts to capture). Library tracing
+    // emissions (runtime, plugin crates) are kept quiet by default —
+    // operators surface them with `RUST_LOG=info`.
+    zeroship_core::observability::init_tracing("warn");
+
     let args: Vec<String> = std::env::args().collect();
     let command = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 

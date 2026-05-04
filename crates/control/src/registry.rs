@@ -82,7 +82,7 @@ async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
     let (client, connection) = compio_postgres::connect(url, NoTls).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
-            eprintln!("control: pg connection error: {e}");
+            tracing::error!(error = %e, "control: pg connection error");
         }
     })
     .detach();
@@ -522,8 +522,10 @@ impl Registry {
                 match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
                     Ok(m) => Some(m),
                     Err(e) => {
-                        eprintln!(
-                            "[registry] versions: manifest parse failure for {id}: {e} — emitting None"
+                        tracing::warn!(
+                            app_id = %id,
+                            error = %e,
+                            "registry: versions: manifest parse failure — emitting None"
                         );
                         None
                     }
@@ -579,12 +581,12 @@ impl Registry {
                     Ok(m) => match m.validate() {
                         Ok(()) => Some(m),
                         Err(e) => {
-                            eprintln!("[registry] invalid manifest for {id}: {e} — using passthrough");
+                            tracing::warn!(app_id = %id, error = %e, "registry: invalid manifest — using passthrough");
                             None
                         }
                     },
                     Err(e) => {
-                        eprintln!("[registry] manifest parse failure for {id}: {e} — using passthrough");
+                        tracing::warn!(app_id = %id, error = %e, "registry: manifest parse failure — using passthrough");
                         None
                     }
                 })

@@ -755,17 +755,18 @@ pub fn start_idle_gc(state: Arc<AppState>) {
             ) {
                 Ok(ids) => ids,
                 Err(p) => {
-                    eprintln!(
-                        "[sandbox] gc: panic during expired-walk; continuing: {p:?}"
-                    );
+                    tracing::error!(panic = ?p, "sandbox gc: panic during expired-walk; continuing");
                     continue;
                 }
             };
             for id in to_kill {
                 if let Some(info) = state.sandboxes.get(&id) {
-                    eprintln!(
-                        "[sandbox] gc: stopping idle sandbox {} (user={}, project={}, backend={})",
-                        info.sandbox_id, info.user_id, info.project_id, info.backend,
+                    tracing::info!(
+                        sandbox_id = %info.sandbox_id,
+                        user_id = %info.user_id,
+                        project_id = %info.project_id,
+                        backend = %info.backend,
+                        "sandbox gc: stopping idle sandbox"
                     );
                 }
                 // Don't unwrap-or-panic — propagate the failure as a
@@ -773,7 +774,7 @@ pub fn start_idle_gc(state: Arc<AppState>) {
                 // is also wrapped in case a poisoned lock would
                 // otherwise kill the loop.
                 if let Err(e) = state.backend.stop(id).await {
-                    eprintln!("[sandbox] gc: backend.stop({id}) failed: {e}");
+                    tracing::warn!(sandbox_id = %id, error = %e, "sandbox gc: backend.stop failed");
                 }
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     state.sandboxes.remove(&id);

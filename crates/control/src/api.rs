@@ -61,7 +61,7 @@ pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Opti
     match token {
         Some(key) if zeroship_core::auth::validate_control_key(key, state.master_key.expose_secret()) => None,
         _ => {
-            eprintln!("[control] auth rejected on {} {}", req.method(), req.path());
+            tracing::warn!(method = %req.method(), path = %req.path(), "control: auth rejected");
             Some(
                 web::HttpResponse::Unauthorized()
                     .json(&serde_json::json!({"error":"unauthorized"})),
@@ -251,7 +251,7 @@ pub async fn deploy(
             }));
         }
         Err(e) => {
-            eprintln!("[deploy] streaming to tmp failed: {e}");
+            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: streaming to tmp failed");
             return web::HttpResponse::InternalServerError().json(&serde_json::json!({
                 "error": "deploy temp storage unavailable",
             }));
@@ -265,7 +265,7 @@ pub async fn deploy(
     let file = match std::fs::File::open(&tmp_path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[deploy] tmp re-open failed: {e}");
+            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: tmp re-open failed");
             let _ = compio::fs::remove_file(&tmp_path).await;
             return web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"deploy temp readback failed"}));
@@ -278,7 +278,7 @@ pub async fn deploy(
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[deploy] mmap failed: {e}");
+            tracing::error!(error = %e, path = %tmp_path.display(), "deploy: mmap failed");
             drop(file);
             let _ = compio::fs::remove_file(&tmp_path).await;
             return web::HttpResponse::InternalServerError()

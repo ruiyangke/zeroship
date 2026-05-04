@@ -30,6 +30,8 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
+    zeroship_core::observability::init_tracing("info,zeroship_control=debug");
+
     let args: Vec<String> = std::env::args().collect();
 
     let port = arg_or_env(&args, "--port", "CONTROL_PORT", "9090");
@@ -72,9 +74,10 @@ async fn main() -> std::io::Result<()> {
     // to create the directory tree (idempotent if it already exists)
     // and then writing + removing a probe file.
     if let Err(e) = std::fs::create_dir_all(&deploy_tmp_dir) {
-        eprintln!(
-            "[control] refusing to start: deploy_tmp_dir {:?} not creatable: {e}",
-            deploy_tmp_dir,
+        tracing::error!(
+            path = %deploy_tmp_dir.display(),
+            error = %e,
+            "control: deploy_tmp_dir not creatable, refusing to start",
         );
         std::process::exit(1);
     }
@@ -83,25 +86,26 @@ async fn main() -> std::io::Result<()> {
         uuid::Uuid::new_v4().simple()
     ));
     if let Err(e) = std::fs::write(&probe, b"") {
-        eprintln!(
-            "[control] refusing to start: deploy_tmp_dir {:?} not writable: {e}",
-            deploy_tmp_dir,
+        tracing::error!(
+            path = %deploy_tmp_dir.display(),
+            error = %e,
+            "control: deploy_tmp_dir not writable, refusing to start",
         );
         std::process::exit(1);
     }
     let _ = std::fs::remove_file(&probe);
-    eprintln!("[control] deploy_tmp_dir = {:?}", deploy_tmp_dir);
+    tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
 
     if !insecure_dev {
         let mut missing = Vec::new();
         if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
         if control_key.is_empty() { missing.push("--control-key / CONTROL_KEY"); }
         if !missing.is_empty() {
-            eprintln!(
-                "[control] refusing to start: required secrets missing: {}\n\
-                 Pass --dev-insecure (or ZEROSHIP_DEV_INSECURE=1) to run\n\
-                 without them — NEVER in production.",
-                missing.join(", "),
+            tracing::error!(
+                missing = %missing.join(", "),
+                "control: refusing to start; required secrets missing. \
+                 Pass --dev-insecure (or ZEROSHIP_DEV_INSECURE=1) to run \
+                 without them — NEVER in production."
             );
             std::process::exit(1);
         }
@@ -110,15 +114,14 @@ async fn main() -> std::io::Result<()> {
             // Stripe entirely. But every webhook delivery will reject
             // with 500, so log loudly at startup so a misconfigured
             // deploy isn't noticed only via Stripe-side retries.
-            eprintln!(
-                "[control] WARNING: stripe_webhook_secret unset — \
-                 /internal/webhooks/stripe will reject every request. \
+            tracing::warn!(
+                "control: stripe_webhook_secret unset — /internal/webhooks/stripe will reject every request. \
                  Set --stripe-webhook-secret if you need Stripe integration."
             );
         }
     }
     if insecure_dev {
-        eprintln!("[control] WARNING: --dev-insecure set; admin + internal auth disabled.");
+        tracing::warn!("control: --dev-insecure set; admin + internal auth disabled");
     }
 
     let registry = Registry::new(&db_url)
@@ -145,9 +148,9 @@ async fn main() -> std::io::Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
     if !legacy_keys.is_empty() {
-        eprintln!(
-            "[control] EnvStore booted with {} legacy master key(s) for rotation grace period",
-            legacy_keys.len(),
+        tracing::info!(
+            legacy_keys = legacy_keys.len(),
+            "control: EnvStore booted with legacy master keys (rotation grace period)"
         );
     }
     let env_store = EnvStore::new_with_previous(
@@ -165,7 +168,7 @@ async fn main() -> std::io::Result<()> {
     let jwt_secret = arg_or_env(&args, "--jwt-secret", "JWT_SECRET", "");
     let jwt_secret = if jwt_secret.is_empty() {
         if !insecure_dev {
-            eprintln!("[control] refusing to start: --jwt-secret / JWT_SECRET required (or pass --dev-insecure)");
+            tracing::error!("control: refusing to start; --jwt-secret / JWT_SECRET required (or pass --dev-insecure)");
             std::process::exit(1);
         }
         // Stable fallback so cookies survive a quick restart in dev.
@@ -183,14 +186,14 @@ async fn main() -> std::io::Result<()> {
     let google_client_secret = env_or("GOOGLE_CLIENT_SECRET", "");
     let google_redirect = env_or("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/google/callback");
     let google_oauth = if !google_client_id.is_empty() && !google_client_secret.is_empty() {
-        eprintln!("[control] Google OAuth enabled — redirect_uri = {google_redirect}");
+        tracing::info!(redirect_uri = %google_redirect, "control: Google OAuth enabled");
         Some(oauth::GoogleConfig {
             client_id: google_client_id,
             client_secret: google_client_secret,
             redirect_uri: google_redirect,
         })
     } else {
-        eprintln!("[control] Google OAuth disabled (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET)");
+        tracing::info!("control: Google OAuth disabled (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET)");
         None
     };
 
@@ -213,7 +216,7 @@ async fn main() -> std::io::Result<()> {
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
-    eprintln!("zeroship-control listening on {bind_addr}");
+    tracing::info!(bind = %bind_addr, "zeroship-control listening");
 
     web::server(async move || {
         web::App::new()

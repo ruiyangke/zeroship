@@ -198,7 +198,10 @@ pub fn load_modules(
 
         if let Some(exc) = sync_exc {
             let local = v8::Local::new(scope, &exc);
-            eprintln!("[v8] evaluate sync threw: {}", local.to_rust_string_lossy(scope));
+            tracing::error!(
+                error = %local.to_rust_string_lossy(scope),
+                "v8 evaluate sync threw"
+            );
             return Err(format!("Failed to evaluate: {entrypoint}"));
         }
 
@@ -220,12 +223,15 @@ pub fn load_modules(
 
     if let Some(rej) = eval_rejection {
         let local = v8::Local::new(scope, &rej);
-        eprintln!("[v8] evaluate rejected: {}", local.to_rust_string_lossy(scope));
+        tracing::error!(
+            error = %local.to_rust_string_lossy(scope),
+            "v8 evaluate rejected"
+        );
         if let Some(obj) = local.to_object(scope) {
             let stack_key = v8::String::new(scope, "stack").unwrap();
             if let Some(stack_val) = obj.get(scope, stack_key.into()) {
                 if !stack_val.is_undefined() {
-                    eprintln!("[v8] stack: {}", stack_val.to_rust_string_lossy(scope));
+                    tracing::error!(stack = %stack_val.to_rust_string_lossy(scope), "v8 evaluate rejected stack");
                 }
             }
         }
@@ -278,7 +284,7 @@ fn resolve_callback<'a>(
         }
     }
 
-    eprintln!("[modules] Cannot resolve: {spec}");
+    tracing::error!(specifier = %spec, "module resolution failed");
     None
 }
 

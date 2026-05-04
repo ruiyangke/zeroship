@@ -34,7 +34,7 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
             None
         }
         _ => {
-            eprintln!("[control-internal] auth rejected on {} {}", req.method(), req.path());
+            tracing::warn!(method = %req.method(), path = %req.path(), "control-internal: auth rejected");
             Some(
                 web::HttpResponse::Unauthorized()
                     .json(&serde_json::json!({"error":"unauthorized"})),
@@ -78,7 +78,7 @@ pub async fn get_app_env(
             web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
         }
         Err(e) => {
-            eprintln!("[control-internal] env fetch error for {id}: {e}");
+            tracing::error!(app_id = %id, error = %e, "control-internal: env fetch error");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}))
         }

@@ -4,6 +4,7 @@ pub mod types;
 pub mod auth;
 pub mod typed_id;
 pub mod crypto;
+pub mod observability;
 pub mod preview_ports;
 
 pub use types::*;

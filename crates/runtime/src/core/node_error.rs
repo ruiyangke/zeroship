@@ -2,7 +2,7 @@
 //!
 //! Per `docs/proposals/node-crypto-native.md` §VII.3a — every
 //! `ERR_CRYPTO_*`, `ERR_INVALID_*`, `ERR_OUT_OF_RANGE`, etc., that we
-//! emit from `crate::web::crypto_node` is in this table with the right
+//! emit from `crate::node::crypto` is in this table with the right
 //! exception class (Error vs TypeError vs RangeError).
 //!
 //! The map is a `match` rather than a phf::Map because the call site

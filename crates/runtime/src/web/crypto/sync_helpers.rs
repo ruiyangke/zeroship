@@ -1,13 +1,13 @@
 //! Surviving crypto helpers after WebCrypto v2 + node:crypto Stage B.
 //!
-//! Native `Crypto` / `SubtleCrypto` / `CryptoKey` (`crypto_native/`)
-//! own the WebCrypto JS surface. Native `Hash` / `Hmac` / random /
-//! KDFs (`crypto_node/`) own the node:crypto JS surface. This file
-//! holds only:
+//! Native `Crypto` / `SubtleCrypto` / `CryptoKey` (`web::crypto`) own
+//! the WebCrypto JS surface. Native `Hash` / `Hmac` / random / KDFs
+//! (`node::crypto`) own the node:crypto JS surface. This file holds
+//! only:
 //!
 //! 1. `fast_random` — thread-local 4 KB CSPRNG buffer (workerd's
-//!    OPENSSL_cleanse pattern), called from `crypto_native::helpers`,
-//!    `crypto_node::random`, and other call sites that need amortised
+//!    OPENSSL_cleanse pattern), called from `web::crypto::helpers`,
+//!    `node::crypto::random`, and other call sites that need amortised
 //!    CSPRNG bytes.
 //!
 //! Everything else that used to live here (the `__cryptoHashSync` /
@@ -82,5 +82,5 @@ pub(crate) fn fast_random(out: &mut [u8]) {
 
 // (The `__cryptoHashSync` / `__cryptoHmacSync` ad-hoc V8 callbacks
 // were removed alongside the JS shim that consumed them; the native
-// `crypto_node::Hash` / `Hmac` classes own these paths now per Stage B
+// `node::crypto::Hash` / `Hmac` classes own these paths now per Stage B
 // of `docs/proposals/node-crypto-native.md`.)

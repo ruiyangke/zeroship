@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 compio = { workspace = true, features = ["fs"] }
 zstd = { workspace = true }
 tar = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

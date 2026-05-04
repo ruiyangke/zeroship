@@ -252,6 +252,7 @@ pub async fn ingest(
                 blobs_uploaded += 1;
             }
             Ok(PutOutcome::Deduped) => {
+                tracing::debug!(hash = %hash, "deploy: blob dedup hit");
                 blobs_deduped += 1;
             }
             Err(BlobError::HashMismatch { expected, got }) => {

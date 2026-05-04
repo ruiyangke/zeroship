@@ -292,8 +292,12 @@ impl TextDecoderStream {
             ));
         }
 
-        // 2. Read fatal / ignoreBOM from options.
-        let (fatal_flag, ignore_bom_flag) = read_decoder_options(scope, options)?;
+        // 2. Read fatal / ignoreBOM from options. Delegates to the
+        //    parent module's `TextDecoderOptions` derive — same WebIDL
+        //    dict as TextDecoder uses.
+        let opts = super::TextDecoderOptions::from_v8(scope, options)?;
+        let fatal_flag = opts.fatal;
+        let ignore_bom_flag = opts.ignore_bom;
 
         // 3. Build the decoder state, shared between the callbacks and
         //    the class instance's getters.
@@ -618,43 +622,14 @@ fn enqueue_on_controller(
 }
 
 // ---------------------------------------------------------------------------
-// Decoder option / buffer-source helpers — local copies of the same
-// shape that lives in the parent module's TextDecoder. They could be
-// unified via `pub(super)` exports, but the surface is small enough
-// (and the failure modes adjacent enough) that keeping a duplicate
-// here keeps the streams module self-contained.
+// Buffer-source helper — local copy of the same shape that lives in
+// the parent module's TextDecoder. Decoder-options parsing is shared
+// via `super::TextDecoderOptions` (a WebIdlDict derive); only the
+// buffer reader stays local because TextDecoderStream's chunk path
+// has stricter "required BufferSource" semantics than TextDecoder's
+// "optional BufferSource" path (the streams transform algorithm
+// makes it required, while TextDecoder.decode allows undefined).
 // ---------------------------------------------------------------------------
-
-fn read_decoder_options(
-    scope: &mut v8::PinScope,
-    val: v8::Local<v8::Value>,
-) -> Result<(bool, bool), OpError> {
-    if val.is_undefined() || val.is_null() {
-        return Ok((false, false));
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
-        return Err(OpError::type_error(
-            "TextDecoderStream: options must be an object",
-        ));
-    };
-    let fatal = read_bool_prop(scope, obj, "fatal")?;
-    let ignore_bom = read_bool_prop(scope, obj, "ignoreBOM")?;
-    Ok((fatal, ignore_bom))
-}
-
-fn read_bool_prop(
-    scope: &mut v8::PinScope,
-    obj: v8::Local<v8::Object>,
-    key: &str,
-) -> Result<bool, OpError> {
-    let key_v8 = v8::String::new(scope, key).ok_or_else(|| {
-        OpError::error("TextDecoderStream: out of memory allocating property key")
-    })?;
-    let val = obj
-        .get(scope, key_v8.into())
-        .ok_or_else(|| OpError::error("TextDecoderStream: property access threw"))?;
-    Ok(val.boolean_value(scope))
-}
 
 fn read_buffer_source(val: v8::Local<v8::Value>) -> Result<Vec<u8>, OpError> {
     // Unlike `TextDecoder.decode()` (where `input` is `optional

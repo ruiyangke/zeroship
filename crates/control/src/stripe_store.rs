@@ -293,9 +293,9 @@ impl StripeStore {
                         let stored_hash: Option<Vec<u8>> = r.get("payload_hash");
                         if let Some(h) = stored_hash {
                             if h != new_hash {
-                                eprintln!(
-                                    "[stripe] payload_hash mismatch for event_id={} — possible replay/tamper",
-                                    sanitize_for_display(event_id),
+                                tracing::warn!(
+                                    event_id = %sanitize_for_display(event_id),
+                                    "stripe: payload_hash mismatch — possible replay/tamper"
                                 );
                                 return Err(StripeError::Validation(
                                     "duplicate event_id with mismatched payload".into(),

@@ -70,6 +70,13 @@ sha1 = { workspace = true }
 # Proc macros
 zeroship-runtime-macros = { workspace = true }
 
+# Logging
+tracing = { workspace = true }
+# Used only by the bench-server / echo-server binaries to init the
+# shared tracing subscriber. The library itself only emits via
+# `tracing::*`.
+zeroship-core = { workspace = true }
+
 [[bin]]
 name = "zeroship-bench-server"
 path = "src/core/server.rs"

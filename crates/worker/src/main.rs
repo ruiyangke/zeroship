@@ -43,6 +43,7 @@ pub struct WorkerConfig {
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
+    zeroship_core::observability::init_tracing("info,zeroship_worker=debug,zeroship_runtime=info");
     init_v8();
 
     let args: Vec<String> = std::env::args().collect();
@@ -73,12 +74,14 @@ async fn main() -> std::io::Result<()> {
 
     if worker_key.is_empty() {
         if bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost" {
-            eprintln!(
-                "[zeroship-worker] WARNING: WORKER_KEY not set — dispatch endpoints are unauthenticated (loopback-only, dev mode)"
+            tracing::warn!(
+                bind = %bind_host,
+                "WORKER_KEY not set — dispatch endpoints unauthenticated (loopback-only, dev mode)"
             );
         } else {
-            eprintln!(
-                "[zeroship-worker] FATAL: refusing to bind non-loopback ({bind_host}) without WORKER_KEY — this would expose unauthenticated code execution"
+            tracing::error!(
+                bind = %bind_host,
+                "refusing to bind non-loopback without WORKER_KEY — would expose unauthenticated code execution"
             );
             std::process::exit(1);
         }
@@ -88,7 +91,7 @@ async fn main() -> std::io::Result<()> {
         LocalDiskBlobStore::new(PathBuf::from(&blob_store_root))
             .expect("failed to initialise blob store"),
     );
-    eprintln!("[zeroship-worker] blob store at {blob_store_root}");
+    tracing::info!(blob_store_root = %blob_store_root, "worker blob store configured");
 
     let config = Arc::new(WorkerConfig {
         control_url,
@@ -115,13 +118,15 @@ async fn main() -> std::io::Result<()> {
     // dispatch handler reads under a brief read lock + Arc clone.
     let shared_envs: SharedEnvs = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
-    eprintln!(
-        "[zeroship-worker] http://{bind_addr} ({workers_count} threads, MAX_ISOLATES={} per thread, graceful shutdown={}s)",
-        config.max_isolates,
-        config.shutdown_timeout_secs,
+    tracing::info!(
+        bind = %bind_addr,
+        threads = workers_count,
+        max_isolates = config.max_isolates,
+        shutdown_timeout_secs = config.shutdown_timeout_secs,
+        "worker listening"
     );
     if !socket_path.is_empty() {
-        eprintln!("[zeroship-worker] unix://{socket_path}");
+        tracing::info!(socket = %socket_path, "worker also bound to unix socket");
         // Remove stale socket file
         let _ = std::fs::remove_file(&socket_path);
     }
@@ -179,7 +184,7 @@ async fn main() -> std::io::Result<()> {
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
     let run_result = server.run().await;
-    eprintln!("[zeroship-worker] shutdown complete");
+    tracing::info!("worker shutdown complete");
     run_result
 }
 

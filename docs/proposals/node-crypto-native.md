@@ -2830,7 +2830,7 @@ pub fn emit_deprecation_warning_once(
 }
 ```
 
-This helper lives at `crates/runtime/src/crypto_node/deprecation.rs` (~40 LOC). The `state::isolate_state` / `state::isolate_runtime_flags` helpers already exist (per the existing `crates/runtime/src/state.rs`, plus the round-1 RuntimeFlags addition). The `process::emit_warning` shim is a thin wrapper over the existing unenv-backed `process` global.
+This helper lives at `crates/runtime/src/node/crypto/deprecation.rs` (~40 LOC). The `state::isolate_state` / `state::isolate_runtime_flags` helpers already exist (per the existing `crates/runtime/src/state.rs`, plus the round-1 RuntimeFlags addition). The `process::emit_warning` shim is a thin wrapper over the existing unenv-backed `process` global.
 
 ### VI.1. The decision matrix
 

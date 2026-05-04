@@ -65,8 +65,12 @@
 extern crate self as zeroship_runtime;
 
 pub mod auth;
+pub mod base;
 pub mod core;
+pub use base::crypto as crypto_ops;  // back-compat shim — all existing
+                                     // crate::crypto_ops::* paths keep working
 pub mod fetch_outcome;
+pub mod node;
 pub mod storage;
 pub mod transport;
 pub mod web;
@@ -120,7 +124,9 @@ pub use core::state;
 // Back-compat re-exports for the webidl/ types (formerly at root).
 pub use webidl::byte_string;
 pub use webidl::clamp;
+pub use webidl::convert;
 pub use webidl::enforce_range;
+pub use webidl::usv_string;
 
 #[cfg(target_os = "linux")]
 pub use core::cpu_timer;
@@ -131,6 +137,7 @@ pub use clamp::{
     read_clamp_i32, read_clamp_i64, read_clamp_u16, read_clamp_u32, read_clamp_u64,
 };
 pub use enforce_range::{EnforceRangeU32, EnforceRangeU64, read_enforce_range_u32, read_enforce_range_u64};
+pub use convert::{WebIdlConvertible, read_record, read_sequence};
 pub use url_native::helpers::USVString;
 pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;

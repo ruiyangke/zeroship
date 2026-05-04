@@ -19,12 +19,12 @@
 
 use super::buffer;
 use super::key_object::{self, KeyObjectState};
-use super::super::crypto::crypto_key;
-use super::super::crypto::key_material::{
+use crate::web::crypto::crypto_key;
+use crate::web::crypto::key_material::{
     AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HashAlgo, KeyAlgorithm, KeyMaterial, KeyType,
     KeyUsage, NamedCurve, RsaHashedKeyAlgorithm, RsaPrivateComponents, RsaPublicComponents,
 };
-use super::super::crypto::okp;
+use crate::web::crypto::okp;
 use crate::state::OpError;
 
 #[allow(unused_imports)]
@@ -397,9 +397,9 @@ fn sign_with_material(
     match material {
         KeyMaterial::RsaPrivate { pkcs8_der, .. } => match padding {
             SignPadding::RsaPss => {
-                super::super::crypto::evp_ffi::sign_with_salt(pkcs8_der, hash, data, salt_length)
+                crate::web::crypto::evp_ffi::sign_with_salt(pkcs8_der, hash, data, salt_length)
             }
-            _ => super::super::crypto::evp_ffi::pkcs1_sign(pkcs8_der, hash, data),
+            _ => crate::web::crypto::evp_ffi::pkcs1_sign(pkcs8_der, hash, data),
         },
         KeyMaterial::EcPrivate { pkcs8_der, raw_xy, .. } => {
             // Node returns DER-encoded ECDSA signatures — call the
@@ -437,14 +437,14 @@ fn verify_with_material(
 ) -> Result<bool, OpError> {
     match material {
         KeyMaterial::RsaPublic { spki_der, .. } => match padding {
-            SignPadding::RsaPss => super::super::crypto::evp_ffi::verify_with_salt(
+            SignPadding::RsaPss => crate::web::crypto::evp_ffi::verify_with_salt(
                 spki_der,
                 hash,
                 data,
                 sig,
                 salt_length,
             ),
-            _ => super::super::crypto::evp_ffi::pkcs1_verify(spki_der, hash, data, sig),
+            _ => crate::web::crypto::evp_ffi::pkcs1_verify(spki_der, hash, data, sig),
         },
         KeyMaterial::EcPublic { spki_der, raw_xy } => {
             ecdsa_verify_der(spki_der, hash, data, sig, raw_xy.len())
@@ -468,10 +468,10 @@ fn verify_with_material(
             // Build SPKI from components and verify against it.
             let spki = build_rsa_spki(&components.n, &components.e)?;
             match padding {
-                SignPadding::RsaPss => super::super::crypto::evp_ffi::verify_with_salt(
+                SignPadding::RsaPss => crate::web::crypto::evp_ffi::verify_with_salt(
                     &spki, hash, data, sig, salt_length,
                 ),
-                _ => super::super::crypto::evp_ffi::pkcs1_verify(&spki, hash, data, sig),
+                _ => crate::web::crypto::evp_ffi::pkcs1_verify(&spki, hash, data, sig),
             }
         }
         _ => {
@@ -492,7 +492,7 @@ fn verify_with_material(
 fn ecdsa_sign_der(pkcs8: &[u8], hash: HashAlgo, data: &[u8], _xy_len: usize) -> Result<Vec<u8>, OpError> {
     // Get raw DER from EVP_DigestSignFinal — same approach as
     // evp_ffi::ecdsa_sign, minus the final ecdsa_der_to_p1363 step.
-    super::super::crypto::evp_ffi::ecdsa_sign_der(pkcs8, hash, data)
+    crate::web::crypto::evp_ffi::ecdsa_sign_der(pkcs8, hash, data)
 }
 
 fn ecdsa_verify_der(
@@ -502,7 +502,7 @@ fn ecdsa_verify_der(
     sig: &[u8],
     _xy_len: usize,
 ) -> Result<bool, OpError> {
-    super::super::crypto::evp_ffi::ecdsa_verify_der(spki, hash, data, sig)
+    crate::web::crypto::evp_ffi::ecdsa_verify_der(spki, hash, data, sig)
 }
 
 // SPKI builders (small DER builders also live in key_object.rs; we

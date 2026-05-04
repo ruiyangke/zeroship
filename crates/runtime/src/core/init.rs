@@ -693,7 +693,7 @@ pub fn load_polyfills_and_modules(
     // named ESM export.
     {
         let global = scope.get_current_context().global(scope);
-        crate::crypto_node::install_globals(scope, global);
+        crate::node::crypto::install_globals(scope, global);
     }
 
     // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).
@@ -790,7 +790,7 @@ pub fn load_polyfills_and_modules(
     match crate::modules::load_modules(scope, &wrapped) {
         Ok(namespace) => Ok(namespace),
         Err(e) => {
-            eprintln!("[v8] Module loading failed: {e}");
+            tracing::error!(error = %e, "v8 module loading failed");
             Err(e)
         }
     }
@@ -908,14 +908,15 @@ fn console_log_callback(
     let mut s = state.borrow_mut();
     let req_id = s.executing_request_id;
 
-    // Operator-visible mirror on stderr (not stdout — stdout should stay
-    // clean for CLI tools that want to capture structured output). Prefix
-    // with request metadata so multi-request logs are disentanglable, and
-    // only enable in dev / when ZEROSHIP_LOG is set.
+    // Operator-visible mirror via tracing. The original eprintln was gated
+    // on `ZEROSHIP_LOG` (or debug builds); preserve that gate so production
+    // operators don't get app-console spam by default. A future tracing-
+    // native gate can use `RUST_LOG=app=info` once the env-var gate is
+    // retired in a follow-up.
     if std::env::var("ZEROSHIP_LOG").is_ok() || cfg!(debug_assertions) {
         match req_id {
-            Some(rid) => eprintln!("[app req={rid}] {line}"),
-            None => eprintln!("[app] {line}"),
+            Some(rid) => tracing::info!(target: "app", req_id = rid, "{line}"),
+            None => tracing::info!(target: "app", "{line}"),
         }
     }
 

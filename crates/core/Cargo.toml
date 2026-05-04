@@ -15,6 +15,12 @@ thiserror = { workspace = true }
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }
+# Observability — tracing subscriber init shared across all binaries.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-log = { workspace = true }
+tracing-logfmt = { workspace = true }
+tracing-bunyan-formatter = { workspace = true }
 
 [lints]
 workspace = true
