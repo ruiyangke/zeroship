@@ -150,6 +150,84 @@ so we can grep back through the rationale.
   - Lands: commit `dc26721d` (codegen + 5 smoke tests in
     `tests/v8_clamp_smoke.rs`).
 
+- **`WebIdlConvertible` trait + `read_sequence<T>` / `read_record<K, V>`
+  helpers** — WebIDL §3.13.16 (sequence) and §3.13.18 (record). The
+  trait is the JS-value → Rust-type conversion at the WebIDL boundary;
+  hand-implemented for primitives (USVString, ByteString, String, bool,
+  u32, i32, f64, Option<T>, Local<Value>) and auto-implemented by the
+  WebIdlDict / WebIdlEnum derives below. `read_sequence` iterates
+  `@@iterator`; `read_record` iterates own enumerable property names
+  in canonical (numeric ascending → string insertion-order) order.
+  Non-iterable / non-object inputs throw TypeError.
+  - Lives in `crates/runtime/src/webidl/convert.rs`. Re-exported as
+    `zeroship_runtime::convert::*`.
+  - Lands: commit `6806f9e5` (codegen + 14 smoke tests in
+    `tests/v8_webidl_convert_smoke.rs`).
+
+- **`#[derive(WebIdlDict)]` for dictionary parsing** — WebIDL §3.10.
+  Generates `from_v8(scope, value) -> Result<Self, OpError>` from a
+  struct with named fields. Each field type must implement
+  `WebIdlConvertible`. Override the JS-side member name with
+  `#[webidl_name = "..."]` (default = ident verbatim). `null` /
+  `undefined` produce `Self::default()`; non-Object → TypeError;
+  per-member errors propagate. Also emits `impl WebIdlConvertible for
+  Self` so dicts compose inside sequence<T>, record<K, V>, and other
+  dicts (the blanket Option<T: WebIdlConvertible> impl lifts
+  `Option<Inner>` through naturally).
+  - Reserved hooks (documented but not implemented in v1):
+    `#[webidl_dict(enforce_range)]` for [EnforceRange] integer fields,
+    `#[webidl_dict(custom_extractor = "fn_name")]` for non-Convertible
+    field types. Trait-based dispatch covers every fetch / streams /
+    WebSocket / WebCrypto dict member type today.
+  - Migration follow-ups (one PR each, deferred to subagent):
+    RequestInit, ResponseInit, BlobPropertyBag, EventInit,
+    FilePropertyBag, QueuingStrategyInit,
+    ReadableStreamGetReaderOptions. ~40 LOC each.
+  - Lands: commit `ba7081b8` (codegen + 16 smoke tests in
+    `tests/v8_webidl_dict_smoke.rs`).
+
+- **`#[derive(WebIdlEnum)]` for enum types** — WebIDL §3.7.10. Generates
+  `from_str` / `as_str` / `WebIdlConvertible` for unit-variant enums.
+  Default name = ident kebab-cased (`NoCors` → `"no-cors"`); override
+  per-variant with `#[webidl_name = "..."]`. The `from_v8` impl
+  ToStrings the value (Symbols → TypeError naturally) then runs
+  `from_str`; unknown name → TypeError per §3.13.7 step 4 with both
+  the offending value AND the accepted-name set in the message.
+  - The `pascal_to_kebab` helper preserves consecutive uppercase as a
+    single lowercase run (`URL` → `"url"`, not `"u-r-l"`) so initialisms
+    work without per-variant overrides. 4 inline unit tests.
+  - Migration follow-ups (deferred): RequestMode, RequestCache,
+    RequestRedirect, RequestCredentials, RequestDestination,
+    ReferrerPolicy, ResponseType, ReadableStreamReaderMode,
+    ReadableStreamType.
+  - Lands: commit `40494fa3` (codegen + 14 smoke tests in
+    `tests/v8_webidl_enum_smoke.rs`).
+
+- **`#[v8_iterable(key = K, value = V)]` for default pair iterators** —
+  WebIDL §3.7.10.2 (default iterators) + §3.7.10.3 (forEach). On a
+  `#[v8_class]` impl block, emits the full pair-iterator surface
+  (keys / values / entries / forEach / @@iterator) plus a companion
+  `<Class>Iterator` class — from a single user-supplied
+  `value_pairs(&self) -> Vec<(K, V)>` method.
+  - **Iteration model**: snapshot. The factory clones `value_pairs()`
+    once at factory-call time and the iterator walks the snapshot.
+    Spec mandates LIVE iteration; this is a deliberate simplification
+    documented in the codegen's doc-comment. Existing live-iteration
+    consumers (Headers, URLSearchParams, FormData iterators) keep
+    their hand-rolled implementations.
+  - **Type bounds**: K ∈ {ByteString, USVString, String, u32};
+    V ∈ same set + Vec<u8> (yielded as Uint8Array).
+  - **Brand check**: every factory + forEach reuses the parent's
+    `__brand_check_<Class>`; cross-class deception
+    (`MyMap.prototype.keys.call(other)`) throws "Illegal invocation".
+  - Iterator constructor is locked: `new <Class>Iterator()` throws.
+  - Migration follow-ups (deferred — separate PR per class to keep
+    risk small): URLSearchParamsIterator (~150 LOC), HeadersIterator
+    (live; needs derive extension), FormDataIterator. Total saving
+    estimated ~400 LOC across 3 classes.
+  - Lands: commit `506a588f` (codegen + 14 smoke tests in
+    `tests/v8_iterable_smoke.rs`).
+
 ## Open
 
 ### Same-name getter+setter pairing
@@ -183,41 +261,6 @@ lifetime. URL-native added a workaround: skip the reborrow when the
 param is named `scope`. Streams hit it in different methods. Generalise:
 detect when return type is `Local<'s, _>` tied to a scope arg and skip
 the reborrow systematically.
-
-### `#[derive(WebIdlDict)]` for dictionary parsing
-
-RequestInit (16 members), ResponseInit, BlobPropertyBag, EventInit,
-FilePropertyBag, QueuingStrategyInit, ReadableStreamGetReaderOptions,
-etc. Each constructor today hand-rolls `obj.get(scope, key)` calls. A
-derive would emit:
-
-```rust
-#[derive(WebIdlDict)]
-struct RequestInit {
-    method: Option<USVString>,
-    body: Option<v8::Local<v8::Value>>,
-    headers: Option<HeadersInit>,
-    signal: Option<v8::Local<v8::Object>>,
-    // ...
-}
-```
-
-Saves ~40 LOC per constructor; consistent error messages on bad members.
-
-### `#[derive(WebIdlEnum)]`
-
-WebIDL enums (RequestMode, RequestCache, RequestRedirect,
-RequestCredentials, RequestDestination, ReferrerPolicy, ResponseType,
-ReadableStreamReaderMode, ReadableStreamType, …). Currently hand-rolled
-per class. Derive would emit `from_str` + WebIDL-correct unknown-value
-rejection.
-
-### `#[v8_iterable(key=K, value=V)]` derive
-
-Headers, FormData, URLSearchParams each ship ~150 LOC of
-structurally-identical iterator boilerplate. A derive could emit all of
-it from a single `value_pairs(&self) -> &[(K, V)]` method. Net ~400 LOC
-removed across the 5 iterable classes.
 
 ### Migrate hand-rolled `[SameObject]` getters to `#[v8_getter(same_object)]`
 
@@ -274,3 +317,39 @@ Today: "#[v8_class] requires a plain type" is the only structured
 error. Most user mistakes (wrong receiver, missing `#[v8_method]`,
 wrong Result return) surface as cryptic syn errors. Worth a 50-LOC
 investment in friendly diagnostics for common shapes.
+
+### Migration follow-ups (Tier 3 derives, one PR each)
+
+The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`) are
+shipped (commits `6806f9e5`, `ba7081b8`, `40494fa3`, `506a588f`) but
+existing classes still hand-roll the equivalent code. Migrate one
+class per PR to keep risk small:
+
+**WebIdlDict migration candidates** (largest hand-rolled dicts):
+  - `RequestInit` — `crates/runtime/src/web/fetch/request.rs` (~16
+    members; saves ~40 LOC)
+  - `ResponseInit` — `crates/runtime/src/web/fetch/response.rs`
+  - `BlobPropertyBag` — `crates/runtime/src/web/blob/`
+  - `EventInit` / `MessageEventInit` / `CloseEventInit` /
+    `CustomEventInit` — `crates/runtime/src/web/dom/`
+  - `QueuingStrategyInit`, `ReadableStreamGetReaderOptions` —
+    `crates/runtime/src/web/streams/`
+  - WebCrypto algorithm-init dicts — `crates/runtime/src/web/crypto/`
+
+**WebIdlEnum migration candidates**:
+  - `RequestMode`, `RequestCache`, `RequestRedirect`,
+    `RequestCredentials`, `RequestDestination` — fetch
+  - `ReferrerPolicy` — fetch
+  - `ResponseType` — fetch
+  - `ReadableStreamReaderMode`, `ReadableStreamType` — streams
+
+**`#[v8_iterable]` migration candidates** (note: snapshot vs. live —
+each requires assessing which mode the spec requires for the class):
+  - `URLSearchParamsIterator` (~150 LOC) — `crates/runtime/src/web/url/search_params.rs`
+  - `HeadersIterator` (~150 LOC) — `crates/runtime/src/web/headers.rs`.
+    LIVE iteration required; deriving needs a "live" mode addition
+    OR keep hand-rolled.
+  - `FormDataIterator` (~100 LOC) — `crates/runtime/src/web/dom/form_data.rs`
+
+Total estimated savings: ~400 LOC of iterator boilerplate, ~200 LOC
+of dict-parsing boilerplate, ~100 LOC of enum-parsing boilerplate.
