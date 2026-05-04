@@ -479,6 +479,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
     let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let public_is_fn = format_ident!("__zs_is_{}", class_ty);
 
     let expanded = quote! {
         #stripped_impl
@@ -618,6 +619,38 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
             }
             false
+        }
+
+        /// Public brand check: is `v` an instance of this class (or a
+        /// subclass via `#[v8_inherit]`) in the current isolate?
+        ///
+        /// Re-exports the macro's per-class brand-check via a stable
+        /// `__zs_is_<Class>(scope, v: Local<Value>) -> bool` symbol so
+        /// cross-class type queries (e.g. `is_blob_instance` /
+        /// `is_form_data_instance` checks in a Request body coercion)
+        /// don't have to hand-roll prototype-chain walks.
+        ///
+        /// Non-Object values (primitives, null, undefined) return
+        /// `false` — the underlying `__brand_check_<Class>` requires
+        /// `Local<Object>`, so this wrapper does the
+        /// `Local::<Object>::try_from` gate for the caller. Spec
+        /// alignment: WebIDL §3.7 brand identity treats only objects
+        /// as candidates.
+        ///
+        /// Returns `false` if the class hasn't been installed in the
+        /// current isolate (the install slot is empty), matching
+        /// `__brand_check_<Class>`'s behaviour.
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        pub fn #public_is_fn(
+            scope: &mut v8::PinScope,
+            v: v8::Local<v8::Value>,
+        ) -> bool {
+            let obj: v8::Local<v8::Object> = match v.try_into() {
+                Ok(o) => o,
+                Err(_) => return false,
+            };
+            #brand_check_fn(scope, obj)
         }
 
         #[allow(non_snake_case, dead_code)]

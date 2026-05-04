@@ -1,526 +1,151 @@
 # runtime-macros TODO
 
-Status of macro extensions tracked here. Closed items keep their commit hash
-so we can grep back through the rationale.
+Closed items keep their commit hash so the rationale stays grep-able.
+Open items track macro extensions consumers can't currently express.
+
+Audit doc: `docs/reviews/v8-class-audit-2026-05-04.md` (Part B = macro
+gaps; cross-referenced as `[B.N]` below).
+Consumer-side migrations: `crates/runtime/TODO.md`.
+
+---
 
 ## Done
 
-- **`#[v8_async_method]`** — async class methods compile to a sync V8
-  callback that allocates a `v8::PromiseResolver`, spawns the user's
-  body via `state.spawned_ops`, and returns the Promise. The pump
-  resolves on `OpResult::JsValue`.
-  - Compile-time guards: `&mut self` rejected (borrow-across-`.await`
-    unsound under V8 re-entry); non-`async` fn rejected.
-  - Supported return types: `()`, `bool`, `u32`, `i32`, `f64`,
-    `String`, `Vec<u8>`, `v8::Global<v8::Value>`, plus `Result<T,
-    OpError>` over any of the above.
-  - Lands: commit `0a26d45b` (codegen + ResolveValue variants),
-    `17b2e880` (16 smoke tests), `caa4f450` (compile-fail doctests).
-  - Borrow safety: the future captures a `Global<v8::Object>` of the
-    wrapper; as long as the future hasn't dropped, V8 cannot finalise
-    the wrapper, so the boxed `Self` behind the recovered `*mut Self`
-    stays valid across every poll. Detail in
-    `gen_async_method_callback`'s doc comment.
+### Core `#[v8_class]`
 
-- **Brand check via cached prototype walk (WebIDL §3.7)** — every
-  method/getter/setter/async-method callback now walks `this`'s
-  prototype chain looking for the cached `Foo.prototype`, throwing
-  `TypeError("Illegal invocation")` synchronously before the unsafe
-  internal-field deref. Pre-fix the only check was "internal field 0
-  is an External", which let cross-class deception
-  (`Foo.prototype.method.call(bar)`) reinterpret a Bar Box as a Foo
-  Box and dereference — UB whenever the structs diverged in field
-  layout, and reachable from any user JS.
-  - Capture: `install` snapshots `Foo.prototype` as a Global<Object>
-    in a `__BrandSlot_<ClassTy>` isolate slot, after any
-    `#[v8_inherit]` / `#[v8_inherit_intrinsic]` chaining has settled.
-  - Check: per-class `__brand_check_<ClassTy>(scope, obj)` walks up
-    to 32 prototype links comparing handle identity against the
-    cached prototype. Subclasses (via `#[v8_inherit]`) match because
-    the parent prototype IS on their chain.
-  - Cost: 1–3 extra Local pointer comparisons per call (typical
-    chain depth), dwarfed by V8's ~100ns callback overhead.
-  - Lands: commit `c95915e1` (macro codegen + 7 smoke tests in
-    `tests/v8_brand_check_smoke.rs`); follow-up `b0339e23` makes the
-    prototype capture lazy on first brand check (eager get_function
-    inside `install` froze the FunctionTemplate's instance shape and
-    silently no-op'd late accessor installs like URL.searchParams).
-  - The local fix in `url_native/search_params.rs::is_url_search_params`
-    is now redundant for any class going through the macro; it's left
-    in place as the URL-specific manual brand check until that file
-    is migrated.
+- **Brand check** via cached prototype walk (WebIDL §3.7) — `c95915e1`,
+  lazy-capture follow-up `b0339e23`. Per-class `__brand_check_<Class>`
+  walks ≤32 prototype links; subclasses (`#[v8_inherit]`) match.
+- **`must_new`** constructor TypeError for `Foo()` without `new` — default-on,
+  opt-out via `#[v8_constructor(callable_no_new)]` — `5b16b016`.
+- **`[SameObject]` getter cache** — `#[v8_getter(same_object)]` stashes
+  via per-class private symbol — `3cb0fe11`.
+- **`[NewObject]` default** — confirmed: default is no-cache; `[SameObject]`
+  is the opt-in. Test only — `4a557dc4`.
+- **Re-entrancy guard** — `&mut self` callbacks throw V8 TypeError on
+  reentrant invoke (per-method, per-instance HashSet) — `7ce7f260`.
+- **`[Clamp]` newtypes** — `ClampU16/U32/I32/U64/I64` in
+  `zeroship_runtime::clamp`. `[EnforceRange]` companion already shipped — `dc26721d`.
+- **Same-name getter+setter pairing** via `#[v8_name = "..."]` —
+  paired install as one accessor descriptor. Codegen landed
+  incrementally (`020a545`, `0dbb753`, `3806341`); smoke test only — `ce68f10`.
+- **`#[v8_async_method]`** — async methods compile to a sync V8 callback
+  + `PromiseResolver` + spawn via `state.spawned_ops`. `&mut self`
+  rejected — `0a26d45b`, `17b2e880`, `caa4f450`.
+- **Public `__zs_is_<Class>`** — `pub fn __zs_is_<Class>(scope, v: Local<Value>)
+  -> bool` emitted alongside `<Class>::install`. Re-exports the per-class
+  brand check for cross-class type queries; eliminates fragile
+  `instance_of(globalThis.X)` shape. [MAC-12 / B.11] — `<commit>`.
 
-- **`#[v8_constructor(must_new)]` — reject `Foo()` without `new`**
-  (WebIDL §3.7.1). Default-on for every macro-emitted constructor
-  (both user-supplied `#[v8_constructor]` and the Default-derived
-  fallback). Pre-fix, calling `Foo()` (no `new`) bound `this` to
-  globalThis and let the constructor write internal fields onto the
-  wrong shape. WPT failures across event_target, blob_native, and
-  abort all stem from this gap.
-  - The TypeError message interpolates the class name so callers
-    diagnose mistakes per-class
-    (`"Failed to construct 'Headers': Please use the 'new' operator…"`).
-  - Opt-out via `#[v8_constructor(callable_no_new)]` for future
-    legacy-callable WebIDL shapes (none today; the attribute is
-    parsed and threaded but no class uses it).
-  - Lands: commit `5b16b016` (macro prologue + 5 smoke tests in
-    `tests/v8_must_new_smoke.rs`).
+### WebIDL derives (Tier 3)
 
-- **`[SameObject]` getter cache attribute** — `#[v8_getter(same_object)]`
-  wraps a getter with WebIDL [SameObject] caching: subsequent reads
-  on the same wrapper instance return the same JS Object via a V8
-  Private symbol stash, instead of minting a fresh Object on every
-  read.
-  - Cache key: per-class-and-getter Private symbol
-    `__zs_same_object_<ClassTy>_<getter>` on the wrapper instance.
-  - User method returns `v8::Global<v8::Object>` (minted on first
-    call); macro stashes via `set_private` and returns the cached
-    Local thereafter. Brand check still applies on the cached path.
-  - Existing hand-rolled SameObject implementations
-    (`Request.headers` in `fetch_request.rs:299`, `Response.headers`,
-    `URL.searchParams`) are NOT migrated in the same commit — that's
-    a follow-up. The smoke test proves the attribute works.
-  - Lands: commit `3cb0fe11` (codegen + 4 smoke tests in
-    `tests/v8_same_object_smoke.rs`).
+- **`WebIdlConvertible`** trait + `read_sequence<T>` / `read_record<K,V>`
+  helpers (WebIDL §3.13.16/§3.13.18) — `6806f9e5`.
+- **`#[derive(WebIdlDict)]`** for dictionary parsing (§3.10) —
+  `ba7081b8`.
+- **`#[derive(WebIdlEnum)]`** for enum types (§3.7.10), kebab-case
+  default with `#[webidl_name = "..."]` override — `40494fa3`.
+- **`#[v8_iterable]`** default pair iterators (§3.7.10.2/§3.7.10.3).
+  Snapshot mode `506a588f`; `mode = live` `5901d68`.
 
-- **`[NewObject]` semantic — confirmed: default IS no-cache** (audit
-  only, no codegen change). The TODO entry implied the macro was
-  caching default getter results and asked for an opt-out attribute.
-  Reading `gen_method_callback` (the path every non-`same_object`
-  getter takes) shows the user method runs unconditionally on each
-  read and `gen_call_return` sets `rv` directly — no Private-symbol
-  stash, no instance-scoped cache. The implicit default IS therefore
-  WebIDL `[NewObject]`. Caching is the OPT-IN: `#[v8_getter(same_object)]`
-  (commit `3cb0fe11`). No new attribute required.
-  - Smoke test `tests/v8_new_object_smoke.rs` (2 tests) demonstrates
-    that a default `#[v8_getter]` returning `v8::Local<v8::Value>`
-    mints a fresh JS Object on every read (`a !== b`) and runs the
-    user method N times for N reads. Pairs with the existing
-    `tests/v8_same_object_smoke.rs` to document both halves of the
-    contract.
-  - Lands: commit `4a557dc4` (smoke test only, no codegen delta).
+### WebIDL derives (Tier 4)
 
-- **Re-entry guard on `&mut self`** — every macro-emitted `&mut self`
-  callback (regular method, setter, SameObject getter cache-miss path)
-  now opens with a per-method, per-instance, thread-local
-  `RefCell<HashSet<usize>>` guard keyed by the External pointer's
-  address (`__ext.value() as usize` == Box raw addr). On entry: insert.
-  If the addr was already in the set, throw a V8 TypeError with a
-  per-method message and `return` BEFORE the unsafe `&mut Self`
-  materialisation. RAII drop guard removes on scope exit.
-  - **Mechanism**: V8 TypeError, NOT `panic!`. Rust panic can't unwind
-    through V8's C++ frames cleanly — empirically that surfaces as
-    "fatal runtime error: failed to initiate panic, error 5" + SIGABRT
-    on Linux. A V8 exception propagates the same way every other
-    macro-emitted error already does (brand-check `Illegal invocation`,
-    `[EnforceRange]` TypeError, etc.).
-  - **Granularity trade-off**: per-method, per-instance. The set is
-    instance-keyed (no false positives across distinct `Foo`
-    instances), and there's a separate set per Rust method (no false
-    positives across `Foo::a` calling `Foo::b` on the same instance).
-    Real-world re-entry via JS callback overwhelmingly hits the SAME
-    method (`this.method(...)` from a callback method registered),
-    which is what the guard catches.
-  - **Cost**: emitted ONLY for `&mut self` methods — `&self` callbacks
-    skip the guard. Per-call overhead is one HashSet insert + one
-    remove on the steady-state path; the set has 0 or 1 entries
-    typically.
-  - **Pre-fix symptom**: classes that wrapped state in an inner
-    `RefCell` would panic with `RefCell already mutably borrowed`
-    from deep inside V8 on re-entry; classes without an inner cell
-    silently corrupted memory.
-  - Lands: commit `7ce7f260` (codegen + 4 smoke tests in
-    `tests/v8_reentrancy_smoke.rs`).
+- **`#[webidl_enum(case_insensitive)]`** — ASCII case-insensitive
+  matching. WebCrypto §15. `92f4632`.
+- **`#[webidl_enum(silent_default)]`** — fall-through to `Self::default()`
+  on unknown; `from_v8` never throws. Fetch `RedirectMode` /
+  `CredentialsMode`, WebSocket `BinaryType`. `e644311`.
+- **`#[webidl_dict_member(reject_null)]`** — null → TypeError; `undefined`
+  still falls through to default. `AddEventListenerOptions.signal`. `0b8564d`.
+- **`DictOrBool<T>`** wrapper for `(<dict> or boolean)` union members.
+  `AddEventListenerOptions` whole. `5ceb593`.
+- **`tc_scope` user-exception preservation** in `WebIdlDict` /
+  `WebIdlEnum` extraction. Adds `OpErrorKind::JsValue(Global<v8::Value>)`;
+  per-member extraction wraps `WebIdlConvertible::from_v8` in
+  `v8::TryCatch` and rethrows the user's exception verbatim. `8065cc0`.
 
-- **`[Clamp]` integer coercion** — `ClampU16` / `ClampU32` / `ClampI32`
-  / `ClampU64` / `ClampI64` newtypes in `zeroship_runtime::clamp`
-  implement WebIDL `[Clamp]` ConvertToInt: NaN → 0, < min → min, > max
-  → max, otherwise round-half-even (banker's rounding) per
-  https://webidl.spec.whatwg.org/#abstract-opdef-converttoint step 8.
-  Unlike `[EnforceRange]` there is NO TypeError path — `[Clamp]` is
-  the lenient counterpart. The 64-bit widths cap at `2^53 - 1` (JS
-  Number precision boundary) on both sides; 32-bit widths cap at
-  `i32::MIN..=i32::MAX` / `0..=u32::MAX`.
-  - Macro detection by ident in `lib.rs::clamp_kind`; emission in
-    `gen_extract` mirrors the `EnforceRangeU64` path but never throws.
-  - Used (when migrated) by Streams chunk-size strategies (`[Clamp]
-    unsigned long`), Blob.slice (`[Clamp] long long`), WebSocket close
-    code (`[Clamp] unsigned short` — currently hand-rolled in
-    `websocket_native::algorithms::clamp_unsigned_short`).
-  - Lands: commit `dc26721d` (codegen + 5 smoke tests in
-    `tests/v8_clamp_smoke.rs`).
-
-- **`WebIdlConvertible` trait + `read_sequence<T>` / `read_record<K, V>`
-  helpers** — WebIDL §3.13.16 (sequence) and §3.13.18 (record). The
-  trait is the JS-value → Rust-type conversion at the WebIDL boundary;
-  hand-implemented for primitives (USVString, ByteString, String, bool,
-  u32, i32, f64, Option<T>, Local<Value>) and auto-implemented by the
-  WebIdlDict / WebIdlEnum derives below. `read_sequence` iterates
-  `@@iterator`; `read_record` iterates own enumerable property names
-  in canonical (numeric ascending → string insertion-order) order.
-  Non-iterable / non-object inputs throw TypeError.
-  - Lives in `crates/runtime/src/webidl/convert.rs`. Re-exported as
-    `zeroship_runtime::convert::*`.
-  - Lands: commit `6806f9e5` (codegen + 14 smoke tests in
-    `tests/v8_webidl_convert_smoke.rs`).
-
-- **`#[derive(WebIdlDict)]` for dictionary parsing** — WebIDL §3.10.
-  Generates `from_v8(scope, value) -> Result<Self, OpError>` from a
-  struct with named fields. Each field type must implement
-  `WebIdlConvertible`. Override the JS-side member name with
-  `#[webidl_name = "..."]` (default = ident verbatim). `null` /
-  `undefined` produce `Self::default()`; non-Object → TypeError;
-  per-member errors propagate. Also emits `impl WebIdlConvertible for
-  Self` so dicts compose inside sequence<T>, record<K, V>, and other
-  dicts (the blanket Option<T: WebIdlConvertible> impl lifts
-  `Option<Inner>` through naturally).
-  - Reserved hooks (documented but not implemented in v1):
-    `#[webidl_dict(enforce_range)]` for [EnforceRange] integer fields,
-    `#[webidl_dict(custom_extractor = "fn_name")]` for non-Convertible
-    field types. Trait-based dispatch covers every fetch / streams /
-    WebSocket / WebCrypto dict member type today.
-  - Migration follow-ups (one PR each, deferred to subagent):
-    RequestInit, ResponseInit, BlobPropertyBag, EventInit,
-    FilePropertyBag, QueuingStrategyInit,
-    ReadableStreamGetReaderOptions. ~40 LOC each.
-  - Lands: commit `ba7081b8` (codegen + 16 smoke tests in
-    `tests/v8_webidl_dict_smoke.rs`).
-
-- **`#[webidl_dict_member(reject_null)]` — null-rejection per
-  member.** Per-field flag on `WebIdlDict` struct fields. When the
-  read value is JS `null`, throw
-  `TypeError("'<member>' member: not a valid value (null is not
-  allowed)")` instead of falling through to `Default::default()`.
-  `undefined` and missing keys still default-construct (preserves
-  WebIDL §3.10's null-vs-undefined distinction).
-  - Spec rationale: WebIDL §3.13.27 — `signal: AbortSignal?` is
-    "MUST be a real AbortSignal or absent — null is a TypeError".
-    Pre-fix the macro routed null through `Option<T>`'s blanket
-    impl which silently returns `None`, masking the spec violation.
-  - Unblocks: `AddEventListenerOptions.signal` (the null path); pairs
-    with the next extension to fully unblock the dict — see
-    `crates/runtime/TODO.md` "V8 class macro migration follow-ups →
-    Deferred → AddEventListenerOptions / EventListenerOptions".
-  - Lands: codegen + 6 new smoke tests in
-    `tests/v8_webidl_dict_smoke.rs` (22 total, up from 16).
-
-- **`DictOrBool<T>` — `(<dict> or boolean)` union shape.** New
-  wrapper type in `crates/runtime/src/webidl/convert.rs` (re-exported
-  through `zeroship_runtime::DictOrBool`) with a hand-rolled
-  `WebIdlConvertible` impl: a primitive JS boolean → `DictOrBool::Bool`;
-  anything else → `DictOrBool::Dict(T::from_v8(...)?)`. The dict
-  derive needs no new attribute — the type IS the contract. The
-  primitive-vs-Boolean-wrapper distinction uses
-  `v8::Local::<v8::Boolean>::try_from(value)` which excludes Boolean
-  wrapper objects (they remain on the dict path), satisfying WebIDL
-  §3.13.6 distinguishability for the (dict, boolean) shape.
-  - We deliberately scope this to the (T or boolean) shape rather
-    than implementing full WebIDL §3.13.6 union resolution — the only
-    runtime consumer is `AddEventListenerOptions`'s
-    `(EventListenerOptions or boolean)` per DOM §2.7. The full
-    algorithm has hundreds of branches (object-with-iterator vs
-    without, FrozenArray, distinguishability rules across types) that
-    aren't needed.
-  - Wrap inside `Option<DictOrBool<T>>` on the dict struct to make
-    `null` / `undefined` fall through to `None` (§3.10 absent path);
-    naked `DictOrBool<T>` would require Default, which `DictOrBool`
-    doesn't provide on purpose (no sensible default between Dict and
-    Bool).
-  - Unblocks: `AddEventListenerOptions` /
-    `EventListenerOptions` migration in `crates/runtime/TODO.md`
-    "V8 class macro migration follow-ups → Deferred". Pairs with
-    `reject_null` on the `signal` field to fully cover the dict.
-  - Lands: new `DictOrBool<T>` enum + WebIdlConvertible impl in
-    `convert.rs`, re-export in `lib.rs`, + 8 new smoke tests in
-    `tests/v8_webidl_dict_smoke.rs` (30 total, up from 22).
-
-- **`tc_scope` user-exception preservation in dict + enum
-  extraction.** Per-member `WebIdlConvertible::from_v8` calls in the
-  `WebIdlDict` derive AND `value.to_string(scope)` in the
-  `WebIdlEnum` `from_v8` are now wrapped in `v8::tc_scope!`. When
-  user JS thrown by V8 callbacks (custom `toString`,
-  `Symbol.toPrimitive`, throwing `valueOf`, throwing dict-member
-  getters) leaves a pending V8 exception, the captured exception
-  value is stashed as `OpError::JsValue(Global<Value>)` and the
-  throw machinery in `gen_throw_error` / `throw_op_error` /
-  `op_error_to_v8` re-throws it verbatim. Callers' `catch` blocks
-  observe the original thrown value: Error subclass identity, custom
-  properties (`e.code`, `e.stack`), `instanceof` chain — all
-  preserved.
-  - Pre-fix the macro discarded the exception and returned a generic
-    `OpError::TypeError("Cannot convert value to ...")`, hiding the
-    user's actual thrown value. Spec impact: ECMA-262 abstract op
-    `ToString` calls `Symbol.toPrimitive` then `toString` then
-    `valueOf` — any of which can throw user values that MUST
-    propagate verbatim per WebIDL §3.13.27. `getReader(options)` in
-    `crates/runtime/src/web/streams/readable.rs` had to hand-roll
-    this exact pattern; now the derive does it natively.
-  - Required adding `OpErrorKind::JsValue(v8::Global<v8::Value>)`
-    variant. Side effects:
-    - `OpErrorKind` lost `Copy` (Global isn't Copy); `OpError`
-      stays `Clone`-only as before. Two callers used `match err.kind`
-      by-value (event_target.rs, crypto/helpers.rs) — both swept to
-      `match &err.kind` in the same change.
-    - Other call sites that match `e.kind` for throw materialisation
-      were updated to detect JsValue first and re-throw the global
-      verbatim (abort_signal, fetch/request, fetch/response,
-      runtime.rs's async resolver path).
-    - The macro's per-arg-extraction throw blocks (ByteString,
-      USVString, EnforceRange{U32,U64}) were factored through a new
-      `gen_extract_throw()` helper that handles JsValue. Previously
-      these had inline match blocks with a wildcard arm that would
-      have silently demoted JsValue to `Exception::error`.
-  - Unblocks: `ReadableStreamGetReaderOptions` /
-    `ReadableStreamReaderMode` migration — see
-    `crates/runtime/TODO.md` "V8 class macro migration follow-ups →
-    Deferred". The hand-rolled `tc_scope!` in `getReader` can be
-    deleted once those types migrate to the derive.
-  - Lands: codegen (dict derive + enum derive + helper) +
-    `OpError::js_value` constructor + the JsValue-passthrough wiring
-    across consumer call sites + 4 new dict smoke tests + 3 new
-    enum smoke tests.
-
-- **`#[derive(WebIdlEnum)]` for enum types** — WebIDL §3.7.10. Generates
-  `from_str` / `as_str` / `WebIdlConvertible` for unit-variant enums.
-  Default name = ident kebab-cased (`NoCors` → `"no-cors"`); override
-  per-variant with `#[webidl_name = "..."]`. The `from_v8` impl
-  ToStrings the value (Symbols → TypeError naturally) then runs
-  `from_str`; unknown name → TypeError per §3.13.7 step 4 with both
-  the offending value AND the accepted-name set in the message.
-  - The `pascal_to_kebab` helper preserves consecutive uppercase as a
-    single lowercase run (`URL` → `"url"`, not `"u-r-l"`) so initialisms
-    work without per-variant overrides. 4 inline unit tests.
-  - Migration follow-ups (deferred): RequestMode, RequestCache,
-    RequestRedirect, RequestCredentials, RequestDestination,
-    ReferrerPolicy, ResponseType, ReadableStreamReaderMode,
-    ReadableStreamType.
-  - Lands: commit `40494fa3` (codegen + 14 smoke tests in
-    `tests/v8_webidl_enum_smoke.rs`).
-
-- **`#[webidl_enum(case_insensitive)]` — ASCII case-insensitive
-  matching.** Type-level flag on `#[derive(WebIdlEnum)]`. Switches
-  `from_str` and `from_v8` from `match` against literal names to an
-  if/else-if ladder using `eq_ignore_ascii_case`. Default behaviour
-  (case-sensitive) is preserved when the flag is absent. Unknown flag
-  idents inside `#[webidl_enum(...)]` surface a syn error so typos
-  don't silently downgrade.
-  - Spec rationale: WebIDL is ASCII for enum names, so the comparison
-    is deliberately ASCII-only — Unicode case folding is out of scope.
-    WebCrypto §15 algorithm normalisation requires case-insensitive
-    matching (`"SHA-256"` / `"sha-256"` / `"Sha-256"` all valid).
-  - Unblocks `HashAlgo` enum migration in `crates/runtime/TODO.md`
-    "V8 class macro migration follow-ups → Deferred".
-  - Lands: codegen + 10 new smoke tests in
-    `tests/v8_webidl_enum_smoke.rs` (24 total).
-
-- **`#[webidl_enum(silent_default)]` — fall through to Default on
-  unknown.** Type-level flag. `from_str` returns
-  `Some(Self::default())` instead of `None` on unknown name; `from_v8`
-  returns `Self::default()` and **never throws** — even when ToString
-  itself throws (Symbols, throwing toString). The spec rationale is
-  WebIDL §3.13.7 step 4 "raise TypeError" being explicitly overridden
-  by Fetch and WebSocket spec sections that fall through to a default
-  for tolerance.
-  - Requires `Self: Default` — the codegen invokes
-    `<Self as Default>::default()`. Compile-error path from Rust's
-    trait resolver if the impl is missing (no custom diagnostic — the
-    standard "the trait `Default` is not implemented" surface is
-    self-explanatory).
-  - Combinable with `case_insensitive`:
-    `#[webidl_enum(silent_default, case_insensitive)]`.
-  - Unblocks `RedirectMode`, `CredentialsMode`, `BinaryType` enum
-    migrations in `crates/runtime/TODO.md` "V8 class macro migration
-    follow-ups → Deferred". Each was deferred because the macro's
-    `from_v8` would have replaced fall-through-to-Default semantics
-    with a TypeError.
-  - Lands: codegen (shared with case_insensitive) + 8 new smoke tests
-    in `tests/v8_webidl_enum_smoke.rs` (32 total).
-
-- **`#[v8_iterable(key = K, value = V [, mode = snapshot|live])]` for
-  default pair iterators** — WebIDL §3.7.10.2 (default iterators) +
-  §3.7.10.3 (forEach). On a `#[v8_class]` impl block, emits the full
-  pair-iterator surface (keys / values / entries / forEach /
-  @@iterator) plus a companion `<Class>Iterator` class — from a single
-  user-supplied `value_pairs(&self) -> Vec<(K, V)>` method.
-  - **Iteration model** (selectable via `mode = ...`):
-    - `mode = snapshot` (default): factory clones `value_pairs()`
-      once at factory-call time, iterator walks the snapshot.
-      Mutations to the parent during iteration are NOT visible.
-      Suits read-only iterables (the common case).
-    - `mode = live`: each `next()` re-reads `value_pairs()` on the
-      stashed-Global parent and indexes at the current cursor;
-      `forEach` re-reads BETWEEN callbacks per WebIDL §3.7.10.3.
-      Mutations between yields ARE visible. If the parent shrinks
-      below the cursor, `next()` yields `done`. Required for Headers
-      / FormData / URLSearchParams iterators.
-  - **Type bounds**: K ∈ {ByteString, USVString, String, u32};
-    V ∈ same set + Vec<u8> (yielded as Uint8Array).
-  - **Brand check**: every factory + forEach reuses the parent's
-    `__brand_check_<Class>`; cross-class deception
-    (`MyMap.prototype.keys.call(other)`) throws "Illegal invocation".
-    The iterator's `next()` brand-checks via the iterator class's
-    own internal-field-1-is-External check; in live mode this is
-    augmented with a defensive null-check on the parent's internal
-    field (yields `done` rather than UB if the parent has been GC'd
-    in a torn-down isolate).
-  - Iterator constructor is locked: `new <Class>Iterator()` throws.
-  - Migration follow-ups (deferred — separate PR per class to keep
-    risk small): URLSearchParamsIterator (~150 LOC),
-    HeadersIterator (live), FormDataIterator. Total saving estimated
-    ~400 LOC across 3 classes.
-  - Lands: commit `506a588f` (snapshot mode codegen + 14 smoke tests
-    in `tests/v8_iterable_smoke.rs`); follow-up commit `5901d68`
-    adds `mode = live` for spec-compliant iteration (9 smoke tests in
-    `tests/v8_iterable_live_smoke.rs`) — covers insert/delete during
-    iteration, shrink-below-cursor, live forEach with self-mutating
-    callback, and explicit `mode = snapshot` back-compat.
-
-- **Same-name getter+setter pairing via `#[v8_name = "..."]`** —
-  paired getters and setters that share a JS-visible name install as a
-  single accessor descriptor. Defining the bare Rust shape (a getter
-  AND a setter both literally named `value`) is impossible — Rust
-  rejects duplicate method names — so the user renames the Rust fns
-  (`get_value` / `set_value`) and applies `#[v8_name = "value"]` to
-  both halves. The install codegen pairs by JS-visible name into one
-  `set_accessor_property("value", getter_cb, setter_cb, attrs)` call
-  rather than two installs that would each overwrite the previous.
-  - The supporting infrastructure (`extract_v8_name`, the
-    `accessor_pairs` HashMap keyed by `js_name`, the
-    `emitted_accessors` dedupe set) was added incrementally during the
-    brand-check / SameObject series (commits `020a545`, `0dbb753`,
-    `3806341`); this entry only lacked a smoke test proving the
-    paired-accessor surface works end-to-end. The added test exercises
-    the get/set roundtrip, the descriptor shape (a single descriptor
-    with both `get` and `set` halves, not two separate ones), brand-
-    check propagation across both halves, and coexistence of a paired
-    pair alongside an unrelated lone getter on the same class.
-  - **Back-compat**: lone getters and lone setters keep working
-    unchanged (no `#[v8_name]` required); the Rust ident continues to
-    serve as the JS name when no override is present.
-  - Lands: smoke test only — 7 tests in
-    `tests/v8_paired_accessor_smoke.rs`; the codegen already covered
-    this surface in earlier commits (`020a545`, `0dbb753`, `3806341`).
+---
 
 ## Open
 
-### `#[reject_shared]` on `Vec<u8>` setter args
+### High — blocks major class migrations
 
-Currently only honoured on regular method args. Setters take exactly one
-arg positionally, so the same logic should apply — but the
-CompressionStream chunks path uses methods, not setters, so this
-isn't blocking.
+- **MAC-01 `#[v8_state(Inner)]`** — internal-field-0 type ≠ `Box<Self>`.
+  Blocks Request (`web/fetch/request.rs`, ~700 LOC) and Response
+  (~550 LOC) whole-class migration. Most invasive change in this list.
+  [B.13]
+- **MAC-02 `#[v8_constructor(post_init = "fn")]`** — post-construction
+  hook with `(scope, this, &Self)`. Blocks streams Reader / Writer /
+  BYOBReader / TransformStream — they need to allocate
+  `PromiseResolver` and `set_private` on the wrapper before returning.
+  [B.3]
 
-### Generic return type detection
+### Medium — multi-consumer or significant LOC saved
 
-`gen_call_return` currently handles a fixed list of scalar types
-(bool/u32/i32/f64/String). New primitives (e.g. `u64` for byte-counter
-getters) require a code edit in `lib.rs::gen_scalar_set`. A trait-based
-dispatch (similar to `IntoResolveValue`) would let users opt in by
-implementing the trait, but the existing list covers every fetch /
-streams / WebSocket / WebCrypto consumer.
+- **MAC-07 `#[v8_static_method]` / `#[v8_static_getter]`** — 9 hand-rolled
+  `install_static` sites: Response `error/json/redirect`, URL `canParse/parse`,
+  AbortSignal `abort/timeout/any`, ReadableStream.from. -200 LOC. [B.1]
+- **MAC-08 `#[v8_getter(same_object, project = field)]`** — cache on
+  state field instead of private symbol (Request.clone semantics). 5
+  consumers: URL.searchParams, Request.headers/.signal, Response.headers,
+  AbortController.signal. [B.2]
+- **MAC-09 `value_pairs(&mut self)` and `&mut PinScope` in `#[v8_iterable]`**
+  — Headers (lazy sort cache), URLSearchParams (sync_from_parent), FormData.
+  -400 LOC across 3 iterators. [B.4]
+- **MAC-10 `#[v8_class(install_on_prototype_template)]`** — for spec
+  base classes inherited via `#[v8_inherit]`. Blocks EventTarget. [B.8]
+- **MAC-11 `#[v8_method(returns_promise)]`** — sync-but-Promise methods.
+  Blob/File `text/arrayBuffer/bytes` (6 sites). -50 LOC. [B.10]
+- **V8 fastcall** — `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
+  Turbofan inlines `CFunction` shim, ~10–30 ns/call. Top ROI candidates:
 
-### Lifetime-tied `Local<'s, T>` returns
+  | Site | Signature | Why hot |
+  |---|---|---|
+  | `AbortSignal.aborted` getter | `(this) → bool` | Every cancel-aware op |
+  | `URL.protocol` / `.host` / `.pathname` | `(this) → FastOneByteString` | URL parsing |
+  | `Headers.has(name)` | `(this, FastOneByteString) → bool` | Routing |
+  | `crypto.getRandomValues(buf)` | `(this, FastApiTypedArray<u8>) → void` | Avoid alloc + copy |
+  | `Streams.desiredSize` | `(this) → f64` | Backpressure |
+  | `URLSearchParams.size` | `(this) → u32` | Dispatch |
 
-The synthetic `&mut PinScope` reborrow shortens the returned `Local`'s
-lifetime. URL-native added a workaround: skip the reborrow when the
-param is named `scope`. Streams hit it in different methods. Generalise:
-detect when return type is `Local<'s, _>` tied to a scope arg and skip
-the reborrow systematically.
+  Phasing: AbortSignal.aborted + URL.pathname first; expand if ≥5%
+  bench delta against v8-1w slot.
 
-### Migrate hand-rolled `[SameObject]` getters to `#[v8_getter(same_object)]`
+### Low — single-consumer or polish
 
-The macro now ships the attribute (commit `3cb0fe11`) but the existing
-hand-rolled SameObject implementations (`Request.headers` in
-`fetch_request.rs:299`, `Response.headers`, `URL.searchParams`) still
-hand-roll the V8 Private symbol stash. Migrate each to the attribute
-to delete the boilerplate and keep one cache implementation in the
-codebase.
+- **MAC-14 arbitrary `Local<Value>` value type in `#[v8_iterable]`** —
+  FormData entry value `(USVString or File)` union. -90 LOC. [B.5]
+- **MAC-15 `#[v8_const(NAME = u16)]`** — DOMException 25 legacy codes;
+  Event.NONE/AT_TARGET/CAPTURING_PHASE/BUBBLING_PHASE. [B.6]
+- **MAC-16 `#[webidl_required]`** dict-member flag — TypeError on
+  `undefined` for required members. QueuingStrategyInit + future. [B.7]
+- **MAC-17 `WrapU16` / `WrapU8` / etc. newtypes** — default-case integer
+  coercion (NaN→0, modulo 2^N). CloseEvent.code today. [B.9]
+- **MAC-18 `#[v8_async_iterable]`** — `[Symbol.asyncIterator]` alias
+  emit. ReadableStream. -10 LOC. [B.12]
+- **Lifetime-tied `Local<'s, T>` returns** — generalize URL-native's
+  `param-named-scope` workaround to detect `Local<'s, _>` tied to a
+  scope arg.
+- **Generic return type detection** — trait-based dispatch (currently a
+  fixed list `bool/u32/i32/f64/String`). Unblocks `u64` byte-counter
+  getters, etc.
+- **`#[reject_shared]` on setter args** — currently methods only.
+  CompressionStream uses methods, so not blocking.
+- **Better compile errors** — friendly diagnostics for common shapes
+  (~50 LOC). Today most user mistakes surface as cryptic syn errors.
 
-### V8 fastcall annotation — `#[v8_getter(fastcall)]` / `#[v8_method(fastcall)]`
+---
 
-Turbofan can inline `CFunction` callbacks at hot call sites,
-skipping External lookup, scope setup, and the FunctionCallback
-entry/exit dance. ~10–30 ns saved per inlined call.
+## Consumer migration pointers
 
-**Macro shape:** an attribute that emits BOTH a slow-path
-`FunctionCallback` (current behavior, unchanged) AND a typed
-`CFunction` shim, then wires them via
-`function_template.set_c_function(...)`. User's Rust fn must be
-`extern "C"` and accept a final `*mut FastApiCallbackOptions` arg
-so it can opt into the slow-path fallback on edge cases (multibyte
-strings, exception paths, etc.).
+Tracked in `crates/runtime/TODO.md` "V8 class macro migration follow-ups"
+— not duplicated here. Highlights:
 
-**Constraints (V8-imposed):**
-- No allocation (no new JS objects, no GC).
-- No exceptions in the fast path — set
-  `FastApiCallbackOptions::fallback = true` to bail to slow path.
-- Restricted arg/return types: `i32` / `u32` / `i64` / `u64` /
-  `f32` / `f64` / `bool`, plus `Local<Value>`, `FastOneByteString`
-  (ASCII string fast path), and `FastApiTypedArray<T>`. WebIDL
-  `DOMString` requires `FastOneByteString` + slow-path fallback
-  on multibyte.
-
-**Top ROI candidates (ordered by call frequency × per-call savings):**
-
-| Site | Signature | Why hot |
-|---|---|---|
-| `AbortSignal.aborted` getter | `(this) → bool` | Every cancel-aware op checks; ~20 ns × N/req |
-| `URL.protocol` / `.host` / `.pathname` getters | `(this) → FastOneByteString` | User handlers parsing URLs |
-| `Headers.has(name)` | `(this, FastOneByteString) → bool` | Routing / proxy handlers |
-| `crypto.getRandomValues(buf)` | `(this, FastApiTypedArray<u8>) → void` | Currently allocates + copies; fastcall writes in place |
-| `Streams.desiredSize` getter | `(this) → f64` | Backpressure-aware producers |
-| `URLSearchParams.size` getter | `(this) → u32` | Common in dispatch logic |
-
-**Phasing:** start with `AbortSignal.aborted` + `URL.pathname`
-(highest call frequency in real handlers), measure with the bench
-harness against the v8-1w slot (`--scenario=httpGet --duration=5s`).
-Expand if a single attribute saves ≥5%; pause if not.
-
-### Better compile errors
-
-Today: "#[v8_class] requires a plain type" is the only structured
-error. Most user mistakes (wrong receiver, missing `#[v8_method]`,
-wrong Result return) surface as cryptic syn errors. Worth a 50-LOC
-investment in friendly diagnostics for common shapes.
-
-### Migration follow-ups (Tier 3 derives, one PR each)
-
-The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`) are
-shipped (commits `6806f9e5`, `ba7081b8`, `40494fa3`, `506a588f`) but
-existing classes still hand-roll the equivalent code. Migrate one
-class per PR to keep risk small:
-
-**WebIdlDict migration candidates** (largest hand-rolled dicts):
-  - `RequestInit` — `crates/runtime/src/web/fetch/request.rs` (~16
-    members; saves ~40 LOC)
-  - `ResponseInit` — `crates/runtime/src/web/fetch/response.rs`
-  - `BlobPropertyBag` — `crates/runtime/src/web/blob/`
-  - `EventInit` / `MessageEventInit` / `CloseEventInit` /
-    `CustomEventInit` — `crates/runtime/src/web/dom/`
-  - `QueuingStrategyInit`, `ReadableStreamGetReaderOptions` —
-    `crates/runtime/src/web/streams/`
-  - WebCrypto algorithm-init dicts — `crates/runtime/src/web/crypto/`
-
-**WebIdlEnum migration candidates**:
-  - `RequestMode`, `RequestCache`, `RequestRedirect`,
-    `RequestCredentials`, `RequestDestination` — fetch
-  - `ReferrerPolicy` — fetch
-  - `ResponseType` — fetch
-  - `ReadableStreamReaderMode`, `ReadableStreamType` — streams
-
-**`#[v8_iterable]` migration candidates** (each requires picking the
-right `mode = snapshot` / `mode = live` per spec):
-  - `URLSearchParamsIterator` (~150 LOC) —
-    `crates/runtime/src/web/url/search_params.rs`. LIVE per WebIDL —
-    `URLSearchParams.delete` mid-iteration MUST be observable; use
-    `mode = live`.
-  - `HeadersIterator` (~150 LOC) — `crates/runtime/src/web/headers.rs`.
-    LIVE per WebIDL — `Headers.append` / `Headers.delete` mid-iteration
-    must be observable; use `mode = live`. Now unblocked: the derive
-    supports live mode.
-  - `FormDataIterator` (~100 LOC) —
-    `crates/runtime/src/web/dom/form_data.rs`. LIVE per WebIDL; use
-    `mode = live`.
-
-Total estimated savings: ~400 LOC of iterator boilerplate, ~200 LOC
-of dict-parsing boilerplate, ~100 LOC of enum-parsing boilerplate.
+- **Whole-class migrations** (blocked on MAC-01 / MAC-02): Request,
+  Response, ReadableStream, WritableStream, TransformStream,
+  Reader/Writer/BYOBReader.
+- **Iterator migrations** (blocked on MAC-09): URLSearchParamsIterator,
+  HeadersIterator, FormDataIterator (-400 LOC).
+- **Hand-rolled `[SameObject]` migrations** (blocked on MAC-08):
+  URL.searchParams, Request/Response.headers, AbortController.signal.
+- **Static methods migrations** (blocked on MAC-07): 9 sites.
