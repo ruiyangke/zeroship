@@ -416,6 +416,93 @@ done
 [ "$v" = "v2" ] && pass "v2 hot deployed" || fail "expected v2, got '$v'"
 
 # ---------------------------------------------------------------------------
+# Test 9: Deploy edge cases (streaming early-rejection paths)
+# ---------------------------------------------------------------------------
+# Targets the streaming deploy handler in `crates/control/src/api.rs`
+# (`deploy()`): content-type, payload-cap and auth gates must fire
+# BEFORE the body is streamed to a tmp file. Companion to Test 2's
+# happy path.
+echo ""
+echo "=== Test 9: Deploy edge cases ==="
+
+# Fresh app for these cases — independent of earlier-test state.
+EDGE_RESP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $MASTER_KEY" \
+    -d '{"name":"deploy-edge"}')
+EDGE_APP_ID=$(echo "$EDGE_RESP" | jq -r '.id')
+[ -n "$EDGE_APP_ID" ] && [ "$EDGE_APP_ID" != "null" ] && pass "9.0: create edge-case app ($EDGE_APP_ID)" || fail "9.0: create edge-case app"
+
+# Build a small valid `.zship` for the content-type / auth cases. The
+# size-cap case sends raw urandom and doesn't need a real zship.
+edge_js=$(mktemp --suffix=.js)
+edge_zship=$(mktemp --suffix=.zship)
+echo 'export function ping() { return "edge"; }' > "$edge_js"
+build_zship "$edge_js" "$edge_zship"
+rm "$edge_js"
+
+# --- 9.1: wrong content-type returns 415 ---
+echo "  -- 9.1: wrong content-type"
+RESP_CODE=$(curl -s -o /tmp/zeroship-e2e-resp.body -w '%{http_code}' \
+    -X POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+    -H "Authorization: Bearer $MASTER_KEY" \
+    -H 'Content-Type: application/octet-stream' \
+    --data-binary "@$edge_zship")
+RESP_BODY=$(head -c 200 /tmp/zeroship-e2e-resp.body 2>/dev/null || true)
+if [ "$RESP_CODE" = "415" ] && echo "$RESP_BODY" | grep -q "unsupported content type"; then
+    pass "9.1: wrong content-type rejected with 415"
+else
+    fail "9.1: expected 415 + 'unsupported content type', got $RESP_CODE (body: $RESP_BODY)"
+fi
+rm -f /tmp/zeroship-e2e-resp.body
+
+# --- 9.2: body exceeding MAX_COMPRESSED_BYTES (256 MiB) returns 413 ---
+# Cap is enforced PRE-decompression, so raw bytes (no zstd needed) trigger
+# it. Use /dev/zero for fast generation — the streaming helper checks
+# total bytes written, not entropy.
+echo "  -- 9.2: body over 256 MiB cap"
+big_body=$(mktemp --suffix=.bin)
+# 257 MiB = 256 MiB cap + 1 MiB overshoot. dd from /dev/zero is ~instant.
+dd if=/dev/zero of="$big_body" bs=1M count=257 status=none
+RESP_CODE=$(curl -s -o /tmp/zeroship-e2e-resp.body -w '%{http_code}' \
+    -X POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+    -H "Authorization: Bearer $MASTER_KEY" \
+    -H 'Content-Type: application/x-zship' \
+    --data-binary "@$big_body")
+RESP_BODY=$(head -c 200 /tmp/zeroship-e2e-resp.body 2>/dev/null || true)
+if [ "$RESP_CODE" = "413" ] && echo "$RESP_BODY" | grep -q "deploy too large"; then
+    pass "9.2: oversized body rejected with 413"
+else
+    fail "9.2: expected 413 + 'deploy too large', got $RESP_CODE (body: $RESP_BODY)"
+fi
+rm -f "$big_body" /tmp/zeroship-e2e-resp.body
+
+# --- 9.3: wrong Authorization returns 401 ---
+# Test 6 exercises auth at the gateway and on app-create, but not on
+# the deploy endpoint specifically. Adds direct coverage of the
+# `check_admin_auth` gate inside `deploy()` — must reject before any
+# body byte is consumed.
+echo "  -- 9.3: wrong auth on deploy"
+RESP_CODE=$(curl -s -o /tmp/zeroship-e2e-resp.body -w '%{http_code}' \
+    -X POST "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
+    -H "Authorization: Bearer wrong-key-12345" \
+    -H 'Content-Type: application/x-zship' \
+    --data-binary "@$edge_zship")
+RESP_BODY=$(head -c 200 /tmp/zeroship-e2e-resp.body 2>/dev/null || true)
+if [ "$RESP_CODE" = "401" ] || [ "$RESP_CODE" = "403" ]; then
+    pass "9.3: wrong auth rejected with $RESP_CODE"
+else
+    fail "9.3: expected 401/403, got $RESP_CODE (body: $RESP_BODY)"
+fi
+rm -f /tmp/zeroship-e2e-resp.body
+rm -f "$edge_zship"
+
+# Cleanup: delete the edge-case app, matching Test 2's pattern.
+DEL=$(curl -sf -X DELETE "http://localhost:$CONTROL_PORT/api/apps/$EDGE_APP_ID" \
+    -H "Authorization: Bearer $MASTER_KEY")
+echo "$DEL" | grep -q "true" && pass "9.4: cleanup edge-case app" || fail "9.4: cleanup edge-case app"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
