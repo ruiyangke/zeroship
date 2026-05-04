@@ -6,7 +6,7 @@ mod metrics;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use ntex::web;
-use zeroship_core::blob::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_runtime::init::init_v8;
 
 use crate::sync::{SharedEnvs, SharedVersions};

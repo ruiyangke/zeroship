@@ -5,8 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntex::web;
-use zeroship_core::vfs::{BundleStore, LocalFs};
-use zeroship_core::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{BlobStore, BundleStore, LocalDiskBlobStore, LocalFs};
 use zeroship_control::{
     api, auth_handlers, auth_service, env_handlers, internal, oauth, stripe_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,

@@ -163,7 +163,7 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
     let app_id_str = uid.to_string();
     if let Err(e) = state.vfs.delete(&app_id_str) {
         match e {
-            zeroship_core::vfs::VfsError::NotFound(_) => { /* ok */ }
+            zeroship_bundle::VfsError::NotFound(_) => { /* ok */ }
             other => {
                 return web::HttpResponse::InternalServerError()
                     .json(&serde_json::json!({"error": other.to_string()}));

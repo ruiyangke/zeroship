@@ -23,8 +23,7 @@ pub mod stripe_store;
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
-use zeroship_core::vfs::BundleStore;
-use zeroship_core::BlobStore;
+use zeroship_bundle::{BlobStore, BundleStore};
 
 pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};

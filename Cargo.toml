@@ -110,6 +110,7 @@ syn = { version = "2", features = ["full"] }
 
 # Internal crates
 zeroship-core = { path = "crates/core" }
+zeroship-bundle = { path = "crates/bundle" }
 compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
 zeroship-plugin-db = { path = "crates/plugin-db" }

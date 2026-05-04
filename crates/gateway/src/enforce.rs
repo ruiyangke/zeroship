@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ntex::web::HttpResponse;
 use uuid::Uuid;
-use zeroship_core::types::{RateLimit, RateLimitPer};
+use zeroship_bundle::{RateLimit, RateLimitPer};
 
 // --- Token Bucket Rate Limiter ---
 

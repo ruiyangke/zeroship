@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use zeroship_core::types::{
+use zeroship_bundle::{
     AssetEntry, AuthLevel, CacheCtl, Cors, HttpMethod, Manifest, ProcedureKind, RateLimit,
     ResourceEntry, WorkerCode,
 };
@@ -556,7 +556,7 @@ fn compile_glob(pattern: &str) -> CompiledGlob {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use zeroship_core::types::{
+    use zeroship_bundle::{
         AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, RedirectAction,
         ResourceEntry, StaticAction,
     };

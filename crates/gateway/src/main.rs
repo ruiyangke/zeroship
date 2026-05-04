@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntex::web;
-use zeroship_core::blob::{BlobStore, LocalDiskBlobStore};
+use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

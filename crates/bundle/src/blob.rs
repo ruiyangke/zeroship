@@ -24,6 +24,23 @@ pub enum BlobError {
 }
 
 // ---------------------------------------------------------------------------
+// Outcome of a put — fresh write or content-addressed dedup.
+// ---------------------------------------------------------------------------
+
+/// What happened on a successful `put_blob` / `put_blob_stream`. The
+/// ingest pipeline uses this to count `blobs_uploaded` vs.
+/// `blobs_deduped` without doing a separate `has_blob` round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PutOutcome {
+    /// The bytes were written to the store as a fresh blob.
+    Wrote,
+    /// The blob already existed (content-addressed dedup hit). For
+    /// streaming puts the reader was drained to advance the caller's
+    /// stream cursor; bytes were not re-persisted.
+    Deduped,
+}
+
+// ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
 
@@ -44,9 +61,30 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// backends.
     fn local_path(&self, hash: &str) -> Option<PathBuf>;
 
-    /// Insert a blob. Idempotent — repeated puts of the same hash are
-    /// no-ops.
-    async fn put_blob(&self, hash: &str, data: &[u8]) -> Result<(), BlobError>;
+    /// Single-shot convenience for in-memory bytes. Default impl wraps
+    /// in a `Cursor` and delegates to `put_blob_stream`. Implementations
+    /// MAY override for a buffered fast path, but the default is correct
+    /// for any backend that has a working streaming put.
+    async fn put_blob(&self, hash: &str, data: &[u8]) -> Result<PutOutcome, BlobError> {
+        let mut cursor = std::io::Cursor::new(data);
+        self.put_blob_stream(hash, data.len() as u64, &mut cursor).await
+    }
+
+    /// Stream a blob into storage. The reader is consumed up to
+    /// `expected_size` bytes; SHA-256 is computed during the read, and
+    /// the persisted blob is committed atomically only if the computed
+    /// hash matches `hash` AND the byte count matches `expected_size`.
+    /// On size or hash mismatch, the partial write is removed.
+    ///
+    /// Idempotent: pre-existing blob → drain the reader (so the caller's
+    /// stream cursor advances past the entry) and return
+    /// `Ok(PutOutcome::Deduped)` without rewriting.
+    async fn put_blob_stream(
+        &self,
+        hash: &str,
+        expected_size: u64,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<PutOutcome, BlobError>;
 
     async fn has_blob(&self, hash: &str) -> Result<bool, BlobError>;
 
@@ -161,37 +199,111 @@ impl BlobStore for LocalDiskBlobStore {
         Some(self.blob_path(hash))
     }
 
-    async fn put_blob(&self, hash: &str, data: &[u8]) -> Result<(), BlobError> {
+    async fn put_blob_stream(
+        &self,
+        hash: &str,
+        expected_size: u64,
+        reader: &mut dyn std::io::Read,
+    ) -> Result<PutOutcome, BlobError> {
         if !validate_hash_format(hash) {
             return Err(BlobError::Backend(format!(
                 "malformed blob hash {hash:?}: expected 64-char lowercase hex"
             )));
         }
-        let actual = sha256_hex(data);
-        if actual != hash {
-            return Err(BlobError::HashMismatch {
-                expected: hash.to_string(),
-                got: actual,
-            });
-        }
         let path = self.blob_path(hash);
-        // Idempotent: blob already on disk → no-op. Content-addressing
-        // means the bytes are identical by definition.
+
+        // Idempotent: pre-existing blob → drain the reader (so the
+        // caller's stream cursor is advanced past the entry) and
+        // report dedup. Content-addressing means the bytes on disk are
+        // identical to whatever the caller would have written.
         if let Ok(meta) = compio::fs::metadata(&path).await {
             if meta.is_file() {
-                return Ok(());
+                std::io::copy(reader, &mut std::io::sink())
+                    .map_err(BlobError::Io)?;
+                return Ok(PutOutcome::Deduped);
             }
         }
+
         if let Some(parent) = path.parent() {
             compio::fs::create_dir_all(parent).await?;
         }
-        let tmp = path.with_extension("tmp");
-        let owned = data.to_vec();
-        let (res, _buf): (std::io::Result<()>, Vec<u8>) =
-            compio::fs::write(&tmp, owned).await.into();
-        res?;
-        compio::fs::rename(&tmp, &path).await?;
-        Ok(())
+
+        // Unique tmp suffix so concurrent writes of the same hash from
+        // different deploys don't trample each other. `create_new`
+        // ensures we never overwrite a partial tmp from another caller.
+        let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+
+        let file = compio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .await?;
+
+        let result: Result<(), BlobError> = async {
+            use compio::io::AsyncWriteAtExt;
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            let mut total: u64 = 0;
+            let chunk_size: usize = 64 * 1024;
+            let mut scratch: Vec<u8> = vec![0u8; chunk_size];
+            let mut offset: u64 = 0;
+
+            loop {
+                // Sync read: tar/zstd are CPU-only over in-memory bytes.
+                let n = reader.read(&mut scratch).map_err(BlobError::Io)?;
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+                if total > expected_size {
+                    return Err(BlobError::Backend(format!(
+                        "blob exceeds declared size {expected_size}"
+                    )));
+                }
+                hasher.update(&scratch[..n]);
+
+                // compio's write_at consumes the buffer and hands it
+                // back via BufResult; allocate a fresh owned chunk per
+                // write (64 KiB allocations are cheap, ~hundreds of ns).
+                let mut chunk: Vec<u8> = Vec::with_capacity(n);
+                chunk.extend_from_slice(&scratch[..n]);
+                let compio::BufResult(res, _returned) =
+                    (&file).write_all_at(chunk, offset).await;
+                res.map_err(BlobError::Io)?;
+                offset += n as u64;
+            }
+
+            if total != expected_size {
+                return Err(BlobError::Backend(format!(
+                    "size mismatch: expected {expected_size}, observed {total}"
+                )));
+            }
+            let computed = hex::encode(hasher.finalize());
+            if computed != hash {
+                return Err(BlobError::HashMismatch {
+                    expected: hash.to_string(),
+                    got: computed,
+                });
+            }
+            file.sync_all().await?;
+            Ok(())
+        }
+        .await;
+
+        // Drop the file handle before the rename; compio::fs::File
+        // closes on drop.
+        drop(file);
+
+        match result {
+            Ok(()) => {
+                compio::fs::rename(&tmp, &path).await?;
+                Ok(PutOutcome::Wrote)
+            }
+            Err(e) => {
+                let _ = compio::fs::remove_file(&tmp).await;
+                Err(e)
+            }
+        }
     }
 
     async fn has_blob(&self, hash: &str) -> Result<bool, BlobError> {

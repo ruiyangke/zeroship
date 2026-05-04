@@ -1,0 +1,21 @@
+[package]
+name = "zeroship-bundle"
+version = "0.1.0"
+edition = "2021"
+description = ".zsapp deploy artifact: manifest types, content-addressed blob store, pack/unpack."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+compio = { workspace = true, features = ["fs"] }
+zstd = { workspace = true }
+tar = { workspace = true }
+
+[lints]
+workspace = true

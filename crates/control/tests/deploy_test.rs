@@ -18,11 +18,10 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use zeroship_control::deploy::{self, IngestError};
-use zeroship_core::types::{
-    AssetEntry, Manifest, ManifestMetadata, WorkerCode,
+use zeroship_bundle::{
+    AssetEntry, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, WorkerCode,
 };
-use zeroship_core::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::deploy::{self, IngestError};
 
 // ---------------------------------------------------------------------------
 // Helpers

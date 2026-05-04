@@ -6,7 +6,8 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use uuid::Uuid;
 
-use zeroship_core::types::{Manifest, RouteEntry, RouteMap};
+use zeroship_bundle::Manifest;
+use zeroship_core::types::{RouteEntry, RouteMap};
 
 use crate::compiled::CompiledManifest;
 use crate::GateState;

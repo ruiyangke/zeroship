@@ -105,9 +105,9 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 ///   per-app limit at the rule level.
 pub(crate) fn compute_bucket_id(
     req: &HttpRequest,
-    per: zeroship_core::types::RateLimitPer,
+    per: zeroship_bundle::RateLimitPer,
 ) -> String {
-    use zeroship_core::types::RateLimitPer;
+    use zeroship_bundle::RateLimitPer;
     match per {
         RateLimitPer::Ip => req
             .connection_info()
@@ -353,7 +353,7 @@ async fn execute_resource_tree(
     wall_start: std::time::Instant,
 ) -> HttpResponse {
     use crate::compiled::ResolvedAction;
-    use zeroship_core::types::ProcedureKind;
+    use zeroship_bundle::ProcedureKind;
 
     // 1. Resolve the resource. No match → 404.
     let Some(policy) = compiled_route.manifest.lookup_resource(dispatch_path) else {
@@ -609,7 +609,7 @@ fn auth_satisfied(
     auth_secret: &str,
     app_id: &Uuid,
 ) -> bool {
-    use zeroship_core::types::AuthLevel;
+    use zeroship_bundle::AuthLevel;
     if matches!(policy.auth, AuthLevel::Anon) {
         return true;
     }
@@ -671,7 +671,7 @@ fn lookup_static_hit(
     compiled_route: &crate::sync::CompiledRoute,
     path: &str,
 ) -> Option<crate::dispatch::StaticHit> {
-    use zeroship_core::types::CacheCtl;
+    use zeroship_bundle::CacheCtl;
     let (entry, mutable) = compiled_route.manifest.lookup_asset_for_static(path)?;
     let cache = entry.cache.clone().unwrap_or_else(|| {
         if !mutable && path.starts_with("/_assets/") {
@@ -714,7 +714,7 @@ fn lookup_static_hit(
 /// empty; the headers tell the browser whether to proceed with the
 /// actual request.
 fn build_preflight_response(
-    cors: &zeroship_core::types::Cors,
+    cors: &zeroship_bundle::Cors,
     origin: &str,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
@@ -767,7 +767,7 @@ fn build_preflight_response(
 /// the right response surface.
 fn inject_cors_response_headers(
     headers: &mut ntex::http::HeaderMap,
-    cors: &zeroship_core::types::Cors,
+    cors: &zeroship_bundle::Cors,
     origin: &str,
 ) {
     use ntex::http::header::{HeaderName, HeaderValue};
@@ -828,7 +828,7 @@ enum BlobFetch {
 async fn fetch_static_bytes(
     mem: &crate::blob_cache::BlobCache,
     disk: &crate::blob_cache::DiskBlobCache,
-    store: &dyn zeroship_core::blob::BlobStore,
+    store: &dyn zeroship_bundle::BlobStore,
     hash: &str,
 ) -> BlobFetch {
     // Tier 1: memory.
@@ -862,7 +862,7 @@ async fn fetch_static_bytes(
             mem.insert(hash.to_string(), b.clone());
             BlobFetch::Hit(b)
         }
-        Err(zeroship_core::blob::BlobError::NotFound(_)) => BlobFetch::NotFound,
+        Err(zeroship_bundle::BlobError::NotFound(_)) => BlobFetch::NotFound,
         Err(e) => BlobFetch::Unavailable(e.to_string()),
     }
 }
@@ -890,7 +890,7 @@ enum DiskAvailability {
 /// silently fail to cache, neither of which is useful.
 async fn ensure_disk_path(
     disk: &crate::blob_cache::DiskBlobCache,
-    store: &dyn zeroship_core::blob::BlobStore,
+    store: &dyn zeroship_bundle::BlobStore,
     hash: &str,
 ) -> DiskAvailability {
     if let Some(path) = disk.local_path(hash) {
@@ -910,7 +910,7 @@ async fn ensure_disk_path(
                 DiskAvailability::InMemoryOnly(b)
             }
         },
-        Err(zeroship_core::blob::BlobError::NotFound(_)) => DiskAvailability::NotFound,
+        Err(zeroship_bundle::BlobError::NotFound(_)) => DiskAvailability::NotFound,
         Err(e) => DiskAvailability::Unavailable(e.to_string()),
     }
 }
@@ -1593,7 +1593,7 @@ fn build_buffered_response(
 /// Cache-Control directive — it's gateway-internal logic ("re-fetch
 /// in the background after max-age expires") rather than a thing
 /// browsers / proxies act on. See `serve_static_hit` for the TODO.
-fn cache_control_header(c: &zeroship_core::types::CacheCtl) -> String {
+fn cache_control_header(c: &zeroship_bundle::CacheCtl) -> String {
     let mut parts: Vec<String> = vec!["public".into(), format!("max-age={}", c.max_age)];
     if let Some(swr) = c.swr_window {
         parts.push(format!("stale-while-revalidate={swr}"));
@@ -2093,7 +2093,7 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::blob_cache::{BlobCache, DiskBlobCache};
-    use zeroship_core::blob::{BlobError, BlobStore};
+    use zeroship_bundle::{BlobError, BlobStore};
 
     /// Build a disk cache rooted in a fresh tmpdir with a generous
     /// budget. Caller is responsible for cleanup (we keep tests
@@ -2322,7 +2322,7 @@ mod tests {
             hash: hash.into(),
             content_type: "application/octet-stream".into(),
             size,
-            cache: zeroship_core::types::CacheCtl {
+            cache: zeroship_bundle::CacheCtl {
                 max_age: 60,
                 swr_window: None,
                 immutable: false,
@@ -2512,7 +2512,7 @@ mod tests {
     /// path's insert won't no-op for the test payloads we care about
     /// (the production default is 256 MiB).
     fn make_state(
-        store: Arc<dyn zeroship_core::blob::BlobStore>,
+        store: Arc<dyn zeroship_bundle::BlobStore>,
         disk: crate::blob_cache::DiskBlobCache,
     ) -> GateState {
         GateState {
@@ -2553,7 +2553,7 @@ mod tests {
         fn calls_for(&self, hash: &str) -> usize {
             self.inner.calls_for(hash)
         }
-        fn store(&self) -> Arc<dyn zeroship_core::blob::BlobStore> {
+        fn store(&self) -> Arc<dyn zeroship_bundle::BlobStore> {
             self.inner.clone()
         }
     }
@@ -2716,7 +2716,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::compiled::CompiledManifest;
-    use zeroship_core::types::{Cors, HttpMethod, Manifest, ResourceEntry};
+    use zeroship_bundle::{Cors, HttpMethod, Manifest, ResourceEntry};
 
     /// Single-resource manifest with a CORS policy attached to `/api/*`.
     /// All preflight tests use this shape; the path narrowness keeps
@@ -3292,7 +3292,7 @@ mod tests {
     fn cache_ctl_emits_stale_if_error() {
         // stale_on_error AND swr_window set → both stale-while-revalidate
         // and stale-if-error directives.
-        let c = zeroship_core::types::CacheCtl {
+        let c = zeroship_bundle::CacheCtl {
             max_age: 60,
             swr_window: Some(30),
             immutable: false,
@@ -3307,7 +3307,7 @@ mod tests {
     #[test]
     fn cache_ctl_no_stale_if_error_without_swr() {
         // stale_on_error WITHOUT swr_window → no stale-if-error.
-        let c = zeroship_core::types::CacheCtl {
+        let c = zeroship_bundle::CacheCtl {
             max_age: 60,
             swr_window: None,
             immutable: false,
@@ -3320,7 +3320,7 @@ mod tests {
 
     #[test]
     fn cache_ctl_immutable_still_works() {
-        let c = zeroship_core::types::CacheCtl {
+        let c = zeroship_bundle::CacheCtl {
             max_age: 31_536_000,
             swr_window: None,
             immutable: true,
@@ -3398,7 +3398,7 @@ mod tests {
     // Tier 4b — Accept-Encoding negotiation
     // -----------------------------------------------------------------------
 
-    use zeroship_core::types::AssetVariant;
+    use zeroship_bundle::AssetVariant;
 
     /// Build a static hit whose `variants` map carries `br` and `gzip`
     /// entries pointing at the given hashes/sizes. Used by the
@@ -3736,7 +3736,7 @@ mod tests {
     // Per-rule rate-limit bucket key derivation
     // -----------------------------------------------------------------------
 
-    use zeroship_core::types::RateLimitPer;
+    use zeroship_bundle::RateLimitPer;
 
     #[test]
     fn compute_bucket_id_app_returns_constant() {
@@ -3802,7 +3802,7 @@ mod tests {
     // assert it agrees with the registry's view of "drained vs fresh"
     // — same code path in two parts.
 
-    use zeroship_core::types::RateLimit;
+    use zeroship_bundle::RateLimit;
 
     #[test]
     fn router_wiring_bucket_id_matches_registry_key() {
@@ -3866,7 +3866,7 @@ mod resource_tree_tests {
     use std::collections::HashMap;
     use ntex::http::body::{Body, MessageBody, ResponseBody};
     use crate::compiled::{CompiledManifest, EffectivePolicy};
-    use zeroship_core::types::{
+    use zeroship_bundle::{
         AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry,
     };
 
@@ -3904,17 +3904,17 @@ mod resource_tree_tests {
     struct StubBlobStore;
 
     #[async_trait::async_trait(?Send)]
-    impl zeroship_core::blob::BlobStore for StubBlobStore {
-        async fn get_blob(&self, _hash: &str) -> Result<bytes::Bytes, zeroship_core::blob::BlobError> {
-            Err(zeroship_core::blob::BlobError::NotFound("unused".into()))
+    impl zeroship_bundle::BlobStore for StubBlobStore {
+        async fn get_blob(&self, _hash: &str) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
+            Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
         fn local_path(&self, _hash: &str) -> Option<std::path::PathBuf> {
             None
         }
-        async fn put_blob(&self, _hash: &str, _data: &[u8]) -> Result<(), zeroship_core::blob::BlobError> {
+        async fn put_blob(&self, _hash: &str, _data: &[u8]) -> Result<(), zeroship_bundle::BlobError> {
             Ok(())
         }
-        async fn has_blob(&self, _hash: &str) -> Result<bool, zeroship_core::blob::BlobError> {
+        async fn has_blob(&self, _hash: &str) -> Result<bool, zeroship_bundle::BlobError> {
             Ok(false)
         }
         async fn put_manifest(
@@ -3922,15 +3922,15 @@ mod resource_tree_tests {
             _app_id: &uuid::Uuid,
             _deploy_hash: &str,
             _json: &[u8],
-        ) -> Result<(), zeroship_core::blob::BlobError> {
+        ) -> Result<(), zeroship_bundle::BlobError> {
             Ok(())
         }
         async fn get_manifest(
             &self,
             _app_id: &uuid::Uuid,
             _deploy_hash: &str,
-        ) -> Result<bytes::Bytes, zeroship_core::blob::BlobError> {
-            Err(zeroship_core::blob::BlobError::NotFound("unused".into()))
+        ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
+            Err(zeroship_bundle::BlobError::NotFound("unused".into()))
         }
     }
 

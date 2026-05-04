@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use uuid::Uuid;
-use zeroship_core::types::{AppVersionInfo, Manifest, VersionMap};
+use zeroship_bundle::Manifest;
+use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
 use crate::{cache, WorkerConfig};

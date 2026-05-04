@@ -1,4 +1,4 @@
-use zeroship_core::vfs::{BundleStore, LocalFs, VfsError};
+use zeroship_bundle::store::{BundleStore, LocalFs, VfsError};
 
 fn temp_dir(suffix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(

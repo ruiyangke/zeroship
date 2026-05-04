@@ -519,7 +519,7 @@ impl Registry {
             let env_version: i64 = row.get("env_version");
             let manifest_json: Option<String> = row.get("manifest_json");
             let manifest = manifest_json.as_deref().and_then(|j| {
-                match serde_json::from_str::<zeroship_core::types::Manifest>(j) {
+                match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
                     Ok(m) => Some(m),
                     Err(e) => {
                         eprintln!(
@@ -575,7 +575,7 @@ impl Registry {
             let manifest_json: Option<String> = row.get("manifest_json");
             let manifest = manifest_json
                 .as_deref()
-                .and_then(|j| match serde_json::from_str::<zeroship_core::types::Manifest>(j) {
+                .and_then(|j| match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
                     Ok(m) => match m.validate() {
                         Ok(()) => Some(m),
                         Err(e) => {
@@ -588,7 +588,7 @@ impl Registry {
                         None
                     }
                 })
-                .unwrap_or_else(zeroship_core::types::Manifest::passthrough);
+                .unwrap_or_else(zeroship_bundle::Manifest::passthrough);
             map.insert(
                 id,
                 RouteEntry {

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use zeroship_core::types::{AssetVariant, CacheCtl, WorkerMode};
+use zeroship_bundle::{AssetVariant, CacheCtl, WorkerMode};
 
 /// What the gateway should do with this request after resolving the
 /// matched resource. Constructed by the resource-tree path in
@@ -23,7 +23,7 @@ pub enum Outcome {
         cache: Option<CacheCtl>,
         /// Per-resource rate limit declared in the manifest. Enforced on
         /// top of the gateway's global per-app limit.
-        rate_limit: Option<zeroship_core::types::RateLimit>,
+        rate_limit: Option<zeroship_bundle::RateLimit>,
         /// Stable hash of the matched resource key. Used by the gateway's
         /// per-resource rate limiter so two resources with the same
         /// `rate_limit` config get independent buckets.

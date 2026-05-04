@@ -5393,13 +5393,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-bundle"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "compio",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "thiserror 2.0.18",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
 name = "zeroship-control"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bcrypt",
- "bytes",
  "compio",
  "compio-postgres",
  "cyper",
@@ -5418,6 +5434,7 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+ "zeroship-bundle",
  "zeroship-core",
  "zstd",
 ]
@@ -5427,9 +5444,6 @@ name = "zeroship-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "async-trait",
- "bytes",
- "compio",
  "hex",
  "hmac 0.12.1",
  "serde",
@@ -5438,6 +5452,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "zeroize",
+ "zeroship-bundle",
 ]
 
 [[package]]
@@ -5461,6 +5476,7 @@ dependencies = [
  "url",
  "uuid",
  "xxhash-rust",
+ "zeroship-bundle",
  "zeroship-core",
 ]
 
@@ -5611,6 +5627,7 @@ dependencies = [
  "sha2 0.10.9",
  "url",
  "uuid",
+ "zeroship-bundle",
  "zeroship-core",
  "zeroship-plugin-db",
  "zeroship-runtime",

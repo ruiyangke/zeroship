@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-bundle = { workspace = true }
 compio-postgres = { workspace = true }
 compio = { workspace = true }
 ntex = { workspace = true }
@@ -19,9 +20,6 @@ uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
-zstd = { workspace = true }
-tar = { workspace = true }
-bytes = { workspace = true }
 async-trait = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
@@ -35,6 +33,13 @@ url = { workspace = true }
 http = { workspace = true }
 # RNG for OAuth state / PKCE — small, no async runtime dep.
 rand = "0.8"
+
+[dev-dependencies]
+# `deploy_test.rs` builds a synthetic `.zsapp` payload (tar+zstd) and
+# feeds it through `zeroship_bundle::ingest`. The runtime path no longer
+# depends on these crates — only the test packer does.
+tar = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true
