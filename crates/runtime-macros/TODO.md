@@ -228,15 +228,33 @@ so we can grep back through the rationale.
   - Lands: commit `506a588f` (codegen + 14 smoke tests in
     `tests/v8_iterable_smoke.rs`).
 
+- **Same-name getter+setter pairing via `#[v8_name = "..."]`** —
+  paired getters and setters that share a JS-visible name install as a
+  single accessor descriptor. Defining the bare Rust shape (a getter
+  AND a setter both literally named `value`) is impossible — Rust
+  rejects duplicate method names — so the user renames the Rust fns
+  (`get_value` / `set_value`) and applies `#[v8_name = "value"]` to
+  both halves. The install codegen pairs by JS-visible name into one
+  `set_accessor_property("value", getter_cb, setter_cb, attrs)` call
+  rather than two installs that would each overwrite the previous.
+  - The supporting infrastructure (`extract_v8_name`, the
+    `accessor_pairs` HashMap keyed by `js_name`, the
+    `emitted_accessors` dedupe set) was added incrementally during the
+    brand-check / SameObject series (commits `020a545`, `0dbb753`,
+    `3806341`); this entry only lacked a smoke test proving the
+    paired-accessor surface works end-to-end. The added test exercises
+    the get/set roundtrip, the descriptor shape (a single descriptor
+    with both `get` and `set` halves, not two separate ones), brand-
+    check propagation across both halves, and coexistence of a paired
+    pair alongside an unrelated lone getter on the same class.
+  - **Back-compat**: lone getters and lone setters keep working
+    unchanged (no `#[v8_name]` required); the Rust ident continues to
+    serve as the JS name when no override is present.
+  - Lands: smoke test only — 7 tests in
+    `tests/v8_paired_accessor_smoke.rs`; the codegen already covered
+    this surface in earlier commits (`020a545`, `0dbb753`, `3806341`).
+
 ## Open
-
-### Same-name getter+setter pairing
-
-Defining `#[v8_getter] value(&self)` and `#[v8_setter] value(&mut self, v)`
-at once is illegal in Rust (duplicate method names) AND the install code
-calls `set_accessor_property` separately for each. Fix needs a
-`#[v8_name = "value"]` rename plus pairing in install codegen. Body's
-`body`/`bodyUsed` are read-only so not blocking fetch.
 
 ### `#[reject_shared]` on `Vec<u8>` setter args
 
