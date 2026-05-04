@@ -34,6 +34,8 @@ use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 
+use zeroship_runtime_macros::WebIdlDict;
+
 use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
 use crate::streams::readable_default_controller as ctlr;
@@ -867,6 +869,22 @@ fn tee_method_callback<'s>(
     }
 }
 
+/// `ReadableStreamIteratorOptions` per Streams §3.2:
+///
+/// ```webidl
+/// dictionary ReadableStreamIteratorOptions {
+///   boolean preventCancel = false;
+/// };
+/// ```
+///
+/// One member, default false. The `WebIdlDict` derive emits the v8
+/// walker; the call site just forwards to `from_v8`.
+#[derive(Default, Debug, WebIdlDict)]
+struct ReadableStreamIteratorOptions {
+    #[webidl_name = "preventCancel"]
+    prevent_cancel: bool,
+}
+
 /// `values(options?)` — spec §3.2.5.9.
 ///
 /// 1. Receiver MUST be a ReadableStream.
@@ -891,23 +909,17 @@ fn values_method_callback<'s>(
     }
 
     // Parse options. Per WebIDL: optional dict; missing/undefined/null →
-    // empty dict (preventCancel defaults to false).
+    // empty dict (preventCancel defaults to false). Non-Object →
+    // TypeError. The derive emits the entire walker.
     let options = args.get(0);
-    let prevent_cancel = if options.is_undefined() || options.is_null() {
-        false
-    } else {
-        let Ok(obj) = v8::Local::<v8::Object>::try_from(options) else {
-            let msg = v8::String::new(scope, "ReadableStream.values: options must be an object")
-                .unwrap();
+    let prevent_cancel = match ReadableStreamIteratorOptions::from_v8(scope, options) {
+        Ok(opts) => opts.prevent_cancel,
+        Err(err) => {
+            let msg = v8::String::new(scope, &err.message).unwrap();
             let exc = v8::Exception::type_error(scope, msg);
             scope.throw_exception(exc);
             return;
-        };
-        let key = v8::String::new(scope, "preventCancel").unwrap();
-        let v = obj
-            .get(scope, key.into())
-            .unwrap_or_else(|| v8::undefined(scope).into());
-        v.boolean_value(scope)
+        }
     };
 
     match crate::streams::async_iter::create_async_iterator(scope, this, prevent_cancel) {
