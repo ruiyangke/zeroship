@@ -87,7 +87,42 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   per-member extraction wraps `WebIdlConvertible::from_v8` in
   `v8::TryCatch` and rethrows the user's exception verbatim. `8065cc0`.
 
----
+### Constructor hooks
+
+- **MAC-02 `#[v8_constructor(post_init = "fn_name")]`** — post-construction
+  hook that runs AFTER the box is installed in V8 internal-field 0
+  and BEFORE the constructor returns to JS. Unblocks streams Reader /
+  Writer / BYOBReader / TransformStream migrations to `#[v8_class]`,
+  plus the SameObject `Request.headers` mint.
+  - Hook signature: `fn(&mut PinScope, Local<Object>) -> Result<(), OpError>`.
+    No `&Self` from the macro — user reads box state via
+    `with_state(scope, this, |s| ...)` (the existing streams pattern),
+    eliminating aliasing-vs-`&mut self`-method risk by construction
+    (design §5.5 Option C).
+  - Per the design: must_new + post_init = post_init never runs if
+    must-new throws (early return); callable_no_new + post_init =
+    post_init only fires for `is_construct_call() == true` (skip
+    private-symbol writes on globalThis); `#[v8_inherit]` = derived's
+    hook runs, base's does NOT auto-chain (matches V8's
+    constructor semantics; explicit chaining works — §5.4 worked
+    AbortSignal example).
+  - Err path: throws via the existing OpError → Exception arm
+    (TypeError / RangeError / Error / DOMException / NodeError).
+    The half-constructed Box stays installed in field 0 until V8's
+    weak finalizer reclaims the wrapper on the next GC sweep
+    (lazy-drop is the v1 contract per §4.4; eager-drop deferred to
+    MAC-NN if production failure rates warrant).
+  - **Phase 1 only.** No consumer migrations land in this commit;
+    Reader / BYOBReader / Writer / TransformStream migrations are
+    follow-up PRs (design §7.1).
+  - Compile-fail diagnostics for the four malformed shapes
+    (missing fn, wrong signature, non-string value, non-ident string)
+    are locked in via `trybuild` in
+    `crates/runtime/tests/compile_fail_post_init/`.
+  - Design: `docs/proposals/macro-constructor-post-init.md`.
+  - Lands: commit `edecd62` (codegen + 9 smoke tests in
+    `tests/v8_post_init_smoke.rs` + 4 trybuild compile-fail
+    snapshots).
 
 ## Open
 
@@ -97,11 +132,6 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   Blocks Request (`web/fetch/request.rs`, ~700 LOC) and Response
   (~550 LOC) whole-class migration. Most invasive change in this list.
   [B.13]
-- **MAC-02 `#[v8_constructor(post_init = "fn")]`** — post-construction
-  hook with `(scope, this, &Self)`. Blocks streams Reader / Writer /
-  BYOBReader / TransformStream — they need to allocate
-  `PromiseResolver` and `set_private` on the wrapper before returning.
-  [B.3]
 
 ### Medium — multi-consumer or significant LOC saved
 

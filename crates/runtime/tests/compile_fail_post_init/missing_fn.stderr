@@ -1,0 +1,15 @@
+error[E0599]: no function or associated item named `does_not_exist` found for struct `Bare` in the current scope
+  --> tests/compile_fail_post_init/missing_fn.rs:15:1
+   |
+13 | pub struct Bare;
+   | --------------- function or associated item `does_not_exist` not found for this struct
+14 |
+15 | #[v8_class]
+   | ^^^^^^^^^^^ function or associated item not found in `Bare`
+   |
+note: if you're trying to build a new `Bare`, consider using `Bare::new` which returns `Bare`
+  --> tests/compile_fail_post_init/missing_fn.rs:18:5
+   |
+18 |     fn new() -> Bare {
+   |     ^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `v8_class` (in Nightly builds, run with -Z macro-backtrace for more info)

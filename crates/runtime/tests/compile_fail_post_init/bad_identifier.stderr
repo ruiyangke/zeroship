@@ -1,0 +1,11 @@
+error: #[v8_constructor]: post_init = "1bad" is not a valid Rust identifier
+  --> tests/compile_fail_post_init/bad_identifier.rs:17:34
+   |
+17 |     #[v8_constructor(post_init = "1bad")]
+   |                                  ^^^^^^
+
+error[E0425]: cannot find value `__Bare_constructor_callback` in this scope
+  --> tests/compile_fail_post_init/bad_identifier.rs:16:6
+   |
+16 | impl Bare {
+   |      ^^^^ not found in this scope

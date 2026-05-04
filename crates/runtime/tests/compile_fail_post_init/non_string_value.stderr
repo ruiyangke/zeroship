@@ -1,0 +1,11 @@
+error: #[v8_constructor]: post_init must be a string literal naming a function on this impl, e.g. post_init = "after_install"
+  --> tests/compile_fail_post_init/non_string_value.rs:19:34
+   |
+19 |     #[v8_constructor(post_init = after_install)]
+   |                                  ^^^^^^^^^^^^^
+
+error[E0425]: cannot find value `__Bare_constructor_callback` in this scope
+  --> tests/compile_fail_post_init/non_string_value.rs:17:6
+   |
+17 | impl Bare {
+   |      ^^^^ not found in this scope
