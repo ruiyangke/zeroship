@@ -68,6 +68,14 @@ enum MethodKind {
     Getter,
     Setter,
     Constructor,
+    /// WebIDL §3.7.4 static operation — `#[v8_static_method]`. No
+    /// receiver, no brand check, no internal-field deref. Installed
+    /// on the constructor FunctionTemplate, not the prototype.
+    StaticMethod,
+    /// WebIDL §3.7.4 static attribute (read-only) — `#[v8_static_getter]`.
+    /// No receiver. Installed via `set_accessor_property` on the
+    /// constructor template.
+    StaticGetter,
 }
 
 struct ClassMethod<'a> {
@@ -107,6 +115,12 @@ fn classify(func: &ImplItemFn) -> Option<MethodKind> {
         }
         if path.is_ident("v8_constructor") {
             return Some(MethodKind::Constructor);
+        }
+        if path.is_ident("v8_static_method") {
+            return Some(MethodKind::StaticMethod);
+        }
+        if path.is_ident("v8_static_getter") {
+            return Some(MethodKind::StaticGetter);
         }
     }
     None
@@ -432,6 +446,15 @@ fn has_mut_self(func: &ImplItemFn) -> bool {
     })
 }
 
+/// True if the function has ANY receiver (`self`, `&self`, `&mut self`).
+/// Used to reject static methods that accidentally took a `self` arg.
+fn has_any_receiver(func: &ImplItemFn) -> bool {
+    func.sig
+        .inputs
+        .iter()
+        .any(|arg| matches!(arg, FnArg::Receiver(_)))
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -497,6 +520,26 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let same_object_flag =
                     matches!(kind, MethodKind::Getter) && extract_same_object(&func.attrs);
 
+                // Compile-time guard: static methods / getters cannot
+                // have a receiver. WebIDL §3.7.4 static operations are
+                // invoked via `Class.method()` with no `this`; the
+                // emitted callback has no internal-field 0 to recover
+                // a `Box<Self>` from, so a `&self` / `&mut self` arg
+                // would never be bound. Reject at compile time with a
+                // clear pointer rather than emit broken codegen.
+                if matches!(kind, MethodKind::StaticMethod | MethodKind::StaticGetter)
+                    && has_any_receiver(func)
+                {
+                    return syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_static_method] / #[v8_static_getter] cannot have a \
+                         `self` receiver — static operations are invoked via \
+                         `Class.method()` with no `this`",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+
                 methods.push(ClassMethod {
                     kind,
                     func,
@@ -554,11 +597,17 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // immediately) but install on the prototype identically — async vs
     // sync is opaque to V8. SameObject getters have their own codegen
     // path that wraps the user method with private-symbol caching.
+    // Static methods / getters skip the brand check and internal-field
+    // deref entirely (no receiver) and install on the constructor
+    // template via `set_with_attr` / `set_accessor_property`.
     let callbacks: Vec<TokenStream2> = regular
         .iter()
         .map(|m| match m.kind {
             MethodKind::AsyncMethod => gen_async_method_callback(class_ty, m),
             MethodKind::Getter if m.same_object => gen_same_object_getter_callback(class_ty, m),
+            MethodKind::StaticMethod | MethodKind::StaticGetter => {
+                gen_static_callback(class_ty, m)
+            }
             _ => gen_method_callback(class_ty, m),
         })
         .collect();
@@ -879,6 +928,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
                     || p.is_ident("v8_getter")
                     || p.is_ident("v8_setter")
                     || p.is_ident("v8_constructor")
+                    || p.is_ident("v8_static_method")
+                    || p.is_ident("v8_static_getter")
                     || p.is_ident("v8_name")
                     || p.is_ident("reject_shared"))
             });
@@ -992,7 +1043,68 @@ fn gen_install(
                         }
                     })
                 }
-                MethodKind::Constructor => None,
+                MethodKind::Constructor
+                | MethodKind::StaticMethod
+                | MethodKind::StaticGetter => None,
+            }
+        })
+        .collect();
+
+    // Static-method / static-getter installs go on the constructor
+    // FunctionTemplate, NOT the prototype. WebIDL §3.7.4: static
+    // operations and attributes live as own-properties of the
+    // interface object (the constructor function). Implementation:
+    // FunctionTemplate inherits Template, so we can call `set_with_attr`
+    // / `set_accessor_property` directly on `__ctor_tmpl` — V8 promotes
+    // the property onto the resolved Function once `get_function`
+    // materialises it.
+    let static_sets: Vec<TokenStream2> = methods
+        .iter()
+        .filter_map(|m| {
+            let js_name = m.js_name.clone();
+            match m.kind {
+                MethodKind::StaticMethod => {
+                    let name = &m.func.sig.ident;
+                    let cb = method_callback_ident(class_ty, name);
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            // Attributes default to NONE — same as
+                            // the prototype-method install above.
+                            // Browsers expose static methods as
+                            // configurable + writable + non-enumerable
+                            // (matching standard JS class semantics);
+                            // we follow that with an explicit DONT_ENUM.
+                            __ctor_tmpl.set_with_attr(
+                                __key.into(),
+                                __fn_tmpl.into(),
+                                v8::PropertyAttribute::DONT_ENUM,
+                            );
+                        }
+                    })
+                }
+                MethodKind::StaticGetter => {
+                    let name = &m.func.sig.ident;
+                    let cb = method_callback_ident(class_ty, name);
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            // FunctionTemplate exposes
+                            // `set_accessor_property`; static getters
+                            // live on the constructor function as
+                            // accessor descriptors per WebIDL §3.7.4.
+                            __ctor_tmpl.set_accessor_property(
+                                __key.into(),
+                                Some(__getter_tmpl),
+                                None,
+                                v8::PropertyAttribute::DONT_ENUM,
+                            );
+                        }
+                    })
+                }
+                _ => None,
             }
         })
         .collect();
@@ -1211,6 +1323,12 @@ fn gen_install(
 
             let __proto = __ctor_tmpl.prototype_template(scope);
             #(#proto_sets)*
+
+            // Static operations / attributes per WebIDL §3.7.4 — own
+            // properties of the constructor function, not the prototype.
+            // No-op when no `#[v8_static_method]` / `#[v8_static_getter]`
+            // attributes are present on the impl block.
+            #(#static_sets)*
 
             // `#[v8_iterable(...)]` — install keys / values / entries /
             // forEach / @@iterator on the prototype template. The
@@ -1805,6 +1923,52 @@ fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStr
             // 7. Return the unsettled Promise. JS sees this as the
             //    method's return value and `await`s on it.
             rv.set(__promise.into());
+        }
+    }
+}
+
+/// Codegen for `#[v8_static_method]` / `#[v8_static_getter]` — WebIDL
+/// §3.7.4 static operations / attributes. No receiver, no brand check,
+/// no internal-field deref. The emitted callback parses JS args, calls
+/// the user's free fn (`<Class>::method(args)` syntax), and routes the
+/// return value through the standard `gen_call_return` marshaling.
+///
+/// Static getters re-use the same callback shape as static methods —
+/// V8's accessor mechanism invokes the callback with no args, the
+/// extraction loop emits no args (the parser skips the receiver, and
+/// there's no receiver, so `params` is whatever args the user
+/// declared — typically zero for getters).
+fn gen_static_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+    let method_name = &m.func.sig.ident;
+    let callback_name = method_callback_ident(class_ty, method_name);
+
+    // Static methods take no `self`, so `parse_params_skipping_self`
+    // collects every param verbatim.
+    let params = parse_params_skipping_self(m.func);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
+
+    let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    let call = quote! {
+        <#class_ty>::#method_name(#(#call_args),*)
+    };
+
+    let call_return = gen_call_return(&call, &m.func.sig.output);
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            // No brand check: WebIDL §3.7.4 static operations are
+            // invoked with no `this` (or `Class` itself as `this`).
+            // No internal-field deref: there's no boxed `Self` to
+            // recover from a wrapper instance.
+            // No re-entrancy guard: there's no `&mut self` to alias.
+            #(#extractions)*
+            #call_return
         }
     }
 }

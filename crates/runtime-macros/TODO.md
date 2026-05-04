@@ -38,6 +38,12 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
 - **`#[v8_async_method]`** — async methods compile to a sync V8 callback
   + `PromiseResolver` + spawn via `state.spawned_ops`. `&mut self`
   rejected — `0a26d45b`, `17b2e880`, `caa4f450`.
+- **`#[v8_static_method]` / `#[v8_static_getter]`** — WebIDL §3.7.4
+  static operations / attributes installed on the constructor template
+  (not the prototype). No receiver, no brand check, no internal-field
+  deref; a `self` arg triggers a `compile_error!`. Unblocks 9 sites
+  (Response.error/json/redirect, URL.canParse/parse, AbortSignal.abort/
+  timeout/any, ReadableStream.from). [MAC-07 / B.1] — `<commit>`.
 - **Public `__zs_is_<Class>`** — `pub fn __zs_is_<Class>(scope, v: Local<Value>)
   -> bool` emitted alongside `<Class>::install`. Re-exports the per-class
   brand check for cross-class type queries; eliminates fragile
@@ -99,9 +105,6 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
 
 ### Medium — multi-consumer or significant LOC saved
 
-- **MAC-07 `#[v8_static_method]` / `#[v8_static_getter]`** — 9 hand-rolled
-  `install_static` sites: Response `error/json/redirect`, URL `canParse/parse`,
-  AbortSignal `abort/timeout/any`, ReadableStream.from. -200 LOC. [B.1]
 - **MAC-08 `#[v8_getter(same_object, project = field)]`** — cache on
   state field instead of private symbol (Request.clone semantics). 5
   consumers: URL.searchParams, Request.headers/.signal, Response.headers,

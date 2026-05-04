@@ -131,6 +131,57 @@ pub fn v8_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marker attribute consumed by `#[v8_class]`: declare a static method
+/// installed on the constructor function (not the prototype) per
+/// WebIDL §3.7.4 static operations.
+///
+/// ```ignore
+/// #[v8_class]
+/// impl Response {
+///     #[v8_static_method]
+///     fn json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>)
+///         -> Result<v8::Global<v8::Object>, OpError> { ... }
+/// }
+/// ```
+///
+/// Codegen skips the brand check, the internal-field deref, and the
+/// `&self` / `&mut self` plumbing — static methods don't have a
+/// receiver. The function is installed via `class_tmpl.set_with_attr`
+/// so it shows up at `Class.method` (not on `Class.prototype.method`
+/// or on instances).
+///
+/// Static methods cannot have a receiver (`&self` / `&mut self`); a
+/// receiver triggers a `compile_error!` pointing at the method.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_static_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Marker attribute consumed by `#[v8_class]`: declare a static getter
+/// installed on the constructor function per WebIDL §3.7.4 static
+/// attributes.
+///
+/// ```ignore
+/// #[v8_class]
+/// impl Box {
+///     #[v8_static_getter]
+///     fn DEFAULT_TIMEOUT() -> u32 { 5000 }
+/// }
+/// ```
+///
+/// Codegen emits the getter as a static method (no setter pairing),
+/// installed via `set_accessor_property` on the constructor template.
+/// The getter's body has no receiver and runs at every read of
+/// `Class.DEFAULT_TIMEOUT`.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_static_getter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Marker attribute consumed by `#[v8_class]`: rename a method on the
 /// JS-visible surface. `#[v8_name = "delete"]` lets a Rust `fn delete_`
 /// be installed as `Foo.prototype.delete`. Outside of a `#[v8_class]`
