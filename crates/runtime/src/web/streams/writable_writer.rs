@@ -31,6 +31,9 @@
 
 use std::cell::RefCell;
 
+use zeroship_runtime_macros::{v8_class, v8_constructor};
+
+use crate::state::OpError;
 use crate::streams::algorithms;
 use crate::streams::promise_resolve;
 use crate::streams::slots::{self, CLOSED_PROMISE, READY_PROMISE, STREAM, WRITER};
@@ -40,11 +43,20 @@ use crate::streams::writable::{is_writable_stream, with_ws_state, WSState};
 const WRITER_BRAND: &str = "[[ws.writer.brand]]";
 
 // ---------------------------------------------------------------------------
-// Writer state — Box<WriterState> in internal field 0
+// Writer state — Box<WritableStreamDefaultWriter> in internal field 0
 // ---------------------------------------------------------------------------
 
+/// Boxed state behind the JS `WritableStreamDefaultWriter` wrapper. Lives
+/// in internal field 0; reclaimed by the V8 weak finalizer registered via
+/// the `#[v8_class]` macro.
+///
+/// MAC-02 migration: parallels the readers. Self::new validates the
+/// stream argument and stashes it in `pending_stream` for the post_init
+/// hook (`after_install`) to consume. The hook does box-install-dependent
+/// setup: WRITER_BRAND priv-sym, [[stream]] / stream.[[writer]] wires,
+/// and the four-way state-driven closedPromise / readyPromise init.
 #[allow(missing_debug_implementations)]
-pub struct WriterState {
+pub struct WritableStreamDefaultWriter {
     /// Resolver paired with the priv-sym `[[closedPromise]]`. Becomes None
     /// after first resolve/reject — subsequent EnsureClosedPromiseRejected
     /// allocates a fresh pre-rejected promise.
@@ -53,14 +65,82 @@ pub struct WriterState {
     /// first resolve/reject. EnsureReadyPromiseRejected allocates fresh
     /// when None.
     pub ready_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
+    /// Stream stashed by the constructor body for `after_install`.
+    /// `None` for writers built via `acquire_writable_stream_default_writer`
+    /// (the Rust-side helper handles SetUpWritableStreamDefaultWriter
+    /// directly without going through post_init).
+    pub pending_stream: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
-impl WriterState {
-    fn new() -> Self {
+impl WritableStreamDefaultWriter {
+    /// Allocate the boxed state with no stashed stream — used by the
+    /// `acquire_*` Rust helper which runs SetUpWritableStreamDefaultWriter
+    /// directly rather than through the macro's post_init hook.
+    fn new_for_internal() -> Self {
         Self {
             closed_resolver: RefCell::new(None),
             ready_resolver: RefCell::new(None),
+            pending_stream: RefCell::new(None),
         }
+    }
+}
+
+#[v8_class]
+#[v8_to_string_tag = "WritableStreamDefaultWriter"]
+impl WritableStreamDefaultWriter {
+    /// `new WritableStreamDefaultWriter(stream)` — spec §4.4.3.
+    /// Validates the argument is a WritableStream that is not already
+    /// locked, then stashes the stream for `after_install` to consume.
+    #[v8_constructor(post_init = "after_install")]
+    fn new(
+        scope: &mut v8::PinScope,
+        stream: v8::Local<v8::Value>,
+    ) -> Result<Self, OpError> {
+        let stream = v8::Local::<v8::Object>::try_from(stream).map_err(|_| {
+            OpError::type_error(
+                "WritableStreamDefaultWriter: argument must be a WritableStream",
+            )
+        })?;
+        if !is_writable_stream(scope, stream) {
+            return Err(OpError::type_error(
+                "WritableStreamDefaultWriter: argument must be a WritableStream",
+            ));
+        }
+        if algorithms::is_writable_stream_locked(scope, stream) {
+            return Err(OpError::type_error(
+                "WritableStreamDefaultWriter: stream is already locked",
+            ));
+        }
+        let stream_g = v8::Global::new(scope, stream);
+        Ok(Self {
+            closed_resolver: RefCell::new(None),
+            ready_resolver: RefCell::new(None),
+            pending_stream: RefCell::new(Some(stream_g)),
+        })
+    }
+
+    /// `SetUpWritableStreamDefaultWriter(writer, stream)` — spec §4.5.4.
+    /// Runs after the macro has installed the Box in field 0 and the
+    /// finalizer is registered.
+    ///
+    /// Set the WRITER_BRAND priv-sym BEFORE the first `with_state` call:
+    /// `with_state` itself runs `is_default_writer` (which checks the
+    /// brand) and returns None if the brand is missing. Without writing
+    /// the brand first, `pending_stream` would be unreachable.
+    pub(crate) fn after_install(
+        scope: &mut v8::PinScope,
+        this: v8::Local<v8::Object>,
+    ) -> Result<(), OpError> {
+        let brand = slots::private_sym(scope, WRITER_BRAND);
+        let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
+        this.set_private(scope, brand, true_v);
+
+        let stream_g = with_state(scope, this, |s| s.pending_stream.borrow_mut().take())
+            .ok_or_else(|| OpError::error("after_install: with_state returned None"))?
+            .ok_or_else(|| OpError::error("after_install: missing pending_stream"))?;
+        let stream = v8::Local::new(scope, &stream_g);
+        finalize_writer(scope, this, stream);
+        Ok(())
     }
 }
 
@@ -76,14 +156,14 @@ pub fn is_default_writer(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -
 pub fn with_state<R>(
     scope: &mut v8::PinScope,
     writer: v8::Local<v8::Object>,
-    f: impl FnOnce(&WriterState) -> R,
+    f: impl FnOnce(&WritableStreamDefaultWriter) -> R,
 ) -> Option<R> {
     if !is_default_writer(scope, writer) {
         return None;
     }
     let raw_v8_field = writer.get_internal_field(scope, 0)?;
     let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const WriterState;
+    let ptr = ext.value() as *const WritableStreamDefaultWriter;
     if ptr.is_null() {
         return None;
     }
@@ -92,140 +172,17 @@ pub fn with_state<R>(
 }
 
 // ---------------------------------------------------------------------------
-// Class template
+// Internal "AcquireWritableStreamDefaultWriter" path — Rust-side construction
 // ---------------------------------------------------------------------------
 
-fn writer_class_template<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
-    let class_name = v8::String::new(scope, "WritableStreamDefaultWriter").unwrap();
-    ctor_tmpl.set_class_name(class_name);
-    ctor_tmpl
-        .instance_template(scope)
-        .set_internal_field_count(1);
-
-    let proto = ctor_tmpl.prototype_template(scope);
-
-    // closed getter
-    {
-        let key = v8::String::new(scope, "closed").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-    // desiredSize getter
-    {
-        let key = v8::String::new(scope, "desiredSize").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, desired_size_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-    // ready getter
-    {
-        let key = v8::String::new(scope, "ready").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, ready_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-
-    install_proto_method(scope, proto, "abort", abort_method_callback);
-    install_proto_method(scope, proto, "close", close_method_callback);
-    install_proto_method(scope, proto, "releaseLock", release_lock_method_callback);
-    install_proto_method(scope, proto, "write", write_method_callback);
-
-    let tag_sym = v8::Symbol::get_to_string_tag(scope);
-    let tag_value = v8::String::new(scope, "WritableStreamDefaultWriter").unwrap();
-    proto.set_with_attr(
-        tag_sym.into(),
-        tag_value.into(),
-        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
-    );
-
-    ctor_tmpl
-}
-
-fn install_proto_method(
-    scope: &mut v8::PinScope,
-    proto: v8::Local<v8::ObjectTemplate>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    proto.set(key.into(), tmpl.into());
-}
-
-// ---------------------------------------------------------------------------
-// Constructor — `new WritableStreamDefaultWriter(stream)` (§4.4.3)
-// ---------------------------------------------------------------------------
-
-fn constructor_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    if !args.is_construct_call() {
-        let msg = v8::String::new(scope, "WritableStreamDefaultWriter: must be called with 'new'").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    let writer_obj = args.this();
-    let stream_arg = args.get(0);
-    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_arg) else {
-        let msg = v8::String::new(
-            scope,
-            "WritableStreamDefaultWriter: argument must be a WritableStream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    };
-    if !is_writable_stream(scope, stream) {
-        let msg = v8::String::new(
-            scope,
-            "WritableStreamDefaultWriter: argument must be a WritableStream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    if algorithms::is_writable_stream_locked(scope, stream) {
-        let msg = v8::String::new(
-            scope,
-            "WritableStreamDefaultWriter: stream is already locked",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    if let Err(err) = setup_writer(scope, writer_obj, stream) {
-        let msg = v8::String::new(scope, &err).unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-    }
-}
-
-/// `AcquireWritableStreamDefaultWriter(stream)` — §4.5.1.
+/// `AcquireWritableStreamDefaultWriter(stream)` — spec §4.5.1.
 ///
 /// Build a fresh writer wrapper bound to `stream`. Used by
 /// `WritableStream.getWriter()`.
+///
+/// The macro-emitted constructor's box install + post_init only runs for
+/// JS-side `new WritableStreamDefaultWriter(stream)`. Internal-only mints
+/// allocate the Box manually here, mirroring the readers + AbortSignal.
 pub fn acquire_writable_stream_default_writer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
@@ -233,7 +190,7 @@ pub fn acquire_writable_stream_default_writer<'s>(
     if algorithms::is_writable_stream_locked(scope, stream) {
         return Err("WritableStream.getWriter: stream is already locked".to_string());
     }
-    let tmpl = writer_class_template(scope);
+    let tmpl = WritableStreamDefaultWriter::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let writer_obj = inst_tmpl
         .new_instance(scope)
@@ -242,22 +199,21 @@ pub fn acquire_writable_stream_default_writer<'s>(
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     writer_obj.set_prototype(scope, proto_v);
-    setup_writer(scope, writer_obj, stream)?;
+    setup_writer_internal(scope, writer_obj, stream);
     Ok(writer_obj)
 }
 
-/// `SetUpWritableStreamDefaultWriter(writer, stream)` — §4.5.4.
-fn setup_writer(
+/// Box install + brand priv-sym + `SetUpWritableStreamDefaultWriter`
+/// state dispatch for the Rust-side (`acquire_*`) path. The lock-already
+/// check happens in the caller (`acquire_*`) so this helper is
+/// infallible.
+fn setup_writer_internal(
     scope: &mut v8::PinScope,
     writer: v8::Local<v8::Object>,
     stream: v8::Local<v8::Object>,
-) -> Result<(), String> {
-    if algorithms::is_writable_stream_locked(scope, stream) {
-        return Err("stream is already locked".to_string());
-    }
-
+) {
     // Build state.
-    let state = WriterState::new();
+    let state = WritableStreamDefaultWriter::new_for_internal();
     let boxed = Box::new(state);
     let raw_ptr = Box::into_raw(boxed);
     let raw_addr = raw_ptr as usize;
@@ -273,11 +229,26 @@ fn setup_writer(
         scope,
         writer,
         Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut WriterState));
+            drop(Box::from_raw(raw_addr as *mut WritableStreamDefaultWriter));
         }),
     );
     std::mem::forget(weak);
 
+    finalize_writer(scope, writer, stream);
+}
+
+/// `SetUpWritableStreamDefaultWriter(writer, stream)` step 3+ — wire the
+/// writer ↔ stream slots and dispatch on stream state to initialize the
+/// closedPromise / readyPromise pair. Shared between the JS path's
+/// `after_install` hook (which writes the brand priv-sym before calling
+/// here) and the Rust `setup_writer_internal` path. Runs after the box
+/// has been installed in field 0 AND the brand priv-sym is set, so
+/// `with_state` resolves correctly.
+fn finalize_writer(
+    scope: &mut v8::PinScope,
+    writer: v8::Local<v8::Object>,
+    stream: v8::Local<v8::Object>,
+) {
     // Wire writer.[[stream]] = stream and stream.[[writer]] = writer.
     slots::write_slot(scope, writer, STREAM, stream.into());
     slots::write_slot(scope, stream, WRITER, writer.into());
@@ -335,7 +306,6 @@ fn setup_writer(
             slots::write_slot(scope, writer, CLOSED_PROMISE, p2.into());
         }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -788,8 +758,57 @@ fn same_value<'s>(
 // ---------------------------------------------------------------------------
 
 pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    let tmpl = writer_class_template(scope);
+    // Macro-emitted FunctionTemplate carries the constructor + Symbol.toStringTag.
+    let tmpl = WritableStreamDefaultWriter::install(scope);
+
+    // Patch in the IDL methods on the prototype. They stay raw
+    // FunctionCallbacks for the same reason as the readers (need direct
+    // args.this() + Promise alloc). See the headers.rs `install_global`
+    // pattern for prior art.
     let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
+
+    install_proto_getter(scope, proto, "closed", closed_getter_callback);
+    install_proto_getter(scope, proto, "desiredSize", desired_size_getter_callback);
+    install_proto_getter(scope, proto, "ready", ready_getter_callback);
+
+    install_proto_method_on_object(scope, proto, "abort", abort_method_callback);
+    install_proto_method_on_object(scope, proto, "close", close_method_callback);
+    install_proto_method_on_object(scope, proto, "releaseLock", release_lock_method_callback);
+    install_proto_method_on_object(scope, proto, "write", write_method_callback);
+
     let key = v8::String::new(scope, "WritableStreamDefaultWriter").unwrap();
     global.set(scope, key.into(), class_fn.into());
+}
+
+fn install_proto_getter(
+    scope: &mut v8::PinScope,
+    proto: v8::Local<v8::Object>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let getter_tmpl = v8::FunctionTemplate::new(scope, cb);
+    let getter_fn = getter_tmpl.get_function(scope).unwrap();
+    let mut desc = v8::PropertyDescriptor::new_from_get_set(
+        getter_fn.into(),
+        v8::undefined(scope).into(),
+    );
+    desc.set_configurable(true);
+    desc.set_enumerable(true);
+    proto.define_property(scope, key.into(), &desc);
+}
+
+fn install_proto_method_on_object(
+    scope: &mut v8::PinScope,
+    proto: v8::Local<v8::Object>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let func = tmpl.get_function(scope).unwrap();
+    proto.set(scope, key.into(), func.into());
 }

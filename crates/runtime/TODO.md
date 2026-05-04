@@ -154,10 +154,17 @@ MAC-02 (the `post_init` hook) shipped to unblock these. Status:
     helper between the JS path's `after_install` hook and the
     Rust-side `set_up_byob_reader_internal` path. Migrated in this
     branch.
+  - `WritableStreamDefaultWriter` — `#[v8_class]` + post_init. The
+    constructor body validates the stream + lock, post_init writes
+    the WRITER_BRAND priv-sym (must come before any `with_state`
+    call, since `with_state` brand-checks) and runs the four-way
+    `WSState` dispatch that initializes closedPromise / readyPromise.
+    The state-dispatch logic lives in `finalize_writer`, shared
+    between `after_install` and `setup_writer_internal` (used by
+    `acquire_writable_stream_default_writer`). Migrated in this
+    branch.
 
 **Deferred from MAC-02 phase 2** (with reasons):
-
-  - `WritableStreamDefaultWriter` — same shape as the readers; deferred.
   - `TransformStream` — most complex (readable + writable Promise wiring,
     budget guard, controller-from-transformer setup). The constructor
     body interleaves with `set_up_transform_stream_default_controller_from_transformer`
