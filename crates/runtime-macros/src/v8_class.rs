@@ -29,15 +29,16 @@
 //! inside the body. See `gen_async_method_callback`'s doc comment for
 //! the borrow-safety contract.
 //!
-//! ## Known gaps (deferred until a real consumer needs them)
+//! ## Same-name getter+setter pairing
 //!
-//! - **Same-name getter+setter pairing.** Defining `#[v8_getter]
-//!   value(&self)` and `#[v8_setter] value(&mut self, v)` at once is
-//!   illegal in Rust (duplicate method names) and the install code
-//!   calls `set_accessor_property` separately for each, which V8
-//!   rejects. Fix needs a `#[v8_name = "value"]` rename plus pairing
-//!   in install codegen. Body's `body`/`bodyUsed` are read-only so
-//!   not blocking fetch.
+//! Defining `#[v8_getter] value(&self)` AND `#[v8_setter] value(&mut
+//! self, v)` in the same impl block is illegal Rust (duplicate method
+//! names). The supported pattern: rename the Rust fns and apply
+//! `#[v8_name = "value"]` to both halves. The install codegen pairs
+//! by JS-visible name into a single `set_accessor_property("value",
+//! getter, setter, attrs)` call rather than two installs that would
+//! each overwrite the previous. See `tests/v8_paired_accessor_smoke.rs`
+//! for the supported shapes.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

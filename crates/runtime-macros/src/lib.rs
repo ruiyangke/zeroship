@@ -249,12 +249,20 @@ pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
 /// `K` and `V` must be one of: `ByteString`, `USVString`, `String`,
 /// `u32`. Additionally `V` may be `Vec<u8>` (yielded as a Uint8Array).
 ///
-/// **Iteration model**: the derive uses snapshot iteration — the
-/// iterator clones `value_pairs()` once at factory-call time and walks
-/// the snapshot. This deviates from WebIDL §3.7.10.2's live-iteration
-/// requirement; classes that need live semantics (Headers,
-/// URLSearchParams, FormData) should hand-roll the iterator instead.
-/// The trade-off is documented in the codegen's doc-comment.
+/// **Iteration model**: the derive supports both snapshot and live
+/// iteration via a `mode = ...` flag (default = `snapshot` for back-
+/// compat):
+///
+///   - `mode = snapshot` (default): the iterator clones `value_pairs()`
+///     once at factory-call time and walks the snapshot. Mutations to
+///     the parent collection mid-iteration are NOT visible. Suits
+///     read-only iterables (the common case).
+///
+///   - `mode = live`: each `next()` re-reads `value_pairs()` on the
+///     parent and indexes at the current cursor; `forEach` re-reads
+///     between callbacks. Mutations between yields ARE visible per
+///     WebIDL §3.7.10.2. Required for Headers / FormData /
+///     URLSearchParams iterators.
 ///
 /// Usage:
 /// ```ignore
@@ -269,6 +277,15 @@ pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
 ///     fn value_pairs(&self) -> Vec<(ByteString, ByteString)> {
 ///         self.entries.clone()
 ///     }
+/// }
+///
+/// // For collections whose contents can change mid-iteration:
+/// struct Bag { entries: RefCell<Vec<(ByteString, ByteString)>> }
+///
+/// #[v8_class]
+/// #[v8_iterable(key = ByteString, value = ByteString, mode = live)]
+/// impl Bag {
+///     // ... value_pairs reads self.entries.borrow().clone() ...
 /// }
 /// ```
 #[proc_macro_attribute]

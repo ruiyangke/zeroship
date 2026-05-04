@@ -203,40 +203,72 @@ so we can grep back through the rationale.
   - Lands: commit `40494fa3` (codegen + 14 smoke tests in
     `tests/v8_webidl_enum_smoke.rs`).
 
-- **`#[v8_iterable(key = K, value = V)]` for default pair iterators** —
-  WebIDL §3.7.10.2 (default iterators) + §3.7.10.3 (forEach). On a
-  `#[v8_class]` impl block, emits the full pair-iterator surface
-  (keys / values / entries / forEach / @@iterator) plus a companion
-  `<Class>Iterator` class — from a single user-supplied
-  `value_pairs(&self) -> Vec<(K, V)>` method.
-  - **Iteration model**: snapshot. The factory clones `value_pairs()`
-    once at factory-call time and the iterator walks the snapshot.
-    Spec mandates LIVE iteration; this is a deliberate simplification
-    documented in the codegen's doc-comment. Existing live-iteration
-    consumers (Headers, URLSearchParams, FormData iterators) keep
-    their hand-rolled implementations.
+- **`#[v8_iterable(key = K, value = V [, mode = snapshot|live])]` for
+  default pair iterators** — WebIDL §3.7.10.2 (default iterators) +
+  §3.7.10.3 (forEach). On a `#[v8_class]` impl block, emits the full
+  pair-iterator surface (keys / values / entries / forEach /
+  @@iterator) plus a companion `<Class>Iterator` class — from a single
+  user-supplied `value_pairs(&self) -> Vec<(K, V)>` method.
+  - **Iteration model** (selectable via `mode = ...`):
+    - `mode = snapshot` (default): factory clones `value_pairs()`
+      once at factory-call time, iterator walks the snapshot.
+      Mutations to the parent during iteration are NOT visible.
+      Suits read-only iterables (the common case).
+    - `mode = live`: each `next()` re-reads `value_pairs()` on the
+      stashed-Global parent and indexes at the current cursor;
+      `forEach` re-reads BETWEEN callbacks per WebIDL §3.7.10.3.
+      Mutations between yields ARE visible. If the parent shrinks
+      below the cursor, `next()` yields `done`. Required for Headers
+      / FormData / URLSearchParams iterators.
   - **Type bounds**: K ∈ {ByteString, USVString, String, u32};
     V ∈ same set + Vec<u8> (yielded as Uint8Array).
   - **Brand check**: every factory + forEach reuses the parent's
     `__brand_check_<Class>`; cross-class deception
     (`MyMap.prototype.keys.call(other)`) throws "Illegal invocation".
+    The iterator's `next()` brand-checks via the iterator class's
+    own internal-field-1-is-External check; in live mode this is
+    augmented with a defensive null-check on the parent's internal
+    field (yields `done` rather than UB if the parent has been GC'd
+    in a torn-down isolate).
   - Iterator constructor is locked: `new <Class>Iterator()` throws.
   - Migration follow-ups (deferred — separate PR per class to keep
-    risk small): URLSearchParamsIterator (~150 LOC), HeadersIterator
-    (live; needs derive extension), FormDataIterator. Total saving
-    estimated ~400 LOC across 3 classes.
-  - Lands: commit `506a588f` (codegen + 14 smoke tests in
-    `tests/v8_iterable_smoke.rs`).
+    risk small): URLSearchParamsIterator (~150 LOC),
+    HeadersIterator (live), FormDataIterator. Total saving estimated
+    ~400 LOC across 3 classes.
+  - Lands: commit `506a588f` (snapshot mode codegen + 14 smoke tests
+    in `tests/v8_iterable_smoke.rs`); follow-up commit `5901d68`
+    adds `mode = live` for spec-compliant iteration (9 smoke tests in
+    `tests/v8_iterable_live_smoke.rs`) — covers insert/delete during
+    iteration, shrink-below-cursor, live forEach with self-mutating
+    callback, and explicit `mode = snapshot` back-compat.
+
+- **Same-name getter+setter pairing via `#[v8_name = "..."]`** —
+  paired getters and setters that share a JS-visible name install as a
+  single accessor descriptor. Defining the bare Rust shape (a getter
+  AND a setter both literally named `value`) is impossible — Rust
+  rejects duplicate method names — so the user renames the Rust fns
+  (`get_value` / `set_value`) and applies `#[v8_name = "value"]` to
+  both halves. The install codegen pairs by JS-visible name into one
+  `set_accessor_property("value", getter_cb, setter_cb, attrs)` call
+  rather than two installs that would each overwrite the previous.
+  - The supporting infrastructure (`extract_v8_name`, the
+    `accessor_pairs` HashMap keyed by `js_name`, the
+    `emitted_accessors` dedupe set) was added incrementally during the
+    brand-check / SameObject series (commits `020a545`, `0dbb753`,
+    `3806341`); this entry only lacked a smoke test proving the
+    paired-accessor surface works end-to-end. The added test exercises
+    the get/set roundtrip, the descriptor shape (a single descriptor
+    with both `get` and `set` halves, not two separate ones), brand-
+    check propagation across both halves, and coexistence of a paired
+    pair alongside an unrelated lone getter on the same class.
+  - **Back-compat**: lone getters and lone setters keep working
+    unchanged (no `#[v8_name]` required); the Rust ident continues to
+    serve as the JS name when no override is present.
+  - Lands: smoke test only — 7 tests in
+    `tests/v8_paired_accessor_smoke.rs`; the codegen already covered
+    this surface in earlier commits (`020a545`, `0dbb753`, `3806341`).
 
 ## Open
-
-### Same-name getter+setter pairing
-
-Defining `#[v8_getter] value(&self)` and `#[v8_setter] value(&mut self, v)`
-at once is illegal in Rust (duplicate method names) AND the install code
-calls `set_accessor_property` separately for each. Fix needs a
-`#[v8_name = "value"]` rename plus pairing in install codegen. Body's
-`body`/`bodyUsed` are read-only so not blocking fetch.
 
 ### `#[reject_shared]` on `Vec<u8>` setter args
 
@@ -343,13 +375,19 @@ class per PR to keep risk small:
   - `ResponseType` — fetch
   - `ReadableStreamReaderMode`, `ReadableStreamType` — streams
 
-**`#[v8_iterable]` migration candidates** (note: snapshot vs. live —
-each requires assessing which mode the spec requires for the class):
-  - `URLSearchParamsIterator` (~150 LOC) — `crates/runtime/src/web/url/search_params.rs`
+**`#[v8_iterable]` migration candidates** (each requires picking the
+right `mode = snapshot` / `mode = live` per spec):
+  - `URLSearchParamsIterator` (~150 LOC) —
+    `crates/runtime/src/web/url/search_params.rs`. LIVE per WebIDL —
+    `URLSearchParams.delete` mid-iteration MUST be observable; use
+    `mode = live`.
   - `HeadersIterator` (~150 LOC) — `crates/runtime/src/web/headers.rs`.
-    LIVE iteration required; deriving needs a "live" mode addition
-    OR keep hand-rolled.
-  - `FormDataIterator` (~100 LOC) — `crates/runtime/src/web/dom/form_data.rs`
+    LIVE per WebIDL — `Headers.append` / `Headers.delete` mid-iteration
+    must be observable; use `mode = live`. Now unblocked: the derive
+    supports live mode.
+  - `FormDataIterator` (~100 LOC) —
+    `crates/runtime/src/web/dom/form_data.rs`. LIVE per WebIDL; use
+    `mode = live`.
 
 Total estimated savings: ~400 LOC of iterator boilerplate, ~200 LOC
 of dict-parsing boilerplate, ~100 LOC of enum-parsing boilerplate.
