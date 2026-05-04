@@ -25,6 +25,10 @@ async-trait = { workspace = true }
 mimalloc = { workspace = true }
 subtle = "2"
 zeroize = "1"
+# `stream_body_to_tmp_file` is generic over `Stream<Item = Result<B, E>>`
+# (B: AsRef<[u8]>) so the helper compiles against ntex's `Bytes` from
+# the request payload. We need `futures::Stream` in the public signature.
+futures = { workspace = true }
 # Auth
 bcrypt = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -41,6 +45,10 @@ rand = "0.8"
 # depends on these crates — only the test packer does.
 tar = { workspace = true }
 zstd = { workspace = true }
+# Stream tmp tests use `bytes::Bytes` to construct `stream::iter`
+# inputs. The production helper is generic over `B: AsRef<[u8]>` so
+# `bytes` itself isn't a runtime dep.
+bytes = { workspace = true }
 
 [lints]
 workspace = true

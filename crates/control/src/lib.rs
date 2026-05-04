@@ -107,4 +107,11 @@ pub struct AppState {
     /// XFF; otherwise an attacker with direct network reach can spoof
     /// audit log IPs and rate-limit buckets.
     pub trust_proxy: bool,
+    /// Directory where in-flight `.zsapp` deploy bodies are streamed
+    /// before mmap+ingest. Defaults to `std::env::temp_dir()`. Operators
+    /// may pin it to a fast local disk (`--deploy-tmp-dir`) so deploy
+    /// throughput isn't bottlenecked by `/tmp` space or filesystem
+    /// type. Files are unlinked immediately after ingest (success or
+    /// failure).
+    pub deploy_tmp_dir: std::path::PathBuf,
 }

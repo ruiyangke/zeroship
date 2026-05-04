@@ -1,7 +1,9 @@
 //! Admin API handlers — app CRUD, deploy, plan, usage.
 
+use std::path::Path as StdPath;
 use std::sync::Arc;
 
+use futures::Stream;
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
@@ -215,88 +217,45 @@ pub async fn deploy(
         }));
     }
 
-    // Stream the request body to a tmp file under the system temp dir.
-    // Tmp files live for the duration of the deploy and are removed
-    // after ingest (success or error). Path includes a uuid so
-    // concurrent deploys don't trample each other.
-    let tmp_path = std::env::temp_dir()
+    // Stream the request body to a tmp file under the configured
+    // deploy tmp dir. Tmp files live for the duration of the deploy
+    // and are removed after ingest (success or error). Path includes
+    // a uuid so concurrent deploys don't trample each other. The
+    // helper itself enforces `MAX_COMPRESSED_BYTES` while writing —
+    // see `stream_body_to_tmp_file`. ntex's `Payload` implements
+    // `Stream<Item = Result<Bytes, PayloadError>>` directly, so the
+    // generic helper accepts it without an adapter.
+    let tmp_path = state
+        .deploy_tmp_dir
         .join(format!("zeroship-deploy-{}.zsapp", uuid::Uuid::new_v4().simple()));
 
-    // Write chunks via compio. Track compressed size; abort if it would
-    // exceed `MAX_COMPRESSED_BYTES`. The append happens via repeated
-    // `write_all_at(buf, offset).await`.
-    let write_result: Result<(), web::HttpResponse> = async {
-        use compio::io::AsyncWriteAtExt;
-
-        // create_new fails if a file already exists at that path —
-        // defensive against tmp uuid collisions (vanishingly rare).
-        let file = match compio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-            .await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("[deploy] tmp create failed for {tmp_path:?}: {e}");
-                return Err(web::HttpResponse::InternalServerError()
-                    .json(&serde_json::json!({"error":"deploy temp storage unavailable"})));
-            }
-        };
-
-        let mut written: u64 = 0;
-        loop {
-            match body.recv().await {
-                Some(Ok(chunk)) => {
-                    let chunk_len = chunk.len();
-                    let new_total = written + chunk_len as u64;
-                    if new_total > zeroship_bundle::MAX_COMPRESSED_BYTES as u64 {
-                        return Err(web::HttpResponse::PayloadTooLarge().json(
-                            &serde_json::json!({
-                                "error": "deploy too large",
-                                "cap_bytes": zeroship_bundle::MAX_COMPRESSED_BYTES,
-                                "observed_bytes": new_total,
-                            }),
-                        ));
-                    }
-                    // compio File::write_all_at takes ownership of the buffer.
-                    // ntex Bytes is a refcounted slice; copy into an owned Vec
-                    // so we can hand it to write_all_at. The to_vec() costs a
-                    // single chunk-sized alloc per chunk (typically 16-256 KiB).
-                    let owned: Vec<u8> = chunk.to_vec();
-                    let compio::BufResult(res, _returned) =
-                        (&file).write_all_at(owned, written).await;
-                    if let Err(e) = res {
-                        eprintln!("[deploy] tmp write failed at offset {written}: {e}");
-                        return Err(web::HttpResponse::InternalServerError().json(
-                            &serde_json::json!({"error":"deploy temp write failed"}),
-                        ));
-                    }
-                    written = new_total;
-                }
-                Some(Err(e)) => {
-                    eprintln!("[deploy] payload read error: {e}");
-                    return Err(web::HttpResponse::BadRequest().json(
-                        &serde_json::json!({"error":"payload error","detail":format!("{e}")}),
-                    ));
-                }
-                None => break,
-            }
+    match stream_body_to_tmp_file(
+        &mut body,
+        &tmp_path,
+        zeroship_bundle::MAX_COMPRESSED_BYTES as u64,
+    )
+    .await
+    {
+        Ok(_written) => { /* fall through to mmap + ingest */ }
+        Err(StreamToTmpError::TooLarge { cap, observed }) => {
+            return web::HttpResponse::PayloadTooLarge().json(&serde_json::json!({
+                "error": "deploy too large",
+                "cap_bytes": cap,
+                "observed_bytes": observed,
+            }));
         }
-        // fsync so the bytes are durable before we mmap them. For tmp
-        // ingest this isn't strictly necessary (we'll unlink soon), but
-        // it ensures the read after this sees the writes completely.
-        if let Err(e) = file.sync_all().await {
-            eprintln!("[deploy] tmp sync_all failed: {e}");
-            return Err(web::HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error":"deploy temp sync failed"})));
+        Err(StreamToTmpError::PayloadError(detail)) => {
+            return web::HttpResponse::BadRequest().json(&serde_json::json!({
+                "error": "payload error",
+                "detail": detail,
+            }));
         }
-        Ok(())
-    }.await;
-
-    if let Err(resp) = write_result {
-        let _ = compio::fs::remove_file(&tmp_path).await;
-        return resp;
+        Err(e) => {
+            eprintln!("[deploy] streaming to tmp failed: {e}");
+            return web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                "error": "deploy temp storage unavailable",
+            }));
+        }
     }
 
     // mmap + ingest. The std::fs::File::open is sync but cheap (no I/O
@@ -431,3 +390,217 @@ pub async fn get_usage(state: State<Arc<AppState>>, id: Path<String>) -> web::Ht
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming helper — used by `deploy()` to land the request body in a
+// tmp file before mmap+ingest. Generic over the stream type so the
+// helper is unit-testable with `futures::stream::iter`; production
+// callers pass in `web::types::Payload` (which is `Stream<Item =
+// Result<Bytes, PayloadError>>`).
+// ---------------------------------------------------------------------------
+
+/// Errors from `stream_body_to_tmp_file`. Maps cleanly onto HTTP
+/// status codes — see `deploy()` for the response shape.
+#[derive(Debug)]
+pub(crate) enum StreamToTmpError {
+    /// Couldn't open the tmp file for writing. Caller should return 500.
+    OpenFailed(String),
+    /// Body exceeded `max_bytes`. Tmp file has been removed.
+    /// Caller should return 413.
+    TooLarge { cap: u64, observed: u64 },
+    /// Underlying payload error (client disconnected, decoding error,
+    /// etc.). Tmp file has been removed. Caller should return 400.
+    PayloadError(String),
+    /// Disk write or sync failed. Tmp file has been removed (best
+    /// effort). Caller should return 500.
+    WriteFailed(String),
+}
+
+impl std::fmt::Display for StreamToTmpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenFailed(s) => write!(f, "tmp file open failed: {s}"),
+            Self::TooLarge { cap, observed } => {
+                write!(f, "body too large: {observed} > {cap}")
+            }
+            Self::PayloadError(s) => write!(f, "payload error: {s}"),
+            Self::WriteFailed(s) => write!(f, "tmp write failed: {s}"),
+        }
+    }
+}
+
+/// Stream a body to a tmp file, enforcing `max_bytes` while writing.
+/// On any error (incl. cap exceeded), the partial tmp file is removed.
+/// On success, the file is fsynced and the total byte count returned.
+///
+/// Generic over the chunk type (`B: AsRef<[u8]>`) so this compiles
+/// against both `ntex::util::Bytes` (production: `web::types::Payload`
+/// yields ntex's bytes type) and stock `bytes::Bytes` (used by tests
+/// constructing `futures::stream::iter`).
+pub(crate) async fn stream_body_to_tmp_file<S, B, E>(
+    stream: &mut S,
+    tmp_path: &StdPath,
+    max_bytes: u64,
+) -> Result<u64, StreamToTmpError>
+where
+    S: Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    use compio::io::AsyncWriteAtExt;
+    use futures::StreamExt;
+
+    let file = compio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)
+        .await
+        .map_err(|e| StreamToTmpError::OpenFailed(e.to_string()))?;
+
+    let mut written: u64 = 0;
+    while let Some(item) = stream.next().await {
+        let chunk = match item {
+            Ok(c) => c,
+            Err(e) => {
+                drop(file);
+                let _ = compio::fs::remove_file(tmp_path).await;
+                return Err(StreamToTmpError::PayloadError(e.to_string()));
+            }
+        };
+        let chunk_slice: &[u8] = chunk.as_ref();
+        let chunk_len = chunk_slice.len() as u64;
+        let new_total = written + chunk_len;
+        if new_total > max_bytes {
+            drop(file);
+            let _ = compio::fs::remove_file(tmp_path).await;
+            return Err(StreamToTmpError::TooLarge {
+                cap: max_bytes,
+                observed: new_total,
+            });
+        }
+        // compio File::write_all_at takes ownership of the buffer.
+        // The chunk is a refcounted slice; copy into an owned Vec so
+        // we can hand it to write_all_at. The to_vec() costs a single
+        // chunk-sized alloc per chunk (typically 16-256 KiB).
+        let owned: Vec<u8> = chunk_slice.to_vec();
+        let compio::BufResult(res, _returned) =
+            (&file).write_all_at(owned, written).await;
+        if let Err(e) = res {
+            drop(file);
+            let _ = compio::fs::remove_file(tmp_path).await;
+            return Err(StreamToTmpError::WriteFailed(format!(
+                "write at offset {written}: {e}"
+            )));
+        }
+        written = new_total;
+    }
+    if let Err(e) = file.sync_all().await {
+        drop(file);
+        let _ = compio::fs::remove_file(tmp_path).await;
+        return Err(StreamToTmpError::WriteFailed(format!("sync_all: {e}")));
+    }
+    drop(file);
+    Ok(written)
+}
+
+#[cfg(test)]
+mod stream_tmp_tests {
+    use super::*;
+    use bytes::Bytes;
+    use futures::stream;
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        std::env::temp_dir().join(format!("zs-stream-test-{label}-{unique}"))
+    }
+
+    #[compio::test]
+    async fn happy_path_writes_concatenated_bytes() {
+        let path = temp_path("happy");
+        let chunks: Vec<Result<Bytes, &str>> = vec![
+            Ok(Bytes::from_static(b"hello, ")),
+            Ok(Bytes::from_static(b"streaming ")),
+            Ok(Bytes::from_static(b"world!")),
+        ];
+        let mut s = stream::iter(chunks);
+        let written = stream_body_to_tmp_file(&mut s, &path, 1024)
+            .await
+            .expect("stream ok");
+        assert_eq!(written, b"hello, streaming world!".len() as u64);
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"hello, streaming world!");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[compio::test]
+    async fn cap_exceeded_removes_tmp_file() {
+        let path = temp_path("cap");
+        let chunks: Vec<Result<Bytes, &str>> = vec![
+            Ok(Bytes::from_static(b"AAAAAAAAAA")), // 10 bytes
+            Ok(Bytes::from_static(b"BBBBBBBBBB")), // would push to 20, > 15
+        ];
+        let mut s = stream::iter(chunks);
+        let err = stream_body_to_tmp_file(&mut s, &path, 15)
+            .await
+            .unwrap_err();
+        match err {
+            StreamToTmpError::TooLarge { cap: 15, observed: 20 } => {}
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        assert!(!path.exists(), "tmp file should be removed on cap-exceeded");
+    }
+
+    #[compio::test]
+    async fn stream_error_removes_tmp_file() {
+        let path = temp_path("err");
+        let chunks: Vec<Result<Bytes, &str>> = vec![
+            Ok(Bytes::from_static(b"some bytes")),
+            Err("network blew up"),
+        ];
+        let mut s = stream::iter(chunks);
+        let err = stream_body_to_tmp_file(&mut s, &path, 1024)
+            .await
+            .unwrap_err();
+        match err {
+            StreamToTmpError::PayloadError(detail) => {
+                assert!(detail.contains("network blew up"), "got {detail}");
+            }
+            other => panic!("expected PayloadError, got {other:?}"),
+        }
+        assert!(!path.exists(), "tmp file should be removed on payload error");
+    }
+
+    #[compio::test]
+    async fn empty_stream_writes_zero_bytes() {
+        let path = temp_path("empty");
+        let chunks: Vec<Result<Bytes, &str>> = vec![];
+        let mut s = stream::iter(chunks);
+        let written = stream_body_to_tmp_file(&mut s, &path, 1024)
+            .await
+            .expect("stream ok");
+        assert_eq!(written, 0);
+        // Empty file should exist (we created it before the loop).
+        assert!(path.exists(), "tmp file should exist even when empty");
+        let contents = std::fs::read(&path).unwrap();
+        assert!(contents.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[compio::test]
+    async fn create_new_fails_when_path_exists() {
+        let path = temp_path("collide");
+        std::fs::write(&path, b"pre-existing").unwrap();
+        let chunks: Vec<Result<Bytes, &str>> = vec![Ok(Bytes::from_static(b"x"))];
+        let mut s = stream::iter(chunks);
+        let err = stream_body_to_tmp_file(&mut s, &path, 1024)
+            .await
+            .unwrap_err();
+        match err {
+            StreamToTmpError::OpenFailed(_) => {}
+            other => panic!("expected OpenFailed, got {other:?}"),
+        }
+        // Pre-existing file must not be overwritten.
+        let contents = std::fs::read(&path).unwrap();
+        assert_eq!(contents, b"pre-existing");
+        let _ = std::fs::remove_file(&path);
+    }
+}

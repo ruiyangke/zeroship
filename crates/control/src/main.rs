@@ -55,6 +55,43 @@ async fn main() -> std::io::Result<()> {
         args.iter().any(|a| a == "--trust-proxy")
             || std::env::var("TRUST_PROXY").map(|v| v == "1").unwrap_or(false);
 
+    let deploy_tmp_dir_str = arg_or_env(
+        &args,
+        "--deploy-tmp-dir",
+        "DEPLOY_TMP_DIR",
+        "", // empty -> fall back to std::env::temp_dir() below
+    );
+    let deploy_tmp_dir: std::path::PathBuf = if deploy_tmp_dir_str.is_empty() {
+        std::env::temp_dir()
+    } else {
+        std::path::PathBuf::from(&deploy_tmp_dir_str)
+    };
+
+    // Validate at startup so operators don't discover a misconfigured
+    // path on first deploy. We check existence + writability by trying
+    // to create the directory tree (idempotent if it already exists)
+    // and then writing + removing a probe file.
+    if let Err(e) = std::fs::create_dir_all(&deploy_tmp_dir) {
+        eprintln!(
+            "[control] refusing to start: deploy_tmp_dir {:?} not creatable: {e}",
+            deploy_tmp_dir,
+        );
+        std::process::exit(1);
+    }
+    let probe = deploy_tmp_dir.join(format!(
+        ".zeroship-probe-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(e) = std::fs::write(&probe, b"") {
+        eprintln!(
+            "[control] refusing to start: deploy_tmp_dir {:?} not writable: {e}",
+            deploy_tmp_dir,
+        );
+        std::process::exit(1);
+    }
+    let _ = std::fs::remove_file(&probe);
+    eprintln!("[control] deploy_tmp_dir = {:?}", deploy_tmp_dir);
+
     if !insecure_dev {
         let mut missing = Vec::new();
         if master_key.is_empty() { missing.push("--master-key / MASTER_KEY"); }
@@ -172,6 +209,7 @@ async fn main() -> std::io::Result<()> {
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
         insecure_dev,
         trust_proxy,
+        deploy_tmp_dir,
     });
 
     let bind_addr = format!("0.0.0.0:{port}");
