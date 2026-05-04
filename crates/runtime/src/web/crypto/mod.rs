@@ -63,7 +63,6 @@ pub mod ec;
 pub mod helpers;
 pub mod hmac;
 pub mod jwk;
-pub mod kernel;
 pub mod key_material;
 pub mod okp;
 pub mod ops;
@@ -73,6 +72,13 @@ pub mod rsa;
 pub mod subtle;
 pub mod sync_helpers;
 pub mod wrap;
+
+// Back-compat shim: the crypto kernel was promoted to a top-level
+// module (`crate::crypto_ops`) since it is the dual-surface backend
+// shared by `web::crypto` (WebCrypto) and `node::crypto` (node:crypto).
+// Re-export here so older `crate::web::crypto::kernel::*` paths keep
+// resolving until callers naturally migrate.
+pub use crate::crypto_ops as kernel;
 
 /// Install Crypto / SubtleCrypto / CryptoKey on `globalThis`. Replaces
 /// the legacy `crypto` ad-hoc op installs in `init.rs` when the

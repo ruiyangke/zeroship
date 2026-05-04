@@ -9,7 +9,6 @@ pub mod base64;
 pub mod blob;
 pub mod codec;
 pub mod crypto;
-pub mod crypto_node;
 pub mod dom;
 pub mod encoding;
 pub mod fetch;
@@ -18,3 +17,9 @@ pub mod streams;
 pub mod structured_clone;
 pub mod url;
 pub mod websocket;
+
+// Back-compat shim: `node:crypto` is a Node-API surface, not a Web
+// API, so it was moved to `crate::node::crypto`. Re-export here so
+// existing `crate::web::crypto_node::*` paths keep resolving until
+// callers naturally migrate.
+pub use crate::node::crypto as crypto_node;
