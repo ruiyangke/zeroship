@@ -182,12 +182,12 @@ pub async fn serve(state: AppState, host: &str, port: u16) -> Result<(), String>
         .await
         .map_err(|e| format!("Failed to bind {addr}: {e}"))?;
 
-    eprintln!("[zeroship] http://{addr}");
+    tracing::info!(addr = %addr, "platform listening");
 
     let server = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
-            eprintln!("[zeroship] Shutting down gracefully...");
+            tracing::info!("platform shutting down gracefully");
         });
 
     server.await.map_err(|e| format!("Server error: {e}"))

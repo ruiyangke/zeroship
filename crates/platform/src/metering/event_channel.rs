@@ -73,7 +73,7 @@ pub fn spawn_event_writer(
             // Append batch to event log
             for event in batch.drain(..) {
                 if let Err(e) = log.append(event) {
-                    eprintln!("[event_writer] Failed to append event: {e}");
+                    tracing::error!(error = %e, "event_writer append failed");
                 }
             }
         }

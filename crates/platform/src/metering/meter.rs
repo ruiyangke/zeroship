@@ -297,10 +297,14 @@ impl MeterRegistry {
                         &stored,
                     ));
                     self.meters.write().unwrap().insert(app_id.clone(), meter);
-                    eprintln!("[metering] Recovered counters for {app_id}: {} resources", stored.len());
+                    tracing::info!(
+                        app_id = %app_id,
+                        resources = stored.len(),
+                        "metering recovered counters"
+                    );
                 }
                 Ok(_) => {} // empty, no recovery needed
-                Err(e) => eprintln!("[metering] Failed to recover {app_id}: {e}"),
+                Err(e) => tracing::error!(app_id = %app_id, error = %e, "metering recovery failed"),
             }
         }
     }

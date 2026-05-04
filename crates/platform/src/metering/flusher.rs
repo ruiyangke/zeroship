@@ -60,7 +60,7 @@ pub async fn flush_all(registry: &MeterRegistry, store: &dyn MeterStore) {
         if store.flush(app_id, &resource_deltas).await.is_ok() {
             meter.counters.commit_flush(&snapshot);
         } else {
-            eprintln!("[flusher] Failed to flush {app_id}, will retry next cycle");
+            tracing::warn!(app_id = %app_id, "flusher flush failed; will retry next cycle");
             // Watermark NOT advanced — deltas will be retried next cycle.
         }
     }
