@@ -96,6 +96,14 @@ struct ClassMethod<'a> {
     /// stashes it on the wrapper instance and returns the cached Local
     /// thereafter. Only meaningful for `MethodKind::Getter`.
     same_object: bool,
+    /// `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]` — emit a
+    /// CFunction shim alongside the slow-path FunctionCallback so V8
+    /// Turbofan can inline the typed-shape call at hot sites. See
+    /// `extract_fastcall` for the rationale and `gen_fastcall_*` for
+    /// the codegen detail. Mutually compatible with `same_object` only
+    /// in the negative — fastcall paths can't allocate and SameObject
+    /// returns a Global<Object>, so the two flags are not co-applicable.
+    fastcall: bool,
 }
 
 fn classify(func: &ImplItemFn) -> Option<MethodKind> {
@@ -158,6 +166,198 @@ fn extract_same_object(attrs: &[Attribute]) -> bool {
         }
     }
     false
+}
+
+/// Read `#[v8_method(fastcall)]` or `#[v8_getter(fastcall)]` from a
+/// method's attributes. Returns true if the bare-identifier `fastcall`
+/// appears in the list form on a `v8_method` or `v8_getter` attribute.
+///
+/// V8's fast API path lets Turbofan inline a typed CFunction call shim
+/// at hot sites, skipping the full FunctionCallback prologue
+/// (~10–30 ns per call). The macro's contract is "opt-in per-method,
+/// preserves the slow path verbatim, falls back automatically when V8
+/// can't take the fast path" (e.g., when the receiver's hidden class
+/// hasn't been seen by the inline cache yet, or when arg shapes don't
+/// match the typed signature like multibyte strings for SeqOneByteString).
+///
+/// The fast path imposes hard restrictions on the method's signature
+/// (see `validate_fastcall_signature` in this file): primitives only,
+/// no allocation, no `&mut self`. We enforce these at compile time so
+/// users get a clear error rather than runtime UB.
+fn extract_fastcall(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        let p = attr.path();
+        if !(p.is_ident("v8_method") || p.is_ident("v8_getter")) {
+            continue;
+        }
+        if let Ok(idents) = attr.parse_args_with(|input: syn::parse::ParseStream| {
+            let mut acc: Vec<syn::Ident> = Vec::new();
+            while !input.is_empty() {
+                let id: syn::Ident = input.parse()?;
+                acc.push(id);
+                if input.is_empty() {
+                    break;
+                }
+                let _: syn::Token![,] = input.parse()?;
+            }
+            Ok(acc)
+        }) {
+            for id in idents {
+                if id == "fastcall" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Validate that the user's method signature is compatible with the
+/// V8 fast API path. Called at expand-time when `#[v8_method(fastcall)]`
+/// or `#[v8_getter(fastcall)]` is set; emits a `compile_error!`-shaped
+/// `syn::Error` on rejection so the user sees the diagnostic at the
+/// right span.
+///
+/// Allowed shapes (per V8 fast API + macro design):
+///   - Receiver: `&self` (no `&mut self`; that's already rejected before
+///     we get here).
+///   - Args: `bool`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`,
+///     `ByteString` (the macro maps to V8's SeqOneByteString fast type).
+///   - Return: `bool`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `()`,
+///     OR `Result<<primitive>, OpError>` (the fast path catches the
+///     Err and re-routes through CallbackScope::new + throw_exception).
+///
+/// Rejected explicitly with helpful messages:
+///   - `String` / `&str` return — fast path forbids allocation
+///   - `Vec<u8>` / `Vec<T>` return — fast path forbids allocation
+///   - `Option<T>` return — fast path can't represent `None`
+///   - `v8::Local<...>` return / arg — requires a scope, which the fast
+///     path doesn't have (would need to allocate a CallbackScope ⇒ slow)
+fn validate_fastcall_signature(func: &ImplItemFn) -> syn::Result<()> {
+    // Validate args (skipping the receiver).
+    for input in func.sig.inputs.iter() {
+        let typed = match input {
+            FnArg::Receiver(_) => continue,
+            FnArg::Typed(t) => t,
+        };
+        let ty = &*typed.ty;
+        // Skip synthetic `&mut PinScope` / `Local<Object>` params —
+        // these would never appear in a fastcall-validated function
+        // because we don't have a scope, but we won't insert them
+        // either. Reject explicitly to be clear.
+        if let Type::Reference(_) = ty {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "#[v8_method(fastcall)]: reference params (e.g. &mut PinScope) \
+                 are not supported in the fast path — fast callbacks have no scope",
+            ));
+        }
+        if let Some(name) = crate::type_ident(ty) {
+            // The full set of allowed arg type names. Keep this list in
+            // sync with `gen_fastcall_arg_extract` and the CFunction
+            // CTypeInfo array.
+            let ok = matches!(
+                name.as_str(),
+                "bool"
+                    | "i32"
+                    | "u32"
+                    | "i64"
+                    | "u64"
+                    | "f32"
+                    | "f64"
+                    | "ByteString"
+            );
+            if !ok {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    format!(
+                        "#[v8_method(fastcall)]: unsupported arg type `{name}` \
+                         — fast path only accepts: bool, i32, u32, i64, u64, f32, f64, ByteString. \
+                         Allocating types (String, Vec<u8>) and union types (Option, Result, Local<Value>) \
+                         are forbidden in the fast path",
+                    ),
+                ));
+            }
+        } else {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "#[v8_method(fastcall)]: arg type not recognised — fast path \
+                 only accepts named primitive types",
+            ));
+        }
+    }
+
+    // Validate return type.
+    match &func.sig.output {
+        ReturnType::Default => Ok(()),
+        ReturnType::Type(_, ret_ty) => {
+            let outer = crate::type_ident(ret_ty);
+            match outer.as_deref() {
+                Some("Result") => {
+                    // Result<T, OpError>: T must be a fastcall-allowed
+                    // primitive (or unit). The Err arm will be re-routed
+                    // through a slow-path CallbackScope throw.
+                    let inner = crate::first_generic_arg(ret_ty);
+                    if let Some(t) = inner {
+                        if crate::is_unit_type(t) {
+                            return Ok(());
+                        }
+                        if let Some(name) = crate::type_ident(t) {
+                            if matches!(
+                                name.as_str(),
+                                "bool" | "i32" | "u32" | "i64" | "u64" | "f32" | "f64"
+                            ) {
+                                return Ok(());
+                            }
+                            return Err(syn::Error::new_spanned(
+                                t,
+                                format!(
+                                    "#[v8_method(fastcall)]: Result inner type `{name}` \
+                                     is not a fastcall primitive — only bool, i32, u32, \
+                                     i64, u64, f32, f64, () are allowed"
+                                ),
+                            ));
+                        }
+                    }
+                    Err(syn::Error::new_spanned(
+                        ret_ty,
+                        "#[v8_method(fastcall)]: Result return must have a primitive Ok type",
+                    ))
+                }
+                Some(name) => {
+                    if matches!(
+                        name,
+                        "bool" | "i32" | "u32" | "i64" | "u64" | "f32" | "f64"
+                    ) {
+                        Ok(())
+                    } else if crate::is_unit_type(ret_ty) {
+                        Ok(())
+                    } else {
+                        Err(syn::Error::new_spanned(
+                            ret_ty,
+                            format!(
+                                "#[v8_method(fastcall)]: return type `{name}` is not a \
+                                 fastcall primitive — String, Vec<u8>, Option<T>, and \
+                                 Local<...> are forbidden (the fast path can't allocate \
+                                 or represent null). Allowed: bool, i32, u32, i64, u64, \
+                                 f32, f64, (), or Result<primitive, OpError>"
+                            ),
+                        ))
+                    }
+                }
+                None => {
+                    if crate::is_unit_type(ret_ty) {
+                        Ok(())
+                    } else {
+                        Err(syn::Error::new_spanned(
+                            ret_ty,
+                            "#[v8_method(fastcall)]: unrecognised return type",
+                        ))
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Read `#[v8_name = "literal"]` from a method's attributes. Returns
@@ -537,7 +737,47 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                          `Class.method()` with no `this`",
                     )
                     .to_compile_error()
-                    .into();
+                    .into();                }
+
+                // `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
+                // Only valid on plain Method / Getter — not async, not
+                // setter, not constructor, not same_object.
+                let fastcall_flag = matches!(kind, MethodKind::Method | MethodKind::Getter)
+                    && extract_fastcall(&func.attrs);
+
+                if fastcall_flag {
+                    // Compile-time guard 1: fastcall path can't take
+                    // `&mut self`. The macro emits the fast shim as a
+                    // bare `extern "C"` fn that recovers `*const Self`
+                    // from internal-field 1; there's no slot for the
+                    // re-entrancy guard the slow path emits for
+                    // `&mut self` callbacks. The user must use
+                    // `&self` + `Cell`/`RefCell` for state that mutates.
+                    if mut_recv {
+                        return syn::Error::new_spanned(
+                            &func.sig.ident,
+                            "#[v8_method(fastcall)] / #[v8_getter(fastcall)] does not \
+                             support &mut self — use &self with Cell/RefCell on state \
+                             that needs to mutate (V8 fast-path callbacks have no \
+                             scope, so the slow path's per-method re-entrancy guard \
+                             cannot be emitted)",
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                    if same_object_flag {
+                        return syn::Error::new_spanned(
+                            &func.sig.ident,
+                            "#[v8_getter(same_object, fastcall)] is not supported — \
+                             SameObject getters return a v8::Global<v8::Object> \
+                             (allocates), and the fast path forbids allocation",
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                    if let Err(err) = validate_fastcall_signature(func) {
+                        return err.to_compile_error().into();
+                    }
                 }
 
                 methods.push(ClassMethod {
@@ -546,6 +786,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     mut_receiver: mut_recv,
                     js_name,
                     same_object: same_object_flag,
+                    fastcall: fastcall_flag,
                 });
             }
         }
@@ -612,9 +853,21 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Fastcall shims — emitted alongside the slow-path FunctionCallback
+    // for methods/getters annotated with `#[v8_method(fastcall)]` or
+    // `#[v8_getter(fastcall)]`. The slow callback above is unchanged;
+    // V8 chooses fast vs slow at JIT time based on receiver shape and
+    // arg types.
+    let fastcall_callbacks: Vec<TokenStream2> = regular
+        .iter()
+        .filter(|m| m.fastcall)
+        .filter_map(|m| gen_fastcall_callback(class_ty, m))
+        .collect();
+    let has_any_fastcall = regular.iter().any(|m| m.fastcall);
+
     let constructor_callback = match constructor {
-        Some(c) => gen_constructor_callback(class_ty, c),
-        None => gen_default_constructor_callback(class_ty),
+        Some(c) => gen_constructor_callback(class_ty, c, has_any_fastcall),
+        None => gen_default_constructor_callback(class_ty, has_any_fastcall),
     };
 
     // Impl-block-level overrides for class-wide install behaviour.
@@ -692,6 +945,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         install_iterable_call.as_ref(),
         async_iterable_method.as_deref(),
         &const_decls,
+        has_any_fastcall,
     );
 
     // Strip our marker attributes from the impl items so rustc doesn't
@@ -888,6 +1142,13 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #constructor_callback
         #(#callbacks)*
 
+        // Fastcall shims emitted alongside the slow-path callbacks
+        // for methods/getters annotated with `#[v8_method(fastcall)]` /
+        // `#[v8_getter(fastcall)]`. Each entry is the `extern "C" fn`
+        // shim + a `static CFunctionInfo` + a `static CFunction`. No-op
+        // when no method on the class is fastcall.
+        #(#fastcall_callbacks)*
+
         // Iterable codegen (when `#[v8_iterable(...)]` is set on the
         // impl block). Emits the companion `<Class>Iterator` struct +
         // its install fn, the four factory callbacks (keys, values,
@@ -952,6 +1213,7 @@ fn gen_install(
     install_iterable_call: Option<&TokenStream2>,
     async_iterable_method: Option<&str>,
     const_decls: &[ConstDecl],
+    has_any_fastcall: bool,
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -986,6 +1248,19 @@ fn gen_install(
     // them twice (once per ClassMethod entry).
     let mut emitted_accessors: HashSet<String> = HashSet::new();
 
+    // Pair lookup for fastcall: which JS-name has a fastcall variant
+    // (and therefore needs `builder(slow).build_fast(scope, &[fast])`
+    // wiring). Methods always pair under their own name; getters pair
+    // by JS-name with their setter sibling, but the setter never has
+    // fastcall (rejected at extract time — setters return ()). So we
+    // only need to track per-method fastcall.
+    let mut fastcall_by_jsname: HashMap<String, &ClassMethod> = HashMap::new();
+    for m in methods {
+        if m.fastcall {
+            fastcall_by_jsname.insert(m.js_name.clone(), m);
+        }
+    }
+
     let proto_sets: Vec<TokenStream2> = methods
         .iter()
         .filter_map(|m| {
@@ -997,13 +1272,30 @@ fn gen_install(
                     // install on the prototype identically.
                     let name = &m.func.sig.ident;
                     let cb = method_callback_ident(class_ty, name);
-                    Some(quote! {
-                        {
-                            let __key = v8::String::new(scope, #js_name).unwrap();
-                            let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                            __proto.set(__key.into(), __fn_tmpl.into());
-                        }
-                    })
+                    if m.fastcall {
+                        let cfn = fastcall_cfn_ident(class_ty, name);
+                        Some(quote! {
+                            {
+                                let __key = v8::String::new(scope, #js_name).unwrap();
+                                // Wire the slow callback as the
+                                // FunctionCallback fallback AND the
+                                // CFunction shim as the fast-path
+                                // overload. V8 chooses fast vs slow at
+                                // JIT time per the receiver/arg shape.
+                                let __fn_tmpl = v8::FunctionTemplate::builder(#cb)
+                                    .build_fast(scope, &[#cfn.0]);
+                                __proto.set(__key.into(), __fn_tmpl.into());
+                            }
+                        })
+                    } else {
+                        Some(quote! {
+                            {
+                                let __key = v8::String::new(scope, #js_name).unwrap();
+                                let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                                __proto.set(__key.into(), __fn_tmpl.into());
+                            }
+                        })
+                    }
                 }
                 MethodKind::Getter | MethodKind::Setter => {
                     if !emitted_accessors.insert(js_name.clone()) {
@@ -1011,12 +1303,25 @@ fn gen_install(
                     }
                     let pair = accessor_pairs.get(&js_name);
                     let (getter_opt, setter_opt) = pair.cloned().unwrap_or_default();
-                    let getter_tokens = match getter_opt {
-                        Some(cb) => quote! {
+                    // Look up whether the getter under this JS-name is
+                    // fastcall-annotated. The setter never is — fastcall
+                    // is rejected at extract for setters since they
+                    // return `()` and V8 setters discard the return.
+                    let getter_fastcall_cfn = fastcall_by_jsname
+                        .get(&js_name)
+                        .filter(|cm| matches!(cm.kind, MethodKind::Getter))
+                        .map(|cm| fastcall_cfn_ident(class_ty, &cm.func.sig.ident));
+                    let getter_tokens = match (getter_opt, getter_fastcall_cfn) {
+                        (Some(cb), Some(cfn)) => quote! {
+                            let __getter_tmpl = v8::FunctionTemplate::builder(#cb)
+                                .build_fast(scope, &[#cfn.0]);
+                            let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
+                        },
+                        (Some(cb), None) => quote! {
                             let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
                             let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(__getter_tmpl);
                         },
-                        None => quote! {
+                        (None, _) => quote! {
                             let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
                         },
                     };
@@ -1286,6 +1591,11 @@ fn gen_install(
     // return the cached `Local` reborrow.
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
 
+    // Internal field count: 2 when at least one method on the class
+    // uses fastcall (slot 0 = External, slot 1 = aligned ptr); else 1
+    // (the existing single-slot External shape).
+    let internal_field_count_lit: usize = if has_any_fastcall { 2 } else { 1 };
+
     quote! {
         /// Install this class on the given V8 scope, returning the
         /// FunctionTemplate. The runtime calls this from
@@ -1316,10 +1626,28 @@ fn gen_install(
             // BEFORE we layer our own prototype properties on top.
             #inherit_base_block
 
-            // Reserve one internal field to hold the boxed Rust state.
+            // Reserve internal fields for the boxed Rust state.
+            //
+            //   Slot 0 — Box<Self> wrapped in an External, with a
+            //            guaranteed-finalizer Weak that drops the Box
+            //            on V8 GC of the wrapper. Used by every slow-
+            //            path callback (the standard wrapper teardown
+            //            path).
+            //   Slot 1 — same Box<Self> raw pointer, set via
+            //            set_aligned_pointer_in_internal_field, ONLY
+            //            when at least one method/getter on the class
+            //            is fastcall-annotated. The fast-path shim
+            //            recovers `*const Self` from this slot via
+            //            get_aligned_pointer_from_internal_field — a
+            //            single load instruction with no scope.
+            //
+            // The two slots hold the same address, so memory cost is
+            // one extra pointer per wrapper instance. Slot 1 is unused
+            // for classes without fastcall, so the field count stays
+            // at 1 in that case.
             __ctor_tmpl
                 .instance_template(scope)
-                .set_internal_field_count(1);
+                .set_internal_field_count(#internal_field_count_lit);
 
             let __proto = __ctor_tmpl.prototype_template(scope);
             #(#proto_sets)*
@@ -1587,6 +1915,431 @@ fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
             #call_return
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fastcall codegen (`#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`)
+// ---------------------------------------------------------------------------
+
+/// Map a Rust arg type to (CTypeInfo, fast-shim arg type tokens,
+/// extraction tokens). Used by `gen_fastcall_callback` to build the
+/// CFunctionInfo array, the extern "C" fn signature, and the per-arg
+/// adaption that converts the fast-API value to the user method's
+/// expected param type.
+///
+/// The returned tuple:
+///   - `cinfo` — token to place inside the CTypeInfo array literal
+///     (e.g. `v8::fast_api::Type::Uint32.as_info()`).
+///   - `arg_ty` — the extern "C" fn parameter type
+///     (e.g. `u32` or `*const v8::fast_api::FastApiOneByteString`).
+///   - `bind` — token that adapts the raw fast-API value (in scope as
+///     a binding named `<original_name>_raw`) to the user method's
+///     expected type (the original Rust type), under the name
+///     `<original_name>` ready for the user-method call.
+fn fastcall_arg_mapping(name: &syn::Ident, ty: &Type) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
+    let raw_name = format_ident!("{}_raw", name);
+    let ident = crate::type_ident(ty);
+    match ident.as_deref() {
+        Some("bool") => Some((
+            quote! { ::v8::fast_api::Type::Bool.as_info() },
+            quote! { bool },
+            quote! { let #name: bool = #raw_name; },
+        )),
+        Some("i32") => Some((
+            quote! { ::v8::fast_api::Type::Int32.as_info() },
+            quote! { i32 },
+            quote! { let #name: i32 = #raw_name; },
+        )),
+        Some("u32") => Some((
+            quote! { ::v8::fast_api::Type::Uint32.as_info() },
+            quote! { u32 },
+            quote! { let #name: u32 = #raw_name; },
+        )),
+        Some("i64") => Some((
+            quote! { ::v8::fast_api::Type::Int64.as_info() },
+            quote! { i64 },
+            quote! { let #name: i64 = #raw_name; },
+        )),
+        Some("u64") => Some((
+            quote! { ::v8::fast_api::Type::Uint64.as_info() },
+            quote! { u64 },
+            quote! { let #name: u64 = #raw_name; },
+        )),
+        Some("f32") => Some((
+            quote! { ::v8::fast_api::Type::Float32.as_info() },
+            quote! { f32 },
+            quote! { let #name: f32 = #raw_name; },
+        )),
+        Some("f64") => Some((
+            quote! { ::v8::fast_api::Type::Float64.as_info() },
+            quote! { f64 },
+            quote! { let #name: f64 = #raw_name; },
+        )),
+        Some("ByteString") => Some((
+            quote! { ::v8::fast_api::Type::SeqOneByteString.as_info() },
+            quote! { *const ::v8::fast_api::FastApiOneByteString },
+            quote! {
+                // SAFETY: V8 guarantees the FastApiOneByteString lives
+                // for the duration of the fast call. as_bytes() returns
+                // a borrowed slice; we copy into a fresh ByteString to
+                // satisfy the user method's owned-bytes signature. This
+                // ALLOCATES a Vec, which technically violates "no alloc
+                // in the fast path" — but ByteString construction is
+                // the cheapest path the user method can accept, and
+                // the Vec is small (header names are typically <64
+                // bytes) so the allocation is dwarfed by the saved
+                // prologue. Tradeoff documented in the macro design.
+                let #name = {
+                    let __bytes_slice = unsafe { (&*#raw_name).as_bytes() };
+                    ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes_slice.to_vec())
+                };
+            },
+        )),
+        _ => None,
+    }
+}
+
+/// Map the user method's return type to:
+///   - `cinfo` — return-side CTypeInfo (e.g. `Type::Bool.as_info()`).
+///   - `ret_ty` — extern "C" fn return type tokens.
+///   - `marshal` — token that takes the user method's call expression
+///     bound to `__r` and produces the extern "C" return value. For
+///     `Result<T, OpError>` the Err arm uses CallbackScope::new(options)
+///     to throw, then returns a sentinel zero-value (V8 ignores the
+///     return when an exception is pending).
+fn fastcall_return_mapping(output: &ReturnType) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
+    let unit_response = (
+        quote! { ::v8::fast_api::Type::Void.as_info() },
+        quote! { () },
+        quote! { let _ = __r; },
+    );
+    match output {
+        ReturnType::Default => Some(unit_response),
+        ReturnType::Type(_, ret_ty) => {
+            let outer = crate::type_ident(ret_ty);
+            match outer.as_deref() {
+                Some("Result") => {
+                    // Result<T, OpError>: for the fast path, on Err we
+                    // construct a CallbackScope from options and throw
+                    // the exception there (which deopts and routes the
+                    // call to the slow path next iteration). The fn
+                    // returns a sentinel default(zero) — V8 ignores the
+                    // return value when an exception is pending.
+                    let inner = crate::first_generic_arg(ret_ty);
+                    if let Some(t) = inner {
+                        if crate::is_unit_type(t) {
+                            return Some((
+                                quote! { ::v8::fast_api::Type::Void.as_info() },
+                                quote! { () },
+                                quote! {
+                                    match __r {
+                                        Ok(_) => {}
+                                        Err(__err) => {
+                                            let __opts: &::v8::fast_api::FastApiCallbackOptions = unsafe { &*__options };
+                                            ::v8::callback_scope!(unsafe let __cb_scope, __opts);
+                                            let __msg = ::v8::String::new(__cb_scope, &__err.message)
+                                                .unwrap();
+                                            let __exc = ::v8::Exception::type_error(__cb_scope, __msg);
+                                            __cb_scope.throw_exception(__exc);
+                                        }
+                                    }
+                                },
+                            ));
+                        }
+                        if let Some(name) = crate::type_ident(t) {
+                            let (cinfo, ret_ty_tok, sentinel) = match name.as_str() {
+                                "bool" => (
+                                    quote! { ::v8::fast_api::Type::Bool.as_info() },
+                                    quote! { bool },
+                                    quote! { false },
+                                ),
+                                "i32" => (
+                                    quote! { ::v8::fast_api::Type::Int32.as_info() },
+                                    quote! { i32 },
+                                    quote! { 0i32 },
+                                ),
+                                "u32" => (
+                                    quote! { ::v8::fast_api::Type::Uint32.as_info() },
+                                    quote! { u32 },
+                                    quote! { 0u32 },
+                                ),
+                                "i64" => (
+                                    quote! { ::v8::fast_api::Type::Int64.as_info() },
+                                    quote! { i64 },
+                                    quote! { 0i64 },
+                                ),
+                                "u64" => (
+                                    quote! { ::v8::fast_api::Type::Uint64.as_info() },
+                                    quote! { u64 },
+                                    quote! { 0u64 },
+                                ),
+                                "f32" => (
+                                    quote! { ::v8::fast_api::Type::Float32.as_info() },
+                                    quote! { f32 },
+                                    quote! { 0.0f32 },
+                                ),
+                                "f64" => (
+                                    quote! { ::v8::fast_api::Type::Float64.as_info() },
+                                    quote! { f64 },
+                                    quote! { 0.0f64 },
+                                ),
+                                _ => return None,
+                            };
+                            return Some((
+                                cinfo,
+                                ret_ty_tok,
+                                quote! {
+                                    match __r {
+                                        Ok(__v) => __v,
+                                        Err(__err) => {
+                                            let __opts: &::v8::fast_api::FastApiCallbackOptions = unsafe { &*__options };
+                                            ::v8::callback_scope!(unsafe let __cb_scope, __opts);
+                                            let __msg = ::v8::String::new(__cb_scope, &__err.message)
+                                                .unwrap();
+                                            let __exc = ::v8::Exception::type_error(__cb_scope, __msg);
+                                            __cb_scope.throw_exception(__exc);
+                                            #sentinel
+                                        }
+                                    }
+                                },
+                            ));
+                        }
+                    }
+                    None
+                }
+                Some("bool") => Some((
+                    quote! { ::v8::fast_api::Type::Bool.as_info() },
+                    quote! { bool },
+                    quote! { __r },
+                )),
+                Some("i32") => Some((
+                    quote! { ::v8::fast_api::Type::Int32.as_info() },
+                    quote! { i32 },
+                    quote! { __r },
+                )),
+                Some("u32") => Some((
+                    quote! { ::v8::fast_api::Type::Uint32.as_info() },
+                    quote! { u32 },
+                    quote! { __r },
+                )),
+                Some("i64") => Some((
+                    quote! { ::v8::fast_api::Type::Int64.as_info() },
+                    quote! { i64 },
+                    quote! { __r },
+                )),
+                Some("u64") => Some((
+                    quote! { ::v8::fast_api::Type::Uint64.as_info() },
+                    quote! { u64 },
+                    quote! { __r },
+                )),
+                Some("f32") => Some((
+                    quote! { ::v8::fast_api::Type::Float32.as_info() },
+                    quote! { f32 },
+                    quote! { __r },
+                )),
+                Some("f64") => Some((
+                    quote! { ::v8::fast_api::Type::Float64.as_info() },
+                    quote! { f64 },
+                    quote! { __r },
+                )),
+                _ => {
+                    if crate::is_unit_type(ret_ty) {
+                        Some(unit_response)
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Mangled identifier of the fastcall extern "C" fn.
+fn fastcall_fn_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Ident {
+    format_ident!("__{}_{}_fastcall_fn", class_ty, method)
+}
+
+/// Mangled identifier of the per-method static CFunction descriptor.
+fn fastcall_cfn_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Ident {
+    format_ident!("__{}_{}_FASTCALL_CFN", class_ty, method)
+}
+
+/// Mangled identifier of the per-method static CFunctionInfo descriptor.
+/// We need a separate static for the CFunctionInfo because its address
+/// must live as long as the CFunction it's referenced from — V8 reads
+/// from `*const CFunctionInfo` at JIT time.
+fn fastcall_cinfo_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Ident {
+    format_ident!("__{}_{}_FASTCALL_CINFO", class_ty, method)
+}
+
+/// Emit the fastcall shim for a method or getter:
+///   - `extern "C" fn __<Class>_<method>_fastcall_fn(recv, args..., options) -> ret`
+///   - `static __<Class>_<method>_FASTCALL_CINFO: CFunctionInfo = ...`
+///   - `static __<Class>_<method>_FASTCALL_CFN: CFunction = ...`
+///
+/// The shim:
+///   1. Recovers `*const Self` from internal-field-1 via
+///      `get_aligned_pointer_from_internal_field(1, 0)` — a single load
+///      instruction. No scope, no External unwrap.
+///   2. Adapts each fast-API typed arg to the user method's Rust type
+///      via `fastcall_arg_mapping`'s `bind` snippet (a no-op for
+///      primitives; a Vec copy for ByteString from FastApiOneByteString).
+///   3. Calls the user method as `<Class>::method(&*self, args...)`.
+///   4. For Result returns, splits Ok/Err: Ok unwraps into the return
+///      slot; Err allocates a CallbackScope, throws via TypeError, and
+///      returns a zero sentinel (V8 ignores the slot when an exception
+///      is pending).
+///
+/// Brand check: not emitted in the fast path. V8's CFunction signature
+/// (typed `Local<Object>` receiver) is enforced at JIT time — Turbofan
+/// inserts an inline-cache shape check before dispatch, so only objects
+/// whose hidden class matches the cached one ever reach the fast path.
+/// Cross-class deception (e.g. `Headers.prototype.has.call(blob)`) hits
+/// a shape-mismatch deopt and falls through to the slow callback, which
+/// runs the prototype-walk brand check and throws "Illegal invocation".
+/// See the design doc for the chain-of-trust analysis.
+fn gen_fastcall_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Option<TokenStream2> {
+    let method_name = &m.func.sig.ident;
+    let fn_name = fastcall_fn_ident(class_ty, method_name);
+    let cinfo_name = fastcall_cinfo_ident(class_ty, method_name);
+    let cfn_name = fastcall_cfn_ident(class_ty, method_name);
+
+    let params = parse_params_skipping_self(m.func);
+
+    // Build per-arg pieces.
+    let mut arg_cinfos: Vec<TokenStream2> = Vec::new();
+    // Fast path: receiver is the first CFunction arg (V8Value).
+    arg_cinfos.push(quote! { ::v8::fast_api::Type::V8Value.as_info() });
+
+    let mut arg_decls: Vec<TokenStream2> = Vec::new();
+    let mut arg_binds: Vec<TokenStream2> = Vec::new();
+    let mut arg_call_idents: Vec<&syn::Ident> = Vec::new();
+
+    for p in &params {
+        let mapping = fastcall_arg_mapping(&p.name, &p.ty)?;
+        let (cinfo, raw_ty, bind) = mapping;
+        arg_cinfos.push(cinfo);
+        let raw_name = format_ident!("{}_raw", p.name);
+        arg_decls.push(quote! { #raw_name: #raw_ty });
+        arg_binds.push(bind);
+        arg_call_idents.push(&p.name);
+    }
+
+    // Trailing CallbackOptions arg — we always emit it so the Result
+    // path (which needs to throw via CallbackScope::new(options)) has
+    // access. For the no-throw case the cost is one extra ABI slot,
+    // negligible.
+    arg_cinfos.push(quote! { ::v8::fast_api::Type::CallbackOptions.as_info() });
+
+    let (ret_cinfo, ret_ty_tok, ret_marshal) = fastcall_return_mapping(&m.func.sig.output)?;
+
+    // CFunction and CFunctionInfo hold raw pointers and are therefore
+    // !Sync. They're safe to share across threads in practice — V8
+    // reads them at JIT compile time on whichever thread compiled the
+    // function, and the underlying data is immutable. We wrap each in
+    // a tuple-struct that asserts Sync via unsafe impl, then deref the
+    // underlying value at the call site.
+    let cinfo_wrapper = format_ident!("{}_Wrapper", cinfo_name);
+    let cfn_wrapper = format_ident!("{}_Wrapper", cfn_name);
+
+    Some(quote! {
+        /// !Sync wrapper around CFunctionInfo. The wrapped value holds
+        /// raw pointers (`*const v8_CTypeInfo`) which Rust auto-derives
+        /// !Sync for — but the data is immutable after construction and
+        /// V8 reads it on the JIT thread, so cross-thread sharing is
+        /// sound. The wrapper is the standard "transparent !Sync escape
+        /// hatch" pattern (same shape as `lazy_static` users).
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        struct #cinfo_wrapper(::v8::fast_api::CFunctionInfo);
+        unsafe impl Sync for #cinfo_wrapper {}
+
+        /// V8 fast API CFunctionInfo descriptor for this method.
+        /// Generated by `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
+        /// Static so its address is stable for V8 to read at JIT time
+        /// (CFunction holds `*const CFunctionInfo`).
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        static #cinfo_name: #cinfo_wrapper = #cinfo_wrapper(
+            ::v8::fast_api::CFunctionInfo::new(
+                #ret_cinfo,
+                &[#(#arg_cinfos),*],
+                ::v8::fast_api::Int64Representation::Number,
+            )
+        );
+
+        /// !Sync wrapper around CFunction — same rationale as the
+        /// CFunctionInfo wrapper above.
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        struct #cfn_wrapper(::v8::fast_api::CFunction);
+        unsafe impl Sync for #cfn_wrapper {}
+
+        /// V8 fast API CFunction descriptor for this method. Holds
+        /// `(address, *const CFunctionInfo)`. Wired into the
+        /// FunctionTemplate via `builder(slow).build_fast(scope, &[#cfn_name.0])`
+        /// so Turbofan can inline the typed-shape call at hot sites.
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        static #cfn_name: #cfn_wrapper = #cfn_wrapper(
+            ::v8::fast_api::CFunction::new(
+                #fn_name as *const ::std::ffi::c_void,
+                &#cinfo_name.0,
+            )
+        );
+
+        /// Fast-path shim for `<#class_ty>::<#method_name>`. Called by
+        /// V8 Turbofan when the optimised JIT inlines this method at a
+        /// hot site. The signature matches the CFunctionInfo above
+        /// exactly — V8 enforces the receiver type at JIT time, so
+        /// `recv` is guaranteed to be a `<#class_ty>` instance (any
+        /// shape mismatch deopts to the slow callback).
+        ///
+        /// Receiver recovery uses internal-field-1 aligned pointer
+        /// (set by `gen_box_and_install_finalizer` when any method on
+        /// the class is fastcall). Slot 0 retains the External + GC
+        /// finalizer for the standard wrapper teardown.
+        ///
+        /// SAFETY:
+        ///   - Slot 1 holds the `Box<#class_ty>` raw pointer set at
+        ///     construction time. As long as the wrapper is reachable
+        ///     by V8, the Box stays alive (slot 0's finalizer fires
+        ///     only on GC of the wrapper).
+        ///   - The receiver-type check is enforced by V8 at JIT time
+        ///     via the CFunction's typed signature. Cross-class call
+        ///     attempts deopt to the slow path before reaching this
+        ///     shim.
+        ///   - We take `&Self` only — fastcall is rejected at macro
+        ///     time for `&mut self`, so no aliasing risk.
+        #[doc(hidden)]
+        #[allow(non_snake_case, unused_variables, unused_unsafe)]
+        extern "C" fn #fn_name(
+            __recv: ::v8::Local<::v8::Object>,
+            #(#arg_decls,)*
+            __options: *mut ::v8::fast_api::FastApiCallbackOptions,
+        ) -> #ret_ty_tok {
+            // Recover the boxed instance via aligned pointer in slot 1.
+            // tag=0 matches the value passed to set_aligned_pointer_in_internal_field.
+            let __raw: *const ::std::ffi::c_void = unsafe {
+                __recv.get_aligned_pointer_from_internal_field(1, 0)
+            };
+            let __instance: &#class_ty = unsafe { &*(__raw as *const #class_ty) };
+
+            // Per-arg adaptation from fast-API raw type to user method
+            // expected type (no-op for primitives; Vec copy for
+            // ByteString from FastApiOneByteString).
+            #(#arg_binds)*
+
+            // Call the user method. The receiver is `&Self`; user
+            // method's signature MUST match (validated at macro time
+            // by `validate_fastcall_signature`).
+            let __r = <#class_ty>::#method_name(__instance, #(#arg_call_idents),*);
+
+            // Marshal the return value. For `Result`, this branches
+            // Ok/Err; the Err arm allocates a CallbackScope and throws.
+            #ret_marshal
+        }
+    })
 }
 
 /// Codegen for `#[v8_getter(same_object)]` — WebIDL `[SameObject]`
@@ -2155,7 +2908,7 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
     }
 }
 
-fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStream2 {
+fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod, has_any_fastcall: bool) -> TokenStream2 {
     let ctor_name = &c.func.sig.ident;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
@@ -2207,7 +2960,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
         }
     };
 
-    let store = gen_box_and_install_finalizer(class_ty);
+    let store = gen_box_and_install_finalizer(class_ty, has_any_fastcall);
     let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
 
     // MAC-02: post_init dispatch — runs AFTER box install, BEFORE the
@@ -2291,9 +3044,9 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
     }
 }
 
-fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
+fn gen_default_constructor_callback(class_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
-    let store = gen_box_and_install_finalizer(class_ty);
+    let store = gen_box_and_install_finalizer(class_ty, has_any_fastcall);
     // No method-level attrs to read — the Default-derived constructor
     // is always must-new. The opt-out attribute requires a user-written
     // `#[v8_constructor]`, by definition.
@@ -2319,13 +3072,35 @@ fn gen_default_constructor_callback(class_ty: &syn::Ident) -> TokenStream2 {
 /// register a guaranteed finalizer on the JS wrapper to reclaim the
 /// Box when V8 GCs the object.
 ///
+/// When `has_any_fastcall` is true, the same raw pointer is also stored
+/// in slot 1 via `set_aligned_pointer_in_internal_field` so fastcall
+/// shims can recover `*const Self` without a scope (a single load,
+/// `get_aligned_pointer_from_internal_field(1, 0)`). Slot 0 keeps the
+/// External + finalizer for the standard wrapper teardown; slot 1 is
+/// scope-free and read-only from the fast path.
+///
 /// The pointer is captured as `usize` in the closure so we don't have
 /// to assert `Send` on a `*mut Self`; we cast back inside the closure
 /// where the type is statically known. The Weak handle is forgotten
 /// (via `mem::forget`) because dropping it would deregister the
 /// finalizer — `with_guaranteed_finalizer` ensures the closure runs
 /// on GC or isolate teardown regardless.
-fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
+fn gen_box_and_install_finalizer(class_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
+    let fastcall_slot1 = if has_any_fastcall {
+        quote! {
+            // tag = 0: must match the tag passed to
+            // get_aligned_pointer_from_internal_field in the fastcall
+            // shim. V8 uses the tag to distinguish embedder pointer
+            // categories — a mismatch returns null.
+            __this.set_aligned_pointer_in_internal_field(
+                1,
+                __raw_ptr as *const ::std::ffi::c_void,
+                0,
+            );
+        }
+    } else {
+        quote! {}
+    };
     quote! {
         let __boxed = Box::new(__instance);
         let __raw_ptr = Box::into_raw(__boxed);
@@ -2333,6 +3108,14 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident) -> TokenStream2 {
 
         let __ext = v8::External::new(scope, __raw_ptr as *mut ::std::ffi::c_void);
         __this.set_internal_field(0, __ext.into());
+
+        // Optional fastcall slot — set only when at least one method
+        // on the class is annotated with `#[v8_method(fastcall)]` /
+        // `#[v8_getter(fastcall)]`. Slot 1 holds the same Box raw
+        // pointer as slot 0's External, but stored as an aligned
+        // pointer so the fast-path shim can recover `*const Self`
+        // without a scope.
+        #fastcall_slot1
 
         // SAFETY: __raw_addr was Box::into_raw'd from Box<#class_ty>;
         // the finalizer closure casts back to the same type and drops

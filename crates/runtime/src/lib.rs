@@ -55,6 +55,90 @@
 //!     }
 //! }
 //! ```
+//!
+//! ## `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]` rejection rules
+//!
+//! Fastcall codegen restricts the user's signature to fit V8's fast API
+//! constraints. The macro emits compile-fail errors at the right span so
+//! mistakes surface as clear messages rather than runtime UB.
+//!
+//! `&mut self` is rejected — fast-path callbacks have no scope and so
+//! the slow path's per-method re-entrancy guard cannot be emitted:
+//!
+//! ```compile_fail
+//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
+//! struct M { n: u32 }
+//! #[v8_class]
+//! impl M {
+//!     #[v8_constructor]
+//!     fn new() -> Self { M { n: 0 } }
+//!     #[v8_method(fastcall)]
+//!     fn bump(&mut self) -> u32 { self.n += 1; self.n }
+//! }
+//! ```
+//!
+//! `String` return is rejected — fast path forbids allocation:
+//!
+//! ```compile_fail
+//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
+//! struct M;
+//! #[v8_class]
+//! impl M {
+//!     #[v8_constructor]
+//!     fn new() -> Self { M }
+//!     #[v8_method(fastcall)]
+//!     fn name(&self) -> String { "x".to_string() }
+//! }
+//! ```
+//!
+//! `Vec<u8>` return is rejected — same allocation reason:
+//!
+//! ```compile_fail
+//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
+//! struct M;
+//! #[v8_class]
+//! impl M {
+//!     #[v8_constructor]
+//!     fn new() -> Self { M }
+//!     #[v8_method(fastcall)]
+//!     fn bytes(&self) -> Vec<u8> { vec![] }
+//! }
+//! ```
+//!
+//! `Option<T>` return is rejected — fast path can't represent `null`:
+//!
+//! ```compile_fail
+//! use zeroship_runtime_macros::{v8_class, v8_method, v8_constructor};
+//! struct M;
+//! #[v8_class]
+//! impl M {
+//!     #[v8_constructor]
+//!     fn new() -> Self { M }
+//!     #[v8_method(fastcall)]
+//!     fn opt(&self) -> Option<u32> { None }
+//! }
+//! ```
+//!
+//! Positive shapes compile fine:
+//!
+//! ```
+//! use zeroship_runtime::state::OpError;
+//! use zeroship_runtime_macros::{v8_class, v8_method, v8_getter, v8_constructor};
+//! struct OkF { n: u32 }
+//! #[v8_class]
+//! impl OkF {
+//!     #[v8_constructor]
+//!     fn new() -> Self { OkF { n: 0 } }
+//!     #[v8_getter(fastcall)]
+//!     fn count(&self) -> u32 { self.n }
+//!     #[v8_method(fastcall)]
+//!     fn ping(&self, n: u32) -> u32 { n + 1 }
+//!     #[v8_method(fastcall)]
+//!     fn check(&self, n: u32) -> Result<bool, OpError> {
+//!         Ok(n > 0)
+//!     }
+//! }
+//! ```
 
 #![allow(unsafe_code)]
 #![allow(missing_debug_implementations)]
