@@ -50,6 +50,9 @@ use syn::{
 };
 
 mod v8_class;
+mod v8_iterable;
+mod webidl_dict;
+mod webidl_enum;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -178,6 +181,98 @@ pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStrea
 /// EventSource / MessagePort / XMLHttpRequest.
 #[proc_macro_attribute]
 pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// `#[derive(WebIdlDict)]` — generate a `from_v8(scope, value) ->
+/// Result<Self, OpError>` impl that reads the JS object's properties as
+/// the struct's named fields, per WebIDL §3.10 (dictionaries).
+///
+/// Each field type must implement [`WebIdlConvertible`]. The trait is
+/// hand-implemented for primitives (USVString, ByteString, String, bool,
+/// u32, i32, f64), for `Option<T>` (lifts the blanket impl), for
+/// `v8::Local<Value>` (passthrough for union-typed members), and is
+/// auto-implemented by this derive AND by `#[derive(WebIdlEnum)]` on
+/// user types. Dictionaries can therefore nest arbitrarily.
+///
+/// Override the WebIDL-visible member name with
+/// `#[webidl_name = "..."]` on a field. Default = field ident verbatim.
+///
+/// Per spec, `null` / `undefined` produce a default-constructed dict
+/// (the derive emits `Self::default()` — `Self: Default` is required).
+/// Non-object values throw TypeError. Per-member conversion errors
+/// throw with the inner converter's message.
+///
+/// See `crates/runtime-macros/src/webidl_dict.rs` for codegen detail.
+#[proc_macro_derive(WebIdlDict, attributes(webidl_name))]
+pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
+    webidl_dict::expand(input)
+}
+
+/// `#[derive(WebIdlEnum)]` — generate `from_str` / `as_str` / a
+/// [`WebIdlConvertible`] impl for a unit-variant enum, per WebIDL
+/// §3.7.10 (enumeration types).
+///
+/// By default each variant maps to its kebab-cased name (`NoCors` →
+/// `"no-cors"`); override with `#[webidl_name = "..."]` on the variant.
+///
+/// The emitted [`WebIdlConvertible`] impl ToString-coerces the JS
+/// value, runs `from_str`, and throws TypeError on unknown name (per
+/// WebIDL §3.13.7 step 4). The error message includes both the
+/// offending value and the accepted-name set.
+///
+/// The derive does NOT require `Self: Default` itself; the caller may
+/// add `#[derive(Default)]` separately if WebIdlDict-as-member fallback
+/// is needed.
+///
+/// See `crates/runtime-macros/src/webidl_enum.rs` for codegen detail.
+#[proc_macro_derive(WebIdlEnum, attributes(webidl_name))]
+pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
+    webidl_enum::expand(input)
+}
+
+/// Impl-block-level marker attribute consumed by `#[v8_class]`: emit
+/// the WebIDL pair-iterator surface (keys / values / entries / forEach /
+/// @@iterator) from a single user-supplied
+/// `value_pairs(&self) -> Vec<(K, V)>` method.
+///
+/// The user's class must define a `value_pairs(&self)` method (without
+/// the `#[v8_method]` marker — it stays Rust-private) that returns a
+/// `Vec<(K, V)>`. The macro emits:
+///
+///   - `keys()` / `values()` / `entries()` factory methods (WebIDL
+///     §3.7.10.2)
+///   - `forEach(callback, thisArg?)` (WebIDL §3.7.10.3)
+///   - `[Symbol.iterator]` aliasing `entries`
+///   - A `<Class>Iterator` companion class with `next() -> { value, done }`
+///
+/// `K` and `V` must be one of: `ByteString`, `USVString`, `String`,
+/// `u32`. Additionally `V` may be `Vec<u8>` (yielded as a Uint8Array).
+///
+/// **Iteration model**: the derive uses snapshot iteration — the
+/// iterator clones `value_pairs()` once at factory-call time and walks
+/// the snapshot. This deviates from WebIDL §3.7.10.2's live-iteration
+/// requirement; classes that need live semantics (Headers,
+/// URLSearchParams, FormData) should hand-roll the iterator instead.
+/// The trade-off is documented in the codegen's doc-comment.
+///
+/// Usage:
+/// ```ignore
+/// struct MyMap { entries: Vec<(ByteString, ByteString)> }
+///
+/// #[v8_class]
+/// #[v8_iterable(key = ByteString, value = ByteString)]
+/// impl MyMap {
+///     #[v8_constructor]
+///     fn new() -> Self { ... }
+///
+///     fn value_pairs(&self) -> Vec<(ByteString, ByteString)> {
+///         self.entries.clone()
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn v8_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 

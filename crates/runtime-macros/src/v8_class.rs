@@ -48,7 +48,7 @@ use syn::{
     Receiver, ReturnType, Type,
 };
 
-use crate::{gen_call_return, gen_extract};
+use crate::{gen_call_return, gen_extract, v8_iterable};
 
 // ---------------------------------------------------------------------------
 // Method classification
@@ -429,6 +429,32 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
     let inherit_base = extract_inherit_base(&input.attrs);
 
+    // `#[v8_iterable(key = K, value = V)]` — emit the pair-iterator
+    // surface (keys / values / entries / forEach / @@iterator) plus a
+    // companion `<Class>Iterator` class.
+    let iterable_attr = match v8_iterable::extract_iterable(&input.attrs) {
+        Ok(opt) => opt,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let iterable_codegen = match iterable_attr.as_ref() {
+        Some(attr) => match v8_iterable::generate(class_ty, attr) {
+            Ok(ts) => ts,
+            Err(err) => return err.to_compile_error().into(),
+        },
+        None => quote! {},
+    };
+    let install_iterable_call = if iterable_attr.is_some() {
+        // The `gen()` codegen above emitted
+        // `<Class>::__zs_install_iterable_methods(scope, __proto)`. We
+        // insert the call here so it fires at the end of `install`'s
+        // prototype-template setup.
+        Some(quote! {
+            <#class_ty>::__zs_install_iterable_methods(scope, __proto);
+        })
+    } else {
+        None
+    };
+
     // `Self::install(scope) -> v8::Local<v8::FunctionTemplate>`
     let install = gen_install(
         class_ty,
@@ -437,6 +463,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         to_string_tag_override.as_deref(),
         inherit_intrinsic.as_deref(),
         inherit_base.as_ref(),
+        install_iterable_call.as_ref(),
     );
 
     // Strip our marker attributes from the impl items so rustc doesn't
@@ -599,6 +626,14 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #constructor_callback
         #(#callbacks)*
+
+        // Iterable codegen (when `#[v8_iterable(...)]` is set on the
+        // impl block). Emits the companion `<Class>Iterator` struct +
+        // its install fn, the four factory callbacks (keys, values,
+        // entries, forEach), the iterator's `next()` callback, and a
+        // `<Class>::__zs_install_iterable_methods` helper called from
+        // `<Class>::install`. No-op when the attribute is absent.
+        #iterable_codegen
     };
 
     expanded.into()
@@ -618,7 +653,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
         let p = attr.path();
         !(p.is_ident("v8_to_string_tag")
             || p.is_ident("v8_inherit_intrinsic")
-            || p.is_ident("v8_inherit"))
+            || p.is_ident("v8_inherit")
+            || p.is_ident("v8_iterable"))
     });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
@@ -648,6 +684,7 @@ fn gen_install(
     to_string_tag_override: Option<&str>,
     inherit_intrinsic: Option<&str>,
     inherit_base: Option<&syn::Path>,
+    install_iterable_call: Option<&TokenStream2>,
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -876,6 +913,13 @@ fn gen_install(
 
             let __proto = __ctor_tmpl.prototype_template(scope);
             #(#proto_sets)*
+
+            // `#[v8_iterable(...)]` — install keys / values / entries /
+            // forEach / @@iterator on the prototype template. The
+            // companion `<Class>Iterator` class is emitted at module
+            // scope (see `iterable_codegen`) and the install call here
+            // wires its factories onto the parent's proto.
+            #install_iterable_call
 
             // Install Symbol.toStringTag so
             // `Object.prototype.toString.call(new Foo())` → "[object Foo]".
