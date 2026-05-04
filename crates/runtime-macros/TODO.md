@@ -236,8 +236,8 @@ so we can grep back through the rationale.
     HeadersIterator (live), FormDataIterator. Total saving estimated
     ~400 LOC across 3 classes.
   - Lands: commit `506a588f` (snapshot mode codegen + 14 smoke tests
-    in `tests/v8_iterable_smoke.rs`); follow-up adds `mode = live`
-    for spec-compliant iteration (9 smoke tests in
+    in `tests/v8_iterable_smoke.rs`); follow-up commit `5901d68`
+    adds `mode = live` for spec-compliant iteration (9 smoke tests in
     `tests/v8_iterable_live_smoke.rs`) — covers insert/delete during
     iteration, shrink-below-cursor, live forEach with self-mutating
     callback, and explicit `mode = snapshot` back-compat.
