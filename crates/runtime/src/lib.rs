@@ -137,7 +137,7 @@ pub use clamp::{
     read_clamp_i32, read_clamp_i64, read_clamp_u16, read_clamp_u32, read_clamp_u64,
 };
 pub use enforce_range::{EnforceRangeU32, EnforceRangeU64, read_enforce_range_u32, read_enforce_range_u64};
-pub use convert::{WebIdlConvertible, read_record, read_sequence};
+pub use convert::{DictOrBool, WebIdlConvertible, read_record, read_sequence};
 pub use url_native::helpers::USVString;
 pub use init::{init_v8, RequestResult, HttpResult};
 pub use modules::ModuleEntry;

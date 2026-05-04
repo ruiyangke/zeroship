@@ -330,3 +330,125 @@ fn reject_null_only_affects_marked_field() {
     assert!(w.name.is_none());
     assert_eq!(w.signal.as_ref().unwrap().as_str(), "ok");
 }
+
+// ---------------------------------------------------------------------------
+// Test 7: `DictOrBool<T>` union shape `(<dict> or boolean)`.
+//
+// Spec consumer: `AddEventListenerOptions` accepts
+// `(EventListenerOptions or boolean)` per DOM §2.7. The boolean
+// shorthand sets `capture` only. Other dict shapes that the spec
+// allows to be a boolean are vanishingly rare; the WebIDL spec's full
+// union machinery is overkill for this single shape.
+//
+// The DictOrBool<T> wrapper carries its own WebIdlConvertible impl
+// that branches on the JS value: primitive boolean → DictOrBool::Bool,
+// otherwise read as T. The dict derive needs no new attribute — the
+// type IS the contract. `null` and `undefined` fall through to the
+// outer Option<DictOrBool<T>>'s default (None), preserving the
+// WebIDL §3.10 dict semantics.
+// ---------------------------------------------------------------------------
+
+use zeroship_runtime::convert::DictOrBool;
+
+#[derive(WebIdlDict, Default, Debug)]
+struct EventListenerOptions {
+    capture: Option<bool>,
+    passive: Option<bool>,
+    once: Option<bool>,
+}
+
+#[derive(WebIdlDict, Default, Debug)]
+struct AddEventListenerOptions {
+    options: Option<DictOrBool<EventListenerOptions>>,
+}
+
+#[test]
+fn dict_or_bool_boolean_shorthand() {
+    let w = run_with_value(r#"({options: true})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).unwrap()
+    });
+    match w.options {
+        Some(DictOrBool::Bool(b)) => assert!(b),
+        other => panic!("expected Some(Bool(true)), got {:?}", other),
+    }
+}
+
+#[test]
+fn dict_or_bool_boolean_shorthand_false() {
+    let w = run_with_value(r#"({options: false})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).unwrap()
+    });
+    match w.options {
+        Some(DictOrBool::Bool(b)) => assert!(!b),
+        other => panic!("expected Some(Bool(false)), got {:?}", other),
+    }
+}
+
+#[test]
+fn dict_or_bool_full_dict() {
+    let w = run_with_value(
+        r#"({options: {capture: true, passive: false, once: true}})"#,
+        |val, scope| AddEventListenerOptions::from_v8(scope, val).unwrap(),
+    );
+    match w.options {
+        Some(DictOrBool::Dict(d)) => {
+            assert_eq!(d.capture, Some(true));
+            assert_eq!(d.passive, Some(false));
+            assert_eq!(d.once, Some(true));
+        }
+        other => panic!("expected Some(Dict(...)), got {:?}", other),
+    }
+}
+
+#[test]
+fn dict_or_bool_partial_dict() {
+    // A dict missing fields still resolves to Dict (not Bool).
+    let w = run_with_value(r#"({options: {capture: true}})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).unwrap()
+    });
+    match w.options {
+        Some(DictOrBool::Dict(d)) => {
+            assert_eq!(d.capture, Some(true));
+            assert_eq!(d.passive, None);
+        }
+        other => panic!("expected Dict, got {:?}", other),
+    }
+}
+
+#[test]
+fn dict_or_bool_null_falls_through() {
+    // null → outer Option<DictOrBool<...>>'s blanket impl returns None.
+    let w = run_with_value(r#"({options: null})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).unwrap()
+    });
+    assert!(w.options.is_none());
+}
+
+#[test]
+fn dict_or_bool_undefined_falls_through() {
+    let w = run_with_value(r#"({options: undefined})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).unwrap()
+    });
+    assert!(w.options.is_none());
+}
+
+#[test]
+fn dict_or_bool_missing_falls_through() {
+    let w = run_with_value(r#"({})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).unwrap()
+    });
+    assert!(w.options.is_none());
+}
+
+#[test]
+fn dict_or_bool_non_object_non_bool_falls_back_to_dict_path() {
+    // A primitive that's not a boolean (e.g. a number) takes the
+    // dict-extraction path. The dict derive then rejects non-object
+    // with TypeError per WebIDL §3.10. This is the same behaviour as
+    // for a non-union dict member — the union just adds the boolean
+    // shortcut.
+    let err = run_with_value(r#"({options: 42})"#, |val, scope| {
+        AddEventListenerOptions::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "expected TypeError on non-object non-bool");
+}

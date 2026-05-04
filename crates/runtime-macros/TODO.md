@@ -204,6 +204,36 @@ so we can grep back through the rationale.
   - Lands: codegen + 6 new smoke tests in
     `tests/v8_webidl_dict_smoke.rs` (22 total, up from 16).
 
+- **`DictOrBool<T>` — `(<dict> or boolean)` union shape.** New
+  wrapper type in `crates/runtime/src/webidl/convert.rs` (re-exported
+  through `zeroship_runtime::DictOrBool`) with a hand-rolled
+  `WebIdlConvertible` impl: a primitive JS boolean → `DictOrBool::Bool`;
+  anything else → `DictOrBool::Dict(T::from_v8(...)?)`. The dict
+  derive needs no new attribute — the type IS the contract. The
+  primitive-vs-Boolean-wrapper distinction uses
+  `v8::Local::<v8::Boolean>::try_from(value)` which excludes Boolean
+  wrapper objects (they remain on the dict path), satisfying WebIDL
+  §3.13.6 distinguishability for the (dict, boolean) shape.
+  - We deliberately scope this to the (T or boolean) shape rather
+    than implementing full WebIDL §3.13.6 union resolution — the only
+    runtime consumer is `AddEventListenerOptions`'s
+    `(EventListenerOptions or boolean)` per DOM §2.7. The full
+    algorithm has hundreds of branches (object-with-iterator vs
+    without, FrozenArray, distinguishability rules across types) that
+    aren't needed.
+  - Wrap inside `Option<DictOrBool<T>>` on the dict struct to make
+    `null` / `undefined` fall through to `None` (§3.10 absent path);
+    naked `DictOrBool<T>` would require Default, which `DictOrBool`
+    doesn't provide on purpose (no sensible default between Dict and
+    Bool).
+  - Unblocks: `AddEventListenerOptions` /
+    `EventListenerOptions` migration in `crates/runtime/TODO.md`
+    "V8 class macro migration follow-ups → Deferred". Pairs with
+    `reject_null` on the `signal` field to fully cover the dict.
+  - Lands: new `DictOrBool<T>` enum + WebIdlConvertible impl in
+    `convert.rs`, re-export in `lib.rs`, + 8 new smoke tests in
+    `tests/v8_webidl_dict_smoke.rs` (30 total, up from 22).
+
 - **`#[derive(WebIdlEnum)]` for enum types** — WebIDL §3.7.10. Generates
   `from_str` / `as_str` / `WebIdlConvertible` for unit-variant enums.
   Default name = ident kebab-cased (`NoCors` → `"no-cors"`); override
