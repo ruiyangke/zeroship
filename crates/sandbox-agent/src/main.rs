@@ -11,7 +11,6 @@ use std::process::ExitCode;
 use ntex::web::middleware::DefaultHeaders;
 use ntex::web::{self, HttpResponse};
 use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
 
 use zeroship_sandbox_agent::{
     dropuser, handlers, proxy, proxy_ws, reap, state_from_env, version, DEFAULT_PORT,
@@ -33,20 +32,21 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Init the JSON-formatted tracing subscriber. Filter by
-/// `SANDBOX_AGENT_LOG` (defaults to `info`); accepts the standard
-/// `RUST_LOG`-style directives — e.g.
-/// `SANDBOX_AGENT_LOG=info,zeroship_sandbox_agent::audit=warn`.
+/// Init the workspace-wide tracing subscriber.
+///
+/// Format pluggable via `ZEROSHIP_LOG_FORMAT={pretty|compact|json|logfmt|bunyan}`;
+/// auto-detects TTY for the default (json off-TTY, pretty on-TTY).
+///
+/// Filter resolution: `RUST_LOG` (standard tracing-subscriber env) wins. If
+/// unset, fall back to the long-standing `SANDBOX_AGENT_LOG` env var so
+/// existing operator runbooks keep working. If neither is set, default to
+/// `info`.
 fn init_tracing() {
-    let filter = EnvFilter::try_from_env("SANDBOX_AGENT_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .json()
-        .with_target(true)
-        .with_current_span(false)
-        .with_span_list(false)
-        .init();
+    let default_filter = std::env::var("SANDBOX_AGENT_LOG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "info,sandbox_agent=debug".to_string());
+    zeroship_core::observability::init_tracing(&default_filter);
 }
 
 async fn run() -> Result<(), String> {
