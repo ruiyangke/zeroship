@@ -16,9 +16,10 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<St
     match worker.modules.get(&worker.entry) {
         Some(h) => Some(h.clone()),
         None => {
-            eprintln!(
-                "[worker-sync] manifest.worker.entry {:?} missing from modules for {app_id}",
-                worker.entry
+            tracing::warn!(
+                app_id = %app_id,
+                entry = ?worker.entry,
+                "worker-sync: manifest.worker.entry missing from modules"
             );
             None
         }
@@ -101,7 +102,7 @@ async fn version_poll_loop(
                     *guard = Some(versions);
                 }
             }
-            Err(e) => eprintln!("[worker-sync] poll error: {e}"),
+            Err(e) => tracing::error!(error = %e, "worker-sync: poll error"),
         }
         compio::time::sleep(interval).await;
     }
@@ -131,13 +132,13 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
             Ok(g) => g.clone(),
             Err(_) => {
                 crate::metrics::inc(&crate::metrics::LOCK_POISONED_TOTAL);
-                eprintln!("[worker-sync] SharedVersions lock poisoned — restart recommended");
+                tracing::error!("worker-sync: SharedVersions lock poisoned — restart recommended");
                 continue;
             }
         };
         let Some(versions) = snapshot else { continue };
         if let Err(e) = reconcile_once(&config, &versions, &envs).await {
-            eprintln!("[worker-sync] reconcile error: {e}");
+            tracing::error!(error = %e, "worker-sync: reconcile error");
         }
     }
 }
@@ -163,12 +164,12 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
         match fetch_app_env(&config.control_url, &config.control_key, app_id).await {
             Ok(env_json) => {
                 if let Err(e) = put_env_from_json(envs, *app_id, &env_json, info.env_version) {
-                    eprintln!("[worker-sync] env parse {app_id}: {e}");
+                    tracing::warn!(app_id = %app_id, error = %e, "worker-sync: env parse failed");
                 }
             }
             Err(e) => {
                 crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
-                eprintln!("[worker-sync] env-only refresh {app_id}: {e}");
+                tracing::warn!(app_id = %app_id, error = %e, "worker-sync: env-only refresh failed");
             }
         }
     }
@@ -236,7 +237,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                     Ok(json) => Some(json),
                                     Err(e) => {
                                         crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
-                                eprintln!("[worker-sync] fetch env {local_id}: {e}");
+                                        tracing::warn!(app_id = %local_id, error = %e, "worker-sync: fetch env failed");
                                         continue; // don't swap V8 with no env
                                     }
                                 }
@@ -246,7 +247,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
 
                             if let Some(env_json) = env_for_load.as_deref() {
                                 if let Err(e) = put_env_from_json(envs, *local_id, env_json, info.env_version) {
-                                    eprintln!("[worker-sync] env parse {local_id}: {e}");
+                                    tracing::warn!(app_id = %local_id, error = %e, "worker-sync: env parse failed");
                                     continue;
                                 }
                             }
@@ -255,23 +256,24 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 if let Some(remote_hash) = remote_hash {
                                     cache::set_hash(*local_id, remote_hash.clone());
                                 }
-                                eprintln!(
-                                    "[worker-sync] updated {local_id} (plan: {}, blob: {}...)",
-                                    info.plan_id,
-                                    &bundle_hash[..bundle_hash.len().min(8)]
+                                tracing::info!(
+                                    app_id = %local_id,
+                                    plan_id = %info.plan_id,
+                                    blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+                                    "worker-sync: app updated"
                                 );
                             }
                         }
                         Err(e) => {
                             crate::metrics::inc(&crate::metrics::BUNDLE_FETCH_FAILURES);
-                            eprintln!("[worker-sync] fetch bundle {local_id}: {e}");
+                            tracing::warn!(app_id = %local_id, error = %e, "worker-sync: fetch bundle failed");
                         }
                     }
                 }
             }
             // App deleted from control plane — evict
             None => {
-                eprintln!("[worker-sync] evicting deleted app {local_id}");
+                tracing::info!(app_id = %local_id, "worker-sync: evicting deleted app");
                 cache::evict_app(local_id);
                 cache::remove_hash(local_id);
                 // Env entry GC'd centrally by version_poll_loop's
