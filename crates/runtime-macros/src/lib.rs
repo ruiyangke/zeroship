@@ -319,6 +319,34 @@ pub fn v8_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Impl-block-level marker attribute consumed by `#[v8_class]`: alias
+/// `[Symbol.asyncIterator]` to a method that already exists on the
+/// class, per WebIDL §3.7.10.5 (default async iterators).
+///
+/// Usage:
+/// ```ignore
+/// #[v8_class]
+/// #[v8_async_iterable(method = "values")]
+/// impl ReadableStream {
+///     #[v8_method]
+///     fn values(&self, ...) -> ... { ... }
+/// }
+/// ```
+///
+/// Codegen emits, in the install fn, a fresh FunctionTemplate wrapping
+/// the named method's existing callback, with `set_class_name(method)`
+/// per spec, and installs it on the prototype under
+/// `Symbol.asyncIterator`. Identity isn't preserved (`obj[Symbol
+/// .asyncIterator] !== obj.values`) — the spec describes two distinct
+/// FunctionTemplates with matching callbacks and aligned `name`
+/// properties, and consumers don't compare for identity.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_async_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Argument-level marker attribute consumed by `#[v8_class]`: when
 /// applied to a `Vec<u8>` parameter, the macro emits a SAB-rejection
 /// guard *before* extracting the bytes. A SharedArrayBuffer-backed

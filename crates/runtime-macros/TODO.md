@@ -47,6 +47,11 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   default with `#[webidl_name = "..."]` override — `40494fa3`.
 - **`#[v8_iterable]`** default pair iterators (§3.7.10.2/§3.7.10.3).
   Snapshot mode `506a588f`; `mode = live` `5901d68`.
+- **`#[v8_async_iterable(method = "name")]`** — alias
+  `[Symbol.asyncIterator]` to a method that already exists per WebIDL
+  §3.7.10.5. Emits a fresh FunctionTemplate wrapping the method's
+  callback, sets `class_name(method)`, installs on the prototype
+  template. [MAC-18 / B.12] — `<commit>`.
 
 ### WebIDL derives (Tier 4)
 
@@ -121,8 +126,6 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   `undefined` for required members. QueuingStrategyInit + future. [B.7]
 - **MAC-17 `WrapU16` / `WrapU8` / etc. newtypes** — default-case integer
   coercion (NaN→0, modulo 2^N). CloseEvent.code today. [B.9]
-- **MAC-18 `#[v8_async_iterable]`** — `[Symbol.asyncIterator]` alias
-  emit. ReadableStream. -10 LOC. [B.12]
 - **Lifetime-tied `Local<'s, T>` returns** — generalize URL-native's
   `param-named-scope` workaround to detect `Local<'s, _>` tied to a
   scope arg.

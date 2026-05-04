@@ -229,6 +229,49 @@ fn extract_reject_shared(attrs: &[Attribute]) -> HashSet<String> {
     names
 }
 
+/// Read `#[v8_async_iterable(method = "name")]` from impl-block
+/// attributes. Returns the method name to alias `[Symbol.asyncIterator]`
+/// to. Per WebIDL §3.7.10.5, the spec calls for a separate
+/// FunctionTemplate that wraps the named method's callback and has its
+/// `name` property set to the method's name; the install codegen
+/// emits exactly that pattern.
+///
+/// Accepts both:
+///   - `#[v8_async_iterable(method = "values")]` — the canonical form
+///   - `#[v8_async_iterable(method = values)]` — bare ident form, for
+///     consistency with `#[v8_iterable(key = TY)]` shape.
+fn extract_async_iterable(attrs: &[Attribute]) -> Result<Option<String>, syn::Error> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_async_iterable") {
+            continue;
+        }
+        let mut method: Option<String> = None;
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("method") {
+                let value = meta.value()?;
+                // Accept "values" or values.
+                if let Ok(s) = value.parse::<syn::LitStr>() {
+                    method = Some(s.value());
+                } else {
+                    let id: syn::Ident = value.parse()?;
+                    method = Some(id.to_string());
+                }
+                Ok(())
+            } else {
+                Err(meta.error("expected `method = \"name\"`"))
+            }
+        })?;
+        let m = method.ok_or_else(|| {
+            syn::Error::new_spanned(
+                attr,
+                "#[v8_async_iterable]: missing `method = \"name\"` (e.g. `method = \"values\"`)",
+            )
+        })?;
+        return Ok(Some(m));
+    }
+    Ok(None)
+}
+
 /// Read `#[v8_inherit_intrinsic = "IteratorPrototype"]` from impl-block
 /// attributes. Currently only `"IteratorPrototype"` is recognised.
 fn extract_inherit_intrinsic(attrs: &[Attribute]) -> Option<String> {
@@ -429,6 +472,35 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let to_string_tag_override = extract_to_string_tag(&input.attrs);
     let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
     let inherit_base = extract_inherit_base(&input.attrs);
+    let async_iterable_method = match extract_async_iterable(&input.attrs) {
+        Ok(opt) => opt,
+        Err(err) => return err.to_compile_error().into(),
+    };
+
+    // Validate that the named method actually exists in the impl block
+    // — better error than waiting for the method-callback ident lookup
+    // to fail at quote-expansion time. Match against the JS-visible
+    // name (post-`#[v8_name = ...]` rename) since that's what users
+    // think of.
+    if let Some(ref name) = async_iterable_method {
+        let exists = methods.iter().any(|m| {
+            matches!(
+                m.kind,
+                MethodKind::Method | MethodKind::AsyncMethod
+            ) && &m.js_name == name
+        });
+        if !exists {
+            return syn::Error::new_spanned(
+                &input.self_ty,
+                format!(
+                    "#[v8_async_iterable(method = \"{name}\")]: no method named `{name}` (must be \
+                     `#[v8_method]` or `#[v8_async_method]` on this impl block)"
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
 
     // `#[v8_iterable(key = K, value = V)]` — emit the pair-iterator
     // surface (keys / values / entries / forEach / @@iterator) plus a
@@ -465,6 +537,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         inherit_intrinsic.as_deref(),
         inherit_base.as_ref(),
         install_iterable_call.as_ref(),
+        async_iterable_method.as_deref(),
     );
 
     // Strip our marker attributes from the impl items so rustc doesn't
@@ -688,7 +761,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
         !(p.is_ident("v8_to_string_tag")
             || p.is_ident("v8_inherit_intrinsic")
             || p.is_ident("v8_inherit")
-            || p.is_ident("v8_iterable"))
+            || p.is_ident("v8_iterable")
+            || p.is_ident("v8_async_iterable"))
     });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
@@ -719,6 +793,7 @@ fn gen_install(
     inherit_intrinsic: Option<&str>,
     inherit_base: Option<&syn::Path>,
     install_iterable_call: Option<&TokenStream2>,
+    async_iterable_method: Option<&str>,
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -824,6 +899,40 @@ fn gen_install(
     let to_string_tag_str = to_string_tag_override
         .map(str::to_string)
         .unwrap_or_else(|| class_name_str.clone());
+
+    // `#[v8_async_iterable(method = "name")]` — alias
+    // `[Symbol.asyncIterator]` to the named method per WebIDL §3.7.10.5.
+    // The user-defined method retains its original installation on the
+    // prototype; this block adds a SECOND FunctionTemplate that wraps
+    // the same callback and is installed under `Symbol.asyncIterator`,
+    // with `set_class_name(method)` so the alias's `name` property
+    // matches the spec.
+    let async_iterable_block = match async_iterable_method {
+        None => quote! {},
+        Some(method_name) => {
+            // Look up the method's callback ident. We've already
+            // validated in `expand` that the method exists, so the
+            // first matching JS-name entry is guaranteed to be present.
+            let method_ident = methods
+                .iter()
+                .find(|m| {
+                    matches!(m.kind, MethodKind::Method | MethodKind::AsyncMethod)
+                        && m.js_name == method_name
+                })
+                .map(|m| &m.func.sig.ident)
+                .expect("async_iterable_method validated in expand()");
+            let cb = method_callback_ident(class_ty, method_ident);
+            quote! {
+                {
+                    let __async_iter_sym = v8::Symbol::get_async_iterator(scope);
+                    let __alias_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                    let __name_v = v8::String::new(scope, #method_name).unwrap();
+                    __alias_tmpl.set_class_name(__name_v);
+                    __proto.set(__async_iter_sym.into(), __alias_tmpl.into());
+                }
+            }
+        }
+    };
 
     // Optional prototype-chain link to a V8 built-in intrinsic.
     // Currently only `"IteratorPrototype"` is wired. Implementation
@@ -954,6 +1063,11 @@ fn gen_install(
             // scope (see `iterable_codegen`) and the install call here
             // wires its factories onto the parent's proto.
             #install_iterable_call
+
+            // `#[v8_async_iterable(method = "name")]` — install
+            // `[Symbol.asyncIterator]` aliasing the named method per
+            // WebIDL §3.7.10.5. Empty when the attribute is absent.
+            #async_iterable_block
 
             // Install Symbol.toStringTag so
             // `Object.prototype.toString.call(new Foo())` → "[object Foo]".
