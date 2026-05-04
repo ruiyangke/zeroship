@@ -671,7 +671,21 @@ impl Headers {
     /// `has(name: ByteString) -> boolean` — Fetch §2.2.1
     /// `dom-headers-has`. Validate name then byte-case-insensitive
     /// existence check. Read path: does NOT check the immutable guard.
-    #[v8_method]
+    ///
+    /// `fastcall` opt-in: the macro emits a CFunction shim alongside
+    /// the FunctionCallback so V8 TurboFan can inline the typed call
+    /// at hot sites. ByteString → V8 SeqOneByteString fast-API type
+    /// (the macro adapts via FastApiOneByteString::as_bytes + Vec
+    /// copy). The Err arm — bad header name (`!is_header_name`) — is
+    /// re-routed through CallbackScope::new(options) + throw_exception,
+    /// which deopts and re-routes to the slow path next iteration.
+    /// Promoted to Tier 1 by the 2026-05-04 httpGet regression bisect
+    /// (`docs/perf/httpget-regression-2026-05-04.md`): scenarios.js
+    /// does `request.headers.get("upgrade")` per request, but
+    /// `headers.has` is a hot enough close-relative on the fetch
+    /// dispatch path that fastcalling it delivers measurable savings
+    /// per `crates/runtime-macros/TODO.md` ROI table.
+    #[v8_method(fastcall)]
     fn has(&self, name: ByteString) -> Result<bool, OpError> {
         self.validate_query_name(name.as_slice())?;
         Ok(self
