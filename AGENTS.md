@@ -10,11 +10,11 @@ This file is the AI-agent landing page. Read the **task router** below first.
 
 | If you're working on… | Start here |
 | --- | --- |
-| **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/gateway/src/dispatch.rs` · `crates/core/src/types.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
+| **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/gateway/src/router/dispatch.rs` · `crates/bundle/src/{manifest,rule}.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
 | **Adding a native primitive** (`zeroship.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
-| **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/control/src/deploy.rs` · `crates/core/src/blob.rs` |
+| **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `docs/reference/mongoose-compat.md` · `crates/plugin-db/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
@@ -81,7 +81,8 @@ For the long form with sequence diagrams, see `docs/architecture/distributed.md`
 
 ```
 crates/
-├── core/             Shared types, typed_id (UUIDv7 + base62), VFS, auth utils, Manifest
+├── core/             Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
+├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── compio-postgres/  PostgreSQL driver (compio-native, replaces sqlx)
 ├── compio-redis/     Redis driver (cluster-aware, compio-native)
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
