@@ -50,6 +50,7 @@ use syn::{
 };
 
 mod v8_class;
+mod webidl_dict;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -179,6 +180,31 @@ pub fn v8_inherit_intrinsic(_attr: TokenStream, item: TokenStream) -> TokenStrea
 #[proc_macro_attribute]
 pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
+}
+
+/// `#[derive(WebIdlDict)]` — generate a `from_v8(scope, value) ->
+/// Result<Self, OpError>` impl that reads the JS object's properties as
+/// the struct's named fields, per WebIDL §3.10 (dictionaries).
+///
+/// Each field type must implement [`WebIdlConvertible`]. The trait is
+/// hand-implemented for primitives (USVString, ByteString, String, bool,
+/// u32, i32, f64), for `Option<T>` (lifts the blanket impl), for
+/// `v8::Local<Value>` (passthrough for union-typed members), and is
+/// auto-implemented by this derive AND by `#[derive(WebIdlEnum)]` on
+/// user types. Dictionaries can therefore nest arbitrarily.
+///
+/// Override the WebIDL-visible member name with
+/// `#[webidl_name = "..."]` on a field. Default = field ident verbatim.
+///
+/// Per spec, `null` / `undefined` produce a default-constructed dict
+/// (the derive emits `Self::default()` — `Self: Default` is required).
+/// Non-object values throw TypeError. Per-member conversion errors
+/// throw with the inner converter's message.
+///
+/// See `crates/runtime-macros/src/webidl_dict.rs` for codegen detail.
+#[proc_macro_derive(WebIdlDict, attributes(webidl_name))]
+pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
+    webidl_dict::expand(input)
 }
 
 /// Argument-level marker attribute consumed by `#[v8_class]`: when
