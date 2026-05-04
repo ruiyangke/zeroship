@@ -50,6 +50,7 @@ use syn::{
 };
 
 mod v8_class;
+mod v8_iterable;
 mod webidl_dict;
 mod webidl_enum;
 
@@ -228,6 +229,51 @@ pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(WebIdlEnum, attributes(webidl_name))]
 pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
     webidl_enum::expand(input)
+}
+
+/// Impl-block-level marker attribute consumed by `#[v8_class]`: emit
+/// the WebIDL pair-iterator surface (keys / values / entries / forEach /
+/// @@iterator) from a single user-supplied
+/// `value_pairs(&self) -> Vec<(K, V)>` method.
+///
+/// The user's class must define a `value_pairs(&self)` method (without
+/// the `#[v8_method]` marker — it stays Rust-private) that returns a
+/// `Vec<(K, V)>`. The macro emits:
+///
+///   - `keys()` / `values()` / `entries()` factory methods (WebIDL
+///     §3.7.10.2)
+///   - `forEach(callback, thisArg?)` (WebIDL §3.7.10.3)
+///   - `[Symbol.iterator]` aliasing `entries`
+///   - A `<Class>Iterator` companion class with `next() -> { value, done }`
+///
+/// `K` and `V` must be one of: `ByteString`, `USVString`, `String`,
+/// `u32`. Additionally `V` may be `Vec<u8>` (yielded as a Uint8Array).
+///
+/// **Iteration model**: the derive uses snapshot iteration — the
+/// iterator clones `value_pairs()` once at factory-call time and walks
+/// the snapshot. This deviates from WebIDL §3.7.10.2's live-iteration
+/// requirement; classes that need live semantics (Headers,
+/// URLSearchParams, FormData) should hand-roll the iterator instead.
+/// The trade-off is documented in the codegen's doc-comment.
+///
+/// Usage:
+/// ```ignore
+/// struct MyMap { entries: Vec<(ByteString, ByteString)> }
+///
+/// #[v8_class]
+/// #[v8_iterable(key = ByteString, value = ByteString)]
+/// impl MyMap {
+///     #[v8_constructor]
+///     fn new() -> Self { ... }
+///
+///     fn value_pairs(&self) -> Vec<(ByteString, ByteString)> {
+///         self.entries.clone()
+///     }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn v8_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
 }
 
 /// Argument-level marker attribute consumed by `#[v8_class]`: when
