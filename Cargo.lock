@@ -5432,6 +5432,7 @@ name = "zeroship"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "zeroship-core",
  "zeroship-plugin-db",
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
