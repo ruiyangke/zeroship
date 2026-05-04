@@ -37,9 +37,9 @@ pub fn is_readable_stream_locked(
 /// `ReadableStreamHasDefaultReader(stream)` — §3.9.1.13. True iff
 /// `[[reader]]` is a default reader. The default-reader test reads the
 /// reader wrapper's internal field 0 and confirms its boxed state is
-/// `DefaultReaderState`. We use a sentinel embed (the wrapper is the only
-/// JS class with this internal-field shape) — any reader installed via
-/// `ReadableStreamDefaultReader::install` matches.
+/// `ReadableStreamDefaultReader`. We use a sentinel embed (the wrapper is
+/// the only JS class with this internal-field shape) — any reader
+/// installed via `ReadableStreamDefaultReader::install` matches.
 pub fn readable_stream_has_default_reader(
     scope: &mut v8::PinScope,
     stream: v8::Local<v8::Object>,

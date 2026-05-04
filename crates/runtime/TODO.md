@@ -136,6 +136,76 @@ The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`,
     keep hand-rolled.
   - `FormDataIterator` — ~100 LOC.
 
+**MAC-02 streams constructor migration** (`#[v8_constructor(post_init = "...")]`):
+
+The four hand-rolled streams classes have constructors that allocate a
+PromiseResolver / state Box / private symbol AFTER the V8 wrapper exists.
+MAC-02 (the `post_init` hook) shipped to unblock these. Status:
+
+  - `ReadableStreamDefaultReader` — `#[v8_class]` + post_init,
+    `acquire_*` keeps the manual Rust-side path. Methods (read /
+    releaseLock / cancel / closed) stay raw FunctionCallbacks (they
+    need direct `args.this()` access for priv-sym reads + Promise
+    allocation, and converting them to `#[v8_method]` is a separate,
+    much larger refactor). Migrated in this branch.
+  - `ReadableStreamBYOBReader` — `#[v8_class]` + post_init, parallel
+    to DefaultReader. The `BYOB_READER_TAG_SLOT` priv-sym + the
+    ReaderGenericInitialize logic share a `finalize_byob_reader`
+    helper between the JS path's `after_install` hook and the
+    Rust-side `set_up_byob_reader_internal` path. Migrated in this
+    branch.
+  - `WritableStreamDefaultWriter` — `#[v8_class]` + post_init. The
+    constructor body validates the stream + lock, post_init writes
+    the WRITER_BRAND priv-sym (must come before any `with_state`
+    call, since `with_state` brand-checks) and runs the four-way
+    `WSState` dispatch that initializes closedPromise / readyPromise.
+    The state-dispatch logic lives in `finalize_writer`, shared
+    between `after_install` and `setup_writer_internal` (used by
+    `acquire_writable_stream_default_writer`). Migrated in this
+    branch.
+
+**Deferred from MAC-02 phase 2** (with reasons):
+  - `TransformStream` — bailed during phase 2. The constructor body has
+    THREE distinct "fail with V8 pending exception" paths that the
+    original code handles with direct `return;` after a peer helper
+    threw on the `scope`:
+
+      1. `parse_strategy_local(scope, writable_strategy, 1.0)` returns
+         `Result<_, ()>` with V8 already holding the pending exception.
+      2. Same for `parse_strategy_local(scope, readable_strategy, 0.0)`.
+      3. `set_up_transform_stream_default_controller_from_transformer`
+         returns `Err("TransformStream: start threw synchronously")`
+         WHEN the user's `transformer.start()` threw — the exception is
+         already pending in V8 and the original code's
+         `if msg != "TransformStream: start threw synchronously"` branch
+         deliberately suppresses pushing a second TypeError.
+
+    Translating these paths through `Self::new() -> Result<Self, OpError>`
+    + macro-emitted error-mapping requires either (a) capturing each
+    pending exception via `tc_scope!` and converting to
+    `OpError::js_value(scope, exception, msg)` (the JsValue passthrough
+    variant) at every call site, or (b) refactoring
+    `parse_strategy_local` and the controller-from-transformer helper
+    to return `Result<_, OpError>` directly. Both are larger than the
+    constructor migrations of the readers / writer (which had clean
+    `Result<(), String>` setup helpers with no JS-thrown side-effects).
+
+    Combined with the 6 pre-existing `wpt_streams_transform` failures
+    (DEFERRED — slot-shared finishPromise refactor), the risk-reward of
+    migrating the constructor without also refactoring the helpers it
+    depends on is poor.
+
+    Recommendation: land the slot-shared finishPromise refactor first
+    (which already touches
+    `set_up_transform_stream_default_controller_from_transformer`),
+    then port the TransformStream constructor with the helpers updated
+    in lockstep.
+
+  Per-class method migration (`#[v8_method]` for read / releaseLock /
+  cancel / write / etc.) is a follow-up after the constructor cluster
+  lands. The bulk of the design's LoC savings live in method migration,
+  not the constructor.
+
 ## Memory footprint
 
 The runtime's per-isolate working set sits around 125 MB after warmup
