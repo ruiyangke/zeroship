@@ -6,10 +6,12 @@ Backlog ordered roughly by leverage.
 
 ### Crypto layout — promote kernel + lift node:crypto out of web/ (`feature/crypto-layout`)
 
-The dual-surface crypto backend (`web/crypto/kernel/`) was promoted to a
-top-level `crypto_ops/` module — it's not "web", it's the shared algorithm
-backend that BOTH `web::crypto` (WebCrypto) and node:crypto call into.
-Promoting to top level makes the architecture visible.
+The dual-surface crypto backend (`web/crypto/kernel/`) was promoted to
+`base/crypto/` — it's not "web", it's the shared algorithm backend that
+BOTH `web::crypto` (WebCrypto) and node:crypto call into. Lifting it to
+`base/` (Chromium-style — foundational utilities shared across surface
+APIs) makes the architecture visible and completes the three-way
+symmetry with `web/crypto/` and `node/crypto/`.
 
 `web/crypto_node/` was lifted to `node/crypto/`. node:crypto is a
 Node-API surface, not a Web API. The new top-level `node/` folder
@@ -20,7 +22,9 @@ future native `node:*` modules (e.g. `node:zlib`, `node:os`).
 Back-compat shims in `lib.rs` + `web/mod.rs` + `web/crypto/mod.rs` keep
 all external paths resolving:
 - `crate::crypto_node` (lib) → re-exports `web::crypto_node` → `node::crypto`
-- `crate::web::crypto::kernel::*` → re-exports `crate::crypto_ops`
+- `crate::web::crypto::kernel::*` → re-exports `crate::base::crypto`
+- `crate::crypto_ops::*` → re-exports `crate::base::crypto` (for
+  internal callers in `node::crypto`)
 
 Pure rename + import-rewrite — zero semantic changes. Test counts match
 baseline (16 crypto + 34 crypto_native + 69 crypto_node + 204 lib).
