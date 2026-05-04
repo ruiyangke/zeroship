@@ -51,6 +51,7 @@ use syn::{
 
 mod v8_class;
 mod webidl_dict;
+mod webidl_enum;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -205,6 +206,28 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(WebIdlDict, attributes(webidl_name))]
 pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
     webidl_dict::expand(input)
+}
+
+/// `#[derive(WebIdlEnum)]` — generate `from_str` / `as_str` / a
+/// [`WebIdlConvertible`] impl for a unit-variant enum, per WebIDL
+/// §3.7.10 (enumeration types).
+///
+/// By default each variant maps to its kebab-cased name (`NoCors` →
+/// `"no-cors"`); override with `#[webidl_name = "..."]` on the variant.
+///
+/// The emitted [`WebIdlConvertible`] impl ToString-coerces the JS
+/// value, runs `from_str`, and throws TypeError on unknown name (per
+/// WebIDL §3.13.7 step 4). The error message includes both the
+/// offending value and the accepted-name set.
+///
+/// The derive does NOT require `Self: Default` itself; the caller may
+/// add `#[derive(Default)]` separately if WebIdlDict-as-member fallback
+/// is needed.
+///
+/// See `crates/runtime-macros/src/webidl_enum.rs` for codegen detail.
+#[proc_macro_derive(WebIdlEnum, attributes(webidl_name))]
+pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
+    webidl_enum::expand(input)
 }
 
 /// Argument-level marker attribute consumed by `#[v8_class]`: when
