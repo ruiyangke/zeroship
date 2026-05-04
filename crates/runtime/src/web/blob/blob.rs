@@ -37,7 +37,7 @@ use std::rc::Rc;
 use crate::state::OpError;
 
 #[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, WebIdlDict};
 
 // ---------------------------------------------------------------------------
 // Blob struct
@@ -400,70 +400,39 @@ fn is_blob_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> boo
 // Constructor argument parsing
 // ---------------------------------------------------------------------------
 
-/// Parse the BlobPropertyBag (`{ type?: string, endings?: "transparent" | "native" }`).
-/// Per WebIDL §3.2.18 dictionary conversion:
-///   - `undefined` → empty dict (defaults applied).
-///   - `null` → empty dict (defaults applied).
-///   - **Object** (incl. function, regex, array, etc.) → read each member.
-///   - Any other primitive (boolean, number, bigint, string, symbol)
-///     → throw TypeError. The Blob WPT confirms this: passing 123,
-///     123.4, true, 'abc' for options throws.
+/// `BlobPropertyBag` per File API §3.2 — `{ type?: string,
+/// endings?: "transparent" | "native" }`.
 ///
-/// Members are accessed in **lexicographic key order** per spec
-/// (`endings` before `type` for BlobPropertyBag). The WPT test
-/// `"options properties should be accessed in lexicographic order"`
-/// enforces this with throwing accessors that record their order.
+/// Field order matters: WebIDL §3.10 step 5 reads dict members in
+/// declaration order. The Blob WPT `"options properties should be
+/// accessed in lexicographic order"` asserts `endings` is read
+/// BEFORE `type` (lexicographic — `endings` < `type`), so the
+/// declaration here is `endings` then `type`. Throwing accessors
+/// in a user-supplied options object surface in that exact order.
+///
+/// `endings` is held as `Option<String>` (rather than an enum) so
+/// the converter just does ToString — observed-but-discarded. The
+/// macro's `WebIdlEnum` derive WOULD throw TypeError on values
+/// outside `{"transparent","native"}`, but the existing
+/// hand-rolled parser is permissive, and matching that keeps WPT
+/// behaviour identical.
+#[derive(Default, Debug, WebIdlDict)]
+pub(crate) struct BlobPropertyBag {
+    pub endings: Option<String>,
+    #[webidl_name = "type"]
+    pub type_: Option<String>,
+}
+
 fn parse_property_bag(
     scope: &mut v8::PinScope,
     init: v8::Local<v8::Value>,
 ) -> Result<String, OpError> {
-    // Spec step 1: undefined/null → empty dictionary.
-    if init.is_undefined() || init.is_null() {
-        return Ok(String::new());
-    }
-    // Spec step 2: non-object primitives throw TypeError.
-    if !is_object_like(init) {
-        return Err(OpError::type_error(
-            "Blob options must be an object or undefined",
-        ));
-    }
-    let obj: v8::Local<v8::Object> = match init.try_into() {
-        Ok(o) => o,
-        // Defensive: the is_object_like check above implies this
-        // succeeds, but the type system can't see that.
-        Err(_) => return Ok(String::new()),
-    };
-
-    // Step 1: `endings` (observed but discarded — Linux has nothing
-    // to normalize line endings against, and the spec lets us treat
-    // "transparent" as the only effective option).
-    //
-    // Read happens BEFORE `type` per WebIDL lexicographic ordering.
-    // We must do the get even though we don't use the result, because
-    // the side-effect (a throwing accessor) is observable — the spec
-    // mandates the throw propagate through Blob's constructor.
-    let endings_key = v8::String::new(scope, "endings").unwrap();
-    let endings_v = obj
-        .get(scope, endings_key.into())
-        .ok_or_else(|| OpError::type_error("Blob options.endings access threw"))?;
-    if !endings_v.is_undefined() {
-        // Spec also calls ToString on the value (per the EndingType
-        // enum conversion). Trigger that side-effect.
-        let _ = endings_v.to_rust_string_lossy(scope);
-    }
-
-    // Step 2: `type` member (USVString, default "").
-    let type_key = v8::String::new(scope, "type").unwrap();
-    let type_v = obj
-        .get(scope, type_key.into())
-        .ok_or_else(|| OpError::type_error("Blob options.type access threw"))?;
-    let raw_type = if type_v.is_undefined() {
-        String::new()
-    } else {
-        type_v.to_rust_string_lossy(scope)
-    };
-
-    Ok(normalize_type(&raw_type))
+    // Per WebIDL §3.10: undefined / null → default-construct (no
+    // member reads); non-Object → TypeError. The auto-derived
+    // `from_v8` does both. The Blob WPT confirms passing 123,
+    // 123.4, true, 'abc' throws TypeError — same outcome.
+    let bag = BlobPropertyBag::from_v8(scope, init)?;
+    Ok(normalize_type(bag.type_.as_deref().unwrap_or("")))
 }
 
 /// Walk a JS sequence (anything iterable) and collect bytes into `out`.

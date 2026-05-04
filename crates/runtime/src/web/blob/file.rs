@@ -39,7 +39,7 @@ use crate::state::OpError;
 
 
 #[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method};
+use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, WebIdlDict};
 
 // ---------------------------------------------------------------------------
 // File struct — Blob prefix + extra fields
@@ -84,50 +84,51 @@ impl Default for File {
 // FilePropertyBag parsing
 // ---------------------------------------------------------------------------
 
-/// FilePropertyBag inherits BlobPropertyBag and adds `lastModified`.
-/// Returns `(type, last_modified)`.
+/// `FilePropertyBag` per File API §4.3. Inherits BlobPropertyBag's
+/// `endings` + `type` members and adds `lastModified`.
+///
+/// The macro doesn't support derive-with-inheritance, so the parent
+/// fields are inlined here. Field order matters per WebIDL §3.10
+/// step 5 (declaration order = read order); for FilePropertyBag the
+/// spec'd lexicographic order is `endings`, `lastModified`, `type`.
+///
+/// `last_modified` is `Option<f64>` because the SPEC default is "the
+/// current time at construction" (§4.3 step 5) — not the type's
+/// numeric default of 0. The constructor materialises the default
+/// post-parse via `current_time_ms()`. JS-side `lastModified` is
+/// `long long`; we use `f64` to ride the whole 53-bit range without
+/// overflow (current epoch fits in ~41 bits).
+#[derive(Default, Debug, WebIdlDict)]
+pub(crate) struct FilePropertyBag {
+    pub endings: Option<String>,
+    #[webidl_name = "lastModified"]
+    pub last_modified: Option<f64>,
+    #[webidl_name = "type"]
+    pub type_: Option<String>,
+}
+
 fn parse_file_property_bag(
     scope: &mut v8::PinScope,
     init: v8::Local<v8::Value>,
 ) -> Result<(String, i64), OpError> {
-    if init.is_undefined() || init.is_null() {
-        return Ok((String::new(), current_time_ms()));
-    }
-    let obj: v8::Local<v8::Object> = match init.try_into() {
-        Ok(o) => o,
-        Err(_) => return Err(OpError::type_error("File options must be an object")),
+    let bag = FilePropertyBag::from_v8(scope, init)?;
+    let type_ =
+        crate::blob_native::blob::normalize_type_public(bag.type_.as_deref().unwrap_or(""));
+    // Spec §4.3 step 5: missing `lastModified` defaults to "the
+    // current time". We surface that defaulting at the call site
+    // (Option::None → current_time_ms) rather than baking it into
+    // the dict's `Default` impl, so the Default::default()-on-non-
+    // Object-init path also produces a fresh timestamp rather than
+    // a zero.
+    let last_modified: i64 = match bag.last_modified {
+        // WebIDL `long long`: ToInt64(V). The dict converter has
+        // already done ToNumber via `f64::from_v8`; `as i64` here
+        // truncates toward zero and saturates ±∞ — same end result
+        // the previous hand-roll produced via
+        // `number_value(scope).unwrap_or(0.0) as i64`.
+        Some(n) => n as i64,
+        None => current_time_ms(),
     };
-
-    // type member.
-    let type_key = v8::String::new(scope, "type").unwrap();
-    let type_v = obj
-        .get(scope, type_key.into())
-        .ok_or_else(|| OpError::type_error("File options.type access threw"))?;
-    let raw_type = if type_v.is_undefined() {
-        String::new()
-    } else {
-        type_v.to_rust_string_lossy(scope)
-    };
-    let type_ = crate::blob_native::blob::normalize_type_public(&raw_type);
-
-    // lastModified member: long long, default = current time.
-    let lm_key = v8::String::new(scope, "lastModified").unwrap();
-    let lm_v = obj
-        .get(scope, lm_key.into())
-        .ok_or_else(|| OpError::type_error("File options.lastModified access threw"))?;
-    let last_modified: i64 = if lm_v.is_undefined() {
-        current_time_ms()
-    } else {
-        // WebIDL `long long`: ToInt64(V). Step over NaN/±∞ via
-        // number_value().unwrap_or(0.0); JS truncates toward zero.
-        lm_v.number_value(scope).unwrap_or(0.0) as i64
-    };
-
-    // Honour `endings` for symmetry with Blob — read the value (so a
-    // throwing accessor would surface), discard it (no-op on Linux).
-    let endings_key = v8::String::new(scope, "endings").unwrap();
-    let _ = obj.get(scope, endings_key.into());
-
     Ok((type_, last_modified))
 }
 
