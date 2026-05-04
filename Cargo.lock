@@ -5453,6 +5453,7 @@ dependencies = [
  "openidconnect",
  "serde",
  "serde_json",
+ "tracing",
  "uuid",
  "zeroship-core",
 ]

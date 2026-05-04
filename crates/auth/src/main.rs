@@ -38,6 +38,8 @@ fn arg_or_env(args: &[String], flag: &str, env_key: &str, default: &str) -> Stri
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
+    zeroship_core::observability::init_tracing("info,zeroship_auth=debug");
+
     let args: Vec<String> = std::env::args().collect();
 
     let port = arg_or_env(&args, "--port", "PORT", "9091");
@@ -67,10 +69,10 @@ async fn main() -> std::io::Result<()> {
         match oauth::google::build(config).await {
             Ok(provider) => {
                 oauth_registry.register(provider);
-                eprintln!("  oauth: google enabled (OIDC discovery OK)");
+                tracing::info!(provider = "google", "oauth provider enabled (OIDC discovery OK)");
             }
             Err(e) => {
-                eprintln!("  oauth: google FAILED — {e}");
+                tracing::error!(provider = "google", error = %e, "oauth provider build failed");
             }
         }
     }
@@ -84,10 +86,10 @@ async fn main() -> std::io::Result<()> {
         match oauth::github::build(config).await {
             Ok(provider) => {
                 oauth_registry.register(provider);
-                eprintln!("  oauth: github enabled");
+                tracing::info!(provider = "github", "oauth provider enabled");
             }
             Err(e) => {
-                eprintln!("  oauth: github FAILED — {e}");
+                tracing::error!(provider = "github", error = %e, "oauth provider build failed");
             }
         }
     }
@@ -101,10 +103,10 @@ async fn main() -> std::io::Result<()> {
         match oauth::apple::build(config).await {
             Ok(provider) => {
                 oauth_registry.register(provider);
-                eprintln!("  oauth: apple enabled (OIDC discovery OK)");
+                tracing::info!(provider = "apple", "oauth provider enabled (OIDC discovery OK)");
             }
             Err(e) => {
-                eprintln!("  oauth: apple FAILED — {e}");
+                tracing::error!(provider = "apple", error = %e, "oauth provider build failed");
             }
         }
     }
@@ -118,10 +120,10 @@ async fn main() -> std::io::Result<()> {
         match oauth::meta::build(config).await {
             Ok(provider) => {
                 oauth_registry.register(provider);
-                eprintln!("  oauth: meta enabled");
+                tracing::info!(provider = "meta", "oauth provider enabled");
             }
             Err(e) => {
-                eprintln!("  oauth: meta FAILED — {e}");
+                tracing::error!(provider = "meta", error = %e, "oauth provider build failed");
             }
         }
     }
@@ -129,7 +131,7 @@ async fn main() -> std::io::Result<()> {
     let state = Arc::new(AppState { auth, oauth: oauth_registry });
 
     let bind_addr = format!("0.0.0.0:{port}");
-    eprintln!("zeroship-auth listening on {bind_addr}");
+    tracing::info!(bind = %bind_addr, "zeroship-auth listening");
 
     web::server(async move || {
         web::App::new()
