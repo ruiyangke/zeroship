@@ -53,6 +53,7 @@ httparse = { workspace = true }
 # don't take a heavy crate-graph edge on `zeroship-runtime` just for
 # panic logging.
 futures = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 ureq = { version = "2", default-features = false, features = ["json"] }

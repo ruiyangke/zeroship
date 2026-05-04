@@ -291,8 +291,11 @@ impl IdempotencyStore for InMemoryIdempotencyStore {
             }
         };
         if let Some(k) = evicted_key {
-            eprintln!(
-                "[gate] idempotency: evicted oldest entry {k} (app {app_id} exceeded {MAX_LIVE_KEYS_PER_APP} live keys)"
+            tracing::warn!(
+                key = %k,
+                app_id = %app_id,
+                max_live_keys = MAX_LIVE_KEYS_PER_APP,
+                "idempotency: evicted oldest entry (max live keys exceeded)"
             );
         }
         Ok(())

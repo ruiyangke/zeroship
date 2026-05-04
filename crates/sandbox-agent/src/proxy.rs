@@ -516,9 +516,15 @@ struct ProxyLogMeta {
 impl ProxyLogMeta {
     fn emit(&self, status: u16, bytes: usize) {
         let elapsed_ms = self.started.elapsed().as_millis();
-        eprintln!(
-            "[sandbox-agent/proxy] req method={} port={} path={} status={} bytes={} elapsed_ms={}",
-            self.method, self.port, self.path, status, bytes, elapsed_ms,
+        tracing::info!(
+            target: "sandbox_agent::proxy",
+            method = %self.method,
+            port = self.port,
+            path = %self.path,
+            status,
+            bytes,
+            elapsed_ms = %elapsed_ms,
+            "sandbox-agent/proxy request"
         );
     }
 }

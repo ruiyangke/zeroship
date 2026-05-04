@@ -28,10 +28,9 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     // operator-visible log line. The N=8 stress test surfaced 14
     // 5xx in c2's cycle — none of which appeared in the controller
     // log because the only existing error path was the HTTP
-    // response body. eprintln to match the rest of the controller's
-    // logging style (no tracing wired in this crate yet).
+    // response body.
     if status >= 500 {
-        eprintln!("[sandbox/handlers] {status}: error={s}");
+        tracing::error!(status, error = %s, "sandbox/handlers");
     }
     let mut resp = match status {
         400 => HttpResponse::BadRequest(),
@@ -249,12 +248,11 @@ where
     for attempt in 1..=max_attempts {
         let elapsed = started.elapsed();
         if elapsed >= total_budget {
-            eprintln!(
-                "[sandbox/handlers] create: retry budget exhausted \
-                 (elapsed_ms={} budget_ms={} attempts={})",
-                elapsed.as_millis(),
-                total_budget.as_millis(),
-                attempt - 1,
+            tracing::warn!(
+                elapsed_ms = %elapsed.as_millis(),
+                budget_ms = %total_budget.as_millis(),
+                attempts = attempt - 1,
+                "sandbox/handlers create: retry budget exhausted"
             );
             return CreateOutcome::Failed {
                 status: 503,
@@ -271,19 +269,24 @@ where
         match res {
             Ok(info) => {
                 if attempt > 1 {
-                    eprintln!(
-                        "[sandbox/handlers] create: succeeded on attempt={attempt} \
-                         sandbox_id={sandbox_id} elapsed_ms={}",
-                        started.elapsed().as_millis(),
+                    tracing::info!(
+                        attempt,
+                        sandbox_id = %sandbox_id,
+                        elapsed_ms = %started.elapsed().as_millis(),
+                        "sandbox/handlers create: succeeded after retries"
                     );
                 }
                 return CreateOutcome::Ok { sandbox_id, info };
             }
             Err(e) => {
                 let retriable = is_retriable_create_error(&e);
-                eprintln!(
-                    "[sandbox/handlers] create: error attempt={attempt}/{max_attempts} \
-                     sandbox_id={sandbox_id} retriable={retriable} error={e}"
+                tracing::warn!(
+                    attempt,
+                    max_attempts,
+                    sandbox_id = %sandbox_id,
+                    retriable,
+                    error = %e,
+                    "sandbox/handlers create: error"
                 );
                 last_err = Some(e);
                 if !retriable {

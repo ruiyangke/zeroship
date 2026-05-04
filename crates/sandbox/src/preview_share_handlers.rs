@@ -371,10 +371,10 @@ async fn persist_preview_state(state: &Arc<AppState>, sandbox_id: Uuid) {
             // default; this is the normal path for that mode.
         }
         Err(e) => {
-            eprintln!(
-                "[sandbox/preview_share] persist-on-mint/rotate failed \
-                 sandbox={sandbox_id} (non-fatal; in-memory state is \
-                 authoritative; restart-restore degraded for this mint): {e}"
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "sandbox/preview_share persist-on-mint/rotate failed (non-fatal; in-memory state is authoritative; restart-restore degraded for this mint)"
             );
         }
     }

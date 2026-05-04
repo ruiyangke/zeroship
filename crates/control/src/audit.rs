@@ -59,7 +59,7 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
     let conn = match registry.conn().await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[audit] connect failed: {e}");
+            tracing::warn!(error = %e, "audit: connect failed");
             return;
         }
     };
@@ -78,10 +78,7 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
         )
         .await;
     if let Err(e) = result {
-        eprintln!(
-            "[audit] insert failed (action={}): {e}",
-            entry.action.as_str()
-        );
+        tracing::warn!(action = entry.action.as_str(), error = %e, "audit: insert failed");
     }
 }
 

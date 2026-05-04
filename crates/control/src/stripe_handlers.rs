@@ -51,7 +51,7 @@ fn stripe_err_response(e: StripeError) -> web::HttpResponse {
         StripeError::Validation(m) => err_json(400, m.clone()),
         StripeError::Db(_) => {
             // Don't leak SQL error detail.
-            eprintln!("[stripe] store error: {e}");
+            tracing::error!(error = %e, "stripe: store error");
             err_json(500, "internal error")
         }
     }
@@ -374,7 +374,7 @@ pub async fn webhook(
     // `insecure_dev=true` on the AppState.
     if state.stripe_webhook_secret.is_empty() {
         if !state.insecure_dev {
-            eprintln!("[stripe] webhook secret not configured; rejecting");
+            tracing::error!("stripe: webhook secret not configured; rejecting");
             return err_json(500, "webhook secret not configured");
         }
         // insecure_dev: skip verification (allows `stripe listen` without
@@ -393,7 +393,7 @@ pub async fn webhook(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         if let Err(e) = verify_stripe_signature(raw, sig_header, state.stripe_webhook_secret.expose_secret(), now, 300) {
-            eprintln!("[stripe] webhook rejected: {e}");
+            tracing::warn!(error = %e, "stripe: webhook rejected (signature verification)");
             return err_json(400, format!("webhook verification failed: {e}"));
         }
     }
@@ -418,11 +418,10 @@ pub async fn webhook(
     // is what actually propagates to invoices. Check multiple wire
     // shapes to be version-robust.
     let Some(creator_id_str) = extract_creator_id(obj) else {
-        eprintln!(
-            "[stripe] event {} missing metadata.creator_id (checked invoice.metadata, \
-             invoice.parent.subscription_details.metadata, invoice.subscription_details.metadata) \
-             — ignored",
-            sanitize_event_id(&event.id),
+        tracing::warn!(
+            event_id = %sanitize_event_id(&event.id),
+            "stripe: event missing metadata.creator_id (checked invoice.metadata, \
+             invoice.parent.subscription_details.metadata, invoice.subscription_details.metadata) — ignored"
         );
         return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_creator_id"}));
     };

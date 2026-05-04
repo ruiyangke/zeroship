@@ -134,7 +134,7 @@ pub(super) async fn fetch_static_bytes(
                 // (eviction race) or the FS could be sick. Don't
                 // panic — fall through to the backend and let it
                 // refill both tiers.
-                eprintln!("[gate] mmap failed for {hash}: {e}");
+                tracing::warn!(hash = %hash, error = %e, "gateway: mmap failed");
             }
         }
     }
@@ -144,7 +144,7 @@ pub(super) async fn fetch_static_bytes(
             // Best-effort disk fill: a failure here doesn't stop the
             // serve. The mem tier still gets the bytes.
             if let Err(e) = disk.insert(hash, &b) {
-                eprintln!("[gate] disk cache insert failed for {hash}: {e}");
+                tracing::warn!(hash = %hash, error = %e, "gateway: disk cache insert failed");
             }
             mem.insert(hash.to_string(), b.clone());
             BlobFetch::Hit(b)
@@ -193,7 +193,7 @@ pub(super) async fn ensure_disk_path(
                 None => DiskAvailability::InMemoryOnly(b),
             },
             Err(e) => {
-                eprintln!("[gate] disk cache insert failed for {hash}: {e}");
+                tracing::warn!(hash = %hash, error = %e, "gateway: disk cache insert failed");
                 DiskAvailability::InMemoryOnly(b)
             }
         },
@@ -240,7 +240,7 @@ async fn serve_static_streaming(
                 .json(&serde_json::json!({"error": "asset bytes missing"}));
         }
         DiskAvailability::Unavailable(err) => {
-            eprintln!("[gate] blob fetch error for {}: {err}", chosen.hash);
+            tracing::error!(hash = %chosen.hash, error = %err, "gateway: blob fetch error");
             return HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": "blob store unavailable"}));
         }
@@ -388,7 +388,7 @@ pub(super) async fn serve_static_hit(
                 .json(&serde_json::json!({"error": "asset bytes missing"}));
         }
         BlobFetch::Unavailable(err) => {
-            eprintln!("[gate] blob fetch error for {}: {err}", chosen.hash);
+            tracing::error!(hash = %chosen.hash, error = %err, "gateway: blob fetch error");
             return HttpResponse::ServiceUnavailable()
                 .json(&serde_json::json!({"error": "blob store unavailable"}));
         }

@@ -23,6 +23,10 @@ fn server_modules() -> Vec<ModuleEntry> {
 }
 
 fn main() {
+    // Bench server is perf-sensitive — quiet by default unless the
+    // operator overrides via RUST_LOG.
+    zeroship_core::observability::init_tracing("warn");
+
     let port: u16 = std::env::args()
         .find(|a| a.starts_with("--port="))
         .and_then(|a| a.strip_prefix("--port=").unwrap().parse().ok())

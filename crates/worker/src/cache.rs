@@ -76,7 +76,7 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
     let source = match std::str::from_utf8(bundle_bytes) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[worker] bundle is not UTF-8 for {app_id}: {e}");
+            tracing::error!(app_id = %app_id, error = %e, "worker: bundle is not UTF-8");
             return false;
         }
     };
@@ -202,7 +202,7 @@ pub fn remove_hash(app_id: &Uuid) {
 
 fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
-        eprintln!("[worker] evicting LRU isolate {oldest_id}");
+        tracing::info!(app_id = %oldest_id, "worker: evicting LRU isolate");
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
         cache.isolates.remove(&oldest_id);
         HASHES.with(|h| { h.borrow_mut().remove(&oldest_id); });

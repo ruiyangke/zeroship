@@ -245,8 +245,10 @@ impl DiskBlobCache {
                     // LRU) — log and move on.
                     if let Err(e) = std::fs::remove_file(&p) {
                         if e.kind() != std::io::ErrorKind::NotFound {
-                            eprintln!(
-                                "[gate] disk cache evict: failed to remove {p:?}: {e}"
+                            tracing::warn!(
+                                path = ?p,
+                                error = %e,
+                                "gateway: disk cache evict — failed to remove"
                             );
                         }
                     }

@@ -22,6 +22,7 @@ bcrypt = { workspace = true }
 jsonwebtoken = { workspace = true }
 openidconnect = { workspace = true }
 mimalloc = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

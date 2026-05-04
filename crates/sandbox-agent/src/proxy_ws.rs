@@ -107,15 +107,13 @@ pub fn ws_port_from_env() -> u16 {
 pub async fn serve(state: AppState, port: u16) -> io::Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().expect("valid bind");
     let listener = TcpListener::bind(addr).await?;
-    eprintln!("[sandbox-agent/proxy_ws] listening on {addr}");
+    tracing::info!(addr = %addr, "sandbox-agent/proxy_ws listening");
 
     let active = Arc::new(AtomicU64::new(0));
 
     loop {
         if state.is_draining() {
-            eprintln!(
-                "[sandbox-agent/proxy_ws] drain flag set; ws listener exiting"
-            );
+            tracing::info!("sandbox-agent/proxy_ws drain flag set; ws listener exiting");
             // Best-effort grace: wait up to DRAIN_GRACE for in-flight
             // WS sessions to close, then exit. The splice loops poll
             // the drain flag at each chunk; they self-terminate.
@@ -141,7 +139,7 @@ pub async fn serve(state: AppState, port: u16) -> io::Result<()> {
         {
             futures_util::future::Either::Left((Ok(pair), _)) => pair,
             futures_util::future::Either::Left((Err(e), _)) => {
-                eprintln!("[sandbox-agent/proxy_ws] accept error: {e}");
+                tracing::warn!(error = %e, "sandbox-agent/proxy_ws accept error");
                 continue;
             }
             futures_util::future::Either::Right(_) => continue, // tick
@@ -152,7 +150,7 @@ pub async fn serve(state: AppState, port: u16) -> io::Result<()> {
         spawn(async move {
             active_c.fetch_add(1, Ordering::Relaxed);
             if let Err(e) = handle_connection(st, stream, peer).await {
-                eprintln!("[sandbox-agent/proxy_ws] connection error: {e}");
+                tracing::warn!(error = %e, "sandbox-agent/proxy_ws connection error");
             }
             active_c.fetch_sub(1, Ordering::Relaxed);
         })
@@ -292,7 +290,7 @@ async fn handle_connection(
     let mut up = match TcpStream::connect(upstream_addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[sandbox-agent/proxy_ws] dial 127.0.0.1:{port} failed: {e}");
+            tracing::warn!(port, error = %e, "sandbox-agent/proxy_ws dial 127.0.0.1 failed");
             write_status(&mut down, 502, "Bad Gateway", b"upstream unreachable").await?;
             return Ok(());
         }
@@ -309,7 +307,7 @@ async fn handle_connection(
     let head_bytes = head.to_vec();
     let compio::BufResult(res, _) = up.write_all(head_bytes).await;
     if let Err(e) = res {
-        eprintln!("[sandbox-agent/proxy_ws] write upstream head failed: {e}");
+        tracing::warn!(error = %e, "sandbox-agent/proxy_ws write upstream head failed");
         let _ = write_status(&mut down, 502, "Bad Gateway", b"upstream write failed").await;
         return Ok(());
     }
@@ -320,7 +318,7 @@ async fn handle_connection(
     let up_head_end = match read_response_head(&mut up, &mut up_head_buf).await {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("[sandbox-agent/proxy_ws] read upstream head failed: {e}");
+            tracing::warn!(error = %e, "sandbox-agent/proxy_ws read upstream head failed");
             let _ = write_status(&mut down, 502, "Bad Gateway", b"upstream malformed response").await;
             return Ok(());
         }
@@ -337,7 +335,7 @@ async fn handle_connection(
     let resp_head = up_head_buf[..up_head_end].to_vec();
     let compio::BufResult(res, _) = down.write_all(resp_head).await;
     if let Err(e) = res {
-        eprintln!("[sandbox-agent/proxy_ws] write down head failed: {e}");
+        tracing::warn!(error = %e, "sandbox-agent/proxy_ws write down head failed");
         return Ok(());
     }
 
@@ -365,7 +363,7 @@ async fn handle_connection(
         let extra = up_head_buf[up_head_end..].to_vec();
         let compio::BufResult(res, _) = down.write_all(extra).await;
         if let Err(e) = res {
-            eprintln!("[sandbox-agent/proxy_ws] flush 101 trailing bytes: {e}");
+            tracing::warn!(error = %e, "sandbox-agent/proxy_ws flush 101 trailing bytes failed");
             return Ok(());
         }
     }

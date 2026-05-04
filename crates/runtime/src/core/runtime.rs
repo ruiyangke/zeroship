@@ -602,21 +602,21 @@ impl RuntimeInner {
             let counter = unsafe { &mut *(data as *mut u32) };
             *counter += 1;
             if *counter >= MAX_HEAP_LIMIT_HITS {
-                eprintln!(
-                    "[v8] Heap limit {}MB hit {} times — terminating isolate",
-                    current_heap_limit / 1024 / 1024,
-                    *counter
+                tracing::error!(
+                    heap_limit_mb = current_heap_limit / 1024 / 1024,
+                    hits = *counter,
+                    "v8 heap limit hit threshold; terminating isolate"
                 );
                 // V8 checks the termination flag after the callback returns,
                 // so the allocation that triggered this callback will throw
                 // a catchable exception first — the terminate fires on the
                 // next microtask boundary.
             } else {
-                eprintln!(
-                    "[v8] Near heap limit: {}MB ({}/{})",
-                    current_heap_limit / 1024 / 1024,
-                    *counter,
-                    MAX_HEAP_LIMIT_HITS
+                tracing::warn!(
+                    heap_limit_mb = current_heap_limit / 1024 / 1024,
+                    hits = *counter,
+                    max_hits = MAX_HEAP_LIMIT_HITS,
+                    "v8 near heap limit"
                 );
             }
             current_heap_limit
@@ -1059,7 +1059,7 @@ impl RuntimeInner {
             system.register(isolate_id, v8_handle);
             match crate::cpu_timer::CpuTimer::new(isolate_id) {
                 Ok(timer) => self.cpu_timer = Some(timer),
-                Err(e) => eprintln!("[cpu-timer] Failed: {e}"),
+                Err(e) => tracing::error!(error = %e, "cpu-timer initialisation failed"),
             }
         }
     }
@@ -2100,10 +2100,10 @@ impl RuntimeInner {
 
         let fraction = self.pump_cpu_accumulated.as_secs_f64() / wall.as_secs_f64();
         if fraction > MAX_CPU_FRACTION {
-            eprintln!(
-                "[runtime] pump CPU budget exceeded: {:.1}% over {:.1}s — terminating isolate",
-                fraction * 100.0,
-                wall.as_secs_f64()
+            tracing::warn!(
+                cpu_fraction = fraction,
+                wall_secs = wall.as_secs_f64(),
+                "runtime pump CPU budget exceeded; terminating isolate"
             );
             return true;
         }

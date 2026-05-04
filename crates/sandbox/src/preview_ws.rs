@@ -86,7 +86,7 @@ pub fn ws_port_from_env() -> u16 {
 pub async fn serve(state: Arc<AppState>, port: u16) -> io::Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().expect("valid bind");
     let listener = TcpListener::bind(addr).await?;
-    eprintln!("[sandbox/preview_ws] listening on {addr}");
+    tracing::info!(addr = %addr, "sandbox/preview_ws listening");
 
     let active = Arc::new(AtomicU64::new(0));
 
@@ -98,14 +98,14 @@ pub async fn serve(state: Arc<AppState>, port: u16) -> io::Result<()> {
                 spawn(async move {
                     active_c.fetch_add(1, Ordering::Relaxed);
                     if let Err(e) = handle_connection(st, stream, peer).await {
-                        eprintln!("[sandbox/preview_ws] connection error: {e}");
+                        tracing::warn!(error = %e, "sandbox/preview_ws connection error");
                     }
                     active_c.fetch_sub(1, Ordering::Relaxed);
                 })
                 .detach();
             }
             Err(e) => {
-                eprintln!("[sandbox/preview_ws] accept error: {e}");
+                tracing::warn!(error = %e, "sandbox/preview_ws accept error");
                 continue;
             }
         }
@@ -193,7 +193,7 @@ async fn handle_connection(
     let auth_bundle = match state.backend.session_auth(sandbox_id).await {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("[sandbox/preview_ws] session_auth failed: {e}");
+            tracing::warn!(error = %e, "sandbox/preview_ws session_auth failed");
             write_status(&mut down, 502, "Bad Gateway", b"agent unreachable").await?;
             return Ok(());
         }
@@ -206,9 +206,9 @@ async fn handle_connection(
     let agent_ws_addr = match derive_agent_ws_addr(&auth_bundle.agent_url) {
         Some(a) => a,
         None => {
-            eprintln!(
-                "[sandbox/preview_ws] couldn't derive WS addr from {}",
-                auth_bundle.agent_url
+            tracing::warn!(
+                agent_url = %auth_bundle.agent_url,
+                "sandbox/preview_ws: couldn't derive WS addr from agent_url"
             );
             write_status(&mut down, 502, "Bad Gateway", b"agent address unparsable").await?;
             return Ok(());
@@ -235,7 +235,7 @@ async fn handle_connection(
     let mut up = match TcpStream::connect(agent_ws_addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[sandbox/preview_ws] dial agent {agent_ws_addr} failed: {e}");
+            tracing::warn!(addr = %agent_ws_addr, error = %e, "sandbox/preview_ws dial agent failed");
             write_status(&mut down, 502, "Bad Gateway", b"agent unreachable").await?;
             return Ok(());
         }
@@ -258,7 +258,7 @@ async fn handle_connection(
 
     let compio::BufResult(res, _) = up.write_all(outbound).await;
     if let Err(e) = res {
-        eprintln!("[sandbox/preview_ws] write to agent failed: {e}");
+        tracing::warn!(error = %e, "sandbox/preview_ws write to agent failed");
         let _ = write_status(&mut down, 502, "Bad Gateway", b"upstream write failed").await;
         return Ok(());
     }
@@ -268,7 +268,7 @@ async fn handle_connection(
     let up_head_end = match read_response_head(&mut up, &mut up_head_buf).await {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("[sandbox/preview_ws] read agent response failed: {e}");
+            tracing::warn!(error = %e, "sandbox/preview_ws read agent response failed");
             let _ = write_status(&mut down, 502, "Bad Gateway", b"agent malformed response").await;
             return Ok(());
         }

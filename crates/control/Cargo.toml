@@ -35,6 +35,7 @@ url = { workspace = true }
 http = { workspace = true }
 # RNG for OAuth state / PKCE — small, no async runtime dep.
 rand = "0.8"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

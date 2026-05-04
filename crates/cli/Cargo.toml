@@ -9,6 +9,7 @@ name = "zeroship"
 path = "src/main.rs"
 
 [dependencies]
+zeroship-core = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }
 zeroship-plugin-storage = { workspace = true }

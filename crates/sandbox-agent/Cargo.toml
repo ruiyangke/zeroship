@@ -38,9 +38,10 @@ base64 = { workspace = true }
 hex = { workspace = true }
 lru = { workspace = true }
 
-# Observability — structured JSON logs + audit events.
-tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "json", "tracing-log"] }
+# Observability — workspace tracing facade. Subscriber init lives in
+# `zeroship_core::observability::init_tracing` (pluggable format via
+# ZEROSHIP_LOG_FORMAT).
+tracing = { workspace = true }
 
 # Request ID generation (UUIDv7 — sortable, time-bearing).
 uuid = { workspace = true }

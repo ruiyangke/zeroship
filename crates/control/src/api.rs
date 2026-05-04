@@ -60,7 +60,7 @@ pub(crate) fn check_admin_auth(req: &web::HttpRequest, state: &AppState) -> Opti
     match token {
         Some(key) if zeroship_core::auth::validate_control_key(key, state.master_key.expose_secret()) => None,
         _ => {
-            eprintln!("[control] auth rejected on {} {}", req.method(), req.path());
+            tracing::warn!(method = %req.method(), path = %req.path(), "control: auth rejected");
             Some(
                 web::HttpResponse::Unauthorized()
                     .json(&serde_json::json!({"error":"unauthorized"})),

@@ -748,7 +748,7 @@ pub(super) async fn handle_idempotency_pre_dispatch(
             // Store error → log and fail closed. A degraded dedupe
             // backend MUST NOT silently let through duplicate
             // mutations; spec §8 is explicit that this is unsafe.
-            eprintln!("[gate] idempotency store error: {e}");
+            tracing::error!(error = %e, "gateway: idempotency store error");
             IdempotencyOutcome::ReturnNow(build_zs_error_response(
                 ntex::http::StatusCode::SERVICE_UNAVAILABLE,
                 "UNAVAILABLE",
@@ -830,7 +830,7 @@ pub(super) async fn capture_response_for_idempotency(
     )
     .await
     {
-        eprintln!("[gate] idempotency capture failed: {e}");
+        tracing::error!(error = %e, "gateway: idempotency capture failed");
         // Best-effort lock release.
         let _ = idempotency::release_lock_without_storing(
             state.idempotency_store.as_ref(),

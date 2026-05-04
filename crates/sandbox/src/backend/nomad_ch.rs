@@ -361,17 +361,13 @@ impl NomadCHBackend {
             };
             let stop_url = format!("{base}/v1/job/{id}?purge=true");
             if let Err(e) = http_delete_unsigned(&stop_url, Duration::from_secs(10)).await {
-                eprintln!(
-                    "[sandbox/nomad-ch] orphan-cleanup: purge {id} failed: {e}"
-                );
+                tracing::warn!(job_id = %id, error = %e, "sandbox/nomad-ch orphan-cleanup: purge failed");
                 continue;
             }
             deleted += 1;
         }
         if deleted > 0 {
-            eprintln!(
-                "[sandbox/nomad-ch] orphan-cleanup: purged {deleted} orphan job(s)"
-            );
+            tracing::info!(deleted, "sandbox/nomad-ch orphan-cleanup: purged orphan jobs");
         }
         Ok(deleted)
     }
@@ -452,13 +448,13 @@ impl NomadCHBackend {
             .map(|(id, _)| *id)
             .collect();
         for old_id in existing {
-            eprintln!(
-                "[sandbox/nomad-ch] create: user {user_id} already has sandbox {old_id}; stopping first"
+            tracing::info!(
+                user_id = %user_id,
+                old_sandbox_id = %old_id,
+                "sandbox/nomad-ch create: user already has sandbox; stopping first"
             );
             if let Err(e) = self.stop(old_id).await {
-                eprintln!(
-                    "[sandbox/nomad-ch] create: stop({old_id}) failed: {e}"
-                );
+                tracing::warn!(sandbox_id = %old_id, error = %e, "sandbox/nomad-ch create: stop failed");
             }
         }
 
@@ -533,9 +529,12 @@ impl NomadCHBackend {
         let pubkey = signing_key.verifying_key();
         let pubkey_b64 = B64.encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
-        eprintln!(
-            "[sandbox/nomad-ch] create: sandbox={sandbox_id} user={user_id} \
-             project={project_id} key_fp={key_fp}"
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            user_id = %user_id,
+            project_id = %project_id,
+            key_fp = %key_fp,
+            "sandbox/nomad-ch create"
         );
 
         // 2. Allocate VM index from the pool. Track in the guard so
@@ -546,15 +545,19 @@ impl NomadCHBackend {
             .unwrap_or_else(|p| p.into_inner())
             .alloc()
             .map_err(|e| {
-                eprintln!(
-                    "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
-                     step=vm_index_alloc error={e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    step = "vm_index_alloc",
+                    error = %e,
+                    "sandbox/nomad-ch create error"
                 );
                 e
             })?;
         guard.vm_index = Some(vm_index);
-        eprintln!(
-            "[sandbox/nomad-ch] vm_index: alloc={vm_index} sandbox={sandbox_id}"
+        tracing::info!(
+            vm_index,
+            sandbox_id = %sandbox_id,
+            "sandbox/nomad-ch vm_index allocated"
         );
 
         // 3. Materialize host dirs. The wrapper script + virtiofsd
@@ -602,9 +605,12 @@ impl NomadCHBackend {
         submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json)
             .await
             .map_err(|e| {
-                eprintln!(
-                    "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
-                     step=submit_nomad_job job={job_id} error={e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    step = "submit_nomad_job",
+                    job = %job_id,
+                    error = %e,
+                    "sandbox/nomad-ch create error"
                 );
                 e
             })?;
@@ -622,17 +628,20 @@ impl NomadCHBackend {
         )
         .await
         .map_err(|e| {
-            eprintln!(
-                "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
-                 step=wait_for_alloc_running error={e}"
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                step = "wait_for_alloc_running",
+                error = %e,
+                "sandbox/nomad-ch create error"
             );
             e
         })?;
-        eprintln!(
-            "[sandbox/nomad-ch] create: alloc=running sandbox={sandbox_id} \
-             vm_index={vm_index} job={job_id} \
-             elapsed_ms={}",
-            create_started.elapsed().as_millis()
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            vm_index,
+            job = %job_id,
+            elapsed_ms = %create_started.elapsed().as_millis(),
+            "sandbox/nomad-ch create alloc running"
         );
 
         // 7. Wait for the in-VM agent to come up. The wrapper boots
@@ -669,16 +678,21 @@ impl NomadCHBackend {
         )
         .await
         .map_err(|e| {
-            eprintln!(
-                "[sandbox/nomad-ch] create: error sandbox={sandbox_id} \
-                 step=wait_for_agent_livez agent_url={agent_url} error={e}"
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                step = "wait_for_agent_livez",
+                agent_url = %agent_url,
+                error = %e,
+                "sandbox/nomad-ch create error"
             );
             e
         })?;
-        eprintln!(
-            "[sandbox/nomad-ch] create: agent_ready sandbox={sandbox_id} \
-             vm_index={vm_index} key_fp={key_fp} elapsed_ms={}",
-            livez_started.elapsed().as_millis()
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            vm_index,
+            key_fp = %key_fp,
+            elapsed_ms = %livez_started.elapsed().as_millis(),
+            "sandbox/nomad-ch create agent_ready"
         );
 
         // 8. Commit state. Refuse to overwrite an existing entry —
@@ -747,10 +761,11 @@ impl NomadCHBackend {
                 preview_audit: Vec::new(),
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
-                eprintln!(
-                    "[sandbox/nomad-ch] persist.seal failed sandbox={sandbox_id} \
-                     vm_index={vm_index} (non-fatal; sandbox live, \
-                     restart-restore unavailable for this record): {e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    vm_index,
+                    error = %e,
+                    "sandbox/nomad-ch persist.seal failed (non-fatal; sandbox live, restart-restore unavailable for this record)"
                 );
             }
         }
@@ -799,15 +814,16 @@ impl NomadCHBackend {
             None => return Ok(()), // idempotent
         };
         let stop_started = Instant::now();
-        eprintln!(
-            "[sandbox/nomad-ch] stop: started sandbox={sandbox_id} \
-             vm_index={} job={}",
-            sandbox.vm_index, sandbox.job_id,
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            vm_index = sandbox.vm_index,
+            job = %sandbox.job_id,
+            "sandbox/nomad-ch stop: started"
         );
         // Channel split: `errs` accumulates per-step failures the
         // caller needs to see (joined into the returned Result) so
-        // the API surface lines up with the K8s backend; `eprintln`
-        // is reserved for operator-only diagnostics that don't
+        // the API surface lines up with the K8s backend; tracing
+        // logs are reserved for operator-only diagnostics that don't
         // belong in the API response (vm_index leak warnings,
         // host_dir-skipped notices). Keeping these distinct means a
         // 200 stop() with operator log noise is observable, and a
@@ -816,7 +832,7 @@ impl NomadCHBackend {
 
         // 1. Drain the agent. Best-effort — if /shutdown 5xx-s the
         //    Nomad purge in step 2 still tears the VM down. We feed
-        //    the error into `errs` (rather than just eprintln) so
+        //    the error into `errs` (rather than via tracing) so
         //    the caller sees it; symmetric with steps 2/3/5 below.
         //    The aggregate error is non-fatal — we keep going through
         //    the cleanup tail regardless.
@@ -903,11 +919,11 @@ impl NomadCHBackend {
                 {
                     Ok(()) => {
                         fence_passed = true;
-                        eprintln!(
-                            "[sandbox/nomad-ch] host_fence: cleared sandbox={sandbox_id} \
-                             agent_url={} elapsed_ms={}",
-                            sandbox.agent_url,
-                            fence_started.elapsed().as_millis(),
+                        tracing::info!(
+                            sandbox_id = %sandbox_id,
+                            agent_url = %sandbox.agent_url,
+                            elapsed_ms = %fence_started.elapsed().as_millis(),
+                            "sandbox/nomad-ch host_fence: cleared"
                         );
                     }
                     Err(e) => {
@@ -917,11 +933,12 @@ impl NomadCHBackend {
                         // failed fence on stop() means the platform
                         // is mid-pathology and the operator wants to
                         // know.
-                        eprintln!(
-                            "[sandbox/nomad-ch] host_fence: timeout sandbox={sandbox_id} \
-                             agent_url={} elapsed_ms={} err={e}",
-                            sandbox.agent_url,
-                            fence_started.elapsed().as_millis(),
+                        tracing::error!(
+                            sandbox_id = %sandbox_id,
+                            agent_url = %sandbox.agent_url,
+                            elapsed_ms = %fence_started.elapsed().as_millis(),
+                            error = %e,
+                            "sandbox/nomad-ch host_fence: timeout"
                         );
                         errs.push(format!("host_fence({}): {e}", sandbox.agent_url));
                         fence_err = Some(e);
@@ -935,36 +952,38 @@ impl NomadCHBackend {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .release(sandbox.vm_index);
-            eprintln!(
-                "[sandbox/nomad-ch] vm_index: release={} sandbox={sandbox_id}",
-                sandbox.vm_index,
+            tracing::info!(
+                vm_index = sandbox.vm_index,
+                sandbox_id = %sandbox_id,
+                "sandbox/nomad-ch vm_index released"
             );
         } else if !job_confirmed_gone {
-            eprintln!(
-                "[sandbox/nomad-ch] vm_index: leak={} reason=wait_failed sandbox={sandbox_id} \
-                 job={}",
-                sandbox.vm_index, sandbox.job_id,
+            tracing::warn!(
+                vm_index = sandbox.vm_index,
+                reason = "wait_failed",
+                sandbox_id = %sandbox_id,
+                job = %sandbox.job_id,
+                "sandbox/nomad-ch vm_index leak"
             );
-            eprintln!(
-                "[sandbox/nomad-ch] stop({}): wait_for_job_gone failed; \
-                 leaking vm_index={} to avoid tap collision (orphan-prune \
-                 will reclaim on next boot)",
-                sandbox.job_id, sandbox.vm_index,
+            tracing::warn!(
+                job = %sandbox.job_id,
+                vm_index = sandbox.vm_index,
+                "sandbox/nomad-ch stop: wait_for_job_gone failed; leaking vm_index to avoid tap collision (orphan-prune will reclaim on next boot)"
             );
         } else {
             // job_confirmed_gone but fence_err is Some.
-            eprintln!(
-                "[sandbox/nomad-ch] vm_index: leak={} reason=host_fence_timeout \
-                 sandbox={sandbox_id} job={}",
-                sandbox.vm_index, sandbox.job_id,
+            tracing::warn!(
+                vm_index = sandbox.vm_index,
+                reason = "host_fence_timeout",
+                sandbox_id = %sandbox_id,
+                job = %sandbox.job_id,
+                "sandbox/nomad-ch vm_index leak"
             );
-            eprintln!(
-                "[sandbox/nomad-ch] stop({}): host_fence timeout; leaking \
-                 vm_index={} to avoid handing out a live IP (orphan-prune \
-                 will reclaim on next boot): {}",
-                sandbox.job_id,
-                sandbox.vm_index,
-                fence_err.as_deref().unwrap_or("<unknown>"),
+            tracing::warn!(
+                job = %sandbox.job_id,
+                vm_index = sandbox.vm_index,
+                error = %fence_err.as_deref().unwrap_or("<unknown>"),
+                "sandbox/nomad-ch stop: host_fence timeout; leaking vm_index to avoid handing out a live IP (orphan-prune will reclaim on next boot)"
             );
         }
 
@@ -993,10 +1012,11 @@ impl NomadCHBackend {
             } else {
                 "host_fence timeout"
             };
-            eprintln!(
-                "[sandbox/nomad-ch] stop({}): leaking host_dir {} ({reason})",
-                sandbox.job_id,
-                sandbox.host_dir.display(),
+            tracing::warn!(
+                job = %sandbox.job_id,
+                host_dir = %sandbox.host_dir.display(),
+                reason,
+                "sandbox/nomad-ch stop: leaking host_dir"
             );
         }
 
@@ -1007,22 +1027,23 @@ impl NomadCHBackend {
         // for periodic prune (Phase 5) to mop up.
         if let Some(persist) = &self.persist {
             if let Err(e) = persist.delete(sandbox_id).await {
-                eprintln!(
-                    "[sandbox/nomad-ch] persist.delete failed sandbox={sandbox_id} \
-                     (non-fatal; sealed record will be cleaned by next-boot \
-                     unreachable-probe + Phase-5 prune): {e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "sandbox/nomad-ch persist.delete failed (non-fatal; sealed record will be cleaned by next-boot unreachable-probe + Phase-5 prune)"
                 );
             }
         }
 
-        eprintln!(
-            "[sandbox/nomad-ch] stop: complete sandbox={sandbox_id} \
-             vm_index={} job={} errs={} job_confirmed_gone={job_confirmed_gone} \
-             fence_passed={fence_passed} elapsed_ms={}",
-            sandbox.vm_index,
-            sandbox.job_id,
-            errs.len(),
-            stop_started.elapsed().as_millis(),
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            vm_index = sandbox.vm_index,
+            job = %sandbox.job_id,
+            errs = errs.len(),
+            job_confirmed_gone,
+            fence_passed,
+            elapsed_ms = %stop_started.elapsed().as_millis(),
+            "sandbox/nomad-ch stop: complete"
         );
         if errs.is_empty() {
             Ok(())
@@ -1566,20 +1587,19 @@ impl Drop for CreateGuard {
                         {
                             Ok(r) if r.status == 200 || r.status == 404 => true,
                             Ok(r) => {
-                                eprintln!(
-                                    "[sandbox/nomad-ch] guard cleanup: purge \
-                                     {job_id} non-2xx status={} body={} \
-                                     (best-effort; vm_index will be leaked)",
-                                    r.status,
-                                    r.body.trim()
+                                tracing::warn!(
+                                    job = %job_id,
+                                    status = r.status,
+                                    body = %r.body.trim(),
+                                    "sandbox/nomad-ch guard cleanup: purge non-2xx (best-effort; vm_index will be leaked)"
                                 );
                                 false
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "[sandbox/nomad-ch] guard cleanup: purge \
-                                     {job_id} failed: {e} (best-effort; \
-                                     vm_index will be leaked)"
+                                tracing::warn!(
+                                    job = %job_id,
+                                    error = %e,
+                                    "sandbox/nomad-ch guard cleanup: purge failed (best-effort; vm_index will be leaked)"
                                 );
                                 false
                             }
@@ -1610,18 +1630,21 @@ impl Drop for CreateGuard {
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
                                 .release(i);
-                            eprintln!(
-                                "[sandbox/nomad-ch] vm_index: release={i} \
-                                 reason=create-failure-cleanup \
-                                 sandbox={sandbox_id} job={job_id}"
+                            tracing::info!(
+                                vm_index = i,
+                                reason = "create-failure-cleanup",
+                                sandbox_id = %sandbox_id,
+                                job = %job_id,
+                                "sandbox/nomad-ch vm_index released"
                             );
                         }
                     } else if let Some(i) = vm_index_opt {
-                        eprintln!(
-                            "[sandbox/nomad-ch] vm_index: leak={i} \
-                             reason=create-failure-cleanup-purge-failed \
-                             sandbox={sandbox_id} job={job_id} \
-                             (orphan-prune will reclaim on next boot)"
+                        tracing::warn!(
+                            vm_index = i,
+                            reason = "create-failure-cleanup-purge-failed",
+                            sandbox_id = %sandbox_id,
+                            job = %job_id,
+                            "sandbox/nomad-ch vm_index leak (orphan-prune will reclaim on next boot)"
                         );
                     }
 
@@ -1654,20 +1677,19 @@ impl Drop for CreateGuard {
                         .await;
                         match blocking {
                             Ok(Ok(())) => {}
-                            Ok(Err(e)) => eprintln!(
-                                "[sandbox/nomad-ch] guard cleanup: {e} \
-                                 (best-effort)"
+                            Ok(Err(e)) => tracing::warn!(
+                                error = %e,
+                                "sandbox/nomad-ch guard cleanup (best-effort)"
                             ),
-                            Err(e) => eprintln!(
-                                "[sandbox/nomad-ch] guard cleanup: \
-                                 host_dir spawn_blocking panic: {e:?}"
+                            Err(e) => tracing::error!(
+                                panic = ?e,
+                                "sandbox/nomad-ch guard cleanup: host_dir spawn_blocking panic"
                             ),
                         }
                     } else if !purge_ok && host_dir_created {
-                        eprintln!(
-                            "[sandbox/nomad-ch] guard cleanup: leaking \
-                             host_dir {} (Nomad purge not confirmed)",
-                            host_dir.display()
+                        tracing::warn!(
+                            host_dir = %host_dir.display(),
+                            "sandbox/nomad-ch guard cleanup: leaking host_dir (Nomad purge not confirmed)"
                         );
                     }
                 })
@@ -1685,17 +1707,18 @@ impl Drop for CreateGuard {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .release(i);
-                eprintln!(
-                    "[sandbox/nomad-ch] vm_index: release={i} \
-                     reason=create-failure-cleanup-runtime-down \
-                     sandbox={sandbox_id} job={job_id_for_fallback}"
+                tracing::info!(
+                    vm_index = i,
+                    reason = "create-failure-cleanup-runtime-down",
+                    sandbox_id = %sandbox_id,
+                    job = %job_id_for_fallback,
+                    "sandbox/nomad-ch vm_index released"
                 );
             }
-            eprintln!(
-                "[sandbox/nomad-ch] guard cleanup: compio::spawn failed (no \
-                 current runtime?); job {job_id_for_fallback} and dir {} left \
-                 for next-boot orphan prune",
-                host_dir_for_fallback.display(),
+            tracing::warn!(
+                job = %job_id_for_fallback,
+                host_dir = %host_dir_for_fallback.display(),
+                "sandbox/nomad-ch guard cleanup: compio::spawn failed (no current runtime?); job and dir left for next-boot orphan prune"
             );
         }
     }
@@ -1722,8 +1745,10 @@ where
                 .cloned()
                 .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_else(|| "<non-string panic>".to_string());
-            eprintln!(
-                "[sandbox/nomad-ch] panic in detached task ({site}): {msg}"
+            tracing::error!(
+                site,
+                panic = %msg,
+                "sandbox/nomad-ch panic in detached task"
             );
             None
         }
@@ -1951,16 +1976,16 @@ async fn wait_for_alloc_running(
                     Ok(v) => v,
                     Err(e) => {
                         let msg = format!("{e}");
-                        // Rate-limit the eprintln so a sustained
-                        // garbage stream doesn't flood the log.
+                        // Rate-limit the log so a sustained
+                        // garbage stream doesn't flood.
                         let now = Instant::now();
                         let stale = last_parse_log_at
                             .map(|t| now.duration_since(t) > Duration::from_secs(5))
                             .unwrap_or(true);
                         if stale {
-                            eprintln!(
-                                "[sandbox/nomad-ch] alloc poll: JSON parse \
-                                 error (will retry): {msg}"
+                            tracing::warn!(
+                                error = %msg,
+                                "sandbox/nomad-ch alloc poll: JSON parse error (will retry)"
                             );
                             last_parse_log_at = Some(now);
                         }
@@ -2006,9 +2031,9 @@ async fn wait_for_alloc_running(
                     .map(|t| now.duration_since(t) > Duration::from_secs(5))
                     .unwrap_or(true);
                 if stale {
-                    eprintln!(
-                        "[sandbox/nomad-ch] alloc poll: HTTP non-200 \
-                         (will retry): {msg}"
+                    tracing::warn!(
+                        error = %msg,
+                        "sandbox/nomad-ch alloc poll: HTTP non-200 (will retry)"
                     );
                     last_http_log_at = Some(now);
                 }
@@ -2025,9 +2050,9 @@ async fn wait_for_alloc_running(
                     .map(|t| now.duration_since(t) > Duration::from_secs(5))
                     .unwrap_or(true);
                 if stale {
-                    eprintln!(
-                        "[sandbox/nomad-ch] alloc poll: HTTP transport \
-                         error (will retry): {e}"
+                    tracing::warn!(
+                        error = %e,
+                        "sandbox/nomad-ch alloc poll: HTTP transport error (will retry)"
                     );
                     last_http_log_at = Some(now);
                 }
@@ -2120,9 +2145,10 @@ async fn wait_for_job_gone(
             .map(|t| now.duration_since(t) > Duration::from_secs(5))
             .unwrap_or(true);
         if stale {
-            eprintln!(
-                "[sandbox/nomad-ch] job-gone poll {scope}: JSON parse \
-                 error (will retry): {msg}"
+            tracing::warn!(
+                scope,
+                error = %msg,
+                "sandbox/nomad-ch job-gone poll: JSON parse error (will retry)"
             );
             *last_parse_log_at = Some(now);
         }
@@ -2140,9 +2166,10 @@ async fn wait_for_job_gone(
             .map(|t| now.duration_since(t) > Duration::from_secs(5))
             .unwrap_or(true);
         if stale {
-            eprintln!(
-                "[sandbox/nomad-ch] job-gone poll {scope}: HTTP error \
-                 (will retry): {msg}"
+            tracing::warn!(
+                scope,
+                error = %msg,
+                "sandbox/nomad-ch job-gone poll: HTTP error (will retry)"
             );
             *last_http_log_at = Some(now);
         }
@@ -2393,9 +2420,12 @@ fn signed_blocking_call(
 /// shape that operators rely on.
 fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
     let excerpt: String = body.chars().take(256).collect();
-    eprintln!(
-        "[sandbox/nomad-ch] agent: error sandbox={sandbox_id} op={op} \
-         status={status} body={excerpt:?}"
+    tracing::warn!(
+        sandbox_id = %sandbox_id,
+        op,
+        status,
+        body = ?excerpt,
+        "sandbox/nomad-ch agent error"
     );
 }
 
@@ -2493,12 +2523,9 @@ async fn wait_for_agent_livez(
                                 // signed-auth check, so the agent IS
                                 // verifying with our pubkey → it's
                                 // ours. Warn and accept.
-                                eprintln!(
-                                    "[sandbox/nomad-ch] wait_for_agent: legacy agent at \
-                                     {base_url} returned no pubkey_fingerprint on /version; \
-                                     falling back to signed-auth-only attestation \
-                                     (upgrade the agent to close the stale-tenant race \
-                                     on /livez=200 before /version is signed-auth gated)"
+                                tracing::warn!(
+                                    base_url = %base_url,
+                                    "sandbox/nomad-ch wait_for_agent: legacy agent returned no pubkey_fingerprint on /version; falling back to signed-auth-only attestation (upgrade the agent to close the stale-tenant race on /livez=200 before /version is signed-auth gated)"
                                 );
                                 return Ok(());
                             }

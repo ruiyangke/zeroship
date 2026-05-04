@@ -189,7 +189,7 @@ fn watchdog_loop(pipe_read: RawFd, handles: Arc<Mutex<HashMap<u64, v8::IsolateHa
         let handles = handles.lock().unwrap();
         if let Some(handle) = handles.get(&app_id) {
             handle.terminate_execution();
-            eprintln!("[cpu-timer] app {app_id:#x} terminated: CPU limit exceeded");
+            tracing::warn!(app_id = format!("{app_id:#x}"), "cpu-timer terminated isolate: CPU limit exceeded");
         }
     }
 }
