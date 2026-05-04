@@ -65,6 +65,8 @@ pub struct GateState {
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
+    zeroship_core::observability::init_tracing("info,zeroship_gateway=debug");
+
     let args: Vec<String> = std::env::args().collect();
     let port = arg_or_env(&args, "--port", "GATE_PORT", "80");
     let control_url = arg_or_env(&args, "--control", "CONTROL_URL", "http://localhost:9090");
@@ -84,8 +86,8 @@ async fn main() -> std::io::Result<()> {
     );
 
     if worker_key.is_empty() {
-        eprintln!(
-            "[zeroship-gate] WARNING: WORKER_KEY not set — worker endpoints are unauthenticated"
+        tracing::warn!(
+            "WORKER_KEY not set — worker endpoints are unauthenticated"
         );
     }
 
@@ -106,9 +108,12 @@ async fn main() -> std::io::Result<()> {
         disk_cache_bytes,
     )
     .expect("failed to initialise disk blob cache");
-    eprintln!(
-        "[zeroship-gate] blob store at {blob_store_root}, mem cache budget {blob_cache_mem_mb} MB, \
-         disk cache at {blob_cache_disk_root} ({blob_cache_disk_gb} GB)"
+    tracing::info!(
+        blob_store_root = %blob_store_root,
+        blob_cache_mem_mb = %blob_cache_mem_mb,
+        blob_cache_disk_root = %blob_cache_disk_root,
+        blob_cache_disk_gb = %blob_cache_disk_gb,
+        "gateway blob store + cache configured"
     );
 
     let worker_urls: Vec<String> = workers_str
@@ -122,9 +127,11 @@ async fn main() -> std::io::Result<()> {
     // For request concurrency, use a generous static bound
     let max_per_worker = 500u32;
 
-    eprintln!(
-        "[zeroship-gate] {} workers, CHWBL with 150 vnodes, max {max_per_worker} req/worker",
-        num_workers
+    tracing::info!(
+        workers = num_workers,
+        vnodes = 150,
+        max_per_worker,
+        "gateway routing configured (CHWBL)"
     );
 
     let hash_ring = proxy::HashRing::new(worker_urls.clone(), max_per_worker);
@@ -152,7 +159,7 @@ async fn main() -> std::io::Result<()> {
     sync::start_sync(state.clone());
 
     let bind_addr = format!("0.0.0.0:{port}");
-    eprintln!("[zeroship-gate] http://{bind_addr}");
+    tracing::info!(bind = %bind_addr, "gateway listening");
 
     web::server(async move || {
         web::App::new()
