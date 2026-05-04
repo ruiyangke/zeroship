@@ -502,6 +502,35 @@ pub(crate) fn parse_params(f: &ItemFn) -> Vec<Param> {
 // Argument extraction codegen (JS value → Rust type)
 // ---------------------------------------------------------------------------
 
+/// Emit the throw machinery for an `OpError` named `__err` in scope.
+/// Used by the per-arg-extraction codegen (ByteString / USVString /
+/// EnforceRange / etc.) where a conversion failure must surface as a
+/// V8 exception and `return` from the V8 callback. The macro emits
+/// `return` after this snippet — that's the caller's responsibility.
+///
+/// Mirrors `gen_throw_error()` (which is used in the call-return path)
+/// but with the simpler match arm set used by the extraction code: no
+/// DomException / NodeError, since those paths never originate from a
+/// primitive boundary type. The JsValue passthrough IS handled —
+/// future-proofing for the case where an extraction op's helper
+/// captures a user-thrown exception (none today, but cheap to wire).
+fn gen_extract_throw() -> TokenStream2 {
+    quote! {
+        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+            let __local = v8::Local::new(scope, __global);
+            scope.throw_exception(__local);
+        } else {
+            let __msg = v8::String::new(scope, &__err.message).unwrap();
+            let __exc = match &__err.kind {
+                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                _ => v8::Exception::error(scope, __msg),
+            };
+            scope.throw_exception(__exc);
+        }
+    }
+}
+
 pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
     let ident = type_ident(ty);
@@ -523,6 +552,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // we don't need the user method to return Result. After the throw
     // is set, JS execution unwinds normally.
     if is_byte_string(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::byte_string::read_byte_string(
                 scope,
@@ -530,13 +560,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -548,6 +572,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // The result is owned `String` so callers don't keep a `Local<Value>`
     // borrow alive across subsequent V8 ops.
     if is_usv_string(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
                 scope,
@@ -555,13 +580,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__s) => ::zeroship_runtime::url_native::helpers::USVString::from_string(__s),
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -571,6 +590,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // Option<USVString> — undefined / null produces None; otherwise
     // run USVString conversion and wrap in Some.
     if is_option_usv_string(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name: Option<::zeroship_runtime::url_native::helpers::USVString> =
                 if args.length() > #idx && !args.get(#idx).is_undefined() {
@@ -580,13 +600,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
                     ) {
                         Ok(__s) => Some(::zeroship_runtime::url_native::helpers::USVString::from_string(__s)),
                         Err(__err) => {
-                            let __msg = v8::String::new(scope, &__err.message).unwrap();
-                            let __exc = match __err.kind {
-                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                                _ => v8::Exception::error(scope, __msg),
-                            };
-                            scope.throw_exception(__exc);
+                            #throw
                             return;
                         }
                     }
@@ -635,6 +649,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // TypeError for NaN, ±∞, negative, and values > 2^53-1 (Number
     // precision limit) — see streams design §XIV.8.
     if is_enforce_range_u64(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
                 scope,
@@ -642,13 +657,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__v) => __v,
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -660,6 +669,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // Used by the WebCrypto IDL surface (Pbkdf2Params.iterations etc.) —
     // see `docs/proposals/webcrypto-native.md` D-20.
     if is_enforce_range_u32(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u32(
                 scope,
@@ -667,13 +677,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__v) => __v,
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -896,6 +900,14 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 
 /// Generate error throw from `OpError`.
 ///
+/// - `OpErrorKind::JsValue(global)` re-throws the captured user-thrown
+///   value verbatim — preserves Error subclass identity, custom
+///   properties (e.g. `e.code`), and the `instanceof` chain. Used by
+///   the dict / enum derives' per-member tc-scope path: when a
+///   member's `WebIdlConvertible::from_v8` triggers user JS that
+///   throws (custom `toString`, throwing `Symbol.toPrimitive`), the
+///   captured exception value MUST reach the caller's `catch` block
+///   unchanged.
 /// - `OpErrorKind::DomException(name)` constructs a real DOMException
 ///   instance via `new globalThis.DOMException(message, name)`. The
 ///   native DOMException class is installed during `setup_globals` (see
@@ -910,19 +922,30 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 ///   `docs/proposals/node-crypto-native.md` D-N32.
 fn gen_throw_error() -> TokenStream2 {
     quote! {
-        let __msg = v8::String::new(scope, &__err.message).unwrap();
-        let __exc: v8::Local<v8::Value> = match __err.kind {
-            ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-            ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-            ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-            }
-            ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-            }
-            ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-        };
-        scope.throw_exception(__exc);
+        // JsValue passthrough — rethrow the captured user exception
+        // verbatim. Skipping the message-translation path preserves
+        // every property of the thrown value (Error subclass identity,
+        // .code, .stack, custom props).
+        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+            let __local = v8::Local::new(scope, __global);
+            scope.throw_exception(__local);
+        } else {
+            let __msg = v8::String::new(scope, &__err.message).unwrap();
+            let __exc: v8::Local<v8::Value> = match &__err.kind {
+                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                }
+                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+                }
+                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                // Already handled by the early-return above.
+                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+            };
+            scope.throw_exception(__exc);
+        }
     }
 }
 

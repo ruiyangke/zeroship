@@ -429,3 +429,109 @@ fn without_silent_default_unknown_still_throws() {
     });
     assert!(err.is_some(), "default behaviour must throw on unknown");
 }
+
+// ---------------------------------------------------------------------------
+// tc_scope user-exception preservation (extension #5).
+//
+// `from_v8` calls `value.to_string(scope)` which invokes user JS
+// (Symbol.toPrimitive, toString, valueOf) per ECMA-262 ToString. If
+// that user code throws, the macro must capture the exception value
+// and surface it as `OpError::JsValue` — preserving Error subclass
+// identity and custom properties (e.g. `e.code`).
+//
+// Pre-fix the macro discarded the user-thrown value and returned a
+// generic TypeError with a fixed string message.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enum_from_v8_user_throw_preserves_error_object() {
+    use zeroship_runtime::init_v8;
+    use zeroship_runtime::state::OpErrorKind;
+
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let src = v8::String::new(
+        scope,
+        r#"
+            (() => {
+                const e = new Error('enum-boom');
+                e.code = 'CUSTOM';
+                return {
+                    [Symbol.toPrimitive]() { throw e; },
+                };
+            })()
+        "#,
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, src, None).unwrap();
+    let value = script.run(scope).unwrap();
+    let err = RequestMode::from_v8(scope, value).expect_err("must error");
+
+    match &err.kind {
+        OpErrorKind::JsValue(global) => {
+            let local = v8::Local::new(scope, global);
+            let obj: v8::Local<v8::Object> = local.try_into().expect("Object");
+            let code_key = v8::String::new(scope, "code").unwrap();
+            let code_val = obj.get(scope, code_key.into()).unwrap();
+            let code_str = code_val.to_rust_string_lossy(scope);
+            assert_eq!(code_str, "CUSTOM");
+        }
+        _ => panic!("expected JsValue kind, got {:?}", err.kind),
+    }
+}
+
+#[test]
+fn enum_from_v8_user_throw_string_preserves_string() {
+    use zeroship_runtime::init_v8;
+    use zeroship_runtime::state::OpErrorKind;
+
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let src = v8::String::new(
+        scope,
+        r#"
+            ({
+                toString() { throw "literal-x"; },
+            })
+        "#,
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, src, None).unwrap();
+    let value = script.run(scope).unwrap();
+    let err = RequestMode::from_v8(scope, value).expect_err("must error");
+
+    match &err.kind {
+        OpErrorKind::JsValue(global) => {
+            let local = v8::Local::new(scope, global);
+            assert!(local.is_string());
+            let s = local.to_rust_string_lossy(scope);
+            assert_eq!(s, "literal-x");
+        }
+        _ => panic!("expected JsValue kind"),
+    }
+}
+
+#[test]
+fn enum_from_v8_normal_unknown_still_typeerror() {
+    // Regression guard: when no user code throws, the unknown-value
+    // path still surfaces as a regular TypeError (NOT JsValue).
+    use zeroship_runtime::state::OpErrorKind;
+
+    let err = run_with_value(r#""nope""#, |val, scope| {
+        RequestMode::from_v8(scope, val).err()
+    })
+    .expect("expected error");
+
+    match &err.kind {
+        OpErrorKind::TypeError => {} // good
+        other => panic!("expected TypeError, got {:?}", other),
+    }
+}

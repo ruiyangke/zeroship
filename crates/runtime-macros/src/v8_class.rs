@@ -1642,8 +1642,15 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
             let __instance: #class_ty = match <#class_ty>::#ctor_name(#(#call_args),*) {
                 Ok(__v) => __v,
                 Err(__err) => {
+                    // JsValue passthrough — preserves user-thrown
+                    // exception verbatim (Error subclass, .code, etc.).
+                    if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+                        let __local = v8::Local::new(scope, __global);
+                        scope.throw_exception(__local);
+                        return;
+                    }
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc: v8::Local<v8::Value> = match __err.kind {
+                    let __exc: v8::Local<v8::Value> = match &__err.kind {
                         ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
                         ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
                         ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
@@ -1653,6 +1660,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
                             ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
                         }
                         ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
                     };
                     scope.throw_exception(__exc);
                     return;

@@ -234,6 +234,52 @@ so we can grep back through the rationale.
     `convert.rs`, re-export in `lib.rs`, + 8 new smoke tests in
     `tests/v8_webidl_dict_smoke.rs` (30 total, up from 22).
 
+- **`tc_scope` user-exception preservation in dict + enum
+  extraction.** Per-member `WebIdlConvertible::from_v8` calls in the
+  `WebIdlDict` derive AND `value.to_string(scope)` in the
+  `WebIdlEnum` `from_v8` are now wrapped in `v8::tc_scope!`. When
+  user JS thrown by V8 callbacks (custom `toString`,
+  `Symbol.toPrimitive`, throwing `valueOf`, throwing dict-member
+  getters) leaves a pending V8 exception, the captured exception
+  value is stashed as `OpError::JsValue(Global<Value>)` and the
+  throw machinery in `gen_throw_error` / `throw_op_error` /
+  `op_error_to_v8` re-throws it verbatim. Callers' `catch` blocks
+  observe the original thrown value: Error subclass identity, custom
+  properties (`e.code`, `e.stack`), `instanceof` chain — all
+  preserved.
+  - Pre-fix the macro discarded the exception and returned a generic
+    `OpError::TypeError("Cannot convert value to ...")`, hiding the
+    user's actual thrown value. Spec impact: ECMA-262 abstract op
+    `ToString` calls `Symbol.toPrimitive` then `toString` then
+    `valueOf` — any of which can throw user values that MUST
+    propagate verbatim per WebIDL §3.13.27. `getReader(options)` in
+    `crates/runtime/src/web/streams/readable.rs` had to hand-roll
+    this exact pattern; now the derive does it natively.
+  - Required adding `OpErrorKind::JsValue(v8::Global<v8::Value>)`
+    variant. Side effects:
+    - `OpErrorKind` lost `Copy` (Global isn't Copy); `OpError`
+      stays `Clone`-only as before. Two callers used `match err.kind`
+      by-value (event_target.rs, crypto/helpers.rs) — both swept to
+      `match &err.kind` in the same change.
+    - Other call sites that match `e.kind` for throw materialisation
+      were updated to detect JsValue first and re-throw the global
+      verbatim (abort_signal, fetch/request, fetch/response,
+      runtime.rs's async resolver path).
+    - The macro's per-arg-extraction throw blocks (ByteString,
+      USVString, EnforceRange{U32,U64}) were factored through a new
+      `gen_extract_throw()` helper that handles JsValue. Previously
+      these had inline match blocks with a wildcard arm that would
+      have silently demoted JsValue to `Exception::error`.
+  - Unblocks: `ReadableStreamGetReaderOptions` /
+    `ReadableStreamReaderMode` migration — see
+    `crates/runtime/TODO.md` "V8 class macro migration follow-ups →
+    Deferred". The hand-rolled `tc_scope!` in `getReader` can be
+    deleted once those types migrate to the derive.
+  - Lands: codegen (dict derive + enum derive + helper) +
+    `OpError::js_value` constructor + the JsValue-passthrough wiring
+    across consumer call sites + 4 new dict smoke tests + 3 new
+    enum smoke tests.
+
 - **`#[derive(WebIdlEnum)]` for enum types** — WebIDL §3.7.10. Generates
   `from_str` / `as_str` / `WebIdlConvertible` for unit-variant enums.
   Default name = ident kebab-cased (`NoCors` → `"no-cors"`); override

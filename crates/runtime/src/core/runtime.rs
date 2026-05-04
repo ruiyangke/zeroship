@@ -1718,23 +1718,33 @@ impl RuntimeInner {
                         ResolveValue::RejectError(e) => {
                             // Materialise the typed exception per
                             // OpError::kind. Mirrors the sync-path
-                            // `gen_throw_error` shape.
-                            let msg = v8::String::new(scope, &e.message).unwrap();
-                            let exc: v8::Local<v8::Value> = match e.kind {
-                                crate::state::OpErrorKind::TypeError => {
-                                    v8::Exception::type_error(scope, msg)
+                            // `gen_throw_error` shape, including the
+                            // JsValue passthrough that re-throws the
+                            // captured user exception verbatim.
+                            let exc: v8::Local<v8::Value> = match &e.kind {
+                                crate::state::OpErrorKind::JsValue(global) => {
+                                    v8::Local::new(scope, global)
                                 }
-                                crate::state::OpErrorKind::RangeError => {
-                                    v8::Exception::range_error(scope, msg)
-                                }
-                                crate::state::OpErrorKind::Error => {
-                                    v8::Exception::error(scope, msg)
-                                }
-                                crate::state::OpErrorKind::DomException(name) => {
-                                    crate::dom::exception::build(scope, &e.message, name).into()
-                                }
-                                crate::state::OpErrorKind::NodeError(code) => {
-                                    crate::node_error::build_node_exception(scope, code, &e.message)
+                                _ => {
+                                    let msg = v8::String::new(scope, &e.message).unwrap();
+                                    match &e.kind {
+                                        crate::state::OpErrorKind::TypeError => {
+                                            v8::Exception::type_error(scope, msg)
+                                        }
+                                        crate::state::OpErrorKind::RangeError => {
+                                            v8::Exception::range_error(scope, msg)
+                                        }
+                                        crate::state::OpErrorKind::Error => {
+                                            v8::Exception::error(scope, msg)
+                                        }
+                                        crate::state::OpErrorKind::DomException(name) => {
+                                            crate::dom::exception::build(scope, &e.message, name).into()
+                                        }
+                                        crate::state::OpErrorKind::NodeError(code) => {
+                                            crate::node_error::build_node_exception(scope, code, &e.message)
+                                        }
+                                        crate::state::OpErrorKind::JsValue(_) => unreachable!(),
+                                    }
                                 }
                             };
                             r.reject(scope, exc);

@@ -218,6 +218,58 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
     let flags = parse_member_flags(&field.attrs)?;
     let ty = &field.ty;
 
+    // Per-member conversion is wrapped in a v8::TryCatch (`tc_scope!`)
+    // so that user JS thrown by V8 callbacks (custom `toString`,
+    // `Symbol.toPrimitive`, throwing valueOf, throwing getters on the
+    // dict member's value) is captured and re-surfaced verbatim as
+    // an OpError::JsValue. Pre-fix the macro discarded the exception
+    // and threw a generic TypeError("Cannot convert ..."), hiding the
+    // user's custom Error subclass and `.code` properties.
+    //
+    // The tc-scope is reset between members — capturing one member's
+    // exception doesn't leak into the next (we early-return on the
+    // first failure anyway).
+    //
+    // Why `Result<T, OpError>` shape: we keep the existing return
+    // contract from `from_v8`. The new `OpError::JsValue` variant
+    // carries the captured exception as a Global<Value>; the caller's
+    // throw machinery (gen_throw_error / throw_op_error) detects this
+    // variant and re-throws the global verbatim.
+    let extraction_msg = format!(
+        "Cannot convert dictionary member '{}' (user code threw)",
+        webidl_name
+    );
+    let convert_call = quote! {
+        {
+            let __captured: ::std::result::Result<#ty, ::zeroship_runtime::state::OpError> = {
+                ::v8::tc_scope!(let __tc, scope);
+                match <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(__tc, __v) {
+                    ::std::result::Result::Ok(__val) => ::std::result::Result::Ok(__val),
+                    ::std::result::Result::Err(__inner_err) => {
+                        // If the inner from_v8 left a pending V8
+                        // exception (user code threw), capture it as a
+                        // Global so the outer throw machinery can
+                        // rethrow verbatim. Otherwise propagate the
+                        // OpError as-is.
+                        if __tc.has_caught() {
+                            let __exc = __tc.exception().expect("has_caught implies Some");
+                            ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::js_value(
+                                    __tc,
+                                    __exc,
+                                    #extraction_msg,
+                                ),
+                            )
+                        } else {
+                            ::std::result::Result::Err(__inner_err)
+                        }
+                    }
+                }
+            };
+            __captured?
+        }
+    };
+
     if flags.reject_null {
         // null branch is NOT routed through WebIdlConvertible — the
         // blanket Option<T> impl returns None for null and would silently
@@ -240,7 +292,7 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
                                 ::zeroship_runtime::state::OpError::type_error(#null_msg),
                             );
                         }
-                        <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(scope, __v)?
+                        #convert_call
                     }
                     _ => <#ty as ::core::default::Default>::default(),
                 }
@@ -252,7 +304,7 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
                 let __key = ::v8::String::new(scope, #webidl_name).unwrap();
                 match __obj.get(scope, __key.into()) {
                     ::std::option::Option::Some(__v) if !__v.is_undefined() => {
-                        <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(scope, __v)?
+                        #convert_call
                     }
                     _ => <#ty as ::core::default::Default>::default(),
                 }

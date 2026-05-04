@@ -923,8 +923,15 @@ fn any_static_callback(
     match any_static(scope, signals_arg) {
         Ok(signal) => rv.set(signal.into()),
         Err(e) => {
+            // JsValue passthrough — preserves user-thrown exceptions
+            // verbatim (Error subclass, .code, etc.).
+            if let crate::state::OpErrorKind::JsValue(global) = &e.kind {
+                let local = v8::Local::new(scope, global);
+                scope.throw_exception(local);
+                return;
+            }
             let m = v8::String::new(scope, &e.message).unwrap();
-            let exc = match e.kind {
+            let exc = match &e.kind {
                 crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, m),
                 crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, m),
                 _ => v8::Exception::error(scope, m),

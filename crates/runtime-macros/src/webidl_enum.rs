@@ -161,20 +161,25 @@ pub fn expand(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     // `from_v8` body diverges on `silent_default`. The throwing path
-    // (default) is the existing behaviour; the silent-default path
-    // never throws — it returns `Self::default()` on every off-spec
-    // input, including ToString failures (Symbols, throwing toString).
-    // The fetch / WebSocket consumers expect this tolerance per spec.
+    // (default) is the existing behaviour, augmented with a tc_scope
+    // around `value.to_string(scope)` to capture user-thrown
+    // exceptions (custom `toString` / `Symbol.toPrimitive`); the
+    // silent-default path swallows everything (deliberately —
+    // tolerance for off-spec inputs is the whole point).
     let from_v8_body = if flags.silent_default {
         quote! {
             // Symbol or throwing toString → fall through to default.
-            // We deliberately do NOT propagate the V8 exception: the
+            // The captured exception is intentionally discarded — the
             // spec sections using this flag say "if not one of the
-            // listed values, use the default" — coercion failure
-            // counts as "not one of" too.
-            let __opt_str = value
-                .to_string(scope)
-                .map(|__s| __s.to_rust_string_lossy(scope));
+            // listed values, use the default", which subsumes "the
+            // value couldn't be coerced". We use a tc_scope so the
+            // exception state doesn't leak out to the caller.
+            let __opt_str: ::std::option::Option<::std::string::String> = {
+                ::v8::tc_scope!(let __tc, scope);
+                let __r = value.to_string(__tc).map(|__s| __s.to_rust_string_lossy(__tc));
+                let _ = __tc.exception(); // clear pending state
+                __r
+            };
             ::std::result::Result::Ok(match __opt_str {
                 ::std::option::Option::Some(__rust_str) => Self::from_str(&__rust_str)
                     .unwrap_or_else(<Self as ::core::default::Default>::default),
@@ -185,17 +190,46 @@ pub fn expand(input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            // Step 1: ToString. Symbols → TypeError naturally.
-            let __s = value.to_string(scope).ok_or_else(|| {
-                ::zeroship_runtime::state::OpError::type_error(
-                    concat!(
-                        "Cannot convert value to enum `",
-                        stringify!(#name),
-                        "` (ToString failed)",
-                    ),
-                )
-            })?;
-            let __rust_str = __s.to_rust_string_lossy(scope);
+            // Step 1: ToString in a tc_scope so user-thrown exceptions
+            // (custom toString, Symbol.toPrimitive) propagate verbatim.
+            // Pre-fix, value.to_string returning None forced us to
+            // fabricate a TypeError, hiding the user's original throw.
+            let __coerced: ::std::result::Result<::std::string::String, ::zeroship_runtime::state::OpError> = {
+                ::v8::tc_scope!(let __tc, scope);
+                match value.to_string(__tc) {
+                    ::std::option::Option::Some(__s) => {
+                        ::std::result::Result::Ok(__s.to_rust_string_lossy(__tc))
+                    }
+                    ::std::option::Option::None => {
+                        if __tc.has_caught() {
+                            let __exc = __tc.exception().expect("has_caught implies Some");
+                            ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::js_value(
+                                    __tc,
+                                    __exc,
+                                    concat!(
+                                        "Cannot convert value to enum `",
+                                        stringify!(#name),
+                                        "` (user code threw)",
+                                    ),
+                                ),
+                            )
+                        } else {
+                            // ToString returned None without raising —
+                            // shouldn't normally happen, but handle as
+                            // a generic TypeError for safety.
+                            ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::type_error(concat!(
+                                    "Cannot convert value to enum `",
+                                    stringify!(#name),
+                                    "` (ToString failed)",
+                                )),
+                            )
+                        }
+                    }
+                }
+            };
+            let __rust_str = __coerced?;
 
             // Step 2: name lookup. Unknown → TypeError per
             // §3.13.7 step 4. We include both the offending value
