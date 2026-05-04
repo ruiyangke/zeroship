@@ -229,6 +229,106 @@ fn extract_reject_shared(attrs: &[Attribute]) -> HashSet<String> {
     names
 }
 
+/// A single `#[v8_const(NAME = LIT)]` declaration.
+struct ConstDecl {
+    /// The JS-visible property name (Rust ident verbatim).
+    name: syn::Ident,
+    /// The literal expression — quoted as-is so the literal's type
+    /// suffix is preserved through expansion.
+    value: syn::ExprLit,
+    /// Selected V8-side materialiser, derived from the literal suffix.
+    kind: ConstKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConstKind {
+    /// Suffix `u16` or `u32` → `v8::Integer::new_from_unsigned`.
+    UInt,
+    /// Suffix `i32` → `v8::Integer::new`.
+    SInt,
+}
+
+/// Parse all `#[v8_const(NAME = LIT)]` attributes off an impl block.
+///
+/// Returns the parsed list (possibly empty) or a `syn::Error` on:
+///   - malformed shape (missing `=`, non-ident name, non-int literal)
+///   - duplicate name
+///   - unsupported literal type suffix
+fn extract_consts(attrs: &[Attribute]) -> Result<Vec<ConstDecl>, syn::Error> {
+    let mut decls: Vec<ConstDecl> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for attr in attrs {
+        if !attr.path().is_ident("v8_const") {
+            continue;
+        }
+        // Parse `NAME = LIT` inside the parens. Use parse_args with a
+        // closure that reads an ident, an `=`, and a literal-expr.
+        let parsed = attr.parse_args_with(
+            |input: syn::parse::ParseStream| -> syn::Result<(syn::Ident, syn::ExprLit)> {
+                let name: syn::Ident = input.parse()?;
+                let _: syn::Token![=] = input.parse()?;
+                let expr: syn::Expr = input.parse()?;
+                let lit = match expr {
+                    syn::Expr::Lit(lit) => lit,
+                    other => {
+                        return Err(syn::Error::new_spanned(
+                            other,
+                            "#[v8_const]: expected an integer literal (e.g. `12u16`, `100i32`)",
+                        ));
+                    }
+                };
+                Ok((name, lit))
+            },
+        )?;
+        let (name, lit) = parsed;
+        let name_str = name.to_string();
+        if !seen.insert(name_str.clone()) {
+            return Err(syn::Error::new_spanned(
+                &name,
+                format!("#[v8_const]: duplicate constant `{name_str}`"),
+            ));
+        }
+        // Inspect the literal's type suffix to pick the V8 materialiser.
+        let int = match &lit.lit {
+            syn::Lit::Int(i) => i,
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "#[v8_const]: expected an integer literal with a type suffix \
+                     (e.g. `12u16`, `100i32`, `1000u32`)",
+                ));
+            }
+        };
+        let kind = match int.suffix() {
+            "u16" | "u32" => ConstKind::UInt,
+            "i32" => ConstKind::SInt,
+            "" => {
+                return Err(syn::Error::new_spanned(
+                    int,
+                    "#[v8_const]: literal needs a type suffix \
+                     (e.g. `12u16`, `100i32`, `1000u32`); unsuffixed literals \
+                     are ambiguous and rejected",
+                ));
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    int,
+                    format!(
+                        "#[v8_const]: unsupported literal suffix `{other}` \
+                         (expected `u16`, `u32`, or `i32`)"
+                    ),
+                ));
+            }
+        };
+        decls.push(ConstDecl {
+            name,
+            value: lit,
+            kind,
+        });
+    }
+    Ok(decls)
+}
+
 /// Read `#[v8_async_iterable(method = "name")]` from impl-block
 /// attributes. Returns the method name to alias `[Symbol.asyncIterator]`
 /// to. Per WebIDL §3.7.10.5, the spec calls for a separate
@@ -476,6 +576,10 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(opt) => opt,
         Err(err) => return err.to_compile_error().into(),
     };
+    let const_decls = match extract_consts(&input.attrs) {
+        Ok(d) => d,
+        Err(err) => return err.to_compile_error().into(),
+    };
 
     // Validate that the named method actually exists in the impl block
     // — better error than waiting for the method-callback ident lookup
@@ -538,6 +642,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         inherit_base.as_ref(),
         install_iterable_call.as_ref(),
         async_iterable_method.as_deref(),
+        &const_decls,
     );
 
     // Strip our marker attributes from the impl items so rustc doesn't
@@ -762,7 +867,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
             || p.is_ident("v8_inherit_intrinsic")
             || p.is_ident("v8_inherit")
             || p.is_ident("v8_iterable")
-            || p.is_ident("v8_async_iterable"))
+            || p.is_ident("v8_async_iterable")
+            || p.is_ident("v8_const"))
     });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
@@ -794,6 +900,7 @@ fn gen_install(
     inherit_base: Option<&syn::Path>,
     install_iterable_call: Option<&TokenStream2>,
     async_iterable_method: Option<&str>,
+    const_decls: &[ConstDecl],
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -899,6 +1006,54 @@ fn gen_install(
     let to_string_tag_str = to_string_tag_override
         .map(str::to_string)
         .unwrap_or_else(|| class_name_str.clone());
+
+    // `#[v8_const(NAME = LIT)]` — per WebIDL §3.7.5, install each
+    // declared constant on BOTH the constructor's FunctionTemplate
+    // (which materialises as `Class.NAME` once `get_function` is
+    // called) and the prototype template (so `Class.prototype.NAME`
+    // and instance lookups via the prototype chain see the value).
+    //
+    // Property attributes per spec: `{ writable: false, enumerable:
+    // true, configurable: false }`. V8 flags: READ_ONLY (= !writable)
+    // and DONT_DELETE (= !configurable). `enumerable: true` is the
+    // template default.
+    let const_block = if const_decls.is_empty() {
+        quote! {}
+    } else {
+        let mut sets: Vec<TokenStream2> = Vec::with_capacity(const_decls.len());
+        for decl in const_decls {
+            let name_str = decl.name.to_string();
+            let value = &decl.value;
+            let materialise = match decl.kind {
+                ConstKind::UInt => quote! {
+                    let __v = v8::Integer::new_from_unsigned(scope, (#value) as u32);
+                },
+                ConstKind::SInt => quote! {
+                    let __v = v8::Integer::new(scope, (#value) as i32);
+                },
+            };
+            sets.push(quote! {
+                {
+                    let __key = v8::String::new(scope, #name_str).unwrap();
+                    #materialise
+                    // Constructor side: `Class.NAME`.
+                    __ctor_tmpl.set_with_attr(
+                        __key.into(),
+                        __v.into(),
+                        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+                    );
+                    // Prototype side: `Class.prototype.NAME` and
+                    // `(new Class()).NAME` via the prototype chain.
+                    __proto.set_with_attr(
+                        __key.into(),
+                        __v.into(),
+                        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+                    );
+                }
+            });
+        }
+        quote! { #(#sets)* }
+    };
 
     // `#[v8_async_iterable(method = "name")]` — alias
     // `[Symbol.asyncIterator]` to the named method per WebIDL §3.7.10.5.
@@ -1068,6 +1223,13 @@ fn gen_install(
             // `[Symbol.asyncIterator]` aliasing the named method per
             // WebIDL §3.7.10.5. Empty when the attribute is absent.
             #async_iterable_block
+
+            // `#[v8_const(NAME = LIT)]` — WebIDL §3.7.5 interface
+            // constants. Installed on BOTH the constructor template
+            // and the prototype template with read-only / non-
+            // configurable / enumerable attributes. Empty when no
+            // constants are declared.
+            #const_block
 
             // Install Symbol.toStringTag so
             // `Object.prototype.toString.call(new Foo())` → "[object Foo]".

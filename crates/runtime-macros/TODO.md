@@ -52,6 +52,12 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   §3.7.10.5. Emits a fresh FunctionTemplate wrapping the method's
   callback, sets `class_name(method)`, installs on the prototype
   template. [MAC-18 / B.12] — `<commit>`.
+- **`#[v8_const(NAME = LIT)]`** — repeatable impl-block-level attribute
+  declaring WebIDL §3.7.5 interface constants. Installs on BOTH the
+  constructor template and the prototype template with `READ_ONLY |
+  DONT_DELETE`; literal type suffix (`u16` / `u32` / `i32`) selects
+  V8 materialiser. Unblocks DOMException's 25 legacy codes + Event's
+  phase constants. [MAC-15 / B.6] — `<commit>`.
 
 ### WebIDL derives (Tier 4)
 
@@ -120,8 +126,6 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
 
 - **MAC-14 arbitrary `Local<Value>` value type in `#[v8_iterable]`** —
   FormData entry value `(USVString or File)` union. -90 LOC. [B.5]
-- **MAC-15 `#[v8_const(NAME = u16)]`** — DOMException 25 legacy codes;
-  Event.NONE/AT_TARGET/CAPTURING_PHASE/BUBBLING_PHASE. [B.6]
 - **MAC-16 `#[webidl_required]`** dict-member flag — TypeError on
   `undefined` for required members. QueuingStrategyInit + future. [B.7]
 - **MAC-17 `WrapU16` / `WrapU8` / etc. newtypes** — default-case integer

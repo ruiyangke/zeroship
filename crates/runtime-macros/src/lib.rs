@@ -319,6 +319,39 @@ pub fn v8_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Impl-block-level marker attribute consumed by `#[v8_class]`:
+/// declare a WebIDL §3.7.5 interface constant. Repeatable — one
+/// occurrence per constant.
+///
+/// ```ignore
+/// #[v8_class]
+/// #[v8_const(SYNTAX_ERR = 12u16)]
+/// #[v8_const(NETWORK_ERR = 19u16)]
+/// impl DOMException { ... }
+/// ```
+///
+/// Each declaration installs the value at BOTH the constructor
+/// function (`Class.NAME`) AND the prototype (`Class.prototype.NAME`)
+/// per WebIDL §3.7.5, with a `{ writable: false, enumerable: true,
+/// configurable: false }` descriptor (read-only, non-configurable;
+/// enumerable per spec).
+///
+/// The literal's type-suffix selects how the value is materialised on
+/// the V8 side:
+///   - `u16` / `u32` → `v8::Integer::new_from_unsigned`
+///   - `i32`         → `v8::Integer::new`
+///
+/// Unsuffixed literals or other type suffixes (`u64`, `i64`, `f64`,
+/// etc.) are rejected with a `compile_error!`. Use `[Clamp]`-style
+/// boundary newtypes for the runtime-side; constants are integers per
+/// WebIDL §3.7.5.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_const(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Impl-block-level marker attribute consumed by `#[v8_class]`: alias
 /// `[Symbol.asyncIterator]` to a method that already exists on the
 /// class, per WebIDL §3.7.10.5 (default async iterators).
