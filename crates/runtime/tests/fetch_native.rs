@@ -531,6 +531,44 @@ fn pre_aborted_cancel_flag_errors() {
     assert!(server.requests().is_empty(), "request should not have been sent");
 }
 
+#[test]
+fn mid_body_cancel_flag_aborts_body_read() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(150));
+        stream.write_all(b"hello").unwrap();
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    });
+
+    let cancel = CancelFlag::new();
+    let request = FetchRequest {
+        cancel: Some(cancel.clone()),
+        ..req("GET", &format!("http://{addr}/slow-body"))
+    };
+
+    let err = run(async {
+        let cancel_for_task = cancel.clone();
+        compio::runtime::spawn(async move {
+            compio::time::sleep(Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        })
+        .detach();
+        zeroship_runtime::fetch_native::http_network::http_network_fetch(&request)
+            .await
+            .expect_err("mid-body cancellation should abort the body read")
+    });
+    assert_eq!(err, "network error: aborted");
+}
+
 // 17. Manual redirect mode returns the redirect response unmodified
 #[test]
 fn manual_redirect_mode_returns_redirect() {

@@ -205,16 +205,14 @@ fn schedule_next_read(
     let read_v = match reader.get(scope, read_key.into()) {
         Some(v) => v,
         None => {
-            error_forwarder(&fwd, "reader.read access failed");
-            remove(&state, stream_id);
+            error_forwarder(&fwd, &state, stream_id, "reader.read access failed");
             return;
         }
     };
     let read_fn = match v8::Local::<v8::Function>::try_from(read_v) {
         Ok(f) => f,
         Err(_) => {
-            error_forwarder(&fwd, "reader.read is not a function");
-            remove(&state, stream_id);
+            error_forwarder(&fwd, &state, stream_id, "reader.read is not a function");
             return;
         }
     };
@@ -231,15 +229,13 @@ fn schedule_next_read(
                 .and_then(|e| e.to_string(tc))
                 .map(|s| s.to_rust_string_lossy(tc))
                 .unwrap_or_else(|| "read() threw".to_string());
-            error_forwarder(&fwd, &msg);
-            remove(&state, stream_id);
+            error_forwarder(&fwd, &state, stream_id, &msg);
             return;
         };
         let promise = match v8::Local::<v8::Promise>::try_from(promise_v) {
             Ok(p) => p,
             Err(_) => {
-                error_forwarder(&fwd, "read() did not return a Promise");
-                remove(&state, stream_id);
+                error_forwarder(&fwd, &state, stream_id, "read() did not return a Promise");
                 return;
             }
         };
@@ -353,8 +349,12 @@ fn on_chunk_callback(
     let result_obj = match v8::Local::<v8::Object>::try_from(result) {
         Ok(o) => o,
         Err(_) => {
-            error_forwarder(&captures.fwd, "read() resolved with non-object");
-            remove(&captures.state, captures.stream_id);
+            error_forwarder(
+                &captures.fwd,
+                &captures.state,
+                captures.stream_id,
+                "read() resolved with non-object",
+            );
             return;
         }
     };
@@ -366,7 +366,7 @@ fn on_chunk_callback(
         .unwrap_or(false);
 
     if done {
-        close_forwarder(&captures.fwd);
+        close_forwarder(&captures.fwd, &captures.state, captures.stream_id);
         return;
     }
 
@@ -374,8 +374,12 @@ fn on_chunk_callback(
     let value = match result_obj.get(scope, value_key.into()) {
         Some(v) => v,
         None => {
-            error_forwarder(&captures.fwd, "read() result has no `value`");
-            remove(&captures.state, captures.stream_id);
+            error_forwarder(
+                &captures.fwd,
+                &captures.state,
+                captures.stream_id,
+                "read() result has no `value`",
+            );
             return;
         }
     };
@@ -445,8 +449,7 @@ fn on_error_callback(
         err.to_rust_string_lossy(scope)
     };
 
-    error_forwarder(&captures.fwd, &msg);
-    remove(&captures.state, captures.stream_id);
+    error_forwarder(&captures.fwd, &captures.state, captures.stream_id, &msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -465,22 +468,32 @@ fn push_chunk(fwd: &ResponseForwarder, data: Vec<u8>) {
     }
 }
 
-fn close_forwarder(fwd: &ResponseForwarder) {
+fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32) {
     let mut inner = fwd.borrow_mut();
     inner.closed = true;
     // If a direct writer is attached, signal EOF.
     if let Some(writer) = inner.direct_writer.as_ref() {
         writer.close();
     }
+    let remove_now = inner.direct_writer.is_some();
+    drop(inner);
+    if remove_now {
+        remove(state, stream_id);
+    }
 }
 
-fn error_forwarder(fwd: &ResponseForwarder, _msg: &str) {
+fn error_forwarder(
+    fwd: &ResponseForwarder,
+    state: &SharedState,
+    stream_id: u32,
+    _msg: &str,
+) {
     // For the wire path an error is functionally equivalent to a
     // close (the TCP layer just sees EOF — the upstream peer won't
     // receive a structured error, only a truncated body). Future work:
     // surface error info via the StreamWriter so the kernel can emit
     // a response trailer or a tcp RST.
-    close_forwarder(fwd);
+    close_forwarder(fwd, state, stream_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,4 +559,32 @@ pub fn drain_into_complete(state: &SharedState, stream_id: u32) -> Vec<Vec<u8>> 
         remove(state, stream_id);
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::RuntimeState;
+    use std::collections::HashMap;
+
+    fn test_state() -> SharedState {
+        Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None)))
+    }
+
+    #[test]
+    fn closed_forwarder_with_attached_writer_is_removed_from_registry() {
+        let state = test_state();
+        let stream_id = 41;
+        let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+        register(&state, stream_id, fwd.clone());
+
+        let (writer, _reader) = crate::channel::stream_buffer();
+        attach_writer(&state, stream_id, writer);
+        close_forwarder(&fwd, &state, stream_id);
+
+        assert!(
+            get(&state, stream_id).is_none(),
+            "closed forwarder should not remain registered after EOF"
+        );
+    }
 }

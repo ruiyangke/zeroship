@@ -20,6 +20,7 @@ use super::algorithms::{
 };
 
 use crate::fetch::MAX_RESPONSE_SIZE;
+use futures::{FutureExt, StreamExt, pin_mut};
 
 /// Network response surfaced to the algorithm chain. Headers come back
 /// as Vec<(name, value)> so the chain can mutate them (e.g. strip
@@ -139,21 +140,49 @@ pub async fn http_network_fetch(
         }
     }
 
-    let body_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("network error: body read failed: {e}"))?;
-    if body_bytes.len() > MAX_RESPONSE_SIZE {
-        return Err(format!(
-            "network error: response body exceeded {MAX_RESPONSE_SIZE}"
-        ));
+    let mut body = Vec::new();
+    let body_stream = response.bytes_stream();
+    pin_mut!(body_stream);
+    loop {
+        let next_chunk = body_stream.next().fuse();
+        pin_mut!(next_chunk);
+        let maybe_chunk = if let Some(flag) = &request.cancel {
+            let cancel_wait = futures::future::poll_fn(|cx| {
+                if flag.is_cancelled() {
+                    std::task::Poll::Ready(())
+                } else {
+                    flag.register_waker(cx.waker());
+                    std::task::Poll::Pending
+                }
+            })
+            .fuse();
+            pin_mut!(cancel_wait);
+            futures::select! {
+                chunk = next_chunk => chunk,
+                _ = cancel_wait => return Err("network error: aborted".to_string()),
+            }
+        } else {
+            next_chunk.await
+        };
+
+        let Some(chunk) = maybe_chunk else { break };
+        let chunk = chunk.map_err(|e| format!("network error: body read failed: {e}"))?;
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_SIZE {
+            return Err(format!("network error: response body exceeded {MAX_RESPONSE_SIZE}"));
+        }
+        body.extend_from_slice(&chunk);
+        if let Some(flag) = &request.cancel
+            && flag.is_cancelled()
+        {
+            return Err("network error: aborted".to_string());
+        }
     }
 
     Ok(NetworkResponse {
         status,
         status_text,
         headers,
-        body: body_bytes.to_vec(),
+        body,
     })
 }
 

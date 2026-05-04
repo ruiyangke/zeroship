@@ -330,7 +330,7 @@ impl<'a> std::future::Future for WaitForData<'a> {
 
     fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         let inner = self.reader.inner.borrow();
-        if !inner.chunks.is_empty() || inner.done {
+        if !inner.chunks.is_empty() || inner.done || inner.overflow {
             std::task::Poll::Ready(())
         } else {
             drop(inner);
@@ -502,5 +502,33 @@ mod tests {
         flag.cancel();
         assert!(woke.load(Ordering::SeqCst));
         assert!(flag.is_cancelled());
+    }
+
+    #[test]
+    fn wait_for_data_resolves_when_stream_overflows() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct TestWake(Arc<AtomicBool>);
+        impl Wake for TestWake {
+            fn wake(self: Arc<Self>) { self.0.store(true, Ordering::SeqCst); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.store(true, Ordering::SeqCst); }
+        }
+
+        let (writer, reader) = stream_buffer_with_cap(4);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TestWake(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(reader.wait_for_data());
+
+        assert!(matches!(Future::poll(fut.as_mut(), &mut cx), Poll::Pending));
+        assert_eq!(writer.push(vec![0u8; 8]), StreamPushResult::Full);
+        assert!(woke.load(Ordering::SeqCst), "overflow should wake a waiting reader");
+        assert!(
+            matches!(Future::poll(fut.as_mut(), &mut cx), Poll::Ready(())),
+            "overflow is terminal; wait_for_data should resolve"
+        );
     }
 }

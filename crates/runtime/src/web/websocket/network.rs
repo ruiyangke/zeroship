@@ -220,6 +220,7 @@ pub fn alloc_native_ws_id(state: &SharedState) -> u32 {
 pub fn free_native_ws_state(state: &SharedState, ws_id: u32) {
     let mut s = state.borrow_mut();
     s.native_websockets.remove(&ws_id);
+    s.native_ws_wrappers.remove(&ws_id);
 }
 
 pub fn lookup_native_ws_state(
@@ -1073,5 +1074,38 @@ pub fn cancel_native_ws(state: &SharedState, ws_id: u32, reason: String) {
     // disconnects.
     if let Some(ws) = lookup_native_ws_state(state, ws_id) {
         ws.borrow_mut().send_tx = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::init_v8;
+    use crate::state::RuntimeState;
+    use std::collections::HashMap;
+
+    #[test]
+    fn free_native_ws_state_also_drops_cached_wrapper() {
+        init_v8();
+        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None)));
+        let mut isolate = v8::Isolate::new(Default::default());
+
+        v8::scope!(let handle_scope, &mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+        let ws_id = alloc_native_ws_id(&state);
+        let wrapper = v8::Object::new(scope);
+        state
+            .borrow_mut()
+            .native_ws_wrappers
+            .insert(ws_id, v8::Global::new(scope, wrapper));
+
+        free_native_ws_state(&state, ws_id);
+
+        assert!(
+            !state.borrow().native_ws_wrappers.contains_key(&ws_id),
+            "free_native_ws_state should not leave a dangling wrapper global"
+        );
     }
 }
