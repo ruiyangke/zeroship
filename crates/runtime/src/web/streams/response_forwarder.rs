@@ -39,7 +39,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use crate::channel::StreamWriter;
+use crate::channel::{StreamPushResult, StreamWriter};
 use crate::state::SharedState;
 
 // ---------------------------------------------------------------------------
@@ -410,7 +410,9 @@ fn on_chunk_callback(
         value.to_rust_string_lossy(scope).into_bytes()
     };
 
-    push_chunk(&captures.fwd, bytes);
+    if !push_chunk(&captures.fwd, &captures.state, captures.stream_id, bytes) {
+        return;
+    }
 
     // Re-arm: schedule the next read. We clone the captures' fields
     // because schedule_next_read consumes them; the captures struct
@@ -456,15 +458,28 @@ fn on_error_callback(
 // Forwarder I/O — used by the callbacks above
 // ---------------------------------------------------------------------------
 
-fn push_chunk(fwd: &ResponseForwarder, data: Vec<u8>) {
+fn push_chunk(
+    fwd: &ResponseForwarder,
+    state: &SharedState,
+    stream_id: u32,
+    data: Vec<u8>,
+) -> bool {
     let mut inner = fwd.borrow_mut();
     if inner.closed {
-        return;
+        return false;
     }
     if let Some(writer) = inner.direct_writer.as_ref() {
-        let _ = writer.push(data);
+        match writer.push(data) {
+            StreamPushResult::Ok => true,
+            StreamPushResult::Closed | StreamPushResult::Full => {
+                drop(inner);
+                close_forwarder(fwd, state, stream_id);
+                false
+            }
+        }
     } else {
         inner.buffer.push_back(data);
+        true
     }
 }
 
@@ -585,6 +600,26 @@ mod tests {
         assert!(
             get(&state, stream_id).is_none(),
             "closed forwarder should not remain registered after EOF"
+        );
+    }
+
+    #[test]
+    fn writer_overflow_closes_forwarder_and_unregisters_it() {
+        let state = test_state();
+        let stream_id = 42;
+        let fwd: ResponseForwarder = Rc::new(RefCell::new(ResponseForwarderInner::default()));
+        register(&state, stream_id, fwd.clone());
+
+        let (writer, reader) = crate::channel::stream_buffer_with_cap(4);
+        attach_writer(&state, stream_id, writer);
+
+        let accepted = push_chunk(&fwd, &state, stream_id, vec![0u8; 8]);
+        assert!(!accepted, "overflow should stop the forwarder immediately");
+        assert!(reader.is_overflow(), "downstream reader should observe overflow");
+        assert!(fwd.borrow().closed, "forwarder should be marked closed");
+        assert!(
+            get(&state, stream_id).is_none(),
+            "overflowed forwarder should be removed from the registry"
         );
     }
 }

@@ -32,6 +32,7 @@
 //!   Body model, a disturbed or locked stream throws TypeError on
 //!   extract.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::state::OpError;
@@ -634,11 +635,11 @@ fn is_url_search_params(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) ->
 // Build a ReadableStream from in-memory bytes
 // ---------------------------------------------------------------------------
 
-/// Build a JS-visible ReadableStream that emits the provided bytes as
-/// a single Uint8Array chunk and then closes. We construct it via the
-/// JS-visible `new ReadableStream(...)` so the resulting object behaves
-/// exactly like a user-constructed stream (instanceof ReadableStream,
-/// proper prototype chain, body consumers can disturb/lock).
+/// Build a JS-visible ReadableStream that emits the provided bytes in
+/// bounded chunks and then closes. We construct it via the JS-visible
+/// `new ReadableStream(...)` so the resulting object behaves exactly
+/// like a user-constructed stream (instanceof ReadableStream, proper
+/// prototype chain, body consumers can disturb/lock).
 ///
 /// The bytes Rc is cheaply cloned so the stream's start callback can
 /// own a fresh reference; the parent BodyImpl still holds the original
@@ -651,8 +652,21 @@ pub fn build_byte_stream(
     v8::Global::new(scope, stream_obj)
 }
 
+/// Chunk size used when materializing byte-backed bodies as a
+/// ReadableStream. Keeping chunks reasonably small avoids turning a
+/// buffered multi-megabyte fetch response into one giant JS-visible
+/// Uint8Array, which plays better with downstream stream piping and
+/// bounded response forwarding.
+const BYTE_STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+struct ByteStreamPullState {
+    bytes: Rc<Vec<u8>>,
+    offset: usize,
+}
+
 /// Construct a fresh ReadableStream wrapping the given bytes. Uses the
-/// JS-visible constructor.
+/// JS-visible constructor with a `pull(controller)` callback so the
+/// buffered body is exposed incrementally rather than as a single chunk.
 fn build_byte_stream_via_constructor<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     bytes: &Rc<Vec<u8>>,
@@ -666,37 +680,37 @@ fn build_byte_stream_via_constructor<'s>(
         .try_into()
         .expect("globalThis.ReadableStream is not a function");
 
-    // Build the underlyingSource object: { start(c) { c.enqueue(bytes); c.close(); } }
-    // The bytes go in via an External captured by the start callback.
+    // Build the underlyingSource object: { pull(c) { enqueue next chunk; close on EOF; } }
+    // The bytes + current offset live in a Rust state block captured by
+    // the pull callback.
     let underlying = v8::Object::new(scope);
 
-    // Box the Rc<Vec<u8>> so the External points at a stable address.
-    // The closure attached to the FunctionTemplate frees the Box via a
-    // weak finalizer on the Function wrapper.
-    let boxed: Box<Rc<Vec<u8>>> = Box::new(bytes.clone());
+    let boxed: Box<RefCell<ByteStreamPullState>> = Box::new(RefCell::new(ByteStreamPullState {
+        bytes: bytes.clone(),
+        offset: 0,
+    }));
     let raw = Box::into_raw(boxed);
     let raw_addr = raw as usize;
     let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
 
-    let tmpl = v8::FunctionTemplate::builder(start_callback)
+    let tmpl = v8::FunctionTemplate::builder(pull_callback)
         .data(ext.into())
         .build(scope);
-    let start_fn = tmpl.get_function(scope).unwrap();
+    let pull_fn = tmpl.get_function(scope).unwrap();
 
-    // Free the Box when the start function is GC'd. (It will be GC'd
-    // shortly after the stream is fully drained — V8 keeps the object
-    // tree alive until then.)
+    // Free the Box when the pull function is GC'd. V8 keeps the object
+    // graph alive while the stream can still be pulled.
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
-        start_fn,
+        pull_fn,
         Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut Rc<Vec<u8>>));
+            drop(Box::from_raw(raw_addr as *mut RefCell<ByteStreamPullState>));
         }),
     );
     std::mem::forget(weak);
 
-    let start_key = v8::String::new(scope, "start").unwrap();
-    underlying.set(scope, start_key.into(), start_fn.into());
+    let pull_key = v8::String::new(scope, "pull").unwrap();
+    underlying.set(scope, pull_key.into(), pull_fn.into());
 
     // new ReadableStream(underlying)
     let args = [underlying.into()];
@@ -706,47 +720,65 @@ fn build_byte_stream_via_constructor<'s>(
     stream
 }
 
-fn start_callback(
+fn pull_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    // controller is args[0]. Read bytes from External data. enqueue +
-    // close.
+    // controller is args[0]. Read bytes from External data. Enqueue
+    // one bounded slice per pull and close once the buffered body is
+    // exhausted.
     let data = args.data();
     let Ok(ext) = v8::Local::<v8::External>::try_from(data) else {
         return;
     };
-    let raw = ext.value() as *const Rc<Vec<u8>>;
+    let raw = ext.value() as *const RefCell<ByteStreamPullState>;
     if raw.is_null() {
         return;
     }
-    // SAFETY: the External points at a Box<Rc<Vec<u8>>> created in
+    // SAFETY: the External points at a Box<RefCell<ByteStreamPullState>> created in
     // build_byte_stream_via_constructor. The finalizer reclaims it; we
-    // borrow read-only here.
-    let bytes_rc = unsafe { &*raw };
+    // mutate the offset here on the isolate thread.
+    let state = unsafe { &*raw };
 
     let controller_v = args.get(0);
     let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
         return;
     };
 
-    if !bytes_rc.is_empty() {
-        // Build a Uint8Array wrapping a fresh ArrayBuffer with the bytes.
-        let buf = v8::ArrayBuffer::new_backing_store_from_vec((**bytes_rc).clone()).make_shared();
-        let ab = v8::ArrayBuffer::with_backing_store(scope, &buf);
-        let len = ab.byte_length();
-        let view = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
-
-        let enq_key = v8::String::new(scope, "enqueue").unwrap();
-        let enq_v = controller.get(scope, enq_key.into()).unwrap();
-        let enq_fn: v8::Local<v8::Function> = enq_v.try_into().unwrap();
-        let enq_args = [view.into()];
-        let _ = enq_fn.call(scope, controller.into(), &enq_args);
+    let mut state = state.borrow_mut();
+    if state.offset >= state.bytes.len() {
+        let close_key = v8::String::new(scope, "close").unwrap();
+        let close_v = controller.get(scope, close_key.into()).unwrap();
+        let close_fn: v8::Local<v8::Function> = close_v.try_into().unwrap();
+        let _ = close_fn.call(scope, controller.into(), &[]);
+        return;
     }
 
-    let close_key = v8::String::new(scope, "close").unwrap();
-    let close_v = controller.get(scope, close_key.into()).unwrap();
-    let close_fn: v8::Local<v8::Function> = close_v.try_into().unwrap();
-    let _ = close_fn.call(scope, controller.into(), &[]);
+    let end = state
+        .offset
+        .saturating_add(BYTE_STREAM_CHUNK_SIZE)
+        .min(state.bytes.len());
+    let chunk = state.bytes[state.offset..end].to_vec();
+    state.offset = end;
+    let should_close = state.offset >= state.bytes.len();
+    drop(state);
+
+    let buf = v8::ArrayBuffer::new_backing_store_from_vec(chunk).make_shared();
+    let ab = v8::ArrayBuffer::with_backing_store(scope, &buf);
+    let len = ab.byte_length();
+    let view = v8::Uint8Array::new(scope, ab, 0, len).unwrap();
+
+    let enq_key = v8::String::new(scope, "enqueue").unwrap();
+    let enq_v = controller.get(scope, enq_key.into()).unwrap();
+    let enq_fn: v8::Local<v8::Function> = enq_v.try_into().unwrap();
+    let enq_args = [view.into()];
+    let _ = enq_fn.call(scope, controller.into(), &enq_args);
+
+    if should_close {
+        let close_key = v8::String::new(scope, "close").unwrap();
+        let close_v = controller.get(scope, close_key.into()).unwrap();
+        let close_fn: v8::Local<v8::Function> = close_v.try_into().unwrap();
+        let _ = close_fn.call(scope, controller.into(), &[]);
+    }
 }

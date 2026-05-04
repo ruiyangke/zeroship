@@ -511,3 +511,22 @@ fn consumer_on_stream_body_reads_chunks() {
     );
     assert_eq!(s, "Hello");
 }
+
+#[test]
+fn byte_backed_body_materializes_as_chunked_stream() {
+    let s = run_async_in_v8(
+        r#"
+        (async () => {
+            const r = new Response(new Uint8Array(150000));
+            const lengths = [];
+            let total = 0;
+            for await (const chunk of r.body) {
+                lengths.push(chunk.length);
+                total += chunk.length;
+            }
+            globalThis.__result = JSON.stringify({ lengths, total });
+        })();
+        "#,
+    );
+    assert_eq!(s, r#"{"lengths":[65536,65536,18928],"total":150000}"#);
+}
