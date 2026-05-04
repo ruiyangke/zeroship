@@ -1,0 +1,25 @@
+error[E0061]: this function takes 0 arguments but 2 arguments were supplied
+  --> tests/compile_fail_post_init/wrong_signature.rs:15:1
+   |
+15 | #[v8_class]
+   | ^^^^^^^^^^^
+   | |
+   | unexpected argument #1 of type `&mut PinnedRef<'_, HandleScope<'_>>`
+   | unexpected argument #2 of type `Local<'_, Object>`
+   |
+note: associated function defined here
+  --> tests/compile_fail_post_init/wrong_signature.rs:23:19
+   |
+23 |     pub(crate) fn after_install() {}
+   |                   ^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `v8_class` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/compile_fail_post_init/wrong_signature.rs:15:1
+   |
+15 | #[v8_class]
+   | ^^^^^^^^^^^ expected `()`, found `Result<_, _>`
+   |
+   = note: expected unit type `()`
+                   found enum `Result<_, _>`
+   = note: this error originates in the attribute macro `v8_class` (in Nightly builds, run with -Z macro-backtrace for more info)

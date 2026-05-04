@@ -2040,31 +2040,92 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
 /// interfaces are spec'd with `[LegacyFactoryFunction]`, e.g.
 /// `Image()`). When `callable_no_new` is present the macro skips the
 /// `is_construct_call` guard.
+///
+/// Parses via `Punctuated<Meta, Comma>` to coexist with the
+/// `post_init = "fn_name"` shape introduced by MAC-02 (design
+/// `docs/proposals/macro-constructor-post-init.md` §4.2). Bare `Path`
+/// metas with the `callable_no_new` ident return true; everything else
+/// (including parse failure) returns false — consistent with the prior
+/// `parse_args_with`-based shape that silently ignored unparseable
+/// attribute lists.
 fn extract_callable_no_new(attrs: &[Attribute]) -> bool {
     for attr in attrs {
         if !attr.path().is_ident("v8_constructor") {
             continue;
         }
-        if let Ok(idents) = attr.parse_args_with(|input: syn::parse::ParseStream| {
-            let mut acc: Vec<syn::Ident> = Vec::new();
-            while !input.is_empty() {
-                let id: syn::Ident = input.parse()?;
-                acc.push(id);
-                if input.is_empty() {
-                    break;
-                }
-                let _: syn::Token![,] = input.parse()?;
-            }
-            Ok(acc)
-        }) {
-            for id in idents {
-                if id == "callable_no_new" {
+        let Ok(metas) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        for m in metas {
+            if let Meta::Path(p) = m {
+                if p.is_ident("callable_no_new") {
                     return true;
                 }
             }
         }
     }
     false
+}
+
+/// `#[v8_constructor(post_init = "fn_name")]` — MAC-02. Returns the
+/// named hook fn (as `syn::Ident`) or `None` if absent. Returns `Err`
+/// on malformed shapes — the macro propagates those as `compile_error!`
+/// at the precise span of the offending value.
+///
+/// Accepted shape:
+///   `#[v8_constructor(post_init = "after_install")]`
+///   `#[v8_constructor(callable_no_new, post_init = "after_install")]`
+///
+/// Rejected shapes (each emits a tailored diagnostic):
+///   - non-string-literal value (`post_init = ident`)
+///   - non-identifier string (`post_init = "1bad"`)
+///
+/// Parser is strict by design — silent no-op on malformed values would
+/// be a debugging nightmare given post_init is semantically load-bearing
+/// (see design §5.7).
+fn extract_post_init(attrs: &[Attribute]) -> Result<Option<syn::Ident>, syn::Error> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_constructor") {
+            continue;
+        }
+        let Ok(metas) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            // If this attribute can't be parsed as a punctuated Meta
+            // list, we let the rest of the macro pipeline surface the
+            // error (extract_callable_no_new also tolerates this; the
+            // user will see a syntax error from one of the parsers).
+            continue;
+        };
+        for meta in metas {
+            let Meta::NameValue(nv) = meta else { continue };
+            if !nv.path.is_ident("post_init") {
+                continue;
+            }
+            let lit = match &nv.value {
+                Expr::Lit(ExprLit {
+                    lit: Lit::Str(s), ..
+                }) => s,
+                other => {
+                    return Err(syn::Error::new_spanned(
+                        other,
+                        "#[v8_constructor]: post_init must be a string literal naming a function on this impl, e.g. post_init = \"after_install\"",
+                    ));
+                }
+            };
+            let raw = lit.value();
+            let ident = syn::parse_str::<syn::Ident>(&raw).map_err(|_| {
+                syn::Error::new_spanned(
+                    lit,
+                    format!("#[v8_constructor]: post_init = {raw:?} is not a valid Rust identifier"),
+                )
+            })?;
+            return Ok(Some(ident));
+        }
+    }
+    Ok(None)
 }
 
 /// WebIDL §3.7.1: every interface constructor MUST be called with `new`.
@@ -2149,6 +2210,68 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
     let store = gen_box_and_install_finalizer(class_ty);
     let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
 
+    // MAC-02: post_init dispatch — runs AFTER box install, BEFORE the
+    // callback returns to V8. Hook signature is
+    // `fn(&mut PinScope, Local<Object>) -> Result<(), OpError>`.
+    //
+    // Behaviour matrix (design §5.2 / §5.3):
+    //   - must_new + post_init: must-new throws early, post_init never
+    //     runs. No special case in this code — must-new returns first.
+    //   - callable_no_new + post_init: hook only fires for `new Foo()`
+    //     (is_construct_call() == true). Bare `Foo()` skips the hook
+    //     to avoid writing private symbols on globalThis (the design
+    //     reverses the v1 "always run" decision; see §5.3).
+    //   - #[v8_inherit]: derived's hook runs; base's does NOT auto-chain
+    //     (V8's existing constructor semantics — derived is responsible
+    //     for invoking base setup explicitly; see §5.4 worked example).
+    //
+    // Box reclamation under failure (§5.9 / §4.4): when the hook returns
+    // Err, the macro throws a JS exception and returns. The box stays
+    // installed in field 0 until the V8 weak finalizer reclaims the
+    // wrapper on the next GC sweep. v1 ships with lazy drop; eager drop
+    // is deferred per the design's cost-benefit analysis. The
+    // user-visible contract: `Self::Drop` side-effects from a failed
+    // post_init may be delayed by up to one GC cycle.
+    let post_init = match extract_post_init(&c.func.attrs) {
+        Ok(None) => quote! {},
+        Err(e) => return e.to_compile_error(),
+        Ok(Some(hook_ident)) => {
+            // Mirror the make_instance Result arm verbatim — same five
+            // OpErrorKind variants from crates/runtime/src/core/state.rs
+            // (TypeError, RangeError, Error, DomException, NodeError, JsValue).
+            // Any addition there must be mirrored here.
+            quote! {
+                if args.is_construct_call() {
+                    match <#class_ty>::#hook_ident(scope, __this) {
+                        Ok(()) => {},
+                        Err(__err) => {
+                            if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+                                let __exc = v8::Local::new(scope, __global);
+                                scope.throw_exception(__exc);
+                                return;
+                            }
+                            let __msg = v8::String::new(scope, &__err.message).unwrap();
+                            let __exc: v8::Local<v8::Value> = match __err.kind {
+                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                                }
+                                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+                                }
+                                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+                            };
+                            scope.throw_exception(__exc);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_ident(
@@ -2163,6 +2286,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
             #make_instance
 
             #store
+            #post_init
         }
     }
 }

@@ -110,5 +110,11 @@ runtime_websocket_strict_enum = []
 # (delete polyfill); reserved.
 runtime_legacy_websocket = []
 
+[dev-dependencies]
+# Compile-fail snapshot tests for proc-macro diagnostics. Locks in
+# `#[v8_constructor(post_init = ...)]` error spans for malformed shapes
+# (MAC-02, design `docs/proposals/macro-constructor-post-init.md` §6.2).
+trybuild = "1.0"
+
 [lints]
 workspace = true
