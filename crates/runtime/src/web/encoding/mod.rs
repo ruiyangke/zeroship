@@ -51,7 +51,7 @@ use encoding_rs::{DecoderResult, Encoding};
 // file's symbol table because the attributes get stripped during the
 // outer expansion. The `v8_class` proc macro removes them before
 // quoting the impl block back out.
-use zeroship_runtime_macros::v8_class;
+use zeroship_runtime_macros::{v8_class, WebIdlDict};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
@@ -251,13 +251,13 @@ impl TextDecoder {
             ));
         }
 
-        let (fatal_flag, ignore_bom_flag) = read_decoder_options(scope, options)?;
+        let opts = TextDecoderOptions::from_v8(scope, options)?;
 
         Ok(TextDecoder {
             encoding,
             decoder: None,
-            fatal_flag,
-            ignore_bom_flag,
+            fatal_flag: opts.fatal,
+            ignore_bom_flag: opts.ignore_bom,
         })
     }
 
@@ -280,7 +280,7 @@ impl TextDecoder {
         // inside the `stream` getter). Only after options coerces
         // do we read the buffer's bytes; if it was detached during
         // options, we get an empty input.
-        let stream = read_stream_option(scope, options)?;
+        let stream = TextDecodeOptions::from_v8(scope, options)?.stream;
         let bytes = read_buffer_source(input)?;
 
         // Lazy-init or re-init the decoder. We drop it after every
@@ -383,68 +383,38 @@ impl TextDecoder {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read `(fatal, ignoreBOM)` from a decoder constructor's options
-/// arg. Per WebIDL §3.2.20 dictionary coercion:
-///   - `undefined` or `null` → use defaults.
-///   - any other non-object → throw `TypeError`.
-///   - object → read `fatal` and `ignoreBOM` properties; missing
-///     properties → defaults.
-fn read_decoder_options(
-    scope: &mut v8::PinScope,
-    val: v8::Local<v8::Value>,
-) -> Result<(bool, bool), OpError> {
-    if val.is_undefined() || val.is_null() {
-        return Ok((false, false));
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
-        return Err(OpError::type_error(
-            "TextDecoder: options must be an object",
-        ));
-    };
-    let fatal = read_bool_prop(scope, obj, "fatal")?;
-    let ignore_bom = read_bool_prop(scope, obj, "ignoreBOM")?;
-    Ok((fatal, ignore_bom))
+/// `TextDecoderOptions` per Encoding §10.2:
+///
+/// ```webidl
+/// dictionary TextDecoderOptions {
+///   boolean fatal = false;
+///   boolean ignoreBOM = false;
+/// };
+/// ```
+///
+/// Two booleans, both default false. Per WebIDL §3.2.20 dictionary
+/// coercion the derive emits:
+///   - `undefined` / `null` → all-defaults via `Self::default()`.
+///   - non-Object → TypeError.
+///   - Object → read each member; missing/undefined → field default.
+#[derive(Default, Debug, WebIdlDict)]
+pub(crate) struct TextDecoderOptions {
+    pub(crate) fatal: bool,
+    #[webidl_name = "ignoreBOM"]
+    pub(crate) ignore_bom: bool,
 }
 
-/// Read `decode()`'s options arg with the same WebIDL rules as
-/// above. Returns the `stream` flag.
-fn read_stream_option(
-    scope: &mut v8::PinScope,
-    val: v8::Local<v8::Value>,
-) -> Result<bool, OpError> {
-    if val.is_undefined() || val.is_null() {
-        return Ok(false);
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
-        return Err(OpError::type_error(
-            "TextDecoder.decode: options must be an object",
-        ));
-    };
-    read_bool_prop(scope, obj, "stream")
-}
-
-fn read_bool_prop(
-    scope: &mut v8::PinScope,
-    obj: v8::Local<v8::Object>,
-    key: &str,
-) -> Result<bool, OpError> {
-    let key_v8 = v8::String::new(scope, key)
-        .ok_or_else(|| OpError::error("TextDecoder: out of memory allocating property key"))?;
-    // KNOWN GAP: if `obj.get()` triggers a user-supplied Proxy or
-    // accessor that throws, V8 sets a pending exception and
-    // returns None. Per WebIDL §3.2.20 the original exception
-    // should propagate to the caller; instead we surface a
-    // generic OpError here, which the macro re-throws as our own
-    // Error with a less helpful message. Properly preserving the
-    // V8 exception requires either a sentinel OpError variant
-    // that the macro recognizes as "exception already pending,
-    // don't overwrite," or scope-aware Result type. Tracked as a
-    // future macro feature; the encoding tests don't exercise
-    // this path.
-    let val = obj
-        .get(scope, key_v8.into())
-        .ok_or_else(|| OpError::error("TextDecoder: property access threw"))?;
-    Ok(val.boolean_value(scope))
+/// `TextDecodeOptions` per Encoding §10.2 — the per-call `decode`
+/// options dict:
+///
+/// ```webidl
+/// dictionary TextDecodeOptions {
+///   boolean stream = false;
+/// };
+/// ```
+#[derive(Default, Debug, WebIdlDict)]
+pub(crate) struct TextDecodeOptions {
+    pub(crate) stream: bool,
 }
 
 /// Coerce a JS value to a byte slice per WebIDL `BufferSource`.

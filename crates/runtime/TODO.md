@@ -61,6 +61,81 @@ for diff stats.
 - `state.rs` has `OpResult::StreamChunk` + `pending_fetches` etc. — some may be
   dead post-cleanup-rawfetch. Audit during reorg.
 
+## V8 class macro migration follow-ups (consumer side)
+
+The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`,
+`#[v8_getter(same_object)]`) ship in `runtime-macros`. Existing
+`web/` classes are migrated one-PR-per-class. Status:
+
+**Done** (in this branch — `feature/v8-class-migrate`):
+
+  - `Crypto.subtle` — `#[v8_getter(same_object)]` (`33a9fe7`)
+  - Crypto enums: KeyType / KeyUsage / KeyFormat / NamedCurve —
+    `#[derive(WebIdlEnum)]` (`e74d591`)
+  - DOM event init dicts: EventInit / CustomEventInit /
+    MessageEventInit / CloseEventInit — `#[derive(WebIdlDict)]`
+    (`09b9ba8`)
+  - Blob/File property bags: BlobPropertyBag / FilePropertyBag —
+    `#[derive(WebIdlDict)]` (`fdd5681`)
+  - QueuingStrategyInit — `#[derive(WebIdlDict)]` (`47948ad`)
+  - WebSocketInit (zeroship-specific) — `#[derive(WebIdlDict)]`
+    (`e226c8c`)
+  - ReadableStreamIteratorOptions — `#[derive(WebIdlDict)]`
+    (`5cbb8e0`)
+  - TextDecoderOptions / TextDecodeOptions (shared by
+    TextDecoder + TextDecoderStream) — `#[derive(WebIdlDict)]`
+    (`9c16906`)
+
+**Deferred** (with reasons):
+
+  - `RequestInit` / `ResponseInit` — Request and Response are
+    hand-rolled, NOT `#[v8_class]`. Migrating the dict alone
+    doesn't help; the constructors need same-name getter+setter
+    pairing in `#[v8_class]`. Track via the macro's
+    `runtime-macros/TODO.md` Tier-4 work.
+  - `RequestMode` / `RequestCache` / `RequestRedirect` /
+    `RequestCredentials` / `RequestDestination` / `ReferrerPolicy`
+    / `ResponseType` — don't exist as Rust enums today (stored
+    as `RefCell<String>` on RequestState/ResponseState). The
+    constructor accepts arbitrary strings without spec validation;
+    migrating requires both adding the enum types AND swapping
+    the storage shape — out of scope for a pure macro migration.
+  - `RedirectMode` / `CredentialsMode` — exist as Rust enums but
+    `from_str(s) -> Self` falls through to Default on unknown
+    values (preserved by request validation contract). The
+    macro's `from_str` returns `Option<Self>` and
+    `WebIdlConvertible` throws TypeError on unknown — semantic
+    mismatch. Would need `.unwrap_or(Default)` glue at every call
+    site to preserve existing behaviour.
+  - `ReadableStreamGetReaderOptions` / `ReadableStreamReaderMode`
+    — hand-rolled `getReader(options)` parser uses `v8::tc_scope!`
+    to capture + rethrow user-thrown errors from a custom
+    `mode.toString()`, preserving the exact exception value. The
+    macro's `WebIdlEnum::from_v8` would replace it with a generic
+    TypeError.
+  - `ReadableStreamType` — `is_byte_stream` parsing is one branch
+    (`type === "bytes"` → bool); not enough surface for a derive.
+  - WebSocket `BinaryType` enum — silent no-op on unknown values
+    per WPT `binaryType-wrong-value.any.js`. The macro's
+    `WebIdlConvertible` throws TypeError on unknown — different
+    behaviour.
+  - WebCrypto algorithm-init dicts — many variant-tagged shapes,
+    custom validation; not a clean derive fit yet.
+  - Crypto `HashAlgo` enum — spec mandates case-insensitive matching
+    ("SHA-256" / "sha-256" / "Sha-256" all valid); the macro's
+    auto-`from_str` is case-sensitive.
+  - `AddEventListenerOptions` / `EventListenerOptions` —
+    `(EventListenerOptions or boolean)` union (boolean shorthand
+    for `capture`), AND `signal: null` is a TypeError (not the
+    dict's default-construct path). Neither is expressible by
+    the dict derive today.
+
+**Iterator migrations** (separate cluster — `#[v8_iterable]`):
+  - `URLSearchParamsIterator` — snapshot iter, ~150 LOC.
+  - `HeadersIterator` — LIVE iter, needs derive extension OR
+    keep hand-rolled.
+  - `FormDataIterator` — ~100 LOC.
+
 ## Memory footprint
 
 The runtime's per-isolate working set sits around 125 MB after warmup

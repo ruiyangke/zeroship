@@ -19,6 +19,8 @@
 
 use std::collections::HashSet;
 
+use zeroship_runtime_macros::WebIdlDict;
+
 use crate::dom::event_target::{
     add_internal_listener, listeners_of, remove_internal_listener,
 };
@@ -235,62 +237,34 @@ pub struct ParsedWebSocketInit {
     pub ping_interval_ms: u32,
 }
 
+/// Wire-shape of the JS dictionary, per the IDL. Numeric defaults are
+/// non-zero (`DEFAULT_MAX_MESSAGE_SIZE`, etc.) so each member rides as
+/// `Option<u32>` and the call site falls back to the constants — this
+/// keeps the `WebIdlDict` derive's required `Default` impl using the
+/// type's natural `0u32`/`None` defaults without us hand-rolling a
+/// custom Default that bakes in the protocol numbers.
+#[derive(Default, Debug, WebIdlDict)]
+struct WebSocketInit {
+    origin: Option<String>,
+    #[webidl_name = "maxMessageSize"]
+    max_message_size: Option<u32>,
+    #[webidl_name = "maxFrameSize"]
+    max_frame_size: Option<u32>,
+    #[webidl_name = "pingIntervalMs"]
+    ping_interval_ms: Option<u32>,
+}
+
 pub fn read_websocket_init(
     scope: &mut v8::PinScope,
     val: v8::Local<v8::Value>,
 ) -> Result<ParsedWebSocketInit, OpError> {
-    let mut parsed = ParsedWebSocketInit {
-        origin: None,
-        max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
-        max_frame_size: DEFAULT_MAX_FRAME_SIZE,
-        ping_interval_ms: DEFAULT_PING_INTERVAL_MS,
-    };
-    if val.is_undefined() || val.is_null() {
-        return Ok(parsed);
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
-        return Err(OpError::type_error(
-            "WebSocket: init must be an object",
-        ));
-    };
-
-    let key =
-        v8::String::new(scope, "origin").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() && !v.is_null() {
-            parsed.origin = Some(v.to_rust_string_lossy(scope));
-        }
-    }
-
-    let key = v8::String::new(scope, "maxMessageSize")
-        .ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() {
-            // unsigned long — V8 uint32 conversion is fine for the
-            // u32 IDL type (the cap fits).
-            parsed.max_message_size =
-                v.uint32_value(scope).unwrap_or(DEFAULT_MAX_MESSAGE_SIZE);
-        }
-    }
-
-    let key = v8::String::new(scope, "maxFrameSize")
-        .ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() {
-            parsed.max_frame_size = v.uint32_value(scope).unwrap_or(DEFAULT_MAX_FRAME_SIZE);
-        }
-    }
-
-    let key = v8::String::new(scope, "pingIntervalMs")
-        .ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, key.into()) {
-        if !v.is_undefined() {
-            parsed.ping_interval_ms =
-                v.uint32_value(scope).unwrap_or(DEFAULT_PING_INTERVAL_MS);
-        }
-    }
-
-    Ok(parsed)
+    let init = WebSocketInit::from_v8(scope, val)?;
+    Ok(ParsedWebSocketInit {
+        origin: init.origin,
+        max_message_size: init.max_message_size.unwrap_or(DEFAULT_MAX_MESSAGE_SIZE),
+        max_frame_size: init.max_frame_size.unwrap_or(DEFAULT_MAX_FRAME_SIZE),
+        ping_interval_ms: init.ping_interval_ms.unwrap_or(DEFAULT_PING_INTERVAL_MS),
+    })
 }
 
 // ---------------------------------------------------------------------------

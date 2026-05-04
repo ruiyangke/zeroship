@@ -47,11 +47,13 @@
 
 use std::cell::RefCell;
 
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_inherit, v8_method, v8_name};
+use zeroship_runtime_macros::{
+    v8_class, v8_constructor, v8_getter, v8_inherit, v8_method, v8_name, WebIdlDict,
+};
 
 use crate::state::OpError;
 
-use super::event::{now_ms, read_event_init, Event};
+use super::event::{now_ms, Event};
 
 /// Backing state for a JS-constructed `CustomEvent`. The `event` field
 /// MUST be first (and the struct MUST be `#[repr(C)]`) — see the module
@@ -77,6 +79,21 @@ impl Default for CustomEvent {
             detail: RefCell::new(None),
         }
     }
+}
+
+/// `CustomEventInit` per DOM §2.4. Inherits from `EventInit` per
+/// the IDL, but the macro doesn't support derive-with-inheritance,
+/// so the parent fields (`bubbles`/`cancelable`/`composed`) are
+/// inlined here. `detail` rides as an `Option<Local<Value>>` so the
+/// caller can either `.map(...)` to a `Global` (constructor path) or
+/// observe `None` for the missing/undefined case (per IDL default
+/// = null, materialised on the JS surface in the `.detail` getter).
+#[derive(Default, Debug, WebIdlDict)]
+struct CustomEventInit<'s> {
+    bubbles: bool,
+    cancelable: bool,
+    composed: bool,
+    detail: Option<v8::Local<'s, v8::Value>>,
 }
 
 #[v8_class]
@@ -106,28 +123,16 @@ impl CustomEvent {
         };
         let type_rust = type_str.to_rust_string_lossy(scope);
 
-        // Inherited EventInit fields (bubbles / cancelable / composed)
-        // come from the same parser Event uses — keeps the two
-        // constructors in lockstep on dict parsing.
-        let init_dict = read_event_init(scope, init)?;
+        // Single dict parse covers inherited EventInit fields
+        // (bubbles/cancelable/composed) plus CustomEventInit's own
+        // `detail`. Per IDL default `detail = null`, and the dict
+        // converter maps both "missing key" and "undefined value" to
+        // None — same observable shape as the previous hand-roll.
+        let init_dict = CustomEventInit::from_v8(scope, init)?;
 
-        // CustomEventInit-specific `detail`. Per IDL default is `null`,
-        // and undefined in the dict (or no dict at all) is treated the
-        // same as null per WebIDL dictionary defaulting.
-        let detail_global: Option<v8::Global<v8::Value>> = if init.is_undefined()
-            || init.is_null()
-        {
-            None
-        } else if let Ok(obj) = v8::Local::<v8::Object>::try_from(init) {
-            let key = v8::String::new(scope, "detail")
-                .ok_or_else(|| OpError::error("out of memory"))?;
-            match obj.get(scope, key.into()) {
-                Some(v) if !v.is_undefined() => Some(v8::Global::new(scope, v)),
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let detail_global: Option<v8::Global<v8::Value>> = init_dict
+            .detail
+            .map(|v| v8::Global::new(scope, v));
 
         let ce = CustomEvent::default();
         *ce.event.event_type.borrow_mut() = type_rust;

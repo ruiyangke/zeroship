@@ -31,7 +31,7 @@
 //! Per spec §6.3.5: `size()` returns `1`. Always. No reading of `chunk`,
 //! no coercion.
 
-use zeroship_runtime_macros::v8_class;
+use zeroship_runtime_macros::{v8_class, WebIdlDict};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter};
 
@@ -218,10 +218,23 @@ fn get_or_create_shared_size_fn<'s>(
 // QueuingStrategyInit dictionary parsing
 // ---------------------------------------------------------------------------
 
+/// `QueuingStrategyInit` per WebIDL §3.2.20 + critic #33.
+///
+/// `highWaterMark` is a REQUIRED member per IDL — the macro doesn't
+/// emit a "required-throws-if-missing" check today (a non-Option
+/// field defaults to `f64::default() == 0.0` on missing key), so we
+/// model it as `Option<f64>` and check None at the call site to
+/// preserve the spec-mandated TypeError.
+#[derive(Default, Debug, WebIdlDict)]
+struct QueuingStrategyInit {
+    #[webidl_name = "highWaterMark"]
+    high_water_mark: Option<f64>,
+}
+
 /// Parse `{ highWaterMark: number }` per WebIDL §3.2.20 + critic #33.
 ///
 /// - `init` undefined / missing → TypeError ("init is required")
-/// - `init` not an object → TypeError
+/// - `init` not an object → TypeError (via the auto-derived `from_v8`)
 /// - `init.highWaterMark` undefined → TypeError ("required member missing")
 /// - `init.highWaterMark` not a number → ToNumber (NaN / -Infinity / ∞ allowed
 ///   at this layer; the spec's `unrestricted double` permits them)
@@ -230,32 +243,26 @@ fn parse_queuing_strategy_init(
     init: v8::Local<v8::Value>,
     class_name: &str,
 ) -> Result<f64, OpError> {
+    // Spec mandates that `init` itself is required-throws — the dict
+    // converter would happily default-construct from undefined/null,
+    // so we keep the explicit pre-check at the call site.
     if init.is_undefined() {
         return Err(OpError::type_error(format!(
             "{class_name}: init argument is required",
         )));
     }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(init) else {
-        return Err(OpError::type_error(format!(
-            "{class_name}: init must be an object",
-        )));
-    };
-    let key = v8::String::new(scope, "highWaterMark")
-        .ok_or_else(|| OpError::error("alloc highWaterMark key"))?;
-    let val = obj
-        .get(scope, key.into())
-        .ok_or_else(|| OpError::error(format!("{class_name}: highWaterMark accessor threw")))?;
-    if val.is_undefined() {
-        return Err(OpError::type_error(format!(
+    let parsed = QueuingStrategyInit::from_v8(scope, init).map_err(|e| {
+        // Dress the converter's generic message with the class name
+        // so test failures point at the offender. Other shapes
+        // (TypeError on non-Object) keep the converter's text — the
+        // class name is implicit in the surrounding stack trace.
+        OpError::type_error(format!("{class_name}: {}", e.message))
+    })?;
+    let n = parsed.high_water_mark.ok_or_else(|| {
+        OpError::type_error(format!(
             "{class_name}: highWaterMark is a required dictionary member",
-        )));
-    }
-    // ToNumber per WebIDL `unrestricted double`. NaN / negative / ∞ are all
-    // valid at this boundary; the controller enforces non-negative-finite
-    // when actually using the value.
-    let n = val
-        .number_value(scope)
-        .ok_or_else(|| OpError::type_error(format!("{class_name}: highWaterMark must be a number")))?;
+        ))
+    })?;
     Ok(n)
 }
 
