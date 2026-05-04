@@ -8,7 +8,7 @@ use crate::state::OpError;
 
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_method, v8_name, v8_to_string_tag,
+    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_to_string_tag,
 };
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -92,6 +92,17 @@ impl Crypto {
         // SAFETY: buf is ASCII (hex digits + hyphens). (Critic #34.)
         unsafe { String::from_utf8_unchecked(buf.to_vec()) }
     }
+
+    /// `crypto.subtle` — `[SameObject]` getter per WebCrypto §10.
+    /// Returns the per-realm SubtleCrypto singleton; the macro's
+    /// `same_object` flag stashes the minted Object on a private symbol
+    /// of the wrapper instance so subsequent reads return the SAME JS
+    /// object (`crypto.subtle === crypto.subtle`).
+    #[v8_getter(same_object)]
+    fn subtle(&self, scope: &mut v8::PinScope) -> v8::Global<v8::Object> {
+        let inst = super::subtle::build(scope);
+        v8::Global::new(scope, inst)
+    }
 }
 
 fn is_allowed_typed_array(value: v8::Local<v8::Value>) -> bool {
@@ -109,30 +120,6 @@ fn is_allowed_typed_array(value: v8::Local<v8::Value>) -> bool {
         || value.is_uint32_array()
         || value.is_big_int64_array()
         || value.is_big_uint64_array()
-}
-
-// ---------------------------------------------------------------------------
-// `subtle` getter — hand-installed (the macro's #[v8_getter] doesn't
-// give us access to `args.this()` for [SameObject] caching).
-// ---------------------------------------------------------------------------
-
-fn subtle_getter_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let this = args.this();
-    let priv_name = v8::String::new(scope, "__subtleInstance").unwrap();
-    let priv_key = v8::Private::for_api(scope, Some(priv_name));
-    if let Some(cached) = this.get_private(scope, priv_key) {
-        if !cached.is_undefined() {
-            rv.set(cached);
-            return;
-        }
-    }
-    let inst = super::subtle::build(scope);
-    let _ = this.set_private(scope, priv_key, inst.into());
-    rv.set(inst.into());
 }
 
 /// Allocate a `Crypto` JS object (the per-realm `globalThis.crypto`
@@ -166,22 +153,10 @@ pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
+    // The `subtle` getter is now wired via `#[v8_getter(same_object)]`
+    // on the impl block — the macro emits a private-symbol-cached
+    // accessor, so we no longer need a hand-rolled callback here.
     let tmpl = Crypto::install(scope);
-
-    // Hand-install the `subtle` getter on the prototype-template so
-    // `crypto.subtle` is a real accessor that runs our callback (and
-    // can access `args.this()` for [SameObject] caching).
-    {
-        let proto_tmpl = tmpl.prototype_template(scope);
-        let key = v8::String::new(scope, "subtle").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, subtle_getter_callback);
-        proto_tmpl.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
 
     let class_fn = tmpl.get_function(scope).unwrap();
     let crypto_class_key = v8::String::new(scope, "Crypto").unwrap();
