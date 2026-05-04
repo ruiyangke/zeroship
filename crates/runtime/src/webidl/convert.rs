@@ -30,6 +30,16 @@ use crate::byte_string::{read_byte_string, ByteString};
 use crate::state::OpError;
 use crate::usv_string::{read_usv_string_or_throw, USVString};
 
+// Re-export the WebIDL default-case integer-coercion newtypes so users
+// can `use zeroship_runtime::convert::WrapU16;` alongside the existing
+// `Clamp{*}` and `EnforceRange{*}` family. Macro-side detection lives
+// in `crates/runtime-macros/src/lib.rs::wrap_kind` and emits the
+// matching `read_wrap_*` reader at the WebIDL boundary.
+pub use crate::wrap::{
+    read_wrap_i16, read_wrap_i32, read_wrap_i8, read_wrap_u16, read_wrap_u32, read_wrap_u8,
+    WrapI16, WrapI32, WrapI8, WrapU16, WrapU32, WrapU8,
+};
+
 /// WebIDL JS-value → Rust-type conversion at the boundary.
 ///
 /// Implementors emit a typed value or throw a TypeError-flavoured

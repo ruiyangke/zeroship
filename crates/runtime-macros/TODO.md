@@ -26,6 +26,12 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   reentrant invoke (per-method, per-instance HashSet) — `7ce7f260`.
 - **`[Clamp]` newtypes** — `ClampU16/U32/I32/U64/I64` in
   `zeroship_runtime::clamp`. `[EnforceRange]` companion already shipped — `dc26721d`.
+- **`Wrap{U8,U16,U32,I8,I16,I32}` newtypes** — default-case integer
+  coercion (no `[Clamp]` / `[EnforceRange]`): NaN/Infinity → 0,
+  truncate toward zero, modulo 2^N, signedness reinterpret. Lives in
+  `zeroship_runtime::wrap`; macro detects via `wrap_kind` mirror of
+  `clamp_kind`. Unblocks CloseEvent.code (`unsigned short` default).
+  [MAC-17 / B.9] — `<commit>`.
 - **Same-name getter+setter pairing** via `#[v8_name = "..."]` —
   paired install as one accessor descriptor. Codegen landed
   incrementally (`020a545`, `0dbb753`, `3806341`); smoke test only — `ce68f10`.
@@ -128,8 +134,6 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   FormData entry value `(USVString or File)` union. -90 LOC. [B.5]
 - **MAC-16 `#[webidl_required]`** dict-member flag — TypeError on
   `undefined` for required members. QueuingStrategyInit + future. [B.7]
-- **MAC-17 `WrapU16` / `WrapU8` / etc. newtypes** — default-case integer
-  coercion (NaN→0, modulo 2^N). CloseEvent.code today. [B.9]
 - **Lifetime-tied `Local<'s, T>` returns** — generalize URL-native's
   `param-named-scope` workaround to detect `Local<'s, _>` tied to a
   scope arg.

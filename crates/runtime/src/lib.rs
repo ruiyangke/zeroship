@@ -127,6 +127,7 @@ pub use webidl::clamp;
 pub use webidl::convert;
 pub use webidl::enforce_range;
 pub use webidl::usv_string;
+pub use webidl::wrap;
 
 #[cfg(target_os = "linux")]
 pub use core::cpu_timer;

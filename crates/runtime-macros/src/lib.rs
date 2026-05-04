@@ -502,6 +502,24 @@ pub(crate) fn clamp_kind(ty: &Type) -> Option<&'static str> {
     }
 }
 
+/// Check if type is one of the `Wrap{U8,U16,U32,I8,I16,I32}` newtypes
+/// from `zeroship_runtime::wrap`. Used for WebIDL default-case integer
+/// coercion (no `[Clamp]` or `[EnforceRange]`): truncate toward zero,
+/// modulo 2^N, reinterpret per signedness. NaN / ±Infinity → 0. Mirror
+/// of `clamp_kind` — returns the suffix so codegen can dispatch on
+/// the target type, `None` otherwise.
+pub(crate) fn wrap_kind(ty: &Type) -> Option<&'static str> {
+    match type_ident(ty).as_deref() {
+        Some("WrapU8") => Some("u8"),
+        Some("WrapU16") => Some("u16"),
+        Some("WrapU32") => Some("u32"),
+        Some("WrapI8") => Some("i8"),
+        Some("WrapI16") => Some("i16"),
+        Some("WrapI32") => Some("i32"),
+        _ => None,
+    }
+}
+
 /// Check if type is the `USVString` newtype from
 /// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
 /// args (URL.* setters, URLSearchParams names/values). Conversion
@@ -703,6 +721,26 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
         };
         return quote! {
             let #name = #ctor(#reader(scope, args.get(#idx)));
+        };
+    }
+
+    // Wrap{U8,U16,U32,I8,I16,I32} → WebIDL default-case integer
+    // coercion (no `[Clamp]` / `[EnforceRange]`). NaN / ±Infinity → 0,
+    // truncate toward zero, modulo 2^N, reinterpret per signedness.
+    // Reader fns in `zeroship_runtime::wrap` implement the algorithm;
+    // this match dispatches on the target integer type.
+    if let Some(kind) = wrap_kind(ty) {
+        let reader = match kind {
+            "u8" => quote! { ::zeroship_runtime::wrap::read_wrap_u8 },
+            "u16" => quote! { ::zeroship_runtime::wrap::read_wrap_u16 },
+            "u32" => quote! { ::zeroship_runtime::wrap::read_wrap_u32 },
+            "i8" => quote! { ::zeroship_runtime::wrap::read_wrap_i8 },
+            "i16" => quote! { ::zeroship_runtime::wrap::read_wrap_i16 },
+            "i32" => quote! { ::zeroship_runtime::wrap::read_wrap_i32 },
+            _ => unreachable!("wrap_kind returned an unrecognised suffix"),
+        };
+        return quote! {
+            let #name = #reader(scope, args.get(#idx));
         };
     }
 
