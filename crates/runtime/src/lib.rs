@@ -65,8 +65,10 @@
 extern crate self as zeroship_runtime;
 
 pub mod auth;
+pub mod base;
 pub mod core;
-pub mod crypto_ops;
+pub use base::crypto as crypto_ops;  // back-compat shim — all existing
+                                     // crate::crypto_ops::* paths keep working
 pub mod fetch_outcome;
 pub mod node;
 pub mod storage;
