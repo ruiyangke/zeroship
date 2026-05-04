@@ -1,0 +1,118 @@
+httpGet 16w bench validation — after Headers.has fastcall
+==========================================================
+2026-05-04 | 32 logical cores | x86_64 | NUMA split: servers on node 0, zerobench on node 1
+duration 10s · saturate (300 conns) · serial per-scenario
+
+Commits exercised:
+  1e4e0b6 — runtime-macros: #[v8_method(fastcall)] / #[v8_getter(fastcall)]
+  9721a76 — runtime: Headers.has migrates to #[v8_method(fastcall)]
+
+
+Pre-fastcall baseline (HEAD 38f9200, results-2026-05-04-after-macro-tier4.txt):
+  v8-compio (16w)        315,842 req/s   p50=900µs   p99=1.5ms
+
+After fastcall (this commit, 3-run):
+  Run 1                  320,446 req/s   p50=793µs   p99=4.5ms
+  Run 2                  325,426 req/s   p50=839µs   p99=1.5ms
+  Run 3                  323,457 req/s   p50=899µs   p99=1.4ms
+                         -------
+  Average                323,110 req/s   (+2.3% vs baseline)
+
+
+Run 1 raw output:
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 3,204,464 requests
+throughput     320,446 req/s · ↑ 22.1 MB/s  ↓ 39.4 MB/s
+transfer       ↑ 221.1 MB sent  ↓ 394.1 MB received
+latency      p50=793µs  p90=1.1ms  p99=4.5ms  p99.9=17ms  max=39ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=3,204,464  4xx=0  5xx=0
+assertions     status==200: 3,204,464/3,204,464 ok
+
+Run 2 raw output:
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 3,254,263 requests
+throughput     325,426 req/s · ↑ 22.5 MB/s  ↓ 40.0 MB/s
+transfer       ↑ 224.5 MB sent  ↓ 400.3 MB received
+latency      p50=839µs  p90=1.1ms  p99=1.5ms  p99.9=17ms  max=35ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=3,254,263  4xx=0  5xx=0
+assertions     status==200: 3,254,263/3,254,263 ok
+
+Run 3 raw output:
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 3,234,570 requests
+throughput     323,457 req/s · ↑ 22.3 MB/s  ↓ 39.8 MB/s
+transfer       ↑ 223.2 MB sent  ↓ 397.9 MB received
+latency      p50=899µs  p90=1.1ms  p99=1.4ms  p99.9=17ms  max=20ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=3,234,570  4xx=0  5xx=0
+assertions     status==200: 3,234,570/3,234,570 ok
+
+
+Honest interpretation
+---------------------
+
++2.3% recovery is well below the ~50-80k req/s estimate in
+docs/perf/httpget-regression-2026-05-04.md and within run-to-run
+noise. The fastcall path's macro plumbing is verified working by
+the v8_fastcall_smoke.rs tests (TurboFan-compiles + 1000-iter steady
+state without deopt) — but **scenarios.js doesn't exercise
+Headers.has on the httpGet path**.
+
+scenarios.js fetch handler does:
+
+    if (request.headers.get("upgrade") === "websocket") { ... }
+
+Headers.get is the per-request hot crossing, NOT Headers.has.
+
+We left Headers.get on the slow path because its return type is
+Result<Option<Vec<u8>>, OpError>:
+
+  - Option<T> can't be represented in V8 fast API (no null sentinel
+    in the typed return shape).
+  - Vec<u8> requires allocation, which the fast path forbids.
+  - rusty_v8 v147 doesn't expose a writer-style out-param shape for
+    SeqOneByteString that would let the fast path return a string
+    via a caller-provided buffer.
+
+Therefore the +2.3% likely comes from the FunctionTemplate
+construction shape change (build_fast vs new) being marginally
+warmer in the inline cache, NOT from any fastcall actually firing
+on the request path.
+
+
+Follow-up gating to close the gap
+---------------------------------
+
+To realise the regression report's +50-80k req/s estimate, EITHER:
+
+  1. **Migrate Headers.get** by introducing a "FastByteStringWriter"
+     adapter — a fastcall taking (this, FastApiOneByteString name,
+     *mut u8 out_buf, *mut usize out_len) → bool, where the fast
+     path writes the value bytes into a caller-provided buffer
+     (capped, e.g., at 4 KiB), returning false (with a deopt) only
+     when the value exceeds the buffer or doesn't exist. The slow
+     path handles the fallback. This requires extending the macro
+     to support out-params and a JS-side wrapper that pre-allocates
+     a Uint8Array per call site (or uses a per-isolate scratchpad).
+
+  2. **Rewrite scenarios.js to use Headers.has** for the upgrade
+     check — diverges from WinterCG idiom and is rejected per the
+     task spec.
+
+  3. **Migrate Response.json** (referenced by docs/perf/httpget-
+     regression-2026-05-04.md as the second hot crossing). Less
+     typed than (1) — body is an arbitrary JS value. Would need a
+     mixed-shape fastcall + slow fallback.
+
+Tier 1 candidates remaining for follow-up commits:
+  - AbortSignal.aborted (`(this) → bool` — pure primitive, easy)
+  - URL.protocol / .host / .pathname (USVString returns — needs
+    SeqOneByteString writer)
+  - URLSearchParams.size (`(this) → u32` — easy)
+  - Streams.desiredSize (`(this) → f64` — easy)
+
+The macro now exists; future commits can land them per the
+ROI table in crates/runtime-macros/TODO.md without revisiting the
+core plumbing.

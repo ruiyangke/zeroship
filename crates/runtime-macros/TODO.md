@@ -124,6 +124,57 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
     `tests/v8_post_init_smoke.rs` + 4 trybuild compile-fail
     snapshots).
 
+- **V8 fastcall annotation** — `#[v8_method(fastcall)]` /
+  `#[v8_getter(fastcall)]` emits a CFunction shim alongside the
+  slow-path FunctionCallback. V8 TurboFan inlines the typed-shape
+  call at hot sites, skipping the full prologue (~30-100ns/call).
+  - Wiring via `FunctionTemplate::builder(slow).build_fast(scope, &[FAST])`.
+  - Box<Self> stored as External in slot 0 (existing) AND as aligned
+    pointer in slot 1; fastcall shim reads via
+    `get_aligned_pointer_from_internal_field(1, 0)` — single load,
+    no scope.
+  - Brand check on fast path: trust V8's CFunction-typed receiver
+    (TurboFan inserts hidden-class shape check before dispatch;
+    cross-class deception deopts to the slow callback's prototype-walk
+    brand check). One load saved per fast call.
+  - Compile-time validation: rejects `&mut self`, `String`/`Vec<u8>`/
+    `Option<T>` returns, unsupported arg types. Compile-fail doctests
+    in `runtime/src/lib.rs` document the rules.
+  - Allowed shapes: `&self` + (`bool`/`i32`/`u32`/`i64`/`u64`/`f32`/
+    `f64`/`ByteString`)* args + (`bool`/`i32`/`u32`/`i64`/`u64`/`f32`/
+    `f64`/`()`) or `Result<primitive, OpError>` return.
+  - `Result<Err>` arms throw via `callback_scope!(unsafe ...)` +
+    `type_error` and return a sentinel; V8 ignores when an exception
+    is pending and re-routes to the slow path.
+  - Lands: commit `1e4e0b6` (macro feature + 9 smoke tests in
+    `tests/v8_fastcall_smoke.rs`); follow-up `9721a76` migrates
+    `Headers.has` (Tier 1 candidate). Bench-validation results in
+    `crates/runtime/benches/results-2026-05-04-after-fastcall.txt`.
+  - **Migration status of Tier 1 ROI candidates** (from the original
+    spec):
+    - `Headers.has(name)` — **MIGRATED** (commit `9721a76`).
+    - `Headers.get(name)` — **DEFERRED**: return type
+      `Result<Option<Vec<u8>>, OpError>` doesn't fit fast API
+      (Option = no null sentinel; Vec<u8> allocates; v147 rusty_v8
+      lacks SeqOneByteString writer/out-param). Tracked as a
+      "FastByteStringWriter adapter" follow-up.
+    - `AbortSignal.aborted` — Open. Pure `(this) → bool`, easy.
+    - `URL.protocol` / `.host` / `.pathname` — Open. Need
+      USVString writer (same blocker as Headers.get).
+    - `crypto.getRandomValues(buf)` — Open. Need
+      FastApiTypedArray<u8>; not yet wired in macro.
+    - `Streams.desiredSize` — Open. `(this) → f64`, easy.
+    - `URLSearchParams.size` — Open. `(this) → u32`, easy.
+  - **Bench validation outcome (2026-05-04)**: httpGet 16w =
+    323k req/s avg (3-run) vs 316k baseline. +2.3%, within noise.
+    scenarios.js does `headers.get("upgrade")`, NOT `.has`, so the
+    migrated Headers.has doesn't sit on the bench hot path. The
+    +2.3% likely comes from FunctionTemplate-construction shape
+    change being marginally warmer in the inline cache, not actual
+    fast-path firing on `/hello`. To realise the regression doc's
+    50-80k estimate, follow-ups must migrate `Headers.get` (needs
+    string-writer adapter) or `Response.json`.
+
 ## Open
 
 ### High — blocks major class migrations
@@ -146,21 +197,6 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   base classes inherited via `#[v8_inherit]`. Blocks EventTarget. [B.8]
 - **MAC-11 `#[v8_method(returns_promise)]`** — sync-but-Promise methods.
   Blob/File `text/arrayBuffer/bytes` (6 sites). -50 LOC. [B.10]
-- **V8 fastcall** — `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
-  Turbofan inlines `CFunction` shim, ~10–30 ns/call. Top ROI candidates:
-
-  | Site | Signature | Why hot |
-  |---|---|---|
-  | `AbortSignal.aborted` getter | `(this) → bool` | Every cancel-aware op |
-  | `URL.protocol` / `.host` / `.pathname` | `(this) → FastOneByteString` | URL parsing |
-  | `Headers.has(name)` | `(this, FastOneByteString) → bool` | Routing |
-  | `crypto.getRandomValues(buf)` | `(this, FastApiTypedArray<u8>) → void` | Avoid alloc + copy |
-  | `Streams.desiredSize` | `(this) → f64` | Backpressure |
-  | `URLSearchParams.size` | `(this) → u32` | Dispatch |
-
-  Phasing: AbortSignal.aborted + URL.pathname first; expand if ≥5%
-  bench delta against v8-1w slot.
-
 ### Low — single-consumer or polish
 
 - **MAC-14 arbitrary `Local<Value>` value type in `#[v8_iterable]`** —
