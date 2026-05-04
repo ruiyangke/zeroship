@@ -210,3 +210,108 @@ fn single_variant_works() {
     assert_eq!(SingleVariant::from_str("only-one"), Some(SingleVariant::OnlyOne));
     assert_eq!(SingleVariant::from_str("nope"), None);
 }
+
+// ---------------------------------------------------------------------------
+// `#[webidl_enum(case_insensitive)]` — ASCII case-insensitive matching.
+// Spec consumer: WebCrypto `HashAlgo` accepts "SHA-256" / "sha-256" /
+// "Sha-256" all as the same algorithm (per WebCrypto §15 algorithm
+// normalisation). Default behaviour is case-sensitive (preserved); the
+// flag opts in.
+// ---------------------------------------------------------------------------
+
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy)]
+#[webidl_enum(case_insensitive)]
+enum HashAlgo {
+    #[webidl_name = "SHA-1"]
+    Sha1,
+    #[webidl_name = "SHA-256"]
+    Sha256,
+    #[webidl_name = "SHA-384"]
+    Sha384,
+    #[webidl_name = "SHA-512"]
+    Sha512,
+}
+
+#[test]
+fn case_insensitive_from_str_exact() {
+    assert_eq!(HashAlgo::from_str("SHA-256"), Some(HashAlgo::Sha256));
+}
+
+#[test]
+fn case_insensitive_from_str_lower() {
+    assert_eq!(HashAlgo::from_str("sha-256"), Some(HashAlgo::Sha256));
+}
+
+#[test]
+fn case_insensitive_from_str_mixed() {
+    assert_eq!(HashAlgo::from_str("Sha-256"), Some(HashAlgo::Sha256));
+    assert_eq!(HashAlgo::from_str("sHa-256"), Some(HashAlgo::Sha256));
+}
+
+#[test]
+fn case_insensitive_unknown_returns_none() {
+    assert_eq!(HashAlgo::from_str("md5"), None);
+    assert_eq!(HashAlgo::from_str("SHA-256-OOPS"), None);
+}
+
+#[test]
+fn case_insensitive_from_v8_lowercase() {
+    let m = run_with_value(r#""sha-512""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, HashAlgo::Sha512);
+}
+
+#[test]
+fn case_insensitive_from_v8_uppercase() {
+    let m = run_with_value(r#""SHA-1""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, HashAlgo::Sha1);
+}
+
+#[test]
+fn case_insensitive_from_v8_mixed() {
+    let m = run_with_value(r#""Sha-384""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, HashAlgo::Sha384);
+}
+
+#[test]
+fn case_insensitive_from_v8_unknown_throws() {
+    let err = run_with_value(r#""md5""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "expected TypeError on unknown");
+}
+
+// Without `case_insensitive`, the existing `RequestMode` enum stays
+// strict — verify (regression guard).
+#[test]
+fn case_sensitive_default_rejects_uppercase() {
+    assert_eq!(RequestMode::from_str("CORS"), None);
+    let err = run_with_value(r#""CORS""#, |val, scope| {
+        RequestMode::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "case-sensitive enum should reject uppercase");
+}
+
+// Mixed: a kebab-case variant with case_insensitive matches the
+// upper-cased input (`LONG-NAME` → variant `Long-name`).
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy)]
+#[webidl_enum(case_insensitive)]
+enum MultiWord {
+    LongName,
+    AnotherOne,
+}
+
+#[test]
+fn case_insensitive_kebab_default_uppercase() {
+    // Default kebab-case naming: `LongName` → "long-name". With
+    // case_insensitive, "LONG-NAME" should match.
+    assert_eq!(MultiWord::LongName.as_str(), "long-name");
+    assert_eq!(MultiWord::from_str("LONG-NAME"), Some(MultiWord::LongName));
+    assert_eq!(MultiWord::from_str("Long-Name"), Some(MultiWord::LongName));
+    assert_eq!(MultiWord::from_str("ANOTHER-ONE"), Some(MultiWord::AnotherOne));
+}

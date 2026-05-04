@@ -225,8 +225,24 @@ pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
 /// add `#[derive(Default)]` separately if WebIdlDict-as-member fallback
 /// is needed.
 ///
+/// # Type-level flags via `#[webidl_enum(...)]`
+///
+///   - `case_insensitive` — `from_str` and `from_v8` perform ASCII
+///     case-insensitive matching against each variant's WebIDL name.
+///     Used by WebCrypto `HashAlgo` per the spec normalisation rules
+///     (`"SHA-256"` / `"sha-256"` / `"Sha-256"` are all valid).
+///   - `silent_default` — `from_str` returns `Some(Self::default())`
+///     on unknown name; `from_v8` ToStrings the value and returns
+///     `Self::default()` on unknown rather than throwing TypeError.
+///     **Requires `Self: Default`** (the derive emits a
+///     `Self::default()` call). Used by Fetch / WebSocket spec sections
+///     that explicitly tolerate unknown enum values (`RedirectMode`,
+///     `CredentialsMode`, `BinaryType`).
+///
+/// Flags are combinable: `#[webidl_enum(silent_default, case_insensitive)]`.
+///
 /// See `crates/runtime-macros/src/webidl_enum.rs` for codegen detail.
-#[proc_macro_derive(WebIdlEnum, attributes(webidl_name))]
+#[proc_macro_derive(WebIdlEnum, attributes(webidl_name, webidl_enum))]
 pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
     webidl_enum::expand(input)
 }

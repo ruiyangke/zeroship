@@ -203,6 +203,22 @@ so we can grep back through the rationale.
   - Lands: commit `40494fa3` (codegen + 14 smoke tests in
     `tests/v8_webidl_enum_smoke.rs`).
 
+- **`#[webidl_enum(case_insensitive)]` — ASCII case-insensitive
+  matching.** Type-level flag on `#[derive(WebIdlEnum)]`. Switches
+  `from_str` and `from_v8` from `match` against literal names to an
+  if/else-if ladder using `eq_ignore_ascii_case`. Default behaviour
+  (case-sensitive) is preserved when the flag is absent. Unknown flag
+  idents inside `#[webidl_enum(...)]` surface a syn error so typos
+  don't silently downgrade.
+  - Spec rationale: WebIDL is ASCII for enum names, so the comparison
+    is deliberately ASCII-only — Unicode case folding is out of scope.
+    WebCrypto §15 algorithm normalisation requires case-insensitive
+    matching (`"SHA-256"` / `"sha-256"` / `"Sha-256"` all valid).
+  - Unblocks `HashAlgo` enum migration in `crates/runtime/TODO.md`
+    "V8 class macro migration follow-ups → Deferred".
+  - Lands: codegen + 10 new smoke tests in
+    `tests/v8_webidl_enum_smoke.rs` (24 total).
+
 - **`#[v8_iterable(key = K, value = V [, mode = snapshot|live])]` for
   default pair iterators** — WebIDL §3.7.10.2 (default iterators) +
   §3.7.10.3 (forEach). On a `#[v8_class]` impl block, emits the full
