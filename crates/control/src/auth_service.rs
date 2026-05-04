@@ -457,7 +457,7 @@ async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
     let (client, connection) = compio_postgres::connect(url, NoTls).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
-            eprintln!("control/auth: pg connection error: {e}");
+            tracing::error!(error = %e, "control/auth: pg connection error");
         }
     }).detach();
     Ok(client)

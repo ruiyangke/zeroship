@@ -235,7 +235,7 @@ impl EnvStore {
     /// env on the next reconcile interval anyway.
     async fn bump_env_version(&self, app_id: Uuid) {
         if let Err(e) = self.registry.bump_env_version(app_id).await {
-            eprintln!("[env_store] bump_env_version({app_id}) failed: {e}");
+            tracing::warn!(app_id = %app_id, error = %e, "env_store: bump_env_version failed");
         }
     }
 

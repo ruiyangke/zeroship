@@ -171,7 +171,7 @@ pub async fn ingest(
         match blob_store.has_blob(&hash).await {
             Ok(true) => {
                 blobs_deduped += 1;
-                eprintln!("[deploy] dedup hit for blobs/{hash}");
+                tracing::debug!(hash = %hash, "deploy: blob dedup hit");
             }
             Ok(false) => {
                 if let Err(e) = blob_store.put_blob(&hash, &bytes).await {

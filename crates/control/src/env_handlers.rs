@@ -40,7 +40,7 @@ fn env_err_response(e: EnvError) -> web::HttpResponse {
         // column names, crypto internals). Log the raw error to stderr
         // but return a generic body to the client.
         Db(_) | Crypto(_) | MasterKeyRequired => {
-            eprintln!("[control] env_store error: {e}");
+            tracing::error!(error = %e, "control: env_store error");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}))
         }
@@ -275,7 +275,7 @@ pub async fn list_audit(
             "limit": limit.clamp(1, 500),
         })),
         Err(e) => {
-            eprintln!("[control] audit query error: {e}");
+            tracing::error!(error = %e, "control: audit query error");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error": "internal error"}))
         }

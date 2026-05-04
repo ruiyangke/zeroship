@@ -5481,6 +5481,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tar",
+ "tracing",
  "url",
  "uuid",
  "zeroize",
