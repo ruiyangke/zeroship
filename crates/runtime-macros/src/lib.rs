@@ -131,6 +131,57 @@ pub fn v8_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marker attribute consumed by `#[v8_class]`: declare a static method
+/// installed on the constructor function (not the prototype) per
+/// WebIDL §3.7.4 static operations.
+///
+/// ```ignore
+/// #[v8_class]
+/// impl Response {
+///     #[v8_static_method]
+///     fn json(scope: &mut v8::PinScope, value: v8::Local<v8::Value>)
+///         -> Result<v8::Global<v8::Object>, OpError> { ... }
+/// }
+/// ```
+///
+/// Codegen skips the brand check, the internal-field deref, and the
+/// `&self` / `&mut self` plumbing — static methods don't have a
+/// receiver. The function is installed via `class_tmpl.set_with_attr`
+/// so it shows up at `Class.method` (not on `Class.prototype.method`
+/// or on instances).
+///
+/// Static methods cannot have a receiver (`&self` / `&mut self`); a
+/// receiver triggers a `compile_error!` pointing at the method.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_static_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Marker attribute consumed by `#[v8_class]`: declare a static getter
+/// installed on the constructor function per WebIDL §3.7.4 static
+/// attributes.
+///
+/// ```ignore
+/// #[v8_class]
+/// impl Box {
+///     #[v8_static_getter]
+///     fn DEFAULT_TIMEOUT() -> u32 { 5000 }
+/// }
+/// ```
+///
+/// Codegen emits the getter as a static method (no setter pairing),
+/// installed via `set_accessor_property` on the constructor template.
+/// The getter's body has no receiver and runs at every read of
+/// `Class.DEFAULT_TIMEOUT`.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_static_getter(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Marker attribute consumed by `#[v8_class]`: rename a method on the
 /// JS-visible surface. `#[v8_name = "delete"]` lets a Rust `fn delete_`
 /// be installed as `Foo.prototype.delete`. Outside of a `#[v8_class]`
@@ -203,8 +254,18 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Non-object values throw TypeError. Per-member conversion errors
 /// throw with the inner converter's message.
 ///
+/// # Per-field flags via `#[webidl_dict_member(...)]`
+///
+///   - `reject_null` — when the read value is JS `null`, throw
+///     `TypeError` rather than fall through to `Default::default()`.
+///     `undefined` and missing keys still default-construct (WebIDL
+///     distinguishes the two). Used by
+///     `AddEventListenerOptions.signal` per WebIDL §3.13.27 — the
+///     nullable-AbortSignal contract is "MUST be a real AbortSignal
+///     or absent — null is a TypeError".
+///
 /// See `crates/runtime-macros/src/webidl_dict.rs` for codegen detail.
-#[proc_macro_derive(WebIdlDict, attributes(webidl_name))]
+#[proc_macro_derive(WebIdlDict, attributes(webidl_name, webidl_dict_member))]
 pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
     webidl_dict::expand(input)
 }
@@ -225,8 +286,24 @@ pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
 /// add `#[derive(Default)]` separately if WebIdlDict-as-member fallback
 /// is needed.
 ///
+/// # Type-level flags via `#[webidl_enum(...)]`
+///
+///   - `case_insensitive` — `from_str` and `from_v8` perform ASCII
+///     case-insensitive matching against each variant's WebIDL name.
+///     Used by WebCrypto `HashAlgo` per the spec normalisation rules
+///     (`"SHA-256"` / `"sha-256"` / `"Sha-256"` are all valid).
+///   - `silent_default` — `from_str` returns `Some(Self::default())`
+///     on unknown name; `from_v8` ToStrings the value and returns
+///     `Self::default()` on unknown rather than throwing TypeError.
+///     **Requires `Self: Default`** (the derive emits a
+///     `Self::default()` call). Used by Fetch / WebSocket spec sections
+///     that explicitly tolerate unknown enum values (`RedirectMode`,
+///     `CredentialsMode`, `BinaryType`).
+///
+/// Flags are combinable: `#[webidl_enum(silent_default, case_insensitive)]`.
+///
 /// See `crates/runtime-macros/src/webidl_enum.rs` for codegen detail.
-#[proc_macro_derive(WebIdlEnum, attributes(webidl_name))]
+#[proc_macro_derive(WebIdlEnum, attributes(webidl_name, webidl_enum))]
 pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
     webidl_enum::expand(input)
 }
@@ -290,6 +367,67 @@ pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn v8_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Impl-block-level marker attribute consumed by `#[v8_class]`:
+/// declare a WebIDL §3.7.5 interface constant. Repeatable — one
+/// occurrence per constant.
+///
+/// ```ignore
+/// #[v8_class]
+/// #[v8_const(SYNTAX_ERR = 12u16)]
+/// #[v8_const(NETWORK_ERR = 19u16)]
+/// impl DOMException { ... }
+/// ```
+///
+/// Each declaration installs the value at BOTH the constructor
+/// function (`Class.NAME`) AND the prototype (`Class.prototype.NAME`)
+/// per WebIDL §3.7.5, with a `{ writable: false, enumerable: true,
+/// configurable: false }` descriptor (read-only, non-configurable;
+/// enumerable per spec).
+///
+/// The literal's type-suffix selects how the value is materialised on
+/// the V8 side:
+///   - `u16` / `u32` → `v8::Integer::new_from_unsigned`
+///   - `i32`         → `v8::Integer::new`
+///
+/// Unsuffixed literals or other type suffixes (`u64`, `i64`, `f64`,
+/// etc.) are rejected with a `compile_error!`. Use `[Clamp]`-style
+/// boundary newtypes for the runtime-side; constants are integers per
+/// WebIDL §3.7.5.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_const(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Impl-block-level marker attribute consumed by `#[v8_class]`: alias
+/// `[Symbol.asyncIterator]` to a method that already exists on the
+/// class, per WebIDL §3.7.10.5 (default async iterators).
+///
+/// Usage:
+/// ```ignore
+/// #[v8_class]
+/// #[v8_async_iterable(method = "values")]
+/// impl ReadableStream {
+///     #[v8_method]
+///     fn values(&self, ...) -> ... { ... }
+/// }
+/// ```
+///
+/// Codegen emits, in the install fn, a fresh FunctionTemplate wrapping
+/// the named method's existing callback, with `set_class_name(method)`
+/// per spec, and installs it on the prototype under
+/// `Symbol.asyncIterator`. Identity isn't preserved (`obj[Symbol
+/// .asyncIterator] !== obj.values`) — the spec describes two distinct
+/// FunctionTemplates with matching callbacks and aligned `name`
+/// properties, and consumers don't compare for identity.
+///
+/// Outside a `#[v8_class]` impl block this attribute is a no-op.
+#[proc_macro_attribute]
+pub fn v8_async_iterable(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
@@ -415,6 +553,24 @@ pub(crate) fn clamp_kind(ty: &Type) -> Option<&'static str> {
     }
 }
 
+/// Check if type is one of the `Wrap{U8,U16,U32,I8,I16,I32}` newtypes
+/// from `zeroship_runtime::wrap`. Used for WebIDL default-case integer
+/// coercion (no `[Clamp]` or `[EnforceRange]`): truncate toward zero,
+/// modulo 2^N, reinterpret per signedness. NaN / ±Infinity → 0. Mirror
+/// of `clamp_kind` — returns the suffix so codegen can dispatch on
+/// the target type, `None` otherwise.
+pub(crate) fn wrap_kind(ty: &Type) -> Option<&'static str> {
+    match type_ident(ty).as_deref() {
+        Some("WrapU8") => Some("u8"),
+        Some("WrapU16") => Some("u16"),
+        Some("WrapU32") => Some("u32"),
+        Some("WrapI8") => Some("i8"),
+        Some("WrapI16") => Some("i16"),
+        Some("WrapI32") => Some("i32"),
+        _ => None,
+    }
+}
+
 /// Check if type is the `USVString` newtype from
 /// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
 /// args (URL.* setters, URLSearchParams names/values). Conversion
@@ -476,6 +632,35 @@ pub(crate) fn parse_params(f: &ItemFn) -> Vec<Param> {
 // Argument extraction codegen (JS value → Rust type)
 // ---------------------------------------------------------------------------
 
+/// Emit the throw machinery for an `OpError` named `__err` in scope.
+/// Used by the per-arg-extraction codegen (ByteString / USVString /
+/// EnforceRange / etc.) where a conversion failure must surface as a
+/// V8 exception and `return` from the V8 callback. The macro emits
+/// `return` after this snippet — that's the caller's responsibility.
+///
+/// Mirrors `gen_throw_error()` (which is used in the call-return path)
+/// but with the simpler match arm set used by the extraction code: no
+/// DomException / NodeError, since those paths never originate from a
+/// primitive boundary type. The JsValue passthrough IS handled —
+/// future-proofing for the case where an extraction op's helper
+/// captures a user-thrown exception (none today, but cheap to wire).
+fn gen_extract_throw() -> TokenStream2 {
+    quote! {
+        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+            let __local = v8::Local::new(scope, __global);
+            scope.throw_exception(__local);
+        } else {
+            let __msg = v8::String::new(scope, &__err.message).unwrap();
+            let __exc = match &__err.kind {
+                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                _ => v8::Exception::error(scope, __msg),
+            };
+            scope.throw_exception(__exc);
+        }
+    }
+}
+
 pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
     let ident = type_ident(ty);
@@ -497,6 +682,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // we don't need the user method to return Result. After the throw
     // is set, JS execution unwinds normally.
     if is_byte_string(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::byte_string::read_byte_string(
                 scope,
@@ -504,13 +690,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -522,6 +702,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // The result is owned `String` so callers don't keep a `Local<Value>`
     // borrow alive across subsequent V8 ops.
     if is_usv_string(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
                 scope,
@@ -529,13 +710,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__s) => ::zeroship_runtime::url_native::helpers::USVString::from_string(__s),
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -545,6 +720,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // Option<USVString> — undefined / null produces None; otherwise
     // run USVString conversion and wrap in Some.
     if is_option_usv_string(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name: Option<::zeroship_runtime::url_native::helpers::USVString> =
                 if args.length() > #idx && !args.get(#idx).is_undefined() {
@@ -554,13 +730,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
                     ) {
                         Ok(__s) => Some(::zeroship_runtime::url_native::helpers::USVString::from_string(__s)),
                         Err(__err) => {
-                            let __msg = v8::String::new(scope, &__err.message).unwrap();
-                            let __exc = match __err.kind {
-                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                                _ => v8::Exception::error(scope, __msg),
-                            };
-                            scope.throw_exception(__exc);
+                            #throw
                             return;
                         }
                     }
@@ -605,10 +775,31 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
         };
     }
 
+    // Wrap{U8,U16,U32,I8,I16,I32} → WebIDL default-case integer
+    // coercion (no `[Clamp]` / `[EnforceRange]`). NaN / ±Infinity → 0,
+    // truncate toward zero, modulo 2^N, reinterpret per signedness.
+    // Reader fns in `zeroship_runtime::wrap` implement the algorithm;
+    // this match dispatches on the target integer type.
+    if let Some(kind) = wrap_kind(ty) {
+        let reader = match kind {
+            "u8" => quote! { ::zeroship_runtime::wrap::read_wrap_u8 },
+            "u16" => quote! { ::zeroship_runtime::wrap::read_wrap_u16 },
+            "u32" => quote! { ::zeroship_runtime::wrap::read_wrap_u32 },
+            "i8" => quote! { ::zeroship_runtime::wrap::read_wrap_i8 },
+            "i16" => quote! { ::zeroship_runtime::wrap::read_wrap_i16 },
+            "i32" => quote! { ::zeroship_runtime::wrap::read_wrap_i32 },
+            _ => unreachable!("wrap_kind returned an unrecognised suffix"),
+        };
+        return quote! {
+            let #name = #reader(scope, args.get(#idx));
+        };
+    }
+
     // EnforceRangeU64 → WebIDL [EnforceRange] unsigned long long. Throws
     // TypeError for NaN, ±∞, negative, and values > 2^53-1 (Number
     // precision limit) — see streams design §XIV.8.
     if is_enforce_range_u64(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
                 scope,
@@ -616,13 +807,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__v) => __v,
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -634,6 +819,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
     // Used by the WebCrypto IDL surface (Pbkdf2Params.iterations etc.) —
     // see `docs/proposals/webcrypto-native.md` D-20.
     if is_enforce_range_u32(ty) {
+        let throw = gen_extract_throw();
         return quote! {
             let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u32(
                 scope,
@@ -641,13 +827,7 @@ pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2
             ) {
                 Ok(__v) => __v,
                 Err(__err) => {
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc = match __err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        _ => v8::Exception::error(scope, __msg),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -870,6 +1050,14 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 
 /// Generate error throw from `OpError`.
 ///
+/// - `OpErrorKind::JsValue(global)` re-throws the captured user-thrown
+///   value verbatim — preserves Error subclass identity, custom
+///   properties (e.g. `e.code`), and the `instanceof` chain. Used by
+///   the dict / enum derives' per-member tc-scope path: when a
+///   member's `WebIdlConvertible::from_v8` triggers user JS that
+///   throws (custom `toString`, throwing `Symbol.toPrimitive`), the
+///   captured exception value MUST reach the caller's `catch` block
+///   unchanged.
 /// - `OpErrorKind::DomException(name)` constructs a real DOMException
 ///   instance via `new globalThis.DOMException(message, name)`. The
 ///   native DOMException class is installed during `setup_globals` (see
@@ -884,19 +1072,30 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 ///   `docs/proposals/node-crypto-native.md` D-N32.
 fn gen_throw_error() -> TokenStream2 {
     quote! {
-        let __msg = v8::String::new(scope, &__err.message).unwrap();
-        let __exc: v8::Local<v8::Value> = match __err.kind {
-            ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-            ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-            ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-            }
-            ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-            }
-            ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-        };
-        scope.throw_exception(__exc);
+        // JsValue passthrough — rethrow the captured user exception
+        // verbatim. Skipping the message-translation path preserves
+        // every property of the thrown value (Error subclass identity,
+        // .code, .stack, custom props).
+        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+            let __local = v8::Local::new(scope, __global);
+            scope.throw_exception(__local);
+        } else {
+            let __msg = v8::String::new(scope, &__err.message).unwrap();
+            let __exc: v8::Local<v8::Value> = match &__err.kind {
+                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                }
+                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+                }
+                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                // Already handled by the early-return above.
+                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+            };
+            scope.throw_exception(__exc);
+        }
     }
 }
 

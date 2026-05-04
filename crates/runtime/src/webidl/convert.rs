@@ -30,6 +30,16 @@ use crate::byte_string::{read_byte_string, ByteString};
 use crate::state::OpError;
 use crate::usv_string::{read_usv_string_or_throw, USVString};
 
+// Re-export the WebIDL default-case integer-coercion newtypes so users
+// can `use zeroship_runtime::convert::WrapU16;` alongside the existing
+// `Clamp{*}` and `EnforceRange{*}` family. Macro-side detection lives
+// in `crates/runtime-macros/src/lib.rs::wrap_kind` and emits the
+// matching `read_wrap_*` reader at the WebIDL boundary.
+pub use crate::wrap::{
+    read_wrap_i16, read_wrap_i32, read_wrap_i8, read_wrap_u16, read_wrap_u32, read_wrap_u8,
+    WrapI16, WrapI32, WrapI8, WrapU16, WrapU32, WrapU8,
+};
+
 /// WebIDL JS-value → Rust-type conversion at the boundary.
 ///
 /// Implementors emit a typed value or throw a TypeError-flavoured
@@ -153,6 +163,74 @@ impl<T: WebIdlConvertible> WebIdlConvertible for Option<T> {
             return Ok(None);
         }
         T::from_v8(scope, value).map(Some)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `DictOrBool<T>` — `(<dict> or boolean)` union shape (WebIDL §3.13.6,
+// narrowed). Spec consumers: `AddEventListenerOptions` accepts
+// `(EventListenerOptions or boolean)` per DOM §2.7 — the boolean
+// shorthand sets `capture` only.
+//
+// We deliberately implement only this specific union shape rather than
+// the full WebIDL §3.13.6 union resolution algorithm. The general
+// algorithm has hundreds of branches (object-with-iterator vs
+// object-without, FrozenArray vs non, distinguishability rules across
+// types, etc.); the runtime's actual consumer set is exactly one shape
+// — `(<dict> or boolean)`. Keeping the surface this small means the
+// type IS the contract: the dict derive needs no new attribute, and
+// the call site reads naturally as `Option<DictOrBool<EventListenerOptions>>`.
+//
+// Distinguishability: per WebIDL §3.13.6.4, dictionary and boolean are
+// always distinguishable in a union (a primitive `boolean` is never an
+// `[[Prototype]]`-bearing object), so the branching in `from_v8` below
+// is unambiguous.
+// ---------------------------------------------------------------------------
+
+/// A `(T or boolean)` WebIDL union member.
+///
+/// `from_v8`:
+///   - JS primitive `boolean` → `DictOrBool::Bool(value)`
+///   - anything else → `DictOrBool::Dict(T::from_v8(scope, value)?)`
+///
+/// Wrap inside `Option<DictOrBool<T>>` to make `null` / `undefined`
+/// fall through to `None` (the WebIDL §3.10 "absent member" path):
+///
+/// ```ignore
+/// #[derive(WebIdlDict, Default)]
+/// struct AddEventListenerOptions {
+///     options: Option<DictOrBool<EventListenerOptions>>,
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictOrBool<T> {
+    /// The full dictionary form.
+    Dict(T),
+    /// The boolean shorthand. Spec call sites that accept this form
+    /// usually map it to a single dict member (e.g. `capture` in
+    /// `AddEventListenerOptions`).
+    Bool(bool),
+}
+
+impl<T: WebIdlConvertible> WebIdlConvertible for DictOrBool<T> {
+    fn from_v8(
+        scope: &mut v8::PinScope,
+        value: v8::Local<v8::Value>,
+    ) -> Result<Self, OpError> {
+        // We branch on the *primitive boolean* shape specifically.
+        // `value.is_boolean()` returns true for both primitive booleans
+        // and Boolean objects (Boolean wrapper objects); per WebIDL
+        // §3.13.6 distinguishability, only the *primitive* must take
+        // the boolean branch — Boolean wrappers are still Objects and
+        // route through the dict path. Use `IsBoolean` (which excludes
+        // wrappers) by checking the v8 Value's exact shape via
+        // `try_from::<v8::Boolean>`.
+        if let Ok(b) = v8::Local::<v8::Boolean>::try_from(value) {
+            return Ok(DictOrBool::Bool(b.is_true()));
+        }
+        // Fall back to the dict (or whatever T's WebIdlConvertible
+        // implements). Errors from T propagate verbatim.
+        Ok(DictOrBool::Dict(T::from_v8(scope, value)?))
     }
 }
 

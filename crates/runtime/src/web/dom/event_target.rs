@@ -844,8 +844,16 @@ fn throw_invalid_state(scope: &mut v8::PinScope, msg: &str) {
 }
 
 fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
+    // JsValue path is the user-exception passthrough: rethrow the
+    // captured value verbatim so `catch` blocks observe the original
+    // (Error subclass, e.code, custom props all preserved).
+    if let crate::state::OpErrorKind::JsValue(global) = &err.kind {
+        let local = v8::Local::new(scope, global);
+        scope.throw_exception(local);
+        return;
+    }
     let m = v8::String::new(scope, &err.message).unwrap();
-    let exc = match err.kind {
+    let exc = match &err.kind {
         crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, m),
         crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, m),
         _ => v8::Exception::error(scope, m),

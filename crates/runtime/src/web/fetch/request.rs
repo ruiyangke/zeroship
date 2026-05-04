@@ -613,8 +613,14 @@ fn request_constructor_callback(
                     }
                 }
                 Err(e) => {
+                    // JsValue passthrough preserves user-thrown values.
+                    if let crate::state::OpErrorKind::JsValue(global) = &e.kind {
+                        let local = v8::Local::new(scope, global);
+                        scope.throw_exception(local);
+                        return;
+                    }
                     let m = v8::String::new(scope, &e.message).unwrap();
-                    let exc = match e.kind {
+                    let exc = match &e.kind {
                         crate::state::OpErrorKind::TypeError => {
                             v8::Exception::type_error(scope, m)
                         }

@@ -68,6 +68,14 @@ enum MethodKind {
     Getter,
     Setter,
     Constructor,
+    /// WebIDL §3.7.4 static operation — `#[v8_static_method]`. No
+    /// receiver, no brand check, no internal-field deref. Installed
+    /// on the constructor FunctionTemplate, not the prototype.
+    StaticMethod,
+    /// WebIDL §3.7.4 static attribute (read-only) — `#[v8_static_getter]`.
+    /// No receiver. Installed via `set_accessor_property` on the
+    /// constructor template.
+    StaticGetter,
 }
 
 struct ClassMethod<'a> {
@@ -107,6 +115,12 @@ fn classify(func: &ImplItemFn) -> Option<MethodKind> {
         }
         if path.is_ident("v8_constructor") {
             return Some(MethodKind::Constructor);
+        }
+        if path.is_ident("v8_static_method") {
+            return Some(MethodKind::StaticMethod);
+        }
+        if path.is_ident("v8_static_getter") {
+            return Some(MethodKind::StaticGetter);
         }
     }
     None
@@ -229,6 +243,149 @@ fn extract_reject_shared(attrs: &[Attribute]) -> HashSet<String> {
     names
 }
 
+/// A single `#[v8_const(NAME = LIT)]` declaration.
+struct ConstDecl {
+    /// The JS-visible property name (Rust ident verbatim).
+    name: syn::Ident,
+    /// The literal expression — quoted as-is so the literal's type
+    /// suffix is preserved through expansion.
+    value: syn::ExprLit,
+    /// Selected V8-side materialiser, derived from the literal suffix.
+    kind: ConstKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConstKind {
+    /// Suffix `u16` or `u32` → `v8::Integer::new_from_unsigned`.
+    UInt,
+    /// Suffix `i32` → `v8::Integer::new`.
+    SInt,
+}
+
+/// Parse all `#[v8_const(NAME = LIT)]` attributes off an impl block.
+///
+/// Returns the parsed list (possibly empty) or a `syn::Error` on:
+///   - malformed shape (missing `=`, non-ident name, non-int literal)
+///   - duplicate name
+///   - unsupported literal type suffix
+fn extract_consts(attrs: &[Attribute]) -> Result<Vec<ConstDecl>, syn::Error> {
+    let mut decls: Vec<ConstDecl> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for attr in attrs {
+        if !attr.path().is_ident("v8_const") {
+            continue;
+        }
+        // Parse `NAME = LIT` inside the parens. Use parse_args with a
+        // closure that reads an ident, an `=`, and a literal-expr.
+        let parsed = attr.parse_args_with(
+            |input: syn::parse::ParseStream| -> syn::Result<(syn::Ident, syn::ExprLit)> {
+                let name: syn::Ident = input.parse()?;
+                let _: syn::Token![=] = input.parse()?;
+                let expr: syn::Expr = input.parse()?;
+                let lit = match expr {
+                    syn::Expr::Lit(lit) => lit,
+                    other => {
+                        return Err(syn::Error::new_spanned(
+                            other,
+                            "#[v8_const]: expected an integer literal (e.g. `12u16`, `100i32`)",
+                        ));
+                    }
+                };
+                Ok((name, lit))
+            },
+        )?;
+        let (name, lit) = parsed;
+        let name_str = name.to_string();
+        if !seen.insert(name_str.clone()) {
+            return Err(syn::Error::new_spanned(
+                &name,
+                format!("#[v8_const]: duplicate constant `{name_str}`"),
+            ));
+        }
+        // Inspect the literal's type suffix to pick the V8 materialiser.
+        let int = match &lit.lit {
+            syn::Lit::Int(i) => i,
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "#[v8_const]: expected an integer literal with a type suffix \
+                     (e.g. `12u16`, `100i32`, `1000u32`)",
+                ));
+            }
+        };
+        let kind = match int.suffix() {
+            "u16" | "u32" => ConstKind::UInt,
+            "i32" => ConstKind::SInt,
+            "" => {
+                return Err(syn::Error::new_spanned(
+                    int,
+                    "#[v8_const]: literal needs a type suffix \
+                     (e.g. `12u16`, `100i32`, `1000u32`); unsuffixed literals \
+                     are ambiguous and rejected",
+                ));
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    int,
+                    format!(
+                        "#[v8_const]: unsupported literal suffix `{other}` \
+                         (expected `u16`, `u32`, or `i32`)"
+                    ),
+                ));
+            }
+        };
+        decls.push(ConstDecl {
+            name,
+            value: lit,
+            kind,
+        });
+    }
+    Ok(decls)
+}
+
+/// Read `#[v8_async_iterable(method = "name")]` from impl-block
+/// attributes. Returns the method name to alias `[Symbol.asyncIterator]`
+/// to. Per WebIDL §3.7.10.5, the spec calls for a separate
+/// FunctionTemplate that wraps the named method's callback and has its
+/// `name` property set to the method's name; the install codegen
+/// emits exactly that pattern.
+///
+/// Accepts both:
+///   - `#[v8_async_iterable(method = "values")]` — the canonical form
+///   - `#[v8_async_iterable(method = values)]` — bare ident form, for
+///     consistency with `#[v8_iterable(key = TY)]` shape.
+fn extract_async_iterable(attrs: &[Attribute]) -> Result<Option<String>, syn::Error> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_async_iterable") {
+            continue;
+        }
+        let mut method: Option<String> = None;
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("method") {
+                let value = meta.value()?;
+                // Accept "values" or values.
+                if let Ok(s) = value.parse::<syn::LitStr>() {
+                    method = Some(s.value());
+                } else {
+                    let id: syn::Ident = value.parse()?;
+                    method = Some(id.to_string());
+                }
+                Ok(())
+            } else {
+                Err(meta.error("expected `method = \"name\"`"))
+            }
+        })?;
+        let m = method.ok_or_else(|| {
+            syn::Error::new_spanned(
+                attr,
+                "#[v8_async_iterable]: missing `method = \"name\"` (e.g. `method = \"values\"`)",
+            )
+        })?;
+        return Ok(Some(m));
+    }
+    Ok(None)
+}
+
 /// Read `#[v8_inherit_intrinsic = "IteratorPrototype"]` from impl-block
 /// attributes. Currently only `"IteratorPrototype"` is recognised.
 fn extract_inherit_intrinsic(attrs: &[Attribute]) -> Option<String> {
@@ -287,6 +444,15 @@ fn has_mut_self(func: &ImplItemFn) -> bool {
             })
         )
     })
+}
+
+/// True if the function has ANY receiver (`self`, `&self`, `&mut self`).
+/// Used to reject static methods that accidentally took a `self` arg.
+fn has_any_receiver(func: &ImplItemFn) -> bool {
+    func.sig
+        .inputs
+        .iter()
+        .any(|arg| matches!(arg, FnArg::Receiver(_)))
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +520,26 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let same_object_flag =
                     matches!(kind, MethodKind::Getter) && extract_same_object(&func.attrs);
 
+                // Compile-time guard: static methods / getters cannot
+                // have a receiver. WebIDL §3.7.4 static operations are
+                // invoked via `Class.method()` with no `this`; the
+                // emitted callback has no internal-field 0 to recover
+                // a `Box<Self>` from, so a `&self` / `&mut self` arg
+                // would never be bound. Reject at compile time with a
+                // clear pointer rather than emit broken codegen.
+                if matches!(kind, MethodKind::StaticMethod | MethodKind::StaticGetter)
+                    && has_any_receiver(func)
+                {
+                    return syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_static_method] / #[v8_static_getter] cannot have a \
+                         `self` receiver — static operations are invoked via \
+                         `Class.method()` with no `this`",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+
                 methods.push(ClassMethod {
                     kind,
                     func,
@@ -411,11 +597,17 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // immediately) but install on the prototype identically — async vs
     // sync is opaque to V8. SameObject getters have their own codegen
     // path that wraps the user method with private-symbol caching.
+    // Static methods / getters skip the brand check and internal-field
+    // deref entirely (no receiver) and install on the constructor
+    // template via `set_with_attr` / `set_accessor_property`.
     let callbacks: Vec<TokenStream2> = regular
         .iter()
         .map(|m| match m.kind {
             MethodKind::AsyncMethod => gen_async_method_callback(class_ty, m),
             MethodKind::Getter if m.same_object => gen_same_object_getter_callback(class_ty, m),
+            MethodKind::StaticMethod | MethodKind::StaticGetter => {
+                gen_static_callback(class_ty, m)
+            }
             _ => gen_method_callback(class_ty, m),
         })
         .collect();
@@ -429,6 +621,39 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let to_string_tag_override = extract_to_string_tag(&input.attrs);
     let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
     let inherit_base = extract_inherit_base(&input.attrs);
+    let async_iterable_method = match extract_async_iterable(&input.attrs) {
+        Ok(opt) => opt,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let const_decls = match extract_consts(&input.attrs) {
+        Ok(d) => d,
+        Err(err) => return err.to_compile_error().into(),
+    };
+
+    // Validate that the named method actually exists in the impl block
+    // — better error than waiting for the method-callback ident lookup
+    // to fail at quote-expansion time. Match against the JS-visible
+    // name (post-`#[v8_name = ...]` rename) since that's what users
+    // think of.
+    if let Some(ref name) = async_iterable_method {
+        let exists = methods.iter().any(|m| {
+            matches!(
+                m.kind,
+                MethodKind::Method | MethodKind::AsyncMethod
+            ) && &m.js_name == name
+        });
+        if !exists {
+            return syn::Error::new_spanned(
+                &input.self_ty,
+                format!(
+                    "#[v8_async_iterable(method = \"{name}\")]: no method named `{name}` (must be \
+                     `#[v8_method]` or `#[v8_async_method]` on this impl block)"
+                ),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
 
     // `#[v8_iterable(key = K, value = V)]` — emit the pair-iterator
     // surface (keys / values / entries / forEach / @@iterator) plus a
@@ -465,6 +690,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         inherit_intrinsic.as_deref(),
         inherit_base.as_ref(),
         install_iterable_call.as_ref(),
+        async_iterable_method.as_deref(),
+        &const_decls,
     );
 
     // Strip our marker attributes from the impl items so rustc doesn't
@@ -479,6 +706,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
     let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let public_is_fn = format_ident!("__zs_is_{}", class_ty);
 
     let expanded = quote! {
         #stripped_impl
@@ -620,6 +848,38 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
             false
         }
 
+        /// Public brand check: is `v` an instance of this class (or a
+        /// subclass via `#[v8_inherit]`) in the current isolate?
+        ///
+        /// Re-exports the macro's per-class brand-check via a stable
+        /// `__zs_is_<Class>(scope, v: Local<Value>) -> bool` symbol so
+        /// cross-class type queries (e.g. `is_blob_instance` /
+        /// `is_form_data_instance` checks in a Request body coercion)
+        /// don't have to hand-roll prototype-chain walks.
+        ///
+        /// Non-Object values (primitives, null, undefined) return
+        /// `false` — the underlying `__brand_check_<Class>` requires
+        /// `Local<Object>`, so this wrapper does the
+        /// `Local::<Object>::try_from` gate for the caller. Spec
+        /// alignment: WebIDL §3.7 brand identity treats only objects
+        /// as candidates.
+        ///
+        /// Returns `false` if the class hasn't been installed in the
+        /// current isolate (the install slot is empty), matching
+        /// `__brand_check_<Class>`'s behaviour.
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        pub fn #public_is_fn(
+            scope: &mut v8::PinScope,
+            v: v8::Local<v8::Value>,
+        ) -> bool {
+            let obj: v8::Local<v8::Object> = match v.try_into() {
+                Ok(o) => o,
+                Err(_) => return false,
+            };
+            #brand_check_fn(scope, obj)
+        }
+
         #[allow(non_snake_case, dead_code)]
         impl #class_ty {
             #install
@@ -655,7 +915,9 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
         !(p.is_ident("v8_to_string_tag")
             || p.is_ident("v8_inherit_intrinsic")
             || p.is_ident("v8_inherit")
-            || p.is_ident("v8_iterable"))
+            || p.is_ident("v8_iterable")
+            || p.is_ident("v8_async_iterable")
+            || p.is_ident("v8_const"))
     });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
@@ -666,6 +928,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
                     || p.is_ident("v8_getter")
                     || p.is_ident("v8_setter")
                     || p.is_ident("v8_constructor")
+                    || p.is_ident("v8_static_method")
+                    || p.is_ident("v8_static_getter")
                     || p.is_ident("v8_name")
                     || p.is_ident("reject_shared"))
             });
@@ -686,6 +950,8 @@ fn gen_install(
     inherit_intrinsic: Option<&str>,
     inherit_base: Option<&syn::Path>,
     install_iterable_call: Option<&TokenStream2>,
+    async_iterable_method: Option<&str>,
+    const_decls: &[ConstDecl],
 ) -> TokenStream2 {
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
@@ -777,7 +1043,68 @@ fn gen_install(
                         }
                     })
                 }
-                MethodKind::Constructor => None,
+                MethodKind::Constructor
+                | MethodKind::StaticMethod
+                | MethodKind::StaticGetter => None,
+            }
+        })
+        .collect();
+
+    // Static-method / static-getter installs go on the constructor
+    // FunctionTemplate, NOT the prototype. WebIDL §3.7.4: static
+    // operations and attributes live as own-properties of the
+    // interface object (the constructor function). Implementation:
+    // FunctionTemplate inherits Template, so we can call `set_with_attr`
+    // / `set_accessor_property` directly on `__ctor_tmpl` — V8 promotes
+    // the property onto the resolved Function once `get_function`
+    // materialises it.
+    let static_sets: Vec<TokenStream2> = methods
+        .iter()
+        .filter_map(|m| {
+            let js_name = m.js_name.clone();
+            match m.kind {
+                MethodKind::StaticMethod => {
+                    let name = &m.func.sig.ident;
+                    let cb = method_callback_ident(class_ty, name);
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            // Attributes default to NONE — same as
+                            // the prototype-method install above.
+                            // Browsers expose static methods as
+                            // configurable + writable + non-enumerable
+                            // (matching standard JS class semantics);
+                            // we follow that with an explicit DONT_ENUM.
+                            __ctor_tmpl.set_with_attr(
+                                __key.into(),
+                                __fn_tmpl.into(),
+                                v8::PropertyAttribute::DONT_ENUM,
+                            );
+                        }
+                    })
+                }
+                MethodKind::StaticGetter => {
+                    let name = &m.func.sig.ident;
+                    let cb = method_callback_ident(class_ty, name);
+                    Some(quote! {
+                        {
+                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                            // FunctionTemplate exposes
+                            // `set_accessor_property`; static getters
+                            // live on the constructor function as
+                            // accessor descriptors per WebIDL §3.7.4.
+                            __ctor_tmpl.set_accessor_property(
+                                __key.into(),
+                                Some(__getter_tmpl),
+                                None,
+                                v8::PropertyAttribute::DONT_ENUM,
+                            );
+                        }
+                    })
+                }
+                _ => None,
             }
         })
         .collect();
@@ -791,6 +1118,88 @@ fn gen_install(
     let to_string_tag_str = to_string_tag_override
         .map(str::to_string)
         .unwrap_or_else(|| class_name_str.clone());
+
+    // `#[v8_const(NAME = LIT)]` — per WebIDL §3.7.5, install each
+    // declared constant on BOTH the constructor's FunctionTemplate
+    // (which materialises as `Class.NAME` once `get_function` is
+    // called) and the prototype template (so `Class.prototype.NAME`
+    // and instance lookups via the prototype chain see the value).
+    //
+    // Property attributes per spec: `{ writable: false, enumerable:
+    // true, configurable: false }`. V8 flags: READ_ONLY (= !writable)
+    // and DONT_DELETE (= !configurable). `enumerable: true` is the
+    // template default.
+    let const_block = if const_decls.is_empty() {
+        quote! {}
+    } else {
+        let mut sets: Vec<TokenStream2> = Vec::with_capacity(const_decls.len());
+        for decl in const_decls {
+            let name_str = decl.name.to_string();
+            let value = &decl.value;
+            let materialise = match decl.kind {
+                ConstKind::UInt => quote! {
+                    let __v = v8::Integer::new_from_unsigned(scope, (#value) as u32);
+                },
+                ConstKind::SInt => quote! {
+                    let __v = v8::Integer::new(scope, (#value) as i32);
+                },
+            };
+            sets.push(quote! {
+                {
+                    let __key = v8::String::new(scope, #name_str).unwrap();
+                    #materialise
+                    // Constructor side: `Class.NAME`.
+                    __ctor_tmpl.set_with_attr(
+                        __key.into(),
+                        __v.into(),
+                        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+                    );
+                    // Prototype side: `Class.prototype.NAME` and
+                    // `(new Class()).NAME` via the prototype chain.
+                    __proto.set_with_attr(
+                        __key.into(),
+                        __v.into(),
+                        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+                    );
+                }
+            });
+        }
+        quote! { #(#sets)* }
+    };
+
+    // `#[v8_async_iterable(method = "name")]` — alias
+    // `[Symbol.asyncIterator]` to the named method per WebIDL §3.7.10.5.
+    // The user-defined method retains its original installation on the
+    // prototype; this block adds a SECOND FunctionTemplate that wraps
+    // the same callback and is installed under `Symbol.asyncIterator`,
+    // with `set_class_name(method)` so the alias's `name` property
+    // matches the spec.
+    let async_iterable_block = match async_iterable_method {
+        None => quote! {},
+        Some(method_name) => {
+            // Look up the method's callback ident. We've already
+            // validated in `expand` that the method exists, so the
+            // first matching JS-name entry is guaranteed to be present.
+            let method_ident = methods
+                .iter()
+                .find(|m| {
+                    matches!(m.kind, MethodKind::Method | MethodKind::AsyncMethod)
+                        && m.js_name == method_name
+                })
+                .map(|m| &m.func.sig.ident)
+                .expect("async_iterable_method validated in expand()");
+            let cb = method_callback_ident(class_ty, method_ident);
+            quote! {
+                {
+                    let __async_iter_sym = v8::Symbol::get_async_iterator(scope);
+                    let __alias_tmpl = v8::FunctionTemplate::new(scope, #cb);
+                    let __name_v = v8::String::new(scope, #method_name).unwrap();
+                    __alias_tmpl.set_class_name(__name_v);
+                    __proto.set(__async_iter_sym.into(), __alias_tmpl.into());
+                }
+            }
+        }
+    };
 
     // Optional prototype-chain link to a V8 built-in intrinsic.
     // Currently only `"IteratorPrototype"` is wired. Implementation
@@ -915,12 +1324,30 @@ fn gen_install(
             let __proto = __ctor_tmpl.prototype_template(scope);
             #(#proto_sets)*
 
+            // Static operations / attributes per WebIDL §3.7.4 — own
+            // properties of the constructor function, not the prototype.
+            // No-op when no `#[v8_static_method]` / `#[v8_static_getter]`
+            // attributes are present on the impl block.
+            #(#static_sets)*
+
             // `#[v8_iterable(...)]` — install keys / values / entries /
             // forEach / @@iterator on the prototype template. The
             // companion `<Class>Iterator` class is emitted at module
             // scope (see `iterable_codegen`) and the install call here
             // wires its factories onto the parent's proto.
             #install_iterable_call
+
+            // `#[v8_async_iterable(method = "name")]` — install
+            // `[Symbol.asyncIterator]` aliasing the named method per
+            // WebIDL §3.7.10.5. Empty when the attribute is absent.
+            #async_iterable_block
+
+            // `#[v8_const(NAME = LIT)]` — WebIDL §3.7.5 interface
+            // constants. Installed on BOTH the constructor template
+            // and the prototype template with read-only / non-
+            // configurable / enumerable attributes. Empty when no
+            // constants are declared.
+            #const_block
 
             // Install Symbol.toStringTag so
             // `Object.prototype.toString.call(new Foo())` → "[object Foo]".
@@ -1500,6 +1927,52 @@ fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStr
     }
 }
 
+/// Codegen for `#[v8_static_method]` / `#[v8_static_getter]` — WebIDL
+/// §3.7.4 static operations / attributes. No receiver, no brand check,
+/// no internal-field deref. The emitted callback parses JS args, calls
+/// the user's free fn (`<Class>::method(args)` syntax), and routes the
+/// return value through the standard `gen_call_return` marshaling.
+///
+/// Static getters re-use the same callback shape as static methods —
+/// V8's accessor mechanism invokes the callback with no args, the
+/// extraction loop emits no args (the parser skips the receiver, and
+/// there's no receiver, so `params` is whatever args the user
+/// declared — typically zero for getters).
+fn gen_static_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+    let method_name = &m.func.sig.ident;
+    let callback_name = method_callback_ident(class_ty, method_name);
+
+    // Static methods take no `self`, so `parse_params_skipping_self`
+    // collects every param verbatim.
+    let params = parse_params_skipping_self(m.func);
+    let reject_shared_names = extract_reject_shared(&m.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
+
+    let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    let call = quote! {
+        <#class_ty>::#method_name(#(#call_args),*)
+    };
+
+    let call_return = gen_call_return(&call, &m.func.sig.output);
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_name(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            mut rv: v8::ReturnValue,
+        ) {
+            // No brand check: WebIDL §3.7.4 static operations are
+            // invoked with no `this` (or `Class` itself as `this`).
+            // No internal-field deref: there's no boxed `Self` to
+            // recover from a wrapper instance.
+            // No re-entrancy guard: there's no `&mut self` to alias.
+            #(#extractions)*
+            #call_return
+        }
+    }
+}
+
 fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
@@ -1642,8 +2115,15 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
             let __instance: #class_ty = match <#class_ty>::#ctor_name(#(#call_args),*) {
                 Ok(__v) => __v,
                 Err(__err) => {
+                    // JsValue passthrough — preserves user-thrown
+                    // exception verbatim (Error subclass, .code, etc.).
+                    if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+                        let __local = v8::Local::new(scope, __global);
+                        scope.throw_exception(__local);
+                        return;
+                    }
                     let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc: v8::Local<v8::Value> = match __err.kind {
+                    let __exc: v8::Local<v8::Value> = match &__err.kind {
                         ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
                         ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
                         ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
@@ -1653,6 +2133,7 @@ fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod) -> TokenStre
                             ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
                         }
                         ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
                     };
                     scope.throw_exception(__exc);
                     return;

@@ -210,3 +210,328 @@ fn single_variant_works() {
     assert_eq!(SingleVariant::from_str("only-one"), Some(SingleVariant::OnlyOne));
     assert_eq!(SingleVariant::from_str("nope"), None);
 }
+
+// ---------------------------------------------------------------------------
+// `#[webidl_enum(case_insensitive)]` — ASCII case-insensitive matching.
+// Spec consumer: WebCrypto `HashAlgo` accepts "SHA-256" / "sha-256" /
+// "Sha-256" all as the same algorithm (per WebCrypto §15 algorithm
+// normalisation). Default behaviour is case-sensitive (preserved); the
+// flag opts in.
+// ---------------------------------------------------------------------------
+
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy)]
+#[webidl_enum(case_insensitive)]
+enum HashAlgo {
+    #[webidl_name = "SHA-1"]
+    Sha1,
+    #[webidl_name = "SHA-256"]
+    Sha256,
+    #[webidl_name = "SHA-384"]
+    Sha384,
+    #[webidl_name = "SHA-512"]
+    Sha512,
+}
+
+#[test]
+fn case_insensitive_from_str_exact() {
+    assert_eq!(HashAlgo::from_str("SHA-256"), Some(HashAlgo::Sha256));
+}
+
+#[test]
+fn case_insensitive_from_str_lower() {
+    assert_eq!(HashAlgo::from_str("sha-256"), Some(HashAlgo::Sha256));
+}
+
+#[test]
+fn case_insensitive_from_str_mixed() {
+    assert_eq!(HashAlgo::from_str("Sha-256"), Some(HashAlgo::Sha256));
+    assert_eq!(HashAlgo::from_str("sHa-256"), Some(HashAlgo::Sha256));
+}
+
+#[test]
+fn case_insensitive_unknown_returns_none() {
+    assert_eq!(HashAlgo::from_str("md5"), None);
+    assert_eq!(HashAlgo::from_str("SHA-256-OOPS"), None);
+}
+
+#[test]
+fn case_insensitive_from_v8_lowercase() {
+    let m = run_with_value(r#""sha-512""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, HashAlgo::Sha512);
+}
+
+#[test]
+fn case_insensitive_from_v8_uppercase() {
+    let m = run_with_value(r#""SHA-1""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, HashAlgo::Sha1);
+}
+
+#[test]
+fn case_insensitive_from_v8_mixed() {
+    let m = run_with_value(r#""Sha-384""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, HashAlgo::Sha384);
+}
+
+#[test]
+fn case_insensitive_from_v8_unknown_throws() {
+    let err = run_with_value(r#""md5""#, |val, scope| {
+        HashAlgo::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "expected TypeError on unknown");
+}
+
+// Without `case_insensitive`, the existing `RequestMode` enum stays
+// strict — verify (regression guard).
+#[test]
+fn case_sensitive_default_rejects_uppercase() {
+    assert_eq!(RequestMode::from_str("CORS"), None);
+    let err = run_with_value(r#""CORS""#, |val, scope| {
+        RequestMode::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "case-sensitive enum should reject uppercase");
+}
+
+// Mixed: a kebab-case variant with case_insensitive matches the
+// upper-cased input (`LONG-NAME` → variant `Long-name`).
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy)]
+#[webidl_enum(case_insensitive)]
+enum MultiWord {
+    LongName,
+    AnotherOne,
+}
+
+#[test]
+fn case_insensitive_kebab_default_uppercase() {
+    // Default kebab-case naming: `LongName` → "long-name". With
+    // case_insensitive, "LONG-NAME" should match.
+    assert_eq!(MultiWord::LongName.as_str(), "long-name");
+    assert_eq!(MultiWord::from_str("LONG-NAME"), Some(MultiWord::LongName));
+    assert_eq!(MultiWord::from_str("Long-Name"), Some(MultiWord::LongName));
+    assert_eq!(MultiWord::from_str("ANOTHER-ONE"), Some(MultiWord::AnotherOne));
+}
+
+// ---------------------------------------------------------------------------
+// `#[webidl_enum(silent_default)]` — fall through to default on
+// unknown rather than throwing TypeError. Spec consumers: Fetch
+// `RedirectMode`, `CredentialsMode`, WebSocket `BinaryType`. The
+// derive REQUIRES `Self: Default` (compile error if the impl is
+// missing) since the codegen invokes `<Self as Default>::default()`.
+// ---------------------------------------------------------------------------
+
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[webidl_enum(silent_default)]
+enum RedirectMode {
+    #[default]
+    Follow,
+    Error,
+    Manual,
+}
+
+#[test]
+fn silent_default_from_str_known() {
+    // Known values still resolve to the corresponding variant.
+    assert_eq!(RedirectMode::from_str("follow"), Some(RedirectMode::Follow));
+    assert_eq!(RedirectMode::from_str("error"), Some(RedirectMode::Error));
+    assert_eq!(RedirectMode::from_str("manual"), Some(RedirectMode::Manual));
+}
+
+#[test]
+fn silent_default_from_str_unknown_returns_default() {
+    // Unknown → Some(default), NOT None. Lets the consumer use
+    // `.unwrap()` confidently.
+    assert_eq!(
+        RedirectMode::from_str("garbage-value"),
+        Some(RedirectMode::Follow)
+    );
+    assert_eq!(RedirectMode::from_str(""), Some(RedirectMode::Follow));
+}
+
+#[test]
+fn silent_default_from_v8_unknown_returns_default_no_throw() {
+    // Unknown JS string → default variant, no throw.
+    let m = run_with_value(r#""garbage-value""#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Follow);
+}
+
+#[test]
+fn silent_default_from_v8_known() {
+    let m = run_with_value(r#""error""#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Error);
+}
+
+#[test]
+fn silent_default_from_v8_symbol_returns_default() {
+    // Symbol → ToString throws. silent_default treats the throw as
+    // "not one of the listed values" and returns the default.
+    let m = run_with_value(r#"Symbol("x")"#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Follow);
+}
+
+#[test]
+fn silent_default_from_v8_number_tostring_unknown() {
+    // 42 ToStrings to "42" — unknown → default.
+    let m = run_with_value(r#"42"#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Follow);
+}
+
+// silent_default + case_insensitive — combinable.
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[webidl_enum(silent_default, case_insensitive)]
+enum BinaryType {
+    #[default]
+    Blob,
+    #[webidl_name = "arraybuffer"]
+    ArrayBuffer,
+}
+
+#[test]
+fn silent_default_and_case_insensitive_combine() {
+    // Known with mixed case
+    assert_eq!(BinaryType::from_str("BLOB"), Some(BinaryType::Blob));
+    assert_eq!(
+        BinaryType::from_str("ArrayBuffer"),
+        Some(BinaryType::ArrayBuffer)
+    );
+    // Unknown → default (no throw, no Err)
+    assert_eq!(BinaryType::from_str("string"), Some(BinaryType::Blob));
+
+    let m = run_with_value(r#""nope""#, |val, scope| {
+        BinaryType::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, BinaryType::Blob);
+
+    let m = run_with_value(r#""ARRAYBUFFER""#, |val, scope| {
+        BinaryType::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, BinaryType::ArrayBuffer);
+}
+
+// Without silent_default, regression guard: existing `RequestMode`
+// still throws on unknown.
+#[test]
+fn without_silent_default_unknown_still_throws() {
+    let err = run_with_value(r#""invalid""#, |val, scope| {
+        RequestMode::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "default behaviour must throw on unknown");
+}
+
+// ---------------------------------------------------------------------------
+// tc_scope user-exception preservation (extension #5).
+//
+// `from_v8` calls `value.to_string(scope)` which invokes user JS
+// (Symbol.toPrimitive, toString, valueOf) per ECMA-262 ToString. If
+// that user code throws, the macro must capture the exception value
+// and surface it as `OpError::JsValue` — preserving Error subclass
+// identity and custom properties (e.g. `e.code`).
+//
+// Pre-fix the macro discarded the user-thrown value and returned a
+// generic TypeError with a fixed string message.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enum_from_v8_user_throw_preserves_error_object() {
+    use zeroship_runtime::init_v8;
+    use zeroship_runtime::state::OpErrorKind;
+
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let src = v8::String::new(
+        scope,
+        r#"
+            (() => {
+                const e = new Error('enum-boom');
+                e.code = 'CUSTOM';
+                return {
+                    [Symbol.toPrimitive]() { throw e; },
+                };
+            })()
+        "#,
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, src, None).unwrap();
+    let value = script.run(scope).unwrap();
+    let err = RequestMode::from_v8(scope, value).expect_err("must error");
+
+    match &err.kind {
+        OpErrorKind::JsValue(global) => {
+            let local = v8::Local::new(scope, global);
+            let obj: v8::Local<v8::Object> = local.try_into().expect("Object");
+            let code_key = v8::String::new(scope, "code").unwrap();
+            let code_val = obj.get(scope, code_key.into()).unwrap();
+            let code_str = code_val.to_rust_string_lossy(scope);
+            assert_eq!(code_str, "CUSTOM");
+        }
+        _ => panic!("expected JsValue kind, got {:?}", err.kind),
+    }
+}
+
+#[test]
+fn enum_from_v8_user_throw_string_preserves_string() {
+    use zeroship_runtime::init_v8;
+    use zeroship_runtime::state::OpErrorKind;
+
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let src = v8::String::new(
+        scope,
+        r#"
+            ({
+                toString() { throw "literal-x"; },
+            })
+        "#,
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, src, None).unwrap();
+    let value = script.run(scope).unwrap();
+    let err = RequestMode::from_v8(scope, value).expect_err("must error");
+
+    match &err.kind {
+        OpErrorKind::JsValue(global) => {
+            let local = v8::Local::new(scope, global);
+            assert!(local.is_string());
+            let s = local.to_rust_string_lossy(scope);
+            assert_eq!(s, "literal-x");
+        }
+        _ => panic!("expected JsValue kind"),
+    }
+}
+
+#[test]
+fn enum_from_v8_normal_unknown_still_typeerror() {
+    // Regression guard: when no user code throws, the unknown-value
+    // path still surfaces as a regular TypeError (NOT JsValue).
+    use zeroship_runtime::state::OpErrorKind;
+
+    let err = run_with_value(r#""nope""#, |val, scope| {
+        RequestMode::from_v8(scope, val).err()
+    })
+    .expect("expected error");
+
+    match &err.kind {
+        OpErrorKind::TypeError => {} // good
+        other => panic!("expected TypeError, got {:?}", other),
+    }
+}

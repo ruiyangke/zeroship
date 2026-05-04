@@ -177,7 +177,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
 
 /// Extract a single dictionary member.
 ///
-/// Code shape:
+/// Code shape (without `reject_null`):
 /// ```ignore
 /// let __key = v8::String::new(scope, "<webidl-name>").unwrap();
 /// let <field>: <Ty> = match __obj.get(scope, __key.into()) {
@@ -187,6 +187,11 @@ pub fn expand(input: TokenStream) -> TokenStream {
 ///     _ => <Ty as Default>::default(),
 /// };
 /// ```
+///
+/// With `#[webidl_dict_member(reject_null)]` the same shape but the
+/// non-undefined branch checks `__v.is_null()` first and throws
+/// TypeError; falls through to Default ONLY for undefined / missing
+/// (preserves WebIDL §3.10's null-vs-undefined distinction).
 ///
 /// The Default fallback covers:
 ///   - missing property (`None` from V8) → default
@@ -210,19 +215,130 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
     // from a Rust keyword or convention (e.g. JS `type` → Rust
     // `type_field`).
     let webidl_name = extract_webidl_name(&field.attrs).unwrap_or_else(|| id.to_string());
+    let flags = parse_member_flags(&field.attrs)?;
     let ty = &field.ty;
 
-    Ok(quote! {
-        let #id: #ty = {
-            let __key = ::v8::String::new(scope, #webidl_name).unwrap();
-            match __obj.get(scope, __key.into()) {
-                ::std::option::Option::Some(__v) if !__v.is_undefined() => {
-                    <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(scope, __v)?
+    // Per-member conversion is wrapped in a v8::TryCatch (`tc_scope!`)
+    // so that user JS thrown by V8 callbacks (custom `toString`,
+    // `Symbol.toPrimitive`, throwing valueOf, throwing getters on the
+    // dict member's value) is captured and re-surfaced verbatim as
+    // an OpError::JsValue. Pre-fix the macro discarded the exception
+    // and threw a generic TypeError("Cannot convert ..."), hiding the
+    // user's custom Error subclass and `.code` properties.
+    //
+    // The tc-scope is reset between members — capturing one member's
+    // exception doesn't leak into the next (we early-return on the
+    // first failure anyway).
+    //
+    // Why `Result<T, OpError>` shape: we keep the existing return
+    // contract from `from_v8`. The new `OpError::JsValue` variant
+    // carries the captured exception as a Global<Value>; the caller's
+    // throw machinery (gen_throw_error / throw_op_error) detects this
+    // variant and re-throws the global verbatim.
+    let extraction_msg = format!(
+        "Cannot convert dictionary member '{}' (user code threw)",
+        webidl_name
+    );
+    let convert_call = quote! {
+        {
+            let __captured: ::std::result::Result<#ty, ::zeroship_runtime::state::OpError> = {
+                ::v8::tc_scope!(let __tc, scope);
+                match <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(__tc, __v) {
+                    ::std::result::Result::Ok(__val) => ::std::result::Result::Ok(__val),
+                    ::std::result::Result::Err(__inner_err) => {
+                        // If the inner from_v8 left a pending V8
+                        // exception (user code threw), capture it as a
+                        // Global so the outer throw machinery can
+                        // rethrow verbatim. Otherwise propagate the
+                        // OpError as-is.
+                        if __tc.has_caught() {
+                            let __exc = __tc.exception().expect("has_caught implies Some");
+                            ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::js_value(
+                                    __tc,
+                                    __exc,
+                                    #extraction_msg,
+                                ),
+                            )
+                        } else {
+                            ::std::result::Result::Err(__inner_err)
+                        }
+                    }
                 }
-                _ => <#ty as ::core::default::Default>::default(),
+            };
+            __captured?
+        }
+    };
+
+    if flags.reject_null {
+        // null branch is NOT routed through WebIdlConvertible — the
+        // blanket Option<T> impl returns None for null and would silently
+        // swallow the spec's TypeError requirement. Per WebIDL §3.13.27
+        // (nullable-AbortSignal-style contracts) we throw with a
+        // human-readable message that names the member; the message
+        // shape mirrors the per-member errors emitted elsewhere in this
+        // module.
+        let null_msg = format!(
+            "'{}' member: not a valid value (null is not allowed)",
+            webidl_name
+        );
+        Ok(quote! {
+            let #id: #ty = {
+                let __key = ::v8::String::new(scope, #webidl_name).unwrap();
+                match __obj.get(scope, __key.into()) {
+                    ::std::option::Option::Some(__v) if !__v.is_undefined() => {
+                        if __v.is_null() {
+                            return ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::type_error(#null_msg),
+                            );
+                        }
+                        #convert_call
+                    }
+                    _ => <#ty as ::core::default::Default>::default(),
+                }
+            };
+        })
+    } else {
+        Ok(quote! {
+            let #id: #ty = {
+                let __key = ::v8::String::new(scope, #webidl_name).unwrap();
+                match __obj.get(scope, __key.into()) {
+                    ::std::option::Option::Some(__v) if !__v.is_undefined() => {
+                        #convert_call
+                    }
+                    _ => <#ty as ::core::default::Default>::default(),
+                }
+            };
+        })
+    }
+}
+
+/// Per-member flags parsed from `#[webidl_dict_member(...)]`.
+#[derive(Default, Debug, Clone, Copy)]
+struct MemberFlags {
+    /// `reject_null`: null → TypeError instead of Default::default().
+    /// Undefined and missing keys still fall through to default.
+    reject_null: bool,
+}
+
+fn parse_member_flags(attrs: &[syn::Attribute]) -> syn::Result<MemberFlags> {
+    let mut out = MemberFlags::default();
+    for attr in attrs {
+        if !attr.path().is_ident("webidl_dict_member") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("reject_null") {
+                out.reject_null = true;
+            } else {
+                return Err(meta.error(
+                    "unknown #[webidl_dict_member] flag (expected `reject_null`)",
+                ));
             }
-        };
-    })
+            Ok(())
+        })?;
+    }
+    Ok(out)
 }
 
 fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {

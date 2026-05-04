@@ -28,7 +28,13 @@ pub struct TimerCallback {
 // ---------------------------------------------------------------------------
 
 /// Error kind — maps to JS exception types.
-#[derive(Debug, Clone, Copy)]
+///
+/// Used to be `Copy`; now `Clone` only because the `JsValue` variant
+/// carries a `v8::Global<v8::Value>` that's `Clone` but not `Copy`.
+/// Existing match-on-`err.kind` sites must update to `match &err.kind`
+/// (two known consumers in the runtime, swept in the same commit that
+/// introduced this variant).
+#[derive(Debug, Clone)]
 pub enum OpErrorKind {
     /// `TypeError` — wrong argument types, missing arguments
     TypeError,
@@ -55,6 +61,21 @@ pub enum OpErrorKind {
     ///
     /// Per `docs/proposals/node-crypto-native.md` D-N32 / §VII.3a.
     NodeError(&'static str),
+    /// A pre-built JS exception value, captured from a user-thrown
+    /// exception in a nested V8 callback (custom `toString`,
+    /// `Symbol.toPrimitive`, throwing `valueOf`, etc.). The macro's
+    /// throw-error arms call `scope.throw_exception(local_from_global)`
+    /// directly so the user's original thrown value reaches `catch`
+    /// blocks verbatim — preserves Error subclasses, custom
+    /// properties (`e.code`), the `instanceof` chain, all of it.
+    ///
+    /// Constructed by `OpError::js_value(scope, exception)` and emitted
+    /// by the macro's per-member dict / enum extraction whenever a
+    /// `WebIdlConvertible::from_v8` call's TryCatch caught a pending
+    /// exception. The `OpError.message` carries a debug stringification
+    /// of the exception for log surfaces; the actual JS-visible value
+    /// is the `Global<Value>` payload.
+    JsValue(v8::Global<v8::Value>),
 }
 
 /// An error from a V8 op.
@@ -109,6 +130,28 @@ impl OpError {
         Self {
             kind: OpErrorKind::NodeError(code),
             message: msg.into(),
+        }
+    }
+
+    /// Capture a user-thrown JS exception verbatim. The macro's
+    /// per-member dict / enum extraction wraps each
+    /// `WebIdlConvertible::from_v8` call in a `v8::tc_scope!`; if the
+    /// inner call left a pending V8 exception (e.g. user code threw
+    /// from a custom `toString`), this constructor stashes the
+    /// exception value as a `Global` so the surrounding throw machinery
+    /// re-throws it verbatim — `catch` blocks observe the original
+    /// thrown value (Error subclass, `e.code`, custom properties).
+    ///
+    /// `message` is a debug stringification used by logs / Display.
+    /// The actual JS-visible value is the captured exception.
+    pub fn js_value(
+        scope: &mut v8::PinScope,
+        exception: v8::Local<v8::Value>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: OpErrorKind::JsValue(v8::Global::new(scope, exception)),
+            message: message.into(),
         }
     }
 }

@@ -241,8 +241,14 @@ pub fn op_error_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     err: OpError,
 ) -> v8::Local<'s, v8::Value> {
+    // JsValue passthrough — surface the captured user exception
+    // verbatim. Skip the message translation; the captured value IS
+    // the exception (with its own message, prototype, props).
+    if let crate::state::OpErrorKind::JsValue(global) = &err.kind {
+        return v8::Local::new(scope, global);
+    }
     let msg = v8::String::new(scope, &err.message).unwrap();
-    match err.kind {
+    match &err.kind {
         crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, msg),
         crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, msg),
         crate::state::OpErrorKind::Error => v8::Exception::error(scope, msg),
@@ -252,6 +258,9 @@ pub fn op_error_to_v8<'s>(
         crate::state::OpErrorKind::NodeError(code) => {
             crate::node_error::build_node_exception(scope, code, &err.message)
         }
+        // Unreachable due to early-return above; keeps the match
+        // exhaustive for the compiler.
+        crate::state::OpErrorKind::JsValue(_) => unreachable!(),
     }
 }
 

@@ -25,6 +25,25 @@
 //! The derive does NOT require `Self: Default` — but if the user adds
 //! `#[derive(Default)]` themselves the WebIdlDict-as-member path can
 //! still default-construct on missing dict keys.
+//!
+//! # Type-level flags
+//!
+//! `#[webidl_enum(case_insensitive)]` switches `from_str` and `from_v8`
+//! to ASCII case-insensitive matching (variant names are stored as
+//! literals; lookup uses `eq_ignore_ascii_case`). Used by WebCrypto
+//! `HashAlgo` where `"SHA-256"` / `"sha-256"` / `"Sha-256"` all match.
+//! WebIDL is ASCII for enum names so we deliberately use the ASCII
+//! comparison — Unicode case folding is not in scope.
+//!
+//! `#[webidl_enum(silent_default)]` makes `from_str` return
+//! `Some(Self::default())` on unknown and `from_v8` return
+//! `Self::default()` (never throws). Used by Fetch / WebSocket sections
+//! that fall through to the default on unknown (`RedirectMode`,
+//! `CredentialsMode`, `BinaryType`). Requires `Self: Default` — the
+//! generated code references `<Self as Default>::default()` so the
+//! compiler errors on `silent_default` enums lacking the impl.
+//!
+//! Flags combine: `#[webidl_enum(silent_default, case_insensitive)]`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -59,14 +78,67 @@ pub fn expand(input: TokenStream) -> TokenStream {
         }
     }
 
-    let from_str_arms: Vec<TokenStream2> = variants
-        .iter()
-        .map(|v| {
-            let id = &v.ident;
-            let webidl_name = webidl_name_for(v);
-            quote! { #webidl_name => ::std::option::Option::Some(Self::#id), }
-        })
-        .collect();
+    // Parse type-level `#[webidl_enum(...)]` flags. Unknown idents
+    // surface as a syn error so typos don't silently downgrade
+    // behaviour.
+    let flags = match parse_enum_flags(&input.attrs) {
+        Ok(f) => f,
+        Err(err) => return err.to_compile_error().into(),
+    };
+
+    // Per-variant arms. Case-sensitive mode dispatches via a `match`
+    // against literal names (cheapest, what the macro emitted before
+    // case-insensitive support). Case-insensitive mode emits an
+    // if/else-if ladder using `eq_ignore_ascii_case` — slightly
+    // costlier than a perfect-hash match but still O(n) on a closed
+    // set, and the n is tiny (hash algos top out at ~5 variants).
+    let from_str_body: TokenStream2 = if flags.case_insensitive {
+        let arms: Vec<TokenStream2> = variants
+            .iter()
+            .map(|v| {
+                let id = &v.ident;
+                let webidl_name = webidl_name_for(v);
+                quote! {
+                    if __s.eq_ignore_ascii_case(#webidl_name) {
+                        return ::std::option::Option::Some(Self::#id);
+                    }
+                }
+            })
+            .collect();
+        let unknown_arm = if flags.silent_default {
+            quote! {
+                ::std::option::Option::Some(<Self as ::core::default::Default>::default())
+            }
+        } else {
+            quote! { ::std::option::Option::None }
+        };
+        quote! {
+            #(#arms)*
+            #unknown_arm
+        }
+    } else {
+        let arms: Vec<TokenStream2> = variants
+            .iter()
+            .map(|v| {
+                let id = &v.ident;
+                let webidl_name = webidl_name_for(v);
+                quote! { #webidl_name => ::std::option::Option::Some(Self::#id), }
+            })
+            .collect();
+        let unknown_arm = if flags.silent_default {
+            quote! {
+                _ => ::std::option::Option::Some(<Self as ::core::default::Default>::default()),
+            }
+        } else {
+            quote! { _ => ::std::option::Option::None, }
+        };
+        quote! {
+            match __s {
+                #(#arms)*
+                #unknown_arm
+            }
+        }
+    };
 
     let as_str_arms: Vec<TokenStream2> = variants
         .iter()
@@ -88,18 +160,103 @@ pub fn expand(input: TokenStream) -> TokenStream {
     // Generic-pass-through (rare for enums, but let's not box callers in).
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
+    // `from_v8` body diverges on `silent_default`. The throwing path
+    // (default) is the existing behaviour, augmented with a tc_scope
+    // around `value.to_string(scope)` to capture user-thrown
+    // exceptions (custom `toString` / `Symbol.toPrimitive`); the
+    // silent-default path swallows everything (deliberately —
+    // tolerance for off-spec inputs is the whole point).
+    let from_v8_body = if flags.silent_default {
+        quote! {
+            // Symbol or throwing toString → fall through to default.
+            // The captured exception is intentionally discarded — the
+            // spec sections using this flag say "if not one of the
+            // listed values, use the default", which subsumes "the
+            // value couldn't be coerced". We use a tc_scope so the
+            // exception state doesn't leak out to the caller.
+            let __opt_str: ::std::option::Option<::std::string::String> = {
+                ::v8::tc_scope!(let __tc, scope);
+                let __r = value.to_string(__tc).map(|__s| __s.to_rust_string_lossy(__tc));
+                let _ = __tc.exception(); // clear pending state
+                __r
+            };
+            ::std::result::Result::Ok(match __opt_str {
+                ::std::option::Option::Some(__rust_str) => Self::from_str(&__rust_str)
+                    .unwrap_or_else(<Self as ::core::default::Default>::default),
+                ::std::option::Option::None => {
+                    <Self as ::core::default::Default>::default()
+                }
+            })
+        }
+    } else {
+        quote! {
+            // Step 1: ToString in a tc_scope so user-thrown exceptions
+            // (custom toString, Symbol.toPrimitive) propagate verbatim.
+            // Pre-fix, value.to_string returning None forced us to
+            // fabricate a TypeError, hiding the user's original throw.
+            let __coerced: ::std::result::Result<::std::string::String, ::zeroship_runtime::state::OpError> = {
+                ::v8::tc_scope!(let __tc, scope);
+                match value.to_string(__tc) {
+                    ::std::option::Option::Some(__s) => {
+                        ::std::result::Result::Ok(__s.to_rust_string_lossy(__tc))
+                    }
+                    ::std::option::Option::None => {
+                        if __tc.has_caught() {
+                            let __exc = __tc.exception().expect("has_caught implies Some");
+                            ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::js_value(
+                                    __tc,
+                                    __exc,
+                                    concat!(
+                                        "Cannot convert value to enum `",
+                                        stringify!(#name),
+                                        "` (user code threw)",
+                                    ),
+                                ),
+                            )
+                        } else {
+                            // ToString returned None without raising —
+                            // shouldn't normally happen, but handle as
+                            // a generic TypeError for safety.
+                            ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::type_error(concat!(
+                                    "Cannot convert value to enum `",
+                                    stringify!(#name),
+                                    "` (ToString failed)",
+                                )),
+                            )
+                        }
+                    }
+                }
+            };
+            let __rust_str = __coerced?;
+
+            // Step 2: name lookup. Unknown → TypeError per
+            // §3.13.7 step 4. We include both the offending value
+            // AND the accepted set in the message — saves a round
+            // of "what enum values are valid?" debugging.
+            Self::from_str(&__rust_str).ok_or_else(|| {
+                ::zeroship_runtime::state::OpError::type_error(format!(
+                    "Cannot convert value `{}` to enum `{}`. Expected one of: {}",
+                    __rust_str,
+                    stringify!(#name),
+                    #accepted_str,
+                ))
+            })
+        }
+    };
+
     let expanded = quote! {
         impl #impl_generics #name #ty_generics #where_clause {
-            /// WebIDL name → variant. None on unknown name.
+            /// WebIDL name → variant. None on unknown name (or
+            /// `Some(Self::default())` if the type carries
+            /// `#[webidl_enum(silent_default)]`).
             ///
             /// Codegen exhaustively maps the variant set; adding or
             /// removing a variant updates this function automatically.
             #[allow(dead_code)]
             pub fn from_str(__s: &str) -> ::std::option::Option<Self> {
-                match __s {
-                    #(#from_str_arms)*
-                    _ => ::std::option::Option::None,
-                }
+                #from_str_body
             }
 
             /// Variant → WebIDL name. Round-trips with `from_str`.
@@ -116,35 +273,48 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 scope: &mut ::v8::PinScope,
                 value: ::v8::Local<::v8::Value>,
             ) -> ::std::result::Result<Self, ::zeroship_runtime::state::OpError> {
-                // Step 1: ToString. Symbols → TypeError naturally.
-                let __s = value.to_string(scope).ok_or_else(|| {
-                    ::zeroship_runtime::state::OpError::type_error(
-                        concat!(
-                            "Cannot convert value to enum `",
-                            stringify!(#name),
-                            "` (ToString failed)",
-                        ),
-                    )
-                })?;
-                let __rust_str = __s.to_rust_string_lossy(scope);
-
-                // Step 2: name lookup. Unknown → TypeError per
-                // §3.13.7 step 4. We include both the offending value
-                // AND the accepted set in the message — saves a round
-                // of "what enum values are valid?" debugging.
-                Self::from_str(&__rust_str).ok_or_else(|| {
-                    ::zeroship_runtime::state::OpError::type_error(format!(
-                        "Cannot convert value `{}` to enum `{}`. Expected one of: {}",
-                        __rust_str,
-                        stringify!(#name),
-                        #accepted_str,
-                    ))
-                })
+                #from_v8_body
             }
         }
     };
 
     expanded.into()
+}
+
+/// Type-level flags parsed from `#[webidl_enum(...)]` on the enum.
+#[derive(Default, Debug, Clone, Copy)]
+struct EnumFlags {
+    case_insensitive: bool,
+    silent_default: bool,
+}
+
+/// Parse `#[webidl_enum(case_insensitive)]` /
+/// `#[webidl_enum(silent_default)]` /
+/// `#[webidl_enum(silent_default, case_insensitive)]`.
+///
+/// Surface unknown flags as a compile error so a typo
+/// (`#[webidl_enum(case_isensitive)]`) doesn't silently fall back to
+/// case-sensitive matching.
+fn parse_enum_flags(attrs: &[syn::Attribute]) -> syn::Result<EnumFlags> {
+    let mut out = EnumFlags::default();
+    for attr in attrs {
+        if !attr.path().is_ident("webidl_enum") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("case_insensitive") {
+                out.case_insensitive = true;
+            } else if meta.path.is_ident("silent_default") {
+                out.silent_default = true;
+            } else {
+                return Err(meta.error(
+                    "unknown #[webidl_enum] flag (expected `case_insensitive` or `silent_default`)",
+                ));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(out)
 }
 
 /// Resolve a variant's WebIDL name.
