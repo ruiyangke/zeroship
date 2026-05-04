@@ -20,7 +20,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use zeroship_runtime_macros::v8_class;
+use zeroship_runtime_macros::{v8_class, WebIdlDict};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
@@ -115,9 +115,12 @@ impl Default for Event {
 // EventInit dictionary parser
 // ---------------------------------------------------------------------------
 
-/// Parsed `EventInit` dict. Sibling DOM classes (`CustomEvent`, future
-/// derived events) reuse this rather than re-implementing the parse.
-#[derive(Default, Debug)]
+/// Parsed `EventInit` dict per DOM §2.2. Sibling DOM classes
+/// (`CustomEvent`, `MessageEvent`, `CloseEvent`) reuse this shape
+/// rather than re-implementing the parse. The `WebIdlDict` derive
+/// emits `EventInit::from_v8(scope, value) -> Result<Self, OpError>`
+/// per WebIDL §3.10.
+#[derive(Default, Debug, WebIdlDict)]
 pub(crate) struct EventInit {
     pub bubbles: bool,
     pub cancelable: bool,
@@ -128,33 +131,7 @@ pub(crate) fn read_event_init(
     scope: &mut v8::PinScope,
     val: v8::Local<v8::Value>,
 ) -> Result<EventInit, OpError> {
-    if val.is_undefined() || val.is_null() {
-        return Ok(EventInit::default());
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(val) else {
-        return Err(OpError::type_error("Event eventInitDict must be an object"));
-    };
-    let bubbles = read_bool_prop(scope, obj, "bubbles")?;
-    let cancelable = read_bool_prop(scope, obj, "cancelable")?;
-    let composed = read_bool_prop(scope, obj, "composed")?;
-    Ok(EventInit {
-        bubbles,
-        cancelable,
-        composed,
-    })
-}
-
-fn read_bool_prop(
-    scope: &mut v8::PinScope,
-    obj: v8::Local<v8::Object>,
-    key: &str,
-) -> Result<bool, OpError> {
-    let key_v8 = v8::String::new(scope, key)
-        .ok_or_else(|| OpError::error("out of memory"))?;
-    let val = obj
-        .get(scope, key_v8.into())
-        .ok_or_else(|| OpError::error("property access threw"))?;
-    Ok(val.boolean_value(scope))
+    EventInit::from_v8(scope, val)
 }
 
 // ---------------------------------------------------------------------------

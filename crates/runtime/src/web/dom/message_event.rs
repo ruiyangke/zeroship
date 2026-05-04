@@ -33,11 +33,13 @@
 
 use std::cell::RefCell;
 
-use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_inherit, v8_method, v8_name};
+use zeroship_runtime_macros::{
+    v8_class, v8_constructor, v8_getter, v8_inherit, v8_method, v8_name, WebIdlDict,
+};
 
 use crate::state::OpError;
 
-use super::event::{now_ms, read_event_init, Event};
+use super::event::{now_ms, Event};
 
 /// Backing state for a JS-constructed `MessageEvent`. The `event` field
 /// MUST be first (and the struct MUST be `#[repr(C)]`) — see the module
@@ -76,75 +78,24 @@ impl Default for MessageEventState {
     }
 }
 
-/// Parsed `MessageEventInit` dict — bubbles/cancelable/composed plus the
-/// MessageEvent-specific data/origin/lastEventId. `source` and `ports`
-/// are read but ignored (v1 doesn't ship MessagePort / Window).
-struct ParsedMessageInit {
+/// `MessageEventInit` dict per HTML §9.4.2. Inherits from EventInit
+/// per IDL; the macro doesn't support derive-with-inheritance, so the
+/// parent fields are inlined here.
+///
+/// `source` and `ports` are accepted but ignored — v1 doesn't ship
+/// MessagePort / Window / ServiceWorker, and reading them only matters
+/// for spec parity (an accessor that throws would break user code).
+/// We rely on the dict converter being lenient about extra members
+/// (it only reads the declared fields).
+#[derive(Default, Debug, WebIdlDict)]
+struct MessageEventInit<'s> {
     bubbles: bool,
     cancelable: bool,
     composed: bool,
-    data: Option<v8::Global<v8::Value>>,
+    data: Option<v8::Local<'s, v8::Value>>,
     origin: String,
+    #[webidl_name = "lastEventId"]
     last_event_id: String,
-}
-
-fn parse_message_event_init(
-    scope: &mut v8::PinScope,
-    init: v8::Local<v8::Value>,
-) -> Result<ParsedMessageInit, OpError> {
-    // Inherited EventInit (bubbles / cancelable / composed) — reuse the
-    // Event parser so the two constructors stay in lockstep.
-    let base = read_event_init(scope, init)?;
-
-    let mut parsed = ParsedMessageInit {
-        bubbles: base.bubbles,
-        cancelable: base.cancelable,
-        composed: base.composed,
-        data: None,
-        origin: String::new(),
-        last_event_id: String::new(),
-    };
-
-    if init.is_undefined() || init.is_null() {
-        return Ok(parsed);
-    }
-    let Ok(obj) = v8::Local::<v8::Object>::try_from(init) else {
-        // read_event_init would already have rejected — re-check defensively.
-        return Err(OpError::type_error(
-            "MessageEvent eventInitDict must be an object",
-        ));
-    };
-
-    // `data` — `any`, default null. undefined is treated as null per
-    // WebIDL dictionary defaulting; we store None and the getter
-    // materialises null on the fly.
-    let data_key =
-        v8::String::new(scope, "data").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, data_key.into()) {
-        if !v.is_undefined() {
-            parsed.data = Some(v8::Global::new(scope, v));
-        }
-    }
-
-    // `origin` — USVString, default "".
-    let origin_key =
-        v8::String::new(scope, "origin").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, origin_key.into()) {
-        if !v.is_undefined() {
-            parsed.origin = v.to_rust_string_lossy(scope);
-        }
-    }
-
-    // `lastEventId` — DOMString, default "".
-    let lei_key =
-        v8::String::new(scope, "lastEventId").ok_or_else(|| OpError::error("out of memory"))?;
-    if let Some(v) = obj.get(scope, lei_key.into()) {
-        if !v.is_undefined() {
-            parsed.last_event_id = v.to_rust_string_lossy(scope);
-        }
-    }
-
-    Ok(parsed)
 }
 
 #[v8_class]
@@ -169,7 +120,7 @@ impl MessageEventState {
         };
         let type_rust = type_str.to_rust_string_lossy(scope);
 
-        let parsed = parse_message_event_init(scope, init)?;
+        let parsed = MessageEventInit::from_v8(scope, init)?;
 
         let me = MessageEventState::default();
         *me.event.event_type.borrow_mut() = type_rust;
@@ -177,7 +128,7 @@ impl MessageEventState {
         me.event.cancelable.set(parsed.cancelable);
         me.event.composed.set(parsed.composed);
         me.event.time_stamp.set(now_ms());
-        *me.data.borrow_mut() = parsed.data;
+        *me.data.borrow_mut() = parsed.data.map(|v| v8::Global::new(scope, v));
         *me.origin.borrow_mut() = parsed.origin;
         *me.last_event_id.borrow_mut() = parsed.last_event_id;
         Ok(me)
