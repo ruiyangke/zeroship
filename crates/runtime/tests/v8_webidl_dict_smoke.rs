@@ -240,3 +240,93 @@ fn undefined_member_is_treated_as_missing() {
     assert!(foo.a.is_none(), "undefined-valued member should default");
     assert_eq!(foo.b, Some(5u32));
 }
+
+// ---------------------------------------------------------------------------
+// Test 6: `#[webidl_dict_member(reject_null)]` per-field flag.
+//
+// Spec consumer: `AddEventListenerOptions.signal: AbortSignal?` —
+// passing `signal: null` is a TypeError per WebIDL §3.13.27 (the
+// nullable-AbortSignal contract is "MUST be a real AbortSignal or
+// absent — null is not allowed"), NOT default-construct. Today the
+// derive routes null through `Option<T>`'s blanket WebIdlConvertible
+// impl which returns None; with the flag, null throws.
+//
+// `undefined` and missing keys still fall through to default — WebIDL
+// distinguishes null (an explicitly-bound null) from undefined
+// (member-not-supplied). The flag affects ONLY null.
+// ---------------------------------------------------------------------------
+
+#[derive(WebIdlDict, Default, Debug)]
+struct WithRequiredNonNull {
+    name: Option<USVString>,
+    #[webidl_dict_member(reject_null)]
+    signal: Option<USVString>,
+}
+
+#[test]
+fn reject_null_throws_on_null() {
+    let err = run_with_value(r#"({signal: null})"#, |val, scope| {
+        WithRequiredNonNull::from_v8(scope, val).err()
+    });
+    let err = err.expect("expected TypeError on signal: null");
+    assert!(
+        err.message.contains("signal") && err.message.contains("null"),
+        "message should mention 'signal' and 'null': {}",
+        err.message
+    );
+}
+
+#[test]
+fn reject_null_accepts_undefined_as_missing() {
+    // undefined = member not supplied → default fallback. Distinct
+    // from null per WebIDL §3.10.
+    let w = run_with_value(r#"({signal: undefined})"#, |val, scope| {
+        WithRequiredNonNull::from_v8(scope, val).unwrap()
+    });
+    assert!(w.signal.is_none());
+}
+
+#[test]
+fn reject_null_accepts_missing_as_default() {
+    // Missing key entirely → default. Same as undefined.
+    let w = run_with_value(r#"({})"#, |val, scope| {
+        WithRequiredNonNull::from_v8(scope, val).unwrap()
+    });
+    assert!(w.signal.is_none());
+}
+
+#[test]
+fn reject_null_accepts_value() {
+    // Concrete value passes through normally.
+    let w = run_with_value(r#"({signal: "hello"})"#, |val, scope| {
+        WithRequiredNonNull::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(w.signal.as_ref().unwrap().as_str(), "hello");
+}
+
+// Without the flag: null falls through to default (existing
+// behaviour). Regression guard.
+#[derive(WebIdlDict, Default, Debug)]
+struct WithoutRejectNull {
+    signal: Option<USVString>,
+}
+
+#[test]
+fn without_reject_null_null_is_default() {
+    let w = run_with_value(r#"({signal: null})"#, |val, scope| {
+        WithoutRejectNull::from_v8(scope, val).unwrap()
+    });
+    assert!(w.signal.is_none(), "default behaviour: null → None");
+}
+
+// Other fields in the same struct are unaffected by the flag — only
+// the marked field rejects null.
+#[test]
+fn reject_null_only_affects_marked_field() {
+    // `name` (no flag) accepts null → None; `signal` would reject.
+    let w = run_with_value(r#"({name: null, signal: "ok"})"#, |val, scope| {
+        WithRequiredNonNull::from_v8(scope, val).unwrap()
+    });
+    assert!(w.name.is_none());
+    assert_eq!(w.signal.as_ref().unwrap().as_str(), "ok");
+}

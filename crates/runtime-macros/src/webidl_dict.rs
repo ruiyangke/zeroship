@@ -177,7 +177,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
 
 /// Extract a single dictionary member.
 ///
-/// Code shape:
+/// Code shape (without `reject_null`):
 /// ```ignore
 /// let __key = v8::String::new(scope, "<webidl-name>").unwrap();
 /// let <field>: <Ty> = match __obj.get(scope, __key.into()) {
@@ -187,6 +187,11 @@ pub fn expand(input: TokenStream) -> TokenStream {
 ///     _ => <Ty as Default>::default(),
 /// };
 /// ```
+///
+/// With `#[webidl_dict_member(reject_null)]` the same shape but the
+/// non-undefined branch checks `__v.is_null()` first and throws
+/// TypeError; falls through to Default ONLY for undefined / missing
+/// (preserves WebIDL §3.10's null-vs-undefined distinction).
 ///
 /// The Default fallback covers:
 ///   - missing property (`None` from V8) → default
@@ -210,19 +215,78 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
     // from a Rust keyword or convention (e.g. JS `type` → Rust
     // `type_field`).
     let webidl_name = extract_webidl_name(&field.attrs).unwrap_or_else(|| id.to_string());
+    let flags = parse_member_flags(&field.attrs)?;
     let ty = &field.ty;
 
-    Ok(quote! {
-        let #id: #ty = {
-            let __key = ::v8::String::new(scope, #webidl_name).unwrap();
-            match __obj.get(scope, __key.into()) {
-                ::std::option::Option::Some(__v) if !__v.is_undefined() => {
-                    <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(scope, __v)?
+    if flags.reject_null {
+        // null branch is NOT routed through WebIdlConvertible — the
+        // blanket Option<T> impl returns None for null and would silently
+        // swallow the spec's TypeError requirement. Per WebIDL §3.13.27
+        // (nullable-AbortSignal-style contracts) we throw with a
+        // human-readable message that names the member; the message
+        // shape mirrors the per-member errors emitted elsewhere in this
+        // module.
+        let null_msg = format!(
+            "'{}' member: not a valid value (null is not allowed)",
+            webidl_name
+        );
+        Ok(quote! {
+            let #id: #ty = {
+                let __key = ::v8::String::new(scope, #webidl_name).unwrap();
+                match __obj.get(scope, __key.into()) {
+                    ::std::option::Option::Some(__v) if !__v.is_undefined() => {
+                        if __v.is_null() {
+                            return ::std::result::Result::Err(
+                                ::zeroship_runtime::state::OpError::type_error(#null_msg),
+                            );
+                        }
+                        <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(scope, __v)?
+                    }
+                    _ => <#ty as ::core::default::Default>::default(),
                 }
-                _ => <#ty as ::core::default::Default>::default(),
+            };
+        })
+    } else {
+        Ok(quote! {
+            let #id: #ty = {
+                let __key = ::v8::String::new(scope, #webidl_name).unwrap();
+                match __obj.get(scope, __key.into()) {
+                    ::std::option::Option::Some(__v) if !__v.is_undefined() => {
+                        <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(scope, __v)?
+                    }
+                    _ => <#ty as ::core::default::Default>::default(),
+                }
+            };
+        })
+    }
+}
+
+/// Per-member flags parsed from `#[webidl_dict_member(...)]`.
+#[derive(Default, Debug, Clone, Copy)]
+struct MemberFlags {
+    /// `reject_null`: null → TypeError instead of Default::default().
+    /// Undefined and missing keys still fall through to default.
+    reject_null: bool,
+}
+
+fn parse_member_flags(attrs: &[syn::Attribute]) -> syn::Result<MemberFlags> {
+    let mut out = MemberFlags::default();
+    for attr in attrs {
+        if !attr.path().is_ident("webidl_dict_member") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("reject_null") {
+                out.reject_null = true;
+            } else {
+                return Err(meta.error(
+                    "unknown #[webidl_dict_member] flag (expected `reject_null`)",
+                ));
             }
-        };
-    })
+            Ok(())
+        })?;
+    }
+    Ok(out)
 }
 
 fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {

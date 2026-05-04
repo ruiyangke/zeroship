@@ -203,8 +203,18 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Non-object values throw TypeError. Per-member conversion errors
 /// throw with the inner converter's message.
 ///
+/// # Per-field flags via `#[webidl_dict_member(...)]`
+///
+///   - `reject_null` — when the read value is JS `null`, throw
+///     `TypeError` rather than fall through to `Default::default()`.
+///     `undefined` and missing keys still default-construct (WebIDL
+///     distinguishes the two). Used by
+///     `AddEventListenerOptions.signal` per WebIDL §3.13.27 — the
+///     nullable-AbortSignal contract is "MUST be a real AbortSignal
+///     or absent — null is a TypeError".
+///
 /// See `crates/runtime-macros/src/webidl_dict.rs` for codegen detail.
-#[proc_macro_derive(WebIdlDict, attributes(webidl_name))]
+#[proc_macro_derive(WebIdlDict, attributes(webidl_name, webidl_dict_member))]
 pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
     webidl_dict::expand(input)
 }

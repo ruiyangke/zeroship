@@ -186,6 +186,24 @@ so we can grep back through the rationale.
   - Lands: commit `ba7081b8` (codegen + 16 smoke tests in
     `tests/v8_webidl_dict_smoke.rs`).
 
+- **`#[webidl_dict_member(reject_null)]` — null-rejection per
+  member.** Per-field flag on `WebIdlDict` struct fields. When the
+  read value is JS `null`, throw
+  `TypeError("'<member>' member: not a valid value (null is not
+  allowed)")` instead of falling through to `Default::default()`.
+  `undefined` and missing keys still default-construct (preserves
+  WebIDL §3.10's null-vs-undefined distinction).
+  - Spec rationale: WebIDL §3.13.27 — `signal: AbortSignal?` is
+    "MUST be a real AbortSignal or absent — null is a TypeError".
+    Pre-fix the macro routed null through `Option<T>`'s blanket
+    impl which silently returns `None`, masking the spec violation.
+  - Unblocks: `AddEventListenerOptions.signal` (the null path); pairs
+    with the next extension to fully unblock the dict — see
+    `crates/runtime/TODO.md` "V8 class macro migration follow-ups →
+    Deferred → AddEventListenerOptions / EventListenerOptions".
+  - Lands: codegen + 6 new smoke tests in
+    `tests/v8_webidl_dict_smoke.rs` (22 total, up from 16).
+
 - **`#[derive(WebIdlEnum)]` for enum types** — WebIDL §3.7.10. Generates
   `from_str` / `as_str` / `WebIdlConvertible` for unit-variant enums.
   Default name = ident kebab-cased (`NoCors` → `"no-cors"`); override
