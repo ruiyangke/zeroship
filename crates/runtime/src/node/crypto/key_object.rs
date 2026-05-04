@@ -28,10 +28,10 @@
 #![allow(unsafe_code)]
 
 use super::buffer;
-use super::super::crypto::crypto_key;
-use super::super::crypto::helpers::{base64url_decode, base64url_encode};
-use super::super::crypto::jwk as wc_jwk;
-use super::super::crypto::key_material::{
+use crate::web::crypto::crypto_key;
+use crate::web::crypto::helpers::{base64url_decode, base64url_encode};
+use crate::web::crypto::jwk as wc_jwk;
+use crate::web::crypto::key_material::{
     AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HashAlgo, HmacKeyAlgorithm, KeyAlgorithm,
     KeyMaterial, KeyType, KeyUsage, NamedCurve, RsaHashedKeyAlgorithm, RsaPrivateComponents,
     RsaPublicComponents,

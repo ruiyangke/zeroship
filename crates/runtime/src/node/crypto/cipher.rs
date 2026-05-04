@@ -25,8 +25,8 @@
 
 use super::buffer;
 use super::key_object;
-use super::super::crypto::crypto_key;
-use super::super::crypto::key_material::KeyMaterial;
+use crate::web::crypto::crypto_key;
+use crate::web::crypto::key_material::KeyMaterial;
 use crate::state::OpError;
 
 #[allow(unused_imports)]

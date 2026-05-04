@@ -14,7 +14,7 @@
 
 use super::buffer;
 use super::key_object::{self, KeyObjectState};
-use super::super::crypto::key_material::{
+use crate::web::crypto::key_material::{
     KeyMaterial, KeyType, NamedCurve, RsaPrivateComponents, RsaPublicComponents,
 };
 use crate::state::OpError;

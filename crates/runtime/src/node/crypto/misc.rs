@@ -3,7 +3,7 @@
 //!
 //! Per `docs/proposals/node-crypto-native.md` §X.2, §X.3, §II.13.
 
-use super::super::crypto::kernel::digest::HASH_NAMES;
+use crate::crypto_ops::digest::HASH_NAMES;
 
 /// `timingSafeEqual(a, b) -> boolean`.
 /// Per D-N31, the lengths must match (non-CT pre-check); the
