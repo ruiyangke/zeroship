@@ -219,6 +219,29 @@ so we can grep back through the rationale.
   - Lands: codegen + 10 new smoke tests in
     `tests/v8_webidl_enum_smoke.rs` (24 total).
 
+- **`#[webidl_enum(silent_default)]` — fall through to Default on
+  unknown.** Type-level flag. `from_str` returns
+  `Some(Self::default())` instead of `None` on unknown name; `from_v8`
+  returns `Self::default()` and **never throws** — even when ToString
+  itself throws (Symbols, throwing toString). The spec rationale is
+  WebIDL §3.13.7 step 4 "raise TypeError" being explicitly overridden
+  by Fetch and WebSocket spec sections that fall through to a default
+  for tolerance.
+  - Requires `Self: Default` — the codegen invokes
+    `<Self as Default>::default()`. Compile-error path from Rust's
+    trait resolver if the impl is missing (no custom diagnostic — the
+    standard "the trait `Default` is not implemented" surface is
+    self-explanatory).
+  - Combinable with `case_insensitive`:
+    `#[webidl_enum(silent_default, case_insensitive)]`.
+  - Unblocks `RedirectMode`, `CredentialsMode`, `BinaryType` enum
+    migrations in `crates/runtime/TODO.md` "V8 class macro migration
+    follow-ups → Deferred". Each was deferred because the macro's
+    `from_v8` would have replaced fall-through-to-Default semantics
+    with a TypeError.
+  - Lands: codegen (shared with case_insensitive) + 8 new smoke tests
+    in `tests/v8_webidl_enum_smoke.rs` (32 total).
+
 - **`#[v8_iterable(key = K, value = V [, mode = snapshot|live])]` for
   default pair iterators** — WebIDL §3.7.10.2 (default iterators) +
   §3.7.10.3 (forEach). On a `#[v8_class]` impl block, emits the full

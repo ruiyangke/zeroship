@@ -315,3 +315,117 @@ fn case_insensitive_kebab_default_uppercase() {
     assert_eq!(MultiWord::from_str("Long-Name"), Some(MultiWord::LongName));
     assert_eq!(MultiWord::from_str("ANOTHER-ONE"), Some(MultiWord::AnotherOne));
 }
+
+// ---------------------------------------------------------------------------
+// `#[webidl_enum(silent_default)]` — fall through to default on
+// unknown rather than throwing TypeError. Spec consumers: Fetch
+// `RedirectMode`, `CredentialsMode`, WebSocket `BinaryType`. The
+// derive REQUIRES `Self: Default` (compile error if the impl is
+// missing) since the codegen invokes `<Self as Default>::default()`.
+// ---------------------------------------------------------------------------
+
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[webidl_enum(silent_default)]
+enum RedirectMode {
+    #[default]
+    Follow,
+    Error,
+    Manual,
+}
+
+#[test]
+fn silent_default_from_str_known() {
+    // Known values still resolve to the corresponding variant.
+    assert_eq!(RedirectMode::from_str("follow"), Some(RedirectMode::Follow));
+    assert_eq!(RedirectMode::from_str("error"), Some(RedirectMode::Error));
+    assert_eq!(RedirectMode::from_str("manual"), Some(RedirectMode::Manual));
+}
+
+#[test]
+fn silent_default_from_str_unknown_returns_default() {
+    // Unknown → Some(default), NOT None. Lets the consumer use
+    // `.unwrap()` confidently.
+    assert_eq!(
+        RedirectMode::from_str("garbage-value"),
+        Some(RedirectMode::Follow)
+    );
+    assert_eq!(RedirectMode::from_str(""), Some(RedirectMode::Follow));
+}
+
+#[test]
+fn silent_default_from_v8_unknown_returns_default_no_throw() {
+    // Unknown JS string → default variant, no throw.
+    let m = run_with_value(r#""garbage-value""#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Follow);
+}
+
+#[test]
+fn silent_default_from_v8_known() {
+    let m = run_with_value(r#""error""#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Error);
+}
+
+#[test]
+fn silent_default_from_v8_symbol_returns_default() {
+    // Symbol → ToString throws. silent_default treats the throw as
+    // "not one of the listed values" and returns the default.
+    let m = run_with_value(r#"Symbol("x")"#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Follow);
+}
+
+#[test]
+fn silent_default_from_v8_number_tostring_unknown() {
+    // 42 ToStrings to "42" — unknown → default.
+    let m = run_with_value(r#"42"#, |val, scope| {
+        RedirectMode::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, RedirectMode::Follow);
+}
+
+// silent_default + case_insensitive — combinable.
+#[derive(WebIdlEnum, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[webidl_enum(silent_default, case_insensitive)]
+enum BinaryType {
+    #[default]
+    Blob,
+    #[webidl_name = "arraybuffer"]
+    ArrayBuffer,
+}
+
+#[test]
+fn silent_default_and_case_insensitive_combine() {
+    // Known with mixed case
+    assert_eq!(BinaryType::from_str("BLOB"), Some(BinaryType::Blob));
+    assert_eq!(
+        BinaryType::from_str("ArrayBuffer"),
+        Some(BinaryType::ArrayBuffer)
+    );
+    // Unknown → default (no throw, no Err)
+    assert_eq!(BinaryType::from_str("string"), Some(BinaryType::Blob));
+
+    let m = run_with_value(r#""nope""#, |val, scope| {
+        BinaryType::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, BinaryType::Blob);
+
+    let m = run_with_value(r#""ARRAYBUFFER""#, |val, scope| {
+        BinaryType::from_v8(scope, val).unwrap()
+    });
+    assert_eq!(m, BinaryType::ArrayBuffer);
+}
+
+// Without silent_default, regression guard: existing `RequestMode`
+// still throws on unknown.
+#[test]
+fn without_silent_default_unknown_still_throws() {
+    let err = run_with_value(r#""invalid""#, |val, scope| {
+        RequestMode::from_v8(scope, val).err()
+    });
+    assert!(err.is_some(), "default behaviour must throw on unknown");
+}
