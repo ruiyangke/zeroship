@@ -18,33 +18,136 @@
 //!
 //! Storage (§XV per-class):
 //! - `[[stream]]`              → V8 priv sym `[[stream]]`
-//! - `[[closedPromise]]` + closedResolver → paired storage in BYOBReaderState
-//! - `[[readIntoRequests]]`    → Rust VecDeque on BYOBReaderState
+//! - `[[closedPromise]]` + closedResolver → paired storage in ReadableStreamBYOBReader
+//! - `[[readIntoRequests]]`    → Rust VecDeque on ReadableStreamBYOBReader
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
+use zeroship_runtime_macros::{v8_class, v8_constructor};
+
+use crate::state::OpError;
 use crate::streams::algorithms;
 use crate::streams::pull_into::ViewConstructor;
 use crate::streams::readable::{is_readable_stream, StreamState};
 use crate::streams::slots::{self, CLOSED_PROMISE, READER, STORED_ERROR, STREAM};
 
 // ---------------------------------------------------------------------------
-// Reader state — Box<BYOBReaderState> in internal field 0
+// Reader state — Box<ReadableStreamBYOBReader> in internal field 0
 // ---------------------------------------------------------------------------
 
+/// Boxed state behind the JS `ReadableStreamBYOBReader` wrapper. Lives in
+/// internal field 0; reclaimed by the V8 weak finalizer registered via the
+/// `#[v8_class]` macro.
+///
+/// MAC-02 migration: parallels `ReadableStreamDefaultReader`. The
+/// constructor (Self::new) validates the stream argument (must be a
+/// byte-typed ReadableStream, must be unlocked) and stashes it in
+/// `pending_stream` so the post_init hook can run ReaderGenericInitialize
+/// + write the BYOB tag priv-sym after the box is reachable via field 0.
 #[allow(missing_debug_implementations)]
-pub struct BYOBReaderState {
+pub struct ReadableStreamBYOBReader {
     pub read_into_requests: RefCell<VecDeque<ReadIntoRequest>>,
     pub closed_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
+    /// Stream stashed by the constructor body for `after_install`.
+    /// `None` for readers built via `acquire_readable_stream_byob_reader`
+    /// (the Rust-side helper handles GenericInitialize directly).
+    pub pending_stream: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
-impl BYOBReaderState {
-    fn new(closed_resolver: v8::Global<v8::PromiseResolver>) -> Self {
+impl ReadableStreamBYOBReader {
+    /// Allocate the boxed state with no stashed stream — used by the
+    /// `acquire_*` Rust helper which runs ReaderGenericInitialize directly
+    /// rather than through the macro's post_init hook.
+    fn new_for_internal(closed_resolver: v8::Global<v8::PromiseResolver>) -> Self {
         Self {
             read_into_requests: RefCell::new(VecDeque::new()),
             closed_resolver: RefCell::new(Some(closed_resolver)),
+            pending_stream: RefCell::new(None),
         }
+    }
+}
+
+#[v8_class]
+#[v8_to_string_tag = "ReadableStreamBYOBReader"]
+impl ReadableStreamBYOBReader {
+    /// `new ReadableStreamBYOBReader(stream)` — spec §3.5.4 step 1–4.
+    /// Validates the argument is a byte-typed ReadableStream that is not
+    /// already locked. The PromiseResolver alloc + stream stash run here
+    /// so the post_init hook (`after_install`) can finish wiring after
+    /// the box is reachable via field 0.
+    #[v8_constructor(post_init = "after_install")]
+    fn new(
+        scope: &mut v8::PinScope,
+        stream: v8::Local<v8::Value>,
+    ) -> Result<Self, OpError> {
+        let stream = v8::Local::<v8::Object>::try_from(stream).map_err(|_| {
+            OpError::type_error(
+                "ReadableStreamBYOBReader: argument must be a ReadableStream",
+            )
+        })?;
+        if !is_readable_stream(scope, stream) {
+            return Err(OpError::type_error(
+                "ReadableStreamBYOBReader: argument must be a ReadableStream",
+            ));
+        }
+        // Reject byte-only stream check: BYOBReader is only valid on byte
+        // streams (their controller is a ReadableByteStreamController).
+        let controller_v = slots::read_slot(scope, stream, slots::CONTROLLER);
+        let controller = v8::Local::<v8::Object>::try_from(controller_v).map_err(|_| {
+            OpError::type_error("ReadableStreamBYOBReader: stream has no controller")
+        })?;
+        if !crate::streams::readable_byte_controller::is_byte_controller(scope, controller)
+        {
+            return Err(OpError::type_error(
+                "ReadableStreamBYOBReader: cannot construct on a non-byte-stream",
+            ));
+        }
+        if algorithms::is_readable_stream_locked(scope, stream) {
+            return Err(OpError::type_error(
+                "ReadableStreamBYOBReader: stream is already locked",
+            ));
+        }
+        // V8 returns None from PromiseResolver::new only on isolate
+        // termination or out-of-memory — surface as Error so the macro's
+        // Err arm throws cleanly rather than panicking.
+        let resolver = v8::PromiseResolver::new(scope)
+            .ok_or_else(|| OpError::error("PromiseResolver::new failed"))?;
+        let resolver_g = v8::Global::new(scope, resolver);
+        let stream_g = v8::Global::new(scope, stream);
+        Ok(Self {
+            read_into_requests: RefCell::new(VecDeque::new()),
+            closed_resolver: RefCell::new(Some(resolver_g)),
+            pending_stream: RefCell::new(Some(stream_g)),
+        })
+    }
+
+    /// `ReaderGenericInitialize(reader, stream)` + BYOB tag write — spec
+    /// §3.9.2. Runs after the macro has installed the Box in field 0.
+    ///
+    /// CAUTION: do NOT call into JS inside the `with_state` closure (it
+    /// holds `&Self` for the closure's duration; reentrant `&mut self`
+    /// methods would alias). The closure body is pure RefCell mutation.
+    pub(crate) fn after_install(
+        scope: &mut v8::PinScope,
+        this: v8::Local<v8::Object>,
+    ) -> Result<(), OpError> {
+        let (stream_g_opt, resolver_g_opt) = with_state(scope, this, |s| {
+            (
+                s.pending_stream.borrow_mut().take(),
+                s.closed_resolver.borrow().clone(),
+            )
+        })
+        .ok_or_else(|| OpError::error("after_install: with_state returned None"))?;
+        let stream_g = stream_g_opt
+            .ok_or_else(|| OpError::error("after_install: missing pending_stream"))?;
+        let resolver_g = resolver_g_opt
+            .ok_or_else(|| OpError::error("after_install: missing closed_resolver"))?;
+        let stream = v8::Local::new(scope, &stream_g);
+        let resolver = v8::Local::new(scope, &resolver_g);
+        let closed_promise = resolver.get_promise(scope);
+        finalize_byob_reader(scope, this, stream, closed_promise);
+        Ok(())
     }
 }
 
@@ -111,16 +214,16 @@ pub fn is_byob_reader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> b
 pub fn with_state<R>(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
-    f: impl FnOnce(&BYOBReaderState) -> R,
+    f: impl FnOnce(&ReadableStreamBYOBReader) -> R,
 ) -> Option<R> {
     let raw = reader.get_internal_field(scope, 0)?;
     let ext = v8::Local::<v8::External>::try_from(raw).ok()?;
-    let ptr = ext.value() as *const BYOBReaderState;
+    let ptr = ext.value() as *const ReadableStreamBYOBReader;
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: External points at a Box<BYOBReaderState> set during
-    // construction; dropped only by the V8 weak finalizer.
+    // SAFETY: External points at a Box<ReadableStreamBYOBReader>; dropped
+    // only by the V8 weak finalizer.
     let inst = unsafe { &*ptr };
     Some(f(inst))
 }
@@ -238,127 +341,15 @@ pub fn error_read_into_request<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// Class template
+// Internal "AcquireReadableStreamBYOBReader" path — Rust-side construction
 // ---------------------------------------------------------------------------
 
-fn reader_class_template<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
-    let class_name = v8::String::new(scope, "ReadableStreamBYOBReader").unwrap();
-    ctor_tmpl.set_class_name(class_name);
-    ctor_tmpl
-        .instance_template(scope)
-        .set_internal_field_count(1);
-
-    let proto = ctor_tmpl.prototype_template(scope);
-
-    {
-        let key = v8::String::new(scope, "closed").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-    install_proto_method(scope, proto, "read", read_method_callback);
-    install_proto_method(scope, proto, "releaseLock", release_lock_method_callback);
-    install_proto_method(scope, proto, "cancel", cancel_method_callback);
-
-    let tag_sym = v8::Symbol::get_to_string_tag(scope);
-    let tag_value = v8::String::new(scope, "ReadableStreamBYOBReader").unwrap();
-    proto.set_with_attr(
-        tag_sym.into(),
-        tag_value.into(),
-        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
-    );
-
-    ctor_tmpl
-}
-
-fn install_proto_method(
-    scope: &mut v8::PinScope,
-    proto: v8::Local<v8::ObjectTemplate>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    proto.set(key.into(), tmpl.into());
-}
-
-// ---------------------------------------------------------------------------
-// Constructor — `new ReadableStreamBYOBReader(stream)`
-// ---------------------------------------------------------------------------
-
-fn constructor_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    if !args.is_construct_call() {
-        let msg =
-            v8::String::new(scope, "ReadableStreamBYOBReader: must be called with 'new'")
-                .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    let reader_obj = args.this();
-    let stream_arg = args.get(0);
-    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_arg) else {
-        let msg = v8::String::new(
-            scope,
-            "ReadableStreamBYOBReader: argument must be a ReadableStream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    };
-    if !is_readable_stream(scope, stream) {
-        let msg = v8::String::new(
-            scope,
-            "ReadableStreamBYOBReader: argument must be a ReadableStream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    // Reject byte-only stream check: BYOBReader is only valid on byte
-    // streams (their controller is a ReadableByteStreamController).
-    let controller_v = slots::read_slot(scope, stream, slots::CONTROLLER);
-    let Ok(controller) = v8::Local::<v8::Object>::try_from(controller_v) else {
-        let msg = v8::String::new(scope, "ReadableStreamBYOBReader: stream has no controller").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    };
-    if !crate::streams::readable_byte_controller::is_byte_controller(scope, controller) {
-        let msg = v8::String::new(
-            scope,
-            "ReadableStreamBYOBReader: cannot construct on a non-byte-stream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    if algorithms::is_readable_stream_locked(scope, stream) {
-        let msg =
-            v8::String::new(scope, "ReadableStreamBYOBReader: stream is already locked")
-                .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    set_up_byob_reader(scope, reader_obj, stream);
-}
-
-/// Public constructor used by `getReader({mode: "byob"})`.
+/// `getReader({mode: "byob"})` Rust path. Mirrors
+/// `acquire_readable_stream_default_reader` shape: build the wrapper via
+/// the macro-emitted FunctionTemplate's `new_instance`, set prototype,
+/// then run the box install + ReaderGenericInitialize manually. The JS
+/// `[[Construct]]` path (`new ReadableStreamBYOBReader(stream)`) goes
+/// through the macro instead.
 pub fn acquire_readable_stream_byob_reader<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
@@ -376,35 +367,28 @@ pub fn acquire_readable_stream_byob_reader<'s>(
                 .to_string(),
         );
     }
-    // Use the GLOBAL ReadableStreamBYOBReader class so `instanceof`
-    // checks work. Fall back to a local template if global isn't set
-    // (e.g., in tests that haven't installed the streams namespace).
-    let global = scope.get_current_context().global(scope);
-    let class_name = v8::String::new(scope, "ReadableStreamBYOBReader").unwrap();
-    let class_v = global.get(scope, class_name.into()).unwrap_or_else(|| v8::undefined(scope).into());
-    let class_fn = if let Ok(f) = v8::Local::<v8::Function>::try_from(class_v) {
-        f
-    } else {
-        let tmpl = reader_class_template(scope);
-        tmpl.get_function(scope).unwrap()
-    };
-    // Create instance via class_fn's instance template (we need internal
-    // fields). Get the FunctionTemplate by calling the matching helper.
-    let tmpl = reader_class_template(scope);
+    // The macro's `install` is idempotent and isolate-cached, so it
+    // returns the same FunctionTemplate as the global `install_global`
+    // path — which means `instanceof ReadableStreamBYOBReader` works
+    // either with or without the streams namespace installed (the prior
+    // hand-rolled defensive globalThis lookup is no longer needed).
+    let tmpl = ReadableStreamBYOBReader::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let reader_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| "alloc BYOB reader instance".to_string())?;
-    // Set prototype to the global class's prototype so instanceof works.
+    let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     reader_obj.set_prototype(scope, proto_v);
 
-    set_up_byob_reader(scope, reader_obj, stream);
+    set_up_byob_reader_internal(scope, reader_obj, stream);
     Ok(reader_obj)
 }
 
-fn set_up_byob_reader(
+/// Box install + BYOB tag write + ReaderGenericInitialize for the
+/// Rust-side (`acquire_*`) path.
+fn set_up_byob_reader_internal(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
     stream: v8::Local<v8::Object>,
@@ -413,7 +397,7 @@ fn set_up_byob_reader(
     let closed_promise = resolver.get_promise(scope);
     let resolver_g = v8::Global::new(scope, resolver);
 
-    let state = BYOBReaderState::new(resolver_g);
+    let state = ReadableStreamBYOBReader::new_for_internal(resolver_g);
     let boxed = Box::new(state);
     let raw_ptr = Box::into_raw(boxed);
     let raw_addr = raw_ptr as usize;
@@ -423,11 +407,23 @@ fn set_up_byob_reader(
         scope,
         reader,
         Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut BYOBReaderState));
+            drop(Box::from_raw(raw_addr as *mut ReadableStreamBYOBReader));
         }),
     );
     std::mem::forget(weak);
 
+    finalize_byob_reader(scope, reader, stream, closed_promise);
+}
+
+/// BYOB tag priv-sym + ReaderGenericInitialize. Shared between the JS
+/// path's `after_install` hook and the Rust `set_up_byob_reader_internal`
+/// path. Runs after the box has been installed in field 0.
+fn finalize_byob_reader<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    reader: v8::Local<v8::Object>,
+    stream: v8::Local<v8::Object>,
+    closed_promise: v8::Local<'s, v8::Promise>,
+) {
     // BYOB reader tag (used by is_byob_reader).
     let tag = v8::Boolean::new(scope, true);
     slots::write_slot(scope, reader, BYOB_READER_TAG_SLOT, tag.into());
@@ -887,8 +883,49 @@ fn fulfill_read_into_error<'s>(
 // ---------------------------------------------------------------------------
 
 pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    let tmpl = reader_class_template(scope);
+    // Macro-emitted FunctionTemplate carries the constructor + Symbol.toStringTag.
+    let tmpl = ReadableStreamBYOBReader::install(scope);
+
+    // Patch in the IDL methods on the prototype (read / releaseLock /
+    // cancel / closed). They stay raw FunctionCallbacks for the same
+    // reason as the default reader (need direct args.this() + Promise
+    // alloc). See the headers.rs `install_global` pattern for prior art.
     let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
+
+    // closed getter
+    {
+        let closed_key = v8::String::new(scope, "closed").unwrap();
+        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
+        let getter_fn = getter_tmpl.get_function(scope).unwrap();
+        let mut desc = v8::PropertyDescriptor::new_from_get_set(
+            getter_fn.into(),
+            v8::undefined(scope).into(),
+        );
+        desc.set_configurable(true);
+        desc.set_enumerable(true);
+        proto.define_property(scope, closed_key.into(), &desc);
+    }
+
+    // read / releaseLock / cancel
+    install_proto_method_on_object(scope, proto, "read", read_method_callback);
+    install_proto_method_on_object(scope, proto, "releaseLock", release_lock_method_callback);
+    install_proto_method_on_object(scope, proto, "cancel", cancel_method_callback);
+
     let key = v8::String::new(scope, "ReadableStreamBYOBReader").unwrap();
     global.set(scope, key.into(), class_fn.into());
+}
+
+fn install_proto_method_on_object(
+    scope: &mut v8::PinScope,
+    proto: v8::Local<v8::Object>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let func = tmpl.get_function(scope).unwrap();
+    proto.set(scope, key.into(), func.into());
 }

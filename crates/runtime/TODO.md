@@ -148,12 +148,16 @@ MAC-02 (the `post_init` hook) shipped to unblock these. Status:
     need direct `args.this()` access for priv-sym reads + Promise
     allocation, and converting them to `#[v8_method]` is a separate,
     much larger refactor). Migrated in this branch.
+  - `ReadableStreamBYOBReader` — `#[v8_class]` + post_init, parallel
+    to DefaultReader. The `BYOB_READER_TAG_SLOT` priv-sym + the
+    ReaderGenericInitialize logic share a `finalize_byob_reader`
+    helper between the JS path's `after_install` hook and the
+    Rust-side `set_up_byob_reader_internal` path. Migrated in this
+    branch.
 
 **Deferred from MAC-02 phase 2** (with reasons):
 
-  - `ReadableStreamBYOBReader` — same shape as DefaultReader; deferred
-    pending bandwidth.
-  - `WritableStreamDefaultWriter` — same shape; deferred.
+  - `WritableStreamDefaultWriter` — same shape as the readers; deferred.
   - `TransformStream` — most complex (readable + writable Promise wiring,
     budget guard, controller-from-transformer setup). The constructor
     body interleaves with `set_up_transform_stream_default_controller_from_transformer`
