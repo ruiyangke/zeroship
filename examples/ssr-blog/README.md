@@ -19,13 +19,13 @@ dist/
 ├── .vite/manifest.json       (client manifest — see gap 1 below)
 ├── server/
 │   └── index.js              (the SSR bundle + RPC bootstrap)
-└── app.zsapp                 (the deploy artifact)
+└── app.zship                 (the deploy artifact)
 ```
 
 ## Inspect the manifest
 
 ```bash
-zstd -dc dist/app.zsapp | tar -xC /tmp/ssr
+zstd -dc dist/app.zship | tar -xC /tmp/ssr
 jq . /tmp/ssr/manifest.json
 ```
 
@@ -76,5 +76,5 @@ Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zsapp --app=<uuid> --control=<url> --key=<master>
+zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --key=<master>
 ```

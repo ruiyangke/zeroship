@@ -43,7 +43,7 @@ export function About() {
             reviews the code, deploys it, monitors it, and helps you charge
             for it when you're ready. The platform takes 15&nbsp;%. You keep
             the rest. You also keep the code: it exports as a{" "}
-            <code className="font-mono text-[15px] not-italic">.zsapp</code>{" "}
+            <code className="font-mono text-[15px] not-italic">.zship</code>{" "}
             bundle, anywhere, anytime.
           </p>
 

@@ -232,7 +232,7 @@ Priority is for *implementation phasing*, not for *spec depth*. Every feature in
 112. [1] Move (drag-and-drop)
 113. [1] Upload binary asset
 114. [1] Download file
-115. [2] Download project as `.zsapp` archive
+115. [2] Download project as `.zship` archive
 116. [1] Right-click context menu
 117. [2] Read-only mode (for shared / preview)
 

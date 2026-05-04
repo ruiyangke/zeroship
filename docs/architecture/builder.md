@@ -569,12 +569,12 @@ CREATE INDEX ON messages (conversation_id, created_at);
        cmd: "vite build"
 3. Sandbox runs `vite build`:
      - @zeroship/vite-plugin's closeBundle hook fires
-     - emits dist/app.zsapp (tar.zst: manifest.json + blobs/<hash>)
-4. Editor backend reads dist/app.zsapp from sandbox:
-     GET /sessions/:id/files/dist/app.zsapp
+     - emits dist/app.zship (tar.zst: manifest.json + blobs/<hash>)
+4. Editor backend reads dist/app.zship from sandbox:
+     GET /sessions/:id/files/dist/app.zship
 5. Editor backend POSTs to control plane:
      POST /api/apps/{production-app-id}/deploy
-     Content-Type: application/x-zsapp
+     Content-Type: application/x-zship
 6. Control plane: streams + verifies blob hashes, dedups against has_blob,
    writes manifest, atomically updates apps.deploy_hash + manifest_json
 7. Gateway + worker pick up the new manifest on their next 5s poll

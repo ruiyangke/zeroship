@@ -2,7 +2,7 @@
 name = "zeroship-bundle"
 version = "0.1.0"
 edition = "2021"
-description = ".zsapp deploy artifact: manifest types, content-addressed blob store, pack/unpack."
+description = ".zship deploy artifact: manifest types, content-addressed blob store, pack/unpack."
 
 [dependencies]
 serde = { workspace = true }

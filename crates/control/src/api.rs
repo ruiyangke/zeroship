@@ -180,10 +180,10 @@ pub async fn delete_app(req: web::HttpRequest, state: State<Arc<AppState>>, id: 
     }
 }
 
-/// Streaming `.zsapp` ingest. Replaces the legacy raw-bundle path —
+/// Streaming `.zship` ingest. Replaces the legacy raw-bundle path —
 /// deploy bundles now arrive as zstd-compressed tar archives carrying
 /// `manifest.json` + `blobs/<sha256>` entries. See
-/// `docs/reference/zsapp.md` for the wire format and ingestion
+/// `docs/reference/zship.md` for the wire format and ingestion
 /// algorithm.
 pub async fn deploy(
     req: web::HttpRequest,
@@ -203,17 +203,17 @@ pub async fn deploy(
         }
     };
 
-    // Hard cut: only `application/x-zsapp` is accepted. The legacy
+    // Hard cut: only `application/x-zship` is accepted. The legacy
     // raw `.appbundle` and `application/javascript` paths are gone.
     let content_type = req
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !is_zsapp_content_type(content_type) {
+    if !is_zship_content_type(content_type) {
         return web::HttpResponse::UnsupportedMediaType().json(&serde_json::json!({
             "error": "unsupported content type",
-            "detail": "expected application/x-zsapp",
+            "detail": "expected application/x-zship",
         }));
     }
 
@@ -227,7 +227,7 @@ pub async fn deploy(
     // generic helper accepts it without an adapter.
     let tmp_path = state
         .deploy_tmp_dir
-        .join(format!("zeroship-deploy-{}.zsapp", uuid::Uuid::new_v4().simple()));
+        .join(format!("zeroship-deploy-{}.zship", uuid::Uuid::new_v4().simple()));
 
     match stream_body_to_tmp_file(
         &mut body,
@@ -318,12 +318,12 @@ pub async fn deploy(
 }
 
 /// Permissive content-type check. We accept the canonical
-/// `application/x-zsapp` plus parameterised variants like
-/// `application/x-zsapp; charset=utf-8` (some clients add charset
+/// `application/x-zship` plus parameterised variants like
+/// `application/x-zship; charset=utf-8` (some clients add charset
 /// even on binary uploads).
-fn is_zsapp_content_type(value: &str) -> bool {
+fn is_zship_content_type(value: &str) -> bool {
     let primary = value.split(';').next().unwrap_or("").trim();
-    primary.eq_ignore_ascii_case("application/x-zsapp")
+    primary.eq_ignore_ascii_case("application/x-zship")
 }
 
 /// Map the structured ingest error to an HTTP response.
@@ -341,7 +341,7 @@ fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
         IngestError::UnsupportedMediaType => web::HttpResponse::UnsupportedMediaType()
             .json(&serde_json::json!({
                 "error": "unsupported content type",
-                "detail": "expected application/x-zsapp",
+                "detail": "expected application/x-zship",
             })),
         IngestError::BlobStoreUnavailable(detail) => web::HttpResponse::ServiceUnavailable()
             .json(&serde_json::json!({

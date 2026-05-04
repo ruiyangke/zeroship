@@ -23,7 +23,7 @@ export interface Todo {
 
 // Hardcoded — the demo is about the build pipeline, not persistence.
 const TODOS: Todo[] = [
-  { id: 1, text: "Read the .zsapp spec",   done: true  },
+  { id: 1, text: "Read the .zship spec",   done: true  },
   { id: 2, text: "Build the CSR demo",      done: true  },
   { id: 3, text: "Verify the manifest",     done: false },
   { id: 4, text: "Stretch — wire up SSR",   done: false },

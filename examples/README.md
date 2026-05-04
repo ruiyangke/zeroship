@@ -1,6 +1,6 @@
 # examples/
 
-Each subdirectory here is a small app that exercises the zeroship build pipeline (`@zeroship/vite-plugin` → `.zsapp` → control plane → BlobStore → gateway) end-to-end. They double as integration tests: if all three build cleanly and produce the right manifest shape, the pipeline is healthy.
+Each subdirectory here is a small app that exercises the zeroship build pipeline (`@zeroship/vite-plugin` → `.zship` → control plane → BlobStore → gateway) end-to-end. They double as integration tests: if all three build cleanly and produce the right manifest shape, the pipeline is healthy.
 
 ## Three rendering modes, three demos
 
@@ -15,7 +15,7 @@ Each demo's README explains:
 - **What it shows** — the rendering mode and the file shape it produces.
 - **How to build** — `npm install && npx vite build`.
 - **The expected manifest shape** — the rules + worker fields the build emits.
-- **How to deploy** — `zeroship deploy ./dist/app.zsapp ...`.
+- **How to deploy** — `zeroship deploy ./dist/app.zship ...`.
 - **Known limitations** — gaps in the platform that this demo surfaces.
 
 ## When to use which mode
@@ -32,13 +32,13 @@ for d in csr-todo ssr-blog ssg-docs; do
 done
 ```
 
-After each, `dist/app.zsapp` is the deploy artifact. Inspect with:
+After each, `dist/app.zship` is the deploy artifact. Inspect with:
 
 ```bash
-zstd -dc examples/<demo>/dist/app.zsapp | tar -tf - | head           # manifest first
-zstd -dc examples/<demo>/dist/app.zsapp | tar -xf - -O manifest.json | jq .
+zstd -dc examples/<demo>/dist/app.zship | tar -tf - | head           # manifest first
+zstd -dc examples/<demo>/dist/app.zship | tar -xf - -O manifest.json | jq .
 ```
 
 ## Other examples in this directory
 
-The `*.js` and other folders alongside these three are older single-file or framework-less examples that don't go through the vite-plugin pipeline. They predate the `.zsapp` format and exist for legacy CLI testing (`zeroship serve <file>.js`).
+The `*.js` and other folders alongside these three are older single-file or framework-less examples that don't go through the vite-plugin pipeline. They predate the `.zship` format and exist for legacy CLI testing (`zeroship serve <file>.js`).

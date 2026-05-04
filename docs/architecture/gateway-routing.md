@@ -160,7 +160,7 @@ The streaming path's range support is wired through `chunk_stream_from_path_rang
 
 ## Content-encoding variants
 
-The gateway negotiates pre-compressed asset variants emitted by the build pipeline (see `docs/reference/zsapp.md`'s "Asset variants" section). The `pick_variant` helper resolves the request's `Accept-Encoding` against the asset's `variants` map; the chosen variant's hash, size, and encoding token feed every downstream concern in `serve_static_hit` and `serve_static_streaming`:
+The gateway negotiates pre-compressed asset variants emitted by the build pipeline (see `docs/reference/zship.md`'s "Asset variants" section). The `pick_variant` helper resolves the request's `Accept-Encoding` against the asset's `variants` map; the chosen variant's hash, size, and encoding token feed every downstream concern in `serve_static_hit` and `serve_static_streaming`:
 
 - **Body fetch** uses the variant's hash. The mem / disk LRUs key off `chosen.hash`, so requests for the same encoding share the same cached bytes.
 - **ETag** is `"<variant.hash>"`. A client that fetched the brotli body and re-requests it later with `If-None-Match: "<br_hash>"` short-circuits to 304 even though the identity hash differs.

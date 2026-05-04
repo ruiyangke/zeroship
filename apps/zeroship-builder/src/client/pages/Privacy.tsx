@@ -59,7 +59,7 @@ export function Privacy() {
 
           <Section title="Your rights">
             <p>
-              You can export your projects (as <code className="font-mono text-[14px] not-italic">.zsapp</code> bundles) and your account data at
+              You can export your projects (as <code className="font-mono text-[14px] not-italic">.zship</code> bundles) and your account data at
               any time. You can delete your account; data is hard-deleted
               after a 30-day grace window. EU residents have full GDPR
               rights — email{" "}

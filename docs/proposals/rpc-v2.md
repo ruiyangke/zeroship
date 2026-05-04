@@ -625,7 +625,7 @@ Response:
 
 ## 7. Manifest — unified resource tree
 
-The `.zsapp` manifest replaces the previous `rules` + `policies` split with a single **`resources`** block that unifies routing and protection. Every entry is a **resource** — a URL path, an RPC namespace, or an RPC procedure. Each resource carries optional **policy** fields (auth, rate_limit, cors, cache, csrf, idempotent, max_input_bytes, middleware, timeout, publicly_accessible) and an optional **routing action** (redirect, rewrite, static); when no routing action is declared, dispatch falls back to the resource's namespace default (see §7.1).
+The `.zship` manifest replaces the previous `rules` + `policies` split with a single **`resources`** block that unifies routing and protection. Every entry is a **resource** — a URL path, an RPC namespace, or an RPC procedure. Each resource carries optional **policy** fields (auth, rate_limit, cors, cache, csrf, idempotent, max_input_bytes, middleware, timeout, publicly_accessible) and an optional **routing action** (redirect, rewrite, static); when no routing action is declared, dispatch falls back to the resource's namespace default (see §7.1).
 
 ### Default dispatch
 
@@ -1346,7 +1346,7 @@ await rpcInvalidate("todos.");          // all queries with id starting with "to
 
 ## 14. What stays the same
 
-- `.zsapp` artifact format — manifest schema is v1 with the unified `resources` block; the rest (worker, assets, runtime_assets, sourcemaps) is unchanged.
+- `.zship` artifact format — manifest schema is v1 with the unified `resources` block; the rest (worker, assets, runtime_assets, sourcemaps) is unchanged.
 - Synthetic-entry pattern from the recent cleanup — expands to also expose `default.rpc` built from a build-time static procedure map. The closure-private registry virtual module is retired.
 - Runtime kernel handles `/_zs/v1/*` by calling `user.default.rpc(name, input, ctx)`; non-RPC paths fall through to `user.default.fetch(request)`.
 - EnvSnapshot, auth gateway, CHWBL routing — untouched.

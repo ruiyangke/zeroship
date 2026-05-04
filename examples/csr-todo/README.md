@@ -23,14 +23,14 @@ dist/
 │   └── *.js / *.css         (hashed Vite chunks)
 ├── server/
 │   └── index.js             (the bundled "use server" exports + RPC bootstrap)
-└── app.zsapp                (the deploy artifact)
+└── app.zship                (the deploy artifact)
 ```
 
 ## Inspect the manifest
 
 ```bash
-mkdir -p /tmp/csr && tar -xf dist/app.zsapp -C /tmp/csr 2>/dev/null \
-  || (zstd -dc dist/app.zsapp | tar -xC /tmp/csr)
+mkdir -p /tmp/csr && tar -xf dist/app.zship -C /tmp/csr 2>/dev/null \
+  || (zstd -dc dist/app.zship | tar -xC /tmp/csr)
 jq . /tmp/csr/manifest.json
 ```
 
@@ -52,7 +52,7 @@ You should see (rules excerpt):
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zsapp --app=<uuid> --control=<url> --key=<master>
+zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --key=<master>
 ```
 
 ## Notes

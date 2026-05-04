@@ -55,18 +55,18 @@ trap cleanup EXIT
 # Helpers
 # ---------------------------------------------------------------------------
 
-# build_zsapp <js_file> <out_zsapp_path>
+# build_zship <js_file> <out_zship_path>
 #
-# Pack a single-module worker into a `.zsapp` archive (tar.zst) the
+# Pack a single-module worker into a `.zship` archive (tar.zst) the
 # control plane accepts at `POST /api/apps/{id}/deploy` with
-# `Content-Type: application/x-zsapp`. Manifest is the first tar entry,
+# `Content-Type: application/x-zship`. Manifest is the first tar entry,
 # the JS payload lives at `blobs/<sha256>`. Schema v2 — see
-# `docs/reference/zsapp.md`.
-build_zsapp() {
+# `docs/reference/zship.md`.
+build_zship() {
     local js_file="$1"
     local out_path="$2"
 
-    local stage; stage=$(mktemp -d -t zeroship-e2e-zsapp-XXXXXX)
+    local stage; stage=$(mktemp -d -t zeroship-e2e-zship-XXXXXX)
     mkdir -p "$stage/blobs"
 
     # SHA-256 the raw JS bytes — this hash is the blob's filename inside
@@ -159,9 +159,9 @@ API_KEY=$(echo "$APP" | jq -r '.api_key')
 
 # Deploy
 tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zsapp)
+tmpz=$(mktemp --suffix=.zship)
 echo 'export function ping() { return "lifecycle-ok"; }' > "$tmpf"
-build_zsapp "$tmpf" "$tmpz"
+build_zship "$tmpf" "$tmpz"
 DEPLOY=$("$BIN/zeroship" deploy "$tmpz" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" 2>&1)
 rm "$tmpf" "$tmpz"
 echo "$DEPLOY" | grep -q "deploy_hash" && pass "deploy" || fail "deploy"
@@ -194,9 +194,9 @@ for i in $(seq 1 10); do
     APP_KEYS[$name]=$(echo "$result" | jq -r '.api_key')
 
     tmpf=$(mktemp --suffix=.js)
-    tmpz=$(mktemp --suffix=.zsapp)
+    tmpz=$(mktemp --suffix=.zship)
     echo "export function ping() { return \"I am $name\"; }" > "$tmpf"
-    build_zsapp "$tmpf" "$tmpz"
+    build_zship "$tmpf" "$tmpz"
     "$BIN/zeroship" deploy "$tmpz" --app="${APP_IDS[$name]}" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
     rm "$tmpf" "$tmpz"
 done
@@ -235,12 +235,12 @@ CID=$(echo "$result" | jq -r '.id')
 CKEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zsapp)
+tmpz=$(mktemp --suffix=.zship)
 cat > "$tmpf" << 'JSEOF'
 let counter = 0;
 export function ping() { counter++; return { count: counter }; }
 JSEOF
-build_zsapp "$tmpf" "$tmpz"
+build_zship "$tmpf" "$tmpz"
 "$BIN/zeroship" deploy "$tmpz" --app="$CID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf" "$tmpz"
 sleep 4
@@ -332,9 +332,9 @@ COLD_ID=$(echo "$result" | jq -r '.id')
 COLD_KEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zsapp)
+tmpz=$(mktemp --suffix=.zship)
 echo 'export function ping() { return "cold-ok"; }' > "$tmpf"
-build_zsapp "$tmpf" "$tmpz"
+build_zship "$tmpf" "$tmpz"
 "$BIN/zeroship" deploy "$tmpz" --app="$COLD_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf" "$tmpz"
 sleep 3
@@ -375,9 +375,9 @@ HOT_ID=$(echo "$result" | jq -r '.id')
 HOT_KEY=$(echo "$result" | jq -r '.api_key')
 
 tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zsapp)
+tmpz=$(mktemp --suffix=.zship)
 echo 'export function ping() { return "v1"; }' > "$tmpf"
-build_zsapp "$tmpf" "$tmpz"
+build_zship "$tmpf" "$tmpz"
 "$BIN/zeroship" deploy "$tmpz" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf" "$tmpz"
 sleep 3
@@ -392,9 +392,9 @@ v=$(echo "$result" | jq -r '.result // empty')
 
 # Deploy v2
 tmpf=$(mktemp --suffix=.js)
-tmpz=$(mktemp --suffix=.zsapp)
+tmpz=$(mktemp --suffix=.zship)
 echo 'export function ping() { return "v2"; }' > "$tmpf"
-build_zsapp "$tmpf" "$tmpz"
+build_zship "$tmpf" "$tmpz"
 "$BIN/zeroship" deploy "$tmpz" --app="$HOT_ID" --control="http://localhost:$CONTROL_PORT" --key="$MASTER_KEY" > /dev/null 2>&1
 rm "$tmpf" "$tmpz"
 

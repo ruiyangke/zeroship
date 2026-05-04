@@ -78,7 +78,7 @@ pub struct AppState {
     /// Optional Google OAuth config — `Some` enables /auth/google/* routes.
     pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
-    /// Content-addressed blob store. Backs `.zsapp` ingestion. The
+    /// Content-addressed blob store. Backs `.zship` ingestion. The
     /// gateway reads asset bytes from its own `BlobStore` instance
     /// (Phase 4), so no asset-serving HTTP shim lives here.
     pub blob_store: Arc<dyn BlobStore>,
@@ -107,7 +107,7 @@ pub struct AppState {
     /// XFF; otherwise an attacker with direct network reach can spoof
     /// audit log IPs and rate-limit buckets.
     pub trust_proxy: bool,
-    /// Directory where in-flight `.zsapp` deploy bodies are streamed
+    /// Directory where in-flight `.zship` deploy bodies are streamed
     /// before mmap+ingest. Defaults to `std::env::temp_dir()`. Operators
     /// may pin it to a fast local disk (`--deploy-tmp-dir`) so deploy
     /// throughput isn't bottlenecked by `/tmp` space or filesystem

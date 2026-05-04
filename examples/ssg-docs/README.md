@@ -23,7 +23,7 @@ dist/
 ├── docs/
 │   └── intro.html
 ├── index.html
-└── app.zsapp               (the deploy artifact)
+└── app.zship               (the deploy artifact)
 ```
 
 `mode: "static"` in `vite.config.ts` skips the SSR sub-build entirely and injects a virtual stub Rollup input that gets deleted in `generateBundle`, so no `_empty-<hash>.js` placeholder ships in the artifact.
@@ -31,7 +31,7 @@ dist/
 ## Inspect the manifest
 
 ```bash
-zstd -dc dist/app.zsapp | tar -xC /tmp/ssg
+zstd -dc dist/app.zship | tar -xC /tmp/ssg
 jq '.rules, .worker' /tmp/ssg/manifest.json
 ```
 
@@ -70,7 +70,7 @@ What you should see:
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zsapp --app=<uuid> --control=<url> --key=<master>
+zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --key=<master>
 ```
 
 Cold start: instant. Per-request work: one blob fetch from the gateway's content-addressed cache. No V8.

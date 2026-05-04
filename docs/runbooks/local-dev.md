@@ -91,12 +91,12 @@ curl -X POST http://localhost:9090/api/apps \
   -d '{"name":"hello","plan_id":"free"}'
 # → {"id":"<uuid>", "api_key":"...", ...}
 
-# Build (.zsapp via vite-plugin)
+# Build (.zship via vite-plugin)
 cd examples/hello && npx vite build
-# Produces dist/app.zsapp (tar.zst archive: manifest.json + blobs/<hash>)
+# Produces dist/app.zship (tar.zst archive: manifest.json + blobs/<hash>)
 
 # Deploy
-./target/release/zeroship deploy ./examples/hello/dist/app.zsapp \
+./target/release/zeroship deploy ./examples/hello/dist/app.zship \
   --app=<uuid> \
   --control=http://localhost:9090 \
   --key=dev-master
@@ -143,5 +143,5 @@ DURATION=10s CONNS=300 WORKERS=16 ./run_zerobench.sh
 - **`Manifest::passthrough()` is synthesized when `manifest_json` is NULL.** Apps without their own manifest get the default routing: POST `/_rpc/*` goes to RPC, everything else to SSR.
 - **Worker holds isolates per-thread.** If you change `--workers`, restart the whole binary; the LRU cache doesn't carry across processes.
 - **Gateway polls control every 5s.** New deploys aren't instant — wait one cycle, or restart the gateway.
-- **Deploy hash mismatch is loud.** The control plane verifies `sha256(blob bytes) == filename hash` for every blob in the `.zsapp`. Any mismatch returns 400 with the offending hash; nothing is partially written.
+- **Deploy hash mismatch is loud.** The control plane verifies `sha256(blob bytes) == filename hash` for every blob in the `.zship`. Any mismatch returns 400 with the offending hash; nothing is partially written.
 - **`init_error` shows up as 500.** A syntax error in your app's JS returns 500 with the message instead of a misleading 404 "no default.fetch handler exported."

@@ -1,4 +1,4 @@
-# `.zsapp` — deploy artifact format
+# `.zship` — deploy artifact format
 
 **Schema:** `version: 2`
 
@@ -6,7 +6,7 @@ A single artifact emitted by the build pipeline and ingested by the control plan
 
 ## Container
 
-`tar.zst` (zstd-compressed tar). MIME: `application/x-zsapp`.
+`tar.zst` (zstd-compressed tar). MIME: `application/x-zship`.
 
 ```
 manifest.json                 ← MUST be the first tar entry
@@ -333,7 +333,7 @@ Operational concerns that aren't security:
 ```
 POST /api/apps/{id}/deploy
 Authorization: Bearer <master-key>
-Content-Type: application/x-zsapp
+Content-Type: application/x-zship
 Content-Length: <bytes> | Transfer-Encoding: chunked
 Body: streaming .tar.zst
 ```

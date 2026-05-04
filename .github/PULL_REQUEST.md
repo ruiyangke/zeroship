@@ -4,7 +4,7 @@
 **Commits:** ~150 since fork
 **TypeScript:** `tsc --noEmit` clean (0 errors)
 **Tests:** 221 e2e across ~25 spec files — **all passing** with `OPENAI_API_KEY` + control plane up; ~150 always-passing without env, the rest skip cleanly when their env isn't set
-**Production build:** clean (`vite build` → `dist/app.zsapp` 3.91 MB, 559 blobs)
+**Production build:** clean (`vite build` → `dist/app.zship` 3.91 MB, 559 blobs)
 
 ---
 

@@ -1,6 +1,6 @@
-//! `.zsapp` ingestion. Streaming tar.zst → blob store + manifest.
+//! `.zship` ingestion. Streaming tar.zst → blob store + manifest.
 //!
-//! See `docs/reference/zsapp.md` for the wire format and the
+//! See `docs/reference/zship.md` for the wire format and the
 //! ingestion algorithm. Phase 2 of the artifact-layout redesign.
 //!
 //! # Streaming
@@ -44,7 +44,7 @@ pub enum IngestError {
     BadRequest { error: String, detail: String },
     /// 413 Payload Too Large — compressed or decompressed cap exceeded.
     TooLarge { cap_bytes: u64, observed_bytes: u64 },
-    /// 415 Unsupported Media Type — Content-Type wasn't application/x-zsapp.
+    /// 415 Unsupported Media Type — Content-Type wasn't application/x-zship.
     UnsupportedMediaType,
     /// 503 Service Unavailable — blob store backend errored.
     BlobStoreUnavailable(String),

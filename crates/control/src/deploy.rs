@@ -1,4 +1,4 @@
-//! `.zsapp` ingestion. The streaming pipeline lives in
+//! `.zship` ingestion. The streaming pipeline lives in
 //! `zeroship_bundle::unpack`. This module re-exports it for callers
 //! that haven't migrated to the `zeroship_bundle::ingest` path
 //! directly (notably `api.rs` and the `deploy_test.rs` integration

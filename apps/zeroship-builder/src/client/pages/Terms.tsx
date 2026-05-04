@@ -40,7 +40,7 @@ export function Terms() {
           <Section title="Your code">
             <p>
               You own what you build. The agents wrote it; you ship it; it's
-              yours. You can export the bundle (<code className="font-mono text-[14px] not-italic">.zsapp</code>) at any time
+              yours. You can export the bundle (<code className="font-mono text-[14px] not-italic">.zship</code>) at any time
               and run it elsewhere — no lock-in. We get a non-exclusive
               licence only to run, store, and serve it on your behalf.
             </p>

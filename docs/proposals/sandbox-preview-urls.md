@@ -15,7 +15,7 @@
 - The builder UI's "Open preview" button.
 - AI-builder share links (the AI generates an app, posts a preview URL into chat, end user clicks).
 - Vite HMR in-builder (the creator edits a file, the running app reloads).
-- Closing the gap between "AI says it works" and "I can see it work" without round-tripping `.zsapp` deploys.
+- Closing the gap between "AI says it works" and "I can see it work" without round-tripping `.zship` deploys.
 
 ## Executive summary
 
@@ -87,7 +87,7 @@ zeroship is "Shopify for AI-generated apps." The builder workflow is:
 2. The AI generates a Vite/Node app inside a fresh sandbox VM.
 3. Inside the VM the user code typically binds `0.0.0.0:5173` (Vite dev server) or `0.0.0.0:3000` (a Node service).
 4. **The creator wants to see the running app in their browser, with HMR, before publishing.**
-5. Eventually they "Publish" → the built artifact is packaged as a `.zsapp` and deployed to the worker tier; reachable via the production gateway at `<app>.zeroship.ai`.
+5. Eventually they "Publish" → the built artifact is packaged as a `.zship` and deployed to the worker tier; reachable via the production gateway at `<app>.zeroship.ai`.
 
 Step 4 is the gap. The production gateway is for finished, deployed apps — not for ephemeral dev servers running inside a microVM. Today the controller can talk to the in-VM agent on `http://10.99.<100+idx>.2:7777` (see `docs/runbooks/sandbox-nomad-ch.md` § Network), but **nothing lets the creator's browser reach the user's dev server**. The agent's surface is `/exec`, `/files`, `/tree`, `/livez`, `/readyz`, `/version`, `/metrics`, `/shutdown` — there is no proxy.
 
@@ -2109,10 +2109,10 @@ k8s-only — kills the unified-interface promise. Skip.
 
 ### E. "Deploy and publish at every save"
 
-Treat the builder as deploy-on-save: every file edit produces a `.zsapp` and pushes through the worker tier. Rejected:
+Treat the builder as deploy-on-save: every file edit produces a `.zship` and pushes through the worker tier. Rejected:
 
 - HMR is impossible — the worker runtime is per-request, no long-lived process bound to port 5173.
-- `.zsapp` build + upload + worker reload is ~5–10 s; unusable for an interactive builder UX.
+- `.zship` build + upload + worker reload is ~5–10 s; unusable for an interactive builder UX.
 - Multiplies platform load by ~1000× (every keystroke).
 
 ### F. Browser → agent direct via WebRTC data channels

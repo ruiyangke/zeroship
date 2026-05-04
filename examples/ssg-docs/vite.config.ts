@@ -12,7 +12,7 @@
 //   - deletes the stub chunk in `generateBundle` so no `_empty-<hash>.js`
 //     ships in the deploy artifact.
 //
-// Result: `dist/` ends up with just the copied HTML, and `app.zsapp` has
+// Result: `dist/` ends up with just the copied HTML, and `app.zship` has
 // `worker: null` plus per-route static rules for every page.
 import { defineConfig, type Plugin } from "vite";
 import { promises as fs } from "node:fs";
@@ -39,7 +39,7 @@ function ssgContentPlugin(): Plugin {
     name: "ssg:copy-content",
     apply: "build",
     // Run BEFORE zeroship's closeBundle so the copied content is on
-    // disk by the time the .zsapp emitter walks dist/.
+    // disk by the time the .zship emitter walks dist/.
     enforce: "pre",
     configResolved(config) {
       root = config.root;

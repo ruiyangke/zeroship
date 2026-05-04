@@ -13,7 +13,7 @@
 // `src/server.ts` can `import clientManifest from "virtual:zeroship/client-manifest"`
 // and look up the hashed filenames by source path.
 //
-// The plugin then packs both into `dist/app.zsapp`.
+// The plugin then packs both into `dist/app.zship`.
 /// <reference types="@zeroship/vite-plugin/types" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";

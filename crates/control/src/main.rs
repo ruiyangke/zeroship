@@ -130,7 +130,7 @@ async fn main() -> std::io::Result<()> {
     ) as Arc<dyn BundleStore + Send + Sync>;
 
     // Phase 2: BlobStore lives alongside the legacy BundleStore on the
-    // same root. New `.zsapp` deploys land in `<bundles_dir>/blobs/`
+    // same root. New `.zship` deploys land in `<bundles_dir>/blobs/`
     // and `<bundles_dir>/manifests/`; legacy `<bundles_dir>/<app_id>/...`
     // files stay where they are until phase 4 retires the BundleStore.
     let blob_root = PathBuf::from(&bundles_dir);

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { transformPlugin, type TransformState } from "./transform.js";
 import { nodeCompatPlugin } from "./node-compat.js";
 import { DEFAULT_RPC_ENDPOINT } from "./constants.js";
-import { emitZsapp } from "./zsapp.js";
+import { emitZship } from "./zship.js";
 import {
   rpcRegistryPlugin,
   SERVER_ENTRY_VIRTUAL_ID,
@@ -46,7 +46,7 @@ export const STATIC_STUB_RESOLVED_ID = "\0" + STATIC_STUB_VIRTUAL_ID;
  *   - `noExternal: true` — bundle every dep (npm packages have no
  *     ESM resolver inside the V8 runtime).
  *   - `target: "webworker"` — picks the right export-conditions map.
- *   - `entryFileNames: "index.js"` — deterministic name; the .zsapp
+ *   - `entryFileNames: "index.js"` — deterministic name; the .zship
  *     emitter uses it as the worker entry.
  *   - `build.ssr: true` + `rollupOptions.input` — when ssrEntry is a
  *     virtual specifier (e.g. `virtual:zeroship/_server-entry`), Vite's
@@ -186,7 +186,7 @@ export function stripUseServer(bundle: string): string {
  * Probe a server-entry source string for `export default`.
  *
  * Internal helper — we call this on the user's untransformed entry
- * source to decide which catch-all rule the .zsapp emitter should
+ * source to decide which catch-all rule the .zship emitter should
  * write (Worker(SSR) when the user wrote their own fetch, Static SPA
  * fallback otherwise). The synthetic SSR entry always exports a
  * default, so probing the bundled output would always say "yes" —
@@ -241,14 +241,14 @@ export function buildPlugin(
   let root = "";
   let isDev = false;
   // The client build's `outDir` (resolved). Read in configResolved so the
-  // closeBundle hook knows where to look for `.zsapp` inputs.
+  // closeBundle hook knows where to look for `.zship` inputs.
   let clientOutDir = "";
   // Whether we already ran the server SSR build for this Vite invocation.
   // closeBundle fires once per environment per invocation; without this
   // guard we'd re-emit the same archive (or worse, re-trigger the SSR
   // build inside its own closeBundle).
   let serverBuilt = false;
-  let zsappEmitted = false;
+  let zshipEmitted = false;
   // Whether the user's SSR entry source contains `export default`.
   // Probed before Rollup runs so it isn't confused by the bootstrap's
   // own appended default. Conservative default = true (emit Worker(SSR)
@@ -266,7 +266,7 @@ export function buildPlugin(
      * In static mode, satisfy Vite's "needs at least one input" check
      * by injecting a virtual entry that resolves to an empty module.
      * The matching `generateBundle` below deletes the empty chunk so
-     * the .zsapp emitter doesn't catalog a `_empty-<hash>.js` asset.
+     * the .zship emitter doesn't catalog a `_empty-<hash>.js` asset.
      *
      * Only runs when the user hasn't already configured an input; if
      * they have an `index.html` or other entry, we leave it alone
@@ -311,7 +311,7 @@ export function buildPlugin(
     },
     /**
      * After Rollup builds the (empty) stub chunk, delete its output so
-     * the .zsapp doesn't end up shipping a `_empty-<hash>.js`.
+     * the .zship doesn't end up shipping a `_empty-<hash>.js`.
      */
     generateBundle(_options: unknown, bundle: Record<string, { name?: string }>) {
       if (mode !== "static") return;
@@ -350,7 +350,7 @@ export function buildPlugin(
       const entry = findServerEntry(root, options.serverEntry);
       if (!entry) {
         console.warn("[zeroship] no server entry found — skipping server bundle");
-        // We still want to emit a static-only .zsapp in this case,
+        // We still want to emit a static-only .zship in this case,
         // so the closeBundle hook handles the SSG path.
         return;
       }
@@ -359,7 +359,7 @@ export function buildPlugin(
       // Probe the user's untransformed entry source for `export default`.
       // The synthetic SSR entry ALWAYS exports a default, so we can't
       // probe the bundled output for this — we need the user's source.
-      // This drives the .zsapp's catch-all rule choice (Worker(SSR) vs
+      // This drives the .zship's catch-all rule choice (Worker(SSR) vs
       // Static SPA fallback). Conservative default is true on read
       // failure: an unwanted Worker(SSR) 404s while an unwanted Static
       // catch-all serves stale shell on intended SSR routes.
@@ -435,7 +435,7 @@ export function buildPlugin(
 
     /**
      * After both client and server builds have written their bundles,
-     * emit the `.zsapp` archive. closeBundle fires at the very end
+     * emit the `.zship` archive. closeBundle fires at the very end
      * of the Vite build lifecycle — once for this plugin instance per
      * `vite build` invocation, regardless of how many environments
      * Vite ran. (Each environment in a multi-env build gets its own
@@ -453,8 +453,8 @@ export function buildPlugin(
      */
     async closeBundle() {
       if (isDev) return;
-      if (zsappEmitted) return;
-      zsappEmitted = true;
+      if (zshipEmitted) return;
+      zshipEmitted = true;
 
       try {
         // Compute the manifest's resource tree (auto-derived RPC
@@ -485,7 +485,7 @@ export function buildPlugin(
           mode: viteMode,
         });
 
-        await emitZsapp({
+        await emitZship({
           root,
           distDir: clientOutDir,
           compiler: getCompilerId(),
@@ -496,7 +496,7 @@ export function buildPlugin(
           },
         });
       } catch (e) {
-        console.error(`[zeroship] failed to emit .zsapp: ${(e as Error).message}`);
+        console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);
         throw e;
       }
     },

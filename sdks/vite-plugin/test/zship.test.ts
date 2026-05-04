@@ -1,8 +1,8 @@
 /**
- * Tests for the `.zsapp` emitter.
+ * Tests for the `.zship` emitter.
  *
  * The emitter walks `dist/`, hashes every file, packs into a tar.zst archive,
- * and emits `dist/app.zsapp`. These tests build a hand-crafted fixture
+ * and emits `dist/app.zship`. These tests build a hand-crafted fixture
  * directory tree, run the emitter, and inspect the output for the
  * cross-references the control plane will validate (manifest schema,
  * blob presence, manifest-first tar order, hash format).
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { brotliDecompressSync, gunzipSync, zstdDecompressSync } from "node:zlib";
 
-import { emitZsapp } from "../src/zsapp.js";
+import { emitZship } from "../src/zship.js";
 import {
   CLIENT_MANIFEST_RESOLVED_ID,
   CLIENT_MANIFEST_VIRTUAL_ID,
@@ -43,7 +43,7 @@ interface Fixture {
 }
 
 async function makeFixture(files: Record<string, string | Buffer>): Promise<Fixture> {
-  const root = join(tmpdir(), `zsapp-test-${randomUUID()}`);
+  const root = join(tmpdir(), `zship-test-${randomUUID()}`);
   await fs.mkdir(root, { recursive: true });
 
   for (const [relPath, content] of Object.entries(files)) {
@@ -117,8 +117,8 @@ function sha256Hex(b: Buffer | string): string {
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-describe("emitZsapp", () => {
-  test("emits a .zsapp archive with manifest first and all referenced blobs present", async () => {
+describe("emitZship", () => {
+  test("emits a .zship archive with manifest first and all referenced blobs present", async () => {
     const fix = await makeFixture({
       "dist/index.html":
         '<!doctype html><html><head><script type="module" src="/assets/main-abc.js"></script></head><body><div id="root"></div></body></html>',
@@ -129,7 +129,7 @@ describe("emitZsapp", () => {
     });
 
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         compiler: "@zeroship/vite-plugin@test",
@@ -139,7 +139,7 @@ describe("emitZsapp", () => {
       // Archive exists at the documented path.
       assert.equal(
         result.outputPath,
-        resolve(fix.root, "dist/app.zsapp"),
+        resolve(fix.root, "dist/app.zship"),
         "archive path"
       );
       const archiveBytes = await fs.readFile(result.outputPath);
@@ -323,7 +323,7 @@ describe("emitZsapp", () => {
       "dist/assets/style-x.css": "body{color:red}",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -355,7 +355,7 @@ describe("emitZsapp", () => {
       "dist/assets/app.js.map": '{"version":3,"sources":[]}',
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -399,7 +399,7 @@ describe("emitZsapp", () => {
       "dist/server/index.js.map": '{"version":3,"sources":[]}',
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -437,7 +437,7 @@ describe("emitZsapp", () => {
       "dist/c.txt": "same content",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -458,7 +458,7 @@ describe("emitZsapp", () => {
     try {
       await assert.rejects(
         () =>
-          emitZsapp({
+          emitZship({
             root: fix.root,
             builtAt: "2026-04-29T00:00:00Z",
             silent: true,
@@ -477,7 +477,7 @@ describe("emitZsapp", () => {
       "dist/assets/x.js": "x",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -496,7 +496,7 @@ describe("emitZsapp", () => {
   test("manifest validation rejects orphan asset hashes (defensive — should never happen)", async () => {
     // This is exercised internally by validateManifest(); we verify by
     // running a happy-path build and confirming validation passes (no
-    // throw from emitZsapp). The unit-level test for the validation
+    // throw from emitZship). The unit-level test for the validation
     // function would require exporting it; we keep that internal and
     // rely on the integration test above which would catch any
     // cross-reference bug as a missing-blob assertion failure.
@@ -506,7 +506,7 @@ describe("emitZsapp", () => {
     });
     try {
       await assert.doesNotReject(() =>
-        emitZsapp({
+        emitZship({
           root: fix.root,
           builtAt: "2026-04-29T00:00:00Z",
           silent: true,
@@ -523,12 +523,12 @@ describe("emitZsapp", () => {
       "dist/server/index.js": "export default { fetch: () => new Response('') };",
     });
     try {
-      await emitZsapp({
+      await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
       });
-      const stagingPath = resolve(fix.root, "dist/.zsapp");
+      const stagingPath = resolve(fix.root, "dist/.zship");
       const exists = await fs
         .stat(stagingPath)
         .then(() => true)
@@ -551,7 +551,7 @@ describe("emitZsapp", () => {
       "dist/assets/app.js": jsBody,
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -605,7 +605,7 @@ describe("emitZsapp", () => {
       "dist/tiny.txt": tiny,
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -635,7 +635,7 @@ describe("emitZsapp", () => {
       "dist/logo.png": pngBody,
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -665,7 +665,7 @@ describe("emitZsapp", () => {
       "dist/assets/app.js": jsBody,
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -690,7 +690,7 @@ describe("emitZsapp", () => {
     // the user did NOT export their own default.fetch. The synthetic
     // server entry's default.fetch is sufficient for /_rpc/* routing,
     // so the catch-all should NOT hit the worker — it should serve
-    // the SPA shell instead. The .zsapp emitter's behavior depends
+    // the SPA shell instead. The .zship emitter's behavior depends
     // only on (a) whether the server bundle exists and (b) the
     // explicit `userHasDefaultFetch` flag, never on the bundle's
     // contents.
@@ -701,7 +701,7 @@ describe("emitZsapp", () => {
         "// RPC-only bundle (synthetic-entry-shaped; opaque to the emitter)\n",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -743,7 +743,7 @@ describe("emitZsapp", () => {
         "export default { fetch: async (req) => new Response('hi') };\n",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -771,7 +771,7 @@ describe("emitZsapp", () => {
       "dist/assets/app.js": jsBody,
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -956,7 +956,7 @@ describe("buildSsrInlineConfig", () => {
   test("ssr_build_no_publicdir_copy", () => {
     // The SSR sub-build's `publicDir` MUST be `false` — otherwise Vite
     // copies `<root>/public/*` into `dist/server/`, and those files
-    // get cataloged as worker.modules entries by the .zsapp emitter.
+    // get cataloged as worker.modules entries by the .zship emitter.
     const config = buildSsrInlineConfig({
       root: "/tmp/myapp",
       ssrEntry: "/tmp/myapp/src/server.ts",
@@ -1005,7 +1005,7 @@ describe("buildSsrInlineConfig", () => {
 
   test("static_only_mode_skips_rollup", async () => {
     // SSG-only fixture: no JS, only static HTML files. After build,
-    // the .zsapp should contain those HTML files as assets, no worker,
+    // the .zship should contain those HTML files as assets, no worker,
     // and NO spurious `_empty-<hash>.js` chunk.
     const fix = await makeFixture({
       "dist/index.html": "<!doctype html><html><body>Home</body></html>",
@@ -1014,7 +1014,7 @@ describe("buildSsrInlineConfig", () => {
         "<!doctype html><html><body>Intro</body></html>",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -1079,7 +1079,7 @@ describe("buildSsrInlineConfig", () => {
       "dist/about.html": "<!doctype html>About",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,
@@ -1117,7 +1117,7 @@ describe("buildSsrInlineConfig", () => {
       "dist/server/index.js": "export default { fetch: () => new Response('') }",
     });
     try {
-      const result = await emitZsapp({
+      const result = await emitZship({
         root: fix.root,
         builtAt: "2026-04-29T00:00:00Z",
         silent: true,

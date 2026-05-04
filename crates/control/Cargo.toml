@@ -40,7 +40,7 @@ http = { workspace = true }
 rand = "0.8"
 
 [dev-dependencies]
-# `deploy_test.rs` builds a synthetic `.zsapp` payload (tar+zstd) and
+# `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and
 # feeds it through `zeroship_bundle::ingest`. The runtime path no longer
 # depends on these crates — only the test packer does.
 tar = { workspace = true }

@@ -38,7 +38,7 @@ The systems are physically separate (different binaries, different processes, di
 
 | Component | Crate | Single-line responsibility |
 | --- | --- | --- |
-| Control plane | `crates/control` | App CRUD · `.zsapp` ingestion · env/secrets · billing · route registry · auth service |
+| Control plane | `crates/control` | App CRUD · `.zship` ingestion · env/secrets · billing · route registry · auth service |
 | Gateway | `crates/gateway` | Manifest dispatch · JWT validation · rate limit · CHWBL routing · BlobStore-backed asset serving with edge LRU |
 | Worker | `crates/worker` | V8-per-thread · BlobStore-backed module fetch · LRU isolate eviction · usage reporting |
 | Runtime (lib) | `crates/runtime` | V8 + compio event loop · fetch · WebSocket · streams · WebCrypto · auth context |
@@ -71,7 +71,7 @@ The systems are physically separate (different binaries, different processes, di
 
 ```
 1. Creator → CLI: `zeroship deploy ./src --app=<id> --key=<master>`
-2. Build:   `vite build` (client) + `vite build --ssr` (server) → `dist/app.zsapp` (tar.zst with manifest + blobs)
+2. Build:   `vite build` (client) + `vite build --ssr` (server) → `dist/app.zship` (tar.zst with manifest + blobs)
 3. CLI →    Control plane: POST /api/apps/<id>/deploy (16 MB body cap)
 4. Control: stream-decompress + verify per-blob hashes; write blobs to `BlobStore`; persist `manifest.json`
             UPDATE apps SET deploy_hash = <hash>
@@ -93,7 +93,7 @@ The systems are physically separate (different binaries, different processes, di
 
 ## What's NOT in this document
 
-- The `.zsapp` archive layout + manifest schema → `docs/reference/zsapp.md`
+- The `.zship` archive layout + manifest schema → `docs/reference/zship.md`
 - The blob store + edge cache architecture → `docs/architecture/blob-store.md`
 - The `Manifest` JSON shape → `crates/core/src/types.rs` and `docs/architecture/gateway-routing.md`
 - Auth flows (creator login, end-user OAuth, JWT cookie semantics) → `docs/reference/auth.md`

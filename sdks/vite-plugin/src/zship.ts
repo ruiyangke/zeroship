@@ -1,6 +1,6 @@
-// sdks/vite-plugin/src/zsapp.ts
+// sdks/vite-plugin/src/zship.ts
 //
-// Emit `.zsapp` artifacts from the `dist/` directory produced by Vite.
+// Emit `.zship` artifacts from the `dist/` directory produced by Vite.
 //
 // The build pipeline:
 //
@@ -9,8 +9,8 @@
 //                                                 dist/index.html
 //
 // We then walk `dist/`, content-hash every file, emit a manifest, and pack
-// it into a tar.zst archive at `dist/app.zsapp`. The wire format is
-// defined in `docs/reference/zsapp.md` (schema v2).
+// it into a tar.zst archive at `dist/app.zship`. The wire format is
+// defined in `docs/reference/zship.md` (schema v2).
 //
 // The control plane ingests this via `POST /api/apps/{id}/deploy`.
 
@@ -107,14 +107,14 @@ export interface PrecompressOptions {
   gzip?: boolean;
 }
 
-export interface ZsappOptions {
+export interface ZshipOptions {
   /** Project root (defaults to Vite's resolved root). */
   root: string;
   /** `outDir` of the client/static build. Default: `dist`. */
   distDir?: string;
   /** Subdir under `distDir` containing the worker bundle. Default: `server`. */
   serverDir?: string;
-  /** Output archive path. Default: `<distDir>/app.zsapp`. */
+  /** Output archive path. Default: `<distDir>/app.zship`. */
   outputPath?: string;
   /** The compiler identifier baked into `metadata.compiler`. */
   compiler?: string;
@@ -162,8 +162,8 @@ export interface ZsappOptions {
   };
 }
 
-export interface ZsappResult {
-  /** Absolute path of the emitted `.zsapp` archive. */
+export interface ZshipResult {
+  /** Absolute path of the emitted `.zship` archive. */
   outputPath: string;
   /** The manifest that was packed (with deploy_hash absent — control plane fills it). */
   manifest: Manifest;
@@ -177,20 +177,20 @@ export interface ZsappResult {
 
 const DEFAULT_DIST_DIR = "dist";
 const DEFAULT_SERVER_SUBDIR = "server";
-const DEFAULT_OUTPUT_NAME = "app.zsapp";
-const STAGING_DIR_NAME = ".zsapp";
+const DEFAULT_OUTPUT_NAME = "app.zship";
+const STAGING_DIR_NAME = ".zship";
 const DEFAULT_ASSET_PREFIX = "/assets/";
 
 /**
- * Build a `.zsapp` archive from the project's `dist/` directory.
+ * Build a `.zship` archive from the project's `dist/` directory.
  *
  * Walks `dist/` (excluding the staging dir), hashes every file, builds the
  * manifest, packs into `tar.zst`. The resulting archive is the exact bytes
  * the CLI uploads to the control plane.
  */
-export async function emitZsapp(
-  options: ZsappOptions
-): Promise<ZsappResult> {
+export async function emitZship(
+  options: ZshipOptions
+): Promise<ZshipResult> {
   const root = resolve(options.root);
   const distDir = resolve(root, options.distDir ?? DEFAULT_DIST_DIR);
   const serverSubdir = options.serverDir ?? DEFAULT_SERVER_SUBDIR;
@@ -211,10 +211,10 @@ export async function emitZsapp(
   const userHasDefaultFetch = options.userHasDefaultFetch ?? true;
   const log = options.silent
     ? () => {}
-    : (msg: string) => console.log(`[zeroship:zsapp] ${msg}`);
+    : (msg: string) => console.log(`[zeroship:zship] ${msg}`);
 
   if (!(await pathExists(distDir))) {
-    throw new Error(`zsapp: dist dir not found at ${distDir}`);
+    throw new Error(`zship: dist dir not found at ${distDir}`);
   }
 
   // 1. Walk dist/ — collect candidate files with their absolute path,
@@ -229,7 +229,7 @@ export async function emitZsapp(
 
   if (items.length === 0) {
     throw new Error(
-      `zsapp: no files found under ${distDir} — did the build run?`
+      `zship: no files found under ${distDir} — did the build run?`
     );
   }
 
@@ -654,12 +654,12 @@ function validateManifest(
   for (const [path, entry] of Object.entries(m.assets)) {
     if (!blobsByHash.has(entry.hash)) {
       throw new Error(
-        `zsapp: asset ${path} references hash ${entry.hash} but the blob is missing`
+        `zship: asset ${path} references hash ${entry.hash} but the blob is missing`
       );
     }
     if (!isSha256Hex(entry.hash)) {
       throw new Error(
-        `zsapp: asset ${path} hash ${entry.hash} is not lowercase 64-char sha256 hex`
+        `zship: asset ${path} hash ${entry.hash} is not lowercase 64-char sha256 hex`
       );
     }
     // Pre-compressed variants must also be valid + present.
@@ -667,17 +667,17 @@ function validateManifest(
       for (const [enc, variant] of Object.entries(entry.variants)) {
         if (enc !== "br" && enc !== "gzip") {
           throw new Error(
-            `zsapp: asset ${path} variant key ${JSON.stringify(enc)} is not in the v1 allow list (br, gzip)`
+            `zship: asset ${path} variant key ${JSON.stringify(enc)} is not in the v1 allow list (br, gzip)`
           );
         }
         if (!isSha256Hex(variant.hash)) {
           throw new Error(
-            `zsapp: asset ${path} variant ${enc} hash ${variant.hash} is not lowercase 64-char sha256 hex`
+            `zship: asset ${path} variant ${enc} hash ${variant.hash} is not lowercase 64-char sha256 hex`
           );
         }
         if (!blobsByHash.has(variant.hash)) {
           throw new Error(
-            `zsapp: asset ${path} variant ${enc} hash ${variant.hash} has no corresponding blob`
+            `zship: asset ${path} variant ${enc} hash ${variant.hash} has no corresponding blob`
           );
         }
       }
@@ -687,17 +687,17 @@ function validateManifest(
   for (const [k, v] of Object.entries(m.sourcemaps)) {
     if (!isSha256Hex(k) || !isSha256Hex(v)) {
       throw new Error(
-        `zsapp: sourcemaps entry ${k} -> ${v} contains non-sha256 hex`
+        `zship: sourcemaps entry ${k} -> ${v} contains non-sha256 hex`
       );
     }
     if (!blobsByHash.has(k)) {
       throw new Error(
-        `zsapp: sourcemap key ${k} has no corresponding asset blob`
+        `zship: sourcemap key ${k} has no corresponding asset blob`
       );
     }
     if (!blobsByHash.has(v)) {
       throw new Error(
-        `zsapp: sourcemap value ${v} has no corresponding blob`
+        `zship: sourcemap value ${v} has no corresponding blob`
       );
     }
   }
@@ -705,18 +705,18 @@ function validateManifest(
   if (m.worker != null) {
     if (!m.worker.entry || !(m.worker.entry in m.worker.modules)) {
       throw new Error(
-        `zsapp: worker.entry ${JSON.stringify(m.worker.entry)} is not a key in worker.modules`
+        `zship: worker.entry ${JSON.stringify(m.worker.entry)} is not a key in worker.modules`
       );
     }
     for (const [spec, hash] of Object.entries(m.worker.modules)) {
       if (!isSha256Hex(hash)) {
         throw new Error(
-          `zsapp: worker.modules[${spec}] hash ${hash} is not lowercase 64-char sha256 hex`
+          `zship: worker.modules[${spec}] hash ${hash} is not lowercase 64-char sha256 hex`
         );
       }
       if (!blobsByHash.has(hash)) {
         throw new Error(
-          `zsapp: worker.modules[${spec}] hash ${hash} has no corresponding blob`
+          `zship: worker.modules[${spec}] hash ${hash} has no corresponding blob`
         );
       }
     }
@@ -736,7 +736,7 @@ function validateManifest(
       if (t === "$path" || t.includes("[")) continue;
       if (!(t in m.assets)) {
         throw new Error(
-          `zsapp: resource ${JSON.stringify(key)}: static.try references ${t} but it's not in assets`
+          `zship: resource ${JSON.stringify(key)}: static.try references ${t} but it's not in assets`
         );
       }
     }

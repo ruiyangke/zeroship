@@ -3,7 +3,7 @@
 // Just `@zeroship/vite-plugin` — every procedure exported from
 // `src/server.ts` becomes an RPC method on the spec wire
 // (`POST /_zs/v1/<id>` with superjson `{ json: <input> }` envelope).
-// Build outputs `dist/server/index.js` (worker bundle) + `dist/app.zsapp`
+// Build outputs `dist/server/index.js` (worker bundle) + `dist/app.zship`
 // (deploy artifact). The bench server (`zeroship serve`) loads the
 // worker bundle directly.
 

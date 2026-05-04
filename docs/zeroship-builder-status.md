@@ -14,7 +14,7 @@ The branch sat at "alpha" before the foundation-polish + wrap-up passes. What fl
 
 - **Real-LLM full-spine e2e** (`e2e/full-spine-real.spec.ts`) walks landing → wizard → brief → workspace → Builder reply against the live OpenAI API and passes. Surfaced four wire bugs along the way; all four are now fixed.
 - **221 e2e tests pass end-to-end** with `OPENAI_API_KEY` + control plane up. No flakes; no skipped-because-broken.
-- **Production build is clean** — `vite build` produces `dist/app.zsapp` (3.91 MB, 559 blobs); the manifest emitter accepts every procedure id.
+- **Production build is clean** — `vite build` produces `dist/app.zship` (3.91 MB, 559 blobs); the manifest emitter accepts every procedure id.
 - **State persistence layer landed** — issues, archive set, quality scorecard, media, backups all moved off bare module-level `Map`s onto `@zeroship/kv` (process-local in dev, but survives HMR / isolate eviction; multi-node consistency tracked under each ISSUES entry).
 - **Critic → scoreboard wired** — every `data-critic-round` middleware emit calls `setQualityFromCritic` via `waitUntil()`. HealthCanvas reads the live persisted scorecard; ISS-16 closed.
 - **Health Performance section shows real KPIs** — request rate / error rate / p95 latency derived from log lines via loose regexes, with hand-rolled SVG sparklines. ISS-18 promoted from "missing" to "partial".
@@ -32,7 +32,7 @@ What's still brittle:
 What's solid:
 - TypeScript: `tsc --noEmit` clean.
 - 221 e2e tests pass with full env; ~150 always pass without env, the rest skip cleanly when their env isn't set.
-- Production build (`vite build` → `.zsapp`) lands cleanly.
+- Production build (`vite build` → `.zship`) lands cleanly.
 - The chat surface, the multi-agent fleet wire, the survey resume protocol, the sandbox backend protocol, the KV persistence wrapper, the tour, and the perf signal pipeline are all well-covered by tests + code comments.
 - Editorial polish layer (responsive · a11y · empty states · ErrorBoundary · shiki syntax highlighting in Files) is complete.
 

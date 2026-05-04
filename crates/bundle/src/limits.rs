@@ -1,5 +1,5 @@
-//! Size and count limits enforced during `.zsapp` ingestion.
-//! See `docs/reference/zsapp.md` "Limits" section.
+//! Size and count limits enforced during `.zship` ingestion.
+//! See `docs/reference/zship.md` "Limits" section.
 
 /// Compressed-body cap. Wire-level limit before any decompression.
 pub const MAX_COMPRESSED_BYTES: usize = 256 * 1024 * 1024;

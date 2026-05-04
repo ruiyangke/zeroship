@@ -1,4 +1,4 @@
-//! Integration tests for the `.zsapp` ingest path.
+//! Integration tests for the `.zship` ingest path.
 //!
 //! These tests exercise `zeroship_control::deploy::ingest` directly
 //! against an on-disk `LocalDiskBlobStore` (under a tmpdir). The DB
@@ -33,7 +33,7 @@ fn db_url() -> Option<String> {
 
 fn tmpdir() -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("zsapp-test-{}", Uuid::new_v4().simple()));
+    p.push(format!("zship-test-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&p).expect("mkdir tmp");
     p
 }
@@ -93,7 +93,7 @@ fn manifest_for(
 /// Pack `(name, bytes)` entries into a tar archive, then zstd-compress
 /// the whole thing. Manifest goes first if `manifest_first`; otherwise
 /// the entries are appended in the order given.
-fn build_zsapp(
+fn build_zship(
     manifest_bytes: &[u8],
     blobs: &[(String, Vec<u8>)], // (hash, raw bytes)
     manifest_first: bool,
@@ -166,7 +166,7 @@ async fn deploy_round_trip() {
         (html_hash.clone(), html.to_vec()),
         (server_hash.clone(), server.to_vec()),
     ];
-    let body = build_zsapp(&manifest_bytes, &blobs, true);
+    let body = build_zship(&manifest_bytes, &blobs, true);
 
     let app_id = Uuid::new_v4();
     let success = deploy::ingest(&bs, &app_id, &body).await.expect("ingest ok");
@@ -240,7 +240,7 @@ async fn deploy_rejects_hash_mismatch() {
     let manifest = manifest_for(None, &[]);
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let blobs = vec![(wrong_hash.clone(), bytes.to_vec())];
-    let body = build_zsapp(&manifest_bytes, &blobs, true);
+    let body = build_zship(&manifest_bytes, &blobs, true);
 
     let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
     match result {
@@ -262,7 +262,7 @@ async fn deploy_rejects_missing_blob() {
     let phantom_hash = "1".repeat(64);
     let manifest = manifest_for(None, &[("/index.html", &phantom_hash, "text/html")]);
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let body = build_zsapp(&manifest_bytes, &[], true);
+    let body = build_zship(&manifest_bytes, &[], true);
 
     let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
     match result {
@@ -286,7 +286,7 @@ async fn deploy_rejects_manifest_not_first() {
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let blobs = vec![(hash, bytes.to_vec())];
     // manifest_first = false → blob entry comes before manifest.json.
-    let body = build_zsapp(&manifest_bytes, &blobs, false);
+    let body = build_zship(&manifest_bytes, &blobs, false);
 
     let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
     match result {
@@ -319,7 +319,7 @@ async fn deploy_rejects_unsupported_version() {
         "metadata": { "built_at": "2026-04-29T00:00:00Z" }
     });
     let manifest_bytes = serde_json::to_vec(&raw).unwrap();
-    let body = build_zsapp(&manifest_bytes, &[], true);
+    let body = build_zship(&manifest_bytes, &[], true);
 
     let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
     match result {
@@ -347,7 +347,7 @@ async fn deploy_dedup_internal() {
     let manifest = manifest_for(None, &[("/file.txt", &hash, "text/plain")]);
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let blobs = vec![(hash.clone(), payload.to_vec())];
-    let body = build_zsapp(&manifest_bytes, &blobs, true);
+    let body = build_zship(&manifest_bytes, &blobs, true);
 
     let app_a = Uuid::new_v4();
     let success_a = deploy::ingest(&bs, &app_a, &body).await.expect("A");

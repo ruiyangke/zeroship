@@ -948,7 +948,7 @@ Three plans:
 
 Below the plan grid: a clear "**The 15 % platform fee**" section with worked example ($100 in revenue → Stripe ~$3.20 → platform $14.52 → creator $82.28). This number is also stated *at first deploy* and *at first earning*, so users see it three times before any money moves.
 
-FAQ: 8 entries, including "what happens if I cancel?", "do I own my code?" (yes, exportable), "can I leave the platform?" (yes, `.zsapp` bundle download).
+FAQ: 8 entries, including "what happens if I cancel?", "do I own my code?" (yes, exportable), "can I leave the platform?" (yes, `.zship` bundle download).
 
 ### 5.3 Skill catalog (`/skills`)
 
