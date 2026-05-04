@@ -28,29 +28,131 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
+use zeroship_runtime_macros::{v8_class, v8_constructor};
+
+use crate::state::OpError;
 use crate::streams::algorithms;
 use crate::streams::readable::{is_readable_stream, StreamState};
 use crate::streams::slots::{self, CLOSED_PROMISE, CONTROLLER, READER, STORED_ERROR, STREAM};
 
 // ---------------------------------------------------------------------------
-// Reader state — Box<DefaultReaderState> in internal field 0
+// Reader state — Box<ReadableStreamDefaultReader> in internal field 0
 // ---------------------------------------------------------------------------
 
+/// Boxed state behind the JS `ReadableStreamDefaultReader` wrapper. Lives in
+/// internal field 0; reclaimed by the V8 weak finalizer registered via the
+/// `#[v8_class]` macro.
+///
+/// MAC-02 migration: `#[v8_class] + #[v8_constructor(post_init = ...)]`
+/// drives box install. The constructor body (Self::new) validates the
+/// stream argument and stashes it in `pending_stream` so the post_init
+/// hook can run `ReaderGenericInitialize` after the box is reachable via
+/// field 0.
 #[allow(missing_debug_implementations)]
-pub struct DefaultReaderState {
+pub struct ReadableStreamDefaultReader {
     /// Outstanding read requests (FIFO).
     pub read_requests: RefCell<VecDeque<ReadRequest>>,
     /// Resolver for the reader's `[[closedPromise]]`. The Promise itself
     /// is stored in the reader wrapper's V8 priv sym `[[closedPromise]]`.
     pub closed_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
+    /// Stream stashed by the constructor body for `after_install` to wire
+    /// `reader.[[stream]]` / `stream.[[reader]]` / closedPromise. Cleared
+    /// (`take()`) inside `after_install`. Carrying it through the box (vs.
+    /// re-fetching from JS args, which the post_init hook can't see) is
+    /// the §1.6 "args plumbing" pattern from the macro design.
+    ///
+    /// `None` for readers built via `acquire_readable_stream_default_reader`
+    /// (the Rust-side helper handles GenericInitialize directly without
+    /// going through post_init).
+    pub pending_stream: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
-impl DefaultReaderState {
-    fn new(closed_resolver: v8::Global<v8::PromiseResolver>) -> Self {
+impl ReadableStreamDefaultReader {
+    /// Allocate the boxed state with no stashed stream — used by the
+    /// `acquire_*` Rust helper which runs ReaderGenericInitialize directly
+    /// rather than through the macro's post_init hook.
+    fn new_for_internal(closed_resolver: v8::Global<v8::PromiseResolver>) -> Self {
         Self {
             read_requests: RefCell::new(VecDeque::new()),
             closed_resolver: RefCell::new(Some(closed_resolver)),
+            pending_stream: RefCell::new(None),
         }
+    }
+}
+
+#[v8_class]
+#[v8_to_string_tag = "ReadableStreamDefaultReader"]
+impl ReadableStreamDefaultReader {
+    /// `new ReadableStreamDefaultReader(stream)` — spec §3.4.4 step 1–3.
+    ///
+    /// Receiver / lock checks fail with TypeError (must-new is emitted by
+    /// the macro). The PromiseResolver alloc and stream stash run here so
+    /// the post_init hook (`after_install`) can finish wiring after the
+    /// box is reachable via field 0.
+    #[v8_constructor(post_init = "after_install")]
+    fn new(
+        scope: &mut v8::PinScope,
+        stream: v8::Local<v8::Value>,
+    ) -> Result<Self, OpError> {
+        let stream = v8::Local::<v8::Object>::try_from(stream).map_err(|_| {
+            OpError::type_error(
+                "ReadableStreamDefaultReader: argument must be a ReadableStream",
+            )
+        })?;
+        if !is_readable_stream(scope, stream) {
+            return Err(OpError::type_error(
+                "ReadableStreamDefaultReader: argument must be a ReadableStream",
+            ));
+        }
+        if algorithms::is_readable_stream_locked(scope, stream) {
+            return Err(OpError::type_error(
+                "ReadableStreamDefaultReader: stream is already locked",
+            ));
+        }
+        // V8 returns None from PromiseResolver::new only on isolate
+        // termination or out-of-memory — surface as Error so the macro's
+        // Err arm throws cleanly rather than panicking.
+        let resolver = v8::PromiseResolver::new(scope)
+            .ok_or_else(|| OpError::error("PromiseResolver::new failed"))?;
+        let resolver_g = v8::Global::new(scope, resolver);
+        let stream_g = v8::Global::new(scope, stream);
+        Ok(Self {
+            read_requests: RefCell::new(VecDeque::new()),
+            closed_resolver: RefCell::new(Some(resolver_g)),
+            pending_stream: RefCell::new(Some(stream_g)),
+        })
+    }
+
+    /// `ReaderGenericInitialize(reader, stream)` — spec §3.9.2. Runs after
+    /// the macro has installed the Box in internal field 0, so
+    /// `with_state(scope, this, ...)` resolves the stashed
+    /// `pending_stream` + `closed_resolver`.
+    ///
+    /// CAUTION: do NOT call into JS inside the `with_state` closure (it
+    /// holds `&Self` for the closure's duration; reentrant `&mut self`
+    /// methods would alias). The closure body is pure RefCell mutation.
+    pub(crate) fn after_install(
+        scope: &mut v8::PinScope,
+        this: v8::Local<v8::Object>,
+    ) -> Result<(), OpError> {
+        let (stream_g_opt, resolver_g_opt) = with_state(scope, this, |s| {
+            (
+                s.pending_stream.borrow_mut().take(),
+                s.closed_resolver.borrow().clone(),
+            )
+        })
+        .ok_or_else(|| OpError::error("after_install: with_state returned None"))?;
+        let stream_g = stream_g_opt.ok_or_else(|| {
+            OpError::error("after_install: missing pending_stream")
+        })?;
+        let resolver_g = resolver_g_opt.ok_or_else(|| {
+            OpError::error("after_install: missing closed_resolver")
+        })?;
+        let stream = v8::Local::new(scope, &stream_g);
+        let resolver = v8::Local::new(scope, &resolver_g);
+        let closed_promise = resolver.get_promise(scope);
+        readable_stream_reader_generic_initialize(scope, this, stream, closed_promise);
+        Ok(())
     }
 }
 
@@ -121,127 +223,35 @@ pub fn is_default_reader(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -
 pub fn with_state<R>(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
-    f: impl FnOnce(&DefaultReaderState) -> R,
+    f: impl FnOnce(&ReadableStreamDefaultReader) -> R,
 ) -> Option<R> {
     let raw_v8_field = reader.get_internal_field(scope, 0)?;
     let ext = v8::Local::<v8::External>::try_from(raw_v8_field).ok()?;
-    let ptr = ext.value() as *const DefaultReaderState;
+    let ptr = ext.value() as *const ReadableStreamDefaultReader;
     if ptr.is_null() {
         return None;
     }
-    // SAFETY: External points at a Box<DefaultReaderState>; dropped only
-    // by the V8 weak finalizer.
+    // SAFETY: External points at a Box<ReadableStreamDefaultReader>; dropped
+    // only by the V8 weak finalizer (registered by the macro for JS-built
+    // readers, by `acquire_*` for Rust-built readers).
     let inst = unsafe { &*ptr };
     Some(f(inst))
 }
 
 // ---------------------------------------------------------------------------
-// Class template
+// Internal "AcquireReadableStreamDefaultReader" path — Rust-side construction
 // ---------------------------------------------------------------------------
 
-fn reader_class_template<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
-    let class_name = v8::String::new(scope, "ReadableStreamDefaultReader").unwrap();
-    ctor_tmpl.set_class_name(class_name);
-    ctor_tmpl
-        .instance_template(scope)
-        .set_internal_field_count(1);
-
-    let proto = ctor_tmpl.prototype_template(scope);
-
-    // closed getter (mixin §3.3)
-    {
-        let key = v8::String::new(scope, "closed").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-
-    install_proto_method(scope, proto, "read", read_method_callback);
-    install_proto_method(scope, proto, "releaseLock", release_lock_method_callback);
-    install_proto_method(scope, proto, "cancel", cancel_method_callback);
-
-    let tag_sym = v8::Symbol::get_to_string_tag(scope);
-    let tag_value = v8::String::new(scope, "ReadableStreamDefaultReader").unwrap();
-    proto.set_with_attr(
-        tag_sym.into(),
-        tag_value.into(),
-        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
-    );
-
-    ctor_tmpl
-}
-
-fn install_proto_method(
-    scope: &mut v8::PinScope,
-    proto: v8::Local<v8::ObjectTemplate>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    proto.set(key.into(), tmpl.into());
-}
-
-// ---------------------------------------------------------------------------
-// Constructor — `new ReadableStreamDefaultReader(stream)`
-// ---------------------------------------------------------------------------
-
-fn constructor_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    if !args.is_construct_call() {
-        let msg = v8::String::new(scope, "ReadableStreamDefaultReader: must be called with 'new'").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    let reader_obj = args.this();
-    let stream_arg = args.get(0);
-    let Ok(stream) = v8::Local::<v8::Object>::try_from(stream_arg) else {
-        let msg = v8::String::new(
-            scope,
-            "ReadableStreamDefaultReader: argument must be a ReadableStream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    };
-    if !is_readable_stream(scope, stream) {
-        let msg = v8::String::new(
-            scope,
-            "ReadableStreamDefaultReader: argument must be a ReadableStream",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    if algorithms::is_readable_stream_locked(scope, stream) {
-        let msg = v8::String::new(
-            scope,
-            "ReadableStreamDefaultReader: stream is already locked",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    set_up_default_reader(scope, reader_obj, stream);
-}
-
-/// Build a fresh ReadableStreamDefaultReader wrapper bound to `stream`.
-/// This is the no-throw version called from `acquire_*` (which has
-/// already done the receiver/lock checks).
+/// Build a fresh ReadableStreamDefaultReader wrapper bound to `stream` from
+/// Rust (i.e. without going through the JS `[[Construct]]` path). Used by
+/// pipeTo / tee / asyncIterator / `getReader()` to mint a reader on a
+/// stream the caller has already proven unlocked.
+///
+/// The macro-emitted constructor's box install + post_init only runs for
+/// JS-side `new ReadableStreamDefaultReader(stream)`. Internal-only mints
+/// allocate the Box manually here, mirroring `mint_abort_signal` in
+/// `web/dom/abort_signal.rs` — the same pattern for "construct the wrapper
+/// without re-entering the JS validation path".
 pub fn acquire_readable_stream_default_reader<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
@@ -249,26 +259,27 @@ pub fn acquire_readable_stream_default_reader<'s>(
     if algorithms::is_readable_stream_locked(scope, stream) {
         return Err("ReadableStream.getReader: stream is already locked".to_string());
     }
-    let tmpl = reader_class_template(scope);
+    let tmpl = ReadableStreamDefaultReader::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let reader_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| "alloc reader instance".to_string())?;
-    // Wire prototype.
+    // Wire prototype so the macro's brand check (prototype-chain walk) and
+    // the patched-in raw method callbacks resolve.
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     reader_obj.set_prototype(scope, proto_v);
 
-    set_up_default_reader(scope, reader_obj, stream);
+    set_up_default_reader_internal(scope, reader_obj, stream);
     Ok(reader_obj)
 }
 
-/// `SetUpReadableStreamDefaultReader(reader, stream)` — §3.9.2 / §3.4.x.
-///
-/// 1. Run ReadableStreamReaderGenericInitialize(reader, stream).
-/// 2. Initialize reader.[[readRequests]] = [].
-fn set_up_default_reader(
+/// Box install + ReaderGenericInitialize for the Rust-side (`acquire_*`)
+/// path. Mirrors what the macro's box-install + `after_install` hook do
+/// for the JS path, but without the JS-side receiver / lock checks (the
+/// caller has already proven those).
+fn set_up_default_reader_internal(
     scope: &mut v8::PinScope,
     reader: v8::Local<v8::Object>,
     stream: v8::Local<v8::Object>,
@@ -278,8 +289,9 @@ fn set_up_default_reader(
     let closed_promise = resolver.get_promise(scope);
     let resolver_g = v8::Global::new(scope, resolver);
 
-    // Build state.
-    let state = DefaultReaderState::new(resolver_g);
+    // Build state — `pending_stream` is None on this path; `after_install`
+    // never runs for a Rust-built reader.
+    let state = ReadableStreamDefaultReader::new_for_internal(resolver_g);
     let boxed = Box::new(state);
     let raw_ptr = Box::into_raw(boxed);
     let raw_addr = raw_ptr as usize;
@@ -289,7 +301,7 @@ fn set_up_default_reader(
         scope,
         reader,
         Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut DefaultReaderState));
+            drop(Box::from_raw(raw_addr as *mut ReadableStreamDefaultReader));
         }),
     );
     std::mem::forget(weak);
@@ -735,8 +747,60 @@ pub fn readable_stream_reader_generic_cancel<'s>(
 // ---------------------------------------------------------------------------
 
 pub fn install(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    let tmpl = reader_class_template(scope);
+    // Macro-emitted FunctionTemplate carries the constructor + Symbol.toStringTag.
+    let tmpl = ReadableStreamDefaultReader::install(scope);
+
+    // Patch in the IDL methods (read / releaseLock / cancel) and the
+    // closed getter on the prototype. They stay raw FunctionCallbacks
+    // because they need `args.this()` access (priv-sym reads) and direct
+    // PromiseResolver allocation; the macro's `#[v8_method]` shape would
+    // require widening every body to `&self`-plus-synthetic-`this` and
+    // re-routing through `with_state`, which is out of scope for this
+    // constructor-only migration.
+    //
+    // The headers.rs `install_global` pattern (lines 895–940) does exactly
+    // this for keys/values/entries/forEach.
     let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
+
+    // closed getter (mixin §3.3) — attach via PropertyDescriptor since
+    // we're operating on the realised prototype Object, not an
+    // ObjectTemplate (which would expose `set_accessor_property`).
+    // No-setter shape via `new_from_get_set` with `undefined` setter,
+    // matching the body consumer accessor pattern in
+    // `fetch/body/consumers.rs:110`.
+    {
+        let closed_key = v8::String::new(scope, "closed").unwrap();
+        let getter_tmpl = v8::FunctionTemplate::new(scope, closed_getter_callback);
+        let getter_fn = getter_tmpl.get_function(scope).unwrap();
+        let mut desc = v8::PropertyDescriptor::new_from_get_set(
+            getter_fn.into(),
+            v8::undefined(scope).into(),
+        );
+        desc.set_configurable(true);
+        desc.set_enumerable(true);
+        proto.define_property(scope, closed_key.into(), &desc);
+    }
+
+    // read / releaseLock / cancel
+    install_proto_method_on_object(scope, proto, "read", read_method_callback);
+    install_proto_method_on_object(scope, proto, "releaseLock", release_lock_method_callback);
+    install_proto_method_on_object(scope, proto, "cancel", cancel_method_callback);
+
     let key = v8::String::new(scope, "ReadableStreamDefaultReader").unwrap();
     global.set(scope, key.into(), class_fn.into());
+}
+
+fn install_proto_method_on_object(
+    scope: &mut v8::PinScope,
+    proto: v8::Local<v8::Object>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let func = tmpl.get_function(scope).unwrap();
+    proto.set(scope, key.into(), func.into());
 }

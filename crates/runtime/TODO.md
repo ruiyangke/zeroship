@@ -136,6 +136,35 @@ The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`,
     keep hand-rolled.
   - `FormDataIterator` — ~100 LOC.
 
+**MAC-02 streams constructor migration** (`#[v8_constructor(post_init = "...")]`):
+
+The four hand-rolled streams classes have constructors that allocate a
+PromiseResolver / state Box / private symbol AFTER the V8 wrapper exists.
+MAC-02 (the `post_init` hook) shipped to unblock these. Status:
+
+  - `ReadableStreamDefaultReader` — `#[v8_class]` + post_init,
+    `acquire_*` keeps the manual Rust-side path. Methods (read /
+    releaseLock / cancel / closed) stay raw FunctionCallbacks (they
+    need direct `args.this()` access for priv-sym reads + Promise
+    allocation, and converting them to `#[v8_method]` is a separate,
+    much larger refactor). Migrated in this branch.
+
+**Deferred from MAC-02 phase 2** (with reasons):
+
+  - `ReadableStreamBYOBReader` — same shape as DefaultReader; deferred
+    pending bandwidth.
+  - `WritableStreamDefaultWriter` — same shape; deferred.
+  - `TransformStream` — most complex (readable + writable Promise wiring,
+    budget guard, controller-from-transformer setup). The constructor
+    body interleaves with `set_up_transform_stream_default_controller_from_transformer`
+    in ways that don't cleanly split into Self::new + after_install
+    without untangling the controller-setup helper too. Deferred.
+
+  Per-class method migration (`#[v8_method]` for read / releaseLock /
+  cancel / write / etc.) is a follow-up after the constructor cluster
+  lands. The bulk of the design's LoC savings live in method migration,
+  not the constructor.
+
 ## Memory footprint
 
 The runtime's per-isolate working set sits around 125 MB after warmup
