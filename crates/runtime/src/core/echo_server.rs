@@ -5,13 +5,15 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 fn main() {
+    zeroship_core::observability::init_tracing("warn");
+
     let port: u16 = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(8888);
 
     let listener = TcpListener::bind(format!("0.0.0.0:{port}")).unwrap();
-    eprintln!("[echo-server] http://0.0.0.0:{port}");
+    tracing::info!(port, "echo-server listening");
 
     const BODY: &[u8] = b"{\"echo\":true}";
     let response = format!(

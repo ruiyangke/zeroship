@@ -36,10 +36,7 @@ where
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(v) => Some(v),
         Err(p) => {
-            eprintln!(
-                "[zeroship] panic in spawned task ({site}): {}",
-                panic_message(&*p)
-            );
+            tracing::error!(site, panic = %panic_message(&*p), "panic in spawned task");
             None
         }
     }

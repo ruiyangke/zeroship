@@ -5601,8 +5601,10 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "socket2 0.5.10",
+ "tracing",
  "url",
  "v8",
+ "zeroship-core",
  "zeroship-runtime-macros",
 ]
 
