@@ -268,8 +268,9 @@ impl K8sBackend {
             deleted += 1;
         }
         if deleted > 0 {
-            eprintln!(
-                "[sandbox/k8s] cleanup_orphans_at_startup: deleted {deleted} orphaned object(s)"
+            tracing::info!(
+                deleted,
+                "sandbox/k8s cleanup_orphans_at_startup: deleted orphaned objects"
             );
         }
         Ok(deleted)
@@ -330,11 +331,13 @@ impl K8sBackend {
             .map(|(id, _)| *id)
             .collect();
         for old_id in existing {
-            eprintln!(
-                "[sandbox/k8s] user {user_id} already has sandbox {old_id}; stopping first"
+            tracing::info!(
+                user_id = %user_id,
+                old_sandbox_id = %old_id,
+                "sandbox/k8s: user already has sandbox; stopping first"
             );
             if let Err(e) = self.stop(old_id).await {
-                eprintln!("[sandbox/k8s] stop({old_id}) failed: {e}");
+                tracing::warn!(sandbox_id = %old_id, error = %e, "sandbox/k8s stop failed");
             }
         }
 
@@ -506,10 +509,11 @@ impl K8sBackend {
                 preview_audit: Vec::new(),
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
-                eprintln!(
-                    "[sandbox/k8s] persist.seal failed sandbox={sandbox_id} \
-                     pod={pod_name} (non-fatal; sandbox live, restart-restore \
-                     unavailable for this record): {e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    pod = %pod_name,
+                    error = %e,
+                    "sandbox/k8s persist.seal failed (non-fatal; sandbox live, restart-restore unavailable for this record)"
                 );
             }
         }
@@ -549,7 +553,7 @@ impl K8sBackend {
         )
         .await
         {
-            eprintln!("[sandbox/k8s] /shutdown to {pod_name} failed (continuing): {e}");
+            tracing::warn!(pod = %pod_name, error = %e, "sandbox/k8s /shutdown failed (continuing)");
         }
 
         // 2. Kill the port-forward (after the drain RPC, before we
@@ -588,9 +592,11 @@ impl K8sBackend {
         //    stop().
         if let Some(persist) = &self.persist {
             if let Err(e) = persist.delete(sandbox_id).await {
-                eprintln!(
-                    "[sandbox/k8s] persist.delete failed sandbox={sandbox_id} \
-                     pod={pod_name} (non-fatal): {e}"
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    pod = %pod_name,
+                    error = %e,
+                    "sandbox/k8s persist.delete failed (non-fatal)"
                 );
             }
         }
@@ -1385,11 +1391,9 @@ async fn wait_for_agent_livez(
                                 // /version was signed-auth-checked, so
                                 // the agent IS verifying with our
                                 // pubkey. Warn + accept.
-                                eprintln!(
-                                    "[sandbox/k8s] wait_for_agent: legacy agent at \
-                                     {base_url} returned no pubkey_fingerprint on \
-                                     /version; falling back to signed-auth-only \
-                                     attestation"
+                                tracing::warn!(
+                                    base_url = %base_url,
+                                    "sandbox/k8s wait_for_agent: legacy agent returned no pubkey_fingerprint on /version; falling back to signed-auth-only attestation"
                                 );
                                 return Ok(());
                             }

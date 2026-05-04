@@ -205,9 +205,11 @@ pub async fn preview_proxy(
             }
             (Some(_), Some(_), true) => "not-owner",
         };
-        eprintln!(
-            "[sandbox/preview] authorize-failed sandbox_id={sandbox_id_str} \
-             port={port} reason={reason}"
+        tracing::warn!(
+            sandbox_id = %sandbox_id_str,
+            port,
+            reason,
+            "sandbox/preview: authorize-failed"
         );
         // 401 if we can't even authenticate (so the creator gets a
         // login prompt); else 404 (uniform, no existence oracle).
@@ -229,9 +231,11 @@ pub async fn preview_proxy(
     let auth_bundle = match state.backend.session_auth(sandbox_id_opt.unwrap()).await {
         Ok(a) => a,
         Err(e) => {
-            eprintln!(
-                "[sandbox/preview] session_auth failed sandbox_id={sandbox_id_str} \
-                 port={port} error={e}"
+            tracing::warn!(
+                sandbox_id = %sandbox_id_str,
+                port,
+                error = %e,
+                "sandbox/preview: session_auth failed"
             );
             // The sandbox passed the registry check but the backend
             // doesn't know it — the runtime is stale. Surface as
@@ -330,15 +334,18 @@ pub async fn preview_proxy(
     let (status, headers, body_out) = match result {
         Ok(Ok(triple)) => triple,
         Ok(Err(e)) => {
-            eprintln!(
-                "[sandbox/preview] agent forward error sandbox_id={sandbox_id_str} \
-                 port={port} error={e}"
+            tracing::warn!(
+                sandbox_id = %sandbox_id_str,
+                port,
+                error = %e,
+                "sandbox/preview: agent forward error"
             );
             return err_with_code(StatusCode::BAD_GATEWAY, "agent_unreachable");
         }
         Err(_join_panic) => {
-            eprintln!(
-                "[sandbox/preview] blocking-pool join failure sandbox_id={sandbox_id_str}"
+            tracing::error!(
+                sandbox_id = %sandbox_id_str,
+                "sandbox/preview: blocking-pool join failure"
             );
             return err_with_code(StatusCode::BAD_GATEWAY, "agent_unreachable");
         }
@@ -539,10 +546,7 @@ fn handle_cookie_conversion(
     ) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "[sandbox/preview] __zsbx_share token validation failed: {:?}",
-                e
-            );
+            tracing::warn!(error = ?e, "sandbox/preview: __zsbx_share token validation failed");
             // Specifically surface "expired"/"revoked" so the AI builder UI
             // can render a tailored error; everything else collapses to 401.
             return token_error_response(e);

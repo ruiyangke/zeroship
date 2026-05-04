@@ -424,12 +424,9 @@ impl NomadCHConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Not fatal in split-deploy mode: the controller's
                 // FS may not be the Nomad client's FS. Log only.
-                eprintln!(
-                    "[sandbox/nomad-ch] config: wrapper_path {} not \
-                     present on controller fs (best-effort check; \
-                     irrelevant if Nomad client runs on a different \
-                     host).",
-                    self.wrapper_path.display()
+                tracing::info!(
+                    wrapper_path = %self.wrapper_path.display(),
+                    "sandbox/nomad-ch config: wrapper_path not present on controller fs (best-effort check; irrelevant if Nomad client runs on a different host)"
                 );
             }
             Err(_) => {

@@ -20,10 +20,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
+    zeroship_core::observability::init_tracing("info,sandbox_agent=debug,zeroship_sandbox=debug");
+
     let config = match SandboxConfig::from_env() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[sandbox] config error: {e}");
+            tracing::error!(error = %e, "sandbox config error");
             std::process::exit(1);
         }
     };
@@ -35,79 +37,65 @@ async fn main() -> std::io::Result<()> {
     // missing nomad-ch fields. Print the section that matches the
     // configured backend; common fields (port, idle_timeout,
     // max_lifetime) print regardless.
-    eprintln!("[sandbox] backend:        {}", config.backend);
-    eprintln!("[sandbox] idle timeout:   {}s", config.idle_timeout_secs);
-    eprintln!("[sandbox] max lifetime:   {}s", config.max_lifetime_secs);
+    tracing::info!(
+        backend = %config.backend,
+        idle_timeout_secs = config.idle_timeout_secs,
+        max_lifetime_secs = config.max_lifetime_secs,
+        "sandbox boot config"
+    );
     match config.backend.as_str() {
         "docker" => {
-            eprintln!("[sandbox] image:          {}", config.image);
-            eprintln!("[sandbox] workspace root: {}", config.workspace_root.display());
-            eprintln!("[sandbox] network:        {}", config.network);
-            eprintln!("[sandbox] memory:         {} MiB", config.memory_mb);
-            eprintln!("[sandbox] cpus:           {}", config.cpus);
+            tracing::info!(
+                image = %config.image,
+                workspace_root = %config.workspace_root.display(),
+                network = %config.network,
+                memory_mib = config.memory_mb,
+                cpus = config.cpus,
+                "sandbox docker backend"
+            );
         }
         "k8s" => {
-            eprintln!("[sandbox] k8s namespace:  {}", config.k8s.namespace);
-            eprintln!("[sandbox] agent image:    {}", config.k8s.image);
-            eprintln!("[sandbox] runtime class:  {}", config.k8s.runtime_class);
-            eprintln!("[sandbox] port-forward:   {}", config.k8s.use_port_forward);
-            eprintln!("[sandbox] memory:         {} MiB", config.memory_mb);
-            eprintln!("[sandbox] cpus:           {}", config.cpus);
+            tracing::info!(
+                namespace = %config.k8s.namespace,
+                agent_image = %config.k8s.image,
+                runtime_class = %config.k8s.runtime_class,
+                port_forward = config.k8s.use_port_forward,
+                memory_mib = config.memory_mb,
+                cpus = config.cpus,
+                "sandbox k8s backend"
+            );
         }
         "nomad-ch" => {
-            eprintln!("[sandbox] nomad addr:     {}", config.nomad_ch.nomad_addr);
-            eprintln!("[sandbox] datacenter:     {}", config.nomad_ch.datacenter);
-            eprintln!(
-                "[sandbox] wrapper script: {}",
-                config.nomad_ch.wrapper_path.display()
-            );
-            eprintln!(
-                "[sandbox] runtime dir:    {}",
-                config.nomad_ch.runtime_dir.display()
-            );
-            eprintln!(
-                "[sandbox] host state dir: {}",
-                config.nomad_ch.host_state_dir.display()
-            );
-            eprintln!(
-                "[sandbox] user homes:     {}",
-                config.nomad_ch.user_home_dir_root.display()
-            );
-            eprintln!(
-                "[sandbox] vm-index pool:  [{}, {}]",
-                config.nomad_ch.vm_index_floor, config.nomad_ch.vm_index_ceil
-            );
-            eprintln!(
-                "[sandbox] subnet 10.{}.x.x",
-                config.nomad_ch.subnet_second_octet
-            );
-            eprintln!(
-                "[sandbox] alloc timeout:  {}s",
-                config.nomad_ch.alloc_running_timeout_secs
-            );
-            eprintln!(
-                "[sandbox] livez timeout:  {}s",
-                config.nomad_ch.agent_livez_timeout_secs
-            );
-            eprintln!(
-                "[sandbox] orphan cleanup: {}",
-                config.nomad_ch.startup_orphan_cleanup
+            tracing::info!(
+                nomad_addr = %config.nomad_ch.nomad_addr,
+                datacenter = %config.nomad_ch.datacenter,
+                wrapper_path = %config.nomad_ch.wrapper_path.display(),
+                runtime_dir = %config.nomad_ch.runtime_dir.display(),
+                host_state_dir = %config.nomad_ch.host_state_dir.display(),
+                user_home_dir_root = %config.nomad_ch.user_home_dir_root.display(),
+                vm_index_floor = config.nomad_ch.vm_index_floor,
+                vm_index_ceil = config.nomad_ch.vm_index_ceil,
+                subnet_second_octet = config.nomad_ch.subnet_second_octet,
+                alloc_running_timeout_secs = config.nomad_ch.alloc_running_timeout_secs,
+                livez_timeout_secs = config.nomad_ch.agent_livez_timeout_secs,
+                startup_orphan_cleanup = config.nomad_ch.startup_orphan_cleanup,
+                "sandbox nomad-ch backend"
             );
         }
         other => {
-            eprintln!("[sandbox] (unknown backend {other:?}; no banner detail)");
+            tracing::warn!(backend = %other, "sandbox unknown backend; no banner detail");
         }
     }
 
     if config.token.is_empty() {
-        eprintln!("[sandbox] WARNING: SANDBOX_TOKEN not set — endpoints are unauthenticated");
+        tracing::warn!("sandbox: SANDBOX_TOKEN not set — endpoints are unauthenticated");
     }
 
     // Build state (probes the backend at startup).
     let state = match AppState::from_config(config.clone()).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[sandbox] backend probe failed: {e}");
+            tracing::error!(error = %e, "sandbox backend probe failed");
             std::process::exit(1);
         }
     };
@@ -125,14 +113,14 @@ async fn main() -> std::io::Result<()> {
     let ws_state = state.clone();
     compio::runtime::spawn(async move {
         if let Err(e) = preview_ws::serve(ws_state, ws_port).await {
-            eprintln!("[sandbox] preview_ws serve exited: {e}");
+            tracing::error!(error = %e, "sandbox preview_ws serve exited");
         }
     })
     .detach();
-    eprintln!("[sandbox] preview-ws listening on :{ws_port}");
+    tracing::info!(ws_port, "sandbox preview-ws listening");
 
     let bind = format!("0.0.0.0:{}", config.port);
-    eprintln!("[sandbox] http://{bind}");
+    tracing::info!(bind = %bind, "sandbox listening");
 
     web::server(async move || {
         web::App::new()

@@ -68,8 +68,8 @@ impl AppState {
         // orphans around for forensics; we log and continue.
         match backend.cleanup_orphans_at_startup().await {
             Ok(0) => {}
-            Ok(n) => eprintln!("[sandbox] startup cleanup: removed {n} orphan(s)"),
-            Err(e) => eprintln!("[sandbox] startup cleanup failed (non-fatal): {e}"),
+            Ok(n) => tracing::info!(orphans = n, "sandbox startup cleanup: removed orphans"),
+            Err(e) => tracing::warn!(error = %e, "sandbox startup cleanup failed (non-fatal)"),
         }
         let registry = SandboxRegistry::new();
 
@@ -80,9 +80,9 @@ impl AppState {
         // `SANDBOX_PERSIST_AUTH=1`; default OFF.
         if let Some(p) = &persist {
             let dir = p.persist_dir();
-            eprintln!(
-                "[sandbox] persist: SANDBOX_PERSIST_AUTH=1; \
-                 restoring sealed records from {dir:?}"
+            tracing::info!(
+                persist_dir = ?dir,
+                "sandbox persist: SANDBOX_PERSIST_AUTH=1; restoring sealed records"
             );
             match restore::restore_at_startup(
                 &dir,
@@ -93,20 +93,18 @@ impl AppState {
             )
             .await
             {
-                Ok(s) => eprintln!(
-                    "[sandbox] persist: restore done seen={} \
-                     restored={} mismatched={} unreachable={} \
-                     corrupt={} unsupported={}",
-                    s.records_seen,
-                    s.restored,
-                    s.mismatched,
-                    s.unreachable,
-                    s.corrupt,
-                    s.unsupported,
+                Ok(s) => tracing::info!(
+                    seen = s.records_seen,
+                    restored = s.restored,
+                    mismatched = s.mismatched,
+                    unreachable = s.unreachable,
+                    corrupt = s.corrupt,
+                    unsupported = s.unsupported,
+                    "sandbox persist: restore done"
                 ),
-                Err(e) => eprintln!(
-                    "[sandbox] persist: restore_at_startup IO failure \
-                     (non-fatal; sealed records left in place): {e}"
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "sandbox persist: restore_at_startup IO failure (non-fatal; sealed records left in place)"
                 ),
             }
         }
@@ -139,7 +137,7 @@ fn start_health_loop(state: Arc<AppState>) {
         loop {
             compio::time::sleep(Duration::from_secs(30)).await;
             if let Err(e) = state.backend.probe().await {
-                eprintln!("[sandbox] health re-probe failed: {e}");
+                tracing::warn!(error = %e, "sandbox health re-probe failed");
             }
         }
     })
