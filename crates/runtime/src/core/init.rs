@@ -3,7 +3,6 @@
 //! Consolidates everything needed to boot an isolate:
 //! - `init_v8()` — one-time V8 platform init
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
-//! - Polyfill constants (`NODE_GLOBALS_JS`)
 //! - Result types (`RequestResult`, `HttpResult`)
 
 use std::time::Duration;
@@ -107,15 +106,6 @@ pub struct HttpResult {
 // `embed/websocket.js` polyfill is gone; if a future emergency
 // requires a rollback, restore from `git log --diff-filter=D --
 // crates/runtime/src/embed/websocket.js`.
-
-/// Node-shaped globals the runtime doesn't already install: a lazy
-/// `globalThis.Buffer` stub (configurable getter so unenv's
-/// `node:buffer` import can swap it out via `Object.defineProperty`)
-/// and `setImmediate` / `clearImmediate` mapped to `setTimeout(0)` /
-/// `clearTimeout`. Loaded BEFORE any user module evaluates, so npm
-/// packages that read these as bare globals (no `node:*` import) find
-/// them present.
-pub const NODE_GLOBALS_JS: &str = include_str!("../embed/node-globals.js");
 
 /// The `zeroship` user-facing ESM module. Exposes the request-scoped helpers
 /// that SDK packages lean on:
@@ -676,7 +666,8 @@ pub fn load_polyfills_and_modules(
     //      sees the native class.
     //   2. Native Crypto / SubtleCrypto / CryptoKey — D-23 landing 3
     //      retired the old `crypto.js` polyfill; native is the only
-    //      path now. Then NODE_GLOBALS_JS runs.
+    //      path now. Then the inline setImmediate / clearImmediate
+    //      shim runs (last surviving JS in init).
     //   3. Native Headers / Streams / Blob / TextEncoderStream — must
     //      install before WEBSOCKET_JS so the latter's
     //      `Object.create(EventTarget.prototype)` captures the native
@@ -705,8 +696,23 @@ pub fn load_polyfills_and_modules(
         crate::crypto_node::install_globals(scope, global);
     }
 
+    // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).
+    // Last surviving JS shim — too small to be worth the dedicated
+    // V8 callback boilerplate (a native impl would need to capture
+    // varargs into a per-call closure for the timer fire). Inlined
+    // here so embed/ stays empty.
     {
-        let code = v8::String::new(scope, NODE_GLOBALS_JS).unwrap();
+        let code = v8::String::new(
+            scope,
+            r#"(function () {
+  const g = globalThis;
+  if (!g.setImmediate) {
+    g.setImmediate = (fn, ...args) => setTimeout(() => fn(...args), 0);
+    g.clearImmediate = (id) => clearTimeout(id);
+  }
+})();"#,
+        )
+        .unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope).unwrap();
     }
