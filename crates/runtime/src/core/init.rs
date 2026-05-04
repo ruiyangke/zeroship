@@ -693,7 +693,7 @@ pub fn load_polyfills_and_modules(
     // named ESM export.
     {
         let global = scope.get_current_context().global(scope);
-        crate::crypto_node::install_globals(scope, global);
+        crate::node::crypto::install_globals(scope, global);
     }
 
     // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).

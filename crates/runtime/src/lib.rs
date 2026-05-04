@@ -66,7 +66,9 @@ extern crate self as zeroship_runtime;
 
 pub mod auth;
 pub mod core;
+pub mod crypto_ops;
 pub mod fetch_outcome;
+pub mod node;
 pub mod storage;
 pub mod transport;
 pub mod web;
