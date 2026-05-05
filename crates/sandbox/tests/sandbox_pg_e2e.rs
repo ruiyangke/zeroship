@@ -1072,6 +1072,53 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / CRITICAL #4 — get_sandbox_row round-trip. The
+// post-takeover rehydrate path uses this to fetch the full row by
+// typed-id-derived UUID; if it ever returns the wrong row (or
+// fails to parse a column), the entire rehydrate pipeline silently
+// no-ops and every HTTP request to the taken sandbox 404s.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for CRITICAL #4"]
+async fn get_sandbox_row_round_trips_full_field_set() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sandbox_uuid) = fresh_info("alice");
+    db.insert_sandbox(
+        &info,
+        host_id,
+        &"abcdef0123456789abcdef0123456789",
+        Some("http://10.99.42.2:7777"),
+        Some(42),
+    )
+    .await
+    .unwrap();
+
+    let row = db
+        .get_sandbox_row(sandbox_uuid)
+        .await
+        .expect("query ok")
+        .expect("row exists");
+
+    assert_eq!(row.sandbox_id, info.sandbox_id);
+    assert_eq!(row.user_id, info.user_id);
+    assert_eq!(row.project_id, info.project_id);
+    assert_eq!(row.backend, "nomad-ch");
+    assert_eq!(row.vm_index, Some(42));
+    assert_eq!(row.agent_url.as_deref(), Some("http://10.99.42.2:7777"));
+    assert_eq!(row.key_fp, "abcdef0123456789abcdef0123456789");
+    assert_eq!(row.status, SandboxStatus::Running);
+    assert_eq!(row.generation, 0);
+
+    // Tombstone it via delete_sandbox; the row should no longer
+    // surface (deleted_at IS NOT NULL filter).
+    db.delete_sandbox(sandbox_uuid, None, None).await.unwrap();
+    let after = db.get_sandbox_row(sandbox_uuid).await.unwrap();
+    assert!(after.is_none(), "tombstoned row must be invisible");
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Round-1 fixer / CRITICAL #3 — A controller that LOST the lease on
 // `stop` MUST NOT delete the row out from under the new owner. The
 // host_id fence is the SQL-level safety net.

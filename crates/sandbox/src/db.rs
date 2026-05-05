@@ -1386,6 +1386,58 @@ impl Database {
         }
     }
 
+    /// Read a single sandbox row by typed-id. Round-1 fixer /
+    /// CRITICAL #4: the post-takeover rehydrate path needs the row's
+    /// fields (user_id, project_id, agent_url, key_fp, generation,
+    /// status) so it can call `restore::probe_and_register_one`.
+    /// Returns `Ok(None)` for an absent / tombstoned row; the caller
+    /// treats that as "skip" (the row got tombstoned mid-takeover).
+    pub async fn get_sandbox_row(&self, sandbox_id: Uuid) -> Result<Option<SandboxRow>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let opt = client
+            .query_opt(
+                "SELECT sandbox_id, user_id, project_id, backend, vm_index, \
+                        agent_url, host_id, generation, status, key_fp, \
+                        EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_secs, \
+                        EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
+                        EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
+                        EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
+                   FROM sandbox.sandboxes \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND deleted_at IS NULL",
+                &[&sandbox_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(opt.map(|r| {
+            let status_str: &str = r.get("status");
+            let started_at_opt: Option<i64> = r.try_get("started_at_secs").ok();
+            let stopped_at_opt: Option<i64> = r.try_get("stopped_at_secs").ok();
+            SandboxRow {
+                sandbox_id: r.get("sandbox_id"),
+                user_id: r.get("user_id"),
+                project_id: r.get("project_id"),
+                backend: r.get("backend"),
+                vm_index: r.try_get("vm_index").ok(),
+                agent_url: r.try_get("agent_url").ok(),
+                host_id: r.get("host_id"),
+                generation: r.get::<_, i64>("generation"),
+                status: SandboxStatus::from_str_opt(status_str)
+                    .unwrap_or(SandboxStatus::Lost),
+                key_fp: r.get("key_fp"),
+                created_at_secs: r.get::<_, i64>("created_at_secs").max(0) as u64,
+                started_at_secs: started_at_opt.map(|v| v.max(0) as u64),
+                stopped_at_secs: stopped_at_opt.map(|v| v.max(0) as u64),
+                last_used_at_secs: r.get::<_, i64>("last_used_at_secs").max(0) as u64,
+            }
+        }))
+    }
+
     /// List all running sandbox rows owned by `host_id` (the
     /// controller's stable UUIDv7). Used by restart-restore.
     pub async fn list_running_sandboxes_for_host(

@@ -233,6 +233,7 @@ fn make_state_inner(
         ),
         // Phase-0 sandbox-pg-state: tests run pg-disabled.
         database: None,
+        persist: None,
     });
     (state, sandbox_id)
 }

@@ -194,6 +194,7 @@ fn make_state(
         // the live shape AppState::from_config picks when
         // SANDBOX_DATABASE_URL is absent.
         database: None,
+        persist: None,
     });
     (state, sandbox_id)
 }

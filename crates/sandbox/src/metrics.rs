@@ -58,6 +58,13 @@ static DEAD_HOSTS_OBSERVED: AtomicU64 = AtomicU64::new(0);
 /// fleet must never see this fire.
 static CLOCK_REWIND: AtomicU64 = AtomicU64::new(0);
 
+/// `sandbox_ha_takeover_orphan_total`. Counter — increments once
+/// per takeover-rehydrate that found NO sealed record on the new
+/// owner's local disk. Round-1 fixer / CRITICAL #4: in Phase 2 v1
+/// we accept "sealed not on this host" as `status='lost'`; a
+/// future cross-host sealed sync (S3? gossip?) is Phase 3+.
+static TAKEOVER_ORPHAN: AtomicU64 = AtomicU64::new(0);
+
 // ────────────────────────────────────────────────────────────────────
 // Gauges
 // ────────────────────────────────────────────────────────────────────
@@ -102,6 +109,19 @@ pub fn add_dead_hosts_observed(n: u64) {
 /// Bump `sandbox_ha_clock_rewind_total` once.
 pub fn inc_clock_rewind() {
     CLOCK_REWIND.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bump `sandbox_ha_takeover_orphan_total` once. Round-1 fixer /
+/// CRITICAL #4: emitted once per post-takeover rehydrate that found
+/// no sealed record locally.
+pub fn inc_takeover_orphan() {
+    TAKEOVER_ORPHAN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Test-only accessor for the takeover-orphan counter.
+#[doc(hidden)]
+pub fn takeover_orphan_value() -> u64 {
+    TAKEOVER_ORPHAN.load(Ordering::Relaxed)
 }
 
 /// Set `sandbox_ha_heartbeat_lag_seconds` to `secs`. NaN-safe; an

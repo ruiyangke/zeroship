@@ -156,6 +156,54 @@ pub async fn restore_at_startup(
     Ok(sum)
 }
 
+/// Round-1 fixer / CRITICAL #4 — single-row probe-and-register
+/// entry point reused by both the boot-path reconciler
+/// (`restore_at_startup`) and the Phase-2.5 takeover post-step
+/// (`spawn_takeover_task`). Wraps `process_pg_row` with an
+/// owned `consumed` set since takeover callers don't run an orphan
+/// sweep and don't care which sealed paths the probe touched.
+///
+/// The function's contract:
+///   - On match: registry is populated; pg row's `last_used_at` is
+///     refreshed (via the eventual heartbeat, not synchronously).
+///   - On fingerprint mismatch / 401: pg row is marked
+///     `recreating` and the sealed file is deleted.
+///   - On unreachable: pg row is marked `unreachable`, sealed file
+///     is kept (the agent may come back).
+///   - On corrupt seal / typed-id mismatch / missing seal: pg row
+///     is marked `lost`. The sealed file is left in place for
+///     operator quarantine review (except the missing case, where
+///     there's nothing to leave).
+///
+/// Phase-2 v1 limitation (documented in CRITICAL #4 fix path
+/// step 3): the new owner's local sealed-records dir might not have
+/// the file (cross-host sealed-record sync is Phase 3+). When the
+/// seal is missing, we surface `RestoreOutcome::SealMissing` and
+/// the caller bumps `sandbox_ha_takeover_orphan_total`.
+pub(crate) async fn probe_and_register_one(
+    database: &Database,
+    persist_dir: &Path,
+    aead_key: &AeadKey,
+    backend: &Backend,
+    registry: &SandboxRegistry,
+    row: &SandboxRow,
+    probe_timeout: Duration,
+) -> RestoreOutcome {
+    let sealed_dir = persist_dir.join("sealed-records");
+    let mut consumed = std::collections::HashSet::new();
+    process_pg_row(
+        database,
+        &sealed_dir,
+        aead_key,
+        backend,
+        registry,
+        row,
+        probe_timeout,
+        &mut consumed,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_pg_row(
     database: &Database,

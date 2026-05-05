@@ -51,6 +51,12 @@ pub struct AppState {
     /// the backends. The schema is brought to
     /// [`LATEST_MIGRATION_VERSION`] before this state ships.
     pub database: Option<Arc<Database>>,
+    /// Round-1 fixer / CRITICAL #4: shared sealed-record persistence
+    /// handle, plumbed for the Phase-2.5 takeover-rehydrate path.
+    /// `None` mirrors the pre-fix disabled shape — the handle exists
+    /// only when `SANDBOX_PERSIST_AUTH=1` was set and a key file is
+    /// readable.
+    pub persist: Option<Arc<Persistence>>,
 }
 
 impl AppState {
@@ -190,6 +196,7 @@ impl AppState {
             backend,
             mint_rate_limiter: Some(MintRateLimiter::new()),
             database,
+            persist,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
@@ -303,6 +310,129 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
         }
     })
     .detach();
+}
+
+/// Round-1 fixer / CRITICAL #4: post-takeover registry rehydrate.
+///
+/// For each newly-owned sandbox the takeover SQL produced, run the
+/// boot-time probe-and-register pipeline against the local sealed
+/// record. The new owner ends up with an in-memory registry entry
+/// (or the row is marked recreating / unreachable / lost based on
+/// the probe result, exactly the way `restore_at_startup`'s loop
+/// classifies things — code path is shared via
+/// `restore::probe_and_register_one`).
+///
+/// Phase-2 v1 limitation: the new owner's persist dir might not
+/// have the sealed record (cross-host sealed sync ships in Phase
+/// 3+). When the seal is missing, the row is marked `lost` and we
+/// bump `sandbox_ha_takeover_orphan_total`.
+///
+/// **Does nothing** when:
+///   - state.persist is None (controller booted with persistence
+///     off — e.g. SANDBOX_PERSIST_AUTH != 1). Without sealed
+///     records there's no way to recover the signing key, so the
+///     row stays `running` in pg and the operator will see a
+///     stale-row alert via the Phase-3 admin tooling. This is the
+///     same behaviour as the pre-fix code, just with the no-op
+///     made explicit.
+///   - state.database is None (covered upstream by the
+///     `state.database.is_some()` gate that spawned the task).
+async fn rehydrate_after_takeover(
+    state: &Arc<AppState>,
+    taken: &[crate::db::TakenSandbox],
+) {
+    let Some(db) = state.database.as_ref() else {
+        return;
+    };
+    let Some(persist) = state.persist.as_ref() else {
+        tracing::warn!(
+            taken_count = taken.len(),
+            "sandbox HA: takeover rehydrate skipped (persist disabled); rows owned but not in-memory"
+        );
+        // Each taken sandbox is effectively orphan-owned until the
+        // operator restarts with persistence enabled. Mark them as
+        // such so the metric reflects reality.
+        for _ in taken {
+            metrics::inc_takeover_orphan();
+        }
+        return;
+    };
+    let persist_dir = persist.persist_dir();
+    let aead_key = persist.aead_key();
+
+    for ts in taken {
+        // Parse the typed-id back to its embedded UUID for the
+        // get_sandbox_row lookup.
+        let sandbox_uuid = match zeroship_core::typed_id::parse_with_prefix(
+            &ts.sandbox_id,
+            "sbx",
+        ) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(
+                    sandbox_id = %ts.sandbox_id,
+                    error = %e,
+                    "sandbox HA: takeover rehydrate skipped (bad typed-id)"
+                );
+                continue;
+            }
+        };
+        // Fetch the full row.
+        let row = match db.get_sandbox_row(sandbox_uuid).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                // Tombstoned mid-takeover (or the row got DELETEd by
+                // someone else). Nothing to rehydrate.
+                tracing::info!(
+                    sandbox_id = %ts.sandbox_id,
+                    "sandbox HA: takeover rehydrate skipped (row gone)"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sandbox_id = %ts.sandbox_id,
+                    error = %e,
+                    "sandbox HA: takeover rehydrate row-fetch failed; will retry next scan"
+                );
+                continue;
+            }
+        };
+
+        let outcome = restore::probe_and_register_one(
+            db,
+            &persist_dir,
+            aead_key,
+            &state.backend,
+            &state.sandboxes,
+            &row,
+            restore::DEFAULT_PROBE_TIMEOUT,
+        )
+        .await;
+        match outcome {
+            restore::RestoreOutcome::Restored => {
+                tracing::info!(
+                    sandbox_id = %ts.sandbox_id,
+                    generation = ts.generation,
+                    "sandbox HA: takeover rehydrate restored to in-memory registry"
+                );
+            }
+            restore::RestoreOutcome::SealMissing => {
+                tracing::warn!(
+                    sandbox_id = %ts.sandbox_id,
+                    "sandbox HA: takeover rehydrate seal missing on this host (Phase 3+ adds cross-host sync)"
+                );
+                metrics::inc_takeover_orphan();
+            }
+            other => {
+                tracing::info!(
+                    sandbox_id = %ts.sandbox_id,
+                    outcome = ?other,
+                    "sandbox HA: takeover rehydrate non-restored outcome"
+                );
+            }
+        }
+    }
 }
 
 /// Periodic peer-scan task (§ 11.3). Every
@@ -426,20 +556,16 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
                                 host_id = %my_host,
                                 "sandbox HA: takeover succeeded"
                             );
-                            // The in-memory generation refresh is
-                            // intentionally minimal here: the new
-                            // owner has not (yet) restored the
-                            // sandbox into its in-memory registry,
-                            // so there's no Sandbox.generation
-                            // field to bump. When the operator
-                            // surfaces the post-takeover slice via
-                            // restore_at_startup (next boot) or
-                            // probes `/version` inline (Phase 2.5),
-                            // the generation will be picked up
-                            // from the pg row's RETURNING value
-                            // recorded by `taken[i].generation`.
-                            // Phase 3 admin API will surface a
-                            // post-takeover restore-now endpoint.
+                            // Round-1 fixer / CRITICAL #4: Phase 2.5
+                            // post-takeover rehydrate. For each taken
+                            // sandbox, fetch the full pg row, run the
+                            // probe-and-classify pipeline against the
+                            // new owner's local sealed record, and
+                            // populate the in-memory registry. Without
+                            // this, every HTTP request to a taken
+                            // sandbox 404s until the next controller
+                            // boot reads `restore_at_startup`.
+                            rehydrate_after_takeover(&state, &taken).await;
                         }
                     }
                     Err(e) => {
