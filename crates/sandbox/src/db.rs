@@ -826,6 +826,19 @@ fn is_concurrent_ddl_race(e: &compio_postgres::Error) -> bool {
 // Phase-1 row types + write methods (round-8: pg as system of record)
 // ────────────────────────────────────────────────────────────────────
 
+/// One row's-worth of takeover RETURNING data. Used by the Phase-2
+/// takeover task to update its in-memory generation map after a
+/// successful CAS-guarded ownership rebind (§ 11.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakenSandbox {
+    /// Typed-id (`sbx_<base62>`) of the row whose ownership now
+    /// belongs to this controller.
+    pub sandbox_id: String,
+    /// Post-takeover `generation` value. Subsequent CAS-guarded
+    /// UPDATEs must carry this as `expected_generation`.
+    pub generation: i64,
+}
+
 /// One row from `sandbox.sandboxes`. Mirrors the persistent shape of
 /// the registry's [`crate::backend::SandboxInfo`] plus host/owner +
 /// CAS counter for the Phase-2 lease-based takeover.
@@ -984,6 +997,196 @@ impl Database {
             .await
             .map_err(DatabaseError::Pg)?;
         Ok(())
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Phase 2 — periodic heartbeat + lease-based takeover (§ 11)
+    // ────────────────────────────────────────────────────────────────
+
+    /// Bump `last_heartbeat = now()` for THIS controller's host row.
+    /// Called periodically by [`crate::spawn_heartbeat_task`]. The
+    /// pg-side `now()` is the canonical wall clock for lease-window
+    /// decisions (§ 12 R-MM); this UPDATE is the one place a
+    /// controller's identity meets pg's clock.
+    ///
+    /// Returns `Err` if pg is unavailable; the heartbeat task logs
+    /// and continues so a transient outage doesn't crash the
+    /// controller. If the row is missing (an operator manually
+    /// deleted it, or boot's `upsert_host` was skipped), this UPDATE
+    /// affects 0 rows but does not error — the next `upsert_host` at
+    /// boot would re-create the row.
+    pub async fn heartbeat(&self) -> Result<()> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        client
+            .execute(
+                "UPDATE sandbox.hosts \
+                    SET last_heartbeat = now() \
+                  WHERE host_id = $1::TEXT",
+                &[&host_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
+    /// Read the pg-side `now() - last_heartbeat` for THIS controller's
+    /// host row. Used by:
+    ///   - the takeover task to refresh the
+    ///     `sandbox_ha_heartbeat_lag_seconds` gauge, and
+    ///   - the clock-rewind detector — § 12 R-MM: a healthy fleet
+    ///     never sees a negative lag here, because pg's `now()` is
+    ///     monotonic from pg's perspective. A negative lag indicates
+    ///     pg's wall clock was rewound or the row's `last_heartbeat`
+    ///     was set to a future timestamp.
+    ///
+    /// Returns `Ok(None)` if the row is absent (a misconfigured
+    /// controller never upserted at boot); `Err` only on pg failure.
+    pub async fn heartbeat_lag_seconds(&self) -> Result<Option<f64>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        let opt = client
+            .query_opt(
+                "SELECT EXTRACT(EPOCH FROM (now() - last_heartbeat))::DOUBLE PRECISION \
+                   FROM sandbox.hosts \
+                  WHERE host_id = $1::TEXT",
+                &[&host_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(opt.map(|row| row.get::<_, f64>(0)))
+    }
+
+    /// Scan `sandbox.hosts` for hosts whose lease has expired —
+    /// `status='alive'` AND `last_heartbeat < now() - lease_ttl`.
+    /// Returns the typed-id strings (`hst_...`) of dead hosts. The
+    /// takeover task pairs each with a CAS UPDATE per § 11.2.
+    ///
+    /// `lease_ttl_secs` is taken from `SANDBOX_HA_LEASE_TTL_SECS`
+    /// (default 60 s, validated at boot to be >= 4 × heartbeat).
+    pub async fn dead_hosts(&self, lease_ttl_secs: u64) -> Result<Vec<String>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let lease_ttl_i64 = i64::try_from(lease_ttl_secs)
+            .map_err(|e| DatabaseError::Validation(format!("lease_ttl overflow: {e}")))?;
+        let rows = client
+            .query(
+                "SELECT host_id FROM sandbox.hosts \
+                  WHERE status = 'alive' \
+                    AND last_heartbeat < now() - make_interval(secs => $1::BIGINT)",
+                &[&lease_ttl_i64],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(r.get::<_, String>("host_id"));
+        }
+        Ok(out)
+    }
+
+    /// Outcome of a takeover UPDATE: which sandbox rows changed
+    /// owner, and what their new `generation` is. The new owner
+    /// must update its in-memory map with these generations so any
+    /// subsequent CAS-guarded write carries the right value.
+    ///
+    /// Empty vec == takeover lost (the dead host's heartbeat
+    /// resumed between `dead_hosts()` and the UPDATE; the EXISTS
+    /// clause filtered it out per § 11.2).
+    pub async fn takeover_sandboxes_from_host(
+        &self,
+        dead_host_typed: &str,
+        my_host: Uuid,
+        lease_ttl_secs: u64,
+    ) -> Result<Vec<TakenSandbox>> {
+        // Self-takeover protection (§ 12.x). Refuse to touch our own
+        // row even if env-var misconfiguration somehow surfaces it
+        // as "dead". This is defensive: heartbeat + dead_hosts
+        // shouldn't ever return self, but we belt-and-suspenders.
+        let my_host_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&my_host)
+        );
+        if dead_host_typed == my_host_typed {
+            return Err(DatabaseError::Validation(format!(
+                "refusing self-takeover: dead_host == my_host == {my_host_typed}",
+            )));
+        }
+        // Validate dead_host shape (`hst_<base62>`). Belt-and-
+        // suspenders — the WHERE clause already binds via $N, but
+        // refusing malformed input early surfaces bugs in callers.
+        let _ = zeroship_core::typed_id::parse_with_prefix(dead_host_typed, "hst")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+
+        let pool = self.open_pool().await?;
+        let mut client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let lease_ttl_i64 = i64::try_from(lease_ttl_secs)
+            .map_err(|e| DatabaseError::Validation(format!("lease_ttl overflow: {e}")))?;
+
+        // Two-step in one TX:
+        //   (1) The CAS-guarded UPDATE per § 11.2 — atomic with the
+        //       EXISTS check on the dead host's heartbeat.
+        //   (2) Mark the dead host's row as 'dead' if (and only if)
+        //       its lease is STILL expired at this instant. If the
+        //       host heart-beated back to life between (1) and (2),
+        //       the WHERE clause misses and we leave status='alive'.
+        let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
+        let rows = tx
+            .query(
+                "UPDATE sandbox.sandboxes \
+                    SET host_id = $1::TEXT, \
+                        generation = generation + 1, \
+                        last_used_at = now() \
+                  WHERE host_id = $2::TEXT \
+                    AND status IN ('starting', 'running') \
+                    AND deleted_at IS NULL \
+                    AND EXISTS ( \
+                        SELECT 1 FROM sandbox.hosts \
+                         WHERE host_id = $2::TEXT \
+                           AND status = 'alive' \
+                           AND last_heartbeat < now() - make_interval(secs => $3::BIGINT) \
+                    ) \
+                  RETURNING sandbox_id, generation",
+                &[&my_host_typed, &dead_host_typed.to_string(), &lease_ttl_i64],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(TakenSandbox {
+                sandbox_id: r.get::<_, String>("sandbox_id"),
+                generation: r.get::<_, i64>("generation"),
+            });
+        }
+
+        // Mark the dead host's row 'dead' atomically with the
+        // takeover. Race-tolerant against a heartbeat that resumed
+        // mid-TX: the WHERE clause checks `last_heartbeat < now() -
+        // lease_ttl` again, so a host that came back to life between
+        // (1) and here keeps `status='alive'`. Note that the inner
+        // takeover above also conditioned on the same predicate, so
+        // a takeover-with-zero-rows + still-alive host leaves the
+        // host's status untouched as expected.
+        tx.execute(
+            "UPDATE sandbox.hosts \
+                SET status = 'dead' \
+              WHERE host_id = $1::TEXT \
+                AND status = 'alive' \
+                AND last_heartbeat < now() - make_interval(secs => $2::BIGINT)",
+            &[&dead_host_typed.to_string(), &lease_ttl_i64],
+        )
+        .await
+        .map_err(DatabaseError::Pg)?;
+        tx.commit().await.map_err(DatabaseError::Pg)?;
+        Ok(out)
     }
 
     /// INSERT a fresh sandbox row at create time. The caller supplies
