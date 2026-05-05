@@ -168,6 +168,56 @@ const _default = {
 Object.assign(__vite_ssr_exports__, _default, { default: _default });
 `,
 
+  // node:async_hooks — native AsyncLocalStorage (ISS-01). The Rust
+  // runtime installs `globalThis.__zsAsyncHooks` with a real
+  // AsyncLocalStorage class backed by V8's
+  // `ContinuationPreservedEmbedderData` slot — the only way to
+  // preserve a store across awaits, including continuations resumed
+  // from native Rust async work like `fetch`. unenv's polyfill is
+  // closure-based and reverts the store synchronously, so anything
+  // that awaits inside `als.run(value, fn)` (e.g. LangGraph nodes
+  // calling `interrupt()` after `await model.invoke()`) loses the
+  // store. We replace the unenv shim outright.
+  //
+  // Surface: `AsyncLocalStorage` is the only class real apps use.
+  // `AsyncResource`, `createHook`, `executionAsyncId`,
+  // `triggerAsyncId` — all stubs that throw "Not implemented" so
+  // silent breakage doesn't slip through (Node ships them all).
+  "node:async_hooks": `
+const N = globalThis.__zsAsyncHooks;
+if (!N || !N.AsyncLocalStorage) {
+  throw new Error("node:async_hooks: native install missing — runtime not initialised");
+}
+const AsyncLocalStorage = N.AsyncLocalStorage;
+
+function _notImplemented(name) {
+  return function() {
+    const err = new Error(name + " is not implemented in zeroship's V8 runtime");
+    err.code = "ERR_METHOD_NOT_IMPLEMENTED";
+    throw err;
+  };
+}
+class AsyncResource {
+  constructor() { _notImplemented("AsyncResource")(); }
+}
+const executionAsyncId = _notImplemented("executionAsyncId");
+const triggerAsyncId = _notImplemented("triggerAsyncId");
+const executionAsyncResource = _notImplemented("executionAsyncResource");
+const createHook = _notImplemented("createHook");
+const asyncWrapProviders = {};
+
+const _default = {
+  AsyncLocalStorage,
+  AsyncResource,
+  createHook,
+  executionAsyncId,
+  triggerAsyncId,
+  executionAsyncResource,
+  asyncWrapProviders,
+};
+Object.assign(__vite_ssr_exports__, _default, { default: _default });
+`,
+
   // node:timers/promises — unenv's setInterval is a Promise, not an async
   // generator. The latter is what `for await` consumers (tRPC, langchain
   // streaming) expect.

@@ -236,9 +236,16 @@ globalThis.Buffer = Buffer;
 
 ### node:async_hooks — AsyncLocalStorage
 
-Closure-based implementation (no actual async tracking):
+**Native, backed by V8's `ContinuationPreservedEmbedderData` slot.** Lives in
+`crates/runtime/src/node/async_hooks/`. The Vite-side synthetic
+`node:async_hooks` module re-exports `globalThis.__zsAsyncHooks.AsyncLocalStorage`
+(installed by Rust at isolate init).
+
+**Why native (and not the closure shape):** the closure-based polyfill that
+shipped originally —
 
 ```javascript
+// DEPRECATED — kept here as a counter-example.
 class AsyncLocalStorage {
     #store = undefined;
     getStore() { return this.#store; }
@@ -246,12 +253,38 @@ class AsyncLocalStorage {
         const prev = this.#store;
         this.#store = store;
         try { return fn(...args); }
-        finally { this.#store = prev; }
+        finally { this.#store = prev; }   // ← reverts BEFORE await resumes
     }
 }
 ```
 
-This works for LangChain's context propagation. For full async tracking (across await boundaries), would need V8 PromiseHook integration — not needed now.
+— reverted state synchronously in `finally`, so any `await` inside `fn`
+saw the post-revert (empty) store after the continuation resumed.
+LangGraph's `interrupt()` after `await model.invoke(...)` failed
+with "Called interrupt() outside the context of a graph" because
+`getRunnableConfig()` returned `null` (ISS-01).
+
+**The fix.** V8 ships an embedder slot —
+`Isolate::SetContinuationPreservedEmbedderData` / `…Get…` (rusty_v8 v147
+exposes it directly) — that V8 propagates AUTOMATICALLY across every
+async hop: `await`, microtask, `.then`, generator yield, native-Promise
+resolution. Embedders use it precisely so context-across-await works
+without a PromiseHook.
+
+**Storage layout.** Each `AsyncLocalStorage` instance mints a unique
+JS Symbol (the per-instance key). The shared slot holds a JS `Map`
+keyed by those Symbols — multiple ALS instances coexist with distinct
+contexts. `run(store, fn, ...args)` clones the current Map, sets
+`<our-symbol> -> store`, installs the clone in the slot, calls `fn`
+inside a `TryCatch` (so the slot is restored on JS-thrown exceptions),
+restores the old slot value on every exit path, and re-throws if needed.
+`enterWith(store)` skips the restore. `disable()` removes our entry from
+the current Map.
+
+**Surface:** `AsyncLocalStorage` is the only class real apps use.
+`AsyncResource`, `createHook`, `executionAsyncId`, `triggerAsyncId`
+ship as `_notImplemented(...)` stubs that throw on use rather than
+silently no-oping.
 
 ## What Changes
 
@@ -310,5 +343,4 @@ All polyfills are pure JS using Web APIs already available in the runtime.
 - **Full Node.js compat** — only what LangChain + OpenAI SDK + zod need
 - **node:fs actual filesystem** — stubs only (throws on use)
 - **node:net / node:tls / node:child_process** — not needed for LangChain
-- **AsyncLocalStorage across await** — simple closure-based impl is sufficient
 - **SHA-1, MD5, SHA-512** — only SHA-256 for now (add later if needed)

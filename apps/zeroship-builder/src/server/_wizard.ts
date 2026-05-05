@@ -21,28 +21,31 @@
 //
 // **Two-node architecture, NOT one.** The naive shape is one node
 // that calls model.invoke() and then interrupt() based on the
-// decision. That fails in the zeroship V8 isolate: native fetch
-// breaks AsyncLocalStorage propagation, so by the time `interrupt()`
-// runs after `await model.invoke()`, langgraph's
-// `getRunnableConfig()` returns null and we get
+// decision. That used to fail in the zeroship V8 isolate: native
+// fetch broke AsyncLocalStorage propagation, so by the time
+// `interrupt()` ran after `await model.invoke()`, langgraph's
+// `getRunnableConfig()` returned null and we got
 //
 //     "Called interrupt() outside the context of a graph."
 //
-// (Verified empirically: `interrupt()` called BEFORE any await works
-// fine. The issue is the fetch boundary inside model.invoke, which is
-// implemented natively by zeroship's runtime and doesn't preserve the
-// AsyncLocalStorage that langgraph's RunnableCallable.invoke sets up
-// via runWithConfig.)
+// **Status as of ISS-01 fix (2026-05-04):** the underlying runtime
+// bug is closed. `crates/runtime/src/node/async_hooks/` now ships a
+// native AsyncLocalStorage backed by V8's
+// `ContinuationPreservedEmbedderData`, which V8 propagates across
+// every async hop including continuations resumed from native
+// `fetch`. The two-node shape below is therefore no longer
+// REQUIRED — `interrupt()` after `await model.invoke()` works in a
+// single node now. Collapsing this back into a single node is left
+// to a follow-up PR (functional behaviour is identical; the split
+// is only a code-shape difference). See ISSUES.md for the full
+// regression context.
 //
-// Fix: split into two nodes.
+// Fix (kept in place for now): split into two nodes.
 //   - `decide` — calls model.invoke, stashes decision in state. No
-//     interrupt() in this node, so the broken AsyncLocalStorage is
-//     irrelevant.
+//     interrupt() in this node.
 //   - `act`   — reads the stashed decision; if ask_survey, emits
 //     data-survey then interrupt(); if finalize, emits data-brief
-//     and ends. NO awaits before interrupt() — the AsyncLocalStorage
-//     is freshly set when langgraph invokes the act node, so
-//     interrupt() works.
+//     and ends.
 //
 // Routing: START → decide → act → (loop or END). The "loop" path
 // goes act → decide so the next round fetches a fresh decision based
