@@ -232,6 +232,8 @@ fn make_state(
         sandboxes: registry,
         backend,
         mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
+        // Phase-0 sandbox-pg-state: tests run pg-disabled.
+        database: None,
     });
     (state, sandbox_id)
 }

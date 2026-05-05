@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use crate::backend::Backend;
 use crate::config::SandboxConfig;
+use crate::db::{Database, LATEST_MIGRATION_VERSION};
 use crate::persist::Persistence;
 use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
@@ -41,6 +42,14 @@ pub struct AppState {
     /// for tests that build `AppState` directly without
     /// `from_config`. Handlers that consume it `expect()` on `Some`.
     pub mint_rate_limiter: Option<MintRateLimiter>,
+    /// Phase-0 pg-backed non-secret state handle (sandbox-pg-state
+    /// design § 8.2). `None` is the disabled-by-absence shape:
+    /// `SANDBOX_DATABASE_URL` is unset, so pg integration is off.
+    /// In Phase 0, the handle exists but no live call sites consume
+    /// it — Phase 1 wires `insert_sandbox` / `record_event` into
+    /// the backends. The schema is brought to
+    /// [`LATEST_MIGRATION_VERSION`] before this state ships.
+    pub database: Option<Arc<Database>>,
 }
 
 impl AppState {
@@ -62,6 +71,62 @@ impl AppState {
         // run with persistence off.
         let persist: Option<Arc<Persistence>> =
             Persistence::from_env()?.map(Arc::new);
+
+        // Phase-0 pg-backed state: build BEFORE the backend probe so
+        // the schema reaches the right version before any backend op
+        // could try to write. Pg-required features stay dormant in
+        // Phase 0 — the handle is plumbed-but-unused; Phase 1 wires
+        // call sites. (`docs/proposals/sandbox-pg-state.md` § 15
+        // Phase 0.)
+        let database: Option<Arc<Database>> = match Database::from_env().await {
+            Ok(opt) => opt.map(Arc::new),
+            Err(e) => {
+                // Dev escape hatch: SANDBOX_PG_OPTIONAL=1 (D-11)
+                // logs and continues with pg disabled. Production
+                // refuses to boot; the operator must fix the
+                // config.
+                if matches!(std::env::var("SANDBOX_PG_OPTIONAL").as_deref(), Ok("1")) {
+                    tracing::warn!(
+                        error = %e,
+                        "SANDBOX_PG_OPTIONAL=1: Database::from_env failed; pg integration disabled"
+                    );
+                    None
+                } else {
+                    return Err(format!("Database::from_env: {e}"));
+                }
+            }
+        };
+
+        if let Some(db) = &database {
+            // Block boot until the schema is at the version this
+            // binary was built against. A designated migrator
+            // applies pending migrations; everyone else polls.
+            // Failure aborts startup.
+            if let Err(e) = db
+                .ensure_schema_at_version(LATEST_MIGRATION_VERSION)
+                .await
+            {
+                if matches!(std::env::var("SANDBOX_PG_OPTIONAL").as_deref(), Ok("1")) {
+                    tracing::warn!(
+                        error = %e,
+                        target_version = LATEST_MIGRATION_VERSION,
+                        "SANDBOX_PG_OPTIONAL=1: ensure_schema_at_version failed; \
+                         pg integration disabled"
+                    );
+                } else {
+                    return Err(format!(
+                        "ensure_schema_at_version({LATEST_MIGRATION_VERSION}): {e}"
+                    ));
+                }
+            } else {
+                tracing::info!(
+                    target_version = LATEST_MIGRATION_VERSION,
+                    host_id = %db.host_id(),
+                    "sandbox pg: schema ready"
+                );
+            }
+        }
+
         let backend = Backend::from_config_with_persist(&config, persist.clone())?;
         backend.probe().await?;
         // Clean up orphan Pods + ConfigMaps from a previous run.
@@ -114,6 +179,7 @@ impl AppState {
             sandboxes: registry,
             backend,
             mint_rate_limiter: Some(MintRateLimiter::new()),
+            database,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once

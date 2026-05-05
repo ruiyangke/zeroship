@@ -29,10 +29,9 @@
 //!   on `sandbox.schema_migrations.version` (D-4 / § 7.1).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use compio_postgres::{Config, NoTls, Pool, PoolConfig};
+use compio_postgres::{Config, Pool, PoolConfig};
 use uuid::Uuid;
 
 // ────────────────────────────────────────────────────────────────────
@@ -146,24 +145,23 @@ pub type Result<T> = std::result::Result<T, DatabaseError>;
 // Database handle
 // ────────────────────────────────────────────────────────────────────
 
-/// Owned connection-pool wrapper + boot-time config snapshot.
+/// Boot-time config snapshot. The pg connection pool itself is
+/// `!Send` (`compio_postgres::Pool` uses `Rc` / `RefCell` internally
+/// — see `crates/compio-postgres/src/pool.rs:15-17`); ntex requires
+/// the worker factory closure to be `Send + Clone` so we cannot
+/// stash a `Pool` inside the shared `Arc<AppState>`.
 ///
-/// `compio_postgres::Pool` is `!Send` (uses `Rc` / `RefCell`
-/// internally — see `crates/compio-postgres/src/pool.rs:15-17`).
-/// `Arc<Database>` is therefore `!Send` and lives on a single compio
-/// runtime thread. That matches the rest of the controller, which is
-/// already single-threaded per process (§ 5).
+/// Phase-0 design: `Database` holds the resolved DSN + config and
+/// builds a transient pool inline for migration runs (one boot
+/// pass) and for `ping`. Phase 1 introduces a per-ntex-worker
+/// thread-local pool when call sites actually consume it.
+///
+/// `Database` itself is `Send + Sync` (just String + Copy fields),
+/// so `Arc<Database>` plumbs cleanly through `AppState` without
+/// breaking ntex's worker-factory bounds.
+#[derive(Debug, Clone)]
 pub struct Database {
-    pool: Pool,
     config: DbConfig,
-}
-
-impl std::fmt::Debug for Database {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Database")
-            .field("config", &self.config)
-            .finish_non_exhaustive()
-    }
 }
 
 impl Database {
@@ -212,15 +210,20 @@ impl Database {
 
         let host_id = load_or_generate_host_id()?;
 
-        // Open the pool eagerly (warm `min_idle` connections — see
-        // pool.rs::connect_with_config). Any connect error here is a
-        // boot-time failure.
+        // Eagerly verify the DSN connects + auths so a misconfigured
+        // controller fails fast at boot rather than at first call.
+        // The transient pool is dropped immediately; Phase-1 call
+        // sites build per-worker pools when they need them.
         let mut pool_cfg = PoolConfig::default();
         pool_cfg.max_size = pool_max;
-        let pool =
-            Pool::connect_with_config(&dsn, pool_cfg)
-                .await
-                .map_err(|e| DatabaseError::Pg(e))?;
+        let pool = Pool::connect_with_config(&dsn, pool_cfg)
+            .await
+            .map_err(DatabaseError::Pg)?;
+        // Smoke-test the connection.
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let _ = client.query("SELECT 1", &[]).await.map_err(DatabaseError::Pg)?;
+        drop(client);
+        drop(pool);
 
         let config = DbConfig {
             dsn,
@@ -229,7 +232,7 @@ impl Database {
             boot_timeout_secs,
             pool_max,
         };
-        Ok(Self { pool, config })
+        Ok(Self { config })
     }
 
     /// Used by tests + the integration test suite: build from a
@@ -244,12 +247,16 @@ impl Database {
         boot_timeout_secs: u64,
     ) -> Result<Self> {
         validate_dsn_scheme(&dsn)?;
+        // Smoke-test the connection so callers get a clean error
+        // when the test fixture is misconfigured.
         let mut pool_cfg = PoolConfig::default();
         pool_cfg.max_size = 4;
-        let pool =
-            Pool::connect_with_config(&dsn, pool_cfg)
-                .await
-                .map_err(|e| DatabaseError::Pg(e))?;
+        let pool = Pool::connect_with_config(&dsn, pool_cfg)
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let _client = pool.get().await.map_err(DatabaseError::Pg)?;
+        drop(_client);
+        drop(pool);
         let config = DbConfig {
             dsn,
             host_id: Uuid::now_v7(),
@@ -257,7 +264,7 @@ impl Database {
             boot_timeout_secs,
             pool_max: 4,
         };
-        Ok(Self { pool, config })
+        Ok(Self { config })
     }
 
     /// Cheap accessor for the controller's stable identity.
@@ -265,17 +272,37 @@ impl Database {
         self.config.host_id
     }
 
-    /// Borrow the underlying pool. Phase-1 call sites use this to
-    /// run the actual INSERT/UPDATE/SELECT statements; Phase 0 only
-    /// the migration runner consumes it.
-    pub fn pool(&self) -> &Pool {
-        &self.pool
+    /// Resolved DSN as the `sandbox_app` role, password injected if
+    /// a `SANDBOX_DATABASE_PASSWORD_PATH` was configured. Phase 1
+    /// uses this to build per-ntex-worker connection pools when
+    /// call sites actually need pooled access.
+    pub fn dsn(&self) -> &str {
+        &self.config.dsn
+    }
+
+    /// Configured pool max-size (D-17 default 16). Phase 1 reads
+    /// this when constructing the per-worker pool.
+    pub fn pool_max(&self) -> usize {
+        self.config.pool_max
+    }
+
+    /// Open a transient connection pool. Used by the boot-time
+    /// migration runner + `ping`; Phase 1 introduces a per-worker
+    /// long-lived pool. Returned `Pool` is `!Send` and lives only
+    /// on the caller's compio thread.
+    async fn open_pool(&self) -> Result<Pool> {
+        let mut cfg = PoolConfig::default();
+        cfg.max_size = self.config.pool_max.max(2);
+        Pool::connect_with_config(&self.config.dsn, cfg)
+            .await
+            .map_err(DatabaseError::Pg)
     }
 
     /// Cheap connectivity check — used by `/readyz` and by integration
     /// tests as the "are we connected?" gate.
     pub async fn ping(&self) -> Result<()> {
-        let client = self.pool.get().await.map_err(DatabaseError::Pg)?;
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
         let rows = client
             .query("SELECT 1", &[])
             .await
@@ -293,7 +320,8 @@ impl Database {
     /// 0 if the table does not yet exist (fresh database). Used by
     /// the boot-path wait loop and by tests.
     pub async fn current_schema_version(&self) -> Result<i64> {
-        let client = self.pool.get().await.map_err(DatabaseError::Pg)?;
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
         // Check existence first so we can return 0 cleanly for a
         // fresh database without spamming pg with an error.
         let exists: bool = client
@@ -355,19 +383,46 @@ impl Database {
         // Bootstrap: ensure the schema + table exist outside any
         // migration TX so a fresh database can be queried for
         // `MAX(version)` below. This is itself idempotent.
-        self.ensure_schema_migrations_table().await?;
+        let pool = self.open_pool().await?;
+        Self::ensure_schema_migrations_table(&pool).await?;
 
-        let current = self.current_schema_version().await?;
+        let current = self.current_schema_version_with_pool(&pool).await?;
         let mut applied: u64 = 0;
         for m in MIGRATIONS.iter().filter(|m| m.version > current) {
-            self.apply_one_migration(*m).await?;
+            Self::apply_one_migration(&pool, *m).await?;
             applied += 1;
         }
         Ok(applied)
     }
 
-    async fn ensure_schema_migrations_table(&self) -> Result<()> {
-        let client = self.pool.get().await.map_err(DatabaseError::Pg)?;
+    async fn current_schema_version_with_pool(&self, pool: &Pool) -> Result<i64> {
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let exists: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pg_catalog.pg_tables
+                      WHERE schemaname = 'sandbox' AND tablename = 'schema_migrations'
+                 )",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?
+            .get(0);
+        if !exists {
+            return Ok(0);
+        }
+        let row = client
+            .query_one(
+                "SELECT COALESCE(MAX(version), 0)::BIGINT FROM sandbox.schema_migrations",
+                &[],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(row.get::<_, i64>(0))
+    }
+
+    async fn ensure_schema_migrations_table(pool: &Pool) -> Result<()> {
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
         client
             .batch_execute(
                 "CREATE SCHEMA IF NOT EXISTS sandbox; \
@@ -383,8 +438,8 @@ impl Database {
         Ok(())
     }
 
-    async fn apply_one_migration(&self, m: Migration) -> Result<()> {
-        let mut client = self.pool.get().await.map_err(DatabaseError::Pg)?;
+    async fn apply_one_migration(pool: &Pool, m: Migration) -> Result<()> {
+        let mut client = pool.get().await.map_err(DatabaseError::Pg)?;
 
         // The DDL body. `batch_execute` inside a TX runs every
         // statement in the file under one transaction (BEGIN issued
@@ -685,9 +740,6 @@ fn is_unique_violation(e: &compio_postgres::Error) -> bool {
     e.code() == Some(&compio_postgres::error::SqlState::UNIQUE_VIOLATION)
 }
 
-// Suppress `unused_imports` for `Arc`/`NoTls` until Phase 1 wires them in.
-#[allow(dead_code)]
-fn _phase1_anchors(_: &Arc<()>, _: NoTls) {}
 
 // ────────────────────────────────────────────────────────────────────
 // Tests

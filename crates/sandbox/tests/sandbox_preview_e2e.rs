@@ -189,6 +189,11 @@ fn make_state(
         sandboxes: registry,
         backend,
         mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
+        // Phase-0 sandbox-pg-state: tests run pg-disabled. The
+        // backends never read this field in Phase 0, so `None` is
+        // the live shape AppState::from_config picks when
+        // SANDBOX_DATABASE_URL is absent.
+        database: None,
     });
     (state, sandbox_id)
 }
