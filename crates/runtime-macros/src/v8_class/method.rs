@@ -66,7 +66,9 @@ use crate::{gen_call_return, gen_throw_op_error_arms, must_str};
 ///
 /// Cost: one HashSet `insert` + one `remove` per `&mut self` call.
 /// The set has 0 or 1 entries in the steady state (re-entry is
-/// pathological, not common).
+/// pathological, not common) — but supports up to N entries during
+/// arbitrary cross-instance nesting, which is the soundness invariant
+/// the macro must uphold (see HISTORICAL NOTE below).
 ///
 /// Emitted ONLY for `&mut self` methods. `&self` callbacks are sound
 /// to nest (multiple aliased shared references are fine) and skip the
@@ -81,6 +83,27 @@ use crate::{gen_call_return, gen_throw_op_error_arms, must_str};
 ///
 /// The caller must run this AFTER the External recovery and BEFORE
 /// the unsafe `&mut Self` materialisation.
+///
+/// **HISTORICAL NOTE — Cell migration attempted and reverted (Wave 2).**
+/// Design proposal §3.4 + §9.3 sketched a single-slot
+/// `Cell<Option<usize>>` with restore-prior-on-drop, claiming
+/// equivalence to the HashSet variant for the cross-instance nesting
+/// case. The Wave 2 implementation revealed a soundness gap for the
+/// 3-deep nesting `a → b → a`: when A.method is in flight at addr
+/// 0xAAAA and the body calls B.method (a different instance), the
+/// slot is overwritten to 0xBBBB; if B's body then synchronously
+/// re-enters A.method, the guard reads `Some(0xBBBB)` and finds it
+/// does NOT match the current `0xAAAA`, so it lets the re-entry
+/// through — and the outer `&mut Self_A` aliases with the new inner
+/// `&mut Self_A`. UB. The HashSet variant catches this case (set
+/// `{0xAAAA, 0xBBBB}` after step 2; step 3's `contains(0xAAAA)`
+/// returns true, throws). See `v8_reentrancy_smoke::
+/// nested_cross_instance_then_same_instance_throws` for the
+/// regression test that pinned the gap. Memory savings (40
+/// bytes/method) NOT worth a soundness regression; the HashSet
+/// variant ships unchanged. A multi-slot Cell-based alternative
+/// (e.g. `RefCell<SmallVec<[usize; 1]>>`) is a possible follow-up
+/// but not in scope for Wave 2.
 fn gen_reentry_guard(
     class_ty: &syn::Ident,
     method_name: &syn::Ident,
