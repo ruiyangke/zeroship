@@ -1270,7 +1270,21 @@ impl RuntimeInner {
                             None => v8::Object::new(scope).into(),
                         }
                     };
-                    match call_rpc_inner(scope, rpc_fn, id_arg, input_arg, ctx_arg) {
+
+                    // Wave D — build the per-request RpcContext + JS object,
+                    // and let `call_rpc_inner` install it in the ALS slot.
+                    // On any build failure we drop ALS support and fall
+                    // through to a no-ALS call (degrades to undefined for
+                    // `__zeroshipGetRpcCtx`, never breaks the dispatch).
+                    let user_json = self.state.borrow().per_request_user.get(&request_id).cloned();
+                    let rpc_ctx = build_rpc_context_from_request(
+                        request_id, method, url, headers, user_json,
+                    );
+                    let rpc_ctx_object = match rpc_ctx.build_js_object(scope) {
+                        Ok(handle) => Some(handle.ctx_object),
+                        Err(_) => None,
+                    };
+                    match call_rpc_inner(scope, rpc_fn, id_arg, input_arg, ctx_arg, rpc_ctx_object) {
                         RpcCallResult::Handled(res) => {
                             // If the call returned a pending promise,
                             // the pump must settle it as RPC (envelope-
@@ -2812,16 +2826,74 @@ fn rpc_invalid_argument_response(message: &str) -> DispatchResult {
     })
 }
 
+/// Map the kernel's per-request inputs into a Wave-D `RpcContext`.
+///
+/// Field mapping per the proposal §3 + the Wave D brief:
+///   - `request_id`  → `req_<n>` derived from the kernel's monotonic
+///     counter (UUIDv7-shaped placeholder; full request-id propagation
+///     from the gateway is a follow-up).
+///   - `headers`     → header list, copied (the slice is short-lived).
+///   - `method` / `url` → as supplied by the gateway.
+///   - `user_json`   → existing `per_request_user` entry, same JSON
+///     string the legacy `zeroship.auth.getUser()` returns.
+///   - `idempotency_key` → `Idempotency-Key` request header (case-
+///     insensitive lookup) when present.
+///   - `trace_id`    → W3C `traceparent` header's `trace-id` field
+///     (positions 3–35 of `00-<trace>-<span>-<flags>`) when present;
+///     else a fresh `trace_<n>` placeholder.
+fn build_rpc_context_from_request(
+    request_id: u64,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    user_json: Option<String>,
+) -> crate::rpc::RpcContext {
+    let mut idempotency_key: Option<String> = None;
+    let mut trace_id_from_header: Option<String> = None;
+    for (k, v) in headers {
+        if idempotency_key.is_none() && k.eq_ignore_ascii_case("Idempotency-Key") {
+            idempotency_key = Some(v.clone());
+        }
+        if trace_id_from_header.is_none() && k.eq_ignore_ascii_case("traceparent") {
+            // `traceparent` = "<ver>-<trace-id>-<parent-id>-<flags>".
+            // Slice the trace-id field (32 hex chars). Robust to
+            // missing dashes / wrong field count: fall through.
+            let parts: Vec<&str> = v.split('-').collect();
+            if parts.len() >= 2 && parts[1].len() == 32 {
+                trace_id_from_header = Some(parts[1].to_string());
+            }
+        }
+    }
+    crate::rpc::RpcContext {
+        request_id: format!("req_{:016x}", request_id),
+        trace_id: trace_id_from_header.unwrap_or_else(|| format!("trace_{:016x}", request_id)),
+        idempotency_key,
+        method: method.to_string(),
+        url: url.to_string(),
+        headers: headers.to_vec(),
+        user_json,
+    }
+}
+
 /// Invoke `default.rpc(id, input, ctx)` and classify the return value.
+///
+/// `als_ctx_object`, when `Some`, is installed into V8's
+/// `ContinuationPreservedEmbedderData` slot under the platform's
+/// RPC-ctx Symbol for the duration of the call (Wave D). The slot is
+/// restored on every exit path (sync return, JS throw, panic). When
+/// `None`, the call runs without an ALS frame — used by paths that
+/// don't have a populated `RpcContext` yet (synthetic-entry tests
+/// pre-Wave-D wire).
 fn call_rpc_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     rpc_fn: v8::Local<'s, v8::Function>,
     id_arg: v8::Local<'s, v8::Value>,
     input_arg: v8::Local<'s, v8::Value>,
     ctx_arg: v8::Local<'s, v8::Value>,
+    als_ctx_object: Option<v8::Local<'s, v8::Object>>,
 ) -> RpcCallResult {
     let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
-    let (result_val, caught_exception) = {
+    let invoke = |scope: &mut v8::PinScope<'s, '_>| {
         v8::tc_scope!(let tc, scope);
         let r = rpc_fn.call(tc, undefined, &[id_arg, input_arg, ctx_arg]);
         if tc.has_caught() {
@@ -2831,6 +2903,10 @@ fn call_rpc_inner<'s>(
         } else {
             (r.map(|v| v8::Global::new(tc, v)), None)
         }
+    };
+    let (result_val, caught_exception) = match als_ctx_object {
+        Some(ctx_object) => crate::rpc::with_rpc_context_in_als(scope, ctx_object, invoke),
+        None => invoke(scope),
     };
 
     scope.perform_microtask_checkpoint();

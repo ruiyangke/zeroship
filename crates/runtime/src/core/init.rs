@@ -141,7 +141,15 @@ function getRequest() {
     return req;
 }
 
-export { env, waitUntil, getRequest };
+// RPC v2 phase 1 (Wave D) — ALS-backed per-request context. Returns
+// the frozen `ctx` object during a `default.rpc(...)` call and
+// `undefined` outside one. The npm `@zeroship/server` package layers
+// `user()` / `request()` / `idempotencyKey()` etc. on top of this.
+function getRequestContext() {
+    return globalThis.__zeroshipGetRpcCtx();
+}
+
+export { env, waitUntil, getRequest, getRequestContext };
 "#;
 
 /// Internal bootstrap-only module. NOT part of the stable user-facing API —
@@ -1750,6 +1758,10 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     // already exists on the global is fine because V8 wires the Error
     // intrinsic before user-visible install hooks fire.
     crate::rpc::install_global(scope, global);
+    // RPC v2 phase 1 (Wave D) — install `__zeroshipGetRpcCtx` so the
+    // `getRequestContext` export in the `zeroship` JS module can read
+    // the per-request platform ctx out of V8's embedder-data slot.
+    crate::rpc::install_dispatch_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).
