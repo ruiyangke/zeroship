@@ -652,6 +652,103 @@ fn mut_self_with_scope_value_pairs_syncs_per_next() {
     assert_eq!(s, "k=v,true,2");
 }
 
+// ---------------------------------------------------------------------------
+// `value_marshal = some_fn` — arbitrary V types via user-supplied
+// marshal function. Mirrors FormData's `(USVString or File)` union.
+// ---------------------------------------------------------------------------
+
+mod custom_marshal {
+    use super::*;
+
+    /// A union-shaped value: a string OR a number, surfaced as either
+    /// a v8 string or v8 number on yield.
+    #[derive(Clone)]
+    pub enum Either {
+        Str(String),
+        Num(f64),
+    }
+
+    /// Marshal hook — `value_marshal = either_to_v8` on the iterable
+    /// attribute. Macro emits `let __v_v = either_to_v8(scope, &__v);`
+    /// per yield. Signature is fixed: `fn(&mut PinScope, &V) ->
+    /// Local<Value>`.
+    pub fn either_to_v8<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        v: &Either,
+    ) -> v8::Local<'s, v8::Value> {
+        match v {
+            Either::Str(s) => v8::String::new(scope, s).unwrap().into(),
+            Either::Num(n) => v8::Number::new(scope, *n).into(),
+        }
+    }
+
+    pub struct Bag {
+        pub entries: RefCell<Vec<(ByteString, Either)>>,
+    }
+
+    #[v8_class]
+    #[v8_iterable(
+        key = ByteString,
+        value = Either,
+        mode = live,
+        value_marshal = either_to_v8
+    )]
+    impl Bag {
+        #[v8_constructor]
+        fn new() -> Bag {
+            Bag {
+                entries: RefCell::new(Vec::new()),
+            }
+        }
+
+        #[v8_method]
+        fn append_str(&self, k: ByteString, v: ByteString) {
+            self.entries.borrow_mut().push((
+                k,
+                Either::Str(String::from_utf8_lossy(v.as_slice()).into_owned()),
+            ));
+        }
+
+        #[v8_method]
+        fn append_num(&self, k: ByteString, v: f64) {
+            self.entries.borrow_mut().push((k, Either::Num(v)));
+        }
+
+        fn value_pairs(&self) -> Vec<(ByteString, Either)> {
+            self.entries.borrow().clone()
+        }
+    }
+}
+
+#[test]
+fn value_marshal_fn_emits_arbitrary_v8_values() {
+    let s = run_in_v8(
+        |scope, global| {
+            install_class::<custom_marshal::Bag>(
+                custom_marshal::Bag::install,
+                "Bag",
+                scope,
+                global,
+            );
+        },
+        r#"
+        const b = new Bag();
+        b.append_str("k1", "hello");
+        b.append_num("k2", 42);
+        const out = [];
+        for (const [k, v] of b) {
+            out.push(`${k}:${typeof v}:${v}`);
+        }
+        out.join(",");
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    // The marshal hook produces a V8 string for the first entry and
+    // a V8 number for the second — proving `value_marshal` ran on
+    // each yield.
+    assert_eq!(s, "k1:string:hello,k2:number:42");
+}
+
 #[test]
 fn mut_self_with_scope_value_pairs_observes_remote_growth() {
     // Run the test in two phases inside a single isolate via a

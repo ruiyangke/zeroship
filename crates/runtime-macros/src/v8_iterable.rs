@@ -75,14 +75,29 @@ pub(crate) enum IterMode {
     Live,
 }
 
-/// Parsed `#[v8_iterable(key = TY, value = TY [, mode = snapshot|live])]`
-/// attribute.
+/// Parsed `#[v8_iterable(key = TY, value = TY [, mode = snapshot|live]
+/// [, value_marshal = ident])]` attribute.
 pub(crate) struct IterableAttr {
     pub key_ty: syn::Type,
     pub value_ty: syn::Type,
     /// Iteration mode. Defaults to `Snapshot` when `mode = ...` is
     /// omitted; back-compat for every existing consumer.
     pub mode: IterMode,
+    /// Optional `value_marshal = some_fn` — a free-function path that
+    /// the macro calls per-yield to convert a `&V` to
+    /// `v8::Local<v8::Value>`. Skips the built-in
+    /// USVString/ByteString/u32/Vec<u8> classification so users can
+    /// surface arbitrary types (e.g. FormData's
+    /// `(USVString or File)` union or any v8 Local).
+    ///
+    /// Required signature on the callee:
+    /// ```ignore
+    /// fn some_fn<'s>(
+    ///     scope: &mut v8::PinScope<'s, '_>,
+    ///     v: &V,
+    /// ) -> v8::Local<'s, v8::Value>
+    /// ```
+    pub value_marshal: Option<syn::Path>,
 }
 
 /// Read `#[v8_iterable(key = ..., value = ..., mode = ...)]` from impl-
@@ -98,6 +113,7 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
         let mut key_ty: Option<syn::Type> = None;
         let mut value_ty: Option<syn::Type> = None;
         let mut mode: Option<IterMode> = None;
+        let mut value_marshal: Option<syn::Path> = None;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("key") {
                 let ty: syn::Type = meta.value()?.parse()?;
@@ -120,9 +136,17 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
                         )));
                     }
                 });
+            } else if meta.path.is_ident("value_marshal") {
+                // Accept a path: `value_marshal = entry_value_to_v8` or
+                // `value_marshal = crate::path::to_v8`. The path resolves
+                // at call-site of the emitted code (inside the parent
+                // class's module), so relative paths are fine for
+                // local helpers.
+                let path: syn::Path = meta.value()?.parse()?;
+                value_marshal = Some(path);
             } else {
                 return Err(meta.error(
-                    "expected `key = TY`, `value = TY`, or `mode = snapshot|live`",
+                    "expected `key = TY`, `value = TY`, `mode = snapshot|live`, or `value_marshal = fn`",
                 ));
             }
             Ok(())
@@ -149,6 +173,7 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
             key_ty,
             value_ty,
             mode: mode.unwrap_or(IterMode::Snapshot),
+            value_marshal,
         });
     }
     Ok(found)
@@ -304,7 +329,26 @@ fn classify_ty(ty: &syn::Type) -> Option<SupportedTy> {
 /// Emit code that converts a snapshot value (the user's K or V) to a
 /// `v8::Local<v8::Value>` named `__out_local`. Caller bound the source
 /// value to `__src` already.
-fn gen_to_v8(ty: &syn::Type, src_ident: &Ident, out_ident: &Ident) -> Result<TokenStream2, syn::Error> {
+///
+/// When `marshal` is `Some(path)`, the macro emits a call to the
+/// user-supplied free function instead of selecting a built-in
+/// classifier. Used for the `value_marshal = ident` attribute (Part
+/// (A) of MAC-09) so consumers like `FormDataIterator` can yield a
+/// `(USVString or File)` union without baking that into the macro.
+fn gen_to_v8(
+    ty: &syn::Type,
+    src_ident: &Ident,
+    out_ident: &Ident,
+    marshal: Option<&syn::Path>,
+) -> Result<TokenStream2, syn::Error> {
+    if let Some(path) = marshal {
+        // Custom marshal — bypass type classification entirely. The
+        // user's function is responsible for producing a valid
+        // `v8::Local<v8::Value>` from `&V`.
+        return Ok(quote! {
+            let #out_ident: v8::Local<v8::Value> = #path(scope, &#src_ident);
+        });
+    }
     let kind = classify_ty(ty).ok_or_else(|| {
         syn::Error::new_spanned(
             ty,
@@ -465,7 +509,9 @@ pub(crate) fn generate(
         quote! {}
     };
 
-    // Sanity check: both K and V are supported in classify_ty.
+    // Sanity check: both K and V must classify, unless `value_marshal`
+    // takes over the V conversion. Key is always classified — keys
+    // are the simple stringly types in every WebIDL pair iterator.
     classify_ty(key_ty).ok_or_else(|| {
         syn::Error::new_spanned(
             key_ty,
@@ -473,13 +519,16 @@ pub(crate) fn generate(
              ByteString, USVString, String, u32",
         )
     })?;
-    classify_ty(value_ty).ok_or_else(|| {
-        syn::Error::new_spanned(
-            value_ty,
-            "#[v8_iterable]: unsupported value type. Expected one of: \
-             ByteString, USVString, String, u32, Vec<u8>",
-        )
-    })?;
+    if attr.value_marshal.is_none() {
+        classify_ty(value_ty).ok_or_else(|| {
+            syn::Error::new_spanned(
+                value_ty,
+                "#[v8_iterable]: unsupported value type. Expected one of: \
+                 ByteString, USVString, String, u32, Vec<u8> — or supply \
+                 `value_marshal = some_fn` for arbitrary V.",
+            )
+        })?;
+    }
 
     let iter_class_ty = format_ident!("{}Iterator", class_ty);
     let iter_class_name_str = iter_class_ty.to_string();
@@ -494,11 +543,11 @@ pub(crate) fn generate(
     // Templates for converting a value back to V8. Shared across modes.
     let key_src = Ident::new("__k", proc_macro2::Span::call_site());
     let key_out = Ident::new("__k_v", proc_macro2::Span::call_site());
-    let key_to_v8 = gen_to_v8(key_ty, &key_src, &key_out)?;
+    let key_to_v8 = gen_to_v8(key_ty, &key_src, &key_out, None)?;
 
     let val_src = Ident::new("__v", proc_macro2::Span::call_site());
     let val_out = Ident::new("__v_v", proc_macro2::Span::call_site());
-    let val_to_v8 = gen_to_v8(value_ty, &val_src, &val_out)?;
+    let val_to_v8 = gen_to_v8(value_ty, &val_src, &val_out, attr.value_marshal.as_ref())?;
 
     // The iterator class — emitted as a parallel V8 class with its own
     // install. We can't use `#[v8_class]` directly because we're inside
@@ -1216,24 +1265,25 @@ pub(crate) fn generate(
                     let __tmpl = v8::FunctionTemplate::new(scope, #factory_values_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
+                // `entries` and `[Symbol.iterator]` MUST resolve to the
+                // SAME FunctionTemplate per WebIDL §3.7.10 default
+                // iterator — JS code commonly compares
+                // `fd.entries === fd[Symbol.iterator]` and the answer
+                // has to be `true`. Build the template once and bind
+                // it under both keys.
+                let __entries_tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
                 {
                     let __key = v8::String::new(scope, "entries").unwrap();
-                    let __tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
-                    proto.set(__key.into(), __tmpl.into());
+                    proto.set(__key.into(), __entries_tmpl.into());
                 }
                 {
                     let __key = v8::String::new(scope, "forEach").unwrap();
                     let __tmpl = v8::FunctionTemplate::new(scope, #for_each_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
-                // @@iterator → entries (WebIDL §3.7.10 default
-                // iterator). Use the same FunctionTemplate as `entries`
-                // so identity is preserved for callers that compare
-                // `obj.entries === obj[Symbol.iterator]`.
                 {
                     let __sym = v8::Symbol::get_iterator(scope);
-                    let __tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
-                    proto.set(__sym.into(), __tmpl.into());
+                    proto.set(__sym.into(), __entries_tmpl.into());
                 }
             }
         }
