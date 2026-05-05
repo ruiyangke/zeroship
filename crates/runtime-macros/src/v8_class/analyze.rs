@@ -1,0 +1,332 @@
+//! Analyse phase — turn a parsed `syn::ItemImpl` into a fully-validated
+//! [`ClassConfig`] that the emit phase can consume directly.
+//!
+//! Wave 3 commit 5 — extracted from `mod.rs`'s `expand_tokens` body
+//! (design `docs/proposals/runtime-macros-refactor.md` §4.1). Wave 4
+//! will further split the parse-side validation into per-attribute
+//! `MarkerAttr` impls; this file is the seam.
+//!
+//! Returns `Result<(ClassConfig, ItemImpl), TokenStream2>`. The `Err`
+//! variant carries pre-rendered `compile_error!` tokens (so callers
+//! pass them straight to the proc-macro driver). The `Ok` variant
+//! carries the analysed cfg plus the marker-stripped impl block to
+//! splice back into the emission.
+
+use std::collections::HashMap;
+
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::{ImplItem, ItemImpl};
+
+use super::fastcall::validate_fastcall_signature;
+use super::parse::{
+    classify, extract_async_iterable, extract_consts, extract_fastcall, extract_inherit_base,
+    extract_inherit_intrinsic, extract_same_object, extract_to_string_tag, extract_v8_name,
+    has_any_receiver, has_mut_self,
+};
+use super::shared::class_config::ClassConfig;
+use super::{ClassMethod, MethodKind};
+use crate::v8_iterable;
+
+/// Analyse a parsed `#[v8_class] impl Foo { ... }` block. Returns the
+/// rendered `ClassConfig` ready for `emit::assemble_tokens` plus the
+/// impl block with macro-only attributes stripped (so rustc doesn't
+/// see unknown attributes after expansion).
+///
+/// The `'a` lifetime is the input's: `ClassConfig<'a>` and the
+/// returned ItemImpl share the same backing AST. Callers that need to
+/// own the AST should call `input.clone()` before invoking this fn.
+pub(super) fn analyze<'a>(
+    input: &'a ItemImpl,
+    state_ty: &'a syn::Ident,
+    marker_ty: &'a syn::Ident,
+) -> Result<(ClassConfig<'a>, ItemImpl), TokenStream2> {
+    // Most existing call sites read `class_ty` as the JS-identity ident
+    // (install slot / brand check / callback names) — that's the
+    // marker. Keep the local name to minimise diff churn; the only
+    // sites that switched to `state_ty` are the constructor's
+    // `let __instance` ascription, the box / finalizer drop type, and
+    // the per-method receiver cast + dispatch.
+    let class_ty = marker_ty;
+
+    let methods = collect_methods(input)?;
+
+    // Conflict-detect duplicate JS-visible names. The macro's self-doc
+    // calls this out: a `#[v8_name = "x"]` rename colliding with
+    // another method literally named `x` would silently double-install
+    // on the prototype. Catch it at compile time.
+    //
+    // Exception: a (Getter, Setter) pair under the same JS name is
+    // legal — that's how WebIDL `attribute` accessors work (e.g.
+    // `URL.href`'s getter+setter pair). The install codegen detects
+    // this and emits a single `set_accessor_property` with both
+    // templates rather than two separate calls.
+    detect_duplicate_js_names(&methods)?;
+
+    // Compute the global `has_any_fastcall` flag; the install fn
+    // needs it to decide on internal-field count and the per-method
+    // emit between `FunctionTemplate::new` and the fast-shim builder.
+    let has_any_fastcall = methods
+        .iter()
+        .filter(|m| m.kind != MethodKind::Constructor)
+        .any(|m| m.fastcall);
+
+    // Impl-block-level overrides for class-wide install behaviour.
+    // These were 6 separate args to `gen_install` before Wave 3; now
+    // they're fields on the single `ClassConfig` parameter object.
+    let to_string_tag_override = extract_to_string_tag(&input.attrs);
+    let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
+    let inherit_base = extract_inherit_base(&input.attrs);
+    let async_iterable_method =
+        extract_async_iterable(&input.attrs).map_err(|e| e.to_compile_error())?;
+    let const_decls = extract_consts(&input.attrs).map_err(|e| e.to_compile_error())?;
+
+    // Validate that the named method actually exists in the impl block
+    // — better error than waiting for the method-callback ident lookup
+    // to fail at quote-expansion time. Match against the JS-visible
+    // name (post-`#[v8_name = ...]` rename) since that's what users
+    // think of.
+    if let Some(ref name) = async_iterable_method {
+        let exists = methods.iter().any(|m| {
+            matches!(m.kind, MethodKind::Method | MethodKind::AsyncMethod) && &m.js_name == name
+        });
+        if !exists {
+            return Err(syn::Error::new_spanned(
+                &input.self_ty,
+                format!(
+                    "#[v8_async_iterable(method = \"{name}\")]: no method named `{name}` (must be \
+                     `#[v8_method]` or `#[v8_async_method]` on this impl block)"
+                ),
+            )
+            .to_compile_error());
+        }
+    }
+
+    // `#[v8_iterable(key = K, value = V)]` — emit the pair-iterator
+    // surface (keys / values / entries / forEach / @@iterator) plus a
+    // companion `<Class>Iterator` class. The user supplies a
+    // `value_pairs(&[mut] self [, scope]) -> Vec<(K, V)>` method on the
+    // impl block; we sniff its receiver/arg shape so the codegen can
+    // pick the right pointer recovery (`*const`/`*mut`) and pass the
+    // outer scope through when requested.
+    let iterable_attr =
+        v8_iterable::extract_iterable(&input.attrs).map_err(|e| e.to_compile_error())?;
+    let value_pairs_sig = v8_iterable::inspect_value_pairs(&input.items);
+    let iterable_codegen = match iterable_attr.as_ref() {
+        Some(attr) => v8_iterable::generate(class_ty, state_ty, attr, value_pairs_sig)
+            .map_err(|e| e.to_compile_error())?,
+        None => quote! {},
+    };
+    let install_iterable_call = if iterable_attr.is_some() {
+        // The `gen()` codegen above emitted
+        // `<Class>::__zs_install_iterable_methods(scope, __proto)`. We
+        // insert the call here so it fires at the end of `install`'s
+        // prototype-template setup.
+        Some(quote! {
+            <#class_ty>::__zs_install_iterable_methods(scope, __proto);
+        })
+    } else {
+        None
+    };
+
+    let cfg = ClassConfig::new(
+        class_ty,
+        state_ty,
+        methods,
+        has_any_fastcall,
+        to_string_tag_override,
+        inherit_intrinsic,
+        inherit_base,
+        async_iterable_method,
+        const_decls,
+        iterable_codegen,
+        install_iterable_call,
+    );
+
+    let stripped_impl = strip_marker_attrs(input.clone());
+    Ok((cfg, stripped_impl))
+}
+
+/// Walk impl-block fns, classify each via `parse::classify`, and run
+/// the per-kind compile-time guards (e.g. `#[v8_async_method] does
+/// not support &mut self`). Returns the validated `Vec<ClassMethod>`
+/// or rendered `compile_error!` tokens for the first guard violation.
+fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream2> {
+    let mut methods: Vec<ClassMethod> = Vec::new();
+    for item in &input.items {
+        if let ImplItem::Fn(func) = item {
+            if let Some(kind) = classify(func) {
+                let js_name = extract_v8_name(&func.attrs)
+                    .unwrap_or_else(|| func.sig.ident.to_string());
+                let mut_recv = has_mut_self(func);
+
+                // Compile-time guard: `#[v8_async_method]` + `&mut self`
+                // is unsound under V8 re-entry. The future captures a
+                // `*mut Self` that's re-acquired on every poll; if a
+                // user `.await` runs JS that re-enters the same method
+                // (e.g. `await something(); this.foo()` triggered by a
+                // microtask), we'd alias `&mut self` with another
+                // borrow inside the same instance. Cell/RefCell on a
+                // `&self` method makes the runtime borrow check
+                // explicit; we require that pattern here.
+                if matches!(kind, MethodKind::AsyncMethod) && mut_recv {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_async_method] does not support &mut self — use \
+                         &self with Cell/RefCell on state that needs to mutate \
+                         (borrow across .await is unsound under V8 re-entry)",
+                    )
+                    .to_compile_error());
+                }
+
+                // Compile-time guard: `#[v8_async_method]` requires the
+                // function to be declared `async`. Without `async`, the
+                // user's body would need to return a Future explicitly
+                // (an unergonomic shape we don't support) — and the
+                // macro's call-site emits `.await`, which would fail
+                // type-check on a non-Future return.
+                if matches!(kind, MethodKind::AsyncMethod) && func.sig.asyncness.is_none() {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_async_method] requires the method to be declared `async`",
+                    )
+                    .to_compile_error());
+                }
+
+                let same_object_flag =
+                    matches!(kind, MethodKind::Getter) && extract_same_object(&func.attrs);
+
+                // Compile-time guard: static methods / getters cannot
+                // have a receiver. WebIDL §3.7.4 static operations are
+                // invoked via `Class.method()` with no `this`; the
+                // emitted callback has no internal-field 0 to recover
+                // a `Box<Self>` from, so a `&self` / `&mut self` arg
+                // would never be bound. Reject at compile time with a
+                // clear pointer rather than emit broken codegen.
+                if matches!(kind, MethodKind::StaticMethod | MethodKind::StaticGetter)
+                    && has_any_receiver(func)
+                {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig.ident,
+                        "#[v8_static_method] / #[v8_static_getter] cannot have a \
+                         `self` receiver — static operations are invoked via \
+                         `Class.method()` with no `this`",
+                    )
+                    .to_compile_error());
+                }
+
+                // `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
+                // Only valid on plain Method / Getter — not async, not
+                // setter, not constructor, not same_object.
+                let fastcall_flag = matches!(kind, MethodKind::Method | MethodKind::Getter)
+                    && extract_fastcall(&func.attrs);
+
+                if fastcall_flag {
+                    // Compile-time guard 1: fastcall path can't take
+                    // `&mut self`. The macro emits the fast shim as a
+                    // bare `extern "C"` fn that recovers `*const Self`
+                    // from internal-field 1; there's no slot for the
+                    // re-entrancy guard the slow path emits for
+                    // `&mut self` callbacks. The user must use
+                    // `&self` + `Cell`/`RefCell` for state that mutates.
+                    if mut_recv {
+                        return Err(syn::Error::new_spanned(
+                            &func.sig.ident,
+                            "#[v8_method(fastcall)] / #[v8_getter(fastcall)] does not \
+                             support &mut self — use &self with Cell/RefCell on state \
+                             that needs to mutate (V8 fast-path callbacks have no \
+                             scope, so the slow path's per-method re-entrancy guard \
+                             cannot be emitted)",
+                        )
+                        .to_compile_error());
+                    }
+                    if same_object_flag {
+                        return Err(syn::Error::new_spanned(
+                            &func.sig.ident,
+                            "#[v8_getter(same_object, fastcall)] is not supported — \
+                             SameObject getters return a v8::Global<v8::Object> \
+                             (allocates), and the fast path forbids allocation",
+                        )
+                        .to_compile_error());
+                    }
+                    if let Err(err) = validate_fastcall_signature(func) {
+                        return Err(err.to_compile_error());
+                    }
+                }
+
+                methods.push(ClassMethod {
+                    kind,
+                    func,
+                    mut_receiver: mut_recv,
+                    js_name,
+                    same_object: same_object_flag,
+                    fastcall: fastcall_flag,
+                });
+            }
+        }
+    }
+    Ok(methods)
+}
+
+/// Reject duplicate JS-visible names (post-`#[v8_name]` rename). The
+/// (Getter, Setter) pair exception lets WebIDL `attribute` accessors
+/// register both halves under the same JS-name — the install codegen
+/// detects this and emits one `set_accessor_property` call.
+fn detect_duplicate_js_names(methods: &[ClassMethod<'_>]) -> Result<(), TokenStream2> {
+    let mut seen: HashMap<String, &ClassMethod> = HashMap::new();
+    for m in methods {
+        if m.kind == MethodKind::Constructor {
+            continue;
+        }
+        if let Some(prev) = seen.insert(m.js_name.clone(), m) {
+            let pair_ok = matches!(
+                (prev.kind, m.kind),
+                (MethodKind::Getter, MethodKind::Setter)
+                    | (MethodKind::Setter, MethodKind::Getter)
+            );
+            if !pair_ok {
+                return Err(syn::Error::new_spanned(
+                    &m.func.sig.ident,
+                    format!(
+                        "#[v8_class]: duplicate JS-visible method name `{}` (rename one with #[v8_name])",
+                        m.js_name,
+                    ),
+                )
+                .to_compile_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
+    // Strip impl-block-level marker attributes (consumed by the macro,
+    // not a real Rust feature).
+    input.attrs.retain(|attr| {
+        let p = attr.path();
+        !(p.is_ident("v8_to_string_tag")
+            || p.is_ident("v8_inherit_intrinsic")
+            || p.is_ident("v8_inherit")
+            || p.is_ident("v8_iterable")
+            || p.is_ident("v8_async_iterable")
+            || p.is_ident("v8_const")
+            || p.is_ident("v8_state_marker"))
+    });
+    for item in &mut input.items {
+        if let ImplItem::Fn(func) = item {
+            func.attrs.retain(|attr| {
+                let p = attr.path();
+                !(p.is_ident("v8_method")
+                    || p.is_ident("v8_async_method")
+                    || p.is_ident("v8_getter")
+                    || p.is_ident("v8_setter")
+                    || p.is_ident("v8_constructor")
+                    || p.is_ident("v8_static_method")
+                    || p.is_ident("v8_static_getter")
+                    || p.is_ident("v8_name")
+                    || p.is_ident("reject_shared"))
+            });
+        }
+    }
+    input
+}
