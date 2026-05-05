@@ -453,11 +453,7 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
     let value_pairs_sig = v8_iterable::inspect_value_pairs(&input.items);
     let iterable_codegen = match iterable_attr.as_ref() {
-<<<<<<< HEAD
-        Some(attr) => match v8_iterable::generate(class_ty, state_ty, attr) {
-=======
         Some(attr) => match v8_iterable::generate(class_ty, attr, value_pairs_sig) {
->>>>>>> ad49b5a (runtime-macros: v8_iterable accepts value_pairs(&mut self) + &mut PinScope (MAC-09))
             Ok(ts) => ts,
             Err(err) => return err.to_compile_error(),
         },
