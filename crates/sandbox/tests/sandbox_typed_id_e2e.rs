@@ -133,6 +133,7 @@ fn make_state_with_typed_id_fixture(token: &str) -> (Arc<zeroship_sandbox::AppSt
         database: None,
         persist: None,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admin_token: None,
     });
     (state, sandbox_uuid, sandbox_typed, user_typed)
 }

@@ -208,7 +208,17 @@ SANDBOX_ADMIN_TOKEN_PATH=/etc/zeroship/admin-bearer  # mode 0o400
 
 When the path is unset OR the file is empty, every `/admin/*` endpoint returns 503 with `{"error":"admin api disabled"}`. Disable-by-default — operators opt in explicitly. Wrong/missing bearer → 401.
 
-The full design (§ 13.8) calls for short-lived JWTs + per-endpoint scopes + 2FA step-up + per-admin rate limit + anomaly detection. Phase 5 / production hardening lands that shape; nothing in Phase 3's wire format blocks it (every handler still takes `&HttpRequest` so the auth path can evolve from "match bearer" to "verify JWT + check scope" without touching the SQL or response shapes). Audit rows currently hard-code the actor as `"operator"`; Phase 5 replaces this with the JWT's `admin_id` claim.
+The full design (§ 13.8) calls for short-lived JWTs + per-endpoint scopes + 2FA step-up + per-admin rate limit + anomaly detection. Phase 5 / production hardening lands that shape; nothing in Phase 3's wire format blocks it (every handler still takes `&HttpRequest` so the auth path can evolve from "match bearer" to "verify JWT + check scope" without touching the SQL or response shapes). Audit rows currently hard-code the actor as `"operator"`; Phase 5 replaces this with the JWT's `admin_id` claim. The Phase-3 → Phase-5 trade-off is documented in [`docs/decisions/2026-05-05-sandbox-admin-shared-bearer.md`](../decisions/2026-05-05-sandbox-admin-shared-bearer.md).
+
+#### Token rotation
+
+The admin bearer is read **once at boot** from `SANDBOX_ADMIN_TOKEN_PATH`; the resulting bytes live in `AppState.admin_token` (Zeroizing-wrapped, scrubbed on drop) for the lifetime of the process. Rotating the token therefore requires a **rolling restart of every controller replica** — there is no signal-based or file-watch-based reload. Workflow:
+
+1. Update the secret-store entry that materializes the file at `SANDBOX_ADMIN_TOKEN_PATH`.
+2. Roll each controller replica one at a time (drain via `SIGTERM` → wait for `SANDBOX_HA_DRAIN_GRACE_SECS`, default 30 s; replica boots and re-reads the file).
+3. After the rolling restart completes, clients must use the new bearer; old-bearer requests now 401.
+
+The trade-off is intentional: per-request file reads were a slow-FS DoS amplifier on the unauthenticated path (Round-3 CRITICAL #3) and a fail-open vector on chmod-error (the pre-Round-3 metadata read used `.ok()?` and silently disabled auth). The boot-cache + rolling-restart shape eliminates both at the cost of zero-downtime rotation.
 
 ### GDPR delete operator workflow
 

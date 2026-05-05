@@ -28,7 +28,7 @@
 //! lives in `crates/control/`) before that contract is finalized.
 //!
 //! Migration to JWT will:
-//!   1. Replace `auth::admin_check` with a JWT verifier that pulls
+//!   1. Replace `admin_check` with a JWT verifier that pulls
 //!      `admin_id` + `scopes` + `step_up` claims from the bearer.
 //!   2. Replace `audit_admin_action`'s hard-coded "operator" actor
 //!      with the JWT's `admin_id` claim.
@@ -76,51 +76,43 @@ const MAX_LIMIT: i64 = 1000;
 const EVENT_EXPORT_CAP: i64 = 10_000;
 
 // ────────────────────────────────────────────────────────────────────
-// Auth — bearer-from-file (Phase 3 narrow shape; § 13.8 expansion
-// deferred to Phase 5 production hardening).
+// Auth — boot-time bearer cache (Round-3 / Phase-3 CRITICAL #3).
+// § 13.8 expansion deferred to Phase 5 production hardening.
 // ────────────────────────────────────────────────────────────────────
 
-/// Reads the admin bearer from `SANDBOX_ADMIN_TOKEN_PATH` and
-/// constant-time-compares against the request's `Authorization`
-/// header. Returns the bearer-as-bytes on success; `None` when the
-/// admin API is disabled (no token path configured), and `Err(401)`
-/// when the request's bearer is missing/wrong.
+/// Constant-time bearer compare via SHA-256 digests.
 ///
-/// File-mount semantics mirror `SANDBOX_DATABASE_PASSWORD_PATH`:
-/// mode 0o400 on Unix (enforced at first read), trim trailing
-/// `\r\n`, treat empty content as disabled.
-pub(crate) fn admin_bearer_from_file() -> Option<String> {
-    let path = std::env::var("SANDBOX_ADMIN_TOKEN_PATH").ok()?;
-    if path.trim().is_empty() {
-        return None;
-    }
-    enforce_admin_token_file_mode(&path).ok()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let trimmed = raw
-        .trim_end_matches(|c: char| c == '\n' || c == '\r')
-        .to_string();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed)
-}
-
-#[cfg(unix)]
-fn enforce_admin_token_file_mode(path: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let meta = std::fs::metadata(path)?;
-    let mode = meta.permissions().mode() & 0o777;
-    if mode != 0o400 {
-        return Err(std::io::Error::other(format!(
-            "SANDBOX_ADMIN_TOKEN_PATH={path:?}: mode={mode:o} must be 0o400"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn enforce_admin_token_file_mode(_path: &str) -> std::io::Result<()> {
-    Ok(())
+/// Round-3 / Phase-3 CRITICAL #1: the original shape returned in O(1) ns
+/// on a length mismatch (early `if presented.len() != expected.len()`),
+/// while the matching path ran `ct_eq` + JSON allocation taking ~µs —
+/// an attacker could bisect the token length from response-time
+/// distributions. Round-3's first patch padded both sides to `max(len)`
+/// and compared via `subtle::ConstantTimeEq`, but `vec![0u8; max_len]`
+/// allocates an attacker-sized buffer on the unauthenticated path:
+/// (a) allocator timing depends on `presented.len()` (capped ~8 KiB by
+/// ntex via the `Authorization` header), so it isn't actually
+/// constant-time at the allocator level; (b) it's a fresh DoS
+/// amplifier on the auth path that the boot-cache fix was meant to
+/// remove.
+///
+/// Round-4 fix: hash both inputs with SHA-256 and `ct_eq` the 32-byte
+/// digests. SHA-256 is constant-time on a fixed-size finalize buffer;
+/// the only length-dependent work is the streaming `update`, whose cost
+/// scales with `presented.len()` (capped ~8 KiB) but does NOT branch on
+/// `presented` vs. `expected` and is identical for the matching and
+/// mismatching paths. After hashing, every code path executes the same
+/// 32-byte ct_eq with no length-dependent control flow or allocation.
+///
+/// Note: the implementation contains no length-dependent control flow
+/// or heap allocation past the fixed-size hasher state. This is a
+/// stronger property than calling `ct_eq` on the raw bytes, which
+/// would still leak length via the early `if a.len() != b.len()` that
+/// `subtle` returns inside its `Choice` for unequal-length slices.
+fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    let p_digest = Sha256::digest(presented);
+    let e_digest = Sha256::digest(expected);
+    p_digest.ct_eq(&e_digest).into()
 }
 
 /// Validates the admin bearer. Returns:
@@ -128,15 +120,41 @@ fn enforce_admin_token_file_mode(_path: &str) -> std::io::Result<()> {
 ///   - `Err(503)` when admin API is disabled (no `SANDBOX_ADMIN_TOKEN_PATH`).
 ///   - `Err(401)` when the bearer is missing or wrong.
 ///
-/// Note: the failure mode order is intentional — disabled returns
-/// 503 (configure me) before checking the bearer. An attacker can
-/// enumerate "admin API enabled or not?" but not "is my bearer
-/// right?" without already being able to test it directly.
-pub(crate) fn admin_check(req: &HttpRequest) -> Result<(), HttpResponse> {
-    let Some(expected) = admin_bearer_from_file() else {
-        return Err(HttpResponse::ServiceUnavailable()
-            .json(&serde_json::json!({"error": "admin api disabled"})));
+/// Round-3 / Phase-3 CRITICAL #3: reads from the boot-cached
+/// `state.admin_token` instead of stat()+read()'ing the file per
+/// request. Bounded amplification at 10k req/s; no slow-FS DoS;
+/// no fail-open on chmod-error (boot-time read fails loud).
+///
+/// Round-4 / IMPORTANT #2: defense-in-depth empty-token guard.
+/// `AppState.admin_token` is a `pub` field; if anything constructs
+/// `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
+/// the constant-time compare against an empty `Authorization: Bearer `
+/// presented bytes would PASS — silent unauthenticated admin access.
+/// The boot loader (`load_admin_token`) already rejects empty tokens
+/// loudly, so production code never reaches this branch, but tests
+/// construct `AppState` directly and the type system advertises the
+/// footgun. Treat empty-`expected` as "no token configured" → 401.
+pub(crate) fn admin_check(
+    req: &HttpRequest,
+    state: &AppState,
+) -> Result<(), HttpResponse> {
+    use zeroize::Zeroizing;
+    let expected: &Zeroizing<String> = match state.admin_token.as_ref() {
+        Some(t) => t,
+        None => {
+            return Err(HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "admin api disabled"})));
+        }
     };
+    let expected_bytes: &[u8] = expected.as_bytes();
+    // Defense-in-depth: empty configured token must never authenticate
+    // any request. Reject BEFORE the constant-time compare; we'd
+    // otherwise need the comparator itself to special-case empty
+    // input, and folding the check into admin_check keeps the
+    // comparator's invariant simple.
+    if expected_bytes.is_empty() {
+        return Err(unauthorized());
+    }
     let header = req
         .headers()
         .get("authorization")
@@ -146,11 +164,7 @@ pub(crate) fn admin_check(req: &HttpRequest) -> Result<(), HttpResponse> {
         .strip_prefix("Bearer ")
         .unwrap_or("")
         .as_bytes();
-    let expected_bytes = expected.as_bytes();
-    if presented.len() != expected_bytes.len() {
-        return Err(unauthorized());
-    }
-    if presented.ct_eq(expected_bytes).into() {
+    if constant_time_bearer_eq(presented, expected_bytes) {
         Ok(())
     } else {
         Err(unauthorized())
@@ -240,7 +254,7 @@ pub async fn list_all_sandboxes(
     state: State,
     query: web::types::Query<ListSandboxesQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let pool = match open_app_pool(&state).await {
@@ -362,7 +376,7 @@ pub async fn get_sandbox_detail(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let raw = path.into_inner();
@@ -420,7 +434,7 @@ pub async fn list_user_sandboxes(
     path: web::types::Path<String>,
     query: web::types::Query<ListSandboxesQuery>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let user_id = path.into_inner();
@@ -513,7 +527,7 @@ pub async fn list_user_shares(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let user_id = path.into_inner();
@@ -583,7 +597,7 @@ pub async fn list_hosts(
     req: HttpRequest,
     state: State,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let pool = match open_app_pool(&state).await {
@@ -650,7 +664,7 @@ pub async fn export_user(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let user_id = path.into_inner();
@@ -702,11 +716,26 @@ pub async fn export_user(
     };
     // Cap events at 10k. Order by ts so the truncation is a tail-cut
     // (operator gets the most recent 10k).
+    //
+    // Round-4 / IMPORTANT #3: filter out `kind = 'gdpr.delete_user'`
+    // from the user-facing export. These rows are operator-side
+    // records — they live in `sandbox.events` because the gdpr-role
+    // INSERT grant runs through that table, but they are NOT user
+    // data. They document who/when erased the user (GDPR Art. 30
+    // Records of Processing Activities) and surfacing them on a
+    // post-erasure export request would let the user re-discover
+    // their own erasure record. The carve-out is operator-records
+    // under the RoPA exemption — see runbook:
+    // `docs/runbooks/sandbox-nomad-ch.md` § Phase-3 admin API. The
+    // events_total / events_truncated counters mirror the same
+    // filter so callers reading those numbers see the user-facing
+    // row count, not the operator-record count.
     let events_json = match tx
         .query_one(
             "WITH capped AS ( \
                SELECT * FROM sandbox.events \
                  WHERE user_id = $1::TEXT \
+                   AND kind <> 'gdpr.delete_user' \
                  ORDER BY ts DESC \
                  LIMIT $2::BIGINT \
              ) \
@@ -721,7 +750,9 @@ pub async fn export_user(
     };
     let events_count: i64 = match tx
         .query_one(
-            "SELECT count(*)::BIGINT FROM sandbox.events WHERE user_id = $1::TEXT",
+            "SELECT count(*)::BIGINT FROM sandbox.events \
+              WHERE user_id = $1::TEXT \
+                AND kind <> 'gdpr.delete_user'",
             &[&user_id],
         )
         .await
@@ -801,7 +832,7 @@ pub async fn delete_user(
     state: State,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Err(r) = admin_check(&req) {
+    if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     let user_id = path.into_inner();
@@ -890,6 +921,10 @@ pub async fn delete_user(
     };
     // Audit row inside the same TX. The sandbox_gdpr role has INSERT
     // grant on events for exactly this audit row (§ 13.2).
+    //
+    // Round-4 / IMPORTANT #6: `admin_id` is hard-coded `"operator"`
+    // pending the Phase-5 per-operator JWT claim. The trade-off is
+    // documented in `docs/decisions/2026-05-05-sandbox-admin-shared-bearer.md`.
     let admin_id = "operator"; // Phase 5 replaces with JWT claim.
     let audit_event_id = zeroship_core::typed_id::generate("evt");
     let audit_data = serde_json::json!({
@@ -899,16 +934,18 @@ pub async fn delete_user(
         "shares_deleted": shares_deleted,
     })
     .to_string();
-    // The audit row's `sandbox_id` column has a CHECK constraint that
-    // requires `sbx_<base62>` form. The gdpr-delete event isn't tied
-    // to a specific sandbox, so we synthesize a sentinel that passes
-    // the CHECK by reusing one of the deleted ids — or, when the user
-    // had none, mint a placeholder typed-id (random suffix; never
-    // collides with a real sandbox row because the row is gone).
-    let audit_sandbox_id = sandbox_ids
-        .first()
-        .cloned()
-        .unwrap_or_else(|| zeroship_core::typed_id::generate("sbx"));
+    // Round-4 / IMPORTANT #4: post-migration 0005 the `sandbox_id`
+    // column on `sandbox.events` is NULLable. The GDPR audit row
+    // isn't tied to any specific sandbox; we write `sandbox_id = NULL`
+    // rather than synthesizing a never-existed `sbx_…` (which used
+    // to pollute `idx_events_sandbox_ts` with unmatchable keys when
+    // the user had zero sandboxes). The pre-existing CHECK
+    // constraint accepts NULL by default.
+    //
+    // We bind `Option<String>` for `sandbox_id`: `None` for the
+    // audit row, `Some(first_id)` would also work but adds nothing —
+    // the row is operator-side metadata, not sandbox-scoped.
+    let audit_sandbox_id: Option<String> = None;
     if let Err(e) = tx
         .execute(
             "INSERT INTO sandbox.events (event_id, sandbox_id, user_id, kind, ts, data) \
@@ -1018,15 +1055,70 @@ mod tests {
         }
     }
 
-    // The admin_bearer_from_file test tries to set env vars; the lib's
-    // `db::tests` already documents the env-mutation discipline.
-    // Phase-3 tests for admin_check live in tests/sandbox_admin_e2e.rs
-    // (real ntex http stack); the unit-level coverage here stays
-    // focused on pure helpers.
+    // Phase-3 admin_check coverage lives in two places:
+    //   - tests/sandbox_admin_e2e.rs — real ntex HTTP stack; full
+    //     auth path including header parsing + 503/401 responses.
+    //   - the constant_time_bearer_eq tests below — pure-helper
+    //     correctness for the SHA-256-digest compare (Round-4 #1).
+    // Boot-loader unit tests live inline in lib.rs's
+    // `boot_loader_tests` module (Round-4 / MINOR #4).
     #[test]
     fn unauthorized_response_shape() {
         let resp = unauthorized();
         assert_eq!(resp.status().as_u16(), 401);
+    }
+
+    /// Round-4 fix: the SHA-256-digest compare returns the right
+    /// boolean for matched / mismatched / unequal-length inputs.
+    /// Timing-side-channel resistance is asserted by inspection of
+    /// the function (no length-dependent control flow or allocation
+    /// past the fixed-size hasher state); a reliable timing test in
+    /// CI is notoriously flaky, so we pin behavioral correctness
+    /// here.
+    #[test]
+    fn constant_time_bearer_eq_correctness() {
+        // Equal-length match.
+        assert!(constant_time_bearer_eq(b"right-token-12345", b"right-token-12345"));
+        // Equal-length mismatch (last byte differs).
+        assert!(!constant_time_bearer_eq(b"right-token-12345", b"right-token-12346"));
+        // Equal-length mismatch (first byte differs).
+        assert!(!constant_time_bearer_eq(b"aight-token-12345", b"bight-token-12345"));
+        // Unequal length: presented shorter than expected.
+        assert!(!constant_time_bearer_eq(b"short", b"right-token-12345"));
+        // Unequal length: presented longer than expected.
+        assert!(!constant_time_bearer_eq(b"right-token-12345-extra", b"right-token-12345"));
+        // Empty presented.
+        assert!(!constant_time_bearer_eq(b"", b"right-token-12345"));
+        // Empty expected (degenerate at THIS layer; admin_check guards
+        // the empty case with an early 401 — Round-4 / IMPORTANT #2.
+        // We assert here that the comparator itself doesn't panic on
+        // empty inputs.)
+        assert!(!constant_time_bearer_eq(b"presented", b""));
+        // Both empty (degenerate; admin_check rejects empty `expected`
+        // before reaching this comparator. SHA-256(empty) ==
+        // SHA-256(empty), so the comparator returns true here — this
+        // is precisely WHY admin_check needs the early-empty reject).
+        assert!(constant_time_bearer_eq(b"", b""));
+    }
+
+    /// Smoke test that the comparator handles wildly different
+    /// lengths without allocating attacker-sized buffers (Round-4
+    /// IMPORTANT #1: pre-fix the comparator did
+    /// `vec![0u8; max(presented.len(), expected.len())]` which gave
+    /// an attacker a fresh DoS amplifier — `presented` is bounded
+    /// only by ntex's ~8 KiB header cap). The post-fix shape hashes
+    /// both sides into 32 bytes regardless of input size.
+    #[test]
+    fn constant_time_bearer_eq_handles_wildly_different_lengths() {
+        let presented = b"x";
+        let expected = vec![0u8; 64];
+        // Should return false without panicking, regardless of the
+        // length disparity. No early-return on length difference.
+        assert!(!constant_time_bearer_eq(presented, &expected));
+        // Reverse: huge presented, tiny expected.
+        let presented = vec![0u8; 64];
+        let expected = b"y";
+        assert!(!constant_time_bearer_eq(&presented, expected));
     }
 }
 

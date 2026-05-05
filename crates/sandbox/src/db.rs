@@ -64,13 +64,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "Phase-3 role-grant tightening (sandbox_app no DELETE on events)",
         sql: include_str!("../migrations/0004_role_split_phase3.sql"),
     },
+    Migration {
+        version: 5,
+        description: "events.sandbox_id NULLable (GDPR audit row writes NULL)",
+        sql: include_str!("../migrations/0005_events_sandbox_id_nullable.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 4;
+pub const LATEST_MIGRATION_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {

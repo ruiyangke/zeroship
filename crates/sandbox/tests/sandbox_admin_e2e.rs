@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 //! Phase-3 admin/operator API end-to-end tests.
 //!
 //! Pg-gated tests need a live Postgres at PG_TEST_URL (defaults to
@@ -82,6 +80,13 @@ fn make_cfg(token: &str) -> SandboxConfig {
 }
 
 fn make_state(database: Option<Arc<Database>>) -> Arc<zeroship_sandbox::AppState> {
+    make_state_with_admin_token(database, None)
+}
+
+fn make_state_with_admin_token(
+    database: Option<Arc<Database>>,
+    admin_token: Option<String>,
+) -> Arc<zeroship_sandbox::AppState> {
     let cfg = make_cfg("ignored-creator-token");
     let backend = Backend::from_config(&cfg).expect("backend");
     let registry = SandboxRegistry::new();
@@ -95,93 +100,19 @@ fn make_state(database: Option<Arc<Database>>) -> Arc<zeroship_sandbox::AppState
         database,
         persist: None,
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        // Round-4 / MINOR #5: admin_token is now Zeroizing-wrapped so
+        // the heap allocation is scrubbed on drop.
+        admin_token: admin_token.map(zeroize::Zeroizing::new),
     })
 }
 
-/// Build an admin-token file at `path` with `token` content; chmod
-/// 0o400 on Unix. Cleanup on drop.
-struct AdminTokenFile {
-    path: std::path::PathBuf,
-}
-
-impl AdminTokenFile {
-    fn new(token: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "zsbx-admin-token-{}-{}",
-            std::process::id(),
-            Uuid::now_v7().simple()
-        ));
-        std::fs::write(&path, token).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
-        }
-        Self { path }
-    }
-}
-
-impl Drop for AdminTokenFile {
-    fn drop(&mut self) {
-        // Best-effort: chmod 0600 first so we can unlink, then remove.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(
-                &self.path,
-                std::fs::Permissions::from_mode(0o600),
-            );
-        }
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Process-global env-mutation lock. The `SANDBOX_ADMIN_TOKEN_PATH`
-/// env var is process-wide; cargo runs integration tests in parallel
-/// by default. This lock serializes every guard's set/restore so a
-/// peer test never observes a half-mutated env state. Tests still
-/// pass with `--test-threads=1` (recommended) but no longer require
-/// it.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Hold the env var while the guard is alive; restore on drop. The
-/// guard owns the [`ENV_LOCK`] mutex for its entire lifetime so the
-/// env-var snapshot is observable only by this test.
-struct EnvGuard {
-    name: &'static str,
-    prev: Option<std::ffi::OsString>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvGuard {
-    fn set(name: &'static str, value: &str) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os(name);
-        // SAFETY: ENV_LOCK serializes every concurrent test that
-        // mutates the same env var; the lock is held for the guard's
-        // lifetime so no peer can observe a partial state.
-        unsafe {
-            std::env::set_var(name, value);
-        }
-        Self {
-            name,
-            prev,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: see EnvGuard::set; the lock is still held.
-        unsafe {
-            match self.prev.take() {
-                Some(v) => std::env::set_var(self.name, v),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-}
+// Round-4 / MINOR #4: `AdminTokenFile`, `EnvGuard`, and `ENV_LOCK`
+// (Round-3 boot-loader env-mutation harness) are gone. The
+// `load_admin_token` function is now pure — it takes an
+// `Option<&Path>` — so its tests live inline in `lib.rs` and don't
+// need to mutate process env. The integration tests in this file
+// inject `admin_token` directly into `AppState` via
+// `make_state_with_admin_token`.
 
 macro_rules! make_app {
     ($state:expr) => {
@@ -226,15 +157,10 @@ macro_rules! make_app {
 // ────────────────────────────────────────────────────────────────────
 
 #[ntex::test]
-async fn admin_disabled_when_token_path_unset() {
-    // EnvGuard with empty value mutates+takes lock; the second mutation
-    // here drops the var entirely. The lock guards both.
-    let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var_os("SANDBOX_ADMIN_TOKEN_PATH");
-    // SAFETY: ENV_LOCK serialises mutations; lock held until end-of-scope.
-    unsafe {
-        std::env::remove_var("SANDBOX_ADMIN_TOKEN_PATH");
-    }
+async fn admin_disabled_when_token_unset() {
+    // Round-3 / Phase-3 CRITICAL #3: admin token is read ONCE at
+    // boot; tests inject it directly via make_state_with_admin_token.
+    // `None` is the disabled-by-absence shape.
     let state = make_state(None);
     let svc = make_app!(state);
 
@@ -243,26 +169,12 @@ async fn admin_disabled_when_token_path_unset() {
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-    // Restore.
-    // SAFETY: see above.
-    unsafe {
-        if let Some(v) = prev {
-            std::env::set_var("SANDBOX_ADMIN_TOKEN_PATH", v);
-        }
-    }
-    drop(lock);
 }
 
 #[ntex::test]
 async fn admin_401_without_bearer() {
     let token = "operator-bearer-12345";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(None);
+    let state = make_state_with_admin_token(None, Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -275,17 +187,31 @@ async fn admin_401_without_bearer() {
 #[ntex::test]
 async fn admin_401_with_wrong_bearer() {
     let token = "right-token-12345";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(None);
+    let state = make_state_with_admin_token(None, Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
         .uri("/admin/sandboxes")
         .header("authorization", "Bearer not-the-right-token-aa")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[ntex::test]
+async fn admin_401_with_wrong_bearer_same_length() {
+    // Round-3 / Phase-3 CRITICAL #1: bearer compare must be
+    // constant-time even when the lengths match. A wrong bearer of
+    // the same length must 401 (not 200, not 5xx).
+    let token = "right-token-1234567890";
+    let wrong = "wrong-token-9876543210";
+    assert_eq!(token.len(), wrong.len(), "test fixture lengths must match");
+    let state = make_state_with_admin_token(None, Some(token.to_string()));
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {wrong}"))
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -298,12 +224,7 @@ async fn admin_503_with_correct_bearer_when_pg_disabled() {
     // "admin api disabled" — operators see the difference in the
     // response body.
     let token = "right-token-12345";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(None);
+    let state = make_state_with_admin_token(None, Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -399,12 +320,7 @@ async fn admin_list_sandboxes_filters_by_user() {
     let _ = seed_sandbox(&db, &user_b).await;
 
     let token = "list-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     // No filter → all 3.
@@ -451,12 +367,7 @@ async fn admin_user_sandboxes_returns_only_users_rows() {
     let _ = seed_sandbox(&db, &user_b).await;
 
     let token = "user-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -482,12 +393,7 @@ async fn admin_user_export_includes_all_categories() {
     seed_event(&db, &sandbox_typed, &user_a, "started").await;
 
     let token = "export-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -516,12 +422,7 @@ async fn admin_user_export_for_unknown_user_returns_empty_arrays() {
     let user_a = zeroship_core::typed_id::generate("usr");
 
     let token = "empty-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -551,12 +452,7 @@ async fn admin_gdpr_delete_removes_all_user_data() {
     seed_event(&db, &sandbox_typed_b, &user_b, "created").await;
 
     let token = "delete-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -649,12 +545,7 @@ async fn admin_gdpr_delete_unknown_user_returns_zero_counts() {
     let user_a = zeroship_core::typed_id::generate("usr");
 
     let token = "idem-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -678,12 +569,7 @@ async fn admin_hosts_lists_known_hosts() {
     let db = migrated_db().await;
 
     let token = "hosts-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -712,12 +598,7 @@ async fn admin_sandbox_detail_returns_pg_row_and_in_memory_flag() {
     let (sandbox_typed, _uuid) = seed_sandbox(&db, &user_a).await;
 
     let token = "detail-bearer-aaaaaa";
-    let token_file = AdminTokenFile::new(token);
-    let _g = EnvGuard::set(
-        "SANDBOX_ADMIN_TOKEN_PATH",
-        token_file.path.to_str().unwrap(),
-    );
-    let state = make_state(Some(Arc::new(db)));
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
     let svc = make_app!(state);
 
     let req = test::TestRequest::default()
@@ -736,4 +617,137 @@ async fn admin_sandbox_detail_returns_pg_row_and_in_memory_flag() {
     // `in_memory` is false because we didn't populate the registry.
     assert_eq!(v["row"]["in_memory"].as_bool().unwrap(), false);
     assert!(v["agent_version"].is_null());
+}
+
+// Boot-time admin-token loader tests now live inline in lib.rs's
+// `#[cfg(test)] mod tests` (Round-4 / MINOR #4 — `load_admin_token` is
+// `pub(crate)` and pure, takes a path argument; no env mutation).
+
+// ────────────────────────────────────────────────────────────────────
+// Round-4 regression tests
+// ────────────────────────────────────────────────────────────────────
+
+/// Round-4 / IMPORTANT #3 regression: the `gdpr.delete_user` audit row
+/// must NOT surface in `GET /admin/users/{user_id}/export`. Pre-fix,
+/// the export's events query selected every row WHERE user_id = $1, so
+/// after a GDPR delete the user could re-discover their own erasure
+/// record on a subsequent export.
+#[ntex::test]
+#[ignore = "needs Postgres; Round-4 IMPORTANT #3 — export filters audit row"]
+async fn admin_user_export_after_gdpr_delete_excludes_audit_row() {
+    let db = migrated_db().await;
+    let user_a = zeroship_core::typed_id::generate("usr");
+    let (sandbox_typed, _) = seed_sandbox(&db, &user_a).await;
+    seed_event(&db, &sandbox_typed, &user_a, "created").await;
+
+    let token = "regress-3-bearer-aa";
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
+    let svc = make_app!(state);
+
+    // Issue the GDPR delete first.
+    let req = test::TestRequest::default()
+        .uri(&format!("/admin/users/{user_a}"))
+        .method(ntex::http::Method::DELETE)
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Now export the (now-erased) user. The audit row exists in
+    // sandbox.events but must be hidden from the export.
+    let req = test::TestRequest::default()
+        .uri(&format!("/admin/users/{user_a}/export"))
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let events = v["events"].as_array().unwrap();
+    assert!(
+        events.iter().all(|e| e["kind"].as_str() != Some("gdpr.delete_user")),
+        "post-erasure export must not include the gdpr.delete_user audit row; got {events:?}"
+    );
+    // events_total must mirror the same filter — counter should not
+    // count the audit row either, otherwise an operator inspecting
+    // events_total post-erasure would see "1 event" with nothing in
+    // the array (confusing).
+    assert_eq!(
+        v["events_total"].as_i64().unwrap(),
+        0,
+        "events_total must reflect user-facing events only (audit row excluded)"
+    );
+}
+
+/// Round-4 / IMPORTANT #4 regression: `DELETE /admin/users/{user_id}`
+/// for a user with ZERO sandboxes must not write a synthetic
+/// `sbx_<random>` id into `sandbox.events`. Pre-fix, the audit row
+/// minted a never-existed typed-id and inserted it as `events.sandbox_id`,
+/// polluting `idx_events_sandbox_ts` with an unmatchable key. Post-fix
+/// (migration 0005) the column is NULLable and the audit row writes NULL.
+#[ntex::test]
+#[ignore = "needs Postgres; Round-4 IMPORTANT #4 — no synthetic sandbox_id"]
+async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
+    let db = migrated_db().await;
+    let user_a = zeroship_core::typed_id::generate("usr");
+    // No seed_sandbox call — the user has zero sandboxes.
+
+    let token = "regress-4-bearer-aa";
+    let state = make_state_with_admin_token(Some(Arc::new(db)), Some(token.to_string()));
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri(&format!("/admin/users/{user_a}"))
+        .method(ntex::http::Method::DELETE)
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["sandboxes_tombstoned"].as_i64().unwrap(), 0);
+
+    // Inspect sandbox.events directly. The audit row must exist
+    // (Art. 30 RoPA) but its sandbox_id must be NULL — not a
+    // synthetic typed-id. Pre-fix, every zero-sandbox GDPR delete
+    // produced exactly one polluted index entry per call.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let row = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM sandbox.events \
+              WHERE user_id = $1::TEXT \
+                AND kind = 'gdpr.delete_user' \
+                AND sandbox_id IS NULL",
+            &[&user_a],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<_, i64>(0),
+        1,
+        "audit row must exist with sandbox_id = NULL (no synthetic id)"
+    );
+
+    // Belt-and-suspenders: NO row exists with a non-NULL synthetic
+    // sandbox_id for this user. (Pre-fix this was 1.)
+    let row = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM sandbox.events \
+              WHERE user_id = $1::TEXT \
+                AND kind = 'gdpr.delete_user' \
+                AND sandbox_id IS NOT NULL",
+            &[&user_a],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<_, i64>(0),
+        0,
+        "no synthetic sandbox_id may have been written"
+    );
 }

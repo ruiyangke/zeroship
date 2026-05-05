@@ -68,6 +68,24 @@ pub struct AppState {
     /// exits cleanly when set; the next deploy can then drop the
     /// process without leaving phantom heartbeat traffic.
     pub shutdown: Arc<AtomicBool>,
+    /// Round-3 / Phase-3 CRITICAL #3: admin bearer token, read ONCE
+    /// at boot from `SANDBOX_ADMIN_TOKEN_PATH`. `None` is the
+    /// disabled-by-absence shape: the env is unset, so every
+    /// `/admin/*` endpoint 503s with `"admin api disabled"`. `Some`
+    /// is the opt-in shape; the boot-time read enforces mode 0o400.
+    ///
+    /// Per-request disk I/O on the auth path is gone — was a slow-FS
+    /// DoS amplification + fail-open on chmod-error. `admin_check`
+    /// reads this field in O(1) and constant-time-compares against
+    /// the request bearer.
+    ///
+    /// Round-4 / MINOR #5: wrapped in `zeroize::Zeroizing<String>` so
+    /// the heap allocation is scrubbed on drop. A core dump or
+    /// `/proc/<pid>/mem` read after process exit can't trivially
+    /// recover the bearer. (Live-process reads are still a concern,
+    /// but the post-mortem surface is closed.) Mirrors the
+    /// `config::ApiToken` treatment of `SANDBOX_TOKEN`.
+    pub admin_token: Option<zeroize::Zeroizing<String>>,
 }
 
 impl AppState {
@@ -239,6 +257,28 @@ impl AppState {
                 ),
             }
         }
+        // Round-3 / Phase-3 CRITICAL #3: read admin bearer ONCE at
+        // boot. Previously every `/admin/*` request stat()+read()'d
+        // the file (slow-FS DoS amplification; fail-open on chmod
+        // error). Boot-time read is fail-loud — a misconfigured
+        // mode (anything other than 0o400) refuses to start the
+        // process. "Disabled because env-unset" stays `None`; the
+        // file existing-but-misconfigured is `Err`.
+        //
+        // Round-4 / MINOR #4: env resolution happens here, then the
+        // pure `load_admin_token` reads/validates the path. Tests can
+        // call `load_admin_token(Some(&path))` directly without
+        // mutating process env (the env-mutation tests stay only on
+        // the production wiring at `from_env`-shaped boundaries).
+        let admin_token_path = std::env::var("SANDBOX_ADMIN_TOKEN_PATH")
+            .ok()
+            .and_then(|v| {
+                let t = v.trim();
+                if t.is_empty() { None } else { Some(std::path::PathBuf::from(t)) }
+            });
+        let admin_token = load_admin_token(admin_token_path.as_deref())?
+            .map(zeroize::Zeroizing::new);
+
         let state = Arc::new(Self {
             config,
             sandboxes: registry,
@@ -247,6 +287,7 @@ impl AppState {
             database,
             persist,
             shutdown: Arc::new(AtomicBool::new(false)),
+            admin_token,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
@@ -272,6 +313,58 @@ impl AppState {
         }
         Ok(state)
     }
+}
+
+/// Round-3 / Phase-3 CRITICAL #3: read the admin bearer ONCE at
+/// boot. Mirrors `Persistence::AeadKey::from_path`.
+///
+/// Round-4 / MINOR #4: this is now a pure function over an optional
+/// path. The production caller in `AppState::from_config` resolves
+/// `SANDBOX_ADMIN_TOKEN_PATH` first then passes the path here, so
+/// tests can drive the loader with a `tempfile::NamedTempFile` path
+/// without mutating process env.
+///
+/// Three outcomes:
+///   - `path = None` → `Ok(None)` (admin API disabled by config)
+///   - file readable + mode 0o400 + non-empty → `Ok(Some(token))`
+///   - ANYTHING else → `Err(...)` (refuse to boot loudly)
+///
+/// Distinguishes "admin API disabled" (legitimate config) from
+/// "admin token misconfigured" (operator error) — Round-2 leaked
+/// the latter as a silent fail-open via `.ok()?` on metadata().
+pub(crate) fn load_admin_token(
+    path: Option<&std::path::Path>,
+) -> Result<Option<String>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let meta = std::fs::metadata(path).map_err(|e| {
+            format!("SANDBOX_ADMIN_TOKEN_PATH={path:?}: stat: {e}")
+        })?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o400 {
+            return Err(format!(
+                "SANDBOX_ADMIN_TOKEN_PATH={path:?}: mode={mode:o} must be 0o400"
+            ));
+        }
+    }
+
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        format!("SANDBOX_ADMIN_TOKEN_PATH={path:?}: read: {e}")
+    })?;
+    let trimmed = raw
+        .trim_end_matches(|c: char| c == '\n' || c == '\r')
+        .to_string();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "SANDBOX_ADMIN_TOKEN_PATH={path:?}: file is empty"
+        ));
+    }
+    Ok(Some(trimmed))
 }
 
 /// Periodic backend probe. `probe()` updates the `healthy` flag
@@ -720,6 +813,92 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
 //
 // The pg-side `set_host_draining` UPDATE is exercised by the
 // pg-gated integration test in tests/sandbox_pg_e2e.rs.
+// ────────────────────────────────────────────────────────────────────
+// Round-4 / MINOR #4 — boot-loader unit tests (pure function, no env
+// mutation; we just feed a path to the loader).
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod boot_loader_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn temp_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "zsbx-admin-token-{}-{}",
+            std::process::id(),
+            Uuid::now_v7().simple()
+        ))
+    }
+
+    fn write_with_mode(path: &std::path::Path, body: &str, mode: u32) {
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        // On non-unix the mode arg is ignored.
+        let _ = mode;
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn loader_returns_none_when_path_is_none() {
+        let got = load_admin_token(None);
+        assert!(matches!(got, Ok(None)), "None path must yield Ok(None); got {got:?}");
+    }
+
+    #[test]
+    fn loader_reads_token_when_mode_0o400() {
+        let path = temp_path();
+        let token = "boot-loader-token-0o400-aaaa";
+        write_with_mode(&path, token, 0o400);
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loader_refuses_bad_mode() {
+        let path = temp_path();
+        write_with_mode(&path, "boot-loader-token-bad-mode-aa", 0o644);
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        let err = got.expect_err("mode 0o644 must yield Err");
+        assert!(err.contains("0o400"), "error must mention required mode; got {err}");
+    }
+
+    #[test]
+    fn loader_refuses_empty_file() {
+        let path = temp_path();
+        write_with_mode(&path, "", 0o400);
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        let err = got.expect_err("empty file must yield Err");
+        assert!(err.contains("empty"), "error must mention 'empty'; got {err}");
+    }
+
+    #[test]
+    fn loader_trims_trailing_newline() {
+        let path = temp_path();
+        let token = "trim-newline-token-bbbb";
+        write_with_mode(&path, &format!("{token}\n"), 0o400);
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+    }
+}
+
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;

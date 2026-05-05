@@ -54,7 +54,11 @@ When unset → every endpoint 503s with `{"error":"admin api disabled"}`. Disabl
 
 Wrong/missing bearer → 401. Correct bearer + pg disabled → 503 with `{"error":"pg integration disabled"}`.
 
-The full § 13.8 shape (short-lived JWT + per-endpoint scopes + 2FA step-up + per-admin rate-limit + anomaly alarms) is Phase 5 / production hardening. Phase 3's bearer-from-file is intentionally narrow — the JWT verifier lives in `crates/control/`, and coupling the sandbox crate to it before that contract is finalized is premature. The audit-event actor is hard-coded as `"operator"` for v1; Phase 5 replaces it with the JWT's `admin_id` claim.
+The full § 13.8 shape (short-lived JWT + per-endpoint scopes + 2FA step-up + per-admin rate-limit + anomaly alarms) is Phase 5 / production hardening. Phase 3's bearer-from-file is intentionally narrow — the JWT verifier lives in `crates/control/`, and coupling the sandbox crate to it before that contract is finalized is premature. The audit-event actor is hard-coded as `"operator"` for v1; Phase 5 replaces it with the JWT's `admin_id` claim. See [`docs/decisions/2026-05-05-sandbox-admin-shared-bearer.md`](../../docs/decisions/2026-05-05-sandbox-admin-shared-bearer.md) for the trade-off.
+
+#### Token rotation
+
+The admin bearer is read **once at boot**. Rotating the token requires a **rolling restart of every controller replica** — there is no signal-based or file-watch-based reload. Update the secret entry that materializes `SANDBOX_ADMIN_TOKEN_PATH`, then roll each replica (`SIGTERM` → drain → reboot reads the new file). The boot-cache shape exists because per-request file reads were a DoS amplifier (Round-3 CRITICAL #3); the trade-off is non-zero-downtime rotation.
 
 Migration plan (Phase 5):
 1. Replace `admin_check` (bearer match) with a JWT verifier + scope check.
