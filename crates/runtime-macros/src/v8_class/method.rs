@@ -648,6 +648,23 @@ pub(super) fn gen_async_method_callback(
 /// extraction loop emits no args (the parser skips the receiver, and
 /// there's no receiver, so `params` is whatever args the user
 /// declared — typically zero for getters).
+///
+/// **Parameter naming.** Both `class_ty` and `state_ty` are threaded
+/// in. `class_ty` keys the callback identifier
+/// (`__<class>_<method>_callback`); `state_ty` keys the dispatch
+/// (`<state_ty>::method_name(...)`). Under `#[v8_state_marker(MarkerTy)]`
+/// the user's `impl` block is `impl StateTy`, not `impl MarkerTy` — so
+/// the dispatch must resolve to StateTy even though the macro keys the
+/// install on MarkerTy. Without `#[v8_state_marker]` the two are
+/// identical (state_ty == class_ty), so this is a no-op for the common
+/// case but mandatory for state-marker support (Phase 1 commit
+/// `d4d65fd` + the static-method extension in `1a924d9`). The H12
+/// finding flagged the name `state_ty` as misleading on the static
+/// path (no instance state), but renaming would diverge from the
+/// instance/setter/async-method codegen paths that share the same
+/// parameter; keeping the cross-emit-site consistency is more valuable
+/// than the naming nit. Documented here so the next reader sees the
+/// rationale rather than reflexively renaming.
 pub(super) fn gen_static_callback(
     class_ty: &syn::Ident,
     state_ty: &syn::Ident,
@@ -663,11 +680,10 @@ pub(super) fn gen_static_callback(
     let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
-    // Static method bodies live on the impl receiver (state_ty), which
-    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not the
-    // unit MarkerTy. Mirror what gen_method_callback does for instance
-    // methods — see the Phase 1 commit (`d4d65fd`) that introduced the
-    // same threading for `&self` / `&mut self` callbacks.
+    // Static method bodies live on the impl target (state_ty), which
+    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not
+    // the unit MarkerTy — see this fn's doc-comment for the parameter
+    // naming rationale.
     let call = quote! {
         <#state_ty>::#method_name(#(#call_args),*)
     };
@@ -715,6 +731,35 @@ fn gen_setter_callback(
     let scope_tok = quote! { scope };
     let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
 
+    // §13.1 fix: setters declared as `Result<(), OpError>` route an
+    // `Err` arm through the standard 6-variant OpError dispatch so the
+    // user's error surfaces as a JS exception instead of being silently
+    // swallowed. Unit-returning setters fall through to a plain call
+    // (no Result match needed). The shape parser at the expand site
+    // already rejects setters whose return type is neither `()` nor
+    // `Result<(), _>`, so this is exhaustive.
+    let is_result = matches!(
+        outer_ident(&m.func.sig.output).as_deref(),
+        Some("Result")
+    );
+    let invoke = if is_result {
+        let throw = crate::gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
+        quote! {
+            match <#state_ty>::#method_name(#receiver_ref, #(#call_args),*) {
+                ::std::result::Result::Ok(()) => {}
+                ::std::result::Result::Err(__err) => {
+                    #throw
+                    return;
+                }
+            }
+        }
+    } else {
+        // Setter returns `()` — call and ignore.
+        quote! {
+            <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+        }
+    };
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_name(
@@ -749,8 +794,11 @@ fn gen_setter_callback(
 
             #(#extractions)*
 
-            // Discard return — setters don't propagate values.
-            let _ = <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            // Setter dispatch — Ok-discard, Err-throw for Result-returning
+            // setters; plain call-and-discard for `()` setters. WebIDL
+            // §3.7.6 says the setter return value is unobservable to JS,
+            // so we never write to `rv`.
+            #invoke
         }
     }
 }
