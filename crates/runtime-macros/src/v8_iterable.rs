@@ -58,7 +58,7 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Attribute, Ident};
+use syn::{Attribute, FnArg, Ident, ImplItem, Receiver};
 
 /// Iteration model for the derive — snapshot or live (WebIDL §3.7.10.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,14 +75,29 @@ pub(crate) enum IterMode {
     Live,
 }
 
-/// Parsed `#[v8_iterable(key = TY, value = TY [, mode = snapshot|live])]`
-/// attribute.
+/// Parsed `#[v8_iterable(key = TY, value = TY [, mode = snapshot|live]
+/// [, value_marshal = ident])]` attribute.
 pub(crate) struct IterableAttr {
     pub key_ty: syn::Type,
     pub value_ty: syn::Type,
     /// Iteration mode. Defaults to `Snapshot` when `mode = ...` is
     /// omitted; back-compat for every existing consumer.
     pub mode: IterMode,
+    /// Optional `value_marshal = some_fn` — a free-function path that
+    /// the macro calls per-yield to convert a `&V` to
+    /// `v8::Local<v8::Value>`. Skips the built-in
+    /// USVString/ByteString/u32/Vec<u8> classification so users can
+    /// surface arbitrary types (e.g. FormData's
+    /// `(USVString or File)` union or any v8 Local).
+    ///
+    /// Required signature on the callee:
+    /// ```ignore
+    /// fn some_fn<'s>(
+    ///     scope: &mut v8::PinScope<'s, '_>,
+    ///     v: &V,
+    /// ) -> v8::Local<'s, v8::Value>
+    /// ```
+    pub value_marshal: Option<syn::Path>,
 }
 
 /// Read `#[v8_iterable(key = ..., value = ..., mode = ...)]` from impl-
@@ -98,6 +113,7 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
         let mut key_ty: Option<syn::Type> = None;
         let mut value_ty: Option<syn::Type> = None;
         let mut mode: Option<IterMode> = None;
+        let mut value_marshal: Option<syn::Path> = None;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("key") {
                 let ty: syn::Type = meta.value()?.parse()?;
@@ -120,9 +136,17 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
                         )));
                     }
                 });
+            } else if meta.path.is_ident("value_marshal") {
+                // Accept a path: `value_marshal = entry_value_to_v8` or
+                // `value_marshal = crate::path::to_v8`. The path resolves
+                // at call-site of the emitted code (inside the parent
+                // class's module), so relative paths are fine for
+                // local helpers.
+                let path: syn::Path = meta.value()?.parse()?;
+                value_marshal = Some(path);
             } else {
                 return Err(meta.error(
-                    "expected `key = TY`, `value = TY`, or `mode = snapshot|live`",
+                    "expected `key = TY`, `value = TY`, `mode = snapshot|live`, or `value_marshal = fn`",
                 ));
             }
             Ok(())
@@ -149,9 +173,118 @@ pub(crate) fn extract_iterable(attrs: &[Attribute]) -> Result<Option<IterableAtt
             key_ty,
             value_ty,
             mode: mode.unwrap_or(IterMode::Snapshot),
+            value_marshal,
         });
     }
     Ok(found)
+}
+
+/// Inspected shape of the user-supplied `value_pairs` method. We sniff
+/// it once from the impl block items and thread the result through the
+/// generator so we can pick the right pointer/borrow recovery and
+/// argument-passing convention.
+///
+/// Supported shapes (selected by sniffing the receiver + arg list):
+///
+///   - `fn value_pairs(&self) -> Vec<(K, V)>` — original. `is_mut =
+///     false, takes_scope = false`. Recovery is `*const Self` + `&*ptr`.
+///   - `fn value_pairs(&mut self) -> Vec<(K, V)>` — Headers' lazy
+///     sort-cache. `is_mut = true, takes_scope = false`. Recovery
+///     promotes to `*mut Self` + `&mut *ptr`.
+///   - `fn value_pairs(&self, scope: &mut PinScope) -> Vec<(K, V)>` —
+///     scope-passed read-only. `is_mut = false, takes_scope = true`.
+///   - `fn value_pairs(&mut self, scope: &mut PinScope) -> Vec<(K, V)>`
+///     — URLSearchParams' sync-from-parent. `is_mut = true, takes_scope
+///     = true`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ValuePairsSig {
+    /// True if the receiver is `&mut self`. Drives `*mut Self` + `&mut *ptr`
+    /// recovery and a per-method per-instance re-entrancy guard.
+    pub is_mut: bool,
+    /// True if the second argument is `&mut PinScope` (or any
+    /// `PinScope` shape we accept). When set, the macro passes the
+    /// outer scope through to `value_pairs`. The user's body may then
+    /// call any scope-taking helper (e.g. `sync_from_parent(scope)`).
+    pub takes_scope: bool,
+}
+
+impl Default for ValuePairsSig {
+    fn default() -> Self {
+        ValuePairsSig {
+            is_mut: false,
+            takes_scope: false,
+        }
+    }
+}
+
+/// Find the `value_pairs` method in the impl block items and inspect
+/// its signature. Returns the default (`&self`, no scope) if no method
+/// is found — the resulting codegen will fail at compile time with a
+/// "no method `value_pairs` on `Self`" error pointing at the call site,
+/// which is good enough.
+///
+/// Recognised receiver shapes:
+///   - `&self` → `is_mut = false`
+///   - `&mut self` → `is_mut = true`
+///
+/// Recognised second-arg shapes (everything else fails the codegen):
+///   - none → `takes_scope = false`
+///   - `&mut v8::PinScope<'…, '…>` (any path ending in `PinScope`) →
+///     `takes_scope = true`
+pub(crate) fn inspect_value_pairs(items: &[ImplItem]) -> ValuePairsSig {
+    for item in items {
+        let ImplItem::Fn(func) = item else {
+            continue;
+        };
+        if func.sig.ident != "value_pairs" {
+            continue;
+        }
+        let mut sig = ValuePairsSig::default();
+        for arg in func.sig.inputs.iter() {
+            match arg {
+                FnArg::Receiver(Receiver {
+                    mutability,
+                    reference: Some(_),
+                    ..
+                }) => {
+                    sig.is_mut = mutability.is_some();
+                }
+                FnArg::Typed(pt) => {
+                    // Detect a `&mut PinScope`-shaped argument by
+                    // sniffing the trailing path segment. We don't
+                    // require a specific lifetime spelling — the user
+                    // may write `&mut v8::PinScope<'s, '_>` or just
+                    // `&mut PinScope` if they `use v8::PinScope`.
+                    if takes_pin_scope(&pt.ty) {
+                        sig.takes_scope = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return sig;
+    }
+    ValuePairsSig::default()
+}
+
+/// True if `ty` is some flavour of `&mut PinScope<...>`. We accept any
+/// path that ends in the `PinScope` segment so users can spell it as
+/// `v8::PinScope`, `::v8::PinScope`, or a bare `PinScope` after `use`.
+fn takes_pin_scope(ty: &syn::Type) -> bool {
+    let syn::Type::Reference(r) = ty else {
+        return false;
+    };
+    if r.mutability.is_none() {
+        return false;
+    }
+    let syn::Type::Path(tp) = &*r.elem else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .map(|s| s.ident == "PinScope")
+        .unwrap_or(false)
 }
 
 /// Recognised string / byte / integer types that we know how to
@@ -196,7 +329,26 @@ fn classify_ty(ty: &syn::Type) -> Option<SupportedTy> {
 /// Emit code that converts a snapshot value (the user's K or V) to a
 /// `v8::Local<v8::Value>` named `__out_local`. Caller bound the source
 /// value to `__src` already.
-fn gen_to_v8(ty: &syn::Type, src_ident: &Ident, out_ident: &Ident) -> Result<TokenStream2, syn::Error> {
+///
+/// When `marshal` is `Some(path)`, the macro emits a call to the
+/// user-supplied free function instead of selecting a built-in
+/// classifier. Used for the `value_marshal = ident` attribute (Part
+/// (A) of MAC-09) so consumers like `FormDataIterator` can yield a
+/// `(USVString or File)` union without baking that into the macro.
+fn gen_to_v8(
+    ty: &syn::Type,
+    src_ident: &Ident,
+    out_ident: &Ident,
+    marshal: Option<&syn::Path>,
+) -> Result<TokenStream2, syn::Error> {
+    if let Some(path) = marshal {
+        // Custom marshal — bypass type classification entirely. The
+        // user's function is responsible for producing a valid
+        // `v8::Local<v8::Value>` from `&V`.
+        return Ok(quote! {
+            let #out_ident: v8::Local<v8::Value> = #path(scope, &#src_ident);
+        });
+    }
     let kind = classify_ty(ty).ok_or_else(|| {
         syn::Error::new_spanned(
             ty,
@@ -269,22 +421,97 @@ fn gen_to_v8(ty: &syn::Type, src_ident: &Ident, out_ident: &Ident) -> Result<Tok
 ///     `next()` yields `done`. If it grows, the cursor walks the new
 ///     entries — that's the spec behaviour.
 ///
-/// `class_ty` is the parent class JS-identity ident (e.g. `Headers`).
-/// `state_ty` is the type of the box stored in V8 internal field 0 of
-/// the parent — equal to `class_ty` under the no-attribute path, but
-/// distinct when the parent uses `#[v8_state_marker]` (MAC-01 Phase 1,
-/// design `docs/proposals/macro-v8-state.md` §2.9).
+/// `class_ty` is the parent class ident (e.g. `Headers`).
 /// `attr` is the parsed `#[v8_iterable(key=..., value=..., mode=...)]`.
+/// `sig` is the user's `value_pairs` receiver/arg shape, sniffed from
+/// the impl block by `inspect_value_pairs`. It picks between
+/// `*const Self`/`*mut Self` recovery and decides whether to pass the
+/// outer `scope` through.
 pub(crate) fn generate(
     class_ty: &Ident,
-    state_ty: &Ident,
     attr: &IterableAttr,
+    sig: ValuePairsSig,
 ) -> Result<TokenStream2, syn::Error> {
     let key_ty = &attr.key_ty;
     let value_ty = &attr.value_ty;
     let live = matches!(attr.mode, IterMode::Live);
+    let is_mut = sig.is_mut;
+    let takes_scope = sig.takes_scope;
 
-    // Sanity check: both K and V are supported in classify_ty.
+    // Receiver-flavoured pointer + borrow tokens. `&mut self` requires
+    // `*mut Self` + `&mut *ptr` (matches the regular `&mut self` method
+    // recovery in v8_class/mod.rs::gen_method_callback).
+    let self_ptr_ty = if is_mut {
+        quote! { *mut #class_ty }
+    } else {
+        quote! { *const #class_ty }
+    };
+    let self_borrow = if is_mut {
+        quote! { &mut * }
+    } else {
+        quote! { &* }
+    };
+    let self_borrow_ty = if is_mut {
+        quote! { &mut #class_ty }
+    } else {
+        quote! { & #class_ty }
+    };
+
+    // Argument list passed to `value_pairs` per the user's signature.
+    let value_pairs_args = if takes_scope {
+        quote! { (scope) }
+    } else {
+        quote! { () }
+    };
+
+    // Per-call re-entrancy guard for `&mut self` value_pairs. Fires
+    // when the same instance's value_pairs is already on the stack
+    // (would never happen in practice since the macro is the only
+    // caller and doesn't recurse, but matches the policy for other
+    // `&mut self` callbacks emitted by `#[v8_class]`). Emits the
+    // RAII guard only — the caller binds `__inflight_addr` from the
+    // recovered External pointer in scope first.
+    //
+    // The thread-local key is local to each emission site (the guard
+    // is inlined inside the callback's body). Naming the thread_local
+    // SCREAMING_SNAKE_CASE silences rustc's "static should have an
+    // upper case name" lint without an `#[allow]` for every consumer.
+    let reentry_guard = if is_mut {
+        let err_msg = format!(
+            "re-entered `value_pairs` on {} instance — concurrent &mut self callback",
+            class_ty
+        );
+        quote! {
+            ::std::thread_local! {
+                static __ZS_VALUE_PAIRS_INFLIGHT: ::std::cell::RefCell<
+                    ::std::collections::HashSet<usize>,
+                > = ::std::cell::RefCell::new(::std::collections::HashSet::new());
+            }
+            let __already_inflight = __ZS_VALUE_PAIRS_INFLIGHT
+                .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
+            if __already_inflight {
+                let __msg = v8::String::new(scope, #err_msg).unwrap();
+                let __exc = v8::Exception::type_error(scope, __msg);
+                scope.throw_exception(__exc);
+                return;
+            }
+            struct __ReentryGuard(usize);
+            impl ::std::ops::Drop for __ReentryGuard {
+                fn drop(&mut self) {
+                    __ZS_VALUE_PAIRS_INFLIGHT.with(|__s| {
+                        __s.borrow_mut().remove(&self.0);
+                    });
+                }
+            }
+            let __reentry_guard = __ReentryGuard(__inflight_addr);
+        }
+    } else {
+        quote! {}
+    };
+
+    // Sanity check: both K and V must classify, unless `value_marshal`
+    // takes over the V conversion. Key is always classified — keys
+    // are the simple stringly types in every WebIDL pair iterator.
     classify_ty(key_ty).ok_or_else(|| {
         syn::Error::new_spanned(
             key_ty,
@@ -292,13 +519,16 @@ pub(crate) fn generate(
              ByteString, USVString, String, u32",
         )
     })?;
-    classify_ty(value_ty).ok_or_else(|| {
-        syn::Error::new_spanned(
-            value_ty,
-            "#[v8_iterable]: unsupported value type. Expected one of: \
-             ByteString, USVString, String, u32, Vec<u8>",
-        )
-    })?;
+    if attr.value_marshal.is_none() {
+        classify_ty(value_ty).ok_or_else(|| {
+            syn::Error::new_spanned(
+                value_ty,
+                "#[v8_iterable]: unsupported value type. Expected one of: \
+                 ByteString, USVString, String, u32, Vec<u8> — or supply \
+                 `value_marshal = some_fn` for arbitrary V.",
+            )
+        })?;
+    }
 
     let iter_class_ty = format_ident!("{}Iterator", class_ty);
     let iter_class_name_str = iter_class_ty.to_string();
@@ -313,11 +543,11 @@ pub(crate) fn generate(
     // Templates for converting a value back to V8. Shared across modes.
     let key_src = Ident::new("__k", proc_macro2::Span::call_site());
     let key_out = Ident::new("__k_v", proc_macro2::Span::call_site());
-    let key_to_v8 = gen_to_v8(key_ty, &key_src, &key_out)?;
+    let key_to_v8 = gen_to_v8(key_ty, &key_src, &key_out, None)?;
 
     let val_src = Ident::new("__v", proc_macro2::Span::call_site());
     let val_out = Ident::new("__v_v", proc_macro2::Span::call_site());
-    let val_to_v8 = gen_to_v8(value_ty, &val_src, &val_out)?;
+    let val_to_v8 = gen_to_v8(value_ty, &val_src, &val_out, attr.value_marshal.as_ref())?;
 
     // The iterator class — emitted as a parallel V8 class with its own
     // install. We can't use `#[v8_class]` directly because we're inside
@@ -413,19 +643,21 @@ pub(crate) fn generate(
     } else {
         quote! {
             // SAFETY: the brand check above passed, so internal field
-            // 0 holds a Box<#state_ty> raw pointer placed there by
+            // 0 holds a Box<#class_ty> raw pointer placed there by
             // gen_box_and_install_finalizer. The borrow ends before we
             // touch `scope` again (the snapshot clone is the last use).
-            let __instance: &#state_ty =
-                unsafe { &*(__ext.value() as *const #state_ty) };
-
-            // Snapshot the pairs. The macro requires the user to
-            // define `value_pairs(&self) -> Vec<(K, V)>`. We clone the
-            // result into the iterator state.
-            let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> =
-                __instance.value_pairs();
-            // Drop the borrow before touching `scope` for the iterator
-            // template install (which mutably borrows).
+            // For `&mut self` value_pairs we promote to *mut + &mut *.
+            let __inflight_addr = __ext.value() as usize;
+            #reentry_guard
+            let __instance_ptr: #self_ptr_ty = __ext.value() as #self_ptr_ty;
+            let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> = {
+                let __instance: #self_borrow_ty =
+                    unsafe { #self_borrow __instance_ptr };
+                __instance.value_pairs #value_pairs_args
+            };
+            // Drop the External BEFORE re-entering scope for the
+            // iterator template install. The `&mut`/`&` borrow above
+            // already ended at the closing brace of the snapshot block.
             drop(__ext);
         }
     };
@@ -493,13 +725,19 @@ pub(crate) fn generate(
                 }
             };
             // SAFETY: the parent's internal field 0 was populated by
-            // gen_box_and_install_finalizer with a Box<#state_ty>; the
+            // gen_box_and_install_finalizer with a Box<#class_ty>; the
             // Global pin keeps the wrapper alive for as long as this
-            // iterator lives. value_pairs() takes &Self only.
-            let __instance: &#state_ty =
-                unsafe { &*(__parent_ext.value() as *const #state_ty) };
-            let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> =
-                __instance.value_pairs();
+            // iterator lives. value_pairs() may take &Self or &mut Self
+            // per the user's signature — the macro promotes the recovery
+            // accordingly.
+            let __inflight_addr = __parent_ext.value() as usize;
+            #reentry_guard
+            let __instance_ptr: #self_ptr_ty = __parent_ext.value() as #self_ptr_ty;
+            let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> = {
+                let __instance: #self_borrow_ty =
+                    unsafe { #self_borrow __instance_ptr };
+                __instance.value_pairs #value_pairs_args
+            };
             // End the parent borrow before re-entering scope.
             drop(__parent_ext);
 
@@ -571,20 +809,28 @@ pub(crate) fn generate(
     let for_each_loop = if live {
         quote! {
             // Live forEach: track a cursor, re-read value_pairs() each
-            // iteration. We don't hold a `&Self` borrow across
-            // callbacks (which would freeze the parent's RefCell, etc.)
-            // — instead we drop it after each pair-fetch.
+            // iteration. We don't hold a `&Self`/`&mut Self` borrow
+            // across callbacks (which would freeze the parent's
+            // RefCell, etc.) — instead we drop it after each
+            // pair-fetch.
             let mut __cursor: usize = 0;
+            // Re-entry guard scope: `value_pairs` is reentry-guarded
+            // for `&mut self` shapes; the address used for the guard
+            // is the parent's External value.
+            let __inflight_addr = __ext.value() as usize;
+            #reentry_guard
             loop {
                 let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> = {
-                    // Fresh `&Self` per iteration. The brand check at
-                    // the top of the callback already established the
-                    // receiver is a #class_ty wrapper; we reload via the
-                    // SAME __ext (it still points at the same Box<#state_ty>
+                    // Fresh `&Self`/`&mut Self` per iteration. The brand
+                    // check at the top of the callback already
+                    // established the receiver is a #class_ty; we reload
+                    // via the SAME __ext (it still points at the same
                     // allocation).
-                    let __instance: &#state_ty =
-                        unsafe { &*(__ext.value() as *const #state_ty) };
-                    __instance.value_pairs()
+                    let __instance_ptr: #self_ptr_ty =
+                        __ext.value() as #self_ptr_ty;
+                    let __instance: #self_borrow_ty =
+                        unsafe { #self_borrow __instance_ptr };
+                    __instance.value_pairs #value_pairs_args
                 };
                 if __cursor >= __pairs.len() {
                     break;
@@ -607,8 +853,11 @@ pub(crate) fn generate(
         }
     } else {
         quote! {
-            let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> =
-                __instance.value_pairs();
+            let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> = {
+                let __instance: #self_borrow_ty =
+                    unsafe { #self_borrow __instance_ptr };
+                __instance.value_pairs #value_pairs_args
+            };
             drop(__ext);
 
             for (#key_src, #val_src) in __pairs.into_iter() {
@@ -622,13 +871,17 @@ pub(crate) fn generate(
         }
     };
 
-    // Snapshot binds `__instance` up-front; live does not.
+    // Snapshot pre-binds the instance pointer + reentry guard; live
+    // re-binds inside the loop. The guard's RAII releases at end of
+    // callback (snapshot) or end of forEach loop scope (live).
     let for_each_instance_pre = if live {
         quote! {}
     } else {
         quote! {
-            let __instance: &#state_ty =
-                unsafe { &*(__ext.value() as *const #state_ty) };
+            let __inflight_addr = __ext.value() as usize;
+            #reentry_guard
+            let __instance_ptr: #self_ptr_ty =
+                __ext.value() as #self_ptr_ty;
         }
     };
 
@@ -761,7 +1014,7 @@ pub(crate) fn generate(
                 scope.throw_exception(__exc);
                 return;
             }
-            // Recover Box<#state_ty> from internal field 0.
+            // Recover Box<#class_ty> from internal field 0.
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
@@ -1012,24 +1265,25 @@ pub(crate) fn generate(
                     let __tmpl = v8::FunctionTemplate::new(scope, #factory_values_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
+                // `entries` and `[Symbol.iterator]` MUST resolve to the
+                // SAME FunctionTemplate per WebIDL §3.7.10 default
+                // iterator — JS code commonly compares
+                // `fd.entries === fd[Symbol.iterator]` and the answer
+                // has to be `true`. Build the template once and bind
+                // it under both keys.
+                let __entries_tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
                 {
                     let __key = v8::String::new(scope, "entries").unwrap();
-                    let __tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
-                    proto.set(__key.into(), __tmpl.into());
+                    proto.set(__key.into(), __entries_tmpl.into());
                 }
                 {
                     let __key = v8::String::new(scope, "forEach").unwrap();
                     let __tmpl = v8::FunctionTemplate::new(scope, #for_each_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
-                // @@iterator → entries (WebIDL §3.7.10 default
-                // iterator). Use the same FunctionTemplate as `entries`
-                // so identity is preserved for callers that compare
-                // `obj.entries === obj[Symbol.iterator]`.
                 {
                     let __sym = v8::Symbol::get_iterator(scope);
-                    let __tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
-                    proto.set(__sym.into(), __tmpl.into());
+                    proto.set(__sym.into(), __entries_tmpl.into());
                 }
             }
         }

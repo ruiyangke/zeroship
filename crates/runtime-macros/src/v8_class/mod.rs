@@ -442,13 +442,18 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
 
     // `#[v8_iterable(key = K, value = V)]` — emit the pair-iterator
     // surface (keys / values / entries / forEach / @@iterator) plus a
-    // companion `<Class>Iterator` class.
+    // companion `<Class>Iterator` class. The user supplies a
+    // `value_pairs(&[mut] self [, scope]) -> Vec<(K, V)>` method on the
+    // impl block; we sniff its receiver/arg shape so the codegen can
+    // pick the right pointer recovery (`*const`/`*mut`) and pass the
+    // outer scope through when requested.
     let iterable_attr = match v8_iterable::extract_iterable(&input.attrs) {
         Ok(opt) => opt,
         Err(err) => return err.to_compile_error(),
     };
+    let value_pairs_sig = v8_iterable::inspect_value_pairs(&input.items);
     let iterable_codegen = match iterable_attr.as_ref() {
-        Some(attr) => match v8_iterable::generate(class_ty, state_ty, attr) {
+        Some(attr) => match v8_iterable::generate(class_ty, attr, value_pairs_sig) {
             Ok(ts) => ts,
             Err(err) => return err.to_compile_error(),
         },

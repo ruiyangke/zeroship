@@ -152,11 +152,17 @@ The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`,
     dict's default-construct path). Neither is expressible by
     the dict derive today.
 
-**Iterator migrations** (separate cluster — `#[v8_iterable]`):
-  - `URLSearchParamsIterator` — snapshot iter, ~150 LOC.
-  - `HeadersIterator` — LIVE iter, needs derive extension OR
-    keep hand-rolled.
-  - `FormDataIterator` — ~100 LOC.
+**Iterator migrations** — MIGRATED via MAC-09 (+ MAC-14 for FormData):
+  - `HeadersIterator` → `#[v8_iterable(mode = live)]`. `value_pairs(&mut self)`
+    wraps the lazy `sorted_cache` rebuild. `5677051` (-333 LOC).
+  - `URLSearchParamsIterator` → `#[v8_iterable(mode = live)]`.
+    `value_pairs(&mut self, scope)` calls `sync_from_parent(scope)` then
+    returns the entries. `da77c03` (-314 LOC).
+  - `FormDataIterator` → `#[v8_iterable(mode = live, value_marshal
+    = entry_value_to_v8)]`. The `(USVString or File)` union goes through
+    the user-supplied marshal hook so File entries preserve V8 object
+    identity. `cc945cc` (-214 LOC).
+  Net consumer savings: ~-861 LOC across the three migrations.
 
 **MAC-02 streams constructor migration** (`#[v8_constructor(post_init = "...")]`):
 

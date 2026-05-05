@@ -47,8 +47,8 @@ use crate::state::OpError;
 
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_inherit_intrinsic, v8_method, v8_name, v8_setter,
-    v8_to_string_tag,
+    v8_class, v8_constructor, v8_getter, v8_inherit_intrinsic, v8_iterable, v8_method, v8_name,
+    v8_setter, v8_to_string_tag,
 };
 
 // ---------------------------------------------------------------------------
@@ -571,6 +571,7 @@ fn fill_from_record(
 // ---------------------------------------------------------------------------
 
 #[v8_class]
+#[v8_iterable(key = ByteString, value = ByteString, mode = live)]
 impl Headers {
     /// `new Headers(init?: HeadersInit)` per Fetch §2.2.1 `dom-Headers`.
     ///
@@ -707,178 +708,30 @@ impl Headers {
             .collect()
     }
 
-    // forEach / keys() / values() / entries() / [@@iterator] aren't
-    // routed through the macro because they need direct access to
-    // `args.this()` (forEach: pass the Headers object as the third
-    // callback arg per WebIDL §3.7.10.3; iterator factories: wire
-    // `this` as the iterator's parent receiver). They are installed
-    // directly in `install_global` via raw FunctionTemplate callbacks.
-}
-
-// ---------------------------------------------------------------------------
-// HeadersIterator (live)
-// ---------------------------------------------------------------------------
-
-/// WebIDL §3.7.10 iteration kinds. Names match the spec.
-#[derive(Debug, Clone, Copy)]
-pub enum IterKind {
-    /// "key" — `Headers.keys()` and the default `[Symbol.iterator]`'s key arg.
-    Key,
-    /// "value" — `Headers.values()`.
-    Value,
-    /// "key+value" — `Headers.entries()` and `[Symbol.iterator]`.
-    KeyAndValue,
-}
-
-/// Iterator state. The `parent` Global keeps the source Headers wrapper
-/// alive so its boxed Self stays valid; `index` advances per `next()`;
-/// `kind` controls what each yielded value looks like.
-pub struct HeadersIterator {
-    parent: Option<v8::Global<v8::Object>>,
-    index: usize,
-    kind: IterKind,
-}
-
-impl Default for HeadersIterator {
-    fn default() -> Self {
-        HeadersIterator {
-            parent: None,
-            index: 0,
-            kind: IterKind::KeyAndValue,
-        }
+    /// `value_pairs(&mut self)` — the WebIDL §3.7.10.2 "value pairs to
+    /// iterate over" hook for `#[v8_iterable(mode = live)]`. Returns
+    /// the sort-and-combined `(name, value)` list as `(ByteString,
+    /// ByteString)` pairs (which the macro Latin-1-encodes back to
+    /// V8 strings on each yield). `&mut self` is required because
+    /// `sort_and_combine` populates the lazy `sorted_cache` on the
+    /// first read after each mutation.
+    fn value_pairs(&mut self) -> Vec<(ByteString, ByteString)> {
+        self.value_pairs_to_iterate_over()
+            .iter()
+            .map(|(n, v)| {
+                (
+                    ByteString::from_bytes(n.clone()),
+                    ByteString::from_bytes(v.clone()),
+                )
+            })
+            .collect()
     }
 }
 
-#[v8_class]
-#[v8_to_string_tag = "Headers Iterator"]
-#[v8_inherit_intrinsic = "IteratorPrototype"]
-impl HeadersIterator {
-    #[v8_method]
-    fn next<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> v8::Local<'s, v8::Value> {
-        let parent_global = match &self.parent {
-            Some(g) => g,
-            None => return iter_result_done(scope),
-        };
-        let parent = v8::Local::new(scope, parent_global);
-        // Reach into the parent's internal field 0 and reborrow its
-        // boxed Headers. Safe because:
-        //   - V8 isolates are per-thread (AGENTS.md key invariant).
-        //   - The Global keeps `parent` alive, which keeps the Box<Headers>
-        //     alive (its finalizer runs only after GC).
-        //   - The borrow scope is the entirety of next() — we don't
-        //     yield across it.
-        let ext = match parent
-            .get_internal_field(scope, 0)
-            .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        {
-            Some(e) => e,
-            None => return iter_result_done(scope),
-        };
-        let headers: &mut Headers = unsafe { &mut *(ext.value() as *mut Headers) };
-
-        let (n, v) = {
-            let pairs = headers.value_pairs_to_iterate_over();
-            if self.index >= pairs.len() {
-                return iter_result_done(scope);
-            }
-            let (n, v) = &pairs[self.index];
-            (n.clone(), v.clone())
-        };
-        self.index += 1;
-
-        let value: v8::Local<v8::Value> = match self.kind {
-            IterKind::KeyAndValue => {
-                // Per WebIDL §3.7.10.3 "iteration result" for key+value:
-                //   ArrayCreate(2) + CreateDataPropertyOrThrow.
-                // Implemented in V8 as v8::Array::new + set_index — NOT
-                // Array.of (which is observable via Array constructor).
-                let arr = v8::Array::new(scope, 2);
-                let n_str = v8::String::new_from_one_byte(
-                    scope,
-                    &n,
-                    v8::NewStringType::Normal,
-                )
-                .unwrap();
-                let v_str = v8::String::new_from_one_byte(
-                    scope,
-                    &v,
-                    v8::NewStringType::Normal,
-                )
-                .unwrap();
-                arr.set_index(scope, 0, n_str.into());
-                arr.set_index(scope, 1, v_str.into());
-                arr.into()
-            }
-            IterKind::Key => v8::String::new_from_one_byte(
-                scope,
-                &n,
-                v8::NewStringType::Normal,
-            )
-            .unwrap()
-            .into(),
-            IterKind::Value => v8::String::new_from_one_byte(
-                scope,
-                &v,
-                v8::NewStringType::Normal,
-            )
-            .unwrap()
-            .into(),
-        };
-        iter_result(scope, value, false)
-    }
-}
-
-/// Build `{ value, done }` per ECMA-262 7.4.7 "CreateIterResultObject".
-fn iter_result<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<v8::Value>,
-    done: bool,
-) -> v8::Local<'s, v8::Value> {
-    let result = v8::Object::new(scope);
-    let value_key = v8::String::new(scope, "value").unwrap();
-    let done_key = v8::String::new(scope, "done").unwrap();
-    let done_v = v8::Boolean::new(scope, done);
-    result.set(scope, value_key.into(), value);
-    result.set(scope, done_key.into(), done_v.into());
-    result.into()
-}
-
-fn iter_result_done<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-    let undef = v8::undefined(scope);
-    iter_result(scope, undef.into(), true)
-}
-
 // ---------------------------------------------------------------------------
-// Iterator factory: keys/values/entries
+// install_global — install Headers + cache template/prototype slot
 // ---------------------------------------------------------------------------
 
-/// Build a fresh HeadersIterator FunctionTemplate. We don't cache —
-/// (a) Globals can't safely outlive their isolate (a thread-local
-/// cache panics on the next isolate's reuse — V8 asserts the Handle
-/// host matches), and (b) template builds are cheap relative to the
-/// iteration cost. If profiling shows this as a hot path, switch to
-/// an isolate-slot cache (v8::Isolate::set_slot).
-fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
-    HeadersIterator::install(scope)
-}
-
-// ---------------------------------------------------------------------------
-// Custom install: wrap macro's install + add the iterator methods
-// ---------------------------------------------------------------------------
-
-/// Install `Headers` on the given global, wiring up the constructor,
-/// methods, AND the parent-aware keys/values/entries iterator factory
-/// methods that the macro can't emit (they need access to
-/// `args.this()`).
-///
-/// This replaces `install_class`-style direct global writes that other
-/// classes use. The ordering matters: we install via the macro's
-/// `Headers::install` first, then patch the prototype's keys/values/
-/// entries/[Symbol.iterator] methods to point at hand-rolled callbacks
-/// that capture `this` per call.
 /// Per-isolate cache of the Headers FunctionTemplate + prototype.
 ///
 /// Set from `install_global`; consumed by the kernel-side fast-path
@@ -892,6 +745,13 @@ pub struct HeadersTemplateSlot {
     pub prototype: v8::Global<v8::Object>,
 }
 
+/// Install `Headers` on the given global. The macro's
+/// `#[v8_iterable(mode = live)]` attribute on the impl block emits
+/// keys / values / entries / forEach / [@@iterator] onto the prototype
+/// automatically — no hand-rolled iterator factory left in this file.
+/// (Pre-MAC-09 the iterator factories needed `args.this()` to capture
+/// the parent receiver into a `Global<Object>`; now the macro does that
+/// internally per WebIDL §3.7.10.)
 pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
@@ -899,32 +759,9 @@ pub fn install_global<'s>(
     let tmpl = Headers::install(scope);
     let class_fn = tmpl.get_function(scope).unwrap();
 
-    // Patch the prototype with parent-aware iterator factories. The
-    // macro can't emit these because the user method body has no
-    // direct access to `args.this()` (the iterator's parent receiver
-    // — needed to wire as `parent: Global<Object>`).
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
-
-    install_iter_factory(scope, proto, "keys", IterKind::Key);
-    install_iter_factory(scope, proto, "values", IterKind::Value);
-    install_iter_factory(scope, proto, "entries", IterKind::KeyAndValue);
-
-    // forEach is hand-rolled too (the macro can't pass `this` as the
-    // third callback arg per WebIDL §3.7.10.3 forEach algorithm).
-    {
-        let tmpl = v8::FunctionTemplate::new(scope, for_each_callback);
-        let func = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "forEach").unwrap();
-        proto.set(scope, key.into(), func.into());
-    }
-
-    // [Symbol.iterator] aliases entries per WebIDL §3.7.10.
-    let sym_iter = v8::Symbol::get_iterator(scope);
-    let entries_key = v8::String::new(scope, "entries").unwrap();
-    let entries_v = proto.get(scope, entries_key.into()).unwrap();
-    proto.set(scope, sym_iter.into(), entries_v);
 
     let key = v8::String::new(scope, "Headers").unwrap();
     global.set(scope, key.into(), class_fn.into());
@@ -1044,176 +881,6 @@ fn install_headers_state(
         }),
     );
     std::mem::forget(weak);
-}
-
-/// Hand-rolled `Headers.prototype.forEach(callback, thisArg?)` per
-/// WebIDL §3.7.10.3 — the spec algorithm spells out "Set pairs to
-/// idlObject's CURRENT list of value pairs to iterate over (it might
-/// have changed)", so we re-read the live "value pairs" between
-/// callback invocations. Mutation during forEach is observable.
-///
-/// Why hand-rolled (not via macro): the callback's third arg is the
-/// Headers object itself — `args.this()` — and the macro doesn't
-/// thread that through to user method bodies.
-fn for_each_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let this_obj = args.this();
-    let headers: &mut Headers = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => unsafe { &mut *(e.value() as *mut Headers) },
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-
-    let cb_arg = args.get(0);
-    let cb_fn: v8::Local<v8::Function> = match cb_arg.try_into() {
-        Ok(f) => f,
-        Err(_) => {
-            let msg = v8::String::new(scope, "forEach callback is not callable").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    let this_arg = args.get(1);
-
-    let mut idx = 0usize;
-    loop {
-        let pair = {
-            let pairs = headers.value_pairs_to_iterate_over();
-            if idx >= pairs.len() {
-                return;
-            }
-            pairs[idx].clone()
-        };
-        idx += 1;
-        let (n, v) = pair;
-
-        let value_v =
-            v8::String::new_from_one_byte(scope, &v, v8::NewStringType::Normal).unwrap();
-        let key_v =
-            v8::String::new_from_one_byte(scope, &n, v8::NewStringType::Normal).unwrap();
-        let cb_args = [value_v.into(), key_v.into(), this_obj.into()];
-
-        // call() returns None if the callback threw — V8 has the
-        // exception pending. Stop iteration; the throw propagates to
-        // the JS caller of forEach.
-        if cb_fn.call(scope, this_arg, &cb_args).is_none() {
-            return;
-        }
-    }
-}
-
-fn install_iter_factory<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    proto: v8::Local<v8::Object>,
-    name: &str,
-    kind: IterKind,
-) {
-    // Encode the kind as a small integer in the External so the same
-    // raw callback can dispatch all three factory methods.
-    let kind_marker: i64 = match kind {
-        IterKind::Key => 0,
-        IterKind::Value => 1,
-        IterKind::KeyAndValue => 2,
-    };
-    let data = v8::Integer::new(scope, kind_marker as i32);
-    let tmpl = v8::FunctionTemplate::builder(iter_factory_callback)
-        .data(data.into())
-        .build(scope);
-    let func = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, name).unwrap();
-    proto.set(scope, key.into(), func.into());
-}
-
-fn iter_factory_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    // `this` must be a Headers instance — its internal field 0 holds
-    // the Box<Headers>. Verify by ext extraction; throw on mismatch.
-    let this_obj = args.this();
-    let _headers_ptr = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut Headers,
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-
-    // Decode kind from the FunctionTemplate data slot.
-    let kind = {
-        let raw = args.data();
-        let n = if let Ok(int) = v8::Local::<v8::Integer>::try_from(raw) {
-            int.value()
-        } else {
-            2
-        };
-        match n {
-            0 => IterKind::Key,
-            1 => IterKind::Value,
-            _ => IterKind::KeyAndValue,
-        }
-    };
-
-    // Build a HeadersIterator object via the cached template; set its
-    // internal field to a fresh Box<HeadersIterator> with parent set.
-    let it_tmpl = iter_template(scope);
-    let inst_tmpl = it_tmpl.instance_template(scope);
-    let it_obj = match inst_tmpl.new_instance(scope) {
-        Some(o) => o,
-        None => {
-            let msg = v8::String::new(scope, "Failed to allocate iterator").unwrap();
-            let exc = v8::Exception::error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    // Wire prototype to %Iterator.prototype% chain via the template's
-    // get_function once (so the prototype is stamped with `next` and
-    // chained via #[v8_inherit_intrinsic]).
-    let it_class_fn = it_tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let it_proto_v = it_class_fn.get(scope, proto_key.into()).unwrap();
-    it_obj.set_prototype(scope, it_proto_v);
-
-    let parent_global = v8::Global::new(scope, this_obj);
-    let boxed = Box::new(HeadersIterator {
-        parent: Some(parent_global),
-        index: 0,
-        kind,
-    });
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    it_obj.set_internal_field(0, ext.into());
-
-    // Finalizer: same shape as the macro's gen_box_and_install_finalizer.
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        it_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut HeadersIterator));
-        }),
-    );
-    std::mem::forget(weak);
-
-    rv.set(it_obj.into());
 }
 
 // ---------------------------------------------------------------------------

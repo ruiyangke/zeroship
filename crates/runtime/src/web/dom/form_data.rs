@@ -32,10 +32,12 @@
 //! call. Mutations between yields ARE observable.
 
 use crate::state::OpError;
+use crate::webidl::usv_string::USVString;
 
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_inherit_intrinsic, v8_method, v8_name, v8_to_string_tag,
+    v8_class, v8_constructor, v8_inherit_intrinsic, v8_iterable, v8_method, v8_name,
+    v8_to_string_tag,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,6 +51,12 @@ use zeroship_runtime_macros::{
 /// V8 Global so the JS object identity is preserved across get()
 /// calls (mandated by `setEntries(name, value)` step "set its
 /// value to entry's value", which the WPT iterates).
+///
+/// `Clone` is required by `#[v8_iterable(value_marshal = ...)]`: the
+/// macro clones each pair before yielding so it can advance the
+/// cursor without holding a borrow into `__pairs`. `v8::Global<T>` is
+/// itself Clone (Rc-shaped), so this is structurally cheap.
+#[derive(Clone)]
 pub enum FormDataValue {
     /// USVString entry.
     String(String),
@@ -111,10 +119,18 @@ impl FormData {
 
 // ---------------------------------------------------------------------------
 // FormData IDL surface (constructor + has + delete via macro;
-// append/set/get/getAll/forEach/iterators hand-rolled below)
+// append/set/get/getAll hand-rolled below — they need scope-aware
+// argument processing the macro doesn't yet model. keys/values/
+// entries/forEach/[Symbol.iterator] come from `#[v8_iterable]`).
 // ---------------------------------------------------------------------------
 
 #[v8_class]
+#[v8_iterable(
+    key = USVString,
+    value = FormDataValue,
+    mode = live,
+    value_marshal = entry_value_to_v8
+)]
 impl FormData {
     /// `new FormData(form?: HTMLFormElement, submitter?: HTMLElement)`
     ///
@@ -142,84 +158,36 @@ impl FormData {
     fn has(&self, name: String) -> bool {
         self.list_has(&name)
     }
-}
 
-// ---------------------------------------------------------------------------
-// FormDataIterator (live, default iterator object per WebIDL §3.7.10)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-pub enum IterKind {
-    Key,
-    Value,
-    KeyAndValue,
-}
-
-pub struct FormDataIterator {
-    parent: Option<v8::Global<v8::Object>>,
-    index: usize,
-    kind: IterKind,
-}
-
-impl Default for FormDataIterator {
-    fn default() -> Self {
-        FormDataIterator {
-            parent: None,
-            index: 0,
-            kind: IterKind::KeyAndValue,
-        }
+    /// `value_pairs(&self)` — the WebIDL §3.7.10.2 "value pairs to
+    /// iterate over" hook for `#[v8_iterable(mode = live)]`. Clones
+    /// the entries into `(USVString, FormDataValue)` (the `Global`
+    /// inside `FormDataValue::File` is Rc-shaped — clone is cheap).
+    /// The macro yields each pair via `entry_value_to_v8` (specified
+    /// by `value_marshal`) so File entries surface as their own
+    /// V8 object identity rather than a string.
+    fn value_pairs(&self) -> Vec<(USVString, FormDataValue)> {
+        self.entries
+            .iter()
+            .map(|(n, v)| (USVString::from(n.clone()), v.clone()))
+            .collect()
     }
 }
 
-#[v8_class]
-#[v8_to_string_tag = "FormData Iterator"]
-#[v8_inherit_intrinsic = "IteratorPrototype"]
-impl FormDataIterator {
-    /// `next() -> { value, done }` per ECMA-262 25.1.1.
-    /// Re-reads the parent's `entries` on every call so mutations
-    /// between yields ARE observable per spec.
-    #[v8_method]
-    fn next<'s>(&mut self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        let parent_global = match &self.parent {
-            Some(g) => g,
-            None => return iter_result_done(scope),
-        };
-        let parent = v8::Local::new(scope, parent_global);
-
-        let ext = match parent
-            .get_internal_field(scope, 0)
-            .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        {
-            Some(e) => e,
-            None => return iter_result_done(scope),
-        };
-        let fd: &FormData = unsafe { &*(ext.value() as *const FormData) };
-
-        if self.index >= fd.entries.len() {
-            return iter_result_done(scope);
-        }
-        let entry = &fd.entries[self.index];
-        let n = entry.0.clone();
-        let v_local = entry_value_to_v8(scope, &entry.1);
-        self.index += 1;
-
-        let value: v8::Local<v8::Value> = match self.kind {
-            IterKind::KeyAndValue => {
-                let arr = v8::Array::new(scope, 2);
-                let n_str = v8::String::new(scope, &n).unwrap();
-                arr.set_index(scope, 0, n_str.into());
-                arr.set_index(scope, 1, v_local);
-                arr.into()
-            }
-            IterKind::Key => v8::String::new(scope, &n).unwrap().into(),
-            IterKind::Value => v_local,
-        };
-        iter_result(scope, value, false)
-    }
-}
+// ---------------------------------------------------------------------------
+// Value-to-V8 marshal — used by `#[v8_iterable(value_marshal = …)]`
+// ---------------------------------------------------------------------------
 
 /// Convert a stored `FormDataValue` to a JS value in the given scope.
-/// Strings become V8 strings; File entries become Local handles.
+/// Strings become V8 strings; File entries become Local handles
+/// (preserving JS object identity across `get` calls per WHATWG XHR
+/// §5).
+///
+/// Wired into the macro via `value_marshal = entry_value_to_v8` on the
+/// `#[v8_iterable]` attribute. Per yield (live mode), the macro
+/// emits `let __v_v: Local<Value> = entry_value_to_v8(scope, &__v);`,
+/// so the union shape `(USVString or File)` doesn't need to live in
+/// the macro's built-in classifier.
 fn entry_value_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     v: &FormDataValue,
@@ -233,32 +201,10 @@ fn entry_value_to_v8<'s>(
     }
 }
 
-fn iter_result<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<v8::Value>,
-    done: bool,
-) -> v8::Local<'s, v8::Value> {
-    let result = v8::Object::new(scope);
-    let value_key = v8::String::new(scope, "value").unwrap();
-    let done_key = v8::String::new(scope, "done").unwrap();
-    let done_v = v8::Boolean::new(scope, done);
-    result.set(scope, value_key.into(), value);
-    result.set(scope, done_key.into(), done_v.into());
-    result.into()
-}
-
-fn iter_result_done<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-    let undef = v8::undefined(scope);
-    iter_result(scope, undef.into(), true)
-}
-
 // ---------------------------------------------------------------------------
-// install_global — wire append/set/get/getAll + iterator factories
+// install_global — wire append/set/get/getAll. The iterable surface
+// (keys/values/entries/forEach/[@@iterator]) comes from the macro.
 // ---------------------------------------------------------------------------
-
-fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
-    FormDataIterator::install(scope)
-}
 
 pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -271,22 +217,14 @@ pub fn install_global<'s>(
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
 
+    // append/set/get/getAll stay hand-rolled — they need scope-aware
+    // argument processing for the (USVString, value, optional
+    // filename) overloads that the macro doesn't yet model. The
+    // iterator surface is now macro-generated above.
     install_method(scope, proto, "append", append_callback);
     install_method(scope, proto, "set", set_callback);
     install_method(scope, proto, "get", get_callback);
     install_method(scope, proto, "getAll", get_all_callback);
-
-    install_iter_factory(scope, proto, "keys", IterKind::Key);
-    install_iter_factory(scope, proto, "values", IterKind::Value);
-    install_iter_factory(scope, proto, "entries", IterKind::KeyAndValue);
-
-    install_method(scope, proto, "forEach", for_each_callback);
-
-    // [Symbol.iterator] aliases entries per WebIDL §3.7.10.
-    let sym_iter = v8::Symbol::get_iterator(scope);
-    let entries_key = v8::String::new(scope, "entries").unwrap();
-    let entries_v = proto.get(scope, entries_key.into()).unwrap();
-    proto.set(scope, sym_iter.into(), entries_v);
 
     let key = v8::String::new(scope, "FormData").unwrap();
     global.set(scope, key.into(), class_fn.into());
@@ -490,158 +428,6 @@ fn get_all_callback(
         }
     }
     rv.set(arr.into());
-}
-
-// ---------------------------------------------------------------------------
-// forEach + iterator factories
-// ---------------------------------------------------------------------------
-
-fn for_each_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let this_obj = args.this();
-    let _fd_ptr = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut FormData,
-        None => {
-            throw_illegal_invocation(scope);
-            return;
-        }
-    };
-
-    let cb_arg = args.get(0);
-    let cb_fn: v8::Local<v8::Function> = match cb_arg.try_into() {
-        Ok(f) => f,
-        Err(_) => {
-            let msg = v8::String::new(scope, "forEach callback is not callable").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    let this_arg = args.get(1);
-
-    let mut idx = 0usize;
-    loop {
-        // Re-read fd via internal field on each iteration so live
-        // mutations during forEach are visible.
-        let fd: &FormData = unsafe {
-            let ext = match this_obj
-                .get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => return,
-            };
-            &*(ext.value() as *const FormData)
-        };
-        if idx >= fd.entries.len() {
-            return;
-        }
-        let entry = &fd.entries[idx];
-        let n = entry.0.clone();
-        let value_v = entry_value_to_v8(scope, &entry.1);
-        idx += 1;
-        let key_v = v8::String::new(scope, &n).unwrap();
-        let cb_args = [value_v, key_v.into(), this_obj.into()];
-        if cb_fn.call(scope, this_arg, &cb_args).is_none() {
-            return;
-        }
-    }
-}
-
-fn install_iter_factory<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    proto: v8::Local<v8::Object>,
-    name: &str,
-    kind: IterKind,
-) {
-    let kind_marker: i64 = match kind {
-        IterKind::Key => 0,
-        IterKind::Value => 1,
-        IterKind::KeyAndValue => 2,
-    };
-    let data = v8::Integer::new(scope, kind_marker as i32);
-    let tmpl = v8::FunctionTemplate::builder(iter_factory_callback)
-        .data(data.into())
-        .build(scope);
-    let func = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, name).unwrap();
-    proto.set(scope, key.into(), func.into());
-}
-
-fn iter_factory_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let this_obj = args.this();
-    let _fd_ptr = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => e.value() as *mut FormData,
-        None => {
-            throw_illegal_invocation(scope);
-            return;
-        }
-    };
-
-    let kind = {
-        let raw = args.data();
-        let n = if let Ok(int) = v8::Local::<v8::Integer>::try_from(raw) {
-            int.value()
-        } else {
-            2
-        };
-        match n {
-            0 => IterKind::Key,
-            1 => IterKind::Value,
-            _ => IterKind::KeyAndValue,
-        }
-    };
-
-    let it_tmpl = iter_template(scope);
-    let inst_tmpl = it_tmpl.instance_template(scope);
-    let it_obj = match inst_tmpl.new_instance(scope) {
-        Some(o) => o,
-        None => {
-            let msg = v8::String::new(scope, "Failed to allocate iterator").unwrap();
-            let exc = v8::Exception::error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    let it_class_fn = it_tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let it_proto_v = it_class_fn.get(scope, proto_key.into()).unwrap();
-    it_obj.set_prototype(scope, it_proto_v);
-
-    let parent_global = v8::Global::new(scope, this_obj);
-    let boxed = Box::new(FormDataIterator {
-        parent: Some(parent_global),
-        index: 0,
-        kind,
-    });
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    it_obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        it_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut FormDataIterator));
-        }),
-    );
-    std::mem::forget(weak);
-
-    rv.set(it_obj.into());
 }
 
 // ---------------------------------------------------------------------------

@@ -58,7 +58,15 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
 - **`#[derive(WebIdlEnum)]`** for enum types (§3.7.10), kebab-case
   default with `#[webidl_name = "..."]` override — `40494fa3`.
 - **`#[v8_iterable]`** default pair iterators (§3.7.10.2/§3.7.10.3).
-  Snapshot mode `506a588f`; `mode = live` `5901d68`.
+  Snapshot mode `506a588f`; `mode = live` `5901d68`. MAC-09 follow-up
+  (`ad49b5a`) lets `value_pairs` accept `&mut self` and an optional
+  `&mut PinScope` arg — the macro sniffs the receiver/arg shape and
+  promotes recovery to `*mut Self` + `&mut *ptr` per call, with a
+  per-instance re-entrancy guard. MAC-14 follow-up (`cc945cc`) adds
+  `value_marshal = some_fn` for arbitrary V types (skipping the
+  built-in classifier so unions / `Local<Value>` shapes work). Same
+  commit fixes the `entries === [Symbol.iterator]` identity bug —
+  both keys now share a single FunctionTemplate.
 - **`#[v8_async_iterable(method = "name")]`** — alias
   `[Symbol.asyncIterator]` to a method that already exists per WebIDL
   §3.7.10.5. Emits a fresh FunctionTemplate wrapping the method's
@@ -190,17 +198,12 @@ Consumer-side migrations: `crates/runtime/TODO.md`.
   state field instead of private symbol (Request.clone semantics). 5
   consumers: URL.searchParams, Request.headers/.signal, Response.headers,
   AbortController.signal. [B.2]
-- **MAC-09 `value_pairs(&mut self)` and `&mut PinScope` in `#[v8_iterable]`**
-  — Headers (lazy sort cache), URLSearchParams (sync_from_parent), FormData.
-  -400 LOC across 3 iterators. [B.4]
 - **MAC-10 `#[v8_class(install_on_prototype_template)]`** — for spec
   base classes inherited via `#[v8_inherit]`. Blocks EventTarget. [B.8]
 - **MAC-11 `#[v8_method(returns_promise)]`** — sync-but-Promise methods.
   Blob/File `text/arrayBuffer/bytes` (6 sites). -50 LOC. [B.10]
 ### Low — single-consumer or polish
 
-- **MAC-14 arbitrary `Local<Value>` value type in `#[v8_iterable]`** —
-  FormData entry value `(USVString or File)` union. -90 LOC. [B.5]
 - **MAC-16 `#[webidl_required]`** dict-member flag — TypeError on
   `undefined` for required members. QueuingStrategyInit + future. [B.7]
 - **Lifetime-tied `Local<'s, T>` returns** — generalize URL-native's
@@ -224,8 +227,14 @@ Tracked in `crates/runtime/TODO.md` "V8 class macro migration follow-ups"
 - **Whole-class migrations** (blocked on MAC-01 / MAC-02): Request,
   Response, ReadableStream, WritableStream, TransformStream,
   Reader/Writer/BYOBReader.
-- **Iterator migrations** (blocked on MAC-09): URLSearchParamsIterator,
-  HeadersIterator, FormDataIterator (-400 LOC).
+- **Iterator migrations** — MIGRATED via MAC-09 (+ MAC-14 for
+  FormData):
+    - HeadersIterator → `#[v8_iterable(mode = live)]` `5677051`
+      (-333 LOC)
+    - URLSearchParamsIterator → `#[v8_iterable(mode = live)]`
+      `da77c03` (-314 LOC)
+    - FormDataIterator → `#[v8_iterable(mode = live, value_marshal
+      = entry_value_to_v8)]` `cc945cc` (-214 LOC)
 - **Hand-rolled `[SameObject]` migrations** (blocked on MAC-08):
   URL.searchParams, Request/Response.headers, AbortController.signal.
 - **Static methods migrations** (blocked on MAC-07): 9 sites.
