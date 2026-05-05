@@ -600,7 +600,11 @@ pub(super) fn gen_async_method_callback(
 /// extraction loop emits no args (the parser skips the receiver, and
 /// there's no receiver, so `params` is whatever args the user
 /// declared — typically zero for getters).
-pub(super) fn gen_static_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+pub(super) fn gen_static_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    m: &ClassMethod,
+) -> TokenStream2 {
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -611,8 +615,13 @@ pub(super) fn gen_static_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Tok
     let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+    // Static method bodies live on the impl receiver (state_ty), which
+    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not the
+    // unit MarkerTy. Mirror what gen_method_callback does for instance
+    // methods — see the Phase 1 commit (`d4d65fd`) that introduced the
+    // same threading for `&self` / `&mut self` callbacks.
     let call = quote! {
-        <#class_ty>::#method_name(#(#call_args),*)
+        <#state_ty>::#method_name(#(#call_args),*)
     };
 
     let call_return = gen_call_return(&call, &m.func.sig.output);

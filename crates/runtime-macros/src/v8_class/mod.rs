@@ -380,7 +380,7 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
                 gen_same_object_getter_callback(class_ty, state_ty, m)
             }
             MethodKind::StaticMethod | MethodKind::StaticGetter => {
-                gen_static_callback(class_ty, m)
+                gen_static_callback(class_ty, state_ty, m)
             }
             _ => gen_method_callback(class_ty, state_ty, m),
         })

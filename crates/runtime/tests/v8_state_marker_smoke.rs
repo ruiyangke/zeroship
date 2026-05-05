@@ -942,4 +942,92 @@ fn marker_keyed_callback_idents_compile() {
     let _n = async_method_state::Worker::install;
     let _o = iterable_with_state::Bag::install;
     let _p = reentrancy_state::Notifier::install;
+    let _q = static_method_state::Builder::install;
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: #[v8_static_method] composes with #[v8_state_marker]
+// ---------------------------------------------------------------------------
+//
+// Static method bodies live on the impl receiver (StateTy). Pre-fix,
+// `gen_static_callback` emitted `<MarkerTy>::method(...)` which fails to
+// resolve because the unit marker has no impl block. The 3-line fix
+// threads `state_ty` through `gen_static_callback` and changes the call
+// expression to `<StateTy>::method(...)`. This test would not compile
+// without the fix.
+
+mod static_method_state {
+    use super::*;
+    use zeroship_runtime_macros::{v8_static_getter, v8_static_method};
+
+    pub struct Builder;
+
+    pub struct BuilderState {
+        pub _seq: Cell<u32>,
+    }
+
+    #[v8_class]
+    #[v8_state_marker(Builder)]
+    impl BuilderState {
+        #[v8_constructor]
+        fn new() -> BuilderState {
+            BuilderState { _seq: Cell::new(0) }
+        }
+
+        // Static method body lives on the impl receiver (BuilderState).
+        // Before the macro fix, the generated callback would emit
+        // `<Builder>::from(...)` which fails to resolve — Builder is a
+        // unit struct with no impl block. The fix threads `state_ty`
+        // through `gen_static_callback` so it emits
+        // `<BuilderState>::from(...)`.
+        #[v8_static_method]
+        fn from(prefix: String, n: u32) -> String {
+            format!("{prefix}-{n}")
+        }
+
+        #[v8_static_method]
+        fn divide(a: u32, b: u32) -> Result<u32, OpError> {
+            if b == 0 {
+                return Err(OpError::range_error("divide by zero"));
+            }
+            Ok(a / b)
+        }
+
+        #[v8_static_getter]
+        #[allow(non_snake_case)]
+        fn DEFAULT_TIMEOUT() -> u32 {
+            5000
+        }
+    }
+}
+
+#[test]
+fn static_method_composes_with_state_marker() {
+    let r = run_in_v8(
+        |scope, global| {
+            install_class::<static_method_state::Builder>(
+                static_method_state::Builder::install,
+                "Builder",
+                scope,
+                global,
+            )
+        },
+        r#"
+        const a = Builder.from("hi", 5);
+        const b = Builder.divide(10, 2);
+        const c = Builder.DEFAULT_TIMEOUT;
+        let kind;
+        try { Builder.divide(10, 0); }
+        catch (e) { kind = e.constructor.name; }
+        // Statics not on instances per WebIDL §3.7.4.
+        const inst = new Builder();
+        const onInst = typeof inst.from;
+        JSON.stringify({ a, b, c, kind, onInst });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(
+        r,
+        r#"{"a":"hi-5","b":5,"c":5000,"kind":"RangeError","onInst":"undefined"}"#
+    );
 }
