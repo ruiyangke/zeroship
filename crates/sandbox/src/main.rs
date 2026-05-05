@@ -11,7 +11,8 @@
 
 use ntex::web;
 use zeroship_sandbox::{
-    handlers, preview, preview_share_handlers, preview_ws, registry, AppState,
+    admin_handlers, handlers, preview, preview_share_handlers, preview_ws, registry,
+    AppState,
 };
 use zeroship_sandbox::config::SandboxConfig;
 
@@ -184,6 +185,39 @@ async fn main() -> std::io::Result<()> {
                     .route(web::get().to(handlers::read_file))
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
+            )
+            // Phase-3 admin / operator API. Auth is the
+            // SANDBOX_ADMIN_TOKEN_PATH bearer (NOT SANDBOX_TOKEN);
+            // when the path is unset every endpoint 503s with
+            // "admin api disabled". See `admin_handlers.rs` for the
+            // full surface + the deferred JWT/scope shape.
+            .service(
+                web::resource("/admin/sandboxes")
+                    .route(web::get().to(admin_handlers::list_all_sandboxes)),
+            )
+            .service(
+                web::resource("/admin/sandboxes/{id}")
+                    .route(web::get().to(admin_handlers::get_sandbox_detail)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}/sandboxes")
+                    .route(web::get().to(admin_handlers::list_user_sandboxes)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}/shares")
+                    .route(web::get().to(admin_handlers::list_user_shares)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}/export")
+                    .route(web::get().to(admin_handlers::export_user)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}")
+                    .route(web::delete().to(admin_handlers::delete_user)),
+            )
+            .service(
+                web::resource("/admin/hosts")
+                    .route(web::get().to(admin_handlers::list_hosts)),
             )
             // Phase-3 share-token mint/list/revoke (§ III). The
             // `/share` resource is registered BEFORE the catch-all

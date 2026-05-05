@@ -8,6 +8,7 @@
 //! See [`backend`] for the backend contract and the docker / k8s
 //! implementations.
 
+pub mod admin_handlers;
 pub mod auth;
 pub mod backend;
 pub mod config;
