@@ -29,7 +29,7 @@ use super::helpers::{
 };
 use super::parse::{extract_callable_no_new, extract_post_init, extract_reject_shared};
 use super::{ClassMethod, MethodKind};
-use crate::gen_call_return;
+use crate::{gen_call_return, must_str};
 
 /// Re-entry guard for `&mut self` methods.
 ///
@@ -93,6 +93,8 @@ fn gen_reentry_guard(
         "re-entered method `{}::{}` on instance — concurrent &mut self callback",
         class_ty, method_name,
     );
+    let scope_tok = quote! { scope };
+    let msg_init = must_str(&scope_tok, &quote! { #err_msg });
     // Use ONE thread_local per method per class. The static names are
     // local to the callback function so they don't pollute the impl
     // block's namespace and don't collide across methods.
@@ -110,7 +112,7 @@ fn gen_reentry_guard(
             // exception propagates correctly and surfaces in user JS
             // as a TypeError, which is way clearer than the pre-fix
             // cryptic RefCell-already-mutably-borrowed panic.
-            let __msg = v8::String::new(scope, #err_msg).unwrap();
+            let __msg = #msg_init;
             let __exc = v8::Exception::type_error(scope, __msg);
             scope.throw_exception(__exc);
             return;
@@ -167,6 +169,8 @@ pub(super) fn gen_method_callback(
 
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -183,7 +187,7 @@ pub(super) fn gen_method_callback(
             // doc-comment for the soundness rationale.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -196,7 +200,7 @@ pub(super) fn gen_method_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -301,6 +305,9 @@ pub(super) fn gen_same_object_getter_callback(
     //   __zs_same_object_<crate::path::to::module>::<MarkerTy>_<method>
     let private_marker_method = format!("{}_{}", class_ty, method_name);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
+    let key_str_init = must_str(&scope_tok, &quote! { __private_name });
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -314,7 +321,7 @@ pub(super) fn gen_same_object_getter_callback(
             //    `__brand_check_<ClassTy>`'s doc-comment.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -336,7 +343,7 @@ pub(super) fn gen_same_object_getter_callback(
                 "::",
                 #private_marker_method,
             );
-            let __key_str = v8::String::new(scope, __private_name).unwrap();
+            let __key_str = #key_str_init;
             let __priv = v8::Private::for_api(scope, Some(__key_str));
 
             // 3. Cache hit short-circuit: if the wrapper has already
@@ -358,7 +365,7 @@ pub(super) fn gen_same_object_getter_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -466,6 +473,8 @@ pub(super) fn gen_async_method_callback(
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -484,7 +493,7 @@ pub(super) fn gen_async_method_callback(
             //    fail before the unsafe deref.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -494,7 +503,7 @@ pub(super) fn gen_async_method_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -654,6 +663,8 @@ fn gen_setter_callback(
     };
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -666,7 +677,7 @@ fn gen_setter_callback(
             // for the soundness rationale.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -676,7 +687,7 @@ fn gen_setter_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -716,9 +727,11 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
     let msg = format!(
         "Failed to construct '{class_name_str}': Please use the 'new' operator, this DOM object constructor cannot be called as a function."
     );
+    let scope_tok = quote! { scope };
+    let msg_init = must_str(&scope_tok, &quote! { #msg });
     quote! {
         if !args.is_construct_call() {
-            let __msg = v8::String::new(scope, #msg).unwrap();
+            let __msg = #msg_init;
             let __exc = v8::Exception::type_error(scope, __msg);
             scope.throw_exception(__exc);
             return;
