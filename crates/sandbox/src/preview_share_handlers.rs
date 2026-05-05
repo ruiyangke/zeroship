@@ -284,23 +284,33 @@ pub async fn mint_share(
                 "sandbox/preview_share: pg insert_share failed (non-fatal)"
             );
         }
-        let evt_data = serde_json::json!({
-            "token_id": format!("shr_{token_id}"),
-            "port": port,
-            "scope": claims.scope,
-            "expires_at": claims.exp,
-        });
-        let event = crate::db::Database::new_event(
-            &sandbox_id_str,
-            &state
-                .sandboxes
-                .get(&id)
-                .map(|i| i.user_id)
-                .unwrap_or_else(|| "usr_unknown".into()),
-            "share.minted",
-            evt_data.to_string(),
-        );
-        let _ = db.insert_event(&event).await;
+        // Round-1 fixer / MINOR #22: skip the audit event entirely
+        // when the registry has no record of the sandbox owner. The
+        // pre-fix synthetic `usr_unknown` would have failed the
+        // user_id CHECK on sandbox.events anyway (the row's
+        // user_id must match `^usr_[0-9A-Za-z]{20,40}$`); falling
+        // back to a warn-and-continue is honest about the
+        // missing-info case and keeps the audit log self-consistent.
+        if let Some(owner) = state.sandboxes.get(&id).map(|i| i.user_id) {
+            let evt_data = serde_json::json!({
+                "token_id": format!("shr_{token_id}"),
+                "port": port,
+                "scope": claims.scope,
+                "expires_at": claims.exp,
+            });
+            let event = crate::db::Database::new_event(
+                &sandbox_id_str,
+                &owner,
+                "share.minted",
+                evt_data.to_string(),
+            );
+            let _ = db.insert_event(&event).await;
+        } else {
+            tracing::warn!(
+                sandbox_id = %sandbox_id_str,
+                "sandbox/preview_share: sandbox owner not in registry; skipping share.minted audit event"
+            );
+        }
     }
 
     HttpResponse::Ok().json(&json!({

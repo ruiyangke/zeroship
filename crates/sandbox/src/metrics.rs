@@ -41,12 +41,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `reason="operator_rebind"`.
 static TAKEOVER_LEASE_EXPIRATION: AtomicU64 = AtomicU64::new(0);
 
-/// `sandbox_ha_lost_leadership_total{op="<op_name>"}`. We don't
-/// explode by op label in the storage layer (would need a HashMap
-/// + Mutex); a single counter is enough for the alert in § 14.7.
-/// Phase 3's exporter binding can split labels via a per-call-site
-/// inc-with-label macro.
+/// `sandbox_ha_lost_leadership_total{op="<op_name>"}`. The
+/// per-op label is materialised lazily into a `Mutex<HashMap>` so
+/// Phase-3 alerting can break down the counter by call-site
+/// without re-instrumenting (round-1 fixer / MINOR #15). The
+/// global aggregate remains in a fast atomic so the hot path stays
+/// allocation-free in steady state — the lock is only taken on
+/// the rare miss-path bumps.
 static LOST_LEADERSHIP: AtomicU64 = AtomicU64::new(0);
+
+/// Per-op breakdown of LOST_LEADERSHIP. `&'static str` keys keep
+/// the map allocation-free — call sites pass string literals
+/// (`"update_sandbox_status_stopped"`, `"delete_sandbox_fence"`,
+/// etc).
+static LOST_LEADERSHIP_BY_OP: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<&'static str, AtomicU64>>,
+> = std::sync::OnceLock::new();
+
+fn lost_leadership_by_op() -> &'static std::sync::Mutex<
+    std::collections::HashMap<&'static str, AtomicU64>,
+> {
+    LOST_LEADERSHIP_BY_OP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
 
 /// `sandbox_ha_dead_hosts_observed_total`. Counter — increments once
 /// per dead-host the takeover task observed in its scan, INCLUDING
@@ -93,9 +109,22 @@ pub fn add_takeover_lease_expiration(n: u64) {
 }
 
 /// Bump `sandbox_ha_lost_leadership_total` once. The `op` label is
-/// reserved for Phase 3's per-op breakdown.
-pub fn inc_lost_leadership(_op: &'static str) {
+/// recorded both on the aggregate counter (cheap atomic) and on a
+/// per-op breakdown map. Round-1 fixer / MINOR #15: pre-fix the
+/// label was discarded entirely; today the breakdown is queryable
+/// via [`lost_leadership_value_for_op`].
+pub fn inc_lost_leadership(op: &'static str) {
     LOST_LEADERSHIP.fetch_add(1, Ordering::Relaxed);
+    let map = lost_leadership_by_op();
+    // Fast path: read-lock and bump if the entry exists.
+    if let Ok(mut g) = map.lock() {
+        let entry = g.entry(op).or_insert_with(|| AtomicU64::new(0));
+        entry.fetch_add(1, Ordering::Relaxed);
+    }
+    // PoisonError: the metric storage doesn't enforce invariants
+    // worth crashing for; if a previous panic left the lock
+    // poisoned, we just lose this label-bump rather than
+    // propagating the panic into a hot path.
 }
 
 /// Bump `sandbox_ha_dead_hosts_observed_total` by `n`.
@@ -145,6 +174,15 @@ pub fn takeover_lease_expiration_value() -> u64 {
 #[doc(hidden)]
 pub fn lost_leadership_value() -> u64 {
     LOST_LEADERSHIP.load(Ordering::Relaxed)
+}
+
+/// Test-only / future-exporter accessor for the per-op breakdown.
+/// Returns 0 for an op label that has never been incremented.
+#[doc(hidden)]
+pub fn lost_leadership_value_for_op(op: &'static str) -> u64 {
+    let map = lost_leadership_by_op();
+    let Ok(g) = map.lock() else { return 0 };
+    g.get(op).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
 /// Test-only accessor for the dead-hosts-observed counter.

@@ -94,7 +94,14 @@ impl Migration {
 /// Connection + behavior config for [`Database`]. Built by
 /// [`Database::from_env`] from the env vars enumerated in § 5.6 of
 /// the design.
-#[derive(Debug, Clone)]
+///
+/// **Hand-rolled `Debug`** redacts the DSN's `password=` query
+/// parameter and the URI userinfo password (round-1 fixer /
+/// MINOR #16). Pre-fix, `tracing::debug!(?config, …)` would echo
+/// the full DSN — including a password injected by
+/// `inject_password_if_configured` — straight into operator logs
+/// where it persisted in journald / log aggregators.
+#[derive(Clone)]
 pub struct DbConfig {
     /// Primary DSN as the `sandbox_app` role. Must start with
     /// `postgres://` or `postgresql://`. Phase 0 only verifies the
@@ -118,6 +125,62 @@ pub struct DbConfig {
     pub boot_timeout_secs: u64,
     /// Pool max-size. From `SANDBOX_PG_POOL_MAX`, default 16 (D-17).
     pub pool_max: usize,
+}
+
+impl std::fmt::Debug for DbConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbConfig")
+            .field("dsn", &redact_dsn_for_debug(&self.dsn))
+            .field("host_id", &self.host_id)
+            .field("run_migrations", &self.run_migrations)
+            .field("boot_timeout_secs", &self.boot_timeout_secs)
+            .field("pool_max", &self.pool_max)
+            .finish()
+    }
+}
+
+/// Best-effort password-redacting DSN renderer for `Debug`. Replaces
+/// the URI userinfo password (`user:PASS@host`) and any
+/// `password=PASS` query param with `<redacted>`. The host /
+/// dbname / sslmode bits remain visible — they're useful for triage
+/// and don't carry secrets.
+fn redact_dsn_for_debug(dsn: &str) -> String {
+    let mut redacted = dsn.to_string();
+    // Userinfo form: scheme://user:pass@host/...
+    if let Some(scheme_idx) = redacted.find("://") {
+        let after_scheme = scheme_idx + 3;
+        if let Some(at_rel) = redacted[after_scheme..].find('@') {
+            let at = after_scheme + at_rel;
+            if let Some(colon_rel) = redacted[after_scheme..at].find(':') {
+                let pwd_start = after_scheme + colon_rel + 1;
+                redacted.replace_range(pwd_start..at, "<redacted>");
+            }
+        }
+    }
+    // Query-string form: ?password=PASS or &password=PASS. Walk
+    // from a moving cursor so a redacted run won't re-match the
+    // search pattern (the literal "<redacted>" doesn't contain
+    // "password=", but defensively we advance regardless).
+    let mut cursor = 0;
+    let needle = "password=";
+    while cursor < redacted.len() {
+        let lower = redacted[cursor..].to_ascii_lowercase();
+        let Some(rel) = lower.find(needle) else {
+            break;
+        };
+        let val_start = cursor + rel + needle.len();
+        let val_end = redacted[val_start..]
+            .find(['&', '#'])
+            .map(|n| val_start + n)
+            .unwrap_or(redacted.len());
+        if val_start < val_end {
+            redacted.replace_range(val_start..val_end, "<redacted>");
+            cursor = val_start + "<redacted>".len();
+        } else {
+            cursor = val_start;
+        }
+    }
+    redacted
 }
 
 /// Errors surfaced by [`Database`] at boot or during migration
@@ -586,6 +649,30 @@ impl Database {
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
+/// Round-1 fixer / MINOR #19: enforce mode 0o400 on the
+/// pg-password file on Unix. Mirrors `persist::AeadKey::from_path`.
+/// On non-Unix targets this is a no-op (the modes are POSIX-only).
+fn enforce_password_file_mode(path: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let meta = std::fs::metadata(path).map_err(|e| {
+            DatabaseError::Validation(format!(
+                "SANDBOX_DATABASE_PASSWORD_PATH={path:?}: stat: {e}"
+            ))
+        })?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o400 {
+            return Err(DatabaseError::Validation(format!(
+                "SANDBOX_DATABASE_PASSWORD_PATH={path:?}: mode={mode:o} \
+                 must be 0o400 (chmod 400 the file)"
+            )));
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+
 /// Shape check for `sandbox.shares.token_id`, mirroring migration
 /// 0003's CHECK (`^tok_[A-Za-z0-9_-]{20,40}$`). Belt-and-suspenders
 /// before the SQL round-trip so a malformed id surfaces a clean
@@ -632,9 +719,12 @@ fn validate_dsn_scheme(dsn: &str) -> Result<()> {
 
 /// If `SANDBOX_DATABASE_PASSWORD_PATH` is set, read the file and
 /// inject the password into the DSN. Otherwise return the DSN
-/// unchanged. Phase 0 only enforces the file mount when the env
-/// var is present; production-grade mode-0o400 enforcement and
-/// host-allowlist checks land with the Phase-1 security review.
+/// unchanged.
+///
+/// Round-1 fixer / MINOR #19: enforces mode 0o400 on Unix (mirrors
+/// `persist::AeadKey::from_path`). A world-readable password file
+/// is a footgun on shared hosts; refusing to boot is the right
+/// answer rather than silently degrading.
 fn inject_password_if_configured(dsn: String) -> Result<String> {
     let Ok(path) = std::env::var("SANDBOX_DATABASE_PASSWORD_PATH") else {
         return Ok(dsn);
@@ -642,6 +732,7 @@ fn inject_password_if_configured(dsn: String) -> Result<String> {
     if path.is_empty() {
         return Ok(dsn);
     }
+    enforce_password_file_mode(&path)?;
     let password = std::fs::read_to_string(&path)
         .map_err(|e| {
             DatabaseError::Validation(format!(
@@ -1942,6 +2033,61 @@ mod tests {
     }
 
     // ─── Unique-violation detection ──────────────────────────────
+
+    // ─── Round-1 fixer / MINOR #16: Debug for DbConfig redacts ──
+
+    #[test]
+    fn dbconfig_debug_redacts_uri_userinfo_password() {
+        let cfg = DbConfig {
+            dsn: "postgres://alice:supers3cret@db.example/zs".into(),
+            host_id: uuid::Uuid::nil(),
+            run_migrations: false,
+            boot_timeout_secs: 60,
+            pool_max: 16,
+        };
+        let s = format!("{cfg:?}");
+        assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
+        assert!(s.contains("alice"), "user must remain visible: {s}");
+        assert!(s.contains("<redacted>"), "redaction marker missing: {s}");
+    }
+
+    #[test]
+    fn dbconfig_debug_redacts_query_password() {
+        let cfg = DbConfig {
+            dsn: "postgres://db.example/zs?sslmode=require&password=supers3cret".into(),
+            host_id: uuid::Uuid::nil(),
+            run_migrations: false,
+            boot_timeout_secs: 60,
+            pool_max: 16,
+        };
+        let s = format!("{cfg:?}");
+        assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
+        assert!(s.contains("sslmode=require"), "non-secret query params must remain: {s}");
+    }
+
+    // ─── Round-1 fixer / MINOR #19: pg-password file mode 0o400 ──
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_password_file_mode_rejects_loose_permissions() {
+        with_env_clean(|| {
+            let tmp = tempdir();
+            let path = tmp.path().join("pgpass");
+            std::fs::write(&path, "secret").unwrap();
+            // Default permissions are usually 0o644 (umask-derived); be
+            // explicit so this passes regardless of umask.
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let err = enforce_password_file_mode(path.to_str().unwrap())
+                .expect_err("0o644 must be rejected");
+            assert!(matches!(err, DatabaseError::Validation(_)));
+
+            // Tighten and retry.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            enforce_password_file_mode(path.to_str().unwrap())
+                .expect("0o400 must pass");
+        });
+    }
 
     #[test]
     fn url_encode_password_handles_reserved_chars() {
