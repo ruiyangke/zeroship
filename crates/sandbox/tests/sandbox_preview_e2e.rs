@@ -195,6 +195,7 @@ fn make_state(
         // SANDBOX_DATABASE_URL is absent.
         database: None,
         persist: None,
+        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     (state, sandbox_id)
 }

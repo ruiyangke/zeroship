@@ -1072,6 +1072,61 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / IMPORTANT #8 — set_host_draining marks the host
+// row 'draining' so peers see drain-intent before our heartbeat
+// goes silent. Without this, a graceful shutdown looks like a
+// crash to peers and they wait the full lease_ttl before noticing.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for IMPORTANT #8"]
+async fn set_host_draining_flips_status_and_stamps_drain_started() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&db.host_id())
+    );
+
+    // Pre: status='alive' from migrated_db()'s upsert_host.
+    let pre = read_host_status(&url, &host_typed).await;
+    assert_eq!(pre.as_deref(), Some("alive"));
+
+    db.set_host_draining().await.expect("set draining ok");
+
+    // Post: status='draining', drain_started_at IS NOT NULL.
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT status, (drain_started_at IS NOT NULL) AS has_drain_started \
+               FROM sandbox.hosts WHERE host_id = $1::TEXT",
+            &[&host_typed],
+        )
+        .await
+        .unwrap();
+    let status: String = row.get(0);
+    let has_drain: bool = row.get(1);
+    assert_eq!(status, "draining");
+    assert!(has_drain, "drain_started_at must be stamped");
+
+    // Idempotent: a second call leaves status=draining and
+    // drain_started_at unchanged.
+    db.set_host_draining().await.expect("second set ok");
+    let row2 = client
+        .query_one(
+            "SELECT status FROM sandbox.hosts WHERE host_id = $1::TEXT",
+            &[&host_typed],
+        )
+        .await
+        .unwrap();
+    let status2: String = row2.get(0);
+    assert_eq!(status2, "draining");
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Round-1 fixer / CRITICAL #4 — get_sandbox_row round-trip. The
 // post-takeover rehydrate path uses this to fetch the full row by
 // typed-id-derived UUID; if it ever returns the wrong row (or

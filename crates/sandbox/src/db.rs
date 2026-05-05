@@ -1062,6 +1062,31 @@ impl Database {
     // Phase 2 — periodic heartbeat + lease-based takeover (§ 11)
     // ────────────────────────────────────────────────────────────────
 
+    /// Round-1 fixer / IMPORTANT #8: mark THIS controller's host row
+    /// `status='draining'`. Called from
+    /// [`crate::AppState::trigger_shutdown`] so peers see the
+    /// drain-intent before our heartbeat goes silent (without this
+    /// hint, peers wait the full lease_ttl before taking over).
+    /// Idempotent: running twice is a no-op past the first apply.
+    pub async fn set_host_draining(&self) -> Result<()> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        client
+            .execute(
+                "UPDATE sandbox.hosts \
+                    SET status = 'draining', drain_started_at = COALESCE(drain_started_at, now()) \
+                  WHERE host_id = $1::TEXT",
+                &[&host_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
     /// Bump `last_heartbeat = now()` for THIS controller's host row.
     /// Called periodically by [`crate::spawn_heartbeat_task`]. The
     /// pg-side `now()` is the canonical wall clock for lease-window

@@ -234,6 +234,7 @@ fn make_state_inner(
         // Phase-0 sandbox-pg-state: tests run pg-disabled.
         database: None,
         persist: None,
+        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     (state, sandbox_id)
 }

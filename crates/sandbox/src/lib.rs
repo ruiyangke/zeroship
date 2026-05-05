@@ -23,6 +23,7 @@ pub mod preview_ws;
 pub mod registry;
 pub mod restore;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,6 +58,53 @@ pub struct AppState {
     /// only when `SANDBOX_PERSIST_AUTH=1` was set and a key file is
     /// readable.
     pub persist: Option<Arc<Persistence>>,
+    /// Round-1 fixer / IMPORTANT #8: graceful-shutdown flag observed
+    /// by the periodic background tasks (heartbeat, takeover-scan,
+    /// health-probe). [`AppState::trigger_shutdown`] flips this to
+    /// `true` and atomically marks the host row `'draining'` in pg
+    /// so peers see the intent before any takeover would fire.
+    /// Each task checks the flag at the top of every iteration and
+    /// exits cleanly when set; the next deploy can then drop the
+    /// process without leaving phantom heartbeat traffic.
+    pub shutdown: Arc<AtomicBool>,
+}
+
+impl AppState {
+    /// Round-1 fixer / IMPORTANT #8: signal background tasks to
+    /// exit cleanly. Best-effort UPDATEs `sandbox.hosts.status =
+    /// 'draining'` for THIS host so peers know we're going away
+    /// before our heartbeat goes silent (without that hint, peers
+    /// would wait the full lease_ttl before noticing). The pg
+    /// write is fire-and-forget; we don't fail shutdown when pg
+    /// is unavailable.
+    ///
+    /// Tasks observe the flag at the top of each iteration via
+    /// [`AppState::shutdown_requested`]. After this call returns,
+    /// the next iteration of each loop will exit; in the worst
+    /// case that is bounded by the longest sleep interval
+    /// (heartbeat=5s, takeover-scan=30s, health-probe=30s).
+    pub async fn trigger_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(db) = self.database.as_ref() {
+            // Best-effort. A hung pg call here would block the
+            // shutdown caller; we already told the tasks to exit
+            // so the process can proceed even if this never
+            // returns success.
+            if let Err(e) = db.set_host_draining().await {
+                tracing::warn!(
+                    error = %e,
+                    "sandbox HA: set_host_draining on shutdown failed (non-fatal)"
+                );
+            }
+        }
+    }
+
+    /// Returns `true` once [`AppState::trigger_shutdown`] has been
+    /// called. Background loops poll this at the top of each
+    /// iteration to decide whether to break out.
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
 }
 
 impl AppState {
@@ -197,6 +245,7 @@ impl AppState {
             mint_rate_limiter: Some(MintRateLimiter::new()),
             database,
             persist,
+            shutdown: Arc::new(AtomicBool::new(false)),
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
@@ -236,7 +285,18 @@ impl AppState {
 fn start_health_loop(state: Arc<AppState>) {
     compio::runtime::spawn(async move {
         loop {
+            // Round-1 fixer / IMPORTANT #8: top-of-loop shutdown
+            // check. The previous iteration's sleep will have
+            // returned by now; if shutdown was signalled during it,
+            // exit before the next probe.
+            if state.shutdown_requested() {
+                tracing::info!("sandbox health loop: shutdown requested; exiting");
+                break;
+            }
             compio::time::sleep(Duration::from_secs(30)).await;
+            if state.shutdown_requested() {
+                break;
+            }
             if let Err(e) = state.backend.probe().await {
                 tracing::warn!(error = %e, "sandbox health re-probe failed");
             }
@@ -296,7 +356,18 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
             "sandbox HA: heartbeat task started"
         );
         loop {
+            // Round-1 fixer / IMPORTANT #8: shutdown check.
+            if state.shutdown_requested() {
+                tracing::info!(
+                    host_id = %db.host_id(),
+                    "sandbox HA: heartbeat task shutting down cleanly"
+                );
+                break;
+            }
             compio::time::sleep(interval).await;
+            if state.shutdown_requested() {
+                break;
+            }
             match db.heartbeat().await {
                 Ok(()) => {}
                 Err(e) => {
@@ -483,7 +554,18 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
         );
 
         loop {
+            // Round-1 fixer / IMPORTANT #8: shutdown check.
+            if state.shutdown_requested() {
+                tracing::info!(
+                    host_id = %my_host,
+                    "sandbox HA: takeover task shutting down cleanly"
+                );
+                break;
+            }
             compio::time::sleep(interval).await;
+            if state.shutdown_requested() {
+                break;
+            }
 
             // Refresh heartbeat-lag gauge + clock-rewind detector.
             match db.heartbeat_lag_seconds().await {
@@ -543,6 +625,13 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
             metrics::add_dead_hosts_observed(real_dead.len() as u64);
 
             for dead_host in real_dead {
+                // Round-1 fixer / IMPORTANT #8: shutdown check
+                // inside the inner loop so a slow takeover scan
+                // doesn't ignore the flag while iterating dead
+                // peers.
+                if state.shutdown_requested() {
+                    break;
+                }
                 match db
                     .takeover_sandboxes_from_host(dead_host, my_host, lease_ttl_secs)
                     .await
@@ -581,4 +670,63 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
         }
     })
     .detach();
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / IMPORTANT #8 — shutdown-flag unit tests.
+// ────────────────────────────────────────────────────────────────────
+//
+// The full graceful-shutdown integration (SIGTERM → trigger_shutdown
+// → task exit → process drop) lives in the bin's main loop; that
+// surface isn't reachable in lib unit tests. What we DO test here:
+//
+//   1. A fixture task that polls `shutdown_requested()` exits within
+//      one iteration of the flag flipping. The fixture mirrors the
+//      heartbeat-task shape: top-of-loop check + sleep + post-sleep
+//      check.
+//
+// The pg-side `set_host_draining` UPDATE is exercised by the
+// pg-gated integration test in tests/sandbox_pg_e2e.rs.
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    #[compio::test]
+    async fn fixture_loop_exits_within_one_iteration_of_flag_flip() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let iterations = Arc::new(AtomicU32::new(0));
+        let shutdown_task = shutdown.clone();
+        let iter_task = iterations.clone();
+
+        let task = compio::runtime::spawn(async move {
+            loop {
+                if shutdown_task.load(Ordering::SeqCst) {
+                    return iter_task.load(Ordering::SeqCst);
+                }
+                compio::time::sleep(Duration::from_millis(20)).await;
+                if shutdown_task.load(Ordering::SeqCst) {
+                    return iter_task.load(Ordering::SeqCst);
+                }
+                iter_task.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        // Let the loop run a few iterations.
+        compio::time::sleep(Duration::from_millis(80)).await;
+        let pre_flip = iterations.load(Ordering::SeqCst);
+        assert!(
+            pre_flip >= 1,
+            "fixture must iterate at least once before flip; got {pre_flip}"
+        );
+
+        // Flip the flag; the next post-sleep check terminates the loop.
+        shutdown.store(true, Ordering::SeqCst);
+
+        let final_iters = task.await.expect("task completes");
+        assert!(
+            final_iters <= pre_flip + 1,
+            "loop must exit within one iteration of flag flip; pre={pre_flip}, post={final_iters}"
+        );
+    }
 }
