@@ -1,3 +1,4 @@
+"use server";
 
 /**
  * HR System — full-featured example using @zeroship/db
@@ -12,6 +13,7 @@
  */
 
 import { createDb, schema } from "@zeroship/db";
+import { procedure } from "@zeroship/server";
 
 const db = createDb({
   // ---------------------------------------------------------------------------
@@ -323,7 +325,7 @@ const db = createDb({
 // Employee Management (12 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createEmployee(
+export const createEmployee = procedure(async (
   firstName: string,
   lastName: string,
   email: string,
@@ -331,7 +333,7 @@ export async function createEmployee(
   positionId: number,
   salary: number,
   extras?: Record<string, unknown>
-) {
+) => {
   const { data, error } = await db.employees.create({
     firstName, lastName, email,
     departmentId, positionId, salary,
@@ -352,21 +354,21 @@ export async function createEmployee(
   });
 
   return { data, error: null };
-}
+});
 
-export async function getEmployees(filters?: Record<string, unknown>) {
+export const getEmployees = procedure(async (filters?: Record<string, unknown>) => {
   return db.employees.find(filters || {}).sort({ lastName: 1, firstName: 1 });
-}
+});
 
-export async function getEmployee(id: number) {
+export const getEmployee = procedure(async (id: number) => {
   return db.employees.findOne({ id });
-}
+});
 
-export async function updateEmployee(id: number, changes: Record<string, unknown>) {
+export const updateEmployee = procedure(async (id: number, changes: Record<string, unknown>) => {
   return db.employees.updateOne({ id }, changes);
-}
+});
 
-export async function terminateEmployee(id: number) {
+export const terminateEmployee = procedure(async (id: number) => {
   const { data: emp } = await db.employees.findOne({ id });
   if (!emp) return { data: null, error: { message: "Employee not found" } };
 
@@ -380,9 +382,9 @@ export async function terminateEmployee(id: number) {
   }
 
   return { data: { terminated: true }, error: null };
-}
+});
 
-export async function getOrgChart() {
+export const getOrgChart = procedure(async () => {
   const { data: allEmployees } = await db.employees.find({ status: "active" });
   if (!allEmployees) return { data: [], error: null };
 
@@ -403,13 +405,13 @@ export async function getOrgChart() {
   }
 
   return { data: roots, error: null };
-}
+});
 
-export async function getDirectReports(managerId: number) {
+export const getDirectReports = procedure(async (managerId: number) => {
   return db.employees.find({ managerId, status: "active" }).sort({ lastName: 1 });
-}
+});
 
-export async function searchEmployees(query: string) {
+export const searchEmployees = procedure(async (query: string) => {
   return db.employees.find({
     $or: [
       { firstName: { $ilike: `%${query}%` } },
@@ -417,21 +419,21 @@ export async function searchEmployees(query: string) {
       { email:     { $ilike: `%${query}%` } },
     ],
   }).limit(20);
-}
+});
 
-export async function addSkill(id: number, skill: string) {
+export const addSkill = procedure(async (id: number, skill: string) => {
   return db.employees.updateOne({ id }, { skills: { $addToSet: skill } });
-}
+});
 
-export async function removeSkill(id: number, skill: string) {
+export const removeSkill = procedure(async (id: number, skill: string) => {
   return db.employees.updateOne({ id }, { skills: { $pull: skill } });
-}
+});
 
-export async function getEmployeesByDepartment(departmentId: number) {
+export const getEmployeesByDepartment = procedure(async (departmentId: number) => {
   return db.employees.find({ departmentId, status: "active" }).sort({ lastName: 1 });
-}
+});
 
-export async function getEmployeeHistory(employeeId: number) {
+export const getEmployeeHistory = procedure(async (employeeId: number) => {
   const [compHistory, posHistory] = await Promise.all([
     db.compensationHistory.find({ employeeId }).sort({ effectiveDate: -1 }),
     db.reviews.find({ employeeId }).sort({ createdAt: -1 }),
@@ -443,43 +445,43 @@ export async function getEmployeeHistory(employeeId: number) {
     },
     error: null,
   };
-}
+});
 
 // ---------------------------------------------------------------------------
 // Department (6 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createDepartment(
+export const createDepartment = procedure(async (
   name: string,
   code: string,
   budget?: number,
   parentDepartmentId?: number
-) {
+) => {
   return db.departments.create({
     name,
     code,
     ...(budget !== undefined && { budget }),
     ...(parentDepartmentId !== undefined && { parentDepartmentId }),
   });
-}
+});
 
-export async function getDepartments() {
+export const getDepartments = procedure(async () => {
   return db.departments.find({}).sort({ name: 1 });
-}
+});
 
-export async function getDepartment(id: number) {
+export const getDepartment = procedure(async (id: number) => {
   return db.departments.findOne({ id });
-}
+});
 
-export async function updateDepartment(id: number, changes: Record<string, unknown>) {
+export const updateDepartment = procedure(async (id: number, changes: Record<string, unknown>) => {
   return db.departments.updateOne({ id }, changes);
-}
+});
 
-export async function deleteDepartment(id: number) {
+export const deleteDepartment = procedure(async (id: number) => {
   return db.departments.deleteOne({ id });
-}
+});
 
-export async function getDepartmentTree() {
+export const getDepartmentTree = procedure(async () => {
   const { data: allDepts } = await db.departments.find({});
   if (!allDepts) return { data: [], error: null };
 
@@ -500,139 +502,139 @@ export async function getDepartmentTree() {
   }
 
   return { data: roots, error: null };
-}
+});
 
 // ---------------------------------------------------------------------------
 // Position (6 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createPosition(
+export const createPosition = procedure(async (
   title: string,
   departmentId: number,
   level: string,
   salaryMin: number,
   salaryMax: number,
   description?: string
-) {
+) => {
   return db.positions.create({ title, departmentId, level, salaryMin, salaryMax, ...(description && { description }) });
-}
+});
 
-export async function getPositions(filters?: Record<string, unknown>) {
+export const getPositions = procedure(async (filters?: Record<string, unknown>) => {
   return db.positions.find(filters || {}).sort({ title: 1 });
-}
+});
 
-export async function getOpenPositions() {
+export const getOpenPositions = procedure(async () => {
   return db.positions.find({ isOpen: true }).sort({ title: 1 });
-}
+});
 
-export async function updatePosition(id: number, changes: Record<string, unknown>) {
+export const updatePosition = procedure(async (id: number, changes: Record<string, unknown>) => {
   return db.positions.updateOne({ id }, changes);
-}
+});
 
-export async function closePosition(id: number) {
+export const closePosition = procedure(async (id: number) => {
   return db.positions.updateOne({ id }, { isOpen: false });
-}
+});
 
-export async function getPositionsByDepartment(departmentId: number) {
+export const getPositionsByDepartment = procedure(async (departmentId: number) => {
   return db.positions.find({ departmentId }).sort({ level: 1 });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Recruitment (10 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createJobPosting(
+export const createJobPosting = procedure(async (
   positionId: number,
   title: string,
   description?: string,
   requirements?: string,
   closingDate?: number
-) {
+) => {
   return db.jobPostings.create({
     positionId, title,
     ...(description && { description }),
     ...(requirements && { requirements }),
     ...(closingDate && { closingDate }),
   });
-}
+});
 
-export async function getJobPostings(filters?: Record<string, unknown>) {
+export const getJobPostings = procedure(async (filters?: Record<string, unknown>) => {
   return db.jobPostings.find(filters || {}).sort({ createdAt: -1 });
-}
+});
 
-export async function getJobPosting(id: number) {
+export const getJobPosting = procedure(async (id: number) => {
   return db.jobPostings.findOne({ id });
-}
+});
 
-export async function publishJobPosting(id: number) {
+export const publishJobPosting = procedure(async (id: number) => {
   return db.jobPostings.updateOne({ id }, { status: "open", postedDate: Date.now() });
-}
+});
 
-export async function closeJobPosting(id: number) {
+export const closeJobPosting = procedure(async (id: number) => {
   return db.jobPostings.updateOne({ id }, { status: "closed" });
-}
+});
 
-export async function applyToJob(
+export const applyToJob = procedure(async (
   jobPostingId: number,
   name: string,
   email: string,
   phone?: string,
   resumeUrl?: string
-) {
+) => {
   return db.applicants.create({
     jobPostingId, name, email,
     ...(phone && { phone }),
     ...(resumeUrl && { resumeUrl }),
     appliedDate: Date.now(),
   });
-}
+});
 
-export async function getApplicants(jobPostingId: number, stage?: string) {
+export const getApplicants = procedure(async (jobPostingId: number, stage?: string) => {
   return db.applicants.find({
     jobPostingId,
     ...(stage && { stage }),
   }).sort({ appliedDate: -1 });
-}
+});
 
-export async function updateApplicantStage(
+export const updateApplicantStage = procedure(async (
   id: number,
   stage: string,
   notes?: string,
   rating?: number
-) {
+) => {
   return db.applicants.updateOne({ id }, {
     stage,
     ...(notes !== undefined && { notes }),
     ...(rating !== undefined && { rating }),
   });
-}
+});
 
-export async function scheduleInterview(
+export const scheduleInterview = procedure(async (
   applicantId: number,
   interviewerId: number,
   scheduledAt: number,
   type: string,
   durationMinutes?: number
-) {
+) => {
   return db.interviews.create({
     applicantId, interviewerId, scheduledAt, type,
     ...(durationMinutes && { durationMinutes }),
   });
-}
+});
 
-export async function submitInterviewFeedback(
+export const submitInterviewFeedback = procedure(async (
   id: number,
   feedback: string,
   rating: number
-) {
+) => {
   return db.interviews.updateOne({ id }, { status: "completed", feedback, rating });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Time & Attendance (8 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function clockIn(employeeId: number, date: number, notes?: string) {
+export const clockIn = procedure(async (employeeId: number, date: number, notes?: string) => {
   // Check if a timesheet already exists for today
   const { data: existing } = await db.timesheets.findOne({ employeeId, date });
   if (existing) {
@@ -644,9 +646,9 @@ export async function clockIn(employeeId: number, date: number, notes?: string) 
     clockIn: Date.now(),
     ...(notes && { notes }),
   });
-}
+});
 
-export async function clockOut(employeeId: number, date: number) {
+export const clockOut = procedure(async (employeeId: number, date: number) => {
   const { data: ts } = await db.timesheets.findOne({ employeeId, date });
   if (!ts) return { data: null, error: { message: "No clock-in found for this date" } };
 
@@ -661,40 +663,40 @@ export async function clockOut(employeeId: number, date: number) {
     { id: tsData._id as number },
     { clockOut: clockOutTime, hoursWorked, overtimeHours }
   );
-}
+});
 
-export async function submitTimesheet(id: number) {
+export const submitTimesheet = procedure(async (id: number) => {
   return db.timesheets.updateOne({ id }, { status: "submitted" });
-}
+});
 
-export async function approveTimesheet(id: number) {
+export const approveTimesheet = procedure(async (id: number) => {
   return db.timesheets.updateOne({ id }, { status: "approved" });
-}
+});
 
-export async function getTimesheets(
+export const getTimesheets = procedure(async (
   employeeId: number,
   fromDate?: number,
   toDate?: number
-) {
+) => {
   return db.timesheets.find({
     employeeId,
     ...(fromDate !== undefined && toDate !== undefined && {
       date: { $gte: fromDate, $lte: toDate },
     }),
   }).sort({ date: -1 });
-}
+});
 
-export async function getWorkSchedule(employeeId: number) {
+export const getWorkSchedule = procedure(async (employeeId: number) => {
   return db.workSchedules.find({ employeeId }).sort({ dayOfWeek: 1 });
-}
+});
 
-export async function updateWorkSchedule(
+export const updateWorkSchedule = procedure(async (
   employeeId: number,
   dayOfWeek: number,
   startTime: string,
   endTime: string,
   isRemote?: boolean
-) {
+) => {
   const { data: existing } = await db.workSchedules.findOne({ employeeId, dayOfWeek });
   if (existing) {
     return db.workSchedules.updateOne(
@@ -706,9 +708,9 @@ export async function updateWorkSchedule(
     employeeId, dayOfWeek, startTime, endTime,
     ...(isRemote !== undefined && { isRemote }),
   });
-}
+});
 
-export async function getOvertimeReport(fromDate?: number, toDate?: number) {
+export const getOvertimeReport = procedure(async (fromDate?: number, toDate?: number) => {
   return db.timesheets.aggregate([
     {
       $match: {
@@ -728,27 +730,27 @@ export async function getOvertimeReport(fromDate?: number, toDate?: number) {
     },
     { $sort: { totalOvertime: -1 } },
   ]);
-}
+});
 
 // ---------------------------------------------------------------------------
 // Leave (10 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function requestLeave(
+export const requestLeave = procedure(async (
   employeeId: number,
   type: string,
   startDate: number,
   endDate: number,
   days: number,
   reason?: string
-) {
+) => {
   return db.leaveRequests.create({
     employeeId, type, startDate, endDate, days,
     ...(reason && { reason }),
   });
-}
+});
 
-export async function approveLeave(id: number, approvedBy: number) {
+export const approveLeave = procedure(async (id: number, approvedBy: number) => {
   const { data } = await db.leaveRequests.updateOne(
     { id, status: "pending" },
     { status: "approved", approvedBy, approvedAt: Date.now() }
@@ -766,27 +768,27 @@ export async function approveLeave(id: number, approvedBy: number) {
   }
 
   return { data, error: null };
-}
+});
 
-export async function denyLeave(id: number, approvedBy: number) {
+export const denyLeave = procedure(async (id: number, approvedBy: number) => {
   return db.leaveRequests.updateOne(
     { id, status: "pending" },
     { status: "denied", approvedBy, approvedAt: Date.now() }
   );
-}
+});
 
-export async function cancelLeave(id: number, employeeId: number) {
+export const cancelLeave = procedure(async (id: number, employeeId: number) => {
   return db.leaveRequests.updateOne(
     { id, employeeId, status: "pending" },
     { status: "cancelled" }
   );
-}
+});
 
-export async function getLeaveRequests(filters?: Record<string, unknown>) {
+export const getLeaveRequests = procedure(async (filters?: Record<string, unknown>) => {
   return db.leaveRequests.find(filters || {}).sort({ createdAt: -1 });
-}
+});
 
-export async function getLeaveBalance(employeeId: number) {
+export const getLeaveBalance = procedure(async (employeeId: number) => {
   const currentYear = new Date().getFullYear();
 
   // Check if there's an explicit balance record
@@ -823,9 +825,9 @@ export async function getLeaveBalance(employeeId: number) {
     },
     error: null,
   };
-}
+});
 
-export async function getLeaveCalendar(departmentId?: number) {
+export const getLeaveCalendar = procedure(async (departmentId?: number) => {
   const empFilter: Record<string, unknown> = { status: { $ne: "terminated" } };
   if (departmentId !== undefined) empFilter.departmentId = departmentId;
 
@@ -838,20 +840,20 @@ export async function getLeaveCalendar(departmentId?: number) {
     employeeId: { $in: ids },
     status: "approved",
   }).sort({ startDate: 1 });
-}
+});
 
-export async function getHolidays(year?: number) {
+export const getHolidays = procedure(async (year?: number) => {
   if (!year) return db.holidays.find({}).sort({ date: 1 });
   const start = new Date(year, 0, 1).getTime();
   const end   = new Date(year, 11, 31, 23, 59, 59).getTime();
   return db.holidays.find({ date: { $gte: start, $lte: end } }).sort({ date: 1 });
-}
+});
 
-export async function createHoliday(name: string, date: number, isRecurring?: boolean) {
+export const createHoliday = procedure(async (name: string, date: number, isRecurring?: boolean) => {
   return db.holidays.create({ name, date, ...(isRecurring !== undefined && { isRecurring }) });
-}
+});
 
-export async function getLeaveReport() {
+export const getLeaveReport = procedure(async () => {
   return db.leaveRequests.aggregate([
     { $match: { status: "approved" } },
     {
@@ -864,21 +866,21 @@ export async function getLeaveReport() {
     },
     { $sort: { totalDays: -1 } },
   ]);
-}
+});
 
 // ---------------------------------------------------------------------------
 // Payroll (8 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createPayrollRun(period: string, processedBy: number) {
+export const createPayrollRun = procedure(async (period: string, processedBy: number) => {
   return db.payrollRuns.create({
     period,
     runDate: Date.now(),
     processedBy,
   });
-}
+});
 
-export async function processPayroll(payrollRunId: number) {
+export const processPayroll = procedure(async (payrollRunId: number) => {
   await db.payrollRuns.updateOne({ id: payrollRunId }, { status: "processing" });
 
   const { data: activeEmployees } = await db.employees.find({ status: "active" });
@@ -930,26 +932,26 @@ export async function processPayroll(payrollRunId: number) {
     },
     error: null,
   };
-}
+});
 
-export async function finalizePayroll(payrollRunId: number) {
+export const finalizePayroll = procedure(async (payrollRunId: number) => {
   await db.payslips.updateMany({ payrollRunId, status: "pending" }, { status: "paid" });
   return { data: { finalized: true }, error: null };
-}
+});
 
-export async function getPayrollRuns(filters?: Record<string, unknown>) {
+export const getPayrollRuns = procedure(async (filters?: Record<string, unknown>) => {
   return db.payrollRuns.find(filters || {}).sort({ runDate: -1 });
-}
+});
 
-export async function getPayslip(id: number) {
+export const getPayslip = procedure(async (id: number) => {
   return db.payslips.findOne({ id });
-}
+});
 
-export async function getPayslipsByEmployee(employeeId: number) {
+export const getPayslipsByEmployee = procedure(async (employeeId: number) => {
   return db.payslips.find({ employeeId }).sort({ createdAt: -1 });
-}
+});
 
-export async function getPayrollSummary(period: string) {
+export const getPayrollSummary = procedure(async (period: string) => {
   const { data: run } = await db.payrollRuns.findOne({ period });
   if (!run) return { data: null, error: { message: "Payroll run not found" } };
 
@@ -965,9 +967,9 @@ export async function getPayrollSummary(period: string) {
     },
     error: null,
   };
-}
+});
 
-export async function exportPayroll(payrollRunId: number) {
+export const exportPayroll = procedure(async (payrollRunId: number) => {
   const { data: slips } = await db.payslips.find({ payrollRunId });
   if (!slips) return { data: "", error: null };
 
@@ -981,13 +983,13 @@ export async function exportPayroll(payrollRunId: number) {
     ].join(",")
   );
   return { data: [header, ...lines].join("\n"), error: null };
-}
+});
 
 // ---------------------------------------------------------------------------
 // Performance (10 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createReview(
+export const createReview = procedure(async (
   employeeId: number,
   reviewerId: number,
   period: string,
@@ -995,112 +997,112 @@ export async function createReview(
   strengths?: string,
   improvements?: string,
   goalsText?: string
-) {
+) => {
   return db.reviews.create({
     employeeId, reviewerId, period, cycle,
     ...(strengths    && { strengths }),
     ...(improvements && { improvements }),
     ...(goalsText    && { goals: goalsText }),
   });
-}
+});
 
-export async function submitReview(id: number, rating: number) {
+export const submitReview = procedure(async (id: number, rating: number) => {
   return db.reviews.updateOne({ id }, { status: "submitted", rating });
-}
+});
 
-export async function acknowledgeReview(id: number) {
+export const acknowledgeReview = procedure(async (id: number) => {
   return db.reviews.updateOne({ id }, { status: "acknowledged" });
-}
+});
 
-export async function getReviewsForEmployee(employeeId: number) {
+export const getReviewsForEmployee = procedure(async (employeeId: number) => {
   return db.reviews.find({ employeeId }).sort({ createdAt: -1 });
-}
+});
 
-export async function getPendingReviews(reviewerId?: number) {
+export const getPendingReviews = procedure(async (reviewerId?: number) => {
   return db.reviews.find({
     status: "draft",
     ...(reviewerId !== undefined && { reviewerId }),
   }).sort({ createdAt: 1 });
-}
+});
 
-export async function createGoal(
+export const createGoal = procedure(async (
   employeeId: number,
   title: string,
   category: string,
   targetDate?: number,
   description?: string
-) {
+) => {
   return db.goals.create({
     employeeId, title, category,
     ...(targetDate  !== undefined && { targetDate }),
     ...(description && { description }),
   });
-}
+});
 
-export async function updateGoalProgress(id: number, progress: number, status?: string) {
+export const updateGoalProgress = procedure(async (id: number, progress: number, status?: string) => {
   return db.goals.updateOne({ id }, {
     progress,
     ...(status && { status }),
   });
-}
+});
 
-export async function getGoals(employeeId: number, filters?: Record<string, unknown>) {
+export const getGoals = procedure(async (employeeId: number, filters?: Record<string, unknown>) => {
   return db.goals.find({ employeeId, ...(filters || {}) }).sort({ targetDate: 1 });
-}
+});
 
-export async function giveFeedback(
+export const giveFeedback = procedure(async (
   fromEmployeeId: number,
   toEmployeeId: number,
   type: string,
   message: string,
   isAnonymous?: boolean
-) {
+) => {
   return db.feedback.create({
     fromEmployeeId, toEmployeeId, type, message,
     ...(isAnonymous !== undefined && { isAnonymous }),
   });
-}
+});
 
-export async function getFeedbackForEmployee(toEmployeeId: number) {
+export const getFeedbackForEmployee = procedure(async (toEmployeeId: number) => {
   return db.feedback.find({ toEmployeeId }).sort({ createdAt: -1 });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Training (8 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function createCourse(
+export const createCourse = procedure(async (
   title: string,
   category: string,
   durationHours: number,
   description?: string,
   isMandatory?: boolean,
   maxParticipants?: number
-) {
+) => {
   return db.courses.create({
     title, category, durationHours,
     ...(description    && { description }),
     ...(isMandatory    !== undefined && { isMandatory }),
     ...(maxParticipants !== undefined && { maxParticipants }),
   });
-}
+});
 
-export async function getCourses(filters?: Record<string, unknown>) {
+export const getCourses = procedure(async (filters?: Record<string, unknown>) => {
   return db.courses.find(filters || {}).sort({ title: 1 });
-}
+});
 
-export async function enrollInCourse(courseId: number, employeeId: number) {
+export const enrollInCourse = procedure(async (courseId: number, employeeId: number) => {
   return db.enrollments.create({
     courseId, employeeId,
     enrolledAt: Date.now(),
   });
-}
+});
 
-export async function completeCourse(
+export const completeCourse = procedure(async (
   courseId: number,
   employeeId: number,
   score?: number
-) {
+) => {
   return db.enrollments.updateOne(
     { courseId, employeeId },
     {
@@ -1109,51 +1111,51 @@ export async function completeCourse(
       ...(score !== undefined && { score }),
     }
   );
-}
+});
 
-export async function getEnrollments(filters?: Record<string, unknown>) {
+export const getEnrollments = procedure(async (filters?: Record<string, unknown>) => {
   return db.enrollments.find(filters || {}).sort({ enrolledAt: -1 });
-}
+});
 
-export async function addCertification(
+export const addCertification = procedure(async (
   employeeId: number,
   name: string,
   issuer: string,
   issueDate: number,
   expiryDate?: number,
   credentialUrl?: string
-) {
+) => {
   return db.certifications.create({
     employeeId, name, issuer, issueDate,
     ...(expiryDate    !== undefined && { expiryDate }),
     ...(credentialUrl && { credentialUrl }),
   });
-}
+});
 
-export async function getCertifications(employeeId: number) {
+export const getCertifications = procedure(async (employeeId: number) => {
   return db.certifications.find({ employeeId }).sort({ issueDate: -1 });
-}
+});
 
-export async function getExpiringCertifications(daysAhead: number = 30) {
+export const getExpiringCertifications = procedure(async (daysAhead: number = 30) => {
   const now    = Date.now();
   const cutoff = now + daysAhead * 86_400_000;
   return db.certifications.find({
     expiryDate: { $gte: now, $lte: cutoff },
   }).sort({ expiryDate: 1 });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Compensation & Benefits (8 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function adjustSalary(
+export const adjustSalary = procedure(async (
   employeeId: number,
   newSalary: number,
   changeType: string,
   effectiveDate: number,
   changeReason?: string,
   approvedBy?: number
-) {
+) => {
   await db.employees.updateOne({ id: employeeId }, { salary: newSalary });
 
   return db.compensationHistory.create({
@@ -1164,103 +1166,103 @@ export async function adjustSalary(
     ...(changeReason && { changeReason }),
     ...(approvedBy !== undefined && { approvedBy }),
   });
-}
+});
 
-export async function getCompensationHistory(employeeId: number) {
+export const getCompensationHistory = procedure(async (employeeId: number) => {
   return db.compensationHistory.find({ employeeId }).sort({ effectiveDate: -1 });
-}
+});
 
-export async function getBenefitsPlans(type?: string) {
+export const getBenefitsPlans = procedure(async (type?: string) => {
   return db.benefitsPlans.find(type ? { type } : {}).sort({ name: 1 });
-}
+});
 
-export async function enrollInBenefit(
+export const enrollInBenefit = procedure(async (
   employeeId: number,
   planId: number,
   startDate: number
-) {
+) => {
   return db.benefitsEnrollments.create({ employeeId, planId, startDate });
-}
+});
 
-export async function getBenefitsEnrollments(employeeId: number) {
+export const getBenefitsEnrollments = procedure(async (employeeId: number) => {
   return db.benefitsEnrollments.find({ employeeId, status: "active" }).sort({ startDate: -1 });
-}
+});
 
-export async function submitExpense(
+export const submitExpense = procedure(async (
   employeeId: number,
   description: string,
   amount: number,
   category: string,
   receiptUrl?: string
-) {
+) => {
   return db.expenseClaims.create({
     employeeId, description, amount, category,
     submittedAt: Date.now(),
     ...(receiptUrl && { receiptUrl }),
   });
-}
+});
 
-export async function approveExpense(id: number, approvedBy: number, approve: boolean) {
+export const approveExpense = procedure(async (id: number, approvedBy: number, approve: boolean) => {
   return db.expenseClaims.updateOne(
     { id },
     { status: approve ? "approved" : "rejected", approvedBy }
   );
-}
+});
 
-export async function getExpenses(filters?: Record<string, unknown>) {
+export const getExpenses = procedure(async (filters?: Record<string, unknown>) => {
   return db.expenseClaims.find(filters || {}).sort({ submittedAt: -1 });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Documents & Compliance (6 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function uploadDocument(
+export const uploadDocument = procedure(async (
   employeeId: number,
   type: string,
   name: string,
   fileUrl: string,
   expiresAt?: number
-) {
+) => {
   return db.documents.create({
     employeeId, type, name, fileUrl,
     uploadedAt: Date.now(),
     ...(expiresAt !== undefined && { expiresAt }),
   });
-}
+});
 
-export async function getDocuments(employeeId: number, type?: string) {
+export const getDocuments = procedure(async (employeeId: number, type?: string) => {
   return db.documents.find({
     employeeId,
     ...(type && { type }),
   }).sort({ uploadedAt: -1 });
-}
+});
 
-export async function getExpiringDocuments(daysAhead: number = 30) {
+export const getExpiringDocuments = procedure(async (daysAhead: number = 30) => {
   const now    = Date.now();
   const cutoff = now + daysAhead * 86_400_000;
   return db.documents.find({
     expiresAt: { $gte: now, $lte: cutoff },
   }).sort({ expiresAt: 1 });
-}
+});
 
-export async function getPolicies(category?: string) {
+export const getPolicies = procedure(async (category?: string) => {
   return db.policies.find(category ? { category } : {}).sort({ effectiveDate: -1 });
-}
+});
 
-export async function getAuditLog(
+export const getAuditLog = procedure(async (
   entityType?: string,
   entityId?: number,
   actorId?: number
-) {
+) => {
   return db.auditLog.find({
     ...(entityType !== undefined && { entityType }),
     ...(entityId   !== undefined && { entityId }),
     ...(actorId    !== undefined && { actorId }),
   }).sort({ timestamp: -1 }).limit(500);
-}
+});
 
-export async function acknowledgePolicy(employeeId: number, policyId: number) {
+export const acknowledgePolicy = procedure(async (employeeId: number, policyId: number) => {
   // Record acknowledgement as a document
   return db.documents.create({
     employeeId,
@@ -1269,33 +1271,33 @@ export async function acknowledgePolicy(employeeId: number, policyId: number) {
     fileUrl: "",
     uploadedAt: Date.now(),
   });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Notifications (4 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function getNotifications(employeeId: number) {
+export const getNotifications = procedure(async (employeeId: number) => {
   return db.notifications.find({ employeeId }).sort({ createdAt: -1 });
-}
+});
 
-export async function markAsRead(id: number) {
+export const markAsRead = procedure(async (id: number) => {
   return db.notifications.updateOne({ id }, { isRead: true });
-}
+});
 
-export async function markAllAsRead(employeeId: number) {
+export const markAllAsRead = procedure(async (employeeId: number) => {
   return db.notifications.updateMany({ employeeId, isRead: false }, { isRead: true });
-}
+});
 
-export async function getUnreadCount(employeeId: number) {
+export const getUnreadCount = procedure(async (employeeId: number) => {
   return db.notifications.countDocuments({ employeeId, isRead: false });
-}
+});
 
 // ---------------------------------------------------------------------------
 // Analytics (10 endpoints)
 // ---------------------------------------------------------------------------
 
-export async function getDashboard() {
+export const getDashboard = procedure(async () => {
   const [
     { data: totalEmployees },
     { data: totalDepartments },
@@ -1320,17 +1322,17 @@ export async function getDashboard() {
     },
     error: null,
   };
-}
+});
 
-export async function getHeadcountByDepartment() {
+export const getHeadcountByDepartment = procedure(async () => {
   return db.employees.aggregate([
     { $match: { status: "active" } },
     { $group: { _id: "$departmentId", headcount: { $sum: 1 }, avgSalary: { $avg: "$salary" } } },
     { $sort: { headcount: -1 } },
   ]);
-}
+});
 
-export async function getSalaryDistribution() {
+export const getSalaryDistribution = procedure(async () => {
   return db.employees.aggregate([
     { $match: { status: "active" } },
     {
@@ -1345,16 +1347,16 @@ export async function getSalaryDistribution() {
     },
     { $sort: { totalPayroll: -1 } },
   ]);
-}
+});
 
-export async function getAttritionReport() {
+export const getAttritionReport = procedure(async () => {
   const { data: terminated } = await db.employees.countDocuments({ status: "terminated" });
   const { data: total }      = await db.employees.countDocuments({});
   const rate = total ? (((terminated as number) || 0) / (total as number) * 100).toFixed(1) : "0.0";
   return { data: { terminated, total, attritionRate: `${rate}%` }, error: null };
-}
+});
 
-export async function getLeaveUtilization() {
+export const getLeaveUtilization = procedure(async () => {
   return db.leaveRequests.aggregate([
     { $match: { status: "approved" } },
     {
@@ -1366,16 +1368,16 @@ export async function getLeaveUtilization() {
     },
     { $sort: { totalDaysUsed: -1 } },
   ]);
-}
+});
 
-export async function getReviewStats() {
+export const getReviewStats = procedure(async () => {
   return db.reviews.aggregate([
     { $group: { _id: "$period", count: { $sum: 1 }, avgRating: { $avg: "$rating" } } },
     { $sort: { _id: -1 } },
   ]);
-}
+});
 
-export async function getTimeToHire() {
+export const getTimeToHire = procedure(async () => {
   // Hired applicants carry the appliedDate; the job posting has the postedDate.
   // We aggregate by jobPostingId and compute avg days from application to hire.
   return db.applicants.aggregate([
@@ -1389,18 +1391,18 @@ export async function getTimeToHire() {
     },
     { $sort: { count: -1 } },
   ]);
-}
+});
 
-export async function getDiversityMetrics() {
+export const getDiversityMetrics = procedure(async () => {
   // Department composition with skill breakdown
   return db.employees.aggregate([
     { $match: { status: "active" } },
     { $group: { _id: "$departmentId", headcount: { $sum: 1 } } },
     { $sort: { headcount: -1 } },
   ]);
-}
+});
 
-export async function getCostPerEmployee() {
+export const getCostPerEmployee = procedure(async () => {
   return db.employees.aggregate([
     { $match: { status: "active" } },
     {
@@ -1413,9 +1415,9 @@ export async function getCostPerEmployee() {
     },
     { $sort: { totalSalary: -1 } },
   ]);
-}
+});
 
-export async function getMonthlyTrends() {
+export const getMonthlyTrends = procedure(async () => {
   const { data: hires } = await db.employees.aggregate([
     { $group: { _id: { $dateToString: { format: "%Y-%m", date: { $toDate: "$hireDate" } } }, count: { $sum: 1 } } },
     { $sort: { _id: 1 } },
@@ -1428,4 +1430,4 @@ export async function getMonthlyTrends() {
   ]);
 
   return { data: { hires, terminations }, error: null };
-}
+});

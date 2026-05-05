@@ -10,7 +10,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tanstack/react-query": "catalog:",
     "@vitejs/plugin-react": "catalog:",
+    "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "react": "catalog:react18",
     "react-dom": "catalog:react18"

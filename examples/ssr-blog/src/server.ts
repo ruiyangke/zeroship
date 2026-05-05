@@ -1,3 +1,4 @@
+"use server";
 // Server entry — picked up by `@zeroship/vite-plugin` and bundled into
 // `dist/server/index.js`. The plugin appends the prelude (always) and
 // the dispatchRpc/default.fetch bootstrap (ONLY when this file has no
@@ -7,6 +8,7 @@
 // See README. Real per-request SSR: every GET hits this fetch handler
 // and gets back a freshly-rendered HTML page.
 
+import { query } from "@zeroship/server";
 import { renderToString } from "react-dom/server";
 import { createElement } from "react";
 import { App } from "./components/App";
@@ -59,16 +61,14 @@ function shell(body: string, props: string): string {
 
 // ── RPC procedures (also usable server-side via .useQuery) ───────────
 //
-// `listPosts` is a regular RPC procedure. The vite-plugin's
-// transform monkey-patches React Query hooks onto every server-module
-// export, so the App component can call `listPosts.useQuery()` BOTH
-// from the browser (hits HTTP /_zs/v1/listPosts) AND from the SSR
-// renderer (calls impl directly via __makeServerProcedure's hook).
+// `listPosts` is a regular RPC procedure marked with `query()`. The
+// vite-plugin's transform monkey-patches React Query hooks onto every
+// wrapped server-module export, so the App component can call
+// `listPosts.useQuery()` BOTH from the browser (hits HTTP
+// /_zs/v1/listPosts) AND from the SSR renderer (calls impl directly
+// via __makeServerProcedure's hook).
 
-export async function listPosts() {
-  return POSTS;
-}
-listPosts.config = { id: "listPosts", kind: "query" } as const;
+export const listPosts = query(async () => POSTS, { id: "listPosts" });
 
 // ── SSR fetch handler ────────────────────────────────────────────────
 

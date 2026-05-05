@@ -27,6 +27,35 @@ export {
   DEFINE_APP_MARKER,
 } from "./types.js";
 
+// ── Procedure wrapper markers ─────────────────────────────────────────
+//
+// ISS-02: explicit opt-in markers replace the path-based "every export
+// under src/server/** is an RPC" rule. The vite-plugin's transform
+// statically recognizes these wrapper names (any of `procedure`,
+// `query`, `mutation`, `stream`, `subscription`) when imported from
+// `@zeroship/server`; only exports whose initializer is one such call
+// become RPCs.
+//
+// Plain `export function helper(...)` and `export const x = ...` stay
+// private to the server bundle.
+//
+// Authoring shape:
+//
+//   import { procedure, query, mutation, z } from "@zeroship/server";
+//
+//   "use server";
+//
+//   export const list = query(async () => db.todos.find({}));
+//   export const greet = procedure(
+//     async (name: string) => `hi ${name}`,
+//     { id: "greet" },
+//   );
+//   export const charge = mutation(
+//     async (input: ChargeArgs) => stripe.charge(input),
+//     { id: "charge", input: z.object({ amount: z.number() }) },
+//   );
+export { procedure, query, mutation, stream, subscription } from "./wrappers.js";
+
 // Phase 5 — `__makeServerProcedure` SSR adapter.
 //
 // The vite-plugin's SSR-enabled-app variant wraps each user procedure

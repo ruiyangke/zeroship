@@ -1,5 +1,6 @@
 "use server";
 
+import { stream as streamRpc, query } from "@zeroship/server";
 import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
@@ -70,48 +71,51 @@ const toolMap = Object.fromEntries(tools.map(t => [t.name, t]));
 
 interface ChatMsg { role: string; content: string }
 
-export async function* chat(message: string, history: ChatMsg[] = []) {
-  const msgs: any[] = (Array.isArray(history) ? history : []).map((m: ChatMsg) =>
-    m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
-  );
-  msgs.push(new HumanMessage(message));
+export const chat = streamRpc(
+  async function* (message: string, history: ChatMsg[] = []) {
+    const msgs: any[] = (Array.isArray(history) ? history : []).map((m: ChatMsg) =>
+      m.role === "user" ? new HumanMessage(m.content) : new AIMessage(m.content)
+    );
+    msgs.push(new HumanMessage(message));
 
-  const m = getModel();
-  for (let step = 0; step < 5; step++) {
-    const stream: any = await m.stream(msgs);
+    const m = getModel();
+    for (let step = 0; step < 5; step++) {
+      const stream: any = await m.stream(msgs);
 
-    let accumulated: any = null;
-    for await (const chunk of stream) {
-      accumulated = accumulated == null ? chunk : accumulated.concat(chunk);
-      const delta = typeof chunk.content === "string" ? chunk.content : "";
-      if (delta) yield { token: delta };
-    }
-    if (accumulated == null) return;
-    msgs.push(accumulated);
-
-    const toolCalls = accumulated.tool_calls ?? [];
-    if (toolCalls.length === 0) return;
-
-    for (const tc of toolCalls) {
-      yield { tool: tc.name, args: tc.args };
-      const fn = toolMap[tc.name];
-      if (!fn) {
-        const msg = `Tool not found: ${tc.name}`;
-        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
-        yield { tool: tc.name, result: msg };
-        continue;
+      let accumulated: any = null;
+      for await (const chunk of stream) {
+        accumulated = accumulated == null ? chunk : accumulated.concat(chunk);
+        const delta = typeof chunk.content === "string" ? chunk.content : "";
+        if (delta) yield { token: delta };
       }
-      try {
-        const result = await fn.invoke(tc.args);
-        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
-        yield { tool: tc.name, result };
-      } catch (e: any) {
-        const msg = `Error: ${e.message}`;
-        msgs.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
-        yield { tool: tc.name, result: msg };
+      if (accumulated == null) return;
+      msgs.push(accumulated);
+
+      const toolCalls = accumulated.tool_calls ?? [];
+      if (toolCalls.length === 0) return;
+
+      for (const tc of toolCalls) {
+        yield { tool: tc.name, args: tc.args };
+        const fn = toolMap[tc.name];
+        if (!fn) {
+          const msg = `Tool not found: ${tc.name}`;
+          msgs.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
+          yield { tool: tc.name, result: msg };
+          continue;
+        }
+        try {
+          const result = await fn.invoke(tc.args);
+          msgs.push(new ToolMessage({ tool_call_id: tc.id, content: result }));
+          yield { tool: tc.name, result };
+        } catch (e: any) {
+          const msg = `Error: ${e.message}`;
+          msgs.push(new ToolMessage({ tool_call_id: tc.id, content: msg }));
+          yield { tool: tc.name, result: msg };
+        }
       }
     }
-  }
-}
+  },
+  { id: "chat" },
+);
 
-export function ping() { return "pong"; }
+export const ping = query(() => "pong", { id: "ping" });
