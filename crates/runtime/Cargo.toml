@@ -77,6 +77,11 @@ tracing = { workspace = true }
 # `tracing::*`.
 zeroship-core = { workspace = true }
 
+# Insertion-ordered map — used by the rpc::superjson encoder to build
+# `Meta::values` and `WithChildren` child maps, matching the wire-order
+# contract Wave A pinned in `crates/core/src/superjson.rs`.
+indexmap = { workspace = true }
+
 [[bin]]
 name = "zeroship-bench-server"
 path = "src/core/server.rs"

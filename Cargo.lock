@@ -5730,6 +5730,7 @@ dependencies = [
  "futures",
  "http",
  "httparse",
+ "indexmap 2.14.0",
  "itoa",
  "libc",
  "mimalloc",
