@@ -422,8 +422,13 @@ impl Database {
     }
 
     async fn ensure_schema_migrations_table(pool: &Pool) -> Result<()> {
+        // Two simultaneous migrators racing on the bootstrap CREATE
+        // SCHEMA hit a 23505 (`pg_namespace_nspname_index`) because
+        // pg's IF NOT EXISTS is not race-safe. Same race-tolerance
+        // shape as the migration runner: catch the duplicate-DDL
+        // SQLSTATEs and treat as success.
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
-        client
+        match client
             .batch_execute(
                 "CREATE SCHEMA IF NOT EXISTS sandbox; \
                  CREATE TABLE IF NOT EXISTS sandbox.schema_migrations ( \
@@ -434,8 +439,17 @@ impl Database {
                  )",
             )
             .await
-            .map_err(DatabaseError::Pg)?;
-        Ok(())
+        {
+            Ok(()) => Ok(()),
+            Err(e) if is_concurrent_ddl_race(&e) => {
+                tracing::info!(
+                    code = %e.code().map(|c| c.code()).unwrap_or(""),
+                    "sandbox bootstrap: concurrent-DDL race on schema_migrations create; treating as success"
+                );
+                Ok(())
+            }
+            Err(e) => Err(DatabaseError::Pg(e)),
+        }
     }
 
     async fn apply_one_migration(pool: &Pool, m: Migration) -> Result<()> {
@@ -450,13 +464,30 @@ impl Database {
         // wrapped in IF NOT EXISTS guards.
         let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
         if let Err(e) = tx.batch_execute(m.sql).await {
-            // Surface the body's error as a well-typed
-            // MigrationFailed; the TX rolls back automatically when
-            // we drop it without commit.
-            return Err(DatabaseError::MigrationFailed {
-                version: m.version,
-                reason: e.to_string(),
-            });
+            let _ = tx.rollback().await;
+            // Concurrent-DDL race against another migrator — pg's
+            // `IF NOT EXISTS` is not atomic; the loser sees a
+            // duplicate_schema / duplicate_table / duplicate_object
+            // / unique_violation SQLSTATE. Treat as race-tolerant
+            // success (§ 6.5 partition note + § 7.1). The
+            // bookkeeping INSERT below either lands (we win the
+            // version) or itself unique_violations (we lose).
+            if !is_concurrent_ddl_race(&e) {
+                return Err(DatabaseError::MigrationFailed {
+                    version: m.version,
+                    reason: e.to_string(),
+                });
+            }
+            tracing::info!(
+                version = m.version,
+                code = %e.code().map(|c| c.code()).unwrap_or(""),
+                "sandbox migration body: concurrent-DDL race; retrying bookkeeping insert only"
+            );
+            // Re-acquire a fresh TX for the bookkeeping insert.
+            // The body's effects are now durable (the winner
+            // committed them); we just need to record OUR row, or
+            // recognise that the winner's row is present.
+            return Self::insert_bookkeeping_row(pool, m).await;
         }
 
         let sha = m.sha256_hex();
@@ -492,6 +523,31 @@ impl Database {
                 );
                 Ok(())
             }
+            Err(e) => Err(DatabaseError::Pg(e)),
+        }
+    }
+
+    /// Insert ONLY the `schema_migrations` bookkeeping row, used by
+    /// the race-tolerance retry path: we hit a duplicate_schema /
+    /// duplicate_table / etc on the body, which means the winner
+    /// has already committed the body's effects. We just need to
+    /// either land our row (if the winner hadn't reached the
+    /// INSERT yet) or recognise the winner's row (unique_violation
+    /// on our INSERT).
+    async fn insert_bookkeeping_row(pool: &Pool, m: Migration) -> Result<()> {
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sha = m.sha256_hex();
+        match client
+            .execute(
+                "INSERT INTO sandbox.schema_migrations \
+                     (version, sha256, description) \
+                 VALUES ($1::BIGINT, $2::TEXT, $3::TEXT) \
+                 ON CONFLICT (version) DO NOTHING",
+                &[&m.version, &sha, &m.description.to_string()],
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
             Err(e) => Err(DatabaseError::Pg(e)),
         }
     }
@@ -735,9 +791,34 @@ fn write_host_id_file(path: &std::path::Path, uuid: Uuid) -> std::io::Result<()>
 }
 
 /// True iff `e` is a SQLSTATE 23505 (unique_violation). Used for
-/// the migration runner's race-tolerance fallback (§ 7.1).
+/// the migration runner's race-tolerance fallback on the bookkeeping
+/// INSERT into `sandbox.schema_migrations` (§ 7.1).
 fn is_unique_violation(e: &compio_postgres::Error) -> bool {
     e.code() == Some(&compio_postgres::error::SqlState::UNIQUE_VIOLATION)
+}
+
+/// True iff `e` indicates a concurrent DDL race we can safely treat
+/// as success — the loser of two simultaneous `CREATE SCHEMA IF NOT
+/// EXISTS` / `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT
+/// EXISTS` calls. Pg's `IF NOT EXISTS` clauses are NOT atomic
+/// against concurrent creators (the existence check + the create
+/// are separate statements internally); the loser sees one of these
+/// SQLSTATEs.
+///
+/// Same race-tolerance shape § 6.5 calls out for the partition
+/// CREATE on the worker side: "the loser sees 42P07
+/// duplicate_object and proceeds".
+fn is_concurrent_ddl_race(e: &compio_postgres::Error) -> bool {
+    use compio_postgres::error::SqlState;
+    match e.code() {
+        Some(c) => {
+            *c == SqlState::UNIQUE_VIOLATION
+                || *c == SqlState::DUPLICATE_SCHEMA
+                || *c == SqlState::DUPLICATE_TABLE
+                || *c == SqlState::DUPLICATE_OBJECT
+        }
+        None => false,
+    }
 }
 
 
