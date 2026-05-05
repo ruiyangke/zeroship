@@ -11,7 +11,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
 use super::super::helpers::{
-    gen_param_extractions, method_callback_ident, parse_params_skipping_self,
+    gen_param_extractions, method_callback_ident, outer_ident, parse_params_skipping_self,
 };
 use super::super::parse::extract_reject_shared;
 use super::super::shared::class_config::ClassConfig;
@@ -84,6 +84,18 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 /// no return marshaling). Discards the user method's return value at
 /// the end; the V8 accessor protocol ignores anything a setter
 /// returns.
+///
+/// Setter return-shape contract (§13.1, enforced at the analyse phase
+/// by `is_unit_return` / `is_result_unit_return`):
+///   - `()` — call-and-discard.
+///   - `Result<(), OpError>` — Ok-discard, Err routed through the
+///     standard 6-variant `gen_throw_op_error_arms` dispatch. Pre-fix
+///     this site emitted `let _ = setter(...)` which silently swallowed
+///     the OpError — the §13.1 finding masked a real bug in
+///     `URL::set_href` and `WebSocketImpl::set_binary_type` whose Err
+///     arms were unobservable to JS.
+///   - Anything else — rejected at compile time in `analyze.rs`'s
+///     setter-shape validator.
 pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let state_ty = cfg.state_ty;
@@ -105,6 +117,35 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // the end; the prologue itself is byte-identical.
     let recover = recover_box::gen_recover_box(class_ty, state_ty, method_name, m.mut_receiver);
 
+    // §13.1 fix: setters declared as `Result<(), OpError>` route an
+    // `Err` arm through the standard 6-variant OpError dispatch so the
+    // user's error surfaces as a JS exception instead of being silently
+    // swallowed. Unit-returning setters fall through to a plain call
+    // (no Result match needed). The shape parser at the analyse site
+    // (analyze.rs) already rejects setters whose return type is neither
+    // `()` nor `Result<(), _>`, so this branch is exhaustive.
+    let is_result = matches!(
+        outer_ident(&m.func.sig.output).as_deref(),
+        Some("Result")
+    );
+    let invoke = if is_result {
+        let throw = crate::gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
+        quote! {
+            match <#state_ty>::#method_name(#receiver_ref, #(#call_args),*) {
+                ::std::result::Result::Ok(()) => {}
+                ::std::result::Result::Err(__err) => {
+                    #throw
+                    return;
+                }
+            }
+        }
+    } else {
+        // Setter returns `()` — call and ignore.
+        quote! {
+            <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+        }
+    };
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_name(
@@ -116,8 +157,11 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
             #(#extractions)*
 
-            // Discard return — setters don't propagate values.
-            let _ = <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            // Setter dispatch — Ok-discard, Err-throw for Result-returning
+            // setters; plain call-and-discard for `()` setters. WebIDL
+            // §3.7.6 says the setter return value is unobservable to JS,
+            // so we never write to `rv`.
+            #invoke
         }
     }
 }

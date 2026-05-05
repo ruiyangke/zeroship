@@ -27,6 +27,24 @@ use crate::gen_call_return;
 /// extraction loop emits no args (the parser skips the receiver, and
 /// there's no receiver, so `params` is whatever args the user
 /// declared — typically zero for getters).
+///
+/// **Parameter naming.** Both `class_ty` and `state_ty` are threaded
+/// in through the [`ClassConfig`]. `class_ty` keys the callback
+/// identifier (`__<class>_<method>_callback`); `state_ty` keys the
+/// dispatch (`<state_ty>::method_name(...)`). Under
+/// `#[v8_state_marker(MarkerTy)]` the user's `impl` block is `impl
+/// StateTy`, not `impl MarkerTy` — so the dispatch must resolve to
+/// StateTy even though the macro keys the install on MarkerTy.
+/// Without `#[v8_state_marker]` the two are identical (state_ty ==
+/// class_ty), so this is a no-op for the common case but mandatory for
+/// state-marker support (Phase 1 commit `d4d65fd` + the static-method
+/// extension in `1a924d9`). The H12 finding flagged the name `state_ty`
+/// as misleading on the static path (no instance state), but renaming
+/// would diverge from the instance/setter/async-method codegen paths
+/// that share the same parameter; keeping the cross-emit-site
+/// consistency is more valuable than the naming nit. Documented here
+/// so the next reader sees the rationale rather than reflexively
+/// renaming.
 pub(crate) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let state_ty = cfg.state_ty;
@@ -40,11 +58,10 @@ pub(crate) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
-    // Static method bodies live on the impl receiver (state_ty), which
-    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not the
-    // unit MarkerTy. Mirror what gen_method_callback does for instance
-    // methods — see the Phase 1 commit (`d4d65fd`) that introduced the
-    // same threading for `&self` / `&mut self` callbacks.
+    // Static method bodies live on the impl target (state_ty), which
+    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not
+    // the unit MarkerTy — see this fn's doc-comment for the parameter
+    // naming rationale.
     let call = quote! {
         <#state_ty>::#method_name(#(#call_args),*)
     };
