@@ -143,34 +143,6 @@ fn __brand_check_Foo(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bo
     }
     false
 }
-/// Public brand check: is `v` an instance of this class (or a
-/// subclass via `#[v8_inherit]`) in the current isolate?
-///
-/// **Deprecated**: prefer the typed `<Class>::is_instance`
-/// method emitted alongside this fn (Wave 5c, design §3.5).
-/// This symbol stays for back-compat with pre-Wave-5c callers;
-/// scheduled for removal in Wave 8 per the macro's
-/// `STABILITY.md`.
-///
-/// Non-Object values (primitives, null, undefined) return
-/// `false` — the underlying `__brand_check_<Class>` requires
-/// `Local<Object>`, so this wrapper does the
-/// `Local::<Object>::try_from` gate for the caller. Spec
-/// alignment: WebIDL §3.7 brand identity treats only objects
-/// as candidates.
-///
-/// Returns `false` if the class hasn't been installed in the
-/// current isolate (the install slot is empty), matching
-/// `__brand_check_<Class>`'s behaviour.
-#[doc(hidden)]
-#[allow(non_snake_case, dead_code)]
-pub fn __zs_is_Foo(scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> bool {
-    let obj: v8::Local<v8::Object> = match v.try_into() {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    __brand_check_Foo(scope, obj)
-}
 #[allow(non_snake_case, dead_code)]
 impl Foo {
     /// Brand-check: returns `true` iff `value` is an instance
@@ -183,11 +155,15 @@ impl Foo {
     ///
     /// This is the stable entry point introduced in Wave 5c
     /// (design `docs/proposals/runtime-macros-refactor.md` §3.5).
-    /// Prefer this over the legacy `__zs_is_<Class>` symbol —
-    /// the latter is deprecated and scheduled for removal in
-    /// Wave 8.
+    /// The Wave 5c-era `__zs_is_<Class>` shim was removed in
+    /// Wave 8 — this method now owns the `Local<Value>::try_into`
+    /// gate that the shim used to wrap.
     pub fn is_instance(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> bool {
-        __zs_is_Foo(scope, value)
+        let obj: v8::Local<v8::Object> = match value.try_into() {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        __brand_check_Foo(scope, obj)
     }
 }
 #[allow(non_snake_case)]

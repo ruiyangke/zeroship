@@ -137,10 +137,11 @@ pub mod node_error {
 
 // ----- V8ClassInstance trait (Wave 5c, design §3.5) -----
 //
-// Stable typed brand-check entry point per `#[v8_class]`. Replaces the
-// underscored `__zs_is_<Class>` grep target with `<Class>::is_instance`
-// (the inherent method) plus a sealed trait `V8ClassInstance` that
-// downstream code can use as a generic bound (`fn check<T: V8ClassInstance>`).
+// Stable typed brand-check entry point per `#[v8_class]`. Wave 5c
+// introduced `<Class>::is_instance` (the inherent method) + a sealed
+// trait `V8ClassInstance` that downstream code can use as a generic
+// bound (`fn check<T: V8ClassInstance>`). Wave 8 removed the legacy
+// underscored `__zs_is_<Class>` shim per the macro's STABILITY.md.
 //
 // The macro emits BOTH:
 //   1. `impl <Class> { pub fn is_instance(scope, v) -> bool { ... } }`
