@@ -113,7 +113,7 @@ pub(super) fn analyze<'a>(
         v8_iterable::extract_iterable(&input.attrs).map_err(|e| e.to_compile_error())?;
     let value_pairs_sig = v8_iterable::inspect_value_pairs(&input.items);
     let iterable_codegen = match iterable_attr.as_ref() {
-        Some(attr) => v8_iterable::generate(class_ty, attr, value_pairs_sig)
+        Some(attr) => v8_iterable::generate(class_ty, state_ty, attr, value_pairs_sig)
             .map_err(|e| e.to_compile_error())?,
         None => quote! {},
     };
