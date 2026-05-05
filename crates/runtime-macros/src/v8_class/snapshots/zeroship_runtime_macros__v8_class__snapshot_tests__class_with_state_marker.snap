@@ -1,5 +1,5 @@
 ---
-source: crates/runtime-macros/src/v8_class/mod.rs
+source: crates/runtime-macros/src/v8_class/snapshot_tests.rs
 expression: format_expansion(out)
 ---
 impl State {
