@@ -453,7 +453,11 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
     let value_pairs_sig = v8_iterable::inspect_value_pairs(&input.items);
     let iterable_codegen = match iterable_attr.as_ref() {
-        Some(attr) => match v8_iterable::generate(class_ty, attr, value_pairs_sig) {
+        // Pass both `class_ty` (marker — drives JS naming) and
+        // `state_ty` (impl-block receiver — what's in the Box).
+        // Under `#[v8_state_marker]` they diverge; without it they're
+        // equal so the emission is byte-identical to before.
+        Some(attr) => match v8_iterable::generate(class_ty, state_ty, attr, value_pairs_sig) {
             Ok(ts) => ts,
             Err(err) => return err.to_compile_error(),
         },

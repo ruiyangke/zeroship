@@ -421,7 +421,16 @@ fn gen_to_v8(
 ///     `next()` yields `done`. If it grows, the cursor walks the new
 ///     entries — that's the spec behaviour.
 ///
-/// `class_ty` is the parent class ident (e.g. `Headers`).
+/// `class_ty` is the parent class's marker ident (e.g. `Headers`, or
+/// `Bag` under `#[v8_state_marker(Bag)] impl BagState`). Used for
+/// JS-visible naming: install slot, brand-check fn, factory fn names,
+/// iterator companion class name, install impl block.
+/// `state_ty` is the type stored in V8 internal field 0 as
+/// `Box<StateTy>` — the same type the impl block's `value_pairs`
+/// receiver desugars against. Without `#[v8_state_marker]` this equals
+/// `class_ty`; with it, it's the impl-block receiver (e.g. `BagState`).
+/// Used for the `*mut`/`*const` casts on parent-state recovery and the
+/// borrow type that calls `value_pairs`.
 /// `attr` is the parsed `#[v8_iterable(key=..., value=..., mode=...)]`.
 /// `sig` is the user's `value_pairs` receiver/arg shape, sniffed from
 /// the impl block by `inspect_value_pairs`. It picks between
@@ -429,6 +438,7 @@ fn gen_to_v8(
 /// outer `scope` through.
 pub(crate) fn generate(
     class_ty: &Ident,
+    state_ty: &Ident,
     attr: &IterableAttr,
     sig: ValuePairsSig,
 ) -> Result<TokenStream2, syn::Error> {
@@ -440,11 +450,14 @@ pub(crate) fn generate(
 
     // Receiver-flavoured pointer + borrow tokens. `&mut self` requires
     // `*mut Self` + `&mut *ptr` (matches the regular `&mut self` method
-    // recovery in v8_class/mod.rs::gen_method_callback).
+    // recovery in v8_class/mod.rs::gen_method_callback). The cast is to
+    // `state_ty` — that's what's actually in the Box at internal field
+    // 0. Under `#[v8_state_marker(M)] impl S`, `class_ty == M` (naming)
+    // but `state_ty == S` (storage + receiver of `value_pairs`).
     let self_ptr_ty = if is_mut {
-        quote! { *mut #class_ty }
+        quote! { *mut #state_ty }
     } else {
-        quote! { *const #class_ty }
+        quote! { *const #state_ty }
     };
     let self_borrow = if is_mut {
         quote! { &mut * }
@@ -452,9 +465,9 @@ pub(crate) fn generate(
         quote! { &* }
     };
     let self_borrow_ty = if is_mut {
-        quote! { &mut #class_ty }
+        quote! { &mut #state_ty }
     } else {
-        quote! { & #class_ty }
+        quote! { & #state_ty }
     };
 
     // Argument list passed to `value_pairs` per the user's signature.
