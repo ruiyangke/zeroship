@@ -165,16 +165,6 @@ pub(super) fn gen_method_callback(
 
     let call_return = gen_call_return(&call, &m.func.sig.output);
 
-    let getter_args = if m.kind == MethodKind::Getter {
-        // V8 getters use AccessorCallback signature; we use FunctionTemplate
-        // for parity with methods, so the args object is still passed.
-        quote! {}
-    } else {
-        quote! {}
-    };
-
-    let _ = getter_args;
-
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
 
