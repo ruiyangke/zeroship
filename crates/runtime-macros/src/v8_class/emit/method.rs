@@ -17,7 +17,7 @@ use super::super::parse::extract_reject_shared;
 use super::super::shared::class_config::ClassConfig;
 use super::super::shared::recover_box;
 use super::super::{ClassMethod, MethodKind};
-use crate::gen_call_return;
+use crate::{gen_call_return, must_str};
 
 /// Slow-path FunctionCallback for `#[v8_method]` and plain
 /// `#[v8_getter]` (without `same_object`). Brand-check + Box<Self>
@@ -199,6 +199,18 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
     // async future capture.
     let brand_check = recover_box::gen_brand_check_throw(&brand_check_fn);
     let recover_external = recover_box::gen_recover_external();
+    // §4.1 Wave 2 + critique C8: pre-fix this site `.expect`'d on the
+    // SharedState slot lookup. A misconfigured runtime (slot not
+    // installed) would Rust-panic THROUGH V8's C++ frames, which on
+    // Linux is a SIGABRT (Rust's panic runtime can't unwind through an
+    // `extern "C"` boundary cleanly — same reasoning as the re-entry
+    // guard's V8-TypeError-not-panic doc-comment). Surface as a JS-side
+    // RangeError instead — exceptional but recoverable.
+    let scope_tok = quote! { scope };
+    let state_missing_msg_init = must_str(
+        &scope_tok,
+        &quote! { "internal error: SharedState not installed on isolate" },
+    );
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -243,10 +255,25 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
             // 4. Pull SharedState off the isolate slot. Cloned `Rc`,
             //    cheap. The future captures another clone; the
             //    callback can drop its handle freely.
-            let __state: ::zeroship_runtime::state::SharedState = scope
-                .get_slot::<::zeroship_runtime::state::SharedState>()
-                .expect("RuntimeState not in isolate slot")
-                .clone();
+            //
+            //    Pre-fix: `.expect("RuntimeState not in isolate slot")`
+            //    Rust-panicked here on a misconfigured runtime. Since
+            //    V8 callbacks are invoked through an `extern "C"`
+            //    boundary, a Rust panic abort is the default — SIGABRT
+            //    on Linux (same reason gen_reentry_guard throws a
+            //    V8 TypeError instead of panicking). Surface as a
+            //    JS-side RangeError so the user observes a recoverable
+            //    JS exception, NOT a crashed worker.
+            let __state: ::zeroship_runtime::state::SharedState =
+                match scope.get_slot::<::zeroship_runtime::state::SharedState>() {
+                    Some(__s) => __s.clone(),
+                    None => {
+                        let __msg = #state_missing_msg_init;
+                        let __exc = v8::Exception::range_error(scope, __msg);
+                        scope.throw_exception(__exc);
+                        return;
+                    }
+                };
             let __request_id = __state.borrow().executing_request_id;
 
             // 5. Build the future. The block keeps `wrapper_global`
