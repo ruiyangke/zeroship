@@ -746,19 +746,15 @@ impl NomadCHBackend {
         // time, which shrinks the AEAD plaintext + removes a
         // migration hazard if the agent listen address ever changes.
         if let Some(persist) = &self.persist {
+            // v3 (round-8): sealed record carries secrets only —
+            // user_id, project_id, backend, vm_index, agent_url,
+            // pubkey_fp, created_at_secs all live in pg now.
             let record = crate::persist::SealedAuth {
                 version: crate::persist::SEAL_VERSION,
                 sandbox_id: sandbox_id.to_string(),
-                user_id: user_id.to_string(),
-                project_id: project_id.to_string(),
-                backend: "nomad-ch".to_string(),
                 signing_key_bytes: sk_bytes,
-                vm_index: Some(vm_index),
-                agent_url: None,
-                pubkey_fp: key_fp.clone(),
-                created_at_secs: now,
                 preview_secrets: None,
-                preview_audit: Vec::new(),
+                boot_id: None,
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 tracing::warn!(
@@ -1242,29 +1238,23 @@ impl NomadCHBackend {
         let Some(persist) = self.persist.clone() else {
             return Ok(false);
         };
-        let (sk_bytes, vm_index) = {
+        let _ = (info, audit); // round-8: legacy fields no longer sealed
+        let sk_bytes = {
             let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
             let Some(s) = guard.get(&sandbox_id) else {
                 return Ok(false);
             };
-            (s.signing_key.to_bytes(), s.vm_index)
+            s.signing_key.to_bytes()
         };
-        let pubkey_fp = sig::pubkey_fingerprint(
-            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
-        );
+        // v3: secret material only. Pg holds info.user_id /
+        // project_id / vm_index / created_at_secs; the share-token
+        // audit is a sandbox.shares row.
         let record = crate::persist::SealedAuth {
             version: crate::persist::SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: info.user_id.clone(),
-            project_id: info.project_id.clone(),
-            backend: "nomad-ch".to_string(),
             signing_key_bytes: sk_bytes,
-            vm_index: Some(vm_index),
-            agent_url: None,
-            pubkey_fp,
-            created_at_secs: info.created_at_secs,
             preview_secrets: secrets,
-            preview_audit: audit,
+            boot_id: None,
         };
         persist
             .seal(sandbox_id, &record)
@@ -1353,39 +1343,43 @@ impl NomadCHBackend {
     /// schema violation for a `backend = "nomad-ch"` record), if
     /// the index is outside the configured pool, or if the
     /// in-memory map already has an entry for `sandbox_id`.
-    pub async fn restore_from_sealed(
+    /// Round-8 Phase-1 restore. Pg row is canonical for `user_id`,
+    /// `backend`, `vm_index`, `agent_url`, `key_fp`; sealed record is
+    /// canonical for `signing_key_bytes`. Boot loop has already
+    /// signed-`/version` probed the agent before calling this.
+    pub async fn restore_from_pg_and_sealed(
         &self,
         sandbox_id: Uuid,
+        row: &crate::db::SandboxRow,
         sealed: &crate::persist::SealedAuth,
+        agent_url: String,
     ) -> Result<super::SandboxAuth, String> {
-        if sealed.backend != "nomad-ch" {
+        if row.backend != "nomad-ch" {
             return Err(format!(
-                "restore_from_sealed: backend mismatch (record says {:?}, this backend is nomad-ch)",
-                sealed.backend
+                "restore: backend mismatch (pg row says {:?}, this backend is nomad-ch)",
+                row.backend
             ));
         }
-        let vm_index = sealed.vm_index.ok_or_else(|| {
-            "restore_from_sealed: sealed nomad-ch record has no vm_index".to_string()
+        let vm_index_i32 = row.vm_index.ok_or_else(|| {
+            "restore: pg row for nomad-ch backend has no vm_index".to_string()
         })?;
-        // Reserve the index BEFORE inserting state — a failure here
-        // (e.g. ceil-out-of-range after operator shrinks the pool)
-        // means the record can't be safely restored on this
-        // controller; the boot path quarantines it.
+        let vm_index = u16::try_from(vm_index_i32)
+            .map_err(|e| format!("restore: vm_index out of u16 range: {e}"))?;
+        // Reserve the index BEFORE inserting state.
         self.vm_index_allocator
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .reserve(vm_index)
-            .map_err(|e| format!("restore_from_sealed: vm_index reserve: {e}"))?;
+            .map_err(|e| format!("restore: vm_index reserve: {e}"))?;
 
         let signing_key = Arc::new(SigningKey::from_bytes(&sealed.signing_key_bytes));
         let pubkey_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
-        if pubkey_fp != sealed.pubkey_fp {
+        if pubkey_fp != row.key_fp {
             return Err(format!(
-                "restore_from_sealed: derived pubkey_fp ({pubkey_fp}) != sealed pubkey_fp ({})",
-                sealed.pubkey_fp
+                "restore: derived pubkey_fp ({pubkey_fp}) != pg key_fp ({})",
+                row.key_fp
             ));
         }
-        let agent_url = self.derive_agent_url(vm_index);
         let host_dir = self.derive_host_dir(sandbox_id);
         let job_id = Self::derive_job_id(sandbox_id);
 
@@ -1393,13 +1387,13 @@ impl NomadCHBackend {
             let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
             if g.contains_key(&sandbox_id) {
                 return Err(format!(
-                    "restore_from_sealed: sandbox {sandbox_id} already present in nomad-ch state"
+                    "restore: sandbox {sandbox_id} already present in nomad-ch state"
                 ));
             }
             g.insert(
                 sandbox_id,
                 NomadChSandbox {
-                    user_id: sealed.user_id.clone(),
+                    user_id: row.user_id.clone(),
                     job_id,
                     vm_index,
                     host_dir,
@@ -1414,6 +1408,18 @@ impl NomadCHBackend {
             agent_url,
             pubkey_fp,
         })
+    }
+
+    /// Legacy v2-shape restore. Round-8 keeps this so existing tests
+    /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
+    /// through [`Self::restore_from_pg_and_sealed`].
+    #[allow(dead_code)]
+    pub async fn restore_from_sealed(
+        &self,
+        _sandbox_id: Uuid,
+        _sealed: &crate::persist::SealedAuth,
+    ) -> Result<super::SandboxAuth, String> {
+        Err("restore_from_sealed: round-8 deprecated — use restore_from_pg_and_sealed".into())
     }
 
     /// Build a short prefix for agent-error log lines so a fleet-

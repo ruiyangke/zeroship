@@ -1103,15 +1103,14 @@ async fn mint_endpoint_seals_preview_state_to_disk() {
         sealed_path.exists(),
         "POST /share must persist-on-mint (sealed file at {sealed_path:?})"
     );
+    let _ = raw_tid; // round-8: audit metadata moves to pg
     let key = AeadKey::from_bytes(aead);
     let reread = unseal_one(&sealed_path, &key).expect("unseal");
     assert_eq!(reread.sandbox_id, id.to_string());
     let ring = reread.preview_secrets.expect("ring sealed on mint");
     assert_eq!(ring.sv_current, 1);
-    assert_eq!(reread.preview_audit.len(), 1, "audit row sealed");
-    assert_eq!(reread.preview_audit[0].token_id, raw_tid);
-    assert_eq!(reread.preview_audit[0].port, 5173);
-    assert_eq!(reread.preview_audit[0].scope, "ro");
+    // Round-8: per-token audit metadata is now a `sandbox.shares`
+    // pg row; the sealed record holds the secret ring only.
     let _ = std::fs::remove_dir_all(&persist_dir);
 }
 
@@ -1161,9 +1160,7 @@ async fn delete_endpoint_seals_post_rotate_state_to_disk() {
         ring.sv_current, 2,
         "DELETE bumps secret_version_current to 2"
     );
-    assert!(
-        reread.preview_audit.is_empty(),
-        "explicit DELETE clears the audit table (zero-grace)"
-    );
+    // Round-8: audit table is in pg now; the sealed record only
+    // carries the secret ring after the rotate.
     let _ = std::fs::remove_dir_all(&persist_dir);
 }

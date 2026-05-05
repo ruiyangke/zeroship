@@ -494,19 +494,15 @@ impl K8sBackend {
         // address (dev). The restart-restore path (when implemented
         // for k8s — see TODO in restore_from_sealed) reads it back.
         if let Some(persist) = &self.persist {
+            // v3: secrets only. Pg holds user_id, project_id, backend,
+            // agent_url, pubkey_fp/key_fp, created_at_secs.
+            let _ = agent_url_for_seal;
             let record = crate::persist::SealedAuth {
                 version: crate::persist::SEAL_VERSION,
                 sandbox_id: sandbox_id.to_string(),
-                user_id: user_id.to_string(),
-                project_id: project_id.to_string(),
-                backend: "k8s".to_string(),
                 signing_key_bytes: signing_key_for_seal.to_bytes(),
-                vm_index: None,
-                agent_url: Some(agent_url_for_seal),
-                pubkey_fp: key_fp.clone(),
-                created_at_secs: now,
                 preview_secrets: None,
-                preview_audit: Vec::new(),
+                boot_id: None,
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 tracing::warn!(
@@ -757,29 +753,21 @@ impl K8sBackend {
         let Some(persist) = self.persist.clone() else {
             return Ok(false);
         };
-        let (sk_bytes, agent_url) = {
+        let _ = (info, audit); // round-8: legacy fields no longer sealed
+        let sk_bytes = {
             let guard = self.state.read().unwrap();
             let Some(s) = guard.get(&sandbox_id) else {
                 return Ok(false);
             };
-            (s.signing_key.to_bytes(), s.agent_url.clone())
+            s.signing_key.to_bytes()
         };
-        let pubkey_fp = sig::pubkey_fingerprint(
-            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
-        );
+        // v3: secrets only.
         let record = crate::persist::SealedAuth {
             version: crate::persist::SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: info.user_id.clone(),
-            project_id: info.project_id.clone(),
-            backend: "k8s".to_string(),
             signing_key_bytes: sk_bytes,
-            vm_index: None,
-            agent_url: Some(agent_url),
-            pubkey_fp,
-            created_at_secs: info.created_at_secs,
             preview_secrets: secrets,
-            preview_audit: audit,
+            boot_id: None,
         };
         persist
             .seal(sandbox_id, &record)

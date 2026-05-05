@@ -248,11 +248,56 @@ pub async fn mint_share(
 
     // Persist-on-mint (best-effort). A controller crash between the
     // in-memory ring/audit update and the next sealed-record write
-    // would lose the freshly-minted token's metadata otherwise.
-    // Failures here are logged and swallowed — the API call MUST
-    // NOT fail on seal failure (the in-memory state is authoritative
-    // for live traffic; persistence is for restart resilience only).
+    // would lose the freshly-minted ring otherwise (the per-token
+    // audit metadata is in pg now, round-8). Failures here are
+    // logged and swallowed.
     persist_preview_state(&state, id).await;
+
+    // Round-8 Phase 1: per-token audit metadata moves to pg. Write
+    // the share row synchronously; on Err log + continue.
+    if let Some(db) = state.database.as_ref() {
+        let typed_token_id = format!("tok_{}", token_id.replace(['-', '_'], "x"));
+        let row = crate::db::ShareRow {
+            // Token-id storage in pg uses a tok_ typed-id wrapper to
+            // satisfy the schema CHECK; the canonical wire-stable
+            // form returned to the API caller is `shr_<raw_tid>`.
+            // Round-8: this is a placeholder mapping; Phase-1.1 will
+            // either change the schema to allow `shr_…` or move the
+            // pg-side typed-id to a hash of the raw `tid`.
+            token_id: typed_token_id.clone(),
+            sandbox_id: sandbox_id_str.clone(),
+            port,
+            scope: claims.scope.clone(),
+            secret_version: claims.sv as i32,
+            issued_at_secs: now,
+            expires_at_secs: claims.exp,
+            iss: claims.iss.clone(),
+        };
+        if let Err(e) = db.insert_share(&row).await {
+            tracing::warn!(
+                sandbox_id = %sandbox_id_str,
+                error = %e,
+                "sandbox/preview_share: pg insert_share failed (non-fatal)"
+            );
+        }
+        let evt_data = serde_json::json!({
+            "token_id": format!("shr_{token_id}"),
+            "port": port,
+            "scope": claims.scope,
+            "expires_at": claims.exp,
+        });
+        let event = crate::db::Database::new_event(
+            &sandbox_id_str,
+            &state
+                .sandboxes
+                .get(&id)
+                .map(|i| i.user_id)
+                .unwrap_or_else(|| "usr_unknown".into()),
+            "share.minted",
+            evt_data.to_string(),
+        );
+        let _ = db.insert_event(&event).await;
+    }
 
     HttpResponse::Ok().json(&json!({
         "token": token,
@@ -339,6 +384,18 @@ pub async fn revoke_all_share(
     // restore must read back the new (post-rotate) state. See doc
     // § II.4 "Revocation".
     persist_preview_state(&state, id).await;
+
+    // Round-8 Phase 1: pg-side rotation revokes every existing share
+    // row for this sandbox so the validator can refuse them.
+    if let Some(db) = state.database.as_ref() {
+        if let Err(e) = db.rotate_share_secret(id).await {
+            tracing::warn!(
+                sandbox_id = %id,
+                error = %e,
+                "sandbox/preview_share: pg rotate_share_secret failed (non-fatal)"
+            );
+        }
+    }
     HttpResponse::Ok().json(&json!({
         "revoked": "all",
         "secret_version_current": sv,

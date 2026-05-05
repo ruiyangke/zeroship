@@ -144,13 +144,20 @@ impl AppState {
         // re-open the AEAD key file or re-read the env. `None` is the
         // disabled/no-op shape — feature-flagged behind
         // `SANDBOX_PERSIST_AUTH=1`; default OFF.
-        if let Some(p) = &persist {
+        // Round-8 Phase-1: restart-restore is pg-driven. We need both
+        // a Database handle (for the host-scoped query) and a
+        // Persistence handle (for the sealed-record secret material).
+        // When either is missing, restore is skipped — the controller
+        // boots empty.
+        if let (Some(db), Some(p)) = (&database, &persist) {
             let dir = p.persist_dir();
             tracing::info!(
                 persist_dir = ?dir,
-                "sandbox persist: SANDBOX_PERSIST_AUTH=1; restoring sealed records"
+                host_id = %db.host_id(),
+                "sandbox persist: pg + sealed restore starting"
             );
             match restore::restore_at_startup(
+                db.as_ref(),
                 &dir,
                 p.aead_key(),
                 &backend,
@@ -165,12 +172,14 @@ impl AppState {
                     mismatched = s.mismatched,
                     unreachable = s.unreachable,
                     corrupt = s.corrupt,
+                    seal_missing = s.seal_missing,
                     unsupported = s.unsupported,
+                    orphans_unlinked = s.orphans_unlinked,
                     "sandbox persist: restore done"
                 ),
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "sandbox persist: restore_at_startup IO failure (non-fatal; sealed records left in place)"
+                    "sandbox persist: restore_at_startup IO failure (non-fatal)"
                 ),
             }
         }

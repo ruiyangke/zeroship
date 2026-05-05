@@ -205,11 +205,72 @@ pub async fn create_sandbox(
     .await;
     match outcome {
         CreateOutcome::Ok { sandbox_id, info } => {
-            let stored = state.sandboxes.insert(sandbox_id, info);
+            let stored = state.sandboxes.insert(sandbox_id, info.clone());
+            // Round-8 Phase 1: pg is the system of record for non-secret
+            // state. Write the sandbox row synchronously after create
+            // succeeds; on Err, log + continue (sandbox is live in
+            // memory; pg will reconcile on next boot).
+            if let Some(db) = state.database.as_ref() {
+                let agent_url = match state.backend.session_auth(sandbox_id).await {
+                    Ok(a) => Some(a.agent_url),
+                    Err(_) => None,
+                };
+                let key_fp = state
+                    .backend
+                    .session_auth(sandbox_id)
+                    .await
+                    .map(|a| a.pubkey_fp)
+                    .unwrap_or_default();
+                let vm_index = parse_vm_index_hint(&info.backend_hint);
+                if let Err(e) = db
+                    .insert_sandbox(
+                        &info,
+                        db.host_id(),
+                        &key_fp,
+                        agent_url.as_deref(),
+                        vm_index,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/handlers: pg insert_sandbox failed (non-fatal)"
+                    );
+                }
+                // Audit event — best-effort.
+                let evt_data = serde_json::json!({
+                    "backend": info.backend,
+                    "vm_index": vm_index,
+                    "agent_url": agent_url,
+                });
+                let event = crate::db::Database::new_event(
+                    &info.sandbox_id,
+                    &info.user_id,
+                    "created",
+                    evt_data.to_string(),
+                );
+                if let Err(e) = db.insert_event(&event).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/handlers: pg insert_event(created) failed (non-fatal)"
+                    );
+                }
+            }
             HttpResponse::Created().json(&stored)
         }
         CreateOutcome::Failed { status, message } => err(status, message),
     }
+}
+
+/// Parse `vm_index=<int>` out of a `backend_hint` string. Round-8
+/// Phase 1: the nomad-ch backend embeds vm_index in its hint; the
+/// docker / k8s backends don't. Returns `None` for any miss.
+fn parse_vm_index_hint(hint: &str) -> Option<i32> {
+    hint.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("vm_index="))
+        .and_then(|s| s.parse::<i32>().ok())
 }
 
 /// FM-E: retry result.
@@ -457,6 +518,7 @@ pub async fn stop_sandbox(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
+    let info_for_audit = state.sandboxes.get(&id);
     if let Err(e) = state.backend.stop(id).await {
         // **Don't** swallow: surface so the operator sees the
         // failure. We still remove from the registry — leaving a
@@ -467,6 +529,33 @@ pub async fn stop_sandbox(
         return err(500, format!("backend.stop: {e}"));
     }
     state.sandboxes.remove(&id);
+
+    // Round-8 Phase 1: best-effort pg writes. Move the row to the
+    // tombstone (deleted_sandboxes) and emit a stopped event.
+    if let Some(db) = state.database.as_ref() {
+        if let Err(e) = db.delete_sandbox(id).await {
+            tracing::warn!(
+                sandbox_id = %id,
+                error = %e,
+                "sandbox/handlers: pg delete_sandbox failed (non-fatal)"
+            );
+        }
+        if let Some(info) = info_for_audit {
+            let event = crate::db::Database::new_event(
+                &info.sandbox_id,
+                &info.user_id,
+                "stopped",
+                "{}".to_string(),
+            );
+            if let Err(e) = db.insert_event(&event).await {
+                tracing::warn!(
+                    sandbox_id = %id,
+                    error = %e,
+                    "sandbox/handlers: pg insert_event(stopped) failed (non-fatal)"
+                );
+            }
+        }
+    }
 
     HttpResponse::Ok().json(&serde_json::json!({"stopped": true, "sandbox_id": id.to_string()}))
 }

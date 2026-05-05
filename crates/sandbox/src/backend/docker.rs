@@ -259,25 +259,18 @@ impl DockerBackend {
         // there's nothing to probe. Docker records seal `agent_url`
         // (the bridge IP) since it's not deterministic from any
         // controller-side identifier.
-        if let (Some(persist), Some(sk), Some(url)) = (
+        if let (Some(persist), Some(sk), Some(_url)) = (
             &self.persist,
             signing_key_opt.as_ref(),
             agent_url_opt.as_ref(),
         ) {
-            let pubkey_fp = sig::pubkey_fingerprint(&sk.verifying_key());
+            // v3: secrets only.
             let record = crate::persist::SealedAuth {
                 version: crate::persist::SEAL_VERSION,
                 sandbox_id: sandbox_id.to_string(),
-                user_id: user_id.to_string(),
-                project_id: project_id.to_string(),
-                backend: "docker".to_string(),
                 signing_key_bytes: sk.to_bytes(),
-                vm_index: None,
-                agent_url: Some(url.clone()),
-                pubkey_fp,
-                created_at_secs: now,
                 preview_secrets: None,
-                preview_audit: Vec::new(),
+                boot_id: None,
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 tracing::warn!(
@@ -453,7 +446,8 @@ impl DockerBackend {
         let Some(persist) = self.persist.clone() else {
             return Ok(false);
         };
-        let (sk_bytes, agent_url) = {
+        let _ = (info, audit); // round-8: legacy fields no longer sealed
+        let sk_bytes = {
             let guard = self.state.read().unwrap();
             let Some(s) = guard.get(&sandbox_id) else {
                 return Ok(false);
@@ -461,27 +455,15 @@ impl DockerBackend {
             let Some(sk) = &s.signing_key else {
                 return Ok(false);
             };
-            let Some(url) = &s.agent_url else {
-                return Ok(false);
-            };
-            (sk.to_bytes(), url.clone())
+            sk.to_bytes()
         };
-        let pubkey_fp = sig::pubkey_fingerprint(
-            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
-        );
+        // v3: secrets only.
         let record = crate::persist::SealedAuth {
             version: crate::persist::SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: info.user_id.clone(),
-            project_id: info.project_id.clone(),
-            backend: "docker".to_string(),
             signing_key_bytes: sk_bytes,
-            vm_index: None,
-            agent_url: Some(agent_url),
-            pubkey_fp,
-            created_at_secs: info.created_at_secs,
             preview_secrets: secrets,
-            preview_audit: audit,
+            boot_id: None,
         };
         persist
             .seal(sandbox_id, &record)

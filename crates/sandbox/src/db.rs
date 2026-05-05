@@ -823,6 +823,504 @@ fn is_concurrent_ddl_race(e: &compio_postgres::Error) -> bool {
 
 
 // ────────────────────────────────────────────────────────────────────
+// Phase-1 row types + write methods (round-8: pg as system of record)
+// ────────────────────────────────────────────────────────────────────
+
+/// One row from `sandbox.sandboxes`. Mirrors the persistent shape of
+/// the registry's [`crate::backend::SandboxInfo`] plus host/owner +
+/// CAS counter for the Phase-2 lease-based takeover.
+#[derive(Debug, Clone)]
+pub struct SandboxRow {
+    pub sandbox_id: String,
+    pub user_id: String,
+    pub project_id: String,
+    pub backend: String,
+    pub vm_index: Option<i32>,
+    pub agent_url: Option<String>,
+    pub host_id: String,
+    pub generation: i64,
+    pub status: SandboxStatus,
+    pub key_fp: String,
+    pub created_at_secs: u64,
+    pub started_at_secs: Option<u64>,
+    pub stopped_at_secs: Option<u64>,
+    pub last_used_at_secs: u64,
+}
+
+/// Pg `sandboxes.status` values. Round-8: `Unreachable` is a Phase-1
+/// addition so the boot loop can mark agents that 200-don't-respond
+/// without losing the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxStatus {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Lost,
+    Recreating,
+    Orphan,
+    Unreachable,
+}
+
+impl SandboxStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Stopped => "stopped",
+            Self::Lost => "lost",
+            Self::Recreating => "recreating",
+            Self::Orphan => "orphan",
+            Self::Unreachable => "unreachable",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        Some(match s {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "stopping" => Self::Stopping,
+            "stopped" => Self::Stopped,
+            "lost" => Self::Lost,
+            "recreating" => Self::Recreating,
+            "orphan" => Self::Orphan,
+            "unreachable" => Self::Unreachable,
+            _ => return None,
+        })
+    }
+}
+
+/// One row from `sandbox.shares`. Mirrors the share-token mint
+/// audit metadata (the token bytes themselves are NEVER stored).
+#[derive(Debug, Clone)]
+pub struct ShareRow {
+    pub token_id: String,
+    pub sandbox_id: String,
+    pub port: u16,
+    pub scope: String,
+    pub secret_version: i32,
+    pub issued_at_secs: u64,
+    pub expires_at_secs: u64,
+    pub iss: Option<String>,
+}
+
+/// Public-facing view of a `sandbox.shares` row (the `secret_version`
+/// is exposed but no secret bytes — `sandbox.shares` doesn't carry
+/// any to begin with).
+#[derive(Debug, Clone)]
+pub struct ShareMetadata {
+    pub token_id: String,
+    pub port: u16,
+    pub scope: String,
+    pub secret_version: i32,
+    pub issued_at_secs: u64,
+    pub expires_at_secs: u64,
+    pub iss: Option<String>,
+    pub last_used_at_secs: u64,
+    pub use_count: i64,
+}
+
+/// One row's-worth of audit material destined for `sandbox.events`.
+/// `kind` follows the open-enum convention from § 6.5; the `data`
+/// JSONB payload is enforced ≤ 8 KiB by a CHECK constraint on the
+/// table.
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub event_id: String,
+    pub sandbox_id: String,
+    pub user_id: String,
+    pub kind: String,
+    pub data_json: String,
+}
+
+impl Database {
+    /// Build a fresh `EventRow` with a freshly-minted typed-id for
+    /// `event_id`. Caller fills `kind` + `data_json`.
+    pub fn new_event(sandbox_id: &str, user_id: &str, kind: &str, data_json: String) -> EventRow {
+        EventRow {
+            event_id: zeroship_core::typed_id::generate("evt"),
+            sandbox_id: sandbox_id.to_string(),
+            user_id: user_id.to_string(),
+            kind: kind.to_string(),
+            data_json,
+        }
+    }
+
+    /// INSERT the host row (idempotent ON CONFLICT (host_id) DO
+    /// UPDATE). Matches the boot-time host upsert from § 10.1 step 2.
+    /// Round-8 Phase 1: hostname/region/backend default to "" /
+    /// "us-local-1" / pg's CHECK-passing default unless the operator
+    /// supplies them via env. Phase-2 wires the heartbeat task that
+    /// updates `last_heartbeat`.
+    pub async fn upsert_host(&self, hostname: &str, backend: &str) -> Result<()> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        // boot_id CHECK is `^[0-9A-Za-z]{20,40}$` — no prefix. Use a
+        // bare base62 UUIDv7 (22 chars), not a `boot_<…>` typed-id.
+        let boot_id_typed = zeroship_core::typed_id::uuid_to_base62(&Uuid::now_v7());
+        let region = std::env::var("SANDBOX_REGION").unwrap_or_else(|_| "us-local-1".to_string());
+        client
+            .execute(
+                "INSERT INTO sandbox.hosts (host_id, boot_id, hostname, region, backend, status) \
+                 VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, $5::TEXT, 'alive') \
+                 ON CONFLICT (host_id) DO UPDATE SET \
+                     boot_id = EXCLUDED.boot_id, \
+                     hostname = EXCLUDED.hostname, \
+                     status = 'alive', \
+                     last_heartbeat = now()",
+                &[
+                    &host_id_typed,
+                    &boot_id_typed,
+                    &hostname.to_string(),
+                    &region,
+                    &backend.to_string(),
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
+    /// INSERT a fresh sandbox row at create time. The caller supplies
+    /// `host_id` (the controller's stable UUIDv7), `key_fp`, and
+    /// `agent_url`; everything else comes from `info`.
+    pub async fn insert_sandbox(
+        &self,
+        info: &crate::backend::SandboxInfo,
+        host_id: Uuid,
+        key_fp: &str,
+        agent_url: Option<&str>,
+        vm_index: Option<i32>,
+    ) -> Result<()> {
+        // Belt-and-suspenders parse-then-pass.
+        let _ = zeroship_core::typed_id::parse_with_prefix(&info.sandbox_id, "sbx")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let _ = zeroship_core::typed_id::parse_with_prefix(&info.user_id, "usr")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let _ = zeroship_core::typed_id::parse_with_prefix(&info.project_id, "prj")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&host_id)
+        );
+        let agent_url_owned = agent_url.map(|s| s.to_string());
+        client
+            .execute(
+                "INSERT INTO sandbox.sandboxes \
+                    (sandbox_id, user_id, project_id, backend, vm_index, \
+                     agent_url, host_id, generation, status, key_fp, \
+                     created_at, started_at, last_used_at) \
+                 VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, $5::INTEGER, \
+                         $6::TEXT, $7::TEXT, 0, 'running', $8::TEXT, \
+                         now(), now(), now())",
+                &[
+                    &info.sandbox_id,
+                    &info.user_id,
+                    &info.project_id,
+                    &info.backend,
+                    &vm_index,
+                    &agent_url_owned,
+                    &host_id_typed,
+                    &key_fp.to_string(),
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
+    /// CAS-guarded status update. Returns the new generation on
+    /// success; returns `Err(NotFound)` when the row is absent or the
+    /// CAS lost (caller's `expected_generation` was stale — in Phase 1
+    /// that's a reconciliation hint; in Phase 2 it's the lease-takeover
+    /// split-brain telemetry).
+    pub async fn update_sandbox_status(
+        &self,
+        sandbox_id: Uuid,
+        status: SandboxStatus,
+        expected_generation: i64,
+    ) -> Result<i64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let stopped_at_clause = match status {
+            SandboxStatus::Stopped | SandboxStatus::Lost | SandboxStatus::Orphan => {
+                ", stopped_at = COALESCE(stopped_at, now())"
+            }
+            _ => "",
+        };
+        let sql = format!(
+            "UPDATE sandbox.sandboxes \
+                SET status = $1::TEXT, \
+                    generation = generation + 1, \
+                    last_used_at = now()\
+                    {stopped_at_clause} \
+              WHERE sandbox_id = $2::TEXT \
+                AND generation = $3::BIGINT \
+                AND deleted_at IS NULL \
+              RETURNING generation"
+        );
+        let opt = client
+            .query_opt(&sql, &[&status.as_str().to_string(), &sandbox_id_typed, &expected_generation])
+            .await
+            .map_err(DatabaseError::Pg)?;
+        match opt {
+            Some(row) => Ok(row.get::<_, i64>(0)),
+            None => Err(DatabaseError::Validation(format!(
+                "CAS missed for sandbox {sandbox_id_typed}: expected_generation={expected_generation}",
+            ))),
+        }
+    }
+
+    /// List all running sandbox rows owned by `host_id` (the
+    /// controller's stable UUIDv7). Used by restart-restore.
+    pub async fn list_running_sandboxes_for_host(
+        &self,
+        host_id: Uuid,
+    ) -> Result<Vec<SandboxRow>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&host_id)
+        );
+        let rows = client
+            .query(
+                "SELECT sandbox_id, user_id, project_id, backend, vm_index, \
+                        agent_url, host_id, generation, status, key_fp, \
+                        EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_secs, \
+                        EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
+                        EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
+                        EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
+                   FROM sandbox.sandboxes \
+                  WHERE host_id = $1::TEXT \
+                    AND status = 'running' \
+                    AND deleted_at IS NULL",
+                &[&host_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let status_str: &str = r.get("status");
+            let started_at_opt: Option<i64> = r.try_get("started_at_secs").ok();
+            let stopped_at_opt: Option<i64> = r.try_get("stopped_at_secs").ok();
+            out.push(SandboxRow {
+                sandbox_id: r.get("sandbox_id"),
+                user_id: r.get("user_id"),
+                project_id: r.get("project_id"),
+                backend: r.get("backend"),
+                vm_index: r.try_get("vm_index").ok(),
+                agent_url: r.try_get("agent_url").ok(),
+                host_id: r.get("host_id"),
+                generation: r.get::<_, i64>("generation"),
+                status: SandboxStatus::from_str_opt(status_str)
+                    .unwrap_or(SandboxStatus::Lost),
+                key_fp: r.get("key_fp"),
+                created_at_secs: r.get::<_, i64>("created_at_secs").max(0) as u64,
+                started_at_secs: started_at_opt.map(|v| v.max(0) as u64),
+                stopped_at_secs: stopped_at_opt.map(|v| v.max(0) as u64),
+                last_used_at_secs: r.get::<_, i64>("last_used_at_secs").max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Move a sandbox row to the `deleted_sandboxes` tombstone in one
+    /// TX. After this call, the row is gone from `sandboxes` but the
+    /// tombstone keeps the operator's audit trail (and prevents the
+    /// boot reconciler from re-INSERTing from a sealed-record orphan
+    /// — though round-8 unlinks orphans rather than re-INSERTing).
+    pub async fn delete_sandbox(&self, sandbox_id: Uuid) -> Result<()> {
+        let pool = self.open_pool().await?;
+        let mut client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
+        // Tombstone INSERT first (with the user_id from the row).
+        tx.execute(
+            "INSERT INTO sandbox.deleted_sandboxes (sandbox_id, user_id) \
+             SELECT sandbox_id, user_id FROM sandbox.sandboxes \
+              WHERE sandbox_id = $1::TEXT \
+             ON CONFLICT (sandbox_id) DO NOTHING",
+            &[&sandbox_id_typed],
+        )
+        .await
+        .map_err(DatabaseError::Pg)?;
+        tx.execute(
+            "DELETE FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&sandbox_id_typed],
+        )
+        .await
+        .map_err(DatabaseError::Pg)?;
+        tx.commit().await.map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
+    /// INSERT a share-token row (mint).
+    pub async fn insert_share(&self, share: &ShareRow) -> Result<()> {
+        let _ = zeroship_core::typed_id::parse_with_prefix(&share.token_id, "tok")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let _ = zeroship_core::typed_id::parse_with_prefix(&share.sandbox_id, "sbx")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let port_i16 = i16::try_from(share.port)
+            .map_err(|e| DatabaseError::Validation(format!("port out of range: {e}")))?;
+        let issued_at_secs = i64::try_from(share.issued_at_secs)
+            .map_err(|e| DatabaseError::Validation(format!("issued_at overflow: {e}")))?;
+        let expires_at_secs = i64::try_from(share.expires_at_secs)
+            .map_err(|e| DatabaseError::Validation(format!("expires_at overflow: {e}")))?;
+        client
+            .execute(
+                "INSERT INTO sandbox.shares \
+                    (token_id, sandbox_id, port, scope, secret_version, \
+                     issued_at, expires_at, iss) \
+                 VALUES ($1::TEXT, $2::TEXT, $3::SMALLINT, $4::TEXT, $5::INTEGER, \
+                         to_timestamp($6::BIGINT), to_timestamp($7::BIGINT), $8::TEXT)",
+                &[
+                    &share.token_id,
+                    &share.sandbox_id,
+                    &port_i16,
+                    &share.scope,
+                    &share.secret_version,
+                    &issued_at_secs,
+                    &expires_at_secs,
+                    &share.iss,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+
+    /// List share-token audit rows for `sandbox_id` filtered by
+    /// `port`. Returns metadata only — no secret bytes (the `shares`
+    /// table doesn't carry them).
+    pub async fn list_shares_for_sandbox(
+        &self,
+        sandbox_id: Uuid,
+        port: u16,
+    ) -> Result<Vec<ShareMetadata>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let port_i16 = i16::try_from(port)
+            .map_err(|e| DatabaseError::Validation(format!("port out of range: {e}")))?;
+        let rows = client
+            .query(
+                "SELECT token_id, port, scope, secret_version, \
+                        EXTRACT(EPOCH FROM issued_at)::BIGINT AS issued_at_secs, \
+                        EXTRACT(EPOCH FROM expires_at)::BIGINT AS expires_at_secs, \
+                        iss, \
+                        COALESCE(EXTRACT(EPOCH FROM last_used_at)::BIGINT, 0) AS last_used_at_secs, \
+                        use_count \
+                   FROM sandbox.shares \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND port = $2::SMALLINT \
+                    AND deleted_at IS NULL",
+                &[&sandbox_id_typed, &port_i16],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let port_i: i16 = r.get("port");
+            out.push(ShareMetadata {
+                token_id: r.get("token_id"),
+                port: port_i.max(0) as u16,
+                scope: r.get("scope"),
+                secret_version: r.get::<_, i32>("secret_version"),
+                issued_at_secs: r.get::<_, i64>("issued_at_secs").max(0) as u64,
+                expires_at_secs: r.get::<_, i64>("expires_at_secs").max(0) as u64,
+                iss: r.try_get("iss").ok(),
+                last_used_at_secs: r.get::<_, i64>("last_used_at_secs").max(0) as u64,
+                use_count: r.get::<_, i64>("use_count"),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Rotate the per-sandbox secret-version. Phase-1 model: the
+    /// in-memory `PreviewSecrets.sv_current` is the canonical counter;
+    /// pg's per-share `secret_version` rows track which secret a
+    /// given share was minted under. Rotate-and-clear (the explicit
+    /// DELETE flow) marks every existing share row revoked so the
+    /// validator can refuse them.
+    ///
+    /// Returns the count of rows revoked. The caller is responsible
+    /// for bumping the in-memory ring's `sv_current`.
+    pub async fn rotate_share_secret(&self, sandbox_id: Uuid) -> Result<u64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let n = client
+            .execute(
+                "UPDATE sandbox.shares \
+                    SET revoked_at = now() \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND deleted_at IS NULL \
+                    AND revoked_at IS NULL",
+                &[&sandbox_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(n)
+    }
+
+    /// INSERT an audit-pipe row.
+    pub async fn insert_event(&self, event: &EventRow) -> Result<()> {
+        let _ = zeroship_core::typed_id::parse_with_prefix(&event.event_id, "evt")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let _ = zeroship_core::typed_id::parse_with_prefix(&event.sandbox_id, "sbx")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let _ = zeroship_core::typed_id::parse_with_prefix(&event.user_id, "usr")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        // JSONB binary mapping for `String` is not in the workspace's
+        // postgres-types feature set; cast TEXT → JSONB inside SQL so
+        // we can keep the `String` parameter binding.
+        client
+            .execute(
+                "INSERT INTO sandbox.events \
+                    (event_id, sandbox_id, user_id, kind, ts, data) \
+                 VALUES ($1::TEXT, $2::TEXT, $3::TEXT, $4::TEXT, now(), \
+                         CAST($5::TEXT AS JSONB))",
+                &[
+                    &event.event_id,
+                    &event.sandbox_id,
+                    &event.user_id,
+                    &event.kind,
+                    &event.data_json,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(())
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────
 
