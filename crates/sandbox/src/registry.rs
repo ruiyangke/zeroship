@@ -11,6 +11,7 @@
 //! each get their own sandbox — see the storage design.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -161,6 +162,17 @@ struct Sandbox {
     created_at: Instant,
     last_used: Arc<RwLock<Instant>>,
     auth: Option<SandboxAuth>,
+    /// Phase-2 CAS counter (sandbox-pg-state design § 11.2).
+    /// Mirrors the pg row's `generation` column. Read-modify-write
+    /// over the lifetime of the sandbox: every CAS-guarded write
+    /// to pg passes the current value as `expected_generation`. On
+    /// a takeover-induced bump (the new owner reclaimed via § 11.2),
+    /// the registry's [`SandboxRegistry::update_generation`] is the
+    /// callback that brings this in-memory value back in sync.
+    ///
+    /// Phase-1 inserts default to 0 (pg's `INSERT ... DEFAULT 0`);
+    /// the restore path picks up the row's actual generation.
+    generation: Arc<AtomicI64>,
     /// Phase-3 preview share-token secret ring. `None` until the
     /// first `POST .../share` mint or until a sealed-record restore
     /// re-hydrates one. Lock granularity matches `last_used` — a
@@ -273,6 +285,12 @@ impl SandboxRegistry {
             created_at: now,
             last_used: Arc::new(RwLock::new(now)),
             auth,
+            // Phase-2: generation starts at 0 to match pg's
+            // `INSERT … generation DEFAULT 0`. The restore path uses
+            // [`Self::set_generation`] to overwrite from pg's row
+            // when re-hydrating after a controller restart or a
+            // takeover-driven probe.
+            generation: Arc::new(AtomicI64::new(0)),
             preview_secrets: Arc::new(RwLock::new(None)),
             preview_audit: Arc::new(RwLock::new(Vec::new())),
         };
@@ -280,6 +298,40 @@ impl SandboxRegistry {
         self.by_sandbox.write().unwrap().insert(sandbox_id, sandbox);
         self.by_user_project.write().unwrap().insert(key, sandbox_id);
         info
+    }
+
+    /// Read the in-memory `generation` for a sandbox. Phase-2 CAS
+    /// callers pass this to `Database::update_sandbox_status` as
+    /// `expected_generation`. Returns `None` for unknown id (the
+    /// caller should treat as already-gone and skip the pg call).
+    pub fn generation_for(&self, id: &Uuid) -> Option<i64> {
+        let guard = self.by_sandbox.read().unwrap();
+        guard.get(id).map(|s| s.generation.load(Ordering::Relaxed))
+    }
+
+    /// Overwrite the in-memory `generation` to `value`. Used by:
+    ///   - the restore path, after `list_running_sandboxes_for_host`
+    ///     surfaces the canonical pg-side generation;
+    ///   - the takeover task, after the CAS UPDATE returns the
+    ///     bumped generation for newly-reclaimed sandboxes (§ 11.2).
+    /// No-op for unknown id.
+    pub fn set_generation(&self, id: &Uuid, value: i64) {
+        let guard = self.by_sandbox.read().unwrap();
+        if let Some(s) = guard.get(id) {
+            s.generation.store(value, Ordering::Relaxed);
+        }
+    }
+
+    /// Bump the in-memory `generation` by 1 and return the NEW
+    /// value. Mirrors pg's `SET generation = generation + 1` on a
+    /// successful CAS write — call this AFTER pg confirms the
+    /// UPDATE landed (i.e. after `Database::update_sandbox_status`
+    /// returns Ok). No-op for unknown id; returns `None`.
+    pub fn bump_generation(&self, id: &Uuid) -> Option<i64> {
+        let guard = self.by_sandbox.read().unwrap();
+        let s = guard.get(id)?;
+        // fetch_add returns the OLD value; we want the NEW.
+        Some(s.generation.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     /// Restore Phase-3 share-token state from a sealed record. Used

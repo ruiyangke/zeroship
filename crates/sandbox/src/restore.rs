@@ -263,6 +263,14 @@ async fn process_pg_row(
                 Ok(auth) => {
                     let info = build_restored_info(row);
                     registry.insert_with_auth(sandbox_id_uuid, info, auth);
+                    // Phase-2 HA: hydrate the in-memory generation
+                    // from the pg row so any subsequent CAS-guarded
+                    // write carries the canonical value (§ 11.2).
+                    // Without this, the registry would default to 0
+                    // and a stop right after restore would miss the
+                    // CAS for any sandbox that's seen a takeover or
+                    // status flip.
+                    registry.set_generation(&sandbox_id_uuid, row.generation);
                     if let Some(secrets) = sealed.preview_secrets.as_ref() {
                         let pv = crate::registry::PreviewSecrets::from_sealed(secrets);
                         registry.restore_preview_state(sandbox_id_uuid, Some(pv), Vec::new());
@@ -272,6 +280,7 @@ async fn process_pg_row(
                         user_id = %row.user_id,
                         project_id = %row.project_id,
                         agent_url = %agent_url,
+                        generation = row.generation,
                         "sandbox/restore: restored from pg + sealed"
                     );
                     RestoreOutcome::Restored

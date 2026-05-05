@@ -519,6 +519,14 @@ pub async fn stop_sandbox(
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
     let info_for_audit = state.sandboxes.get(&id);
+    // Phase-2 HA: snapshot the in-memory `generation` BEFORE
+    // backend.stop so the CAS write below carries the value this
+    // controller still believes it owns. A peer takeover that
+    // already happened will have bumped the pg row past this value;
+    // our UPDATE will return 0 rows and we'll log lost-leadership
+    // before proceeding with local cleanup (§ 11.2).
+    let expected_generation = state.sandboxes.generation_for(&id);
+
     if let Err(e) = state.backend.stop(id).await {
         // **Don't** swallow: surface so the operator sees the
         // failure. We still remove from the registry — leaving a
@@ -533,6 +541,48 @@ pub async fn stop_sandbox(
     // Round-8 Phase 1: best-effort pg writes. Move the row to the
     // tombstone (deleted_sandboxes) and emit a stopped event.
     if let Some(db) = state.database.as_ref() {
+        // Phase-2 CAS-guarded status flip. Before we drop the row
+        // into the tombstone, mark it 'stopped' under the
+        // generation we still believe we own. CAS-loss means a
+        // peer took over (lease expired from our view); we log
+        // `lost-leadership`, increment the metric, and STILL
+        // proceed with the tombstone — the new owner will see
+        // status='stopped' on its next probe and clean up.
+        if let Some(gen) = expected_generation {
+            match db
+                .update_sandbox_status(id, crate::db::SandboxStatus::Stopped, gen)
+                .await
+            {
+                Ok(new_gen) => {
+                    tracing::debug!(
+                        sandbox_id = %id,
+                        old_generation = gen,
+                        new_generation = new_gen,
+                        "sandbox/handlers: pg update_sandbox_status(stopped) ok"
+                    );
+                }
+                Err(e) => {
+                    let err_msg = format!("{e:?}");
+                    if err_msg.contains("CAS missed") {
+                        // Lost-leadership: the row's generation is
+                        // ahead of ours, meaning a peer took over.
+                        tracing::warn!(
+                            sandbox_id = %id,
+                            expected_generation = gen,
+                            "sandbox/handlers: lost-leadership on stop (CAS conflict); proceeding with local cleanup"
+                        );
+                        crate::metrics::inc_lost_leadership("update_sandbox_status_stopped");
+                    } else {
+                        tracing::warn!(
+                            sandbox_id = %id,
+                            error = %e,
+                            "sandbox/handlers: pg update_sandbox_status(stopped) failed (non-fatal)"
+                        );
+                    }
+                }
+            }
+        }
+
         if let Err(e) = db.delete_sandbox(id).await {
             tracing::warn!(
                 sandbox_id = %id,
