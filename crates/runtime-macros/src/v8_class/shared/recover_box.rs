@@ -20,7 +20,7 @@
 //! regression per design §5.1.2's "structural change" classifier.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::emit::reentry_guard::gen_reentry_guard;
 
@@ -123,9 +123,9 @@ pub(crate) fn gen_recover_box(
     state_ty: &syn::Ident,
     method_name: &syn::Ident,
     mut_receiver: bool,
+    brand_check_fn: &syn::Ident,
 ) -> TokenStream2 {
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
-    let brand = gen_brand_check_throw(&brand_check_fn);
+    let brand = gen_brand_check_throw(brand_check_fn);
     let external = gen_recover_external();
     let reentry_guard = gen_reentry_guard(class_ty, method_name, mut_receiver);
     let materialise = if mut_receiver {

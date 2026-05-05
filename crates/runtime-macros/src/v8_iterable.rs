@@ -661,6 +661,14 @@ pub(crate) fn generate(
 
     let iter_install_slot_ty = format_ident!("__InstallSlot_{}", iter_class_ty);
 
+    // The parent class's brand-check ident. v8_iterable can't read
+    // ClassConfig (the iterable codegen pre-dates ClassConfig in the
+    // call graph — see `analyze.rs:117-119`), so the format_ident
+    // recurs here. If a future refactor extracts an `IterableConfig`
+    // shape parameter, this site moves to read from that. The string
+    // form `__brand_check_<Class>` is the same one Wave 9 N1 cached
+    // on `ClassConfig::brand_check_ident`; both emit identical
+    // tokens at the user's expansion site.
     let parent_brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     // Brand-check + External-recovery preamble — one canonical
     // implementation in `v8_class::shared::recover_box`. Each callsite

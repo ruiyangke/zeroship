@@ -34,7 +34,10 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
     let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    // Wave 9 N1: brand-check ident from ClassConfig (computed once at
+    // ClassConfig::new). This emit site DEFINES the fn — the cached
+    // ident is what every consumer reads.
+    let brand_check_fn = &cfg.brand_check_ident;
 
     quote! {
         /// Brand-check helper: walks the prototype chain of `this`

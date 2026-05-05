@@ -133,11 +133,20 @@ pub(super) fn gen_param_extractions(
 /// True for `&mut v8::PinScope<'_, '_>` and similar reference forms.
 /// We don't bother distinguishing `&` vs `&mut` — V8 ops universally
 /// require `&mut`, and the type alias system means PinScope appears
-/// in many shapes (with/without lifetime params, with/without the v8::
-/// prefix).
+/// in many shapes (with/without lifetime params, with/without the
+/// `v8::` prefix or the absolute `::v8::` form).
+///
+/// Wave 9 H17: matches the LAST path segment only. Pre-fix any
+/// segment named `PinScope` along the path satisfied the predicate,
+/// so a hypothetical user `mod PinScope` (or a type alias `type
+/// SomePinScope = ...`) could spuriously activate the synthetic
+/// scope binding. After this tightening, only paths whose terminal
+/// segment is the literal ident `PinScope` qualify — matches the
+/// canonical spellings (`PinScope`, `v8::PinScope`, `::v8::PinScope`)
+/// and rejects unrelated paths that merely contain the ident.
 fn is_pin_scope_ref(ty: &Type) -> bool {
     if let Type::Reference(r) = ty {
-        return type_path_contains_segment(&r.elem, "PinScope");
+        return last_path_segment_is(&r.elem, "PinScope");
     }
     false
 }
@@ -145,8 +154,13 @@ fn is_pin_scope_ref(ty: &Type) -> bool {
 /// True for `v8::Local<v8::Object>` typed params — synthetic that
 /// gets bound to `args.this()`. Used by methods that need access
 /// to the JS wrapper itself (e.g. to register a Global for use by
-/// async event-dispatch paths). Distinct from is_pin_scope_ref:
-/// no reference form, just the bare Local<Object>.
+/// async event-dispatch paths). Distinct from `is_pin_scope_ref`:
+/// no reference form, just the bare `Local<Object>`.
+///
+/// Wave 9 H17: same tightening as `is_pin_scope_ref` — match the
+/// LAST segment of the inner generic arg's path, not any segment.
+/// Pre-fix `v8::Local<some::Object<...>>` would have matched
+/// erroneously.
 fn is_wrapper_local(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
         return false;
@@ -161,24 +175,33 @@ fn is_wrapper_local(ty: &Type) -> bool {
     let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
         return false;
     };
-    // Look for v8::Object as the last generic arg.
+    // The first type-shaped generic arg is the Local's payload type.
+    // Match its trailing segment against `Object` — the only payload
+    // we accept for the wrapper synthetic.
     args.args.iter().any(|arg| {
         if let syn::GenericArgument::Type(inner) = arg {
-            return type_path_contains_segment(inner, "Object");
+            return last_path_segment_is(inner, "Object");
         }
         false
     })
 }
 
-fn type_path_contains_segment(ty: &Type, target: &str) -> bool {
-    if let Type::Path(tp) = ty {
-        return tp
-            .path
-            .segments
-            .iter()
-            .any(|s| s.ident == target);
-    }
-    false
+/// True iff `ty` is a path type whose LAST segment ident equals
+/// `target`. Tightened in Wave 9 H17 from the prior
+/// `type_path_contains_segment`, which matched any segment along
+/// the path. The terminal-segment check is sufficient for the macro's
+/// type predicates (we accept any prefix path the user might spell —
+/// `PinScope`, `v8::PinScope`, `::v8::PinScope` — but reject types
+/// that merely re-use the ident as an inner module name).
+fn last_path_segment_is(ty: &Type, target: &str) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    tp.path
+        .segments
+        .last()
+        .map(|s| s.ident == target)
+        .unwrap_or(false)
 }
 
 pub(super) fn parse_params_skipping_self(f: &ImplItemFn) -> Vec<crate::Param> {
