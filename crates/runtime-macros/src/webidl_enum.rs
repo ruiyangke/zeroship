@@ -194,7 +194,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
             // (custom toString, Symbol.toPrimitive) propagate verbatim.
             // Pre-fix, value.to_string returning None forced us to
             // fabricate a TypeError, hiding the user's original throw.
-            let __coerced: ::std::result::Result<::std::string::String, ::zeroship_runtime::state::OpError> = {
+            let __coerced: ::std::result::Result<::std::string::String, ::zeroship_runtime::macro_runtime::state::OpError> = {
                 ::v8::tc_scope!(let __tc, scope);
                 match value.to_string(__tc) {
                     ::std::option::Option::Some(__s) => {
@@ -204,7 +204,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                         if __tc.has_caught() {
                             let __exc = __tc.exception().expect("has_caught implies Some");
                             ::std::result::Result::Err(
-                                ::zeroship_runtime::state::OpError::js_value(
+                                ::zeroship_runtime::macro_runtime::state::OpError::js_value(
                                     __tc,
                                     __exc,
                                     concat!(
@@ -219,7 +219,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                             // shouldn't normally happen, but handle as
                             // a generic TypeError for safety.
                             ::std::result::Result::Err(
-                                ::zeroship_runtime::state::OpError::type_error(concat!(
+                                ::zeroship_runtime::macro_runtime::state::OpError::type_error(concat!(
                                     "Cannot convert value to enum `",
                                     stringify!(#name),
                                     "` (ToString failed)",
@@ -236,7 +236,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
             // AND the accepted set in the message — saves a round
             // of "what enum values are valid?" debugging.
             Self::from_str(&__rust_str).ok_or_else(|| {
-                ::zeroship_runtime::state::OpError::type_error(format!(
+                ::zeroship_runtime::macro_runtime::state::OpError::type_error(format!(
                     "Cannot convert value `{}` to enum `{}`. Expected one of: {}",
                     __rust_str,
                     stringify!(#name),
@@ -268,11 +268,11 @@ pub fn expand(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl #impl_generics ::zeroship_runtime::convert::WebIdlConvertible for #name #ty_generics #where_clause {
+        impl #impl_generics ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for #name #ty_generics #where_clause {
             fn from_v8(
                 scope: &mut ::v8::PinScope,
                 value: ::v8::Local<::v8::Value>,
-            ) -> ::std::result::Result<Self, ::zeroship_runtime::state::OpError> {
+            ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
                 #from_v8_body
             }
         }

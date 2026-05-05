@@ -313,8 +313,8 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
             //    V8 TypeError instead of panicking). Surface as a
             //    JS-side RangeError so the user observes a recoverable
             //    JS exception, NOT a crashed worker.
-            let __state: ::zeroship_runtime::state::SharedState =
-                match scope.get_slot::<::zeroship_runtime::state::SharedState>() {
+            let __state: ::zeroship_runtime::macro_runtime::state::SharedState =
+                match scope.get_slot::<::zeroship_runtime::macro_runtime::state::SharedState>() {
                     Some(__s) => __s.clone(),
                     None => {
                         let __msg = #state_missing_msg_init;
@@ -344,8 +344,8 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
                 // even under V8 re-entry from microtasks.
                 let __instance: &#state_ty = unsafe { &*(__raw_addr as *mut #state_ty) };
                 let __result = <#state_ty>::#method_name(__instance, #(#call_args),*).await;
-                let __value = ::zeroship_runtime::state::IntoResolveValue::into_resolve_value(__result);
-                ::zeroship_runtime::state::OpResult::JsValue {
+                let __value = ::zeroship_runtime::macro_runtime::state::IntoResolveValue::into_resolve_value(__result);
+                ::zeroship_runtime::macro_runtime::state::OpResult::JsValue {
                     resolver: __resolver_global,
                     value: __value,
                     request_id: __request_id,

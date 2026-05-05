@@ -206,11 +206,11 @@ impl KnownType {
             KnownType::ByteString => {
                 let throw = gen_extract_throw();
                 quote! {
-                    let #name = match ::zeroship_runtime::byte_string::read_byte_string(
+                    let #name = match ::zeroship_runtime::macro_runtime::byte_string::read_byte_string(
                         scope,
                         args.get(#idx),
                     ) {
-                        Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
+                        Ok(__bytes) => ::zeroship_runtime::macro_runtime::byte_string::ByteString::from_bytes(__bytes),
                         Err(__err) => {
                             #throw
                             return;
@@ -223,11 +223,11 @@ impl KnownType {
             KnownType::USVString => {
                 let throw = gen_extract_throw();
                 quote! {
-                    let #name = match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
+                    let #name = match ::zeroship_runtime::macro_runtime::url_native::helpers::read_usv_string_or_throw(
                         scope,
                         args.get(#idx),
                     ) {
-                        Ok(__s) => ::zeroship_runtime::url_native::helpers::USVString::from_string(__s),
+                        Ok(__s) => ::zeroship_runtime::macro_runtime::url_native::helpers::USVString::from_string(__s),
                         Err(__err) => {
                             #throw
                             return;
@@ -240,13 +240,13 @@ impl KnownType {
             KnownType::OptionUSVString => {
                 let throw = gen_extract_throw();
                 quote! {
-                    let #name: Option<::zeroship_runtime::url_native::helpers::USVString> =
+                    let #name: Option<::zeroship_runtime::macro_runtime::url_native::helpers::USVString> =
                         if args.length() > #idx && !args.get(#idx).is_undefined() {
-                            match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
+                            match ::zeroship_runtime::macro_runtime::url_native::helpers::read_usv_string_or_throw(
                                 scope,
                                 args.get(#idx),
                             ) {
-                                Ok(__s) => Some(::zeroship_runtime::url_native::helpers::USVString::from_string(__s)),
+                                Ok(__s) => Some(::zeroship_runtime::macro_runtime::url_native::helpers::USVString::from_string(__s)),
                                 Err(__err) => {
                                     #throw
                                     return;
@@ -278,7 +278,7 @@ impl KnownType {
             KnownType::EnforceRangeU64 => {
                 let throw = gen_extract_throw();
                 quote! {
-                    let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
+                    let #name = match ::zeroship_runtime::macro_runtime::enforce_range::read_enforce_range_u64(
                         scope,
                         args.get(#idx),
                     ) {
@@ -295,7 +295,7 @@ impl KnownType {
             KnownType::EnforceRangeU32 => {
                 let throw = gen_extract_throw();
                 quote! {
-                    let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u32(
+                    let #name = match ::zeroship_runtime::macro_runtime::enforce_range::read_enforce_range_u32(
                         scope,
                         args.get(#idx),
                     ) {
@@ -446,24 +446,24 @@ fn wrap_int_from_ty(ty: &Type) -> Option<WrapInt> {
 fn clamp_reader_ctor(c: ClampInt) -> (TokenStream2, TokenStream2) {
     match c {
         ClampInt::U16 => (
-            quote! { ::zeroship_runtime::clamp::read_clamp_u16 },
-            quote! { ::zeroship_runtime::clamp::ClampU16 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::read_clamp_u16 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::ClampU16 },
         ),
         ClampInt::U32 => (
-            quote! { ::zeroship_runtime::clamp::read_clamp_u32 },
-            quote! { ::zeroship_runtime::clamp::ClampU32 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::read_clamp_u32 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::ClampU32 },
         ),
         ClampInt::I32 => (
-            quote! { ::zeroship_runtime::clamp::read_clamp_i32 },
-            quote! { ::zeroship_runtime::clamp::ClampI32 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::read_clamp_i32 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::ClampI32 },
         ),
         ClampInt::U64 => (
-            quote! { ::zeroship_runtime::clamp::read_clamp_u64 },
-            quote! { ::zeroship_runtime::clamp::ClampU64 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::read_clamp_u64 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::ClampU64 },
         ),
         ClampInt::I64 => (
-            quote! { ::zeroship_runtime::clamp::read_clamp_i64 },
-            quote! { ::zeroship_runtime::clamp::ClampI64 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::read_clamp_i64 },
+            quote! { ::zeroship_runtime::macro_runtime::clamp::ClampI64 },
         ),
     }
 }
@@ -472,11 +472,11 @@ fn clamp_reader_ctor(c: ClampInt) -> (TokenStream2, TokenStream2) {
 /// reader fn returns the wrap newtype directly.
 fn wrap_reader(w: WrapInt) -> TokenStream2 {
     match w {
-        WrapInt::U8 => quote! { ::zeroship_runtime::wrap::read_wrap_u8 },
-        WrapInt::U16 => quote! { ::zeroship_runtime::wrap::read_wrap_u16 },
-        WrapInt::U32 => quote! { ::zeroship_runtime::wrap::read_wrap_u32 },
-        WrapInt::I8 => quote! { ::zeroship_runtime::wrap::read_wrap_i8 },
-        WrapInt::I16 => quote! { ::zeroship_runtime::wrap::read_wrap_i16 },
-        WrapInt::I32 => quote! { ::zeroship_runtime::wrap::read_wrap_i32 },
+        WrapInt::U8 => quote! { ::zeroship_runtime::macro_runtime::wrap::read_wrap_u8 },
+        WrapInt::U16 => quote! { ::zeroship_runtime::macro_runtime::wrap::read_wrap_u16 },
+        WrapInt::U32 => quote! { ::zeroship_runtime::macro_runtime::wrap::read_wrap_u32 },
+        WrapInt::I8 => quote! { ::zeroship_runtime::macro_runtime::wrap::read_wrap_i8 },
+        WrapInt::I16 => quote! { ::zeroship_runtime::macro_runtime::wrap::read_wrap_i16 },
+        WrapInt::I32 => quote! { ::zeroship_runtime::macro_runtime::wrap::read_wrap_i32 },
     }
 }

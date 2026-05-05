@@ -88,23 +88,23 @@ pub(crate) fn gen_throw_op_error_arms(
 ) -> TokenStream2 {
     let msg_init = must_str(scope_expr, &quote! { &(#err_expr).message });
     quote! {
-        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &(#err_expr).kind {
+        if let ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(__global) = &(#err_expr).kind {
             let __local = v8::Local::new(#scope_expr, __global);
             (#scope_expr).throw_exception(__local);
         } else {
             let __msg = #msg_init;
             let __exc: v8::Local<v8::Value> = match &(#err_expr).kind {
-                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(#scope_expr, __msg),
-                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(#scope_expr, __msg),
-                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                    ::zeroship_runtime::dom::exception::build(#scope_expr, &(#err_expr).message, __name).into()
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(#scope_expr, __msg),
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(#scope_expr, __msg),
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::DomException(__name) => {
+                    ::zeroship_runtime::macro_runtime::dom::exception::build(#scope_expr, &(#err_expr).message, __name).into()
                 }
-                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                    ::zeroship_runtime::node_error::build_node_exception(#scope_expr, __code, &(#err_expr).message)
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::NodeError(__code) => {
+                    ::zeroship_runtime::macro_runtime::node_error::build_node_exception(#scope_expr, __code, &(#err_expr).message)
                 }
-                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(#scope_expr, __msg),
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::Error => v8::Exception::error(#scope_expr, __msg),
                 // Already handled by the early-return above.
-                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+                ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
             };
             (#scope_expr).throw_exception(__exc);
         }

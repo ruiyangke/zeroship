@@ -256,39 +256,46 @@ pub(crate) fn __Marker_constructor_callback(
     let __instance: State = match <State>::new(start) {
         Ok(__v) => __v,
         Err(__err) => {
-            if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &(__err)
-                .kind
+            if let ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(
+                __global,
+            ) = &(__err).kind
             {
                 let __local = v8::Local::new(scope, __global);
                 (scope).throw_exception(__local);
             } else {
                 let __msg = v8::String::new(scope, &(__err).message).unwrap();
                 let __exc: v8::Local<v8::Value> = match &(__err).kind {
-                    ::zeroship_runtime::state::OpErrorKind::TypeError => {
+                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::TypeError => {
                         v8::Exception::type_error(scope, __msg)
                     }
-                    ::zeroship_runtime::state::OpErrorKind::RangeError => {
+                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::RangeError => {
                         v8::Exception::range_error(scope, __msg)
                     }
-                    ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                        ::zeroship_runtime::dom::exception::build(
+                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::DomException(
+                        __name,
+                    ) => {
+                        ::zeroship_runtime::macro_runtime::dom::exception::build(
                                 scope,
                                 &(__err).message,
                                 __name,
                             )
                             .into()
                     }
-                    ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                        ::zeroship_runtime::node_error::build_node_exception(
+                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::NodeError(
+                        __code,
+                    ) => {
+                        ::zeroship_runtime::macro_runtime::node_error::build_node_exception(
                             scope,
                             __code,
                             &(__err).message,
                         )
                     }
-                    ::zeroship_runtime::state::OpErrorKind::Error => {
+                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::Error => {
                         v8::Exception::error(scope, __msg)
                     }
-                    ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(_) => {
+                        unreachable!()
+                    }
                 };
                 (scope).throw_exception(__exc);
             }
