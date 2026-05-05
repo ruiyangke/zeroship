@@ -145,15 +145,10 @@ fn expose_message_default_false_overridable() {
 
 #[test]
 fn details_round_trip() {
-    // Note: the test harness's `unwrap_json_envelope` re-stringifies
-    // the body via `serde_json::to_string` (BTreeMap-backed) which
-    // sorts keys alphabetically. We deliberately assert against the
-    // *sorted* shape here so the test passes through that helper.
-    // The runtime preserves V8's insertion order all the way to the
-    // wire — the reordering is a property of the Rust-side
-    // re-serialization, not RpcError. (A do-the-comparison-in-JS test
-    // would also work, but the dispatch helper is the standard
-    // smoke-test path used by every other class.)
+    // serde_json's workspace-level `preserve_order` feature (enabled by
+    // the superjson wire format in Wave A) makes Value preserve insertion
+    // order through every Rust-side re-serialization step — so V8's
+    // insertion order survives all the way to the wire byte-identical.
     let r = dispatch(
         m(r#"export function test() {
             const e = new RpcError("INVALID_ARGUMENT", "x", { details: { path: ["a"], n: 7 } });
@@ -164,7 +159,7 @@ fn details_round_trip() {
     )
     .unwrap();
     assert!(
-        r.json.contains("\"details\":{\"n\":7,\"path\":[\"a\"]}"),
+        r.json.contains("\"details\":{\"path\":[\"a\"],\"n\":7}"),
         "got: {}",
         r.json
     );
