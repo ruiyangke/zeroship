@@ -618,6 +618,39 @@ mod tests {
         }
     }
 
+    /// Round-2 fixer / IMPORTANT #4: after a successful CAS UPDATE,
+    /// callers MUST mirror the new generation into the registry so
+    /// the next CAS write carries the right value. This test asserts
+    /// the basic round-trip; the handler-level wiring is verified by
+    /// the pg-gated integration tests in `tests/sandbox_pg_e2e.rs`.
+    #[test]
+    fn set_generation_round_trips() {
+        let r = SandboxRegistry::new();
+        let id = Uuid::now_v7();
+        r.insert(id, make_info(id, "alice"));
+        // Default at insert is 0 (matches pg's `INSERT … generation
+        // DEFAULT 0`).
+        assert_eq!(r.generation_for(&id), Some(0));
+
+        // Simulate the post-CAS flow: handler calls set_generation
+        // with the value pg returned from the UPDATE … RETURNING.
+        r.set_generation(&id, 5);
+        assert_eq!(r.generation_for(&id), Some(5));
+
+        // Subsequent CAS write would read 5 as expected_generation.
+        r.set_generation(&id, 6);
+        assert_eq!(r.generation_for(&id), Some(6));
+    }
+
+    #[test]
+    fn set_generation_unknown_id_is_noop() {
+        let r = SandboxRegistry::new();
+        let id = Uuid::now_v7();
+        // No panic, no insert.
+        r.set_generation(&id, 42);
+        assert_eq!(r.generation_for(&id), None);
+    }
+
     #[test]
     fn ensure_preview_secret_is_idempotent() {
         let r = SandboxRegistry::new();

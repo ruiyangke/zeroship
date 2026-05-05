@@ -234,16 +234,14 @@ pub async fn create_sandbox(
             // succeeds; on Err, log + continue (sandbox is live in
             // memory; pg will reconcile on next boot).
             if let Some(db) = state.database.as_ref() {
-                let agent_url = match state.backend.session_auth(sandbox_id).await {
-                    Ok(a) => Some(a.agent_url),
-                    Err(_) => None,
+                // Round-2 fixer / MINOR #2: hold session_auth's result
+                // once and destructure both fields. Pre-fix called
+                // session_auth twice — wasted RTT and inconsistent
+                // failure handling between the two calls.
+                let (agent_url, key_fp) = match state.backend.session_auth(sandbox_id).await {
+                    Ok(a) => (Some(a.agent_url), a.pubkey_fp),
+                    Err(_) => (None, String::new()),
                 };
-                let key_fp = state
-                    .backend
-                    .session_auth(sandbox_id)
-                    .await
-                    .map(|a| a.pubkey_fp)
-                    .unwrap_or_default();
                 let vm_index = parse_vm_index_hint(&info.backend_hint);
                 if let Err(e) = db
                     .insert_sandbox(
