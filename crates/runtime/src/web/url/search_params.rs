@@ -29,7 +29,7 @@ use crate::url_native::url::URL;
 
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_inherit_intrinsic, v8_method, v8_to_string_tag,
+    v8_class, v8_constructor, v8_inherit_intrinsic, v8_iterable, v8_method, v8_to_string_tag,
 };
 
 // ---------------------------------------------------------------------------
@@ -154,48 +154,14 @@ impl URLSearchParams {
     }
 }
 
-/// Brand check: walk `obj`'s prototype chain looking for the cached
-/// `URLSearchParams.prototype`. Returns true iff the receiver is a real
-/// URLSearchParams instance.
-///
-/// M4/M5 — `URLSearchParams.prototype.entries.call(headers)` was
-/// type-unsafe pre-fix because the only check was "internal field 0 is
-/// an External", which any `#[v8_class]` instance with one internal
-/// field would pass. Reinterpreting a Headers Box as a URLSearchParams
-/// Box was UB. This brand check prevents that: the receiver must have
-/// our specific URLSearchParams.prototype somewhere on its prototype
-/// chain.
-///
-/// Note: this is a system-wide macro gap; the broader fix lives in the
-/// `#[v8_class]` callback codegen (see runtime-macros/TODO.md). For
-/// now we apply it locally to the URLSearchParams iterator factories
-/// and forEach.
-fn is_url_search_params(obj: v8::Local<v8::Object>, scope: &mut v8::PinScope) -> bool {
-    let Some(slot) = scope.get_slot::<crate::url_native::UrlNativeSlot>() else {
-        return false;
-    };
-    let expected_proto = v8::Local::new(scope, &slot.search_params_prototype);
-    // Walk the [[Prototype]] chain. Stop at null or after a depth cap.
-    let mut current: v8::Local<v8::Value> = obj.get_prototype(scope).unwrap_or_else(|| v8::null(scope).into());
-    for _ in 0..32 {
-        if current.is_null_or_undefined() {
-            return false;
-        }
-        // V8 compares by pointer identity for the same Local; our
-        // expected_proto is the prototype Function created at install
-        // time, so any genuine URLSearchParams instance has it on its
-        // chain.
-        if let Ok(co) = v8::Local::<v8::Object>::try_from(current) {
-            if co == expected_proto {
-                return true;
-            }
-            current = co.get_prototype(scope).unwrap_or_else(|| v8::null(scope).into());
-        } else {
-            return false;
-        }
-    }
-    false
-}
+// Brand check is now provided by the `#[v8_class]` macro: the
+// auto-generated `__brand_check_URLSearchParams` walks `obj`'s
+// [[Prototype]] chain for the cached `URLSearchParams.prototype` and
+// is invoked at the top of every method/getter/iterator-factory/
+// forEach callback. The pre-MAC-09 hand-rolled `is_url_search_params`
+// helper here became dead once the iterator factory + forEach moved
+// into the macro emit (M4/M5 fixes are now expressed by the same
+// brand-check on every entry point).
 
 /// Reach into a V8 object's internal field 0 and recover the raw
 /// pointer to the boxed `URL` if present. Returns `None` for non-URL
@@ -233,6 +199,7 @@ pub(crate) fn url_ptr_from_object(
 // ---------------------------------------------------------------------------
 
 #[v8_class]
+#[v8_iterable(key = USVString, value = USVString, mode = live)]
 impl URLSearchParams {
     /// `new URLSearchParams(init?)`: per §6.2 / IDL union of
     ///   - USVString (parsed as application/x-www-form-urlencoded)
@@ -462,11 +429,22 @@ impl URLSearchParams {
         self.entries.len() as u32
     }
 
-    // forEach, keys, values, entries, [Symbol.iterator] are installed
-    // in `install_global` because they need access to `args.this()`
-    // (forEach passes `this` as the 3rd callback arg per WebIDL
-    // §3.7.10.3; iterator factories wire `this` as the iterator's
-    // parent receiver).
+    /// `value_pairs(&mut self, scope)` — the WebIDL §3.7.10.2 "value
+    /// pairs to iterate over" hook for `#[v8_iterable(mode = live)]`.
+    /// Re-syncs from the parent URL on every call (the macro invokes
+    /// this once per `next()` and once per forEach iteration), then
+    /// returns the entries as `(USVString, USVString)` pairs which the
+    /// macro encodes back to V8 strings on each yield.
+    fn value_pairs(
+        &mut self,
+        scope: &mut v8::PinScope,
+    ) -> Vec<(USVString, USVString)> {
+        self.sync_from_parent(scope);
+        self.entries
+            .iter()
+            .map(|(n, v)| (USVString::from(n.clone()), USVString::from(v.clone())))
+            .collect()
+    }
 }
 
 /// Compare two strings by UTF-16 code units (lex order). Pure ASCII
@@ -703,120 +681,8 @@ fn fill_from_record(
 }
 
 // ---------------------------------------------------------------------------
-// URLSearchParamsIterator
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-pub enum IterKind {
-    Key,
-    Value,
-    KeyAndValue,
-}
-
-pub struct URLSearchParamsIterator {
-    /// Weak reference to the parent URLSearchParams JS wrapper. Held
-    /// weakly (not as a strong `Global`) so an iterator never extends
-    /// the lifetime of the SP it iterates — see M3. If the SP is
-    /// GC'd before the iterator runs, `next()` simply yields `done`.
-    parent: Option<v8::Weak<v8::Object>>,
-    index: usize,
-    kind: IterKind,
-}
-
-impl Default for URLSearchParamsIterator {
-    fn default() -> Self {
-        URLSearchParamsIterator {
-            parent: None,
-            index: 0,
-            kind: IterKind::KeyAndValue,
-        }
-    }
-}
-
-#[v8_class]
-#[v8_to_string_tag = "URLSearchParams Iterator"]
-#[v8_inherit_intrinsic = "IteratorPrototype"]
-impl URLSearchParamsIterator {
-    #[v8_method]
-    fn next<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> v8::Local<'s, v8::Value> {
-        let parent_weak = match &self.parent {
-            Some(w) => w,
-            None => return iter_result_done(scope),
-        };
-        let parent = match parent_weak.to_local(scope) {
-            Some(p) => p,
-            // Parent SP has been GC'd — terminate the iterator cleanly.
-            None => return iter_result_done(scope),
-        };
-        let ext = match parent
-            .get_internal_field(scope, 0)
-            .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-        {
-            Some(e) => e,
-            None => return iter_result_done(scope),
-        };
-        // SAFETY: parent (Local<Object>) keeps the SP wrapper alive for
-        // this scope, which keeps the Box<URLSearchParams> alive (the
-        // finalizer runs only after GC). No concurrent &mut alias to
-        // this Box exists — we don't reenter JS until after the local
-        // borrow expires at end-of-method.
-        let sp: &mut URLSearchParams = unsafe { &mut *(ext.value() as *mut URLSearchParams) };
-
-        // Always re-sync from the parent URL on each next() to honor
-        // §6.1's live-iteration semantics. With the last_seen_search
-        // cache (C3), unchanged parents short-circuit to no work.
-        sp.sync_from_parent(scope);
-
-        let (n, v) = {
-            let pairs = &sp.entries;
-            if self.index >= pairs.len() {
-                return iter_result_done(scope);
-            }
-            let (n, v) = &pairs[self.index];
-            (n.clone(), v.clone())
-        };
-        self.index += 1;
-
-        let value: v8::Local<v8::Value> = match self.kind {
-            IterKind::KeyAndValue => {
-                let arr = v8::Array::new(scope, 2);
-                let n_str = v8::String::new(scope, &n).unwrap();
-                let v_str = v8::String::new(scope, &v).unwrap();
-                arr.set_index(scope, 0, n_str.into());
-                arr.set_index(scope, 1, v_str.into());
-                arr.into()
-            }
-            IterKind::Key => v8::String::new(scope, &n).unwrap().into(),
-            IterKind::Value => v8::String::new(scope, &v).unwrap().into(),
-        };
-        iter_result(scope, value, false)
-    }
-}
-
-fn iter_result<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<v8::Value>,
-    done: bool,
-) -> v8::Local<'s, v8::Value> {
-    let result = v8::Object::new(scope);
-    let value_key = v8::String::new(scope, "value").unwrap();
-    let done_key = v8::String::new(scope, "done").unwrap();
-    let done_v = v8::Boolean::new(scope, done);
-    result.set(scope, value_key.into(), value);
-    result.set(scope, done_key.into(), done_v.into());
-    result.into()
-}
-
-fn iter_result_done<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-    let undef = v8::undefined(scope);
-    iter_result(scope, undef.into(), true)
-}
-
-// ---------------------------------------------------------------------------
-// install_global — install URLSearchParams + iterator factories + size getter
+// install_global — install URLSearchParams; iterator surface comes from
+// the macro's `#[v8_iterable(mode = live)]` emit.
 // ---------------------------------------------------------------------------
 
 pub fn install_global<'s>(
@@ -826,187 +692,7 @@ pub fn install_global<'s>(
     let tmpl = URLSearchParams::install(scope);
     let class_fn = tmpl.get_function(scope).unwrap();
 
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
-
-    install_iter_factory(scope, proto, "keys", IterKind::Key);
-    install_iter_factory(scope, proto, "values", IterKind::Value);
-    install_iter_factory(scope, proto, "entries", IterKind::KeyAndValue);
-
-    // forEach — hand-rolled because the macro can't pass `args.this()`
-    // as the 3rd cb arg per WebIDL §3.7.10.3.
-    {
-        let tmpl = v8::FunctionTemplate::new(scope, for_each_callback);
-        let func = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "forEach").unwrap();
-        proto.set(scope, key.into(), func.into());
-    }
-
-    // [Symbol.iterator] aliases entries per §6.1.
-    {
-        let sym_iter = v8::Symbol::get_iterator(scope);
-        let entries_key = v8::String::new(scope, "entries").unwrap();
-        let entries_v = proto.get(scope, entries_key.into()).unwrap();
-        proto.set(scope, sym_iter.into(), entries_v);
-    }
-
     let key = v8::String::new(scope, "URLSearchParams").unwrap();
     global.set(scope, key.into(), class_fn.into());
     class_fn
-}
-
-fn for_each_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let this_obj = args.this();
-    // M5 brand check: `URLSearchParams.prototype.forEach.call(headers)`
-    // would otherwise reinterpret the Headers Box as URLSearchParams.
-    if !is_url_search_params(this_obj, scope) {
-        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    let sp: &mut URLSearchParams = match this_obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-    {
-        Some(e) => unsafe { &mut *(e.value() as *mut URLSearchParams) },
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-
-    let cb_arg = args.get(0);
-    let cb_fn: v8::Local<v8::Function> = match cb_arg.try_into() {
-        Ok(f) => f,
-        Err(_) => {
-            let msg = v8::String::new(scope, "forEach callback is not callable").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    let this_arg = args.get(1);
-
-    sp.sync_from_parent(scope);
-    let mut idx = 0usize;
-    loop {
-        // Re-read live each iteration per WebIDL §3.7.10.3.
-        sp.sync_from_parent(scope);
-        if idx >= sp.entries.len() {
-            return;
-        }
-        let (n, v) = sp.entries[idx].clone();
-        idx += 1;
-        let n_v = v8::String::new(scope, &n).unwrap();
-        let v_v = v8::String::new(scope, &v).unwrap();
-        let cb_args = [v_v.into(), n_v.into(), this_obj.into()];
-        if cb_fn.call(scope, this_arg, &cb_args).is_none() {
-            return;
-        }
-    }
-}
-
-fn iter_template<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::FunctionTemplate> {
-    URLSearchParamsIterator::install(scope)
-}
-
-fn install_iter_factory<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    proto: v8::Local<v8::Object>,
-    name: &str,
-    kind: IterKind,
-) {
-    let kind_marker: i64 = match kind {
-        IterKind::Key => 0,
-        IterKind::Value => 1,
-        IterKind::KeyAndValue => 2,
-    };
-    let data = v8::Integer::new(scope, kind_marker as i32);
-    let tmpl = v8::FunctionTemplate::builder(iter_factory_callback)
-        .data(data.into())
-        .build(scope);
-    let func = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, name).unwrap();
-    proto.set(scope, key.into(), func.into());
-}
-
-fn iter_factory_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let this_obj = args.this();
-    // M4 brand check: real URLSearchParams instance only — otherwise
-    // `URLSearchParams.prototype.entries.call(headers)` would
-    // reinterpret arbitrary memory as a URLSearchParams Box.
-    if !is_url_search_params(this_obj, scope) {
-        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-
-    let kind = {
-        let raw = args.data();
-        let n = if let Ok(int) = v8::Local::<v8::Integer>::try_from(raw) {
-            int.value()
-        } else {
-            2
-        };
-        match n {
-            0 => IterKind::Key,
-            1 => IterKind::Value,
-            _ => IterKind::KeyAndValue,
-        }
-    };
-
-    let it_tmpl = iter_template(scope);
-    let inst_tmpl = it_tmpl.instance_template(scope);
-    let it_obj = match inst_tmpl.new_instance(scope) {
-        Some(o) => o,
-        None => {
-            let msg = v8::String::new(scope, "Failed to allocate iterator").unwrap();
-            let exc = v8::Exception::error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    let it_class_fn = it_tmpl.get_function(scope).unwrap();
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let it_proto_v = it_class_fn.get(scope, proto_key.into()).unwrap();
-    it_obj.set_prototype(scope, it_proto_v);
-
-    // Hold the parent URLSearchParams weakly: if it's GC'd before the
-    // iterator's next() runs, we yield {done:true} (see M3). This also
-    // prevents iterators from extending any URL↔SP cycle (which is
-    // already broken at the SP→URL link by C1 — defense in depth).
-    let parent_weak = v8::Weak::new(scope, this_obj);
-    let boxed = Box::new(URLSearchParamsIterator {
-        parent: Some(parent_weak),
-        index: 0,
-        kind,
-    });
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    it_obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        it_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut URLSearchParamsIterator));
-        }),
-    );
-    std::mem::forget(weak);
-
-    rv.set(it_obj.into());
 }
