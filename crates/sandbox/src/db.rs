@@ -378,10 +378,22 @@ impl Database {
         self.config.pool_max
     }
 
-    /// Open a transient connection pool. Used by the boot-time
-    /// migration runner + `ping`; Phase 1 introduces a per-worker
-    /// long-lived pool. Returned `Pool` is `!Send` and lives only
-    /// on the caller's compio thread.
+    /// Open a transient connection pool.
+    ///
+    /// **TODO (round-1 fixer / IMPORTANT #10):** every method on
+    /// `Database` calls this and drops the pool inside the same
+    /// future. That round-trips a TCP connect + auth handshake on
+    /// every call. The fix is a per-compio-thread `thread_local!`
+    /// holding a long-lived `Pool`, lazily initialized on first
+    /// use; deferred to a follow-up because `compio_postgres::Pool`
+    /// is `!Send` + `!Sync`, so a naive thread-local works in
+    /// principle but interacts subtly with ntex's worker-factory
+    /// bounds (factory must be `Send + Clone`; thread-locals
+    /// satisfy that as long as we don't try to share a `Pool`
+    /// across worker boundaries — which we don't, since each
+    /// worker thread has its own `thread_local`). Documenting
+    /// here so the next round picks it up; the current pattern is
+    /// correct, just slow on the hot path.
     async fn open_pool(&self) -> Result<Pool> {
         let mut cfg = PoolConfig::default();
         cfg.max_size = self.config.pool_max.max(2);
