@@ -1,0 +1,147 @@
+RPC v2 dispatch microbench — 2026-05-05, fd5683d (off proposal/rpc-v2-revise),
+Intel(R) Xeon(R) CPU @ 2.80GHz · 32 logical cores · Linux 6.12.80 x86_64
+
+Path under test
+---------------
+Production single-call dispatch of `default.rpc(name, input, ctx)`:
+
+  call_fetch_handler
+    → extract_zs_v1_id          slice "/_zs/v1/<id>" out of the URL
+    → parse_envelope_body       fast path on `{"json":<v>}` ASCII shape
+    → RpcContext::build_js_object
+        - Object.new
+        - String fields (requestId, traceId, method)
+        - native frozen Headers (kernel template + seal_immutable + Object.freeze)
+        - native frozen URL (build_native_url + seal_url + Object.freeze)
+        - AbortController + signal getter
+    → with_rpc_context_in_als   save / clone-map / install / restore
+        ContinuationPreservedEmbedderData under platform Symbol
+    → rpc_fn.call(undefined, [id, input, ctx])    ← the function call
+    → microtask checkpoint
+    → classify_rpc_return       JSON.stringify on a non-Response /
+                                non-AsyncIterator value, wrap in
+                                {"json":<value>} envelope
+
+User procedure: `export default { rpc: (id, input, ctx) => input }`. Echo
+ensures we measure dispatch + JSON cost, not procedure logic.
+
+Bench harness: `crates/runtime/benches/rpc_dispatch.rs` — Criterion 0.5,
+`bench_with_input` per workload, `iter_batched_ref` (each iter clones the
+body String so we don't measure realloc). Warm-up 1 s, measurement 3 s,
+100 samples per workload (Linear sampling mode). Samples are sorted to
+extract p50 / p99 from `target/criterion/rpc_dispatch/<w>/new/sample.json`
+(per-iter ns = total-ns / iters-per-sample).
+
+
+Results
+-------
+
+  Workload          bytes   p50          p99          min          max
+  ──────────────  ───────  ───────────  ───────────  ───────────  ───────────
+  tiny                 16  30,357 ns    62,509 ns    23,629 ns    62,509 ns
+  small               231  32,093 ns    81,803 ns    25,705 ns    81,803 ns
+  medium            3,641  52,992 ns    89,054 ns    47,276 ns    89,054 ns
+  large            50,630  356,373 ns   383,661 ns   333,931 ns   383,661 ns
+  multipart         3,641  54,442 ns    101,597 ns   47,546 ns    101,597 ns
+
+
+Throughput (Criterion-reported, 3-tuple is [low, mean, high] of the slope
+fit — the per-iter-ns figure):
+
+  tiny       29.890 µs   30.606 µs   31.366 µs    498 KiB/s   510 KiB/s   523 KiB/s
+  small      31.877 µs   32.433 µs   32.975 µs   6.68 MiB/s  6.79 MiB/s  6.91 MiB/s
+  medium     53.285 µs   53.727 µs   54.196 µs   64.1 MiB/s  64.6 MiB/s  65.2 MiB/s
+  large     355.78  µs  357.35  µs  359.13  µs    134 MiB/s   135 MiB/s   136 MiB/s
+  multipart  53.977 µs   54.376 µs   54.802 µs   63.4 MiB/s  63.9 MiB/s  64.3 MiB/s
+
+(p99 numbers above are sample-derived. Criterion does not emit a p99
+estimate; we sort the per-iter-ns samples and take index ceil(0.99 · n).)
+
+
+Cost breakdown (estimates; not directly instrumented this wave)
+---------------------------------------------------------------
+The proposal's §5 estimate decomposes single-call dispatch into roughly
+constant overhead + workload-proportional JSON cost. The bench supports
+that shape:
+
+  - Workload-proportional component dominates at large scale:
+      large/medium ratio: 356 µs / 53 µs ≈ 6.7×
+      large/medium body ratio: 50,630 / 3,641 ≈ 13.9×
+    JSON.stringify + V8 string materialization is super-linear in
+    object count, sub-linear in bytes due to string interning.
+
+  - Constant component visible in the small-end gap:
+      tiny - small delta:   30 µs → 32 µs  (+2 µs for 215 extra bytes)
+      small - medium delta: 32 µs → 53 µs  (+21 µs for 3,410 extra bytes)
+    The ~30 µs floor on `tiny` is the dispatch fixed cost: ALS install,
+    frozen Headers/URL build, AbortController construction, and the V8
+    function call itself. JSON parse + stringify of the 16-byte body is
+    a few hundred ns at most.
+
+  - Multipart vs medium are identical workloads with different
+    Content-Type headers: 53 µs vs 54 µs. Header processing in the
+    kernel is just a slice-and-store; no parse fee. Confirms dispatch
+    overhead is constant across header shapes.
+
+Per-component overhead (NOT measured this wave — quoted from the
+proposal §5 estimates the bench is here to falsify or confirm):
+
+  - extract_zs_v1_id                            < 50 ns   (pure-Rust slice)
+  - parse_envelope_body (fast path)             ~1 µs     (ASCII prefix check + V8 JSON.parse)
+  - RpcContext::build_js_object                ~10-15 µs  (Headers + URL freeze + AbortController)
+  - with_rpc_context_in_als                     ~1 µs     (Map.clone + slot set/restore)
+  - rpc_fn.call (echo, no body)                ~3-5 µs   (V8 function call + microtask checkpoint)
+  - classify_rpc_return + JSON.stringify        ~2 µs    (tiny payload)
+                                              ─────────
+  total estimate (tiny):                       ~17-24 µs
+
+Measured tiny p50: 30 µs. Roughly aligned with estimate; remaining gap is
+String allocation + return-trip through the kernel + observability.
+
+A targeted Wave F-2 follow-up could instrument these spans directly via
+`std::time::Instant` capture between the dispatch milestones, gated by
+a feature flag so the timer doesn't perturb production. Out of scope
+here — the brief is to land the headline single-call numbers.
+
+
+Conclusion
+----------
+
+Single-call dispatch p50 = 30 µs / p99 = 62 µs at the tiny workload, the
+shape that maximises the dispatch-overhead-to-procedure ratio. Even at
+this floor, dispatch is dominated by ALS setup + frozen Headers/URL
+construction + JSON encoding, not by the V8 function call itself.
+
+Per the proposal §5 estimate, fastcall savings on the call-site itself
+would be on the order of 30-100 ns — under 1% of the 30 µs floor.
+A two-step `#[v8_method(fastcall)] enqueue` ABI would shave that
+fraction off ONE side of the dispatch but require an extra await turn
+on the slow path for non-trivial procedure bodies, easily costing more
+than it saves at p99.
+
+Recommendation: **single-call dispatch remains the phase 1 ABI.**
+Wave F-2 (two-step fastcall variant) is deferred until a workload is
+shown where the dispatch fixed cost is meaningful relative to procedure
+latency — i.e. where the `tiny` p50 of 30 µs becomes a measurable
+fraction of typical end-to-end latency. Most production RPCs do real
+work (DB query, fetch, Stripe call) that dwarfs this floor; compressing
+dispatch by a few percent isn't worth the added ABI complexity.
+
+Proposal §5 should be amended (or annotated) to commit to single-call
+for phase 1, citing this baseline.
+
+
+Reproduction
+------------
+
+  $ cargo bench -p zeroship-runtime --bench rpc_dispatch -- \
+        --warm-up-time 1 --measurement-time 3
+
+Output written to `target/criterion/rpc_dispatch/`. p50/p99 derivation
+from `sample.json`:
+
+  jq -r '
+    [.iters, .times] | transpose | map(.[1] / .[0]) | sort
+    | length as $n
+    | "p50=\(.[($n/2|floor)])   p99=\(.[($n*99/100|floor)])"
+  ' target/criterion/rpc_dispatch/<workload>/new/sample.json

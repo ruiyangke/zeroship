@@ -98,6 +98,11 @@ ada-url = "3.4.4"
 v8 = "147"
 deno_core_icudata = "0.77"
 
+# Microbenchmarks. Pinned at 0.5 (matches platform crate's dev-dep).
+# Wave F (RPC v2 phase 1) added the first proper microbench in this
+# workspace (`crates/runtime/benches/rpc_dispatch.rs`).
+criterion = { version = "0.5", features = ["html_reports"] }
+
 # WHATWG Encoding spec — Henri Sivonen's reference impl, also the
 # encoding library used by Firefox. Replaces hand-rolled UTF-8 decode
 # with a spec-correct state machine (matches WPT). 30+ encodings
