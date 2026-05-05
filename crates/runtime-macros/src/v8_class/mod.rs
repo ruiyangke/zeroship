@@ -58,7 +58,7 @@ use quote::{format_ident, quote};
 use std::collections::{HashMap, HashSet};
 use syn::{ImplItem, ItemImpl, Type};
 
-use crate::v8_iterable;
+use crate::{must_str, v8_iterable};
 
 mod fastcall;
 mod helpers;
@@ -817,11 +817,13 @@ fn gen_install(
                     // install on the prototype identically.
                     let name = &m.func.sig.ident;
                     let cb = method_callback_ident(class_ty, name);
+                    let scope_tok = quote! { scope };
+                    let key_init = must_str(&scope_tok, &quote! { #js_name });
                     if m.fastcall {
                         let cfn = fastcall_cfn_ident(class_ty, name);
                         Some(quote! {
                             {
-                                let __key = v8::String::new(scope, #js_name).unwrap();
+                                let __key = #key_init;
                                 // Wire the slow callback as the
                                 // FunctionCallback fallback AND the
                                 // CFunction shim as the fast-path
@@ -835,7 +837,7 @@ fn gen_install(
                     } else {
                         Some(quote! {
                             {
-                                let __key = v8::String::new(scope, #js_name).unwrap();
+                                let __key = #key_init;
                                 let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
                                 __proto.set(__key.into(), __fn_tmpl.into());
                             }
@@ -879,9 +881,11 @@ fn gen_install(
                             let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
                         },
                     };
+                    let scope_tok = quote! { scope };
+                    let key_init = must_str(&scope_tok, &quote! { #js_name });
                     Some(quote! {
                         {
-                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __key = #key_init;
                             #getter_tokens
                             #setter_tokens
                             __proto.set_accessor_property(
@@ -916,9 +920,11 @@ fn gen_install(
                 MethodKind::StaticMethod => {
                     let name = &m.func.sig.ident;
                     let cb = method_callback_ident(class_ty, name);
+                    let scope_tok = quote! { scope };
+                    let key_init = must_str(&scope_tok, &quote! { #js_name });
                     Some(quote! {
                         {
-                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __key = #key_init;
                             let __fn_tmpl = v8::FunctionTemplate::new(scope, #cb);
                             // Attributes default to NONE — same as
                             // the prototype-method install above.
@@ -937,9 +943,11 @@ fn gen_install(
                 MethodKind::StaticGetter => {
                     let name = &m.func.sig.ident;
                     let cb = method_callback_ident(class_ty, name);
+                    let scope_tok = quote! { scope };
+                    let key_init = must_str(&scope_tok, &quote! { #js_name });
                     Some(quote! {
                         {
-                            let __key = v8::String::new(scope, #js_name).unwrap();
+                            let __key = #key_init;
                             let __getter_tmpl = v8::FunctionTemplate::new(scope, #cb);
                             // FunctionTemplate exposes
                             // `set_accessor_property`; static getters
@@ -994,9 +1002,11 @@ fn gen_install(
                     let __v = v8::Integer::new(scope, (#value) as i32);
                 },
             };
+            let scope_tok = quote! { scope };
+            let key_init = must_str(&scope_tok, &quote! { #name_str });
             sets.push(quote! {
                 {
-                    let __key = v8::String::new(scope, #name_str).unwrap();
+                    let __key = #key_init;
                     #materialise
                     // Constructor side: `Class.NAME`.
                     __ctor_tmpl.set_with_attr(
@@ -1039,11 +1049,13 @@ fn gen_install(
                 .map(|m| &m.func.sig.ident)
                 .expect("async_iterable_method validated in expand()");
             let cb = method_callback_ident(class_ty, method_ident);
+            let scope_tok = quote! { scope };
+            let name_init = must_str(&scope_tok, &quote! { #method_name });
             quote! {
                 {
                     let __async_iter_sym = v8::Symbol::get_async_iterator(scope);
                     let __alias_tmpl = v8::FunctionTemplate::new(scope, #cb);
-                    let __name_v = v8::String::new(scope, #method_name).unwrap();
+                    let __name_v = #name_init;
                     __alias_tmpl.set_class_name(__name_v);
                     __proto.set(__async_iter_sym.into(), __alias_tmpl.into());
                 }
@@ -1068,24 +1080,29 @@ fn gen_install(
     // JS is the documented Deno/Cloudflare workaround.
     let inherit_block = match inherit_intrinsic {
         None => quote! {},
-        Some("IteratorPrototype") => quote! {
-            // After get_function() the prototype object exists in the
-            // current context. Walk to %Iterator.prototype% and chain.
-            {
-                let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
-                let __proto_key = v8::String::new(scope, "prototype").unwrap();
-                let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
-                let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
-                // %IteratorPrototype% via getPrototypeOf(getPrototypeOf([][Symbol.iterator]())).
-                let __js = v8::String::new(
-                    scope,
-                    "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))",
-                ).unwrap();
-                let __script = v8::Script::compile(scope, __js, None).unwrap();
-                let __iter_proto = __script.run(scope).unwrap();
-                __ctor_proto.set_prototype(scope, __iter_proto);
+        Some("IteratorPrototype") => {
+            let scope_tok = quote! { scope };
+            let proto_key_init = must_str(&scope_tok, &quote! { "prototype" });
+            let js_init = must_str(
+                &scope_tok,
+                &quote! { "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))" },
+            );
+            quote! {
+                // After get_function() the prototype object exists in the
+                // current context. Walk to %Iterator.prototype% and chain.
+                {
+                    let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
+                    let __proto_key = #proto_key_init;
+                    let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
+                    let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
+                    // %IteratorPrototype% via getPrototypeOf(getPrototypeOf([][Symbol.iterator]())).
+                    let __js = #js_init;
+                    let __script = v8::Script::compile(scope, __js, None).unwrap();
+                    let __iter_proto = __script.run(scope).unwrap();
+                    __ctor_proto.set_prototype(scope, __iter_proto);
+                }
             }
-        },
+        }
         Some(other) => {
             let msg = format!(
                 "#[v8_inherit_intrinsic]: unrecognised value `{other}` (expected \"IteratorPrototype\")"
@@ -1141,6 +1158,10 @@ fn gen_install(
     // (the existing single-slot External shape).
     let internal_field_count_lit: usize = if has_any_fastcall { 2 } else { 1 };
 
+    let scope_tok = quote! { scope };
+    let class_name_init = must_str(&scope_tok, &quote! { #class_name_str });
+    let tag_value_init = must_str(&scope_tok, &quote! { #to_string_tag_str });
+
     quote! {
         /// Install this class on the given V8 scope, returning the
         /// FunctionTemplate. The runtime calls this from
@@ -1164,7 +1185,7 @@ fn gen_install(
             }
 
             let __ctor_tmpl = v8::FunctionTemplate::new(scope, #constructor_callback_ident);
-            let __class_name = v8::String::new(scope, #class_name_str).unwrap();
+            let __class_name = #class_name_init;
             __ctor_tmpl.set_class_name(__class_name);
 
             // `#[v8_inherit(BaseClass)]` — establish the prototype chain
@@ -1232,7 +1253,7 @@ fn gen_install(
             // overrides it (e.g. "Headers Iterator" for default iterators).
             {
                 let __tag_sym = v8::Symbol::get_to_string_tag(scope);
-                let __tag_value = v8::String::new(scope, #to_string_tag_str).unwrap();
+                let __tag_value = #tag_value_init;
                 __proto.set_with_attr(
                     __tag_sym.into(),
                     __tag_value.into(),

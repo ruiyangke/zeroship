@@ -54,6 +54,8 @@ use syn::{
     parse_macro_input, Data, DeriveInput, Field, Fields, GenericParam, Lifetime, LifetimeParam,
 };
 
+use crate::must_str_abs;
+
 pub fn expand(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -282,9 +284,11 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
             "'{}' member: not a valid value (null is not allowed)",
             webidl_name
         );
+        let scope_tok = quote! { scope };
+        let key_init = must_str_abs(&scope_tok, &quote! { #webidl_name });
         Ok(quote! {
             let #id: #ty = {
-                let __key = ::v8::String::new(scope, #webidl_name).unwrap();
+                let __key = #key_init;
                 match __obj.get(scope, __key.into()) {
                     ::std::option::Option::Some(__v) if !__v.is_undefined() => {
                         if __v.is_null() {
@@ -299,9 +303,11 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
             };
         })
     } else {
+        let scope_tok = quote! { scope };
+        let key_init = must_str_abs(&scope_tok, &quote! { #webidl_name });
         Ok(quote! {
             let #id: #ty = {
-                let __key = ::v8::String::new(scope, #webidl_name).unwrap();
+                let __key = #key_init;
                 match __obj.get(scope, __key.into()) {
                     ::std::option::Option::Some(__v) if !__v.is_undefined() => {
                         #convert_call

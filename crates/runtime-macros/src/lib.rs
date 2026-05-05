@@ -623,6 +623,57 @@ pub(crate) struct Param {
 // Argument extraction codegen (JS value → Rust type)
 // ---------------------------------------------------------------------------
 
+/// Emit `v8::String::new(<scope>, <lit>).unwrap()` for a string literal
+/// or interpolated str token.
+///
+/// The 50+ call sites of this pattern across the crate's emit code are
+/// noisy — `v8::String::new` returns `Option<Local<String>>` and is
+/// `None` only on V8 string-pool exhaustion (a near-zero probability
+/// event in practice; V8 itself aborts on isolate OOM well before
+/// this), so every site does an `.unwrap()`. Centralising the pattern:
+///   - Reduces visual noise in the generated code's templates.
+///   - Gives one place to switch to a panic-free fallback if we ever
+///     decide to surface OOM as a V8 RangeError instead of aborting.
+///   - Makes drift easier to spot — if a future change wants the
+///     `new_from_onebyte_const` ASCII fast path, it's one helper edit
+///     instead of 50 grep-and-replace sites.
+///
+/// `scope_expr` is interpolated as the V8 scope binding (almost always
+/// `scope` in callbacks; the parameter form lets factory codegen pass
+/// a different binding without rebinding). `lit` is interpolated
+/// directly — pass either a string literal (`"prototype"`) or a
+/// pre-built token stream that names a `&str` binding (a `String` /
+/// `&str` ident, etc.).
+///
+/// Output token shape (byte-identical to the previous open-coded
+/// pattern, verified by the v8_class snapshot suite):
+///
+/// ```ignore
+/// v8::String::new(<scope>, <lit>).unwrap()
+/// ```
+///
+/// Use [`must_str_abs`] when the surrounding emit code uses the
+/// absolute `::v8::` path (e.g. derive macros' emit, where the user's
+/// crate may not have `use v8;` imported).
+///
+/// # Wave-1 scope
+///
+/// This Wave-1 sweep migrates the call sites in `lib.rs`, `mod.rs`,
+/// `webidl_dict.rs`, `webidl_enum.rs`. The remaining sites in
+/// `method.rs` and `v8_iterable.rs` are owned by Wave 1 #170 / #171
+/// and will pick up the helper as part of those merges.
+pub(crate) fn must_str(scope_expr: &TokenStream2, lit: &TokenStream2) -> TokenStream2 {
+    quote! { v8::String::new(#scope_expr, #lit).unwrap() }
+}
+
+/// Absolute-path variant of [`must_str`]. Emits
+/// `::v8::String::new(<scope>, <lit>).unwrap()`. Used by the WebIDL
+/// derive macros, whose emit lives in user crates that may not have
+/// imported `v8` directly.
+pub(crate) fn must_str_abs(scope_expr: &TokenStream2, lit: &TokenStream2) -> TokenStream2 {
+    quote! { ::v8::String::new(#scope_expr, #lit).unwrap() }
+}
+
 /// Single source of truth for the OpError → V8 exception dispatch. Emits
 /// the full 6-variant match (TypeError, RangeError, DomException,
 /// NodeError, Error, JsValue passthrough) used wherever the macro
@@ -672,12 +723,13 @@ pub(crate) fn gen_throw_op_error_arms(
     scope_expr: &TokenStream2,
     err_expr: &TokenStream2,
 ) -> TokenStream2 {
+    let msg_init = must_str(scope_expr, &quote! { &(#err_expr).message });
     quote! {
         if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &(#err_expr).kind {
             let __local = v8::Local::new(#scope_expr, __global);
             (#scope_expr).throw_exception(__local);
         } else {
-            let __msg = v8::String::new(#scope_expr, &(#err_expr).message).unwrap();
+            let __msg = #msg_init;
             let __exc: v8::Local<v8::Value> = match &(#err_expr).kind {
                 ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(#scope_expr, __msg),
                 ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(#scope_expr, __msg),
@@ -1037,10 +1089,14 @@ fn gen_scalar_set(ty: &Type, val: &TokenStream2) -> TokenStream2 {
         Some("i32") => quote! { rv.set(v8::Integer::new(scope, #val).into()); },
         Some("f64") => quote! { rv.set(v8::Number::new(scope, #val).into()); },
         // Default: String
-        _ => quote! {
-            let __v = v8::String::new(scope, &#val).unwrap();
-            rv.set(__v.into());
-        },
+        _ => {
+            let scope = quote! { scope };
+            let v_init = must_str(&scope, &quote! { &#val });
+            quote! {
+                let __v = #v_init;
+                rv.set(__v.into());
+            }
+        }
     }
 }
 
@@ -1064,19 +1120,25 @@ fn gen_option_some_set(ty: &Type) -> TokenStream2 {
     match type_ident(ty).as_deref() {
         Some("bool") => quote! { rv.set(v8::Boolean::new(scope, __inner).into()); },
         Some("u32") => quote! { rv.set(v8::Integer::new_from_unsigned(scope, __inner).into()); },
-        _ => quote! {
-            let __v = v8::String::new(scope, &__inner).unwrap();
-            rv.set(__v.into());
-        },
+        _ => {
+            let scope = quote! { scope };
+            let v_init = must_str(&scope, &quote! { &__inner });
+            quote! {
+                let __v = #v_init;
+                rv.set(__v.into());
+            }
+        }
     }
 }
 
 /// Generate code to build a `v8::Array` from a `Vec<String>`.
 fn gen_vec_set() -> TokenStream2 {
+    let scope = quote! { scope };
+    let v_init = must_str(&scope, &quote! { __s });
     quote! {
         let __arr = v8::Array::new(scope, __vec.len() as i32);
         for (__i, __s) in __vec.iter().enumerate() {
-            let __v = v8::String::new(scope, __s).unwrap();
+            let __v = #v_init;
             __arr.set_index(scope, __i as u32, __v.into());
         }
         rv.set(__arr.into());
@@ -1267,11 +1329,15 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                     let __r = #call;
                     rv.set(v8::Number::new(scope, __r).into());
                 },
-                Some("String") => quote! {
-                    let __r = #call;
-                    let __v = v8::String::new(scope, &__r).unwrap();
-                    rv.set(__v.into());
-                },
+                Some("String") => {
+                    let scope = quote! { scope };
+                    let v_init = must_str(&scope, &quote! { &__r });
+                    quote! {
+                        let __r = #call;
+                        let __v = #v_init;
+                        rv.set(__v.into());
+                    }
+                }
 
                 // --- Direct V8 value (Local<Value>, Local<Object>, etc.) ---
                 // Used by methods that build a custom JS shape (e.g.
