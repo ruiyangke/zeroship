@@ -122,8 +122,8 @@ pub(super) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
             #to_string_tag_block
 
             // `#[v8_inherit_intrinsic]` — prototype-chain link to a V8
-            // built-in (currently only `IteratorPrototype` is wired).
-            // Empty when the attribute is absent.
+            // built-in (`IteratorPrototype` or `Error`). Empty when the
+            // attribute is absent.
             #inherit_intrinsic_block
 
             // Cache the FunctionTemplate for this isolate. Future
@@ -623,54 +623,38 @@ fn gen_install_to_string_tag(cfg: &ClassConfig) -> TokenStream2 {
 }
 
 /// Optional prototype-chain link to a V8 built-in intrinsic.
-/// Currently only `"IteratorPrototype"` is wired. Implementation
+/// Wired values: `"IteratorPrototype"` and `"Error"`. Implementation
 /// strategy: after build-time, the install call has access to an
 /// active context (downstream test/setup_globals already operate
-/// inside one). We compile and run a tiny JS snippet that grabs
-/// `%Iterator.prototype%` (the prototype-of-prototype of any built-in
-/// iterator like `[][Symbol.iterator]()`) and applies it to our
-/// prototype via `Object.setPrototypeOf`.
+/// inside one). We compile and run a tiny JS snippet that resolves
+/// the target intrinsic prototype and apply it via `set_prototype`.
 ///
-/// This is the minimal correct implementation per WebIDL §3.7.10.2
-/// (default iterator [[Prototype]] = %Iterator.prototype%). V8
-/// exposes `Intrinsic::IteratorPrototype` only through
+/// - IteratorPrototype: `%Iterator.prototype%` lives at
+///   `Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))`.
+///   The minimal correct implementation per WebIDL §3.7.10.2.
+/// - Error: `Error.prototype` is a direct global property. Used by
+///   classes (e.g. RpcError) that need to satisfy
+///   `instanceof Error` per WebIDL §3.14 inheritance.
+///
+/// V8 exposes `Intrinsic::IteratorPrototype` only through
 /// `Template::set_intrinsic_data_property`, which would install it AS
 /// a named property — wrong shape. Direct prototype-set via JS is the
 /// documented Deno/Cloudflare workaround.
 ///
 /// Wave 9 NS2: the unrecognised-value diagnostic moved to
 /// `analyze.rs`'s pre-emit validation step. By the time we get here,
-/// `inherit_intrinsic` is known to be either `None` or
-/// `Some("IteratorPrototype")`. Any other value would have been
-/// rejected as a clean `syn::Error` before this fn ran.
+/// `inherit_intrinsic` is known to be either `None`,
+/// `Some("IteratorPrototype")`, or `Some("Error")`. Any other value
+/// would have been rejected as a clean `syn::Error` before this fn ran.
 fn gen_install_inherit_intrinsic(cfg: &ClassConfig) -> TokenStream2 {
     let inherit_intrinsic = cfg.inherit_intrinsic.as_deref();
 
-    match inherit_intrinsic {
-        None => quote! {},
+    let js_expr = match inherit_intrinsic {
+        None => return quote! {},
         Some("IteratorPrototype") => {
-            let scope_tok = quote! { scope };
-            let proto_key_init = must_str(&scope_tok, &quote! { "prototype" });
-            let js_init = must_str(
-                &scope_tok,
-                &quote! { "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))" },
-            );
-            quote! {
-                // After get_function() the prototype object exists in the
-                // current context. Walk to %Iterator.prototype% and chain.
-                {
-                    let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
-                    let __proto_key = #proto_key_init;
-                    let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
-                    let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
-                    // %IteratorPrototype% via getPrototypeOf(getPrototypeOf([][Symbol.iterator]())).
-                    let __js = #js_init;
-                    let __script = v8::Script::compile(scope, __js, None).unwrap();
-                    let __iter_proto = __script.run(scope).unwrap();
-                    __ctor_proto.set_prototype(scope, __iter_proto);
-                }
-            }
+            "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))"
         }
+        Some("Error") => "Error.prototype",
         // Unreachable per the analyse-phase validation in
         // `v8_class/analyze.rs` (Wave 9 NS2). Kept as a defensive
         // guard; the `unreachable!` here surfaces as a proc-macro
@@ -678,7 +662,25 @@ fn gen_install_inherit_intrinsic(cfg: &ClassConfig) -> TokenStream2 {
         // into the user's fn body — so any future drift in the
         // validation gate fails loudly.
         Some(_) => unreachable!(
-            "v8_inherit_intrinsic validation in analyze.rs accepts only `IteratorPrototype`"
+            "v8_inherit_intrinsic validation in analyze.rs accepts only `IteratorPrototype` or `Error`"
         ),
+    };
+
+    let scope_tok = quote! { scope };
+    let proto_key_init = must_str(&scope_tok, &quote! { "prototype" });
+    let js_init = must_str(&scope_tok, &quote! { #js_expr });
+    quote! {
+        // After get_function() the prototype object exists in the
+        // current context. Resolve the target intrinsic prototype and chain.
+        {
+            let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
+            let __proto_key = #proto_key_init;
+            let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
+            let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
+            let __js = #js_init;
+            let __script = v8::Script::compile(scope, __js, None).unwrap();
+            let __target_proto = __script.run(scope).unwrap();
+            __ctor_proto.set_prototype(scope, __target_proto);
+        }
     }
 }

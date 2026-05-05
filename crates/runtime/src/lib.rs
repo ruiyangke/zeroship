@@ -158,6 +158,7 @@ pub mod macro_runtime;  // stable re-export surface for runtime-macros emit
                         // (Wave 5a, design §3.9). DO NOT bypass this from
                         // the macro — see the module-level rustdoc.
 pub mod node;
+pub mod rpc;
 pub mod storage;
 pub mod transport;
 pub mod web;

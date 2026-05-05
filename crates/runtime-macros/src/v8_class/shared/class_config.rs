@@ -57,9 +57,9 @@ pub(crate) struct ClassConfig<'a> {
     /// `class_ty.to_string()` when `None`.
     pub to_string_tag: Option<String>,
     /// `#[v8_inherit_intrinsic = "..."]` — name of the V8 built-in
-    /// intrinsic to chain. Currently only `"IteratorPrototype"` is
-    /// recognised; other values produce a `compile_error!` in the
-    /// emit.
+    /// intrinsic to chain. Recognised values: `"IteratorPrototype"`
+    /// and `"Error"`. Other values produce a `compile_error!` in the
+    /// analyse phase.
     pub inherit_intrinsic: Option<String>,
     /// `#[v8_inherit(BasePath)]` — parent class whose install template
     /// the derived class chains via `FunctionTemplate::inherit`.
