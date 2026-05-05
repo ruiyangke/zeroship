@@ -623,33 +623,96 @@ pub(crate) struct Param {
 // Argument extraction codegen (JS value → Rust type)
 // ---------------------------------------------------------------------------
 
+/// Single source of truth for the OpError → V8 exception dispatch. Emits
+/// the full 6-variant match (TypeError, RangeError, DomException,
+/// NodeError, Error, JsValue passthrough) used wherever the macro
+/// translates a `Result<T, OpError>` boundary into a JS `throw`.
+///
+/// `scope_expr` and `err_expr` are inserted as the V8 scope and the
+/// `OpError` reference, respectively — typically `quote!(scope)` and
+/// `quote!(__err)` in slow-path callbacks. They're parametric so the
+/// helper can be re-used from sites that bind these under different
+/// names (e.g. async-method post-resolution). The emitted block:
+///
+/// ```ignore
+/// if let OpErrorKind::JsValue(g) = &<err>.kind {
+///     <scope>.throw_exception(Local::new(<scope>, g));
+/// } else {
+///     let msg = v8::String::new(<scope>, &<err>.message).unwrap();
+///     let exc = match &<err>.kind {
+///         OpErrorKind::TypeError       => v8::Exception::type_error(<scope>, msg),
+///         OpErrorKind::RangeError      => v8::Exception::range_error(<scope>, msg),
+///         OpErrorKind::DomException(n) => zeroship::dom::exception::build(<scope>, &<err>.message, n).into(),
+///         OpErrorKind::NodeError(c)    => zeroship::node_error::build_node_exception(<scope>, c, &<err>.message),
+///         OpErrorKind::Error           => v8::Exception::error(<scope>, msg),
+///         OpErrorKind::JsValue(_)      => unreachable!(),
+///     };
+///     <scope>.throw_exception(exc);
+/// }
+/// ```
+///
+/// Callers MUST emit `return;` (or whatever control-flow primitive
+/// suits the surrounding callback shape) AFTER this block — the helper
+/// only produces the exception-throw, never the unwind.
+///
+/// # Migration note
+///
+/// As of this commit, two of the four historical OpError-throw sites
+/// in this crate route through this helper:
+///   - `gen_extract_throw` (per-arg extraction failures) — was missing
+///     DomException/NodeError, now covers all 6 variants.
+///   - `gen_throw_error` (call-return Result arm).
+///
+/// The remaining two sites — both in `v8_class/method.rs` — are owned
+/// by Wave 1 #170 (statics agent) and Wave 1 #171 (iterators agent)
+/// respectively. They will pick up this helper as part of their merge.
+/// Until then, a `__msg` binding mismatch with `__err.kind`-without-a-
+/// `&` deref in the post_init arm is preserved verbatim in those files.
+pub(crate) fn gen_throw_op_error_arms(
+    scope_expr: &TokenStream2,
+    err_expr: &TokenStream2,
+) -> TokenStream2 {
+    quote! {
+        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &(#err_expr).kind {
+            let __local = v8::Local::new(#scope_expr, __global);
+            (#scope_expr).throw_exception(__local);
+        } else {
+            let __msg = v8::String::new(#scope_expr, &(#err_expr).message).unwrap();
+            let __exc: v8::Local<v8::Value> = match &(#err_expr).kind {
+                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(#scope_expr, __msg),
+                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(#scope_expr, __msg),
+                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                    ::zeroship_runtime::dom::exception::build(#scope_expr, &(#err_expr).message, __name).into()
+                }
+                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                    ::zeroship_runtime::node_error::build_node_exception(#scope_expr, __code, &(#err_expr).message)
+                }
+                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(#scope_expr, __msg),
+                // Already handled by the early-return above.
+                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+            };
+            (#scope_expr).throw_exception(__exc);
+        }
+    }
+}
+
 /// Emit the throw machinery for an `OpError` named `__err` in scope.
 /// Used by the per-arg-extraction codegen (ByteString / USVString /
 /// EnforceRange / etc.) where a conversion failure must surface as a
 /// V8 exception and `return` from the V8 callback. The macro emits
 /// `return` after this snippet — that's the caller's responsibility.
 ///
-/// Mirrors `gen_throw_error()` (which is used in the call-return path)
-/// but with the simpler match arm set used by the extraction code: no
-/// DomException / NodeError, since those paths never originate from a
-/// primitive boundary type. The JsValue passthrough IS handled —
-/// future-proofing for the case where an extraction op's helper
-/// captures a user-thrown exception (none today, but cheap to wire).
+/// Pre-2026-05-05 this used a 3-arm match that downgraded
+/// DomException/NodeError to a generic `Error`; that was a contract
+/// bug — extraction can return any OpError variant via dict / enum
+/// `WebIdlConvertible::from_v8`, and a `OpError::dom_exception(...)`
+/// MUST surface as a real `DOMException`, not a generic `Error`. Now
+/// delegates to [`gen_throw_op_error_arms`] for the full 6-variant
+/// match, in lockstep with `gen_throw_error`.
 fn gen_extract_throw() -> TokenStream2 {
-    quote! {
-        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
-            let __local = v8::Local::new(scope, __global);
-            scope.throw_exception(__local);
-        } else {
-            let __msg = v8::String::new(scope, &__err.message).unwrap();
-            let __exc = match &__err.kind {
-                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                _ => v8::Exception::error(scope, __msg),
-            };
-            scope.throw_exception(__exc);
-        }
-    }
+    let scope = quote! { scope };
+    let err = quote! { __err };
+    gen_throw_op_error_arms(&scope, &err)
 }
 
 pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
@@ -1062,32 +1125,12 @@ fn gen_vec_vec_u8_set() -> TokenStream2 {
 ///   for `if (e.code === "ERR_...")` branching. Per
 ///   `docs/proposals/node-crypto-native.md` D-N32.
 fn gen_throw_error() -> TokenStream2 {
-    quote! {
-        // JsValue passthrough — rethrow the captured user exception
-        // verbatim. Skipping the message-translation path preserves
-        // every property of the thrown value (Error subclass identity,
-        // .code, .stack, custom props).
-        if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
-            let __local = v8::Local::new(scope, __global);
-            scope.throw_exception(__local);
-        } else {
-            let __msg = v8::String::new(scope, &__err.message).unwrap();
-            let __exc: v8::Local<v8::Value> = match &__err.kind {
-                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-                }
-                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-                }
-                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-                // Already handled by the early-return above.
-                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
-            };
-            scope.throw_exception(__exc);
-        }
-    }
+    // Routed through the shared `gen_throw_op_error_arms` helper —
+    // single source of truth for the 6-variant OpErrorKind dispatch.
+    // Adding a 7th variant means editing one match in one helper.
+    let scope = quote! { scope };
+    let err = quote! { __err };
+    gen_throw_op_error_arms(&scope, &err)
 }
 
 /// Generate the function call + return value handling.
