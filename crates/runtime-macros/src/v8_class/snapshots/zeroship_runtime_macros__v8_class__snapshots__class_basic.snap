@@ -412,5 +412,5 @@ pub(crate) fn __Foo_set_value_callback(
     let __reentry_guard = __ReentryGuard(__inflight_addr);
     let __instance = unsafe { &mut *(__ext.value() as *mut Foo) };
     let n: u32 = args.get(0i32).uint32_value(scope).unwrap_or(0);
-    let _ = <Foo>::set_value(&mut *__instance, n);
+    <Foo>::set_value(&mut *__instance, n);
 }

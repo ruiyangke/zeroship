@@ -16,6 +16,12 @@
 //! clear message and return BEFORE the unsafe `&mut Self`
 //! materialisation. On scope exit (RAII drop guard): remove.
 //!
+//! Wave 2 explored a single-slot `Cell<Option<usize>>` as a memory
+//! optimisation but reverted the migration after discovering a
+//! soundness gap for the 3-deep nesting case `a → b → a` (see
+//! `nested_cross_instance_then_same_instance_throws` below — the
+//! regression test that pinned the gap). HashSet ships unchanged.
+//!
 //! Implementation note: we throw a V8 TypeError rather than `panic!`
 //! because Rust's panic runtime can't unwind through V8's C++ frames
 //! (SIGABRT on Linux). The user-facing message is still way clearer
@@ -319,4 +325,100 @@ fn guard_releases_after_throw() {
         |val, scope| js_string(val, scope),
     );
     assert_eq!(s, r#"{"first":42,"second":42}"#);
+}
+
+// ---------------------------------------------------------------------------
+// Restore-prior nesting: A → B → A. With the post-Wave-2 single-slot
+// `Cell<Option<usize>>`, the guard's correctness depends on the drop
+// guard restoring the PRIOR value (not just None) so that, after the
+// inner B-call's drop guard fires, the slot is `Some(a_addr)` again —
+// which means a synchronous attempt to re-enter A from inside B's body
+// MUST still fire the guard (A is still in-flight on the call stack).
+// This pins the cross-instance + same-method nesting semantic that the
+// HashSet variant got "for free" (`HashSet.contains(a_addr)` after B's
+// `remove(b_addr)` is still true). With the Cell variant, the
+// correctness comes from the restore-prior-on-drop pattern.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_cross_instance_then_same_instance_throws() {
+    let s = run_in_v8(
+        |scope, global| {
+            install_class::<reentry_class::Reenterable>(
+                reentry_class::Reenterable::install,
+                "Reenterable",
+                scope,
+                global,
+            );
+        },
+        r#"
+        const a = new Reenterable(1);
+        const b = new Reenterable(2);
+        let innerKind = null, innerMsg = null;
+        // a's callback calls b.tickle (cross-instance, allowed). b's
+        // callback then tries to re-enter a.tickle synchronously
+        // — that MUST throw the per-method TypeError because a is
+        // still in flight on this thread's call stack.
+        a.set_callback(() => { b.tickle(); });
+        b.set_callback(() => {
+            try { a.tickle(); }
+            catch (e) {
+                innerKind = e.constructor.name;
+                innerMsg  = e.message;
+            }
+        });
+        const outer = a.tickle();
+        JSON.stringify({
+            outer,
+            innerKind,
+            innerHasMethod: innerMsg && innerMsg.indexOf("Reenterable::tickle") !== -1,
+        });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(
+        s,
+        r#"{"outer":1,"innerKind":"TypeError","innerHasMethod":true}"#
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Slot fully restores after nested return. After the A→B→A throw test,
+// the drop chain MUST leave __INFLIGHT[tickle] = None. A fresh top-level
+// call on either A or B must NOT throw.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slot_clears_after_nested_unwind() {
+    let s = run_in_v8(
+        |scope, global| {
+            install_class::<reentry_class::Reenterable>(
+                reentry_class::Reenterable::install,
+                "Reenterable",
+                scope,
+                global,
+            );
+        },
+        r#"
+        const a = new Reenterable(11);
+        const b = new Reenterable(22);
+        a.set_callback(() => { b.tickle(); });
+        b.set_callback(() => {});
+        // Outer A → inner B → done. After the outer unwinds, the
+        // thread's __INFLIGHT[tickle] slot MUST be None again.
+        const first = a.tickle();
+        // Same instances, fresh top-level call. The Cell-restore-prior
+        // semantics are correct iff this returns 11 (no false-positive
+        // re-entry throw).
+        a.set_callback(() => {});  // make a's callback a no-op
+        const second = a.tickle();
+        // A *different* instance also works (no shared bookkeeping
+        // across instances).
+        b.set_callback(() => {});
+        const third = b.tickle();
+        JSON.stringify({ first, second, third });
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, r#"{"first":11,"second":11,"third":22}"#);
 }

@@ -29,7 +29,7 @@ use super::helpers::{
 };
 use super::parse::{extract_callable_no_new, extract_post_init, extract_reject_shared};
 use super::{ClassMethod, MethodKind};
-use crate::gen_call_return;
+use crate::{gen_call_return, gen_throw_op_error_arms, must_str};
 
 /// Re-entry guard for `&mut self` methods.
 ///
@@ -66,7 +66,9 @@ use crate::gen_call_return;
 ///
 /// Cost: one HashSet `insert` + one `remove` per `&mut self` call.
 /// The set has 0 or 1 entries in the steady state (re-entry is
-/// pathological, not common).
+/// pathological, not common) — but supports up to N entries during
+/// arbitrary cross-instance nesting, which is the soundness invariant
+/// the macro must uphold (see HISTORICAL NOTE below).
 ///
 /// Emitted ONLY for `&mut self` methods. `&self` callbacks are sound
 /// to nest (multiple aliased shared references are fine) and skip the
@@ -81,6 +83,27 @@ use crate::gen_call_return;
 ///
 /// The caller must run this AFTER the External recovery and BEFORE
 /// the unsafe `&mut Self` materialisation.
+///
+/// **HISTORICAL NOTE — Cell migration attempted and reverted (Wave 2).**
+/// Design proposal §3.4 + §9.3 sketched a single-slot
+/// `Cell<Option<usize>>` with restore-prior-on-drop, claiming
+/// equivalence to the HashSet variant for the cross-instance nesting
+/// case. The Wave 2 implementation revealed a soundness gap for the
+/// 3-deep nesting `a → b → a`: when A.method is in flight at addr
+/// 0xAAAA and the body calls B.method (a different instance), the
+/// slot is overwritten to 0xBBBB; if B's body then synchronously
+/// re-enters A.method, the guard reads `Some(0xBBBB)` and finds it
+/// does NOT match the current `0xAAAA`, so it lets the re-entry
+/// through — and the outer `&mut Self_A` aliases with the new inner
+/// `&mut Self_A`. UB. The HashSet variant catches this case (set
+/// `{0xAAAA, 0xBBBB}` after step 2; step 3's `contains(0xAAAA)`
+/// returns true, throws). See `v8_reentrancy_smoke::
+/// nested_cross_instance_then_same_instance_throws` for the
+/// regression test that pinned the gap. Memory savings (40
+/// bytes/method) NOT worth a soundness regression; the HashSet
+/// variant ships unchanged. A multi-slot Cell-based alternative
+/// (e.g. `RefCell<SmallVec<[usize; 1]>>`) is a possible follow-up
+/// but not in scope for Wave 2.
 fn gen_reentry_guard(
     class_ty: &syn::Ident,
     method_name: &syn::Ident,
@@ -93,6 +116,8 @@ fn gen_reentry_guard(
         "re-entered method `{}::{}` on instance — concurrent &mut self callback",
         class_ty, method_name,
     );
+    let scope_tok = quote! { scope };
+    let msg_init = must_str(&scope_tok, &quote! { #err_msg });
     // Use ONE thread_local per method per class. The static names are
     // local to the callback function so they don't pollute the impl
     // block's namespace and don't collide across methods.
@@ -110,7 +135,7 @@ fn gen_reentry_guard(
             // exception propagates correctly and surfaces in user JS
             // as a TypeError, which is way clearer than the pre-fix
             // cryptic RefCell-already-mutably-borrowed panic.
-            let __msg = v8::String::new(scope, #err_msg).unwrap();
+            let __msg = #msg_init;
             let __exc = v8::Exception::type_error(scope, __msg);
             scope.throw_exception(__exc);
             return;
@@ -165,18 +190,10 @@ pub(super) fn gen_method_callback(
 
     let call_return = gen_call_return(&call, &m.func.sig.output);
 
-    let getter_args = if m.kind == MethodKind::Getter {
-        // V8 getters use AccessorCallback signature; we use FunctionTemplate
-        // for parity with methods, so the args object is still passed.
-        quote! {}
-    } else {
-        quote! {}
-    };
-
-    let _ = getter_args;
-
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -193,7 +210,7 @@ pub(super) fn gen_method_callback(
             // doc-comment for the soundness rationale.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -206,7 +223,7 @@ pub(super) fn gen_method_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -311,6 +328,9 @@ pub(super) fn gen_same_object_getter_callback(
     //   __zs_same_object_<crate::path::to::module>::<MarkerTy>_<method>
     let private_marker_method = format!("{}_{}", class_ty, method_name);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
+    let key_str_init = must_str(&scope_tok, &quote! { __private_name });
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -324,7 +344,7 @@ pub(super) fn gen_same_object_getter_callback(
             //    `__brand_check_<ClassTy>`'s doc-comment.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -346,7 +366,7 @@ pub(super) fn gen_same_object_getter_callback(
                 "::",
                 #private_marker_method,
             );
-            let __key_str = v8::String::new(scope, __private_name).unwrap();
+            let __key_str = #key_str_init;
             let __priv = v8::Private::for_api(scope, Some(__key_str));
 
             // 3. Cache hit short-circuit: if the wrapper has already
@@ -368,7 +388,7 @@ pub(super) fn gen_same_object_getter_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -476,6 +496,19 @@ pub(super) fn gen_async_method_callback(
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
+    // §4.1 Wave 2 + critique C8: pre-fix this site `.expect`'d on the
+    // SharedState slot lookup. A misconfigured runtime (slot not
+    // installed) would Rust-panic THROUGH V8's C++ frames, which on
+    // Linux is a SIGABRT (Rust's panic runtime can't unwind through an
+    // `extern "C"` boundary cleanly — same reasoning as the re-entry
+    // guard's V8-TypeError-not-panic doc-comment). Surface as a JS-side
+    // RangeError instead — exceptional but recoverable.
+    let state_missing_msg_init = must_str(
+        &scope_tok,
+        &quote! { "internal error: SharedState not installed on isolate" },
+    );
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -494,7 +527,7 @@ pub(super) fn gen_async_method_callback(
             //    fail before the unsafe deref.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -504,7 +537,7 @@ pub(super) fn gen_async_method_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -536,10 +569,25 @@ pub(super) fn gen_async_method_callback(
             // 4. Pull SharedState off the isolate slot. Cloned `Rc`,
             //    cheap. The future captures another clone; the
             //    callback can drop its handle freely.
-            let __state: ::zeroship_runtime::state::SharedState = scope
-                .get_slot::<::zeroship_runtime::state::SharedState>()
-                .expect("RuntimeState not in isolate slot")
-                .clone();
+            //
+            //    Pre-fix: `.expect("RuntimeState not in isolate slot")`
+            //    Rust-panicked here on a misconfigured runtime. Since
+            //    V8 callbacks are invoked through an `extern "C"`
+            //    boundary, a Rust panic abort is the default — SIGABRT
+            //    on Linux (same reason gen_reentry_guard throws a
+            //    V8 TypeError instead of panicking). Surface as a
+            //    JS-side RangeError so the user observes a recoverable
+            //    JS exception, NOT a crashed worker.
+            let __state: ::zeroship_runtime::state::SharedState =
+                match scope.get_slot::<::zeroship_runtime::state::SharedState>() {
+                    Some(__s) => __s.clone(),
+                    None => {
+                        let __msg = #state_missing_msg_init;
+                        let __exc = v8::Exception::range_error(scope, __msg);
+                        scope.throw_exception(__exc);
+                        return;
+                    }
+                };
             let __request_id = __state.borrow().executing_request_id;
 
             // 5. Build the future. The block keeps `wrapper_global`
@@ -600,6 +648,23 @@ pub(super) fn gen_async_method_callback(
 /// extraction loop emits no args (the parser skips the receiver, and
 /// there's no receiver, so `params` is whatever args the user
 /// declared — typically zero for getters).
+///
+/// **Parameter naming.** Both `class_ty` and `state_ty` are threaded
+/// in. `class_ty` keys the callback identifier
+/// (`__<class>_<method>_callback`); `state_ty` keys the dispatch
+/// (`<state_ty>::method_name(...)`). Under `#[v8_state_marker(MarkerTy)]`
+/// the user's `impl` block is `impl StateTy`, not `impl MarkerTy` — so
+/// the dispatch must resolve to StateTy even though the macro keys the
+/// install on MarkerTy. Without `#[v8_state_marker]` the two are
+/// identical (state_ty == class_ty), so this is a no-op for the common
+/// case but mandatory for state-marker support (Phase 1 commit
+/// `d4d65fd` + the static-method extension in `1a924d9`). The H12
+/// finding flagged the name `state_ty` as misleading on the static
+/// path (no instance state), but renaming would diverge from the
+/// instance/setter/async-method codegen paths that share the same
+/// parameter; keeping the cross-emit-site consistency is more valuable
+/// than the naming nit. Documented here so the next reader sees the
+/// rationale rather than reflexively renaming.
 pub(super) fn gen_static_callback(
     class_ty: &syn::Ident,
     state_ty: &syn::Ident,
@@ -615,11 +680,10 @@ pub(super) fn gen_static_callback(
     let extractions = gen_param_extractions(&params, &reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
-    // Static method bodies live on the impl receiver (state_ty), which
-    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not the
-    // unit MarkerTy. Mirror what gen_method_callback does for instance
-    // methods — see the Phase 1 commit (`d4d65fd`) that introduced the
-    // same threading for `&self` / `&mut self` callbacks.
+    // Static method bodies live on the impl target (state_ty), which
+    // under `#[v8_state_marker(MarkerTy)]` is the StateTy struct, not
+    // the unit MarkerTy — see this fn's doc-comment for the parameter
+    // naming rationale.
     let call = quote! {
         <#state_ty>::#method_name(#(#call_args),*)
     };
@@ -664,6 +728,37 @@ fn gen_setter_callback(
     };
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    let scope_tok = quote! { scope };
+    let illegal_msg_init = must_str(&scope_tok, &quote! { "Illegal invocation" });
+
+    // §13.1 fix: setters declared as `Result<(), OpError>` route an
+    // `Err` arm through the standard 6-variant OpError dispatch so the
+    // user's error surfaces as a JS exception instead of being silently
+    // swallowed. Unit-returning setters fall through to a plain call
+    // (no Result match needed). The shape parser at the expand site
+    // already rejects setters whose return type is neither `()` nor
+    // `Result<(), _>`, so this is exhaustive.
+    let is_result = matches!(
+        outer_ident(&m.func.sig.output).as_deref(),
+        Some("Result")
+    );
+    let invoke = if is_result {
+        let throw = crate::gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
+        quote! {
+            match <#state_ty>::#method_name(#receiver_ref, #(#call_args),*) {
+                ::std::result::Result::Ok(()) => {}
+                ::std::result::Result::Err(__err) => {
+                    #throw
+                    return;
+                }
+            }
+        }
+    } else {
+        // Setter returns `()` — call and ignore.
+        quote! {
+            <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+        }
+    };
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -676,7 +771,7 @@ fn gen_setter_callback(
             // for the soundness rationale.
             let __this = args.this();
             if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                let __msg = #illegal_msg_init;
                 let __exc = v8::Exception::type_error(scope, __msg);
                 scope.throw_exception(__exc);
                 return;
@@ -686,7 +781,7 @@ fn gen_setter_callback(
             {
                 Some(e) => e,
                 None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+                    let __msg = #illegal_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -699,8 +794,11 @@ fn gen_setter_callback(
 
             #(#extractions)*
 
-            // Discard return — setters don't propagate values.
-            let _ = <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            // Setter dispatch — Ok-discard, Err-throw for Result-returning
+            // setters; plain call-and-discard for `()` setters. WebIDL
+            // §3.7.6 says the setter return value is unobservable to JS,
+            // so we never write to `rv`.
+            #invoke
         }
     }
 }
@@ -726,9 +824,11 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
     let msg = format!(
         "Failed to construct '{class_name_str}': Please use the 'new' operator, this DOM object constructor cannot be called as a function."
     );
+    let scope_tok = quote! { scope };
+    let msg_init = must_str(&scope_tok, &quote! { #msg });
     quote! {
         if !args.is_construct_call() {
-            let __msg = v8::String::new(scope, #msg).unwrap();
+            let __msg = #msg_init;
             let __exc = v8::Exception::type_error(scope, __msg);
             scope.throw_exception(__exc);
             return;
@@ -758,31 +858,19 @@ pub(super) fn gen_constructor_callback(
     );
 
     let make_instance = if is_result {
+        // Routed through the shared `gen_throw_op_error_arms` helper —
+        // single source of truth for the 6-variant OpErrorKind dispatch
+        // (TypeError, RangeError, DomException, NodeError, Error,
+        // JsValue passthrough). The helper throws via
+        // `scope.throw_exception(...)` in both the JsValue and the
+        // typed-error branches; the macro emits `return;` after to
+        // unwind the V8 callback.
+        let throw = gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
         quote! {
             let __instance: #state_ty = match <#state_ty>::#ctor_name(#(#call_args),*) {
                 Ok(__v) => __v,
                 Err(__err) => {
-                    // JsValue passthrough — preserves user-thrown
-                    // exception verbatim (Error subclass, .code, etc.).
-                    if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
-                        let __local = v8::Local::new(scope, __global);
-                        scope.throw_exception(__local);
-                        return;
-                    }
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc: v8::Local<v8::Value> = match &__err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                            ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-                        }
-                        ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                            ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-                        }
-                        ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -822,34 +910,17 @@ pub(super) fn gen_constructor_callback(
         Ok(None) => quote! {},
         Err(e) => return e.to_compile_error(),
         Ok(Some(hook_ident)) => {
-            // Mirror the make_instance Result arm verbatim — same five
-            // OpErrorKind variants from crates/runtime/src/core/state.rs
-            // (TypeError, RangeError, Error, DomException, NodeError, JsValue).
-            // Any addition there must be mirrored here.
+            // Routed through the shared `gen_throw_op_error_arms` helper
+            // — same 6-variant OpErrorKind dispatch as the make_instance
+            // Result arm above. Adding a 7th variant means editing one
+            // match in one helper.
+            let throw = gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
             quote! {
                 if args.is_construct_call() {
                     match <#class_ty>::#hook_ident(scope, __this) {
                         Ok(()) => {},
                         Err(__err) => {
-                            if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
-                                let __exc = v8::Local::new(scope, __global);
-                                scope.throw_exception(__exc);
-                                return;
-                            }
-                            let __msg = v8::String::new(scope, &__err.message).unwrap();
-                            let __exc: v8::Local<v8::Value> = match __err.kind {
-                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-                                }
-                                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-                                }
-                                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
-                            };
-                            scope.throw_exception(__exc);
+                            #throw
                             return;
                         }
                     }

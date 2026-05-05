@@ -466,6 +466,46 @@ pub(super) fn has_any_receiver(func: &ImplItemFn) -> bool {
         .any(|arg| matches!(arg, FnArg::Receiver(_)))
 }
 
+/// True if the function's return type is the unit `()` — either the
+/// implicit `ReturnType::Default` (no `->` clause) or an explicit
+/// `-> ()` written by the user. Used by the setter-shape validator to
+/// reject non-unit returns that would otherwise be silently swallowed.
+pub(super) fn is_unit_return(output: &syn::ReturnType) -> bool {
+    match output {
+        syn::ReturnType::Default => true,
+        syn::ReturnType::Type(_, ty) => matches!(
+            ty.as_ref(),
+            syn::Type::Tuple(t) if t.elems.is_empty()
+        ),
+    }
+}
+
+/// True if the function's return type is `Result<(), _>` — used by the
+/// setter-shape validator to allow Result-returning setters whose Ok
+/// case is unit. We don't validate the Err type here (the callback
+/// codegen routes any `OpError` through `gen_throw_op_error_arms`).
+pub(super) fn is_result_unit_return(output: &syn::ReturnType) -> bool {
+    let syn::ReturnType::Type(_, ty) = output else {
+        return false;
+    };
+    let syn::Type::Path(p) = ty.as_ref() else {
+        return false;
+    };
+    let Some(last) = p.path.segments.last() else {
+        return false;
+    };
+    if last.ident != "Result" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    let Some(syn::GenericArgument::Type(ok_ty)) = args.args.first() else {
+        return false;
+    };
+    matches!(ok_ty, syn::Type::Tuple(t) if t.elems.is_empty())
+}
+
 /// `#[v8_constructor(...)]` opt-out for the must-new check — currently
 /// unused (no class today wants `Foo()` without `new` to succeed), but
 /// retained as a hook for future legacy-callable shapes (a few WebIDL
