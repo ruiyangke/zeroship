@@ -102,6 +102,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{Attribute, FnArg, Ident, ImplItem, Receiver};
 
+use crate::must_str;
+
 /// Iteration model for the derive — snapshot or live (WebIDL §3.7.10.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IterMode {
@@ -398,11 +400,14 @@ fn gen_to_v8(
              ByteString, USVString, String, u32, Vec<u8>",
         )
     })?;
+    let scope_tok = quote! { scope };
     Ok(match kind {
-        SupportedTy::Utf8 => quote! {
-            let __s_ref: &str = ::std::convert::AsRef::as_ref(&#src_ident);
-            let #out_ident: v8::Local<v8::Value> =
-                v8::String::new(scope, __s_ref).unwrap().into();
+        SupportedTy::Utf8 => {
+            let s_ref_init = must_str(&scope_tok, &quote! { __s_ref });
+            quote! {
+                let __s_ref: &str = ::std::convert::AsRef::as_ref(&#src_ident);
+                let #out_ident: v8::Local<v8::Value> = #s_ref_init.into();
+            }
         },
         SupportedTy::ByteStr => quote! {
             // ByteString → Latin-1 one-byte string. The snapshot stores
@@ -531,6 +536,7 @@ pub(crate) fn generate(
     // is inlined inside the callback's body). Naming the thread_local
     // SCREAMING_SNAKE_CASE silences rustc's "static should have an
     // upper case name" lint without an `#[allow]` for every consumer.
+    let scope_tok = quote! { scope };
     let reentry_guard = if is_mut {
         let err_msg = format!(
             "re-entered `value_pairs` on {} instance — concurrent &mut self callback",
@@ -540,6 +546,8 @@ pub(crate) fn generate(
             "re-entry depth exceeded for `value_pairs` on {} (cap is 8 — a future raise requires a code change)",
             class_ty
         );
+        let err_msg_init = must_str(&scope_tok, &quote! { #err_msg });
+        let depth_msg_init = must_str(&scope_tok, &quote! { #depth_msg });
         // Wave 8 — same shape as `v8_class/emit/reentry_guard.rs`'s
         // multi-slot Cell migration (closes design §13 / C5/H13).
         // 8-slot fixed-cap heap-free array; LIFO push/pop on entry/drop.
@@ -569,13 +577,13 @@ pub(crate) fn generate(
                 });
             match __slot_index {
                 ::std::option::Option::None => {
-                    let __msg = v8::String::new(scope, #err_msg).unwrap();
+                    let __msg = #err_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
                 }
                 ::std::option::Option::Some(::std::usize::MAX) => {
-                    let __msg = v8::String::new(scope, #depth_msg).unwrap();
+                    let __msg = #depth_msg_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -674,6 +682,48 @@ pub(crate) fn generate(
     let iter_kind_keys: i32 = 0;
     let iter_kind_values: i32 = 1;
     let iter_kind_entries: i32 = 2;
+
+    // Wave 9 NS5 / H10: pre-render the must_str token streams for
+    // every literal `v8::String::new(scope, "...").unwrap()` that
+    // would otherwise be hand-rolled in the emit blocks below. Each
+    // `..._init` is a TokenStream that expands to
+    //   v8::String::new(scope, "<lit>").unwrap()
+    // matching the `must_str` helper in `codegen.rs`. Centralising
+    // here keeps the emit blocks readable AND lets a future change
+    // (e.g. switch to `new_from_onebyte_const` for ASCII fast path)
+    // happen at one site instead of 25.
+    let class_name_init = must_str(&scope_tok, &quote! { #iter_class_name_str });
+    let to_string_tag_init = must_str(&scope_tok, &quote! { #iter_to_string_tag_str });
+    let next_key_init = must_str(&scope_tok, &quote! { "next" });
+    let proto_key_init = must_str(&scope_tok, &quote! { "prototype" });
+    let value_key_init = must_str(&scope_tok, &quote! { "value" });
+    let done_key_init = must_str(&scope_tok, &quote! { "done" });
+    let keys_key_init = must_str(&scope_tok, &quote! { "keys" });
+    let values_key_init = must_str(&scope_tok, &quote! { "values" });
+    let entries_key_init = must_str(&scope_tok, &quote! { "entries" });
+    let foreach_key_init = must_str(&scope_tok, &quote! { "forEach" });
+    let alloc_fail_msg_init = must_str(&scope_tok, &quote! { "Failed to allocate iterator" });
+    let foreach_not_callable_init = must_str(
+        &scope_tok,
+        &quote! { "forEach callback is not callable" },
+    );
+    let iter_proto_walk_js_init = must_str(
+        &scope_tok,
+        &quote! { "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))" },
+    );
+    // The constructor-throws message is built from a `concat!()` so
+    // the `#iter_class_name_str` interpolation expands at the user's
+    // expansion site rather than at macro time.
+    let illegal_ctor_msg_init = must_str(
+        &scope_tok,
+        &quote! {
+            ::std::concat!(
+                "Illegal constructor: ",
+                #iter_class_name_str,
+                " can only be created via the parent's keys() / values() / entries()",
+            )
+        },
+    );
 
     // ---------------------------------------------------------------
     // Per-mode iterator struct definition.
@@ -824,8 +874,8 @@ pub(crate) fn generate(
                     // Defensive: the parent's internal field is gone.
                     // Yield `done` rather than UB on a null deref.
                     let __res = v8::Object::new(scope);
-                    let __vk = v8::String::new(scope, "value").unwrap();
-                    let __dk = v8::String::new(scope, "done").unwrap();
+                    let __vk = #value_key_init;
+                    let __dk = #done_key_init;
                     let __undef = v8::undefined(scope);
                     let __true = v8::Boolean::new(scope, true);
                     __res.set(scope, __vk.into(), __undef.into());
@@ -855,8 +905,8 @@ pub(crate) fn generate(
                 // Done: parent shrank below the cursor (or never had
                 // enough entries).
                 let __res = v8::Object::new(scope);
-                let __vk = v8::String::new(scope, "value").unwrap();
-                let __dk = v8::String::new(scope, "done").unwrap();
+                let __vk = #value_key_init;
+                let __dk = #done_key_init;
                 let __undef = v8::undefined(scope);
                 let __true = v8::Boolean::new(scope, true);
                 __res.set(scope, __vk.into(), __undef.into());
@@ -883,8 +933,8 @@ pub(crate) fn generate(
             if __it.__index >= __it.__pairs.len() {
                 // Done: return { value: undefined, done: true }.
                 let __res = v8::Object::new(scope);
-                let __vk = v8::String::new(scope, "value").unwrap();
-                let __dk = v8::String::new(scope, "done").unwrap();
+                let __vk = #value_key_init;
+                let __dk = #done_key_init;
                 let __undef = v8::undefined(scope);
                 let __true = v8::Boolean::new(scope, true);
                 __res.set(scope, __vk.into(), __undef.into());
@@ -1023,7 +1073,7 @@ pub(crate) fn generate(
                     return v8::Local::new(scope, cached.0.clone());
                 }
                 let __ctor_tmpl = v8::FunctionTemplate::new(scope, __zs_iter_construct_throws);
-                let __class_name = v8::String::new(scope, #iter_class_name_str).unwrap();
+                let __class_name = #class_name_init;
                 __ctor_tmpl.set_class_name(__class_name);
                 __ctor_tmpl
                     .instance_template(scope)
@@ -1033,7 +1083,7 @@ pub(crate) fn generate(
 
                 // next()
                 {
-                    let __key = v8::String::new(scope, "next").unwrap();
+                    let __key = #next_key_init;
                     let __fn_tmpl = v8::FunctionTemplate::new(scope, #next_ident);
                     __proto.set(__key.into(), __fn_tmpl.into());
                 }
@@ -1041,7 +1091,7 @@ pub(crate) fn generate(
                 // Symbol.toStringTag — "<Class> Iterator" per spec.
                 {
                     let __tag_sym = v8::Symbol::get_to_string_tag(scope);
-                    let __tag_value = v8::String::new(scope, #iter_to_string_tag_str).unwrap();
+                    let __tag_value = #to_string_tag_init;
                     __proto.set_with_attr(
                         __tag_sym.into(),
                         __tag_value.into(),
@@ -1053,14 +1103,10 @@ pub(crate) fn generate(
                 // WebIDL §3.7.10.2 default iterator [[Prototype]].
                 {
                     let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
-                    let __proto_key = v8::String::new(scope, "prototype").unwrap();
+                    let __proto_key = #proto_key_init;
                     let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
                     let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
-                    let __js = v8::String::new(
-                        scope,
-                        "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))",
-                    )
-                    .unwrap();
+                    let __js = #iter_proto_walk_js_init;
                     let __script = v8::Script::compile(scope, __js, None).unwrap();
                     let __iter_proto = __script.run(scope).unwrap();
                     __ctor_proto.set_prototype(scope, __iter_proto);
@@ -1084,15 +1130,7 @@ pub(crate) fn generate(
             _args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
-            let __msg = v8::String::new(
-                scope,
-                concat!(
-                    "Illegal constructor: ",
-                    #iter_class_name_str,
-                    " can only be created via the parent's keys() / values() / entries()",
-                ),
-            )
-            .unwrap();
+            let __msg = #illegal_ctor_msg_init;
             let __exc = v8::Exception::type_error(scope, __msg);
             scope.throw_exception(__exc);
         }
@@ -1132,7 +1170,7 @@ pub(crate) fn generate(
             let __it_obj = match __it_inst_tmpl.new_instance(scope) {
                 Some(o) => o,
                 None => {
-                    let __msg = v8::String::new(scope, "Failed to allocate iterator").unwrap();
+                    let __msg = #alloc_fail_msg_init;
                     let __exc = v8::Exception::error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -1144,7 +1182,7 @@ pub(crate) fn generate(
             // URLSearchParams iterator shape (see search_params.rs::
             // iter_factory_callback).
             let __it_class_fn = __it_tmpl.get_function(scope).unwrap();
-            let __proto_key = v8::String::new(scope, "prototype").unwrap();
+            let __proto_key = #proto_key_init;
             let __it_proto_v = __it_class_fn.get(scope, __proto_key.into()).unwrap();
             __it_obj.set_prototype(scope, __it_proto_v);
 
@@ -1238,7 +1276,7 @@ pub(crate) fn generate(
             let __cb_fn: v8::Local<v8::Function> = match __cb_arg.try_into() {
                 Ok(f) => f,
                 Err(_) => {
-                    let __msg = v8::String::new(scope, "forEach callback is not callable").unwrap();
+                    let __msg = #foreach_not_callable_init;
                     let __exc = v8::Exception::type_error(scope, __msg);
                     scope.throw_exception(__exc);
                     return;
@@ -1305,8 +1343,8 @@ pub(crate) fn generate(
             };
 
             let __res = v8::Object::new(scope);
-            let __vk = v8::String::new(scope, "value").unwrap();
-            let __dk = v8::String::new(scope, "done").unwrap();
+            let __vk = #value_key_init;
+            let __dk = #done_key_init;
             let __false = v8::Boolean::new(scope, false);
             __res.set(scope, __vk.into(), __value);
             __res.set(scope, __dk.into(), __false.into());
@@ -1333,12 +1371,12 @@ pub(crate) fn generate(
                 proto: v8::Local<'s, v8::ObjectTemplate>,
             ) {
                 {
-                    let __key = v8::String::new(scope, "keys").unwrap();
+                    let __key = #keys_key_init;
                     let __tmpl = v8::FunctionTemplate::new(scope, #factory_keys_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
                 {
-                    let __key = v8::String::new(scope, "values").unwrap();
+                    let __key = #values_key_init;
                     let __tmpl = v8::FunctionTemplate::new(scope, #factory_values_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }
@@ -1350,11 +1388,11 @@ pub(crate) fn generate(
                 // it under both keys.
                 let __entries_tmpl = v8::FunctionTemplate::new(scope, #factory_entries_ident);
                 {
-                    let __key = v8::String::new(scope, "entries").unwrap();
+                    let __key = #entries_key_init;
                     proto.set(__key.into(), __entries_tmpl.into());
                 }
                 {
-                    let __key = v8::String::new(scope, "forEach").unwrap();
+                    let __key = #foreach_key_init;
                     let __tmpl = v8::FunctionTemplate::new(scope, #for_each_ident);
                     proto.set(__key.into(), __tmpl.into());
                 }

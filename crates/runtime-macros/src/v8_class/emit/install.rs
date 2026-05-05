@@ -346,6 +346,11 @@ pub(super) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
     // `Template::set_intrinsic_data_property`, which would install
     // it AS a named property — wrong shape. Direct prototype-set via
     // JS is the documented Deno/Cloudflare workaround.
+    // Wave 9 NS2: the unrecognised-value diagnostic moved to
+    // `analyze.rs`'s pre-emit validation step. By the time we get
+    // here, `inherit_intrinsic` is known to be either `None` or
+    // `Some("IteratorPrototype")`. Any other value would have been
+    // rejected as a clean `syn::Error` before this fn ran.
     let inherit_block = match inherit_intrinsic {
         None => quote! {},
         Some("IteratorPrototype") => {
@@ -371,12 +376,14 @@ pub(super) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
                 }
             }
         }
-        Some(other) => {
-            let msg = format!(
-                "#[v8_inherit_intrinsic]: unrecognised value `{other}` (expected \"IteratorPrototype\")"
-            );
-            quote! { compile_error!(#msg); }
-        }
+        // Unreachable per the analyse-phase validation above. Kept as
+        // a defensive guard; the `unreachable!` here surfaces as a
+        // proc-macro panic at expand time, NOT as a `compile_error!`
+        // spliced into the user's fn body — so any future drift in
+        // the validation gate fails loudly.
+        Some(_) => unreachable!(
+            "v8_inherit_intrinsic validation in analyze.rs accepts only `IteratorPrototype`"
+        ),
     };
 
     // `#[v8_inherit(BaseClass)]` plumbs prototype-chain inheritance —
