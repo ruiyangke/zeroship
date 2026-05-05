@@ -144,7 +144,15 @@ pub async fn preview_proxy(
         // bad; treat the whole route like an unknown resource).
         Err(_) => return uniform_404(),
     };
-    let sandbox_id_opt: Option<Uuid> = sandbox_id_str.parse().ok();
+    // Round-2 fixer / CRITICAL #1: accept both `sbx_<base62>` (the
+    // canonical wire shape) and hyphenated UUID (back-compat). The
+    // pre-fix `.parse()` only handled hyphenated UUIDs, so every
+    // share-token cookie URL or creator-bearer path with a typed-id
+    // 401-or-404'd silently.
+    let sandbox_id_opt: Option<Uuid> =
+        zeroship_core::typed_id::parse_with_prefix(&sandbox_id_str, "sbx")
+            .ok()
+            .or_else(|| sandbox_id_str.parse().ok());
 
     // 2. Cookie-conversion: if the request carries `?t=<token>`, this
     //    is the share-token first-hit. Validate, set `__Host-zsbx_share_<sbx>`,

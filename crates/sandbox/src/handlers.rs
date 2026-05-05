@@ -43,8 +43,34 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     resp.json(&serde_json::json!({"error": s}))
 }
 
-fn parse_uuid(s: &str) -> Result<Uuid, HttpResponse> {
-    s.parse::<Uuid>().map_err(|_| err(400, "invalid sandbox id (not a uuid)"))
+/// Parse a sandbox id from an HTTP path segment into the embedded
+/// UUID. Round-2 fixer / CRITICAL #1: the API returns `sbx_<base62>`
+/// from `POST /sandboxes`; every follow-up call (GET / DELETE / exec
+/// / files / preview / share) MUST accept that same string back. The
+/// pre-fix `s.parse::<Uuid>()` rejected it and 400ed every follow-up
+/// — the entire HTTP API was non-functional after create.
+///
+/// Accepts:
+///   - Typed-id form `sbx_<base62>` (the canonical wire shape since
+///     the round-1 typed-id rollout) — embedded UUID is decoded via
+///     `typed_id::parse_with_prefix(s, "sbx")`.
+///   - Bare hyphenated UUID — back-compat for internal/test-only
+///     callers (the pg/db layer is moving to typed-id-only; this
+///     fallback exists so the round-1 e2e fixtures that inject raw
+///     UUIDs into the in-memory registry continue to work).
+///
+/// Path-traversal posture: `parse_with_prefix` rejects any embedded
+/// `/`, `..`, or non-base62 byte BEFORE the value reaches the
+/// registry / pg / sealed-record paths. The bare-UUID fallback is
+/// equally safe — `Uuid::parse_str` only accepts the canonical
+/// hyphenated shape.
+fn parse_sandbox_id_to_uuid(s: &str) -> Result<Uuid, HttpResponse> {
+    if let Ok(uuid) = zeroship_core::typed_id::parse_with_prefix(s, "sbx") {
+        return Ok(uuid);
+    }
+    s.parse::<Uuid>().map_err(|_| {
+        err(400, "invalid sandbox id (expected sbx_<base62> or hyphenated uuid)")
+    })
 }
 
 /// Validate an HTTP-supplied typed-id at the boundary, asserting
@@ -60,6 +86,15 @@ fn parse_uuid(s: &str) -> Result<Uuid, HttpResponse> {
 /// not echoed back to keep boundary noise out of the wire).
 fn is_typed_id(id: &str, expected_prefix: &str) -> bool {
     zeroship_core::typed_id::parse_with_prefix(id, expected_prefix).is_ok()
+}
+
+/// Render an internal `Uuid` to the canonical wire form
+/// `sbx_<base62>`. Round-2 fixer / IMPORTANT #3: every HTTP response
+/// + log line that surfaces a sandbox id MUST use this — pre-fix the
+/// stop endpoint emitted a hyphenated UUID while create emitted a
+/// typed-id, so audit tools that joined on payload-id broke.
+pub(crate) fn typed_sandbox_id(id: &Uuid) -> String {
+    format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(id))
 }
 
 fn infer_content_type(path: &str) -> &'static str {
@@ -444,7 +479,7 @@ pub async fn get_sandbox(
     query: web::types::Query<GetQuery>,
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
-    let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
+    let id = match parse_sandbox_id_to_uuid(&path) { Ok(u) => u, Err(r) => return r };
     let Some(user_id) = query.into_inner().user_id else {
         return err(400, "get requires ?user_id=<id>");
     };
@@ -469,7 +504,7 @@ fn require_owner(
     state: &AppState,
     raw_id: &str,
 ) -> Result<Uuid, HttpResponse> {
-    let id = parse_uuid(raw_id).map_err(|r| r)?;
+    let id = parse_sandbox_id_to_uuid(raw_id)?;
     // Pull user_id from the query string. Hand-parse to avoid
     // pulling another extractor through every signature; the
     // string is short and the format is fixed.
@@ -635,7 +670,14 @@ pub async fn stop_sandbox(
         }
     }
 
-    HttpResponse::Ok().json(&serde_json::json!({"stopped": true, "sandbox_id": id.to_string()}))
+    // Round-2 fixer / IMPORTANT #3: emit the SAME id form `POST
+    // /sandboxes` returned (`sbx_<base62>`). Pre-fix the stop
+    // response leaked a hyphenated UUID, so audit tools that joined
+    // on payload-id broke at every stop.
+    HttpResponse::Ok().json(&serde_json::json!({
+        "stopped": true,
+        "sandbox_id": typed_sandbox_id(&id),
+    }))
 }
 
 // ─── POST /sandboxes/:id/exec ─────────────────────────────────────
@@ -764,6 +806,56 @@ mod tests {
             created_at_secs: 0,
             last_used_at_secs: 0,
         }
+    }
+
+    // ─── Round-2 fixer / CRITICAL #1: parse_sandbox_id_to_uuid ──
+
+    #[test]
+    fn parse_sandbox_id_accepts_typed_id() {
+        let uuid = Uuid::now_v7();
+        let typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&uuid)
+        );
+        let parsed = parse_sandbox_id_to_uuid(&typed)
+            .expect("typed-id form must parse");
+        assert_eq!(parsed, uuid, "typed-id round-trip must yield the same UUID");
+    }
+
+    #[test]
+    fn parse_sandbox_id_accepts_hyphenated_uuid_back_compat() {
+        let uuid = Uuid::now_v7();
+        let s = uuid.to_string();
+        let parsed = parse_sandbox_id_to_uuid(&s)
+            .expect("hyphenated uuid must parse for back-compat with internal callers");
+        assert_eq!(parsed, uuid);
+    }
+
+    #[test]
+    fn parse_sandbox_id_rejects_wrong_prefix() {
+        // Right shape, wrong prefix — must NOT silently fall through
+        // to the bare-UUID branch (the embedded base62 is NOT a valid
+        // hyphenated UUID, so `s.parse::<Uuid>()` will fail and we
+        // return 400, which is the right answer).
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(parse_sandbox_id_to_uuid(&usr).is_err());
+    }
+
+    #[test]
+    fn parse_sandbox_id_rejects_garbage() {
+        for s in ["", "garbage", "sbx_", "sbx_!!!", "alice"] {
+            assert!(parse_sandbox_id_to_uuid(s).is_err(), "{s:?} must reject");
+        }
+    }
+
+    #[test]
+    fn typed_sandbox_id_has_sbx_prefix() {
+        let uuid = Uuid::now_v7();
+        let s = typed_sandbox_id(&uuid);
+        assert!(s.starts_with("sbx_"), "got {s:?}");
+        // Round-trip via the parser.
+        let parsed = parse_sandbox_id_to_uuid(&s).unwrap();
+        assert_eq!(parsed, uuid);
     }
 
     // ─── Round-1 fixer / CRITICAL #1: typed-id validation ───────

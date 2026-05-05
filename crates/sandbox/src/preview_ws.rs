@@ -465,7 +465,12 @@ fn parse_preview_path(path: &str) -> Option<(Uuid, u16, String)> {
     let stripped = no_query.strip_prefix("/sandboxes/")?;
     // sandbox-id /preview/ port / sub_path
     let (id_str, rest) = stripped.split_once('/')?;
-    let sandbox_id: Uuid = id_str.parse().ok()?;
+    // Round-2 fixer / CRITICAL #1: WS-Upgrade preview URLs carry the
+    // same `sbx_<base62>` typed-id as the HTTP path. Accept that form
+    // and fall back to bare UUID for back-compat.
+    let sandbox_id: Uuid = zeroship_core::typed_id::parse_with_prefix(id_str, "sbx")
+        .ok()
+        .or_else(|| id_str.parse().ok())?;
     let rest = rest.strip_prefix("preview/")?;
     let (port_str, sub_path) = rest.split_once('/').unwrap_or((rest, ""));
     let port: u16 = port_str.parse().ok()?;

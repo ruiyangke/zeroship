@@ -156,7 +156,13 @@ fn authorize_owner(
         // succeeded had user_id been present.
         return Err(not_found());
     }
-    let id: Uuid = sandbox_id_str.parse().map_err(|_| not_found())?;
+    // Round-2 fixer / CRITICAL #1: accept the typed-id form returned
+    // by `POST /sandboxes` AND the bare UUID form for back-compat.
+    // Both map to 404 (uniform-no-existence-oracle) on parse failure.
+    let id: Uuid = zeroship_core::typed_id::parse_with_prefix(sandbox_id_str, "sbx")
+        .ok()
+        .or_else(|| sandbox_id_str.parse().ok())
+        .ok_or_else(not_found)?;
     if !is_proxyable_port(port, DEFAULT_DENY) {
         return Err(not_found());
     }
