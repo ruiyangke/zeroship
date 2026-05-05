@@ -676,9 +676,16 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
 // Round-1 fixer / IMPORTANT #8 — shutdown-flag unit tests.
 // ────────────────────────────────────────────────────────────────────
 //
-// The full graceful-shutdown integration (SIGTERM → trigger_shutdown
-// → task exit → process drop) lives in the bin's main loop; that
-// surface isn't reachable in lib unit tests. What we DO test here:
+// Round-2 fixer / CRITICAL #3: the binary's main loop now wires
+// SIGINT/SIGTERM → ntex `run()` returns → `trigger_shutdown()` →
+// `SANDBOX_HA_DRAIN_GRACE_SECS` (default 30s) of grace for the
+// background tasks to observe the flag and exit. This is a
+// post-drain shutdown: peers see the `'draining'` host status only
+// AFTER ntex has finished draining HTTP. A pre-drain notification
+// would require a signal handler that runs BEFORE ntex's, which
+// compio doesn't yet expose; deferred follow-up.
+//
+// What we test here at the lib level:
 //
 //   1. A fixture task that polls `shutdown_requested()` exits within
 //      one iteration of the flag flipping. The fixture mirrors the
