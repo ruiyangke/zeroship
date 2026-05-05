@@ -354,22 +354,39 @@ fn extract_webidl_name(attrs: &[syn::Attribute]) -> Option<String> {
 }
 
 /// Convert PascalCase → kebab-case. `NoCors` → `no-cors`,
-/// `Navigate` → `navigate`, `Iso8859Text` → `iso8859-text`.
+/// `Navigate` → `navigate`, `Iso8859Text` → `iso8859-text`,
+/// `APIKey` → `api-key`, `XMLHttpRequest` → `xml-http-request`,
+/// `URL` → `url`, `IP` → `ip`.
 ///
-/// Rule: emit a `-` before each uppercase ASCII letter that follows a
-/// lowercase ASCII letter or a digit. (Doesn't insert before runs of
-/// uppercase — `IO` stays `io` after first-letter handling.)
+/// Rule: emit a `-` before each uppercase ASCII letter `c` at index
+/// `i > 0` if EITHER:
+///   1. `chars[i - 1]` is lowercase or a digit  (lower→Upper boundary;
+///      handles `NoCors`, `Iso8859Text`).
+///   2. `chars[i - 1]` is uppercase AND `chars[i + 1]` exists and is
+///      lowercase  (Upper→Upper-then-lower boundary; handles
+///      `APIKey` → `api-key`, `XMLHttpRequest` → `xml-http-request`).
+///
+/// Pre-2026-05-05 the function only implemented rule (1), so trailing
+/// initialism + word combinations like `APIKey` collapsed to `apikey`
+/// (per WHATWG conventions: should be `api-key`). Single-word
+/// initialisms like `URL` and `IP` correctly stay as `url` / `ip` —
+/// rule (2) requires a following lowercase, which a trailing
+/// uppercase or end-of-string doesn't satisfy.
 fn pascal_to_kebab(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     let chars: Vec<char> = s.chars().collect();
     for (i, ch) in chars.iter().enumerate() {
         if i > 0 && ch.is_ascii_uppercase() {
-            // Insert `-` before this uppercase letter if the previous
-            // char was lowercase or a digit. Skip the dash if the
-            // previous char was also uppercase (handles initialisms
-            // like `URL` → `url`, not `u-r-l`).
             let prev = chars[i - 1];
-            if prev.is_ascii_lowercase() || prev.is_ascii_digit() {
+            // Rule 1: lower→Upper or digit→Upper boundary.
+            let lower_to_upper = prev.is_ascii_lowercase() || prev.is_ascii_digit();
+            // Rule 2: Upper→Upper-then-lower (initialism's last
+            // letter starts a new word). The bound check on `i + 1`
+            // is intentional — at end-of-string we keep the run
+            // collapsed (so `URL` stays `url`, not `ur-l`).
+            let trailing_initialism = prev.is_ascii_uppercase()
+                && chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase());
+            if lower_to_upper || trailing_initialism {
                 out.push('-');
             }
         }
@@ -396,7 +413,8 @@ mod kebab_tests {
 
     #[test]
     fn initialism_at_start() {
-        // URL → url (no dash; consecutive uppercase doesn't split)
+        // URL → url (no dash; consecutive uppercase doesn't split when
+        // there's no following lowercase)
         assert_eq!(pascal_to_kebab("URL"), "url");
     }
 
@@ -404,5 +422,26 @@ mod kebab_tests {
     fn digit_then_upper() {
         // Iso8859Text → iso8859-text (digit precedes T; insert dash)
         assert_eq!(pascal_to_kebab("Iso8859Text"), "iso8859-text");
+    }
+
+    #[test]
+    fn single_letter_initialism() {
+        // IP → ip (single-letter initialism; no dash needed)
+        assert_eq!(pascal_to_kebab("IP"), "ip");
+    }
+
+    #[test]
+    fn trailing_initialism_word() {
+        // APIKey → api-key (initialism + word; the new rule)
+        assert_eq!(pascal_to_kebab("APIKey"), "api-key");
+        // Multi-segment shape: XMLHttpRequest → xml-http-request
+        assert_eq!(pascal_to_kebab("XMLHttpRequest"), "xml-http-request");
+    }
+
+    #[test]
+    fn initialism_at_end() {
+        // Ends in initialism with no following lowercase — stays
+        // collapsed. Examples: AsURL → as-url (URL run preserved).
+        assert_eq!(pascal_to_kebab("AsURL"), "as-url");
     }
 }
