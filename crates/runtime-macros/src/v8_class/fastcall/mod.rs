@@ -9,19 +9,27 @@
 //! when arg shapes don't match the typed signature (e.g. multibyte
 //! strings for SeqOneByteString).
 //!
-//! Hosts:
-//! - `validate_fastcall_signature` — parse-time signature checker.
-//! - `fastcall_arg_mapping` / `fastcall_return_mapping` — Rust ↔ fast-API
-//!   type translators.
-//! - `fastcall_fn_ident` / `fastcall_cfn_ident` / `fastcall_cinfo_ident`
-//!   — mangled identifier helpers.
-//! - `gen_fastcall_callback` — emits the extern "C" shim, the static
-//!   `CFunctionInfo`, and the static `CFunction`.
+//! Layout (post-Wave-4b):
+//! - [`types::FastcallType`] — table-driven Rust ↔ fast-API type
+//!   classifier (closes F6 / §3 stringly-typed-dispatch). Replaces the
+//!   pre-Wave-4b parallel string-keyed mappings.
+//! - This file —
+//!   - `validate_fastcall_signature` — parse-time signature checker.
+//!   - `fastcall_arg_mapping` / `fastcall_return_mapping` — thin
+//!     wrappers that classify via [`FastcallType`] and emit the
+//!     CTypeInfo + extern fn type + bind/marshal triple.
+//!   - `fastcall_fn_ident` / `fastcall_cfn_ident` / `fastcall_cinfo_ident`
+//!     — mangled identifier helpers.
+//!   - `gen_fastcall_callback` — emits the extern "C" shim, the static
+//!     `CFunctionInfo`, and the static `CFunction`.
+
+mod types;
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{FnArg, ImplItemFn, ReturnType, Type};
 
+use self::types::FastcallType;
 use super::helpers::parse_params_skipping_self;
 use super::ClassMethod;
 
@@ -173,237 +181,104 @@ pub(super) fn validate_fastcall_signature(func: &ImplItemFn) -> syn::Result<()> 
     }
 }
 
-/// Map a Rust arg type to (CTypeInfo, fast-shim arg type tokens,
-/// extraction tokens). Used by `gen_fastcall_callback` to build the
-/// CFunctionInfo array, the extern "C" fn signature, and the per-arg
-/// adaption that converts the fast-API value to the user method's
-/// expected param type.
+/// Map a Rust arg type to (CTypeInfo, fast-shim arg type tokens, bind
+/// snippet). Used by `gen_fastcall_callback` to build the CFunctionInfo
+/// array, the extern "C" fn signature, and the per-arg adaption that
+/// converts the fast-API value to the user method's expected param type.
 ///
-/// The returned tuple:
-///   - `cinfo` — token to place inside the CTypeInfo array literal
-///     (e.g. `v8::fast_api::Type::Uint32.as_info()`).
-///   - `arg_ty` — the extern "C" fn parameter type
-///     (e.g. `u32` or `*const v8::fast_api::FastApiOneByteString`).
-///   - `bind` — token that adapts the raw fast-API value (in scope as
-///     a binding named `<original_name>_raw`) to the user method's
-///     expected type (the original Rust type), under the name
-///     `<original_name>` ready for the user-method call.
-fn fastcall_arg_mapping(name: &syn::Ident, ty: &Type) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
-    let raw_name = format_ident!("{}_raw", name);
-    let ident = crate::type_ident(ty);
-    match ident.as_deref() {
-        Some("bool") => Some((
-            quote! { ::v8::fast_api::Type::Bool.as_info() },
-            quote! { bool },
-            quote! { let #name: bool = #raw_name; },
-        )),
-        Some("i32") => Some((
-            quote! { ::v8::fast_api::Type::Int32.as_info() },
-            quote! { i32 },
-            quote! { let #name: i32 = #raw_name; },
-        )),
-        Some("u32") => Some((
-            quote! { ::v8::fast_api::Type::Uint32.as_info() },
-            quote! { u32 },
-            quote! { let #name: u32 = #raw_name; },
-        )),
-        Some("i64") => Some((
-            quote! { ::v8::fast_api::Type::Int64.as_info() },
-            quote! { i64 },
-            quote! { let #name: i64 = #raw_name; },
-        )),
-        Some("u64") => Some((
-            quote! { ::v8::fast_api::Type::Uint64.as_info() },
-            quote! { u64 },
-            quote! { let #name: u64 = #raw_name; },
-        )),
-        Some("f32") => Some((
-            quote! { ::v8::fast_api::Type::Float32.as_info() },
-            quote! { f32 },
-            quote! { let #name: f32 = #raw_name; },
-        )),
-        Some("f64") => Some((
-            quote! { ::v8::fast_api::Type::Float64.as_info() },
-            quote! { f64 },
-            quote! { let #name: f64 = #raw_name; },
-        )),
-        Some("ByteString") => Some((
-            quote! { ::v8::fast_api::Type::SeqOneByteString.as_info() },
-            quote! { *const ::v8::fast_api::FastApiOneByteString },
-            quote! {
-                // SAFETY: V8 guarantees the FastApiOneByteString lives
-                // for the duration of the fast call. as_bytes() returns
-                // a borrowed slice; we copy into a fresh ByteString to
-                // satisfy the user method's owned-bytes signature. This
-                // ALLOCATES a Vec, which technically violates "no alloc
-                // in the fast path" — but ByteString construction is
-                // the cheapest path the user method can accept, and
-                // the Vec is small (header names are typically <64
-                // bytes) so the allocation is dwarfed by the saved
-                // prologue. Tradeoff documented in the macro design.
-                let #name = {
-                    let __bytes_slice = unsafe { (&*#raw_name).as_bytes() };
-                    ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes_slice.to_vec())
-                };
-            },
-        )),
-        _ => None,
+/// Wave 4b: classification + emission both delegate to
+/// [`FastcallType`] (design §3.7, closes F6). The two parallel
+/// string-keyed `match` tables that used to inline the per-type
+/// triples are gone — the variant carries the data.
+fn fastcall_arg_mapping(
+    name: &syn::Ident,
+    ty: &Type,
+) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
+    let kind = FastcallType::from_arg_ty(ty)?;
+    Some((kind.cinfo(), kind.extern_ty(), kind.arg_bind(name)))
+}
+
+/// Map the user method's return type to (CTypeInfo, extern fn return
+/// type, marshal snippet). For `Result<T, OpError>` the Err arm uses
+/// CallbackScope::new(options) to throw, then returns a sentinel zero-
+/// value (V8 ignores the return when an exception is pending).
+///
+/// Wave 4b: classification splits Result vs. bare ahead of time, then
+/// dispatches to a shared per-variant emitter ([`FastcallType`], design
+/// §3.7).
+fn fastcall_return_mapping(
+    output: &ReturnType,
+) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
+    match output {
+        ReturnType::Default => Some(unit_marshal()),
+        ReturnType::Type(_, ret_ty) => {
+            // Result<T, OpError> → marshal with throw-on-Err sentinel.
+            if crate::type_ident(ret_ty).as_deref() == Some("Result") {
+                let inner = crate::first_generic_arg(ret_ty)?;
+                let kind = FastcallType::from_return_inner(inner)?;
+                return Some((kind.cinfo(), kind.extern_ty(), result_marshal(kind)));
+            }
+            // Bare T → identity marshal (or the unit sentinel for `()`).
+            let kind = FastcallType::from_return_inner(ret_ty)?;
+            Some((kind.cinfo(), kind.extern_ty(), bare_marshal(kind)))
+        }
     }
 }
 
-/// Map the user method's return type to:
-///   - `cinfo` — return-side CTypeInfo (e.g. `Type::Bool.as_info()`).
-///   - `ret_ty` — extern "C" fn return type tokens.
-///   - `marshal` — token that takes the user method's call expression
-///     bound to `__r` and produces the extern "C" return value. For
-///     `Result<T, OpError>` the Err arm uses CallbackScope::new(options)
-///     to throw, then returns a sentinel zero-value (V8 ignores the
-///     return when an exception is pending).
-fn fastcall_return_mapping(output: &ReturnType) -> Option<(TokenStream2, TokenStream2, TokenStream2)> {
-    let unit_response = (
-        quote! { ::v8::fast_api::Type::Void.as_info() },
-        quote! { () },
-        quote! { let _ = __r; },
-    );
-    match output {
-        ReturnType::Default => Some(unit_response),
-        ReturnType::Type(_, ret_ty) => {
-            let outer = crate::type_ident(ret_ty);
-            match outer.as_deref() {
-                Some("Result") => {
-                    // Result<T, OpError>: for the fast path, on Err we
-                    // construct a CallbackScope from options and throw
-                    // the exception there (which deopts and routes the
-                    // call to the slow path next iteration). The fn
-                    // returns a sentinel default(zero) — V8 ignores the
-                    // return value when an exception is pending.
-                    let inner = crate::first_generic_arg(ret_ty);
-                    if let Some(t) = inner {
-                        if crate::is_unit_type(t) {
-                            return Some((
-                                quote! { ::v8::fast_api::Type::Void.as_info() },
-                                quote! { () },
-                                quote! {
-                                    match __r {
-                                        Ok(_) => {}
-                                        Err(__err) => {
-                                            let __opts: &::v8::fast_api::FastApiCallbackOptions = unsafe { &*__options };
-                                            ::v8::callback_scope!(unsafe let __cb_scope, __opts);
-                                            let __msg = ::v8::String::new(__cb_scope, &__err.message)
-                                                .unwrap();
-                                            let __exc = ::v8::Exception::type_error(__cb_scope, __msg);
-                                            __cb_scope.throw_exception(__exc);
-                                        }
-                                    }
-                                },
-                            ));
-                        }
-                        if let Some(name) = crate::type_ident(t) {
-                            let (cinfo, ret_ty_tok, sentinel) = match name.as_str() {
-                                "bool" => (
-                                    quote! { ::v8::fast_api::Type::Bool.as_info() },
-                                    quote! { bool },
-                                    quote! { false },
-                                ),
-                                "i32" => (
-                                    quote! { ::v8::fast_api::Type::Int32.as_info() },
-                                    quote! { i32 },
-                                    quote! { 0i32 },
-                                ),
-                                "u32" => (
-                                    quote! { ::v8::fast_api::Type::Uint32.as_info() },
-                                    quote! { u32 },
-                                    quote! { 0u32 },
-                                ),
-                                "i64" => (
-                                    quote! { ::v8::fast_api::Type::Int64.as_info() },
-                                    quote! { i64 },
-                                    quote! { 0i64 },
-                                ),
-                                "u64" => (
-                                    quote! { ::v8::fast_api::Type::Uint64.as_info() },
-                                    quote! { u64 },
-                                    quote! { 0u64 },
-                                ),
-                                "f32" => (
-                                    quote! { ::v8::fast_api::Type::Float32.as_info() },
-                                    quote! { f32 },
-                                    quote! { 0.0f32 },
-                                ),
-                                "f64" => (
-                                    quote! { ::v8::fast_api::Type::Float64.as_info() },
-                                    quote! { f64 },
-                                    quote! { 0.0f64 },
-                                ),
-                                _ => return None,
-                            };
-                            return Some((
-                                cinfo,
-                                ret_ty_tok,
-                                quote! {
-                                    match __r {
-                                        Ok(__v) => __v,
-                                        Err(__err) => {
-                                            let __opts: &::v8::fast_api::FastApiCallbackOptions = unsafe { &*__options };
-                                            ::v8::callback_scope!(unsafe let __cb_scope, __opts);
-                                            let __msg = ::v8::String::new(__cb_scope, &__err.message)
-                                                .unwrap();
-                                            let __exc = ::v8::Exception::type_error(__cb_scope, __msg);
-                                            __cb_scope.throw_exception(__exc);
-                                            #sentinel
-                                        }
-                                    }
-                                },
-                            ));
-                        }
-                    }
-                    None
+/// Marshal triple for the `()` return shape (also used by
+/// `ReturnType::Default`). The user method's call is bound to `__r`
+/// and discarded — the extern fn returns `()` to V8.
+fn unit_marshal() -> (TokenStream2, TokenStream2, TokenStream2) {
+    let kind = FastcallType::Void;
+    (kind.cinfo(), kind.extern_ty(), quote! { let _ = __r; })
+}
+
+/// Marshal snippet for a `Result<T, OpError>` return. Ok unwraps into
+/// the extern slot; Err allocates a CallbackScope from the options
+/// pointer, throws via TypeError, and returns the per-variant sentinel.
+fn result_marshal(kind: FastcallType) -> TokenStream2 {
+    let sentinel = kind.err_sentinel();
+    if matches!(kind, FastcallType::Void) {
+        // Result<(), OpError>: no Ok unwrap, no return-value sentinel
+        // — the `match` is end-of-fn (rustc accepts the implicit `()`).
+        return quote! {
+            match __r {
+                Ok(_) => {}
+                Err(__err) => {
+                    let __opts: &::v8::fast_api::FastApiCallbackOptions = unsafe { &*__options };
+                    ::v8::callback_scope!(unsafe let __cb_scope, __opts);
+                    let __msg = ::v8::String::new(__cb_scope, &__err.message)
+                        .unwrap();
+                    let __exc = ::v8::Exception::type_error(__cb_scope, __msg);
+                    __cb_scope.throw_exception(__exc);
                 }
-                Some("bool") => Some((
-                    quote! { ::v8::fast_api::Type::Bool.as_info() },
-                    quote! { bool },
-                    quote! { __r },
-                )),
-                Some("i32") => Some((
-                    quote! { ::v8::fast_api::Type::Int32.as_info() },
-                    quote! { i32 },
-                    quote! { __r },
-                )),
-                Some("u32") => Some((
-                    quote! { ::v8::fast_api::Type::Uint32.as_info() },
-                    quote! { u32 },
-                    quote! { __r },
-                )),
-                Some("i64") => Some((
-                    quote! { ::v8::fast_api::Type::Int64.as_info() },
-                    quote! { i64 },
-                    quote! { __r },
-                )),
-                Some("u64") => Some((
-                    quote! { ::v8::fast_api::Type::Uint64.as_info() },
-                    quote! { u64 },
-                    quote! { __r },
-                )),
-                Some("f32") => Some((
-                    quote! { ::v8::fast_api::Type::Float32.as_info() },
-                    quote! { f32 },
-                    quote! { __r },
-                )),
-                Some("f64") => Some((
-                    quote! { ::v8::fast_api::Type::Float64.as_info() },
-                    quote! { f64 },
-                    quote! { __r },
-                )),
-                _ => {
-                    if crate::is_unit_type(ret_ty) {
-                        Some(unit_response)
-                    } else {
-                        None
-                    }
-                }
+            }
+        };
+    }
+    quote! {
+        match __r {
+            Ok(__v) => __v,
+            Err(__err) => {
+                let __opts: &::v8::fast_api::FastApiCallbackOptions = unsafe { &*__options };
+                ::v8::callback_scope!(unsafe let __cb_scope, __opts);
+                let __msg = ::v8::String::new(__cb_scope, &__err.message)
+                    .unwrap();
+                let __exc = ::v8::Exception::type_error(__cb_scope, __msg);
+                __cb_scope.throw_exception(__exc);
+                #sentinel
             }
         }
     }
+}
+
+/// Marshal snippet for a bare `T` return — the user method's call value
+/// passes through verbatim. For `()` we emit a `let _ = __r;` so the
+/// expression bound is consumed but the fn returns `()` to V8.
+fn bare_marshal(kind: FastcallType) -> TokenStream2 {
+    if matches!(kind, FastcallType::Void) {
+        return quote! { let _ = __r; };
+    }
+    quote! { __r }
 }
 
 /// Mangled identifier of the fastcall extern "C" fn.

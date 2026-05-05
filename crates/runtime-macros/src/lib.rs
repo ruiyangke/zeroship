@@ -40,6 +40,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{GenericArgument, Ident, PathArguments, ReturnType, Type, TypePath};
 
+mod known_type;
 mod v8_class;
 mod v8_iterable;
 mod webidl_dict;
@@ -544,41 +545,11 @@ pub(crate) fn is_enforce_range_u32(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("EnforceRangeU32")
 }
 
-/// Check if type is one of the `Clamp{U16,U32,I32,U64,I64}` newtypes from
-/// `zeroship_runtime::clamp`. Used for WebIDL `[Clamp]` integer coercion
-/// — clamps to the integer range and round-half-even rounds, instead of
-/// throwing TypeError like `[EnforceRange]`. Returns the suffix
-/// (`"u16"`, `"u32"`, `"i32"`, `"u64"`, `"i64"`) so the codegen can
-/// dispatch on the target integer type, or `None` if the param isn't a
-/// Clamp newtype.
-pub(crate) fn clamp_kind(ty: &Type) -> Option<&'static str> {
-    match type_ident(ty).as_deref() {
-        Some("ClampU16") => Some("u16"),
-        Some("ClampU32") => Some("u32"),
-        Some("ClampI32") => Some("i32"),
-        Some("ClampU64") => Some("u64"),
-        Some("ClampI64") => Some("i64"),
-        _ => None,
-    }
-}
-
-/// Check if type is one of the `Wrap{U8,U16,U32,I8,I16,I32}` newtypes
-/// from `zeroship_runtime::wrap`. Used for WebIDL default-case integer
-/// coercion (no `[Clamp]` or `[EnforceRange]`): truncate toward zero,
-/// modulo 2^N, reinterpret per signedness. NaN / ±Infinity → 0. Mirror
-/// of `clamp_kind` — returns the suffix so codegen can dispatch on
-/// the target type, `None` otherwise.
-pub(crate) fn wrap_kind(ty: &Type) -> Option<&'static str> {
-    match type_ident(ty).as_deref() {
-        Some("WrapU8") => Some("u8"),
-        Some("WrapU16") => Some("u16"),
-        Some("WrapU32") => Some("u32"),
-        Some("WrapI8") => Some("i8"),
-        Some("WrapI16") => Some("i16"),
-        Some("WrapI32") => Some("i32"),
-        _ => None,
-    }
-}
+// Wave 4b: `clamp_kind` / `wrap_kind` standalone helpers folded into
+// `KnownType::Clamp(ClampInt)` / `KnownType::Wrap(WrapInt)` (closes the
+// stringly-typed-dispatch anti-pattern §3, plus F10/H8). The variant
+// data IS the suffix; no "unrecognised suffix" `unreachable!` arm to
+// audit.
 
 /// Check if type is the `USVString` newtype from
 /// `zeroship_runtime::url_native::helpers`. Used for WebIDL USVString
@@ -761,288 +732,23 @@ pub(crate) fn gen_throw_op_error_arms(
 /// MUST surface as a real `DOMException`, not a generic `Error`. Now
 /// delegates to [`gen_throw_op_error_arms`] for the full 6-variant
 /// match, in lockstep with `gen_throw_error`.
-fn gen_extract_throw() -> TokenStream2 {
+pub(crate) fn gen_extract_throw() -> TokenStream2 {
     let scope = quote! { scope };
     let err = quote! { __err };
     gen_throw_op_error_arms(&scope, &err)
 }
 
+/// Emit the per-arg extraction tokens for the slow-path
+/// FunctionCallback. Wave 4b — delegates to the table-driven
+/// [`KnownType`] classifier (design §3.7, closes F10 / H8). The body
+/// here is a thin shim: classify the type once, ask the variant for
+/// its emission. The 13-arm string-keyed dispatch and the
+/// `clamp_kind` / `wrap_kind` standalone helpers (with their
+/// `unreachable!` arms) used to live inline; they fold into
+/// `KnownType::extract_tokens` and the variant data, respectively.
 pub(crate) fn gen_extract(index: usize, name: &Ident, ty: &Type) -> TokenStream2 {
     let idx = index as i32;
-    let ident = type_ident(ty);
-
-    // v8::Local<v8::Value> (or any v8::Local<v8::T>) — pass the raw
-    // arg through unchanged. Lets handlers accept union types
-    // (Request body, Headers init, etc.) and dispatch on the V8
-    // value's actual shape themselves.
-    if ident.as_deref() == Some("Local") {
-        return quote! {
-            let #name = args.get(#idx);
-        };
-    }
-
-    // ByteString → WebIDL ByteString conversion. On any code unit
-    // > 0xFF, sets a pending TypeError and returns from the callback
-    // (so the JS caller observes the throw). The match-and-return
-    // shape works in callbacks that return `()` (the V8 ABI shape) —
-    // we don't need the user method to return Result. After the throw
-    // is set, JS execution unwinds normally.
-    if is_byte_string(ty) {
-        let throw = gen_extract_throw();
-        return quote! {
-            let #name = match ::zeroship_runtime::byte_string::read_byte_string(
-                scope,
-                args.get(#idx),
-            ) {
-                Ok(__bytes) => ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes),
-                Err(__err) => {
-                    #throw
-                    return;
-                }
-            };
-        };
-    }
-
-    // USVString → WebIDL USVString conversion. Replaces lone surrogate
-    // code units with U+FFFD per https://webidl.spec.whatwg.org/#es-USVString.
-    // The result is owned `String` so callers don't keep a `Local<Value>`
-    // borrow alive across subsequent V8 ops.
-    if is_usv_string(ty) {
-        let throw = gen_extract_throw();
-        return quote! {
-            let #name = match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
-                scope,
-                args.get(#idx),
-            ) {
-                Ok(__s) => ::zeroship_runtime::url_native::helpers::USVString::from_string(__s),
-                Err(__err) => {
-                    #throw
-                    return;
-                }
-            };
-        };
-    }
-
-    // Option<USVString> — undefined / null produces None; otherwise
-    // run USVString conversion and wrap in Some.
-    if is_option_usv_string(ty) {
-        let throw = gen_extract_throw();
-        return quote! {
-            let #name: Option<::zeroship_runtime::url_native::helpers::USVString> =
-                if args.length() > #idx && !args.get(#idx).is_undefined() {
-                    match ::zeroship_runtime::url_native::helpers::read_usv_string_or_throw(
-                        scope,
-                        args.get(#idx),
-                    ) {
-                        Ok(__s) => Some(::zeroship_runtime::url_native::helpers::USVString::from_string(__s)),
-                        Err(__err) => {
-                            #throw
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
-        };
-    }
-
-    // Clamp{U16,U32,I32,U64,I64} → WebIDL [Clamp] integer coercion.
-    // Unlike [EnforceRange], [Clamp] never throws: NaN → 0, < min → min,
-    // > max → max, otherwise round-half-even. The reader fns in
-    // `zeroship_runtime::clamp` implement the algorithm; this match
-    // dispatches on the target integer type and wraps in the right
-    // newtype constructor.
-    if let Some(kind) = clamp_kind(ty) {
-        let (reader, ctor) = match kind {
-            "u16" => (
-                quote! { ::zeroship_runtime::clamp::read_clamp_u16 },
-                quote! { ::zeroship_runtime::clamp::ClampU16 },
-            ),
-            "u32" => (
-                quote! { ::zeroship_runtime::clamp::read_clamp_u32 },
-                quote! { ::zeroship_runtime::clamp::ClampU32 },
-            ),
-            "i32" => (
-                quote! { ::zeroship_runtime::clamp::read_clamp_i32 },
-                quote! { ::zeroship_runtime::clamp::ClampI32 },
-            ),
-            "u64" => (
-                quote! { ::zeroship_runtime::clamp::read_clamp_u64 },
-                quote! { ::zeroship_runtime::clamp::ClampU64 },
-            ),
-            "i64" => (
-                quote! { ::zeroship_runtime::clamp::read_clamp_i64 },
-                quote! { ::zeroship_runtime::clamp::ClampI64 },
-            ),
-            _ => unreachable!("clamp_kind returned an unrecognised suffix"),
-        };
-        return quote! {
-            let #name = #ctor(#reader(scope, args.get(#idx)));
-        };
-    }
-
-    // Wrap{U8,U16,U32,I8,I16,I32} → WebIDL default-case integer
-    // coercion (no `[Clamp]` / `[EnforceRange]`). NaN / ±Infinity → 0,
-    // truncate toward zero, modulo 2^N, reinterpret per signedness.
-    // Reader fns in `zeroship_runtime::wrap` implement the algorithm;
-    // this match dispatches on the target integer type.
-    if let Some(kind) = wrap_kind(ty) {
-        let reader = match kind {
-            "u8" => quote! { ::zeroship_runtime::wrap::read_wrap_u8 },
-            "u16" => quote! { ::zeroship_runtime::wrap::read_wrap_u16 },
-            "u32" => quote! { ::zeroship_runtime::wrap::read_wrap_u32 },
-            "i8" => quote! { ::zeroship_runtime::wrap::read_wrap_i8 },
-            "i16" => quote! { ::zeroship_runtime::wrap::read_wrap_i16 },
-            "i32" => quote! { ::zeroship_runtime::wrap::read_wrap_i32 },
-            _ => unreachable!("wrap_kind returned an unrecognised suffix"),
-        };
-        return quote! {
-            let #name = #reader(scope, args.get(#idx));
-        };
-    }
-
-    // EnforceRangeU64 → WebIDL [EnforceRange] unsigned long long. Throws
-    // TypeError for NaN, ±∞, negative, and values > 2^53-1 (Number
-    // precision limit) — see streams design §XIV.8.
-    if is_enforce_range_u64(ty) {
-        let throw = gen_extract_throw();
-        return quote! {
-            let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u64(
-                scope,
-                args.get(#idx),
-            ) {
-                Ok(__v) => __v,
-                Err(__err) => {
-                    #throw
-                    return;
-                }
-            };
-        };
-    }
-
-    // EnforceRangeU32 → WebIDL [EnforceRange] unsigned long. Throws
-    // TypeError for NaN, ±∞, negative, non-integer, and values > 2^32-1.
-    // Used by the WebCrypto IDL surface (Pbkdf2Params.iterations etc.) —
-    // see `docs/proposals/webcrypto-native.md` D-20.
-    if is_enforce_range_u32(ty) {
-        let throw = gen_extract_throw();
-        return quote! {
-            let #name = match ::zeroship_runtime::enforce_range::read_enforce_range_u32(
-                scope,
-                args.get(#idx),
-            ) {
-                Ok(__v) => __v,
-                Err(__err) => {
-                    #throw
-                    return;
-                }
-            };
-        };
-    }
-
-    // Vec<u8> → read from ArrayBufferView backing store (zero-serialization binary transfer)
-    if is_vec_u8(ty) {
-        return quote! {
-            let #name: Vec<u8> = {
-                let __arg = args.get(#idx);
-                if let Ok(__view) = v8::Local::<v8::ArrayBufferView>::try_from(__arg) {
-                    let mut __buf = vec![0u8; __view.byte_length()];
-                    __view.copy_contents(&mut __buf);
-                    __buf
-                } else if let Ok(__ab) = v8::Local::<v8::ArrayBuffer>::try_from(__arg) {
-                    let __store = __ab.get_backing_store();
-                    let mut __buf = vec![0u8; __ab.byte_length()];
-                    for __i in 0..__buf.len() {
-                        __buf[__i] = __store[__i].get();
-                    }
-                    __buf
-                } else {
-                    Vec::new()
-                }
-            };
-        };
-    }
-
-    match ident.as_deref() {
-        Some("Option") => {
-            let inner_ty = first_generic_arg(ty);
-            let inner = inner_ty.and_then(type_ident);
-            // Option<Vec<u8>> needs the same ArrayBuffer/View
-            // extraction the bare Vec<u8> path uses, just lifted
-            // through Option to handle missing/null/undefined args.
-            if inner_ty.map(is_vec_u8).unwrap_or(false) {
-                return quote! {
-                    let #name: Option<Vec<u8>> = if args.length() > #idx
-                        && !args.get(#idx).is_null_or_undefined()
-                    {
-                        let __arg = args.get(#idx);
-                        if let Ok(__view) = v8::Local::<v8::ArrayBufferView>::try_from(__arg) {
-                            let mut __buf = vec![0u8; __view.byte_length()];
-                            __view.copy_contents(&mut __buf);
-                            Some(__buf)
-                        } else if let Ok(__ab) = v8::Local::<v8::ArrayBuffer>::try_from(__arg) {
-                            let __store = __ab.get_backing_store();
-                            let mut __buf = vec![0u8; __ab.byte_length()];
-                            for __i in 0..__buf.len() {
-                                __buf[__i] = __store[__i].get();
-                            }
-                            Some(__buf)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                };
-            }
-            match inner.as_deref() {
-                Some("u32") => quote! {
-                    let #name: Option<u32> = if args.length() > #idx
-                        && !args.get(#idx).is_null_or_undefined()
-                    {
-                        args.get(#idx).uint32_value(scope)
-                    } else {
-                        None
-                    };
-                },
-                Some("i32") => quote! {
-                    let #name: Option<i32> = if args.length() > #idx
-                        && !args.get(#idx).is_null_or_undefined()
-                    {
-                        args.get(#idx).int32_value(scope)
-                    } else {
-                        None
-                    };
-                },
-                // Default to Option<String>
-                _ => quote! {
-                    let #name: Option<String> = if args.length() > #idx
-                        && !args.get(#idx).is_null_or_undefined()
-                    {
-                        Some(args.get(#idx).to_rust_string_lossy(scope))
-                    } else {
-                        None
-                    };
-                },
-            }
-        }
-        Some("bool") => quote! {
-            let #name: bool = args.get(#idx).boolean_value(scope);
-        },
-        Some("u32") => quote! {
-            let #name: u32 = args.get(#idx).uint32_value(scope).unwrap_or(0);
-        },
-        Some("i32") => quote! {
-            let #name: i32 = args.get(#idx).int32_value(scope).unwrap_or(0);
-        },
-        Some("f64") => quote! {
-            let #name: f64 = args.get(#idx).number_value(scope).unwrap_or(0.0);
-        },
-        // Default: String (covers named types like String, &str aliases, etc.)
-        _ => quote! {
-            let #name: String = args.get(#idx).to_rust_string_lossy(scope);
-        },
-    }
+    known_type::KnownType::from_ty(ty).extract_tokens(name, idx)
 }
 
 // ---------------------------------------------------------------------------
