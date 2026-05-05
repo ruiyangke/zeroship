@@ -78,6 +78,60 @@ pub fn parse(typed_id: &str) -> Result<(&str, uuid::Uuid), String> {
     Ok((prefix, uuid))
 }
 
+/// Parse error for [`parse_with_prefix`]. Distinguishes a wrong-prefix
+/// boundary check from a malformed-id parse error so callers (e.g.
+/// `crates/sandbox/src/db.rs`) can map them onto distinct error
+/// variants without losing the underlying detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    /// The id parsed cleanly but its prefix did not match the expected
+    /// entity-type prefix. Used by `parse_with_prefix` as the
+    /// path-traversal-hardening boundary check (Invariant 2 in
+    /// `docs/proposals/sandbox-pg-state.md`).
+    WrongPrefix { expected: String, got: String },
+    /// The id failed to parse — wrong shape, invalid base62, missing
+    /// underscore, etc. Carries the same string the underlying [`parse`]
+    /// would have returned.
+    Malformed(String),
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongPrefix { expected, got } => {
+                write!(f, "expected prefix '{expected}', got '{got}'")
+            }
+            Self::Malformed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Parse a typed ID and assert its prefix matches `expected_prefix`.
+///
+/// Layered safety check on top of [`parse`]. Callers that have a
+/// known entity type (e.g. `sandbox.db.insert_sandbox` knows it is
+/// receiving an `sbx_…` id) use this helper to refuse mismatched
+/// prefixes BEFORE the value reaches any downstream wire (SQL,
+/// filesystem path, HTTP header). Mirrors the path-traversal
+/// hardening posture in `crates/sandbox/src/persist.rs:36-40`.
+///
+/// Returns the embedded UUID on success.
+pub fn parse_with_prefix(
+    typed_id: &str,
+    expected_prefix: &str,
+) -> Result<uuid::Uuid, ParseError> {
+    let (got, uuid) = parse(typed_id).map_err(ParseError::Malformed)?;
+    if got != expected_prefix {
+        return Err(ParseError::WrongPrefix {
+            expected: expected_prefix.to_string(),
+            got: got.to_string(),
+        });
+    }
+    Ok(uuid)
+}
+
 /// Strip the prefix and decode to UUID string (hyphenated).
 pub fn to_uuid_string(typed_id: &str) -> Result<String, String> {
     let (_, uuid) = parse(typed_id)?;
@@ -163,5 +217,46 @@ mod tests {
         assert!(u.starts_with("usr_"));
         assert!(a.starts_with("app_"));
         assert!(s.starts_with("ses_"));
+    }
+
+    #[test]
+    fn parse_with_prefix_matches() {
+        let id = generate("sbx");
+        let uuid = parse_with_prefix(&id, "sbx").expect("matching prefix should parse");
+        let (_, expected) = parse(&id).unwrap();
+        assert_eq!(uuid, expected);
+    }
+
+    #[test]
+    fn parse_with_prefix_rejects_wrong_prefix() {
+        let id = new_user_id(); // prefix = "usr"
+        let err =
+            parse_with_prefix(&id, "sbx").expect_err("wrong prefix must error");
+        match err {
+            ParseError::WrongPrefix { expected, got } => {
+                assert_eq!(expected, "sbx");
+                assert_eq!(got, "usr");
+            }
+            ParseError::Malformed(_) => panic!("should not classify as malformed"),
+        }
+    }
+
+    #[test]
+    fn parse_with_prefix_rejects_malformed() {
+        // No underscore → underlying parse fails first.
+        let err = parse_with_prefix("garbage", "sbx").expect_err("malformed must error");
+        assert!(matches!(err, ParseError::Malformed(_)));
+
+        // Invalid base62 after a real prefix.
+        let err = parse_with_prefix("sbx_!!!notbase62!!!", "sbx")
+            .expect_err("invalid base62 must error");
+        assert!(matches!(err, ParseError::Malformed(_)));
+    }
+
+    #[test]
+    fn parse_with_prefix_rejects_empty() {
+        let err =
+            parse_with_prefix("", "sbx").expect_err("empty input must error");
+        assert!(matches!(err, ParseError::Malformed(_)));
     }
 }
