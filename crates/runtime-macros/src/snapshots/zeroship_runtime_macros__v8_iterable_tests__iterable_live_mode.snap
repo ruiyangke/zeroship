@@ -248,28 +248,62 @@ pub(crate) fn __Headers_for_each(
     let mut __cursor: usize = 0;
     let __inflight_addr = __ext.value() as usize;
     ::std::thread_local! {
-        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::RefCell <
-        ::std::collections::HashSet < usize >, > =
-        ::std::cell::RefCell::new(::std::collections::HashSet::new());
+        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::Cell < [::std::option::Option <
+        usize >; 8], > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
     }
-    let __already_inflight = __ZS_VALUE_PAIRS_INFLIGHT
-        .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
-    if __already_inflight {
-        let __msg = v8::String::new(
-                scope,
-                "re-entered `value_pairs` on Headers instance — concurrent &mut self callback",
-            )
-            .unwrap();
-        let __exc = v8::Exception::type_error(scope, __msg);
-        scope.throw_exception(__exc);
-        return;
+    let __slot_index: ::std::option::Option<usize> = __ZS_VALUE_PAIRS_INFLIGHT
+        .with(|__s| {
+            let mut __arr = __s.get();
+            for __slot in __arr.iter() {
+                if *__slot == ::std::option::Option::Some(__inflight_addr) {
+                    return ::std::option::Option::None;
+                }
+            }
+            for __i in 0..__arr.len() {
+                if __arr[__i].is_none() {
+                    __arr[__i] = ::std::option::Option::Some(__inflight_addr);
+                    __s.set(__arr);
+                    return ::std::option::Option::Some(__i);
+                }
+            }
+            ::std::option::Option::Some(::std::usize::MAX)
+        });
+    match __slot_index {
+        ::std::option::Option::None => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entered `value_pairs` on Headers instance — concurrent &mut self callback",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(::std::usize::MAX) => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entry depth exceeded for `value_pairs` on Headers (cap is 8 — a future raise requires a code change)",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(_) => {}
     }
     struct __ReentryGuard(usize);
     impl ::std::ops::Drop for __ReentryGuard {
         fn drop(&mut self) {
             __ZS_VALUE_PAIRS_INFLIGHT
                 .with(|__s| {
-                    __s.borrow_mut().remove(&self.0);
+                    let mut __arr = __s.get();
+                    for __slot in __arr.iter_mut() {
+                        if *__slot == ::std::option::Option::Some(self.0) {
+                            *__slot = ::std::option::Option::None;
+                            break;
+                        }
+                    }
+                    __s.set(__arr);
                 });
         }
     }
@@ -364,28 +398,62 @@ pub(crate) fn __Headers_iter_next(
     };
     let __inflight_addr = __parent_ext.value() as usize;
     ::std::thread_local! {
-        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::RefCell <
-        ::std::collections::HashSet < usize >, > =
-        ::std::cell::RefCell::new(::std::collections::HashSet::new());
+        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::Cell < [::std::option::Option <
+        usize >; 8], > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
     }
-    let __already_inflight = __ZS_VALUE_PAIRS_INFLIGHT
-        .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
-    if __already_inflight {
-        let __msg = v8::String::new(
-                scope,
-                "re-entered `value_pairs` on Headers instance — concurrent &mut self callback",
-            )
-            .unwrap();
-        let __exc = v8::Exception::type_error(scope, __msg);
-        scope.throw_exception(__exc);
-        return;
+    let __slot_index: ::std::option::Option<usize> = __ZS_VALUE_PAIRS_INFLIGHT
+        .with(|__s| {
+            let mut __arr = __s.get();
+            for __slot in __arr.iter() {
+                if *__slot == ::std::option::Option::Some(__inflight_addr) {
+                    return ::std::option::Option::None;
+                }
+            }
+            for __i in 0..__arr.len() {
+                if __arr[__i].is_none() {
+                    __arr[__i] = ::std::option::Option::Some(__inflight_addr);
+                    __s.set(__arr);
+                    return ::std::option::Option::Some(__i);
+                }
+            }
+            ::std::option::Option::Some(::std::usize::MAX)
+        });
+    match __slot_index {
+        ::std::option::Option::None => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entered `value_pairs` on Headers instance — concurrent &mut self callback",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(::std::usize::MAX) => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entry depth exceeded for `value_pairs` on Headers (cap is 8 — a future raise requires a code change)",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(_) => {}
     }
     struct __ReentryGuard(usize);
     impl ::std::ops::Drop for __ReentryGuard {
         fn drop(&mut self) {
             __ZS_VALUE_PAIRS_INFLIGHT
                 .with(|__s| {
-                    __s.borrow_mut().remove(&self.0);
+                    let mut __arr = __s.get();
+                    for __slot in __arr.iter_mut() {
+                        if *__slot == ::std::option::Option::Some(self.0) {
+                            *__slot = ::std::option::Option::None;
+                            break;
+                        }
+                    }
+                    __s.set(__arr);
                 });
         }
     }

@@ -45,6 +45,48 @@
 //! via the macro's emitted doc comment so consumers can opt out of
 //! the derive when they need live iteration.
 //!
+//! # Live-mode contract on `value_pairs` (closes design §13.6)
+//!
+//! Live-mode codegen calls `value_pairs(&[mut] self [, scope])` once
+//! per `next()` and once per `forEach` callback iteration. The macro
+//! treats the call as **observationally pure** — i.e. the
+//! key→value entries it returns must reflect the parent's state at
+//! call time without any externally-visible side effect.
+//!
+//! What this means in practice for the supported live-mode consumers
+//! (Headers, FormData, URLSearchParams) and any future ones:
+//!
+//!   - **Allowed**: lazy materialisation behind a Cell/RefCell (e.g.
+//!     `Headers` sorts its entries on first iteration and caches the
+//!     result; subsequent `value_pairs()` calls return the cached
+//!     `Vec<(K, V)>` without re-sorting). The mutation is internal
+//!     and does not flow to JS-visible state.
+//!   - **Allowed**: returning a fresh `Vec<(K, V)>` per call — clones
+//!     are cheap relative to the V8 callback overhead, and the macro
+//!     drops the previous vec at the next call boundary.
+//!   - **NOT allowed**: emitting Events, calling user-supplied
+//!     callbacks, mutating user-observable state, or returning
+//!     entries that vary across calls without a corresponding parent
+//!     mutation. The cursor advance in `next()` assumes
+//!     `value_pairs()[idx]` resolves to a stable entry given a
+//!     stable parent.
+//!
+//! Today's enforcement is convention-only — the macro doesn't emit
+//! runtime asserts because:
+//!   1. A correct user wrap (the `&mut self` re-entry guard already
+//!      catches concurrent re-entry; a non-mutating implementation
+//!      passes the guard trivially).
+//!   2. The `cargo test --release` suite for Headers / FormData /
+//!      URLSearchParams (`v8_iterable_live_smoke.rs`) covers the
+//!      observable shape — any drift from the contract surfaces as
+//!      a smoke-test failure, not silent UB.
+//!
+//! A future debug-build instrumentation hook could `assert!` that
+//! two consecutive `value_pairs()` calls with no JS mutation
+//! between them return equal vecs (`#[cfg(debug_assertions)]`
+//! gated, behind a thread-local guard). Deferred — current
+//! consumer count (3) doesn't justify the per-call overhead.
+//!
 //! # Type bounds on K, V
 //!
 //! The macro emits `v8::String::new_from_one_byte(scope, &k)` for
@@ -494,25 +536,64 @@ pub(crate) fn generate(
             "re-entered `value_pairs` on {} instance — concurrent &mut self callback",
             class_ty
         );
+        let depth_msg = format!(
+            "re-entry depth exceeded for `value_pairs` on {} (cap is 8 — a future raise requires a code change)",
+            class_ty
+        );
+        // Wave 8 — same shape as `v8_class/emit/reentry_guard.rs`'s
+        // multi-slot Cell migration (closes design §13 / C5/H13).
+        // 8-slot fixed-cap heap-free array; LIFO push/pop on entry/drop.
+        // See the v8_class helper's doc-comment for the rationale.
         quote! {
             ::std::thread_local! {
-                static __ZS_VALUE_PAIRS_INFLIGHT: ::std::cell::RefCell<
-                    ::std::collections::HashSet<usize>,
-                > = ::std::cell::RefCell::new(::std::collections::HashSet::new());
+                static __ZS_VALUE_PAIRS_INFLIGHT: ::std::cell::Cell<
+                    [::std::option::Option<usize>; 8],
+                > = ::std::cell::Cell::new([::std::option::Option::None; 8]);
             }
-            let __already_inflight = __ZS_VALUE_PAIRS_INFLIGHT
-                .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
-            if __already_inflight {
-                let __msg = v8::String::new(scope, #err_msg).unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
+            let __slot_index: ::std::option::Option<usize> = __ZS_VALUE_PAIRS_INFLIGHT
+                .with(|__s| {
+                    let mut __arr = __s.get();
+                    for __slot in __arr.iter() {
+                        if *__slot == ::std::option::Option::Some(__inflight_addr) {
+                            return ::std::option::Option::None;
+                        }
+                    }
+                    for __i in 0..__arr.len() {
+                        if __arr[__i].is_none() {
+                            __arr[__i] = ::std::option::Option::Some(__inflight_addr);
+                            __s.set(__arr);
+                            return ::std::option::Option::Some(__i);
+                        }
+                    }
+                    ::std::option::Option::Some(::std::usize::MAX)
+                });
+            match __slot_index {
+                ::std::option::Option::None => {
+                    let __msg = v8::String::new(scope, #err_msg).unwrap();
+                    let __exc = v8::Exception::type_error(scope, __msg);
+                    scope.throw_exception(__exc);
+                    return;
+                }
+                ::std::option::Option::Some(::std::usize::MAX) => {
+                    let __msg = v8::String::new(scope, #depth_msg).unwrap();
+                    let __exc = v8::Exception::type_error(scope, __msg);
+                    scope.throw_exception(__exc);
+                    return;
+                }
+                ::std::option::Option::Some(_) => {}
             }
             struct __ReentryGuard(usize);
             impl ::std::ops::Drop for __ReentryGuard {
                 fn drop(&mut self) {
                     __ZS_VALUE_PAIRS_INFLIGHT.with(|__s| {
-                        __s.borrow_mut().remove(&self.0);
+                        let mut __arr = __s.get();
+                        for __slot in __arr.iter_mut() {
+                            if *__slot == ::std::option::Option::Some(self.0) {
+                                *__slot = ::std::option::Option::None;
+                                break;
+                            }
+                        }
+                        __s.set(__arr);
                     });
                 }
             }
@@ -1074,7 +1155,15 @@ pub(crate) fn generate(
             __it_obj.set_internal_field(0, __ext.into());
 
             // Guaranteed finalizer to reclaim the Box on GC. Same shape
-            // as `gen_box_and_install_finalizer` in v8_class.rs.
+            // as `gen_box_and_install_finalizer` in
+            // `v8_class/emit/constructor.rs` — including the deliberate
+            // `mem::forget(__weak)` that leaks ~32 bytes of WeakData
+            // per iterator instance (closes design §13.5 / §13.7).
+            // Measurement protocol + accepted-leak rationale documented
+            // verbatim on the v8_class helper. Iterator instances are
+            // typically transient (1-5 lifetime per parent), so the
+            // resident overhead per app is dominated by the parent
+            // class's leak, not this one.
             let __weak = v8::Weak::with_guaranteed_finalizer(
                 scope,
                 __it_obj,
