@@ -78,15 +78,24 @@ use zeroship_sandbox_agent::sig;
 /// surfaced via the operator's "unknown record" runbook — never
 /// silently downgraded.
 ///
-/// **v1 → v2 (Phase 3, preview-share tokens).** v2 adds
-/// [`SealedAuth::preview_secrets`] — the per-sandbox ring of
-/// `(current, previous?)` 32-byte HMAC secrets used to sign share
-/// tokens. v1 records (no preview_secret) are still accepted: they
-/// load with `preview_secrets: None`, share-token mint is a no-op
-/// from-fresh, and the controller mints a fresh ring on the next
-/// `POST .../share` mint. The on-disk record is rewritten as v2 the
-/// next time the sandbox is sealed.
-pub const SEAL_VERSION: u8 = 2;
+/// **v3 (Phase 1, pg-as-system-of-record).** Round-8 schema shrink.
+/// Pg is the system of record for non-secret state from day 1, so
+/// sealed records hold secrets only — `signing_key_bytes` and
+/// `preview_secrets`. The legacy fields (`user_id`, `project_id`,
+/// `backend`, `vm_index`, `agent_url`, `pubkey_fp`, `created_at_secs`,
+/// `preview_audit`) are gone from the v3 struct; pg holds them. A new
+/// `boot_id: Option<u64>` lets the boot-time reconciler tell apart
+/// orphans from this controller's lifetime vs orphans from a previous
+/// boot. v2 records still load — the deserializer ignores the dropped
+/// fields — and the v3 binary gets the missing data from pg at
+/// restore time.
+///
+/// **v1 → v2 (legacy).** v2 added `preview_secrets` + `preview_audit`.
+/// v3 keeps `preview_secrets` (it's secret) and drops `preview_audit`
+/// (now a pg row in `sandbox.shares`). v1 reader stayed in v2 for
+/// back-compat; round-8 keeps that compat one more step (v1 + v2
+/// records both deserialize through the v3 struct).
+pub const SEAL_VERSION: u8 = 3;
 
 /// Length of the truncated SHA-256 digest used as the filename. 16
 /// bytes → 32 hex chars. See module doc for the collision argument.
@@ -100,52 +109,49 @@ const NONCE_LEN: usize = 24;
 /// AEAD key length (32 bytes for XChaCha20-Poly1305).
 pub const AEAD_KEY_LEN: usize = 32;
 
-/// Per-sandbox auth record persisted to disk. Mirrors `SandboxAuth`
-/// plus enough metadata to re-bind the agent on restart (`vm_index`
-/// for nomad-ch derives `agent_url`; `pubkey_fp` is checked by the
-/// signed `/version` rebind probe in § II.5).
+/// Per-sandbox auth record persisted to disk.
+///
+/// **v3 (round-8, Phase 1).** Holds secret material only:
+/// `signing_key_bytes` and `preview_secrets`. Pg owns every other
+/// piece of per-sandbox state (`user_id`, `project_id`, `backend`,
+/// `vm_index`, `agent_url`, `key_fp`, `created_at`, share-token audit
+/// rows). The boot-time reconciler reads `boot_id` to distinguish
+/// orphans from this controller's lifetime vs orphans from a previous
+/// boot.
+///
+/// v2 records still deserialize through this struct — serde silently
+/// drops the legacy fields the v2 writer emitted (`user_id`,
+/// `project_id`, etc.). The v3 reader trusts pg for those values, not
+/// the sealed record. There are no production v2 records (pre-launch);
+/// the back-compat read is for unit tests and dev fixtures.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedAuth {
     pub version: u8,
+    /// Round-8: kept as the join key during restart-restore. The
+    /// caller computes the sealed filename from the sandbox UUID
+    /// (SHA-256-truncated) and passes the typed-id back via this
+    /// field after decrypt; pg's `sandboxes.sandbox_id` row is the
+    /// source for everything else.
     pub sandbox_id: String,
-    pub user_id: String,
-    pub project_id: String,
-    /// `"docker"` | `"k8s"` | `"nomad-ch"`. Surfaced so the
-    /// controller's restore path can route each record to the right
-    /// backend; lifted from `SandboxInfo.backend`.
-    pub backend: String,
     /// Raw 32-byte Ed25519 secret key. The on-disk form is AEAD-
     /// sealed; once decrypted, callers must wrap in `Arc<SigningKey>`
     /// promptly (matching the in-memory hygiene of the per-backend
     /// records) and avoid copying these bytes around.
     pub signing_key_bytes: [u8; 32],
-    /// Nomad-CH only — used to recompute the deterministic
-    /// `agent_url` (`http://10.99.<100+idx>.2:7777`) at restart.
-    /// Round-6 I3: NOT sealing `agent_url` shrinks the attack surface
-    /// and removes the migration hazard if the agent listen address
-    /// ever changes.
-    pub vm_index: Option<u16>,
-    /// `agent_url` for backends where it isn't a deterministic
-    /// function of an integer (Docker: container bridge IP; K8s:
-    /// Pod IP / port-forward loopback). For nomad-ch we leave this
-    /// `None` and recompute from `vm_index`.
-    pub agent_url: Option<String>,
-    /// SHA-256(verifying_key_bytes)[..8] hex. Used by the controller's
-    /// signed `/version` rebind probe (§ II.5) to confirm the agent
-    /// at `agent_url` is the one we minted keys for.
-    pub pubkey_fp: String,
-    pub created_at_secs: u64,
-    /// Phase-3 preview-share-token secret ring. `None` for v1 records;
-    /// `Some` once the controller has minted at least one share-token
-    /// secret for this sandbox. The on-wire JSON omits the field
-    /// entirely (via `skip_serializing_if`) for v1 round-trips.
+    /// Per-sandbox HMAC secret ring used to sign preview share
+    /// tokens. `None` until the controller has minted at least one
+    /// share-token secret for this sandbox. The on-wire JSON omits
+    /// the field entirely (via `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_secrets: Option<SealedPreviewSecrets>,
-    /// Phase-3 preview-share audit table. Empty `Vec` is treated the
-    /// same as a missing field (v1) — the controller boots with no
-    /// audit history and re-fills as new tokens are minted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preview_audit: Vec<SealedAuditEntry>,
+    /// Round-8 addition: monotonically-increasing per-process boot
+    /// counter. Set by the controller when sealing; the boot-time
+    /// reconciler reads this to tell "sealed in this controller's
+    /// lifetime" (orphan from a partially-cancelled create here)
+    /// from "sealed in a previous boot" (different alarm severity).
+    /// `None` for v2 records that never carried a boot_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<u64>,
 }
 
 /// On-disk form of the per-sandbox HMAC secret ring used to sign
@@ -178,11 +184,13 @@ pub struct SealedPreviewSecrets {
     pub grace_until_unix: Option<u64>,
 }
 
-/// On-disk audit-log entry per minted share token. The token bytes
-/// themselves are NEVER persisted — only the metadata the creator
-/// dashboard surfaces via `GET .../share`. Bounded by the per-sandbox
-/// mint rate-limit (100/day default) and the explicit-DELETE
-/// rotate-and-clear-audit semantics.
+/// On-disk audit-log entry per minted share token. **Round-8 Phase 1:
+/// no longer carried inside `SealedAuth`** — share-token audit metadata
+/// is now a `sandbox.shares` row in pg. The struct is retained for
+/// v2-record back-compat (the v2 deserializer would otherwise refuse
+/// to round-trip records that carried `preview_audit`) and for the
+/// share-list internal helper that adapts the pg row shape into the
+/// public JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedAuditEntry {
     pub token_id: String,
@@ -201,53 +209,39 @@ pub struct SealedAuditEntry {
 }
 
 impl SealedAuth {
-    /// Convenience: derive the on-disk `SealedAuth` from the
-    /// in-memory `SandboxAuth` plus the surrounding metadata the
-    /// registry already holds. Caller computes `created_at_secs`.
-    pub fn from_components(
+    /// Round-8 v3 builder: the sealed record holds only the secret
+    /// material the controller can't reproduce from pg. Pg holds
+    /// `user_id`, `project_id`, `backend`, `vm_index`, `agent_url`,
+    /// `key_fp`, `created_at` — they don't pass through here.
+    pub fn from_secrets(
         sandbox_id: Uuid,
-        user_id: &str,
-        project_id: &str,
-        backend: &str,
         auth: &SandboxAuth,
-        vm_index: Option<u16>,
-        nomad_ch_agent_url_is_derived: bool,
-        created_at_secs: u64,
+        boot_id: Option<u64>,
     ) -> Self {
-        let agent_url = if nomad_ch_agent_url_is_derived {
-            None
-        } else {
-            Some(auth.agent_url.clone())
-        };
         Self {
             version: SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: user_id.to_string(),
-            project_id: project_id.to_string(),
-            backend: backend.to_string(),
             signing_key_bytes: auth.signing_key.to_bytes(),
-            vm_index,
-            agent_url,
-            pubkey_fp: auth.pubkey_fp.clone(),
-            created_at_secs,
             preview_secrets: None,
-            preview_audit: Vec::new(),
+            boot_id,
         }
     }
 
-    /// Convert back to an in-memory `SandboxAuth`. The caller is
-    /// responsible for supplying `agent_url` for nomad-ch (where it
-    /// isn't sealed; see § II.0 §4 round-6 I3). Other backends use
-    /// the sealed `agent_url` directly via `into_sandbox_auth`.
+    /// Convert back to an in-memory `SandboxAuth`, given the
+    /// non-secret fields (`agent_url`, `pubkey_fp`) sourced from pg
+    /// at restore time.
+    ///
+    /// The caller is responsible for verifying the supplied
+    /// `pubkey_fp` against the agent's response (the boot-path probe
+    /// does this); this method only checks that the persisted signing
+    /// key produces the same fingerprint as the one pg recorded —
+    /// catches the rare case where pg and the sealed file disagree
+    /// (operator review needed).
     pub fn into_sandbox_auth_with(
         &self,
         agent_url: String,
+        pubkey_fp: String,
     ) -> Result<SandboxAuth, String> {
-        // v1 → v2: preview_secrets is None (legacy); the controller
-        // mints fresh on next share-mint. v2 records carry the ring.
-        // Anything > SEAL_VERSION is rejected by `unseal_one` already,
-        // so this branch only needs to guard against unknown LOWER
-        // versions (none today; v1 is the floor).
         if self.version == 0 || self.version > SEAL_VERSION {
             return Err(format!(
                 "sealed record version {} not understood by this binary \
@@ -257,31 +251,17 @@ impl SealedAuth {
         }
         let signing_key = Arc::new(SigningKey::from_bytes(&self.signing_key_bytes));
         let computed_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
-        if computed_fp != self.pubkey_fp {
+        if computed_fp != pubkey_fp {
             return Err(format!(
-                "sealed record corrupted: pubkey_fp mismatch (record={}, \
-                 derived-from-key={computed_fp})",
-                self.pubkey_fp
+                "sealed record corrupted: derived pubkey_fp ({computed_fp}) \
+                 does not match pg-side key_fp ({pubkey_fp})",
             ));
         }
         Ok(SandboxAuth {
             signing_key,
             agent_url,
-            pubkey_fp: self.pubkey_fp.clone(),
+            pubkey_fp,
         })
-    }
-
-    /// Convert back to an in-memory `SandboxAuth` for backends whose
-    /// `agent_url` is sealed alongside the keys (Docker / K8s).
-    /// Returns `Err` for nomad-ch records (`agent_url == None` in
-    /// that case — caller must use `into_sandbox_auth_with`).
-    pub fn into_sandbox_auth(&self) -> Result<SandboxAuth, String> {
-        let agent_url = self.agent_url.clone().ok_or_else(|| {
-            "sealed record has no agent_url (nomad-ch); caller must \
-             recompute from vm_index and use into_sandbox_auth_with"
-                .to_string()
-        })?;
-        self.into_sandbox_auth_with(agent_url)
     }
 }
 
@@ -747,33 +727,26 @@ mod tests {
         AeadKey::from_bytes([seed; AEAD_KEY_LEN])
     }
 
-    fn make_auth(sandbox_id: Uuid) -> (SealedAuth, [u8; 32]) {
+    fn make_auth(sandbox_id: Uuid) -> (SealedAuth, [u8; 32], String) {
         let sk_bytes = [0xab; 32];
         let sk = SigningKey::from_bytes(&sk_bytes);
         let fp = sig::pubkey_fingerprint(&sk.verifying_key());
         let auth = SealedAuth {
             version: SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: "alice".into(),
-            project_id: "p1".into(),
-            backend: "nomad-ch".into(),
             signing_key_bytes: sk_bytes,
-            vm_index: Some(7),
-            agent_url: None,
-            pubkey_fp: fp,
-            created_at_secs: 1_700_000_000,
             preview_secrets: None,
-            preview_audit: Vec::new(),
+            boot_id: Some(7),
         };
-        (auth, sk_bytes)
+        (auth, sk_bytes, fp)
     }
 
     #[test]
-    fn roundtrip_preserves_all_fields() {
+    fn roundtrip_preserves_secret_fields() {
         let dir = fresh_dir("roundtrip");
         let key = fresh_key(0x42);
         let id = Uuid::now_v7();
-        let (auth, _sk) = make_auth(id);
+        let (auth, _sk, expected_fp) = make_auth(id);
         let path = seal(id, &auth, &dir, &key).expect("seal");
         assert!(path.starts_with(&dir));
         // Filename: hex(sha256(sandbox_id.to_string()))[..32] + ".sealed"
@@ -783,21 +756,17 @@ mod tests {
         let got = unseal_one(&path, &key).expect("unseal");
         assert_eq!(got.version, SEAL_VERSION);
         assert_eq!(got.sandbox_id, auth.sandbox_id);
-        assert_eq!(got.user_id, "alice");
-        assert_eq!(got.project_id, "p1");
-        assert_eq!(got.backend, "nomad-ch");
         assert_eq!(got.signing_key_bytes, auth.signing_key_bytes);
-        assert_eq!(got.vm_index, Some(7));
-        assert_eq!(got.agent_url, None);
-        assert_eq!(got.pubkey_fp, auth.pubkey_fp);
-        assert_eq!(got.created_at_secs, 1_700_000_000);
+        assert_eq!(got.boot_id, Some(7));
+        assert!(got.preview_secrets.is_none());
 
         // The reconstituted SandboxAuth has a working signing key
-        // (matches the persisted pubkey fingerprint). nomad-ch path:
-        // caller supplies the agent_url separately.
+        // (matches the persisted pubkey fingerprint). The pg-side
+        // `key_fp` is supplied by the caller at restore time; the
+        // sealed record itself is silent on it.
         let reconstituted =
-            got.into_sandbox_auth_with("http://10.99.107.2:7777".into()).unwrap();
-        assert_eq!(reconstituted.pubkey_fp, auth.pubkey_fp);
+            got.into_sandbox_auth_with("http://10.99.107.2:7777".into(), expected_fp.clone()).unwrap();
+        assert_eq!(reconstituted.pubkey_fp, expected_fp);
         assert_eq!(reconstituted.agent_url, "http://10.99.107.2:7777");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -808,7 +777,7 @@ mod tests {
         let dir = fresh_dir("tamper");
         let key = fresh_key(0x10);
         let id = Uuid::now_v7();
-        let (auth, _) = make_auth(id);
+        let (auth, _, _) = make_auth(id);
         let path = seal(id, &auth, &dir, &key).expect("seal");
 
         // Flip a single byte mid-ciphertext (past the 24-byte
@@ -836,7 +805,7 @@ mod tests {
         let key1 = fresh_key(0x11);
         let key2 = fresh_key(0x22);
         let id = Uuid::now_v7();
-        let (auth, _) = make_auth(id);
+        let (auth, _, _) = make_auth(id);
         let path = seal(id, &auth, &dir, &key1).expect("seal");
 
         let err = unseal_one(&path, &key2).expect_err("wrong key must fail");
@@ -889,8 +858,8 @@ mod tests {
         let key = fresh_key(0x99);
         let id_a = Uuid::now_v7();
         let id_b = Uuid::now_v7();
-        let (a, _) = make_auth(id_a);
-        let (b, _) = make_auth(id_b);
+        let (a, _, _) = make_auth(id_a);
+        let (b, _, _) = make_auth(id_b);
         seal(id_a, &a, &dir, &key).unwrap();
         seal(id_b, &b, &dir, &key).unwrap();
 
@@ -916,7 +885,7 @@ mod tests {
         let dir = fresh_dir("dir-mixed");
         let key = fresh_key(0x77);
         let id_good = Uuid::now_v7();
-        let (good, _) = make_auth(id_good);
+        let (good, _, _) = make_auth(id_good);
         seal(id_good, &good, &dir, &key).unwrap();
 
         // A second file with the right naming but garbage content.
@@ -936,7 +905,7 @@ mod tests {
         let dir = fresh_dir("future");
         let key = fresh_key(0x33);
         let id = Uuid::now_v7();
-        let (mut auth, _) = make_auth(id);
+        let (mut auth, _, _) = make_auth(id);
         auth.version = SEAL_VERSION + 7; // pretend a future binary wrote this
         let path = seal(id, &auth, &dir, &key).unwrap();
         let err = unseal_one(&path, &key).expect_err("must reject future version");
@@ -947,37 +916,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// v1 → v2 backward compat: a record written by an older binary
-    /// (no `preview_secrets`, no `preview_audit`) must read back with
-    /// the new fields defaulted, NOT fail. The next seal rewrites at
-    /// SEAL_VERSION (v2).
+    /// v2 → v3 back-compat: a record written by the v2 binary (with
+    /// the legacy metadata fields `user_id`, `project_id`, `backend`,
+    /// `vm_index`, `agent_url`, `pubkey_fp`, `created_at_secs`,
+    /// `preview_audit`) must round-trip through the v3 deserializer
+    /// with the dropped fields silently ignored. The v3 reader then
+    /// gets the missing data from pg.
     #[test]
-    fn v1_record_loads_with_default_preview_fields() {
-        let dir = fresh_dir("v1-compat");
+    fn v2_record_loads_into_v3_struct_with_legacy_fields_ignored() {
+        let dir = fresh_dir("v2-compat");
         let key = fresh_key(0x44);
         let id = Uuid::now_v7();
-        let (auth, _) = make_auth(id);
-        // Hand-craft the v1 JSON (no preview_secrets / preview_audit).
-        let v1_json = serde_json::json!({
-            "version": 1u8,
-            "sandbox_id": auth.sandbox_id,
-            "user_id": auth.user_id,
-            "project_id": auth.project_id,
-            "backend": auth.backend,
-            "signing_key_bytes": auth.signing_key_bytes,
-            "vm_index": auth.vm_index,
-            "agent_url": auth.agent_url,
-            "pubkey_fp": auth.pubkey_fp,
-            "created_at_secs": auth.created_at_secs,
+        let sk = SigningKey::from_bytes(&[0xab; 32]);
+        let fp = sig::pubkey_fingerprint(&sk.verifying_key());
+        // Hand-craft the v2 JSON (the original v2 envelope).
+        let sk_bytes_v: Vec<u8> = vec![0xab; 32];
+        let v2_json = serde_json::json!({
+            "version": 2u8,
+            "sandbox_id": id.to_string(),
+            "user_id": "alice",
+            "project_id": "p1",
+            "backend": "nomad-ch",
+            "signing_key_bytes": sk_bytes_v,
+            "vm_index": 7,
+            "agent_url": null,
+            "pubkey_fp": fp,
+            "created_at_secs": 1_700_000_000u64,
         });
-        let parsed: SealedAuth = serde_json::from_value(v1_json).expect("parse v1");
-        assert_eq!(parsed.version, 1);
-        assert!(parsed.preview_secrets.is_none(), "v1 has no ring");
-        assert!(parsed.preview_audit.is_empty(), "v1 has no audit");
+        // Serde silently drops the legacy fields; v3 only knows
+        // version + sandbox_id + signing_key_bytes + preview_secrets
+        // + boot_id.
+        let parsed: SealedAuth = serde_json::from_value(v2_json).expect("parse v2");
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.sandbox_id, id.to_string());
+        assert_eq!(parsed.signing_key_bytes, [0xab; 32]);
+        assert!(parsed.preview_secrets.is_none(), "v2 record had no ring");
+        assert_eq!(parsed.boot_id, None, "v2 had no boot_id");
 
-        // Seal+unseal a hand-rolled v1 record on disk: write the v1
-        // JSON through the AEAD layer, then unseal_one must accept.
-        let v1_bytes = serde_json::to_vec(&parsed).unwrap();
+        // Seal+unseal a hand-rolled v2 record on disk through the
+        // AEAD layer; unseal_one must accept and return a v3-shaped
+        // struct (legacy fields dropped).
+        let v2_bytes = serde_json::to_vec(&parsed).unwrap();
         let filename = seal_filename_for(id);
         let path = dir.join(&filename);
         std::fs::create_dir_all(&dir).unwrap();
@@ -987,17 +966,24 @@ mod tests {
         let aad = filename.trim_end_matches(".sealed").as_bytes();
         let ct = key
             .cipher()
-            .encrypt(&nonce, Payload { msg: &v1_bytes, aad })
+            .encrypt(&nonce, Payload { msg: &v2_bytes, aad })
             .unwrap();
         let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ct);
         std::fs::write(&path, &out).unwrap();
 
-        let got = unseal_one(&path, &key).expect("v1 record must load");
-        assert_eq!(got.version, 1);
+        let got = unseal_one(&path, &key).expect("v2 record must load through v3 reader");
+        assert_eq!(got.version, 2);
+        assert_eq!(got.signing_key_bytes, [0xab; 32]);
         assert!(got.preview_secrets.is_none());
-        assert!(got.preview_audit.is_empty());
+        assert_eq!(got.boot_id, None);
+        // The v3 reader is silent on agent_url + key_fp; the caller
+        // (restore loop) supplies them from the pg row.
+        let recon = got
+            .into_sandbox_auth_with("http://10.99.107.2:7777".into(), fp.clone())
+            .unwrap();
+        assert_eq!(recon.pubkey_fp, fp);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1058,7 +1044,7 @@ mod tests {
         let key = fresh_key(0xab);
         let p = Persistence::new(dir.clone(), key);
         let id = Uuid::now_v7();
-        let (sealed, _) = make_auth(id);
+        let (sealed, _, _) = make_auth(id);
 
         // Empty start.
         let listed = p.list().await.expect("list empty");
@@ -1109,7 +1095,7 @@ mod tests {
         let key = fresh_key(0x07);
         let p = Persistence::new(dir.clone(), key);
         let id = Uuid::now_v7();
-        let (sealed, _) = make_auth(id);
+        let (sealed, _, _) = make_auth(id);
         p.seal(id, &sealed).await.expect("seal");
 
         let expected_name = seal_filename_for(id);

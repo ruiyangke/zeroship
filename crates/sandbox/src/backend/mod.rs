@@ -367,6 +367,29 @@ impl Backend {
         }
     }
 
+    /// Round-8 Phase-1 restore. Pg row is canonical for non-secret
+    /// fields; sealed record is canonical for the signing key. The
+    /// boot loop has already probed the agent before this is called.
+    pub async fn restore_from_pg_and_sealed(
+        &self,
+        sandbox_id: Uuid,
+        row: &crate::db::SandboxRow,
+        sealed: &crate::persist::SealedAuth,
+        agent_url: String,
+    ) -> Result<SandboxAuth, String> {
+        match self {
+            Self::NomadCh(b) => {
+                b.restore_from_pg_and_sealed(sandbox_id, row, sealed, agent_url).await
+            }
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "restore_from_pg_and_sealed: backend {:?} doesn't yet support \
+                 restart-restore (Phase-1 nomad-ch-only; Docker/K8s pending \
+                 deterministic agent_url re-derivation)",
+                self.name()
+            )),
+        }
+    }
+
     /// Seal an updated `SealedAuth` for `sandbox_id` that carries the
     /// caller-provided preview-share state (`preview_secrets`,
     /// `preview_audit`). Used by the share-token mint / rotate

@@ -54,6 +54,16 @@ httparse = { workspace = true }
 # panic logging.
 futures = { workspace = true }
 tracing = { workspace = true }
+# Pg-backed non-secret state for sandboxes / shares / events
+# (sandbox-pg-state design, Phase 0). Migrations + the `Database`
+# handle live in `src/db.rs`. Compio-native; matches the rest of the
+# stack (zero tokio).
+compio-postgres = { workspace = true }
+thiserror = { workspace = true }
+# Bounded MPMC queue used by the Phase-1 pg-write worker pool
+# (design § 14.14). Declared here in Phase 0 even though the queue
+# isn't wired yet — the dep churn is paid once.
+flume = { workspace = true }
 
 [dev-dependencies]
 ureq = { version = "2", default-features = false, features = ["json"] }

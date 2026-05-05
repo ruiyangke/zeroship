@@ -156,7 +156,13 @@ fn authorize_owner(
         // succeeded had user_id been present.
         return Err(not_found());
     }
-    let id: Uuid = sandbox_id_str.parse().map_err(|_| not_found())?;
+    // Round-2 fixer / CRITICAL #1: accept the typed-id form returned
+    // by `POST /sandboxes` AND the bare UUID form for back-compat.
+    // Both map to 404 (uniform-no-existence-oracle) on parse failure.
+    let id: Uuid = zeroship_core::typed_id::parse_with_prefix(sandbox_id_str, "sbx")
+        .ok()
+        .or_else(|| sandbox_id_str.parse().ok())
+        .ok_or_else(not_found)?;
     if !is_proxyable_port(port, DEFAULT_DENY) {
         return Err(not_found());
     }
@@ -248,11 +254,70 @@ pub async fn mint_share(
 
     // Persist-on-mint (best-effort). A controller crash between the
     // in-memory ring/audit update and the next sealed-record write
-    // would lose the freshly-minted token's metadata otherwise.
-    // Failures here are logged and swallowed — the API call MUST
-    // NOT fail on seal failure (the in-memory state is authoritative
-    // for live traffic; persistence is for restart resilience only).
+    // would lose the freshly-minted ring otherwise (the per-token
+    // audit metadata is in pg now, round-8). Failures here are
+    // logged and swallowed.
     persist_preview_state(&state, id).await;
+
+    // Round-8 Phase 1: per-token audit metadata moves to pg. Write
+    // the share row synchronously; on Err log + continue.
+    if let Some(db) = state.database.as_ref() {
+        // Migration 0003 widened the schema CHECK from base62 to
+        // base64url so we can store `tok_<raw_tid>` byte-exactly. The
+        // earlier `replace(['-','_'], "x")` munge collapsed distinct
+        // tokens whose raw tids differed only in `-` vs `_` (or
+        // happened to contain `x`); see CRITICAL #6 in the round-1
+        // fixer review.
+        let typed_token_id = format!("tok_{token_id}");
+        let row = crate::db::ShareRow {
+            // Storage form is `tok_<raw_tid>`; the API-returned
+            // `share_token_id` is `shr_<raw_tid>`. Same payload after
+            // the prefix, distinct prefixes to mark API surface vs
+            // storage surface.
+            token_id: typed_token_id.clone(),
+            sandbox_id: sandbox_id_str.clone(),
+            port,
+            scope: claims.scope.clone(),
+            secret_version: claims.sv as i32,
+            issued_at_secs: now,
+            expires_at_secs: claims.exp,
+            iss: claims.iss.clone(),
+        };
+        if let Err(e) = db.insert_share(&row).await {
+            tracing::warn!(
+                sandbox_id = %sandbox_id_str,
+                error = %e,
+                "sandbox/preview_share: pg insert_share failed (non-fatal)"
+            );
+        }
+        // Round-1 fixer / MINOR #22: skip the audit event entirely
+        // when the registry has no record of the sandbox owner. The
+        // pre-fix synthetic `usr_unknown` would have failed the
+        // user_id CHECK on sandbox.events anyway (the row's
+        // user_id must match `^usr_[0-9A-Za-z]{20,40}$`); falling
+        // back to a warn-and-continue is honest about the
+        // missing-info case and keeps the audit log self-consistent.
+        if let Some(owner) = state.sandboxes.get(&id).map(|i| i.user_id) {
+            let evt_data = serde_json::json!({
+                "token_id": format!("shr_{token_id}"),
+                "port": port,
+                "scope": claims.scope,
+                "expires_at": claims.exp,
+            });
+            let event = crate::db::Database::new_event(
+                &sandbox_id_str,
+                &owner,
+                "share.minted",
+                evt_data.to_string(),
+            );
+            let _ = db.insert_event(&event).await;
+        } else {
+            tracing::warn!(
+                sandbox_id = %sandbox_id_str,
+                "sandbox/preview_share: sandbox owner not in registry; skipping share.minted audit event"
+            );
+        }
+    }
 
     HttpResponse::Ok().json(&json!({
         "token": token,
@@ -339,6 +404,18 @@ pub async fn revoke_all_share(
     // restore must read back the new (post-rotate) state. See doc
     // § II.4 "Revocation".
     persist_preview_state(&state, id).await;
+
+    // Round-8 Phase 1: pg-side rotation revokes every existing share
+    // row for this sandbox so the validator can refuse them.
+    if let Some(db) = state.database.as_ref() {
+        if let Err(e) = db.rotate_share_secret(id).await {
+            tracing::warn!(
+                sandbox_id = %id,
+                error = %e,
+                "sandbox/preview_share: pg rotate_share_secret failed (non-fatal)"
+            );
+        }
+    }
     HttpResponse::Ok().json(&json!({
         "revoked": "all",
         "secret_version_current": sv,

@@ -11,7 +11,8 @@
 
 use ntex::web;
 use zeroship_sandbox::{
-    handlers, preview, preview_share_handlers, preview_ws, registry, AppState,
+    admin_handlers, handlers, preview, preview_share_handlers, preview_ws, registry,
+    AppState,
 };
 use zeroship_sandbox::config::SandboxConfig;
 
@@ -122,7 +123,22 @@ async fn main() -> std::io::Result<()> {
     let bind = format!("0.0.0.0:{}", config.port);
     tracing::info!(bind = %bind, "sandbox listening");
 
-    web::server(async move || {
+    // Round-2 fixer / CRITICAL #3: keep a strong handle to AppState
+    // so we can call `trigger_shutdown()` AFTER ntex's `server.run()`
+    // returns. ntex installs its own SIGINT/SIGTERM handler — when
+    // those signals arrive, `run()` stops accepting and waits for
+    // in-flight requests to drain, then returns. We then flip the
+    // shutdown flag so the detached heartbeat / takeover / health
+    // tasks observe it on their next iteration and exit cleanly.
+    //
+    // Limitation: this is post-drain (not pre-drain) — peers won't
+    // see the `'draining'` host status until after ntex has finished
+    // draining HTTP. A pre-drain notification would require a signal
+    // handler that runs BEFORE ntex's, which compio doesn't yet
+    // expose. Tracked as a follow-up; not blocking for Round-2.
+    let shutdown_state = state.clone();
+
+    let server_result = web::server(async move || {
         web::App::new()
             .state(state.clone())
             .service(
@@ -170,6 +186,39 @@ async fn main() -> std::io::Result<()> {
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
             )
+            // Phase-3 admin / operator API. Auth is the
+            // SANDBOX_ADMIN_TOKEN_PATH bearer (NOT SANDBOX_TOKEN);
+            // when the path is unset every endpoint 503s with
+            // "admin api disabled". See `admin_handlers.rs` for the
+            // full surface + the deferred JWT/scope shape.
+            .service(
+                web::resource("/admin/sandboxes")
+                    .route(web::get().to(admin_handlers::list_all_sandboxes)),
+            )
+            .service(
+                web::resource("/admin/sandboxes/{id}")
+                    .route(web::get().to(admin_handlers::get_sandbox_detail)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}/sandboxes")
+                    .route(web::get().to(admin_handlers::list_user_sandboxes)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}/shares")
+                    .route(web::get().to(admin_handlers::list_user_shares)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}/export")
+                    .route(web::get().to(admin_handlers::export_user)),
+            )
+            .service(
+                web::resource("/admin/users/{user_id}")
+                    .route(web::delete().to(admin_handlers::delete_user)),
+            )
+            .service(
+                web::resource("/admin/hosts")
+                    .route(web::get().to(admin_handlers::list_hosts)),
+            )
             // Phase-3 share-token mint/list/revoke (§ III). The
             // `/share` resource is registered BEFORE the catch-all
             // `/preview/{port}/{path}*` so ntex matches the more
@@ -207,5 +256,26 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(&bind)?
     .run()
-    .await
+    .await;
+
+    // ntex.run() returned: SIGINT/SIGTERM was received and the HTTP
+    // listener has finished draining. Flip the shutdown flag so the
+    // detached heartbeat / takeover / health-probe loops exit on
+    // their next iteration; best-effort UPDATE the host row to
+    // `'draining'` so peers see the intent.
+    tracing::info!("sandbox: HTTP server stopped; signalling background tasks to drain");
+    shutdown_state.trigger_shutdown().await;
+    // Bound the wait so a hung pg pool can't keep us alive forever.
+    let drain_grace_secs = std::env::var("SANDBOX_HA_DRAIN_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
+    tracing::info!(
+        drain_grace_secs,
+        "sandbox: waiting for background tasks to observe shutdown"
+    );
+    compio::time::sleep(std::time::Duration::from_secs(drain_grace_secs)).await;
+    tracing::info!("sandbox: drain grace elapsed; exiting");
+
+    server_result
 }

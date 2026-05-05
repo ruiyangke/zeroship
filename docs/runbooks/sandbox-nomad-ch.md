@@ -159,3 +159,74 @@ setsid wrapper.
 - **Per-user `/home/u` persistence across hosts.** The current single-node design uses a host bind-mount. The next milestone replaces this with Ceph-RBD-backed volumes via a CSI plugin; until then, sandboxes scheduled on a different host won't see the user's package caches.
 - **Multi-tenant cluster networking.** No CNI, no NetworkPolicy. The `/30` design intentionally has no gateway — sandboxes can only talk to the controller. If you need east-west traffic between sandboxes you want the k8s backend.
 - **HA controller.** Two `nomad-ch` controllers on the same Nomad cluster will fight over `zsbx-` jobs at startup if both have orphan-cleanup on.
+
+## Phase-3: pg role split (operator config)
+
+The pg-backed state design (`docs/proposals/sandbox-pg-state.md` § 13.2) ships four pg roles with least-privilege grants. Migration `0004_role_split_phase3.sql` tightens 0001's permissive bundle:
+
+| Role | Capability summary |
+| --- | --- |
+| `sandbox_admin` | DDL on the `sandbox` schema (migrations only) |
+| `sandbox_app` | `INSERT/UPDATE/SELECT/DELETE` on non-events tables; `INSERT/SELECT` on `events` (NO DELETE — the controller cannot tamper with audit) |
+| `sandbox_audit` | `INSERT`-only on `events` |
+| `sandbox_gdpr` | `SELECT/DELETE` on cascade tables; `INSERT` on `events` + `deleted_sandboxes` (single-TX cascade audit) |
+
+The controller selects the per-role DSN via three env vars; each defaults to `SANDBOX_DATABASE_URL` (single-role-for-dev convenience). Production sets all three so the role-isolation invariant holds:
+
+| Env var | Purpose |
+| --- | --- |
+| `SANDBOX_DATABASE_URL` | Primary DSN (sandbox_app role) |
+| `SANDBOX_DATABASE_URL_AUDIT` | Audit DSN (sandbox_audit role) |
+| `SANDBOX_DATABASE_URL_GDPR` | GDPR DSN (sandbox_gdpr role) |
+
+Production deployment expectations:
+1. Operator pre-provisions the four roles with passwords (the migration creates them as `NOLOGIN` skeletons; operator promotes via `ALTER ROLE … LOGIN PASSWORD '…'`).
+2. Each DSN points at the same database; only the username + password differ.
+3. Migrations run as `sandbox_admin` (set `SANDBOX_DATABASE_URL` temporarily to the admin DSN AND `SANDBOX_PG_RUN_MIGRATIONS=1` for ONE deploy, then revert). Phase 5 introduces a separate `SANDBOX_DATABASE_ADMIN_URL` env var so this isn't a transient swap.
+
+## Phase-3: admin/operator API
+
+Eight endpoints under `/admin/*` for cross-tenant operator queries + GDPR data-export and data-delete (`docs/proposals/sandbox-pg-state.md` § 13.5–13.7):
+
+| Endpoint | Role used | Purpose |
+| --- | --- | --- |
+| `GET /admin/sandboxes` | `sandbox_app` | List all sandboxes (filters: `user_id`, `host_id`, `status`; `limit`/`offset`) |
+| `GET /admin/sandboxes/{id}` | `sandbox_app` | Single sandbox detail (pg row + in_memory + agent-version-placeholder) |
+| `GET /admin/users/{user_id}/sandboxes` | `sandbox_app` | Per-user shortcut |
+| `GET /admin/users/{user_id}/shares` | `sandbox_app` | Per-user share metadata |
+| `GET /admin/users/{user_id}/export` | `sandbox_app` | GDPR data-export (REPEATABLE READ tx; events capped at 10000) |
+| `DELETE /admin/users/{user_id}` | `sandbox_gdpr` | GDPR cascade delete + sealed-record unlink |
+| `GET /admin/hosts` | `sandbox_app` | Controller fleet status |
+
+### Auth (Phase 3, narrow)
+
+A single bearer-from-file model — separate from `SANDBOX_TOKEN` so a leaked controller token does NOT grant operator access:
+
+```
+SANDBOX_ADMIN_TOKEN_PATH=/etc/zeroship/admin-bearer  # mode 0o400
+```
+
+When the path is unset OR the file is empty, every `/admin/*` endpoint returns 503 with `{"error":"admin api disabled"}`. Disable-by-default — operators opt in explicitly. Wrong/missing bearer → 401.
+
+The full design (§ 13.8) calls for short-lived JWTs + per-endpoint scopes + 2FA step-up + per-admin rate limit + anomaly detection. Phase 5 / production hardening lands that shape; nothing in Phase 3's wire format blocks it (every handler still takes `&HttpRequest` so the auth path can evolve from "match bearer" to "verify JWT + check scope" without touching the SQL or response shapes). Audit rows currently hard-code the actor as `"operator"`; Phase 5 replaces this with the JWT's `admin_id` claim. The Phase-3 → Phase-5 trade-off is documented in [`docs/decisions/2026-05-05-sandbox-admin-shared-bearer.md`](../decisions/2026-05-05-sandbox-admin-shared-bearer.md).
+
+#### Token rotation
+
+The admin bearer is read **once at boot** from `SANDBOX_ADMIN_TOKEN_PATH`; the resulting bytes live in `AppState.admin_token` (Zeroizing-wrapped, scrubbed on drop) for the lifetime of the process. Rotating the token therefore requires a **rolling restart of every controller replica** — there is no signal-based or file-watch-based reload. Workflow:
+
+1. Update the secret-store entry that materializes the file at `SANDBOX_ADMIN_TOKEN_PATH`.
+2. Roll each controller replica one at a time (drain via `SIGTERM` → wait for `SANDBOX_HA_DRAIN_GRACE_SECS`, default 30 s; replica boots and re-reads the file).
+3. After the rolling restart completes, clients must use the new bearer; old-bearer requests now 401.
+
+The trade-off is intentional: per-request file reads were a slow-FS DoS amplifier on the unauthenticated path (Round-3 CRITICAL #3) and a fail-open vector on chmod-error (the pre-Round-3 metadata read used `.ok()?` and silently disabled auth). The boot-cache + rolling-restart shape eliminates both at the cost of zero-downtime rotation.
+
+### GDPR delete operator workflow
+
+The cascade DELETE does NOT touch the live runtime. If the user has running sandboxes, the controller's in-memory state still holds them; the next stop+create cycle will fail (no pg row → 404). Workflow:
+
+1. **Stop all of the user's sandboxes first.** Either via the regular `DELETE /sandboxes/{id}` flow as the creator, or via a batched script reading from `GET /admin/users/{user_id}/sandboxes`.
+2. **Confirm `GET /admin/users/{user_id}/sandboxes` returns 0 active sandboxes.**
+3. **Issue `DELETE /admin/users/{user_id}`.** The response carries the count of tombstoned sandboxes, deleted shares, deleted events (pre-audit-row), and unlinked sealed records.
+4. **Audit row is written inside the same TX** — `events.kind = 'gdpr.delete_user'` with `data.admin_id` = `"operator"` (Phase 5: real admin id from JWT).
+
+Idempotent: calling DELETE for an already-cleaned user returns `{"sandboxes_tombstoned":0,"shares_deleted":0,"events_deleted":0,"sealed_files_unlinked":0}` with status 200.

@@ -1,26 +1,36 @@
-//! Controller restart restore (preview-URL § II.0 §4 + § II.5).
+//! Controller restart restore (round-8 / Phase 1: pg-driven).
 //!
-//! Driven by `AppState::from_config` when `SANDBOX_PERSIST_AUTH=1`.
-//! Reads sealed `SandboxAuth` records from
-//! `<persist_dir>/sealed-records/`, signed-`/version` probes each
-//! agent, and on match re-installs both the in-memory backend state
-//! and the registry entry — so signed RPC + (Phase-1+) preview
-//! traffic resume without the operator having to recreate sandboxes.
+//! On boot, the controller queries pg for every sandbox row owned by
+//! its `host_id` with `status='running'`, then unseals the matching
+//! sealed record by sandbox_id. The sealed record holds secret
+//! material only (`signing_key`, `preview_secrets`, `boot_id`); pg
+//! holds every other field (`user_id`, `project_id`, `backend`,
+//! `vm_index`, `agent_url`, `key_fp`, `created_at`).
 //!
-//! ## Outcomes per record
+//! This module is the boot-time reconciler. There is no periodic
+//! reconciler (round-8: pg is the single writer for non-secret state;
+//! sealed is the single writer for secret state — categories don't
+//! overlap, so steady-state has no drift source).
 //!
-//! | Probe result | Action | Sealed file |
-//! |---|---|---|
-//! | match (`200` + matching `pubkey_fingerprint`) | restore in-memory state, re-insert into registry | kept |
-//! | mismatch (`200` + different fp, OR `401`) | log + delete sealed file | deleted (sandbox was recycled; the agent at this address is a different tenant) |
-//! | unreachable (timeout, RST) | log + leave on disk | kept (sandbox might come back; next restart probes again) |
+//! ## Outcomes per pg row
 //!
-//! ## Phase-0 scope
+//! | Probe result | Action | Pg row | Sealed file |
+//! |---|---|---|---|
+//! | match | restore in-memory; UPDATE last_used_at | running | kept |
+//! | mismatch (different fp) | UPDATE status='recreating' | recreating | deleted |
+//! | unreachable | UPDATE status='unreachable' | unreachable | kept |
+//! | sealed missing | UPDATE status='lost' | lost | (none) |
+//!
+//! Plus the orphan sweep:
+//! - **Sealed without pg row** → unlink (cancelled-create orphan).
+//!
+//! ## Phase-1 scope
 //!
 //! Backend rehydration is implemented for nomad-ch only; Docker and
-//! K8s bubble up an `Err` from `Backend::restore_from_sealed` in the
-//! "tracked as a Phase-1 follow-up" branch. Their sealed records are
-//! kept on disk for a future binary that knows how to restore them.
+//! K8s bubble up an `Err` from `Backend::restore_from_sealed`. Their
+//! sealed records are kept on disk for a future binary that knows
+//! how to restore them, and pg rows stay marked `running` (the
+//! operator decides whether to delete or wait).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,39 +40,47 @@ use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 use zeroship_sandbox_agent::sig;
 
-use crate::backend::{Backend, SandboxInfo};
-use crate::persist::{unseal_dir, AeadKey, SealedAuth, UnsealedRecord};
+use crate::backend::{Backend, SandboxAuth, SandboxInfo};
+use crate::db::{Database, SandboxRow, SandboxStatus};
+use crate::persist::{seal_filename_for, unseal_one, AeadKey, SealedAuth};
 use crate::registry::SandboxRegistry;
 
-/// Per-record outcome the boot path emits for telemetry / tests.
+/// Per-row outcome the boot path emits for telemetry / tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreOutcome {
-    /// Probe matched the sealed `pubkey_fp`; backend + registry
-    /// state restored.
+    /// Probe matched the agent's reported fingerprint; backend +
+    /// registry state restored.
     Restored,
     /// Probe answered with a different fingerprint (or 401-with-
-    /// stale-pubkey). Sealed file was deleted; sandbox is gone.
+    /// stale-pubkey). Pg row marked `recreating`; sealed file deleted.
     Mismatched,
-    /// Agent unreachable within the per-record probe window. Sealed
-    /// file was left on disk for the next restart attempt.
+    /// Agent unreachable within the per-record probe window. Pg row
+    /// marked `unreachable`; sealed file left in place.
     Unreachable,
-    /// AEAD-unseal failed (corrupt file or wrong key). Left in place
-    /// for the operator's `sealed-record verify` runbook.
+    /// AEAD-unseal failed (corrupt file or wrong key). Pg row marked
+    /// `lost`. Sealed file left for the operator's quarantine
+    /// runbook.
     Corrupt,
+    /// Pg row exists but no sealed file on this host. Sandbox cannot
+    /// be reconstructed; `status='lost'` for operator review.
+    SealMissing,
     /// Backend doesn't yet know how to rehydrate state for this
-    /// record's `backend` field. Sealed file is kept; next restart
-    /// of a binary that DOES know will pick it up.
+    /// row's `backend` field. Pg row left alone; sealed file kept.
     BackendUnsupported,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RestoreSummary {
     pub records_seen: usize,
     pub restored: usize,
     pub mismatched: usize,
     pub unreachable: usize,
     pub corrupt: usize,
+    pub seal_missing: usize,
     pub unsupported: usize,
+    /// Sealed records orphaned from a partially-cancelled create
+    /// (no pg row for this host); unlinked by this pass.
+    pub orphans_unlinked: usize,
 }
 
 /// Per-probe deadline. Conservative for v1 — a sandbox that doesn't
@@ -70,13 +88,14 @@ pub struct RestoreSummary {
 /// can usefully restore. Adjustable per-test.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Boot-path entry-point. Reads + probes every sealed record under
-/// `<persist_dir>/sealed-records/`, populating `registry` and the
-/// backend's per-sandbox state for each match.
+/// Boot-path entry-point. Queries pg for every sandbox row owned by
+/// this host; for each row, unseals the matching sealed record by
+/// sandbox_id and signed-`/version` probes the agent.
 ///
-/// Call sites pass `now_secs` so the (currently-unused) `created_at`
-/// telemetry can be computed deterministically in tests.
+/// The orphan sweep (sealed records without a matching pg row for
+/// this host) runs at the end of the pass.
 pub async fn restore_at_startup(
+    database: &Database,
     persist_dir: &Path,
     aead_key: &AeadKey,
     backend: &Backend,
@@ -84,236 +103,401 @@ pub async fn restore_at_startup(
     probe_timeout: Duration,
 ) -> std::io::Result<RestoreSummary> {
     let sealed_dir = persist_dir.join("sealed-records");
-    let records = unseal_dir(&sealed_dir, aead_key)?;
-    let mut sum = RestoreSummary {
-        records_seen: records.len(),
-        restored: 0,
-        mismatched: 0,
-        unreachable: 0,
-        corrupt: 0,
-        unsupported: 0,
+    let host_id = database.host_id();
+
+    // 1. Pg-driven restore: load all 'running' rows for this host.
+    let rows = match database.list_running_sandboxes_for_host(host_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                host_id = %host_id,
+                "sandbox/restore: pg query for running sandboxes failed; continuing with empty set"
+            );
+            Vec::new()
+        }
     };
-    for r in records {
-        let outcome = process_record(r, backend, registry, probe_timeout).await;
+
+    let mut sum = RestoreSummary::default();
+    sum.records_seen = rows.len();
+
+    // Track which sealed files the pg-driven pass touched, so the
+    // orphan sweep can unlink the ones it didn't.
+    let mut consumed = std::collections::HashSet::new();
+
+    for row in rows {
+        let outcome = process_pg_row(
+            database,
+            &sealed_dir,
+            aead_key,
+            backend,
+            registry,
+            &row,
+            probe_timeout,
+            &mut consumed,
+        )
+        .await;
         match outcome {
             RestoreOutcome::Restored => sum.restored += 1,
             RestoreOutcome::Mismatched => sum.mismatched += 1,
             RestoreOutcome::Unreachable => sum.unreachable += 1,
             RestoreOutcome::Corrupt => sum.corrupt += 1,
+            RestoreOutcome::SealMissing => sum.seal_missing += 1,
             RestoreOutcome::BackendUnsupported => sum.unsupported += 1,
         }
     }
+
+    // 2. Orphan sweep: sealed records on disk that have no
+    // corresponding pg row for this host. They are leftovers from a
+    // partially-cancelled create — the controller crashed between
+    // seal and pg-INSERT. Unlink them.
+    sum.orphans_unlinked = sweep_orphan_sealed(&sealed_dir, &consumed);
+
     Ok(sum)
 }
 
-async fn process_record(
-    record: UnsealedRecord,
+/// Round-1 fixer / CRITICAL #4 — single-row probe-and-register
+/// entry point reused by both the boot-path reconciler
+/// (`restore_at_startup`) and the Phase-2.5 takeover post-step
+/// (`spawn_takeover_task`). Wraps `process_pg_row` with an
+/// owned `consumed` set since takeover callers don't run an orphan
+/// sweep and don't care which sealed paths the probe touched.
+///
+/// The function's contract:
+///   - On match: registry is populated; pg row's `last_used_at` is
+///     refreshed (via the eventual heartbeat, not synchronously).
+///   - On fingerprint mismatch / 401: pg row is marked
+///     `recreating` and the sealed file is deleted.
+///   - On unreachable: pg row is marked `unreachable`, sealed file
+///     is kept (the agent may come back).
+///   - On corrupt seal / typed-id mismatch / missing seal: pg row
+///     is marked `lost`. The sealed file is left in place for
+///     operator quarantine review (except the missing case, where
+///     there's nothing to leave).
+///
+/// Phase-2 v1 limitation (documented in CRITICAL #4 fix path
+/// step 3): the new owner's local sealed-records dir might not have
+/// the file (cross-host sealed-record sync is Phase 3+). When the
+/// seal is missing, we surface `RestoreOutcome::SealMissing` and
+/// the caller bumps `sandbox_ha_takeover_orphan_total`.
+pub(crate) async fn probe_and_register_one(
+    database: &Database,
+    persist_dir: &Path,
+    aead_key: &AeadKey,
     backend: &Backend,
     registry: &SandboxRegistry,
+    row: &SandboxRow,
     probe_timeout: Duration,
 ) -> RestoreOutcome {
-    let (path, sealed) = match record.result {
-        Ok(s) => (record.path, s),
+    let sealed_dir = persist_dir.join("sealed-records");
+    let mut consumed = std::collections::HashSet::new();
+    process_pg_row(
+        database,
+        &sealed_dir,
+        aead_key,
+        backend,
+        registry,
+        row,
+        probe_timeout,
+        &mut consumed,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_pg_row(
+    database: &Database,
+    sealed_dir: &Path,
+    aead_key: &AeadKey,
+    backend: &Backend,
+    registry: &SandboxRegistry,
+    row: &SandboxRow,
+    probe_timeout: Duration,
+    consumed: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> RestoreOutcome {
+    // Parse the sandbox_id (typed-id string) into the embedded UUID
+    // so we can compute the sealed filename. An unparseable id
+    // means pg disagrees with the typed-id contract; mark lost.
+    let sandbox_id_uuid: Uuid = match zeroship_core::typed_id::parse(&row.sandbox_id) {
+        Ok((_, uuid)) => uuid,
         Err(e) => {
-            tracing::warn!(
-                path = ?record.path,
+            // Round-2 fixer / MINOR #1: pre-fix this fell back to
+            // `sandbox_id_from_str_lossy` → `Uuid::nil()` and fired
+            // an UPDATE that no-op'd against a real row but pretended
+            // to have marked it Lost. Today we skip the row entirely
+            // and bump `sandbox_corrupt_id_total` so an alert can
+            // catch a code/data drift (the only way to land here is
+            // if a binary that DOESN'T validate typed-id at insert
+            // wrote into the same pg).
+            tracing::error!(
+                sandbox_id = %row.sandbox_id,
                 error = %e,
-                "sandbox/restore: corrupt sealed record; leaving in place for operator verify-and-quarantine"
+                "sandbox/restore: pg sandbox_id failed typed-id parse; SKIPPING row + bumping sandbox_corrupt_id_total"
             );
+            crate::metrics::inc_sandbox_corrupt_id();
             return RestoreOutcome::Corrupt;
         }
     };
-    // sandbox_id parse: typed-id strings under our control, so this
-    // should never fail. If it does, treat the file as corrupt.
-    let sandbox_id: Uuid = match sealed.sandbox_id.parse() {
-        Ok(id) => id,
+    let sealed_path = sealed_dir.join(seal_filename_for(sandbox_id_uuid));
+    consumed.insert(sealed_path.clone());
+
+    // Unseal.
+    let sealed: SealedAuth = match unseal_one(&sealed_path, aead_key) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                sandbox_id = %row.sandbox_id,
+                path = ?sealed_path,
+                "sandbox/restore: pg row has no sealed record on this host; marking lost"
+            );
+            let _ = database
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
+                .await;
+            return RestoreOutcome::SealMissing;
+        }
         Err(e) => {
             tracing::warn!(
-                path = ?path,
-                sandbox_id = ?sealed.sandbox_id,
+                sandbox_id = %row.sandbox_id,
+                path = ?sealed_path,
                 error = %e,
-                "sandbox/restore: sealed record has unparseable sandbox_id; quarantining"
+                "sandbox/restore: sealed record corrupt; marking lost"
             );
+            let _ = database
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
+                .await;
             return RestoreOutcome::Corrupt;
         }
     };
 
-    // Compute the agent_url. nomad-ch records intentionally don't
-    // seal it (round-6 I3); the backend recomputes from `vm_index`.
-    let agent_url = match sealed.backend.as_str() {
-        "nomad-ch" => match (backend, sealed.vm_index) {
-            (Backend::NomadCh(nb), Some(idx)) => nb.derive_agent_url(idx),
-            (Backend::NomadCh(_), None) => {
-                tracing::warn!(
-                    path = ?path,
-                    "sandbox/restore: sealed record for nomad-ch backend has no vm_index; quarantining (schema bug)"
-                );
-                return RestoreOutcome::Corrupt;
-            }
-            _ => {
-                // Sealed record says nomad-ch but the running
-                // controller is on a different backend. Operator
-                // changed `SANDBOX_BACKEND` between restarts;
-                // quarantine the record (no probe possible).
-                tracing::warn!(
-                    path = ?path,
-                    sealed_backend = %sealed.backend,
-                    running_backend = backend.name(),
-                    "sandbox/restore: sealed record backend mismatch; not restoring"
-                );
-                return RestoreOutcome::BackendUnsupported;
-            }
-        },
-        other => match sealed.agent_url.as_ref() {
-            Some(url) if backend.name() == other => url.clone(),
-            Some(_) => {
-                tracing::warn!(
-                    path = ?path,
-                    sealed_backend = other,
-                    running_backend = backend.name(),
-                    "sandbox/restore: sealed record backend mismatch; not restoring"
-                );
-                return RestoreOutcome::BackendUnsupported;
-            }
-            None => {
-                tracing::warn!(
-                    path = ?path,
-                    sealed_backend = other,
-                    "sandbox/restore: sealed record missing agent_url; quarantining"
-                );
-                return RestoreOutcome::Corrupt;
-            }
-        },
-    };
-
-    // Reconstitute the signing key for the probe. We don't insert
-    // anything into backend/registry yet — the probe's outcome is
-    // gated by the agent's response.
+    // Reconstitute the signing key. The fingerprint check is against
+    // the pg-side `key_fp` (round-8: that's where it lives now).
     let signing_key = Arc::new(SigningKey::from_bytes(&sealed.signing_key_bytes));
     let derived_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
-    if derived_fp != sealed.pubkey_fp {
+    if derived_fp != row.key_fp {
         tracing::warn!(
-            path = ?path,
+            sandbox_id = %row.sandbox_id,
             derived_fp = %derived_fp,
-            sealed_fp = %sealed.pubkey_fp,
-            "sandbox/restore: sealed record corrupt: derived pubkey_fp != sealed"
+            pg_key_fp = %row.key_fp,
+            "sandbox/restore: sealed signing key disagrees with pg key_fp; marking recreating + deleting sealed"
         );
-        return RestoreOutcome::Corrupt;
+        let _ = std::fs::remove_file(&sealed_path);
+        let _ = database
+            .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation, None)
+            .await;
+        return RestoreOutcome::Mismatched;
     }
 
-    // Signed /version probe — the same shape `wait_for_agent_livez`
-    // uses on the create path. We don't want to drag the full
-    // wait-loop here; it polls until match-or-timeout, which is the
-    // wrong primitive for restore (we want one shot per record so a
-    // single dead VM can't stall the whole boot path).
-    match probe_and_classify(&agent_url, &signing_key, &sealed.pubkey_fp, probe_timeout).await {
-        ProbeOutcome::Match { actual_fp: _ } => {
+    // Resolve agent_url. Pg has it for docker/k8s; nomad-ch derives
+    // it from vm_index, but pg also stores the derived value at
+    // create time (round-8: the controller computed it once and put
+    // it in the row), so we just trust the pg row.
+    let agent_url = match row.agent_url.clone() {
+        Some(u) => u,
+        None => {
+            tracing::warn!(
+                sandbox_id = %row.sandbox_id,
+                "sandbox/restore: pg row has no agent_url; marking lost"
+            );
+            let _ = database
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
+                .await;
+            return RestoreOutcome::Corrupt;
+        }
+    };
+
+    // Probe.
+    match probe_and_classify(&agent_url, &signing_key, &row.key_fp, probe_timeout).await {
+        ProbeOutcome::Match { .. } => {
             // Hand off to the backend to rehydrate per-sandbox
             // state + the registry to record the SandboxInfo.
-            match backend.restore_from_sealed(sandbox_id, &sealed).await {
+            match backend
+                .restore_from_pg_and_sealed(sandbox_id_uuid, row, &sealed, agent_url.clone())
+                .await
+            {
                 Ok(auth) => {
-                    let info = build_restored_info(sandbox_id, &sealed, backend.name());
-                    registry.insert_with_auth(sandbox_id, info, auth);
-                    // Phase-3 (preview-URL § II.4): rehydrate the
-                    // share-token secret ring + audit table from the
-                    // sealed record so cookies minted before the
-                    // restart still validate. Ignored for v1 records
-                    // (preview_secrets == None, preview_audit empty).
-                    let secrets = sealed
-                        .preview_secrets
-                        .as_ref()
-                        .map(crate::registry::PreviewSecrets::from_sealed);
-                    let audit = sealed
-                        .preview_audit
-                        .iter()
-                        .map(crate::registry::PreviewAuditEntry::from_sealed)
-                        .collect();
-                    registry.restore_preview_state(sandbox_id, secrets, audit);
+                    let info = build_restored_info(row);
+                    registry.insert_with_auth(sandbox_id_uuid, info, auth);
+                    // Phase-2 HA: hydrate the in-memory generation
+                    // from the pg row so any subsequent CAS-guarded
+                    // write carries the canonical value (§ 11.2).
+                    // Without this, the registry would default to 0
+                    // and a stop right after restore would miss the
+                    // CAS for any sandbox that's seen a takeover or
+                    // status flip.
+                    registry.set_generation(&sandbox_id_uuid, row.generation);
+                    if let Some(secrets) = sealed.preview_secrets.as_ref() {
+                        let pv = crate::registry::PreviewSecrets::from_sealed(secrets);
+                        registry.restore_preview_state(sandbox_id_uuid, Some(pv), Vec::new());
+                    }
+                    // Round-2 fixer / IMPORTANT #2: a row that came
+                    // in as 'unreachable' now passes the probe — flip
+                    // it back to 'running' so subsequent dispatches
+                    // see the recovered state. We CAS on the row's
+                    // current generation; if a peer has moved past
+                    // us in the interim, we silently let the peer
+                    // own the transition.
+                    if matches!(row.status, SandboxStatus::Unreachable) {
+                        match database
+                            .update_sandbox_status(
+                                sandbox_id_uuid,
+                                SandboxStatus::Running,
+                                row.generation,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(new_gen) => {
+                                registry.set_generation(&sandbox_id_uuid, new_gen);
+                                tracing::info!(
+                                    sandbox_id = %row.sandbox_id,
+                                    old_status = "unreachable",
+                                    new_status = "running",
+                                    new_generation = new_gen,
+                                    "sandbox/restore: probe-Ok flipped unreachable → running"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::info!(
+                                    sandbox_id = %row.sandbox_id,
+                                    error = %e,
+                                    "sandbox/restore: unreachable→running flip skipped (CAS lost or pg err); registry hydration still applied"
+                                );
+                            }
+                        }
+                    }
                     tracing::info!(
-                        sandbox_id = %sandbox_id,
-                        user_id = %sealed.user_id,
-                        project_id = %sealed.project_id,
-                        backend = %sealed.backend,
+                        sandbox_id = %row.sandbox_id,
+                        user_id = %row.user_id,
+                        project_id = %row.project_id,
                         agent_url = %agent_url,
-                        "sandbox/restore: restored sandbox"
+                        generation = row.generation,
+                        prior_status = row.status.as_str(),
+                        "sandbox/restore: restored from pg + sealed"
                     );
                     RestoreOutcome::Restored
                 }
-                Err(e) if e.contains("doesn't yet support") => {
+                Err(e) if e.contains("doesn't yet support") || e.contains("backend mismatch") => {
                     tracing::info!(
-                        sandbox_id = %sandbox_id,
+                        sandbox_id = %row.sandbox_id,
                         backend = backend.name(),
                         error = %e,
-                        "sandbox/restore: backend doesn't support restore; sealed file kept for a future binary"
+                        "sandbox/restore: backend doesn't support restore; pg row + sealed kept for next-binary boot"
                     );
                     RestoreOutcome::BackendUnsupported
                 }
                 Err(e) => {
                     tracing::warn!(
-                        sandbox_id = %sandbox_id,
+                        sandbox_id = %row.sandbox_id,
                         error = %e,
-                        "sandbox/restore: backend.restore_from_sealed failed"
+                        "sandbox/restore: backend.restore_from_pg_and_sealed failed; marking lost"
                     );
+                    let _ = database
+                        .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
+                        .await;
                     RestoreOutcome::Corrupt
                 }
             }
         }
         ProbeOutcome::Mismatched { actual_fp } => {
-            // Sandbox was recycled; the agent at `agent_url` is
-            // serving a different tenant. Delete the sealed file —
-            // we don't trust this address for the original sandbox
-            // anymore.
             tracing::warn!(
-                sandbox_id = %sandbox_id,
+                sandbox_id = %row.sandbox_id,
                 agent_url = %agent_url,
-                expected_fp = %sealed.pubkey_fp,
+                expected_fp = %row.key_fp,
                 actual_fp = %actual_fp,
-                "sandbox/restore: fp_mismatch; deleting sealed record"
+                "sandbox/restore: fp_mismatch; marking recreating + deleting sealed"
             );
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(path = ?path, error = %e, "sandbox/restore: failed to delete mismatched sealed file");
-            }
+            let _ = std::fs::remove_file(&sealed_path);
+            let _ = database
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation, None)
+                .await;
             RestoreOutcome::Mismatched
         }
         ProbeOutcome::Unauthorized => {
-            // 401: agent is verifying with a different controller
-            // pubkey. Same disposition as fp mismatch — the agent
-            // at this address is no longer ours.
             tracing::warn!(
-                sandbox_id = %sandbox_id,
+                sandbox_id = %row.sandbox_id,
                 agent_url = %agent_url,
-                "sandbox/restore: /version returned 401 (different controller pubkey); deleting sealed record"
+                "sandbox/restore: /version returned 401; marking recreating + deleting sealed"
             );
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(path = ?path, error = %e, "sandbox/restore: failed to delete unauth sealed file");
-            }
+            let _ = std::fs::remove_file(&sealed_path);
+            let _ = database
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation, None)
+                .await;
             RestoreOutcome::Mismatched
         }
         ProbeOutcome::Unreachable(reason) => {
             tracing::warn!(
-                sandbox_id = %sandbox_id,
+                sandbox_id = %row.sandbox_id,
                 agent_url = %agent_url,
                 reason = %reason,
-                "sandbox/restore: unreachable; leaving sealed record in place"
+                "sandbox/restore: agent unreachable; marking unreachable; pg row + sealed kept"
             );
+            let _ = database
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Unreachable, row.generation, None)
+                .await;
             RestoreOutcome::Unreachable
         }
     }
 }
 
-fn build_restored_info(sandbox_id: Uuid, sealed: &SealedAuth, backend_name: &str) -> SandboxInfo {
+// Round-2 fixer / MINOR #1: `sandbox_id_from_str_lossy` was removed —
+// see the corresponding `process_pg_row` arm above. It used to swallow
+// malformed ids and fire a no-op UPDATE; now we skip the row + emit
+// `sandbox_corrupt_id_total`.
+
+fn build_restored_info(row: &SandboxRow) -> SandboxInfo {
     SandboxInfo {
-        sandbox_id: sandbox_id.to_string(),
-        user_id: sealed.user_id.clone(),
-        project_id: sealed.project_id.clone(),
-        backend: backend_name.to_string(),
+        sandbox_id: row.sandbox_id.clone(),
+        user_id: row.user_id.clone(),
+        project_id: row.project_id.clone(),
+        backend: row.backend.clone(),
         backend_hint: format!(
             "restored vm_index={:?} fp={}",
-            sealed.vm_index, sealed.pubkey_fp
+            row.vm_index, row.key_fp
         ),
-        created_at_secs: sealed.created_at_secs,
-        last_used_at_secs: sealed.created_at_secs,
+        created_at_secs: row.created_at_secs,
+        last_used_at_secs: row.last_used_at_secs,
     }
+}
+
+/// Walk the sealed-records dir and delete every `*.sealed` file
+/// whose path is not in `consumed` — those files were not matched
+/// by any pg row owned by this host, so they're orphans from a
+/// partially-cancelled create. Returns count unlinked.
+fn sweep_orphan_sealed(
+    sealed_dir: &Path,
+    consumed: &std::collections::HashSet<std::path::PathBuf>,
+) -> usize {
+    let read = match std::fs::read_dir(sealed_dir) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let mut n = 0;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|e| e == "sealed") {
+            continue;
+        }
+        if consumed.contains(&path) {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    path = ?path,
+                    "sandbox/restore: orphan sealed record (no pg row for this host); unlinked"
+                );
+                n += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = ?path,
+                    error = %e,
+                    "sandbox/restore: failed to unlink orphan sealed record"
+                );
+            }
+        }
+    }
+    n
 }
 
 #[derive(Debug)]
@@ -324,10 +508,7 @@ enum ProbeOutcome {
     Unreachable(String),
 }
 
-/// Single-shot signed `/version` probe. Returns one of three
-/// outcomes (match / mismatch / unreachable). Mirrors the per-iter
-/// step inside `nomad_ch::wait_for_agent_livez` but without the
-/// poll loop — restore wants one shot per record.
+/// Single-shot signed `/version` probe.
 async fn probe_version_signed(
     agent_url: &str,
     signing_key: &Arc<SigningKey>,
@@ -366,10 +547,6 @@ async fn probe_version_signed(
 
     match result {
         Ok(resp) if resp.status == 200 => {
-            // Parse `pubkey_fingerprint` out of the JSON. A missing
-            // field surfaces as "actual_fp = empty"; we treat that
-            // as a mismatch so a malformed agent doesn't get silent
-            // restore.
             let fp = serde_json::from_str::<serde_json::Value>(&resp.body)
                 .ok()
                 .and_then(|v| {
@@ -378,8 +555,6 @@ async fn probe_version_signed(
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_default();
-            // Caller compares to the sealed `pubkey_fp`; we surface
-            // the actual_fp so the boot-path log records both.
             ProbeOutcome::Match { actual_fp: fp }
         }
         Ok(resp) if resp.status == 401 => ProbeOutcome::Unauthorized,
@@ -392,9 +567,6 @@ async fn probe_version_signed(
     }
 }
 
-/// Compose `process_record`'s match/mismatch decision: it asks the
-/// probe for `actual_fp` and compares against the sealed value.
-/// Wrapping in this function keeps the equality check in one place.
 async fn probe_and_classify(
     agent_url: &str,
     signing_key: &Arc<SigningKey>,
@@ -434,23 +606,16 @@ fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Drive a single sealed record through the same dispatch the
-/// boot loop uses. Behind `#[doc(hidden)]` so the integration tests
-/// can probe / classify / dispatch one record at a time without
-/// having to fan out through `restore_at_startup`'s directory walk.
+/// Used by tests to construct a `SandboxAuth` from secret material
+/// + pg-supplied agent_url + key_fp, mirroring the path the production
+/// boot loop walks.
 #[doc(hidden)]
-pub async fn _test_process_one(
-    sealed_path: &Path,
-    sealed: SealedAuth,
-    backend: &Backend,
-    registry: &SandboxRegistry,
-    probe_timeout: Duration,
-) -> RestoreOutcome {
-    let record = UnsealedRecord {
-        path: sealed_path.to_path_buf(),
-        result: Ok(sealed),
-    };
-    process_record(record, backend, registry, probe_timeout).await
+pub fn _test_build_auth_from_sealed(
+    sealed: &SealedAuth,
+    agent_url: String,
+    pubkey_fp: String,
+) -> Result<SandboxAuth, String> {
+    sealed.into_sandbox_auth_with(agent_url, pubkey_fp)
 }
 
 // ─── tests ─────────────────────────────────────────────────────
@@ -458,391 +623,62 @@ pub async fn _test_process_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SandboxConfig;
-    use crate::persist::{seal, AeadKey, SEAL_VERSION};
-    use std::io::Write as _;
-    use std::net::TcpListener;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread;
 
-    /// Tiny single-shot HTTP/1.1 fixture. Returns the bound port +
-    /// a stop-flag the test sets to wind the listener down. Body +
-    /// status are caller-supplied; one signed-`/version` request
-    /// per test is the expected shape.
-    fn spawn_mock_agent(body: String, status: u16) -> (u16, Arc<AtomicBool>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        listener.set_nonblocking(true).unwrap();
-        thread::spawn(move || {
-            use std::io::Read as _;
-            while !stop_clone.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        // Drain whatever request we got — we don't
-                        // verify the signature in the fixture; the
-                        // controller-side is what we're testing.
-                        stream
-                            .set_read_timeout(Some(Duration::from_millis(50)))
-                            .ok();
-                        let mut buf = [0u8; 4096];
-                        let _ = stream.read(&mut buf);
-                        let resp = format!(
-                            "HTTP/1.1 {status} OK\r\n\
-                             Content-Type: application/json\r\n\
-                             Content-Length: {}\r\n\
-                             Connection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        let _ = stream.write_all(resp.as_bytes());
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        (port, stop)
-    }
-
-    fn make_cfg() -> SandboxConfig {
-        // Same shape as nomad_ch's test cfg — kept local rather than
-        // re-exporting to avoid pulling test-only symbols across
-        // module boundaries.
-        SandboxConfig {
-            port: 9091,
-            token: crate::config::ApiToken::new("x"),
+    #[test]
+    fn build_restored_info_round_trips_pg_fields() {
+        let row = SandboxRow {
+            sandbox_id: "sbx_abcdefghij1234567890".into(),
+            user_id: "usr_aaaaaaaaaaaaaaaaaaaa".into(),
+            project_id: "prj_bbbbbbbbbbbbbbbbbbbb".into(),
             backend: "nomad-ch".into(),
-            image: "img".into(),
-            workspace_root: PathBuf::from("/var/zeroship/projects"),
-            network: "n".into(),
-            memory_mb: 1024,
-            cpus: 2.0,
-            idle_timeout_secs: 1800,
-            max_lifetime_secs: 28800,
-            auto_pull: false,
-            k8s: crate::config::K8sConfig {
-                namespace: "default".into(),
-                image: "i".into(),
-                runtime_class: "kvm-sandbox".into(),
-                ready_timeout_secs: 120,
-                use_port_forward: false,
-                port_forward_start: 18000,
-                user_home_size: "5Gi".into(),
-                user_home_storage_class: None,
-                startup_orphan_cleanup: false,
-            },
-            nomad_ch: crate::config::NomadCHConfig {
-                nomad_addr: "http://127.0.0.1:4646".into(),
-                datacenter: "dc1".into(),
-                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
-                runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
-                host_state_dir: PathBuf::from("/var/zeroship/ch"),
-                user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
-                vm_index_floor: 1,
-                vm_index_ceil: 200,
-                alloc_running_timeout_secs: 60,
-                agent_livez_timeout_secs: 30,
-                host_fence_timeout_secs: 30,
-                startup_orphan_cleanup: false,
-                subnet_second_octet: 99,
-            },
-            create_retry_max: 2,
-            create_retry_total_timeout_secs: 90,
-        }
-    }
-
-    fn fresh_dir(label: &str) -> PathBuf {
-        let p = std::env::temp_dir()
-            .join(format!("zsbx-restore-{label}-{}", Uuid::now_v7().simple()));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    #[compio::test]
-    async fn restore_at_startup_with_no_dir_returns_zero() {
-        let dir = fresh_dir("nodir");
-        let key = AeadKey::from_bytes([0u8; 32]);
-        let backend = Backend::NomadCh(
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap(),
-        );
-        let reg = SandboxRegistry::new();
-        // sealed-records subdir doesn't exist → zero records.
-        let s = restore_at_startup(&dir, &key, &backend, &reg, DEFAULT_PROBE_TIMEOUT)
-            .await
-            .unwrap();
-        assert_eq!(s.records_seen, 0);
-        assert_eq!(s.restored, 0);
-        assert_eq!(s.mismatched, 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Probe matches → backend state restored, registry populated.
-    /// We don't bind a real Nomad here; the fixture mock answers the
-    /// `/version` probe with a matching pubkey_fingerprint. The
-    /// nomad-ch backend's `restore_from_sealed` re-derives agent_url
-    /// and rehydrates state; the test confirms registry entry shape.
-    #[compio::test]
-    async fn restore_match_rehydrates_registry_and_backend_state() {
-        let key = AeadKey::from_bytes([0xa5; 32]);
-        let dir = fresh_dir("match");
-        let sealed_dir = dir.join("sealed-records");
-        std::fs::create_dir_all(&sealed_dir).unwrap();
-
-        // Mock the agent at a free port; point the sealed record's
-        // `agent_url` at it via subnet_second_octet trickery — we
-        // use a _custom_ override path: build the backend with
-        // subnet_second_octet=99, then patch the derive_agent_url
-        // through a second sealed-record field. The cleanest way is
-        // to bypass derive_agent_url for the test by writing a
-        // sealed record whose backend matches the running backend
-        // and whose `vm_index` derives to a `10.99.<x>.2:7777` URL
-        // we won't actually hit — and route the probe via a custom
-        // mock URL.
-
-        // The mock listens on 127.0.0.1:<port>. We can't trick
-        // derive_agent_url into pointing at 127.0.0.1 from a u16
-        // vm_index (the formula is `10.99.<100+idx>.2:7777`). So
-        // we sidestep: this test exercises ONLY the corrupt-record
-        // and unreachable paths. The match-path is exercised by
-        // the `_test_process_one`-driven test below using a custom
-        // sealed `agent_url` field on a non-nomad-ch fake backend.
-
-        // (Drop the listener immediately; this test doesn't need
-        // it after all.)
-        let id = Uuid::now_v7();
-        let sk_bytes = [0x07; 32];
-        let sk = SigningKey::from_bytes(&sk_bytes);
-        let fp = sig::pubkey_fingerprint(&sk.verifying_key());
-        let sealed = SealedAuth {
-            version: SEAL_VERSION,
-            sandbox_id: id.to_string(),
-            user_id: "alice".into(),
-            project_id: "p".into(),
-            backend: "nomad-ch".into(),
-            signing_key_bytes: sk_bytes,
             vm_index: Some(7),
-            agent_url: None,
-            pubkey_fp: fp,
+            agent_url: Some("http://10.99.107.2:7777".into()),
+            host_id: "hst_cccccccccccccccccccc".into(),
+            generation: 0,
+            status: SandboxStatus::Running,
+            key_fp: "0123456789abcdef0123456789abcdef".into(),
             created_at_secs: 1_700_000_000,
-            preview_secrets: None,
-            preview_audit: Vec::new(),
+            started_at_secs: Some(1_700_000_001),
+            stopped_at_secs: None,
+            last_used_at_secs: 1_700_000_500,
         };
-        seal(id, &sealed, &sealed_dir, &key).unwrap();
-
-        let backend = Backend::NomadCh(
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap(),
-        );
-        let reg = SandboxRegistry::new();
-        // 10.99.107.2:7777 — never going to answer in the test
-        // environment; the probe times out → unreachable. The
-        // record is left on disk.
-        let s = restore_at_startup(&dir, &key, &backend, &reg, Duration::from_millis(150))
-            .await
-            .unwrap();
-        assert_eq!(s.records_seen, 1);
-        assert_eq!(s.unreachable, 1);
-        assert_eq!(s.restored, 0);
-        assert_eq!(s.mismatched, 0);
-        // Sealed file still on disk (unreachable → keep).
-        let n_files = std::fs::read_dir(&sealed_dir)
-            .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .map(|e| e.path().extension().is_some_and(|x| x == "sealed"))
-                    .unwrap_or(false)
-            })
-            .count();
-        assert_eq!(n_files, 1, "unreachable probe must leave sealed file in place");
-        let _ = std::fs::remove_dir_all(&dir);
+        let info = build_restored_info(&row);
+        assert_eq!(info.user_id, "usr_aaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(info.project_id, "prj_bbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(info.backend, "nomad-ch");
+        assert_eq!(info.created_at_secs, 1_700_000_000);
     }
 
-    /// Mismatch path: probe answers 200 with a *different*
-    /// fingerprint → sealed file is deleted, outcome = Mismatched.
-    /// Drives the per-record path directly via `_test_process_one`
-    /// so we can point the agent_url at the local mock. (The boot
-    /// loop's nomad-ch backend can't be aimed at 127.0.0.1 because
-    /// derive_agent_url is hard-coded to the 10.99/16 layout.)
-    #[compio::test]
-    async fn process_record_deletes_mismatched_sealed_file() {
-        let dir = fresh_dir("mismatch");
-        let key = AeadKey::from_bytes([0x11; 32]);
-        let sealed_dir = dir.join("sealed-records");
-        std::fs::create_dir_all(&sealed_dir).unwrap();
+    // Round-2 fixer / MINOR #1: removed `sandbox_id_lossy_parses_typed_id_suffix`
+    // because the helper itself is gone. The new behaviour (skip + bump
+    // `sandbox_corrupt_id_total`) is exercised end-to-end in the pg-gated
+    // integration tests.
 
-        // Mock /version returns a *different* fingerprint → mismatch.
-        let stranger_sk = SigningKey::from_bytes(&[0x99; 32]);
-        let stranger_fp = sig::pubkey_fingerprint(&stranger_sk.verifying_key());
-        let body = format!(
-            r#"{{"agent_version":"x","pubkey_fingerprint":"{stranger_fp}"}}"#
-        );
-        let (port, stop) = spawn_mock_agent(body, 200);
-        let agent_url = format!("http://127.0.0.1:{port}");
+    #[test]
+    fn sweep_orphan_sealed_unlinks_only_unconsumed() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-orphan-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id_consumed = uuid::Uuid::now_v7();
+        let id_orphan = uuid::Uuid::now_v7();
+        let consumed_path = dir.join(seal_filename_for(id_consumed));
+        let orphan_path = dir.join(seal_filename_for(id_orphan));
+        std::fs::write(&consumed_path, b"x").unwrap();
+        std::fs::write(&orphan_path, b"y").unwrap();
+        // A file that isn't a .sealed file must not be touched.
+        let stray = dir.join("README.txt");
+        std::fs::write(&stray, b"keep").unwrap();
 
-        // Seal a record whose `pubkey_fp` is OUR key, with `backend`
-        // set to a non-nomad-ch backend so `agent_url` is honored.
-        // We use `backend = "k8s"` purely as a stand-in here — the
-        // restore path will quarantine it anyway because this test
-        // controller is on nomad-ch. Simpler: drive
-        // `_test_process_one` directly with our own sealed value.
-        let id = Uuid::now_v7();
-        let sk_bytes = [0x07; 32];
-        let sk = SigningKey::from_bytes(&sk_bytes);
-        let our_fp = sig::pubkey_fingerprint(&sk.verifying_key());
-        let sealed = SealedAuth {
-            version: SEAL_VERSION,
-            sandbox_id: id.to_string(),
-            user_id: "alice".into(),
-            project_id: "p".into(),
-            // Use "k8s" so the agent_url path is honored. The k8s
-            // backend's `restore_from_sealed` returns
-            // "doesn't yet support" but we never get there because
-            // the probe mismatches first.
-            backend: "k8s".into(),
-            signing_key_bytes: sk_bytes,
-            vm_index: None,
-            agent_url: Some(agent_url),
-            pubkey_fp: our_fp,
-            created_at_secs: 1_700_000_000,
-            preview_secrets: None,
-            preview_audit: Vec::new(),
-        };
-        let sealed_path = seal(id, &sealed, &sealed_dir, &key).unwrap();
+        let mut consumed = std::collections::HashSet::new();
+        consumed.insert(consumed_path.clone());
 
-        // Build a k8s backend so the backend.name() check matches.
-        let k8s = match make_cfg_k8s() {
-            Ok(c) => c,
-            Err(e) => {
-                stop.store(true, Ordering::Relaxed);
-                panic!("k8s test cfg: {e}");
-            }
-        };
-        let backend = Backend::K8s(crate::backend::k8s::K8sBackend::new(k8s, None).unwrap());
-        let reg = SandboxRegistry::new();
-
-        let outcome =
-            _test_process_one(&sealed_path, sealed, &backend, &reg, Duration::from_millis(500))
-                .await;
-        stop.store(true, Ordering::Relaxed);
-        assert_eq!(outcome, RestoreOutcome::Mismatched);
-        // Sealed file deleted on mismatch.
-        assert!(!sealed_path.exists(), "mismatch must delete sealed file");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn make_cfg_k8s() -> Result<SandboxConfig, String> {
-        let mut c = make_cfg();
-        c.backend = "k8s".into();
-        Ok(c)
-    }
-
-    /// Happy path on the rehydrate side: even without a probe, the
-    /// nomad-ch backend's `restore_from_sealed` re-installs state,
-    /// reserves the vm_index, and yields a `SandboxAuth` whose
-    /// `agent_url` matches the deterministic derivation. After this
-    /// returns, the backend's exec/file-CRUD lookups would find the
-    /// sandbox by id.
-    #[compio::test]
-    async fn nomad_ch_restore_from_sealed_rehydrates_state() {
-        let backend =
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap();
-        let id = Uuid::now_v7();
-        let sk_bytes = [0xee; 32];
-        let sk = SigningKey::from_bytes(&sk_bytes);
-        let fp = sig::pubkey_fingerprint(&sk.verifying_key());
-        let sealed = SealedAuth {
-            version: SEAL_VERSION,
-            sandbox_id: id.to_string(),
-            user_id: "alice".into(),
-            project_id: "p1".into(),
-            backend: "nomad-ch".into(),
-            signing_key_bytes: sk_bytes,
-            vm_index: Some(42),
-            agent_url: None,
-            pubkey_fp: fp.clone(),
-            created_at_secs: 1_700_000_000,
-            preview_secrets: None,
-            preview_audit: Vec::new(),
-        };
-        let auth = backend.restore_from_sealed(id, &sealed).await.expect("rehydrate");
-        // agent_url derived from vm_index + subnet octet.
-        assert_eq!(auth.agent_url, "http://10.99.142.2:7777");
-        assert_eq!(auth.pubkey_fp, fp);
-        // Registry-level lookup (no probe needed since we just
-        // installed the state directly).
-        let lifted = backend.session_auth(id).await.expect("lookup");
-        assert_eq!(lifted.agent_url, "http://10.99.142.2:7777");
-    }
-
-    /// Restore is rejected when the sealed record's backend doesn't
-    /// match the running controller's backend. Operator changed
-    /// `SANDBOX_BACKEND` between restarts; restore quarantines the
-    /// record (no probe possible).
-    #[compio::test]
-    async fn nomad_ch_restore_rejects_wrong_backend_label() {
-        let backend =
-            crate::backend::nomad_ch::NomadCHBackend::new(make_cfg(), None).unwrap();
-        let id = Uuid::now_v7();
-        let sk_bytes = [0xee; 32];
-        let sk = SigningKey::from_bytes(&sk_bytes);
-        let sealed = SealedAuth {
-            version: SEAL_VERSION,
-            sandbox_id: id.to_string(),
-            user_id: "alice".into(),
-            project_id: "p1".into(),
-            backend: "k8s".into(), // mismatched
-            signing_key_bytes: sk_bytes,
-            vm_index: Some(42),
-            agent_url: None,
-            pubkey_fp: sig::pubkey_fingerprint(&sk.verifying_key()),
-            created_at_secs: 0,
-            preview_secrets: None,
-            preview_audit: Vec::new(),
-        };
-        let err = backend
-            .restore_from_sealed(id, &sealed)
-            .await
-            .expect_err("backend mismatch must Err");
-        assert!(err.contains("backend mismatch"), "got {err:?}");
-    }
-
-    #[compio::test]
-    async fn probe_unreachable_when_no_listener() {
-        let key = AeadKey::from_bytes([0x33; 32]);
-        let dir = fresh_dir("unreach");
-        let sealed_dir = dir.join("sealed-records");
-        std::fs::create_dir_all(&sealed_dir).unwrap();
-        let id = Uuid::now_v7();
-        let sk_bytes = [0x07; 32];
-        let sk = SigningKey::from_bytes(&sk_bytes);
-        let fp = sig::pubkey_fingerprint(&sk.verifying_key());
-        let sealed = SealedAuth {
-            version: SEAL_VERSION,
-            sandbox_id: id.to_string(),
-            user_id: "alice".into(),
-            project_id: "p".into(),
-            backend: "k8s".into(),
-            signing_key_bytes: sk_bytes,
-            vm_index: None,
-            // 127.0.0.1:1 → `connection refused` deterministic.
-            agent_url: Some("http://127.0.0.1:1".into()),
-            pubkey_fp: fp,
-            created_at_secs: 0,
-            preview_secrets: None,
-            preview_audit: Vec::new(),
-        };
-        let path = seal(id, &sealed, &sealed_dir, &key).unwrap();
-        let backend = Backend::K8s(
-            crate::backend::k8s::K8sBackend::new(make_cfg_k8s().unwrap(), None).unwrap(),
-        );
-        let reg = SandboxRegistry::new();
-        let outcome =
-            _test_process_one(&path, sealed, &backend, &reg, Duration::from_millis(300)).await;
-        assert_eq!(outcome, RestoreOutcome::Unreachable);
-        assert!(path.exists(), "unreachable must leave sealed file");
+        let n = sweep_orphan_sealed(&dir, &consumed);
+        assert_eq!(n, 1);
+        assert!(consumed_path.exists(), "consumed file must stay");
+        assert!(!orphan_path.exists(), "orphan file must be unlinked");
+        assert!(stray.exists(), "non-.sealed files must be ignored");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

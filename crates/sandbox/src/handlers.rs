@@ -43,53 +43,58 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
     resp.json(&serde_json::json!({"error": s}))
 }
 
-fn parse_uuid(s: &str) -> Result<Uuid, HttpResponse> {
-    s.parse::<Uuid>().map_err(|_| err(400, "invalid sandbox id (not a uuid)"))
+/// Parse a sandbox id from an HTTP path segment into the embedded
+/// UUID. Round-2 fixer / CRITICAL #1: the API returns `sbx_<base62>`
+/// from `POST /sandboxes`; every follow-up call (GET / DELETE / exec
+/// / files / preview / share) MUST accept that same string back. The
+/// pre-fix `s.parse::<Uuid>()` rejected it and 400ed every follow-up
+/// — the entire HTTP API was non-functional after create.
+///
+/// Accepts:
+///   - Typed-id form `sbx_<base62>` (the canonical wire shape since
+///     the round-1 typed-id rollout) — embedded UUID is decoded via
+///     `typed_id::parse_with_prefix(s, "sbx")`.
+///   - Bare hyphenated UUID — back-compat for internal/test-only
+///     callers (the pg/db layer is moving to typed-id-only; this
+///     fallback exists so the round-1 e2e fixtures that inject raw
+///     UUIDs into the in-memory registry continue to work).
+///
+/// Path-traversal posture: `parse_with_prefix` rejects any embedded
+/// `/`, `..`, or non-base62 byte BEFORE the value reaches the
+/// registry / pg / sealed-record paths. The bare-UUID fallback is
+/// equally safe — `Uuid::parse_str` only accepts the canonical
+/// hyphenated shape.
+fn parse_sandbox_id_to_uuid(s: &str) -> Result<Uuid, HttpResponse> {
+    if let Ok(uuid) = zeroship_core::typed_id::parse_with_prefix(s, "sbx") {
+        return Ok(uuid);
+    }
+    s.parse::<Uuid>().map_err(|_| {
+        err(400, "invalid sandbox id (expected sbx_<base62> or hyphenated uuid)")
+    })
 }
 
-/// Charset for user_id and project_id at the HTTP boundary.
+/// Validate an HTTP-supplied typed-id at the boundary, asserting
+/// the prefix matches `expected_prefix` (e.g. `"usr"`, `"prj"`,
+/// `"sbx"`). Round-1 fixer / CRITICAL #1: every id that flows into
+/// pg, k8s label values, and sealed-record paths is now a typed-id
+/// (`<prefix>_<base62-uuidv7>`); `parse_with_prefix` is the
+/// path-traversal-hardening boundary check (Invariant 2 in the
+/// design doc).
 ///
-/// **Tighter than DNS-1123 on purpose:** these IDs flow into k8s
-/// resource names (PVC, Pod), label values, and YAML manifests.
-/// k8s label values are restricted to `(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?`
-/// (max 63 chars) and resource names to lowercase DNS-1123. We
-/// intersect both:
-///
-///   * lowercase a-z, digits 0-9, dash `-` only
-///   * must start with [a-z0-9] (DNS-1123 + k8s-label both demand)
-///   * length ≤ 50 (leaves headroom for prefixes like
-///     `zsbx-userhome-<id>` to stay under 253-char DNS-1123)
-///
-/// Underscore is NOT allowed: previous versions accepted it and
-/// `user_pvc_name` rewrote `_` → `-`, which collapsed `alice_1`
-/// and `alice-1` to the same PVC — cross-user data bleed.
-/// Uppercase is NOT allowed for the same reason: `Alice` and
-/// `alice` would collapse. Today the validator + `user_pvc_name`
-/// (lower-only, dash-only) are mutually self-consistent, so the
-/// 1:1 between `user_id` and PVC name is restored.
-fn is_safe_id_char(c: char) -> bool {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+/// Returns `Ok(())` on success; `Err(())` on any malformed input
+/// (callers map to a 400 with a generic message; the parse error is
+/// not echoed back to keep boundary noise out of the wire).
+fn is_typed_id(id: &str, expected_prefix: &str) -> bool {
+    zeroship_core::typed_id::parse_with_prefix(id, expected_prefix).is_ok()
 }
 
-/// Validate an HTTP-supplied id (user_id, project_id) at the
-/// boundary. `is_safe_id_char` enforces the per-character rule;
-/// this helper adds the boundary checks (non-empty, leading char,
-/// length cap).
-fn is_safe_id(id: &str) -> bool {
-    if id.is_empty() || id.len() > 50 {
-        return false;
-    }
-    let mut chars = id.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
-    };
-    // First char must be alphanumeric (k8s + DNS-1123).
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return false;
-    }
-    // Remaining chars: per-char rule.
-    chars.all(is_safe_id_char)
+/// Render an internal `Uuid` to the canonical wire form
+/// `sbx_<base62>`. Round-2 fixer / IMPORTANT #3: every HTTP response
+/// + log line that surfaces a sandbox id MUST use this — pre-fix the
+/// stop endpoint emitted a hyphenated UUID while create emitted a
+/// typed-id, so audit tools that joined on payload-id broke.
+pub(crate) fn typed_sandbox_id(id: &Uuid) -> String {
+    format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(id))
 }
 
 fn infer_content_type(path: &str) -> &'static str {
@@ -149,18 +154,18 @@ pub async fn create_sandbox(
     if !auth::check(&req, &state) { return unauthorized(); }
 
     let user_id = body.user_id.trim().to_string();
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return err(
             400,
-            "invalid user_id: must be [a-z0-9-]{1,50} starting with [a-z0-9]",
+            "invalid user_id: must be a typed-id of the form usr_<base62>",
         );
     }
 
     let project_id = body.project_id.trim().to_string();
-    if !is_safe_id(&project_id) {
+    if !is_typed_id(&project_id, "prj") {
         return err(
             400,
-            "invalid project_id: must be [a-z0-9-]{1,50} starting with [a-z0-9]",
+            "invalid project_id: must be a typed-id of the form prj_<base62>",
         );
     }
 
@@ -197,19 +202,96 @@ pub async fn create_sandbox(
         max_attempts,
         total_budget,
         || async {
-            let sandbox_id = Uuid::new_v4();
+            // Round-1 fixer / CRITICAL #1: mint a UUIDv7 (typed-id
+            // backbone — the same UUIDv7 is what the typed-id wraps)
+            // rather than v4. The retry path mints a fresh id per
+            // attempt so a stale-tenant retry lands on a different
+            // vm_index for nomad-ch (FM-E).
+            let sandbox_id = Uuid::now_v7();
             let res = state.backend.create(sandbox_id, &user_id, &project_id).await;
             (sandbox_id, res)
         },
     )
     .await;
     match outcome {
-        CreateOutcome::Ok { sandbox_id, info } => {
-            let stored = state.sandboxes.insert(sandbox_id, info);
+        CreateOutcome::Ok { sandbox_id, mut info } => {
+            // Round-1 fixer / CRITICAL #1: SandboxInfo's `sandbox_id`
+            // is the typed-id `sbx_<base62>` form everywhere the wire
+            // sees it (registry → handlers → pg → preview-token
+            // claims). The backends still take `Uuid` as their
+            // internal key (cheap to look up; sealed-record filename
+            // is `sha256(uuid_bytes).sealed`); but the public-facing
+            // string carries the typed prefix so pg's CHECK passes
+            // and `restore::process_pg_row::parse_with_prefix("sbx")`
+            // round-trips.
+            info.sandbox_id = format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+            );
+            let stored = state.sandboxes.insert(sandbox_id, info.clone());
+            // Round-8 Phase 1: pg is the system of record for non-secret
+            // state. Write the sandbox row synchronously after create
+            // succeeds; on Err, log + continue (sandbox is live in
+            // memory; pg will reconcile on next boot).
+            if let Some(db) = state.database.as_ref() {
+                // Round-2 fixer / MINOR #2: hold session_auth's result
+                // once and destructure both fields. Pre-fix called
+                // session_auth twice — wasted RTT and inconsistent
+                // failure handling between the two calls.
+                let (agent_url, key_fp) = match state.backend.session_auth(sandbox_id).await {
+                    Ok(a) => (Some(a.agent_url), a.pubkey_fp),
+                    Err(_) => (None, String::new()),
+                };
+                let vm_index = parse_vm_index_hint(&info.backend_hint);
+                if let Err(e) = db
+                    .insert_sandbox(
+                        &info,
+                        db.host_id(),
+                        &key_fp,
+                        agent_url.as_deref(),
+                        vm_index,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/handlers: pg insert_sandbox failed (non-fatal)"
+                    );
+                }
+                // Audit event — best-effort.
+                let evt_data = serde_json::json!({
+                    "backend": info.backend,
+                    "vm_index": vm_index,
+                    "agent_url": agent_url,
+                });
+                let event = crate::db::Database::new_event(
+                    &info.sandbox_id,
+                    &info.user_id,
+                    "created",
+                    evt_data.to_string(),
+                );
+                if let Err(e) = db.insert_event(&event).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/handlers: pg insert_event(created) failed (non-fatal)"
+                    );
+                }
+            }
             HttpResponse::Created().json(&stored)
         }
         CreateOutcome::Failed { status, message } => err(status, message),
     }
+}
+
+/// Parse `vm_index=<int>` out of a `backend_hint` string. Round-8
+/// Phase 1: the nomad-ch backend embeds vm_index in its hint; the
+/// docker / k8s backends don't. Returns `None` for any miss.
+fn parse_vm_index_hint(hint: &str) -> Option<i32> {
+    hint.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("vm_index="))
+        .and_then(|s| s.parse::<i32>().ok())
 }
 
 /// FM-E: retry result.
@@ -320,7 +402,7 @@ where
 ///     either way a fresh vm_index is the cheapest recovery)
 ///
 /// Non-retriable cases (configuration / serialization / pool):
-///   - validate_id failures
+///   - typed-id validation failures (`user_id: expected prefix 'usr'…`)
 ///   - "concurrent sandbox create" (per-user gate)
 ///   - "no free vm_index" (pool exhausted)
 ///   - "nomad-ch backend unhealthy" (probe loop sets the bit)
@@ -364,7 +446,7 @@ pub async fn list_sandboxes(
             "list requires ?user_id=<id> — cross-user listing is not exposed",
         );
     };
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return err(400, "invalid user_id");
     }
     let filtered: Vec<_> = state
@@ -395,11 +477,11 @@ pub async fn get_sandbox(
     query: web::types::Query<GetQuery>,
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
-    let id = match parse_uuid(&path) { Ok(u) => u, Err(r) => return r };
+    let id = match parse_sandbox_id_to_uuid(&path) { Ok(u) => u, Err(r) => return r };
     let Some(user_id) = query.into_inner().user_id else {
         return err(400, "get requires ?user_id=<id>");
     };
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return err(400, "invalid user_id");
     }
     match state.sandboxes.get(&id) {
@@ -420,7 +502,7 @@ fn require_owner(
     state: &AppState,
     raw_id: &str,
 ) -> Result<Uuid, HttpResponse> {
-    let id = parse_uuid(raw_id).map_err(|r| r)?;
+    let id = parse_sandbox_id_to_uuid(raw_id)?;
     // Pull user_id from the query string. Hand-parse to avoid
     // pulling another extractor through every signature; the
     // string is short and the format is fixed.
@@ -438,7 +520,7 @@ fn require_owner(
             })
         })
         .unwrap_or_default();
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return Err(err(404, "sandbox not found"));
     }
     match state.sandboxes.get(&id) {
@@ -457,6 +539,111 @@ pub async fn stop_sandbox(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
+    let info_for_audit = state.sandboxes.get(&id);
+    // Phase-2 HA: snapshot the in-memory `generation` BEFORE any
+    // pg or backend write so the CAS-guarded UPDATEs below carry
+    // the value this controller still believes it owns. A peer
+    // takeover that already happened will have bumped the pg row
+    // past this value; our UPDATE returns CasLost and we abandon
+    // the destructive ops on this side (§ 11.2).
+    let expected_generation = state.sandboxes.generation_for(&id);
+    let owner_user_id = info_for_audit.as_ref().map(|i| i.user_id.clone());
+
+    // Round-2 fixer / CRITICAL #2: pre-flight CAS Stopping fence.
+    //
+    // Pre-fix, we ran `backend.stop(id)` BEFORE asking pg whether
+    // we still own the row. If a peer had just taken over via
+    // lease expiration, the agent at the recycled vm_index now
+    // belongs to the new owner — and our `backend.stop` would have
+    // killed their runtime out from under them. The new owner's
+    // probe-and-register-one had succeeded; we just yanked it.
+    //
+    // The fix is to flip the row to `Stopping` under (host_id,
+    // generation) BEFORE touching the backend. CasLost ⇒ a peer
+    // owns it; we skip backend.stop AND skip the pg DELETE; the
+    // only thing we do is in-memory + sealed-record cleanup, which
+    // are local to this controller and don't affect the new owner.
+    //
+    // When pg is disabled (database=None) we skip the fence — that
+    // matches the dev / single-node deploy where there's no peer to
+    // race with anyway.
+    let mut cas_lost = false;
+    let mut new_generation: Option<i64> = None;
+    if let (Some(db), Some(gen)) = (state.database.as_ref(), expected_generation) {
+        match db
+            .update_sandbox_status_with_host(
+                id,
+                crate::db::SandboxStatus::Stopping,
+                gen,
+                db.host_id(),
+                owner_user_id.as_deref(),
+            )
+            .await
+        {
+            Ok(new_gen) => {
+                new_generation = Some(new_gen);
+                state.sandboxes.set_generation(&id, new_gen);
+                tracing::debug!(
+                    sandbox_id = %typed_sandbox_id(&id),
+                    old_generation = gen,
+                    new_generation = new_gen,
+                    "sandbox/handlers: pg pre-flight CAS Stopping ok"
+                );
+            }
+            Err(crate::db::DatabaseError::CasLost {
+                sandbox_id: sid,
+                expected_generation: eg,
+                observed_generation: og,
+                current_host_id: chi,
+            }) => {
+                tracing::warn!(
+                    sandbox_id = %sid,
+                    expected_generation = eg,
+                    observed_generation = og,
+                    current_host_id = ?chi,
+                    "sandbox/handlers: lost-leadership on stop pre-flight; skipping backend.stop AND pg-delete (peer owns it now)"
+                );
+                crate::metrics::inc_lost_leadership("update_sandbox_status_stopping");
+                cas_lost = true;
+            }
+            Err(crate::db::DatabaseError::NotFound { sandbox_id: sid }) => {
+                tracing::info!(
+                    sandbox_id = %sid,
+                    "sandbox/handlers: stop pre-flight saw row already gone; skipping backend.stop"
+                );
+                cas_lost = true;
+            }
+            Err(e) => {
+                // Pg failure on pre-flight: log, but treat as if
+                // CAS was OK so we don't strand the runtime. This
+                // is a deliberate availability-over-consistency
+                // choice — a flaky pg shouldn't lock-in stale
+                // sandboxes.
+                tracing::warn!(
+                    sandbox_id = %typed_sandbox_id(&id),
+                    error = %e,
+                    "sandbox/handlers: pg pre-flight CAS failed; proceeding with backend.stop"
+                );
+            }
+        }
+    }
+
+    // CAS-LOST PATH: skip backend.stop and pg-delete entirely.
+    // Local cleanup only — registry remove is safe (in-memory,
+    // local to this controller). Sealed record was sealed on the
+    // ORIGINAL owner's disk; the new owner has its own copy (or
+    // not, per Phase-2 v1 cross-host limitation). Leaving our
+    // local copy alone is the conservative choice; the orphan
+    // sweep at next boot would clean it up anyway.
+    if cas_lost {
+        state.sandboxes.remove(&id);
+        return HttpResponse::Ok().json(&serde_json::json!({
+            "stopped": true,
+            "sandbox_id": typed_sandbox_id(&id),
+            "lost_leadership": true,
+        }));
+    }
+
     if let Err(e) = state.backend.stop(id).await {
         // **Don't** swallow: surface so the operator sees the
         // failure. We still remove from the registry — leaving a
@@ -468,7 +655,123 @@ pub async fn stop_sandbox(
     }
     state.sandboxes.remove(&id);
 
-    HttpResponse::Ok().json(&serde_json::json!({"stopped": true, "sandbox_id": id.to_string()}))
+    // Round-8 Phase 1: best-effort pg writes. Move the row to the
+    // tombstone (deleted_sandboxes) and emit a stopped event.
+    if let Some(db) = state.database.as_ref() {
+        // Final flip from `Stopping` → `Stopped` (records the
+        // stopped_at timestamp). We carry the generation that came
+        // back from the pre-flight UPDATE; if pre-flight wasn't run
+        // (no expected_generation), best-effort skip.
+        if let Some(gen) = new_generation {
+            match db
+                .update_sandbox_status_with_host(
+                    id,
+                    crate::db::SandboxStatus::Stopped,
+                    gen,
+                    db.host_id(),
+                    owner_user_id.as_deref(),
+                )
+                .await
+            {
+                Ok(final_gen) => {
+                    state.sandboxes.set_generation(&id, final_gen);
+                    tracing::debug!(
+                        sandbox_id = %typed_sandbox_id(&id),
+                        new_generation = final_gen,
+                        "sandbox/handlers: pg update_sandbox_status(stopped) ok"
+                    );
+                }
+                Err(crate::db::DatabaseError::CasLost {
+                    sandbox_id: sid,
+                    expected_generation: eg,
+                    observed_generation: og,
+                    current_host_id: chi,
+                }) => {
+                    // Extremely rare: another controller squeezed in
+                    // between our pre-flight Stopping flip and this
+                    // final Stopped flip. We've already done the
+                    // backend.stop on what we owned at pre-flight
+                    // time; the new owner gets to clean up its own
+                    // view.
+                    tracing::warn!(
+                        sandbox_id = %sid,
+                        expected_generation = eg,
+                        observed_generation = og,
+                        current_host_id = ?chi,
+                        "sandbox/handlers: lost-leadership between Stopping and Stopped; skipping pg-delete"
+                    );
+                    crate::metrics::inc_lost_leadership("update_sandbox_status_stopped");
+                    cas_lost = true;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox_id = %typed_sandbox_id(&id),
+                        error = %e,
+                        "sandbox/handlers: pg update_sandbox_status(stopped) failed (non-fatal)"
+                    );
+                }
+            }
+        }
+
+        // Round-1 fixer / CRITICAL #3 + Round-2 fixer / CRITICAL #2:
+        // tombstone DELETE only when we still own the row. The row
+        // is `Stopping` at this point (in our view); host_id fence
+        // ensures no one else moves it.
+        if !cas_lost {
+            match db
+                .delete_sandbox(
+                    id,
+                    Some(db.host_id()),
+                    owner_user_id.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::db::DatabaseError::NotFound { sandbox_id: sid }) => {
+                    // Either the fence rejected (someone else owns it)
+                    // or the row is genuinely gone. Either way, no
+                    // further action needed.
+                    tracing::info!(
+                        sandbox_id = %sid,
+                        "sandbox/handlers: pg delete_sandbox saw 0 rows (fence or already gone)"
+                    );
+                    crate::metrics::inc_lost_leadership("delete_sandbox_fence");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox_id = %typed_sandbox_id(&id),
+                        error = %e,
+                        "sandbox/handlers: pg delete_sandbox failed (non-fatal)"
+                    );
+                }
+            }
+        }
+
+        if let Some(info) = info_for_audit {
+            let event = crate::db::Database::new_event(
+                &info.sandbox_id,
+                &info.user_id,
+                "stopped",
+                "{}".to_string(),
+            );
+            if let Err(e) = db.insert_event(&event).await {
+                tracing::warn!(
+                    sandbox_id = %id,
+                    error = %e,
+                    "sandbox/handlers: pg insert_event(stopped) failed (non-fatal)"
+                );
+            }
+        }
+    }
+
+    // Round-2 fixer / IMPORTANT #3: emit the SAME id form `POST
+    // /sandboxes` returned (`sbx_<base62>`). Pre-fix the stop
+    // response leaked a hyphenated UUID, so audit tools that joined
+    // on payload-id broke at every stop.
+    HttpResponse::Ok().json(&serde_json::json!({
+        "stopped": true,
+        "sandbox_id": typed_sandbox_id(&id),
+    }))
 }
 
 // ─── POST /sandboxes/:id/exec ─────────────────────────────────────
@@ -599,6 +902,87 @@ mod tests {
         }
     }
 
+    // ─── Round-2 fixer / CRITICAL #1: parse_sandbox_id_to_uuid ──
+
+    #[test]
+    fn parse_sandbox_id_accepts_typed_id() {
+        let uuid = Uuid::now_v7();
+        let typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&uuid)
+        );
+        let parsed = parse_sandbox_id_to_uuid(&typed)
+            .expect("typed-id form must parse");
+        assert_eq!(parsed, uuid, "typed-id round-trip must yield the same UUID");
+    }
+
+    #[test]
+    fn parse_sandbox_id_accepts_hyphenated_uuid_back_compat() {
+        let uuid = Uuid::now_v7();
+        let s = uuid.to_string();
+        let parsed = parse_sandbox_id_to_uuid(&s)
+            .expect("hyphenated uuid must parse for back-compat with internal callers");
+        assert_eq!(parsed, uuid);
+    }
+
+    #[test]
+    fn parse_sandbox_id_rejects_wrong_prefix() {
+        // Right shape, wrong prefix — must NOT silently fall through
+        // to the bare-UUID branch (the embedded base62 is NOT a valid
+        // hyphenated UUID, so `s.parse::<Uuid>()` will fail and we
+        // return 400, which is the right answer).
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(parse_sandbox_id_to_uuid(&usr).is_err());
+    }
+
+    #[test]
+    fn parse_sandbox_id_rejects_garbage() {
+        for s in ["", "garbage", "sbx_", "sbx_!!!", "alice"] {
+            assert!(parse_sandbox_id_to_uuid(s).is_err(), "{s:?} must reject");
+        }
+    }
+
+    #[test]
+    fn typed_sandbox_id_has_sbx_prefix() {
+        let uuid = Uuid::now_v7();
+        let s = typed_sandbox_id(&uuid);
+        assert!(s.starts_with("sbx_"), "got {s:?}");
+        // Round-trip via the parser.
+        let parsed = parse_sandbox_id_to_uuid(&s).unwrap();
+        assert_eq!(parsed, uuid);
+    }
+
+    // ─── Round-1 fixer / CRITICAL #1: typed-id validation ───────
+
+    #[test]
+    fn typed_id_validator_accepts_well_formed_typed_id() {
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(is_typed_id(&usr, "usr"));
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(is_typed_id(&prj, "prj"));
+    }
+
+    #[test]
+    fn typed_id_validator_refuses_human_style_ids() {
+        // Pre-CRITICAL-#1 the handler accepted these and the
+        // downstream Database::insert_sandbox silently failed because
+        // its own parse_with_prefix rejected them. Now we refuse at
+        // the handler boundary so a 400 surfaces immediately.
+        for id in ["alice", "bob", "myproj", "p", "u-1", ""] {
+            assert!(!is_typed_id(id, "usr"), "{id:?} must NOT pass usr typed-id check");
+        }
+    }
+
+    #[test]
+    fn typed_id_validator_refuses_wrong_prefix() {
+        // Right shape, wrong prefix — mirrors the path-traversal
+        // hardening posture from typed_id::ParseError::WrongPrefix.
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(!is_typed_id(&prj, "usr"));
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(!is_typed_id(&usr, "prj"));
+    }
+
     // ─── FM-E: classifier ───────────────────────────────────────
 
     #[test]
@@ -630,7 +1014,9 @@ mod tests {
         assert!(!is_retriable_create_error(
             "nomad-ch backend unhealthy; refusing new sandboxes"
         ));
-        assert!(!is_retriable_create_error("validate_id: bad chars"));
+        assert!(!is_retriable_create_error(
+            "user_id: expected prefix 'usr', got 'alice'"
+        ));
     }
 
     // ─── FM-E: retry loop ───────────────────────────────────────

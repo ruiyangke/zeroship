@@ -321,8 +321,16 @@ pub struct NomadCHConfig {
     /// alive. Operator log will say `vm_index: leak=<n> reason=
     /// host_fence_timeout`. Orphan-prune at next controller boot
     /// reclaims it indirectly. `SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS`
-    /// (default 30). Set to 0 to disable the fence entirely (NOT
+    /// (default 120). Set to 0 to disable the fence entirely (NOT
     /// recommended in production — restores the FM-F race).
+    ///
+    /// Was 30s pre-Phase-3 stress run; bumped to 120s after measuring
+    /// 30-way concurrent stop on a single n2-standard-32 worker:
+    /// fence p95=29s, max=31.1s — i.e., 30s is too tight when many CH
+    /// processes tear down concurrently (worker IO/CPU contention
+    /// during teardown, NOT the controller polling cadence). 60-way
+    /// burst can push p99 well past 30s. 120s gives 4× headroom while
+    /// still bounding the per-stop budget to "minutes, not hours".
     pub host_fence_timeout_secs: u64,
 
     /// Second octet of the per-VM /30 subnet. Default 99 keeps the
@@ -590,7 +598,7 @@ impl SandboxConfig {
             )?,
             host_fence_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_HOST_FENCE_TIMEOUT_SECS",
-                30u64,
+                120u64,
             )?,
             startup_orphan_cleanup: parse_env(
                 "SANDBOX_NOMAD_CH_STARTUP_ORPHAN_CLEANUP",

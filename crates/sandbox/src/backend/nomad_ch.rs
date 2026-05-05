@@ -378,8 +378,8 @@ impl NomadCHBackend {
         user_id: &str,
         project_id: &str,
     ) -> Result<SandboxInfo, String> {
-        validate_id(user_id, "user_id")?;
-        validate_id(project_id, "project_id")?;
+        validate_typed_id(user_id, "usr", "user_id")?;
+        validate_typed_id(project_id, "prj", "project_id")?;
 
         // M7 circuit-breaker. Pool exhaustion under partial-failure
         // storm: 50 concurrent stalled Nomad RPCs would saturate
@@ -746,19 +746,15 @@ impl NomadCHBackend {
         // time, which shrinks the AEAD plaintext + removes a
         // migration hazard if the agent listen address ever changes.
         if let Some(persist) = &self.persist {
+            // v3 (round-8): sealed record carries secrets only —
+            // user_id, project_id, backend, vm_index, agent_url,
+            // pubkey_fp, created_at_secs all live in pg now.
             let record = crate::persist::SealedAuth {
                 version: crate::persist::SEAL_VERSION,
                 sandbox_id: sandbox_id.to_string(),
-                user_id: user_id.to_string(),
-                project_id: project_id.to_string(),
-                backend: "nomad-ch".to_string(),
                 signing_key_bytes: sk_bytes,
-                vm_index: Some(vm_index),
-                agent_url: None,
-                pubkey_fp: key_fp.clone(),
-                created_at_secs: now,
                 preview_secrets: None,
-                preview_audit: Vec::new(),
+                boot_id: None,
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 tracing::warn!(
@@ -889,7 +885,7 @@ impl NomadCHBackend {
         //    defense-in-depth.
         //
         //    Fence policy: poll /livez for up to
-        //    `host_fence_timeout_secs` (default 30s). Two
+        //    `host_fence_timeout_secs` (default 120s). Two
         //    consecutive failures (connect-refused, timeout, or 5xx)
         //    → "no agent listening" → release. If the fence times
         //    out, **leak** the vm_index — handing out a live IP is
@@ -1242,29 +1238,23 @@ impl NomadCHBackend {
         let Some(persist) = self.persist.clone() else {
             return Ok(false);
         };
-        let (sk_bytes, vm_index) = {
+        let _ = (info, audit); // round-8: legacy fields no longer sealed
+        let sk_bytes = {
             let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
             let Some(s) = guard.get(&sandbox_id) else {
                 return Ok(false);
             };
-            (s.signing_key.to_bytes(), s.vm_index)
+            s.signing_key.to_bytes()
         };
-        let pubkey_fp = sig::pubkey_fingerprint(
-            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
-        );
+        // v3: secret material only. Pg holds info.user_id /
+        // project_id / vm_index / created_at_secs; the share-token
+        // audit is a sandbox.shares row.
         let record = crate::persist::SealedAuth {
             version: crate::persist::SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: info.user_id.clone(),
-            project_id: info.project_id.clone(),
-            backend: "nomad-ch".to_string(),
             signing_key_bytes: sk_bytes,
-            vm_index: Some(vm_index),
-            agent_url: None,
-            pubkey_fp,
-            created_at_secs: info.created_at_secs,
             preview_secrets: secrets,
-            preview_audit: audit,
+            boot_id: None,
         };
         persist
             .seal(sandbox_id, &record)
@@ -1353,39 +1343,43 @@ impl NomadCHBackend {
     /// schema violation for a `backend = "nomad-ch"` record), if
     /// the index is outside the configured pool, or if the
     /// in-memory map already has an entry for `sandbox_id`.
-    pub async fn restore_from_sealed(
+    /// Round-8 Phase-1 restore. Pg row is canonical for `user_id`,
+    /// `backend`, `vm_index`, `agent_url`, `key_fp`; sealed record is
+    /// canonical for `signing_key_bytes`. Boot loop has already
+    /// signed-`/version` probed the agent before calling this.
+    pub async fn restore_from_pg_and_sealed(
         &self,
         sandbox_id: Uuid,
+        row: &crate::db::SandboxRow,
         sealed: &crate::persist::SealedAuth,
+        agent_url: String,
     ) -> Result<super::SandboxAuth, String> {
-        if sealed.backend != "nomad-ch" {
+        if row.backend != "nomad-ch" {
             return Err(format!(
-                "restore_from_sealed: backend mismatch (record says {:?}, this backend is nomad-ch)",
-                sealed.backend
+                "restore: backend mismatch (pg row says {:?}, this backend is nomad-ch)",
+                row.backend
             ));
         }
-        let vm_index = sealed.vm_index.ok_or_else(|| {
-            "restore_from_sealed: sealed nomad-ch record has no vm_index".to_string()
+        let vm_index_i32 = row.vm_index.ok_or_else(|| {
+            "restore: pg row for nomad-ch backend has no vm_index".to_string()
         })?;
-        // Reserve the index BEFORE inserting state — a failure here
-        // (e.g. ceil-out-of-range after operator shrinks the pool)
-        // means the record can't be safely restored on this
-        // controller; the boot path quarantines it.
+        let vm_index = u16::try_from(vm_index_i32)
+            .map_err(|e| format!("restore: vm_index out of u16 range: {e}"))?;
+        // Reserve the index BEFORE inserting state.
         self.vm_index_allocator
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .reserve(vm_index)
-            .map_err(|e| format!("restore_from_sealed: vm_index reserve: {e}"))?;
+            .map_err(|e| format!("restore: vm_index reserve: {e}"))?;
 
         let signing_key = Arc::new(SigningKey::from_bytes(&sealed.signing_key_bytes));
         let pubkey_fp = sig::pubkey_fingerprint(&signing_key.verifying_key());
-        if pubkey_fp != sealed.pubkey_fp {
+        if pubkey_fp != row.key_fp {
             return Err(format!(
-                "restore_from_sealed: derived pubkey_fp ({pubkey_fp}) != sealed pubkey_fp ({})",
-                sealed.pubkey_fp
+                "restore: derived pubkey_fp ({pubkey_fp}) != pg key_fp ({})",
+                row.key_fp
             ));
         }
-        let agent_url = self.derive_agent_url(vm_index);
         let host_dir = self.derive_host_dir(sandbox_id);
         let job_id = Self::derive_job_id(sandbox_id);
 
@@ -1393,13 +1387,13 @@ impl NomadCHBackend {
             let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
             if g.contains_key(&sandbox_id) {
                 return Err(format!(
-                    "restore_from_sealed: sandbox {sandbox_id} already present in nomad-ch state"
+                    "restore: sandbox {sandbox_id} already present in nomad-ch state"
                 ));
             }
             g.insert(
                 sandbox_id,
                 NomadChSandbox {
-                    user_id: sealed.user_id.clone(),
+                    user_id: row.user_id.clone(),
                     job_id,
                     vm_index,
                     host_dir,
@@ -1414,6 +1408,18 @@ impl NomadCHBackend {
             agent_url,
             pubkey_fp,
         })
+    }
+
+    /// Legacy v2-shape restore. Round-8 keeps this so existing tests
+    /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
+    /// through [`Self::restore_from_pg_and_sealed`].
+    #[allow(dead_code)]
+    pub async fn restore_from_sealed(
+        &self,
+        _sandbox_id: Uuid,
+        _sealed: &crate::persist::SealedAuth,
+    ) -> Result<super::SandboxAuth, String> {
+        Err("restore_from_sealed: round-8 deprecated — use restore_from_pg_and_sealed".into())
     }
 
     /// Build a short prefix for agent-error log lines so a fleet-
@@ -1769,18 +1775,15 @@ fn cpus_boot(cpus: f32) -> u32 {
     if n < 1 { 1 } else { n as u32 }
 }
 
-/// Map `SandboxConfig.cpus` to the Nomad `Resources.CPU` advisory
-/// (MHz). Same floor philosophy as [`cpus_boot`]: we never want to
-/// emit `CPU=0` (rejected by some Nomad configs) when we're about
-/// to boot a real VM. Floor at 500 MHz (≈ 0.25 vCPU). NaN /
-/// negative → floor.
-pub(crate) fn resources_cpu_mhz(cpus: f32) -> u32 {
-    if !cpus.is_finite() {
-        return 500;
-    }
-    let mhz = cpus * 2000.0;
-    if mhz < 500.0 { 500 } else { mhz as u32 }
-}
+/// Nomad `Resources.CPU` advisory (MHz). Constant 500 MHz —
+/// neither raw_exec nor Cloud Hypervisor enforce CPU quota, so this
+/// number only feeds Nomad's bin-packing arithmetic. Scaling it with
+/// `cfg.cpus` artificially capped placement at 20 VMs/worker on
+/// n2-standard-32 (80,000 advertised MHz / 4,000) when the real
+/// binding constraints are tap count (12/worker today) and memory.
+/// Pinning at the floor lets bin-packing match physical limits.
+/// 500 MHz is the smallest plausible non-zero value Nomad accepts.
+pub(crate) const NOMAD_CPU_MHZ_ADVISORY: u32 = 500;
 
 // ─── Nomad job spec construction ────────────────────────────────
 
@@ -1875,17 +1878,10 @@ pub(crate) fn build_nomad_job_json(
                             cfg.nomad_ch.subnet_second_octet.to_string(),
                     },
                     "Resources": {
-                        // CPU is in MHz units in the Nomad API.
-                        // 1 vCPU ≈ 2000 MHz advisory; our
-                        // SandboxConfig.cpus is fractional so
-                        // multiply. Floor at 500 MHz (0.25 vCPU) for
-                        // the same reason cpus_boot floors at 1: a
-                        // misconfigured `cpus=0.0` (or a NaN slipping
-                        // past validation) would otherwise produce
-                        // CPU=0, which Nomad rejects on some configs
-                        // and is anyway nonsensical when we're about
-                        // to boot a VM with at least one vCPU.
-                        "CPU": resources_cpu_mhz(cfg.cpus),
+                        // CPU MHz is advisory under raw_exec + CH —
+                        // see `NOMAD_CPU_MHZ_ADVISORY`. Memory is the
+                        // real bin-packing input.
+                        "CPU": NOMAD_CPU_MHZ_ADVISORY,
                         "MemoryMB": cfg.memory_mb as u32,
                     },
                     "KillTimeout": 10_000_000_000u64,  // 10s, ns
@@ -2742,38 +2738,24 @@ fn sanitize_path(p: &str) -> Result<String, String> {
     Ok(p.to_string())
 }
 
-/// Validate user_id / project_id at the backend boundary.
-/// **Mirror of `k8s.rs::validate_id` — keep them in sync.** Both
-/// repeat the HTTP-handler rule as defense-in-depth; cross-module
-/// sharing is intentionally avoided in this PR (the deduplication
-/// belongs in a follow-up that consolidates the validate helpers
-/// once we have ≥ 3 backends needing them).
-fn validate_id(id: &str, what: &'static str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 50 {
-        return Err(format!(
-            "{what} must be 1..=50 chars; got {} chars",
-            id.len()
-        ));
-    }
-    let mut chars = id.chars();
-    // Defense-in-depth: the empty check above already guarantees
-    // chars.next() is Some, but using `?` propagates the empty-id
-    // error cleanly if a future refactor moves the length check
-    // around. Cheaper than `unwrap()` to reason about.
-    let first = chars
-        .next()
-        .ok_or_else(|| format!("{what} unexpectedly empty"))?;
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return Err(format!(
-            "{what} must start with [a-z0-9]; got {id:?}"
-        ));
-    }
-    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err(format!(
-            "{what} must match [a-z0-9-]+ after first char; got {id:?}"
-        ));
-    }
-    Ok(())
+/// Validate a typed-id (`<prefix>_<base62-uuidv7>`) at the backend
+/// boundary. **Mirror of `k8s.rs::validate_typed_id` — keep them in
+/// sync.** Both repeat the HTTP-handler rule as defense-in-depth;
+/// cross-module sharing is intentionally avoided in this PR (the
+/// deduplication belongs in a follow-up that consolidates the validate
+/// helpers once we have ≥ 3 backends needing them).
+///
+/// Phase-1+2 wire migration: previously this enforced the legacy
+/// DNS-1123 charset `[a-z0-9-]{1,50}`, which rejected typed-ids
+/// (they contain `_`) and 500'd every real HTTP create.
+fn validate_typed_id(
+    id: &str,
+    expected_prefix: &str,
+    what: &'static str,
+) -> Result<(), String> {
+    zeroship_core::typed_id::parse_with_prefix(id, expected_prefix)
+        .map(|_uuid| ())
+        .map_err(|e| format!("{what}: {e}"))
 }
 
 #[cfg(test)]
@@ -3181,16 +3163,11 @@ mod tests {
     }
 
     #[test]
-    fn resources_cpu_mhz_floors_at_500() {
-        // I3: Resources.CPU floor matches cpus_boot's floor — no 0.
-        assert_eq!(resources_cpu_mhz(0.0), 500);
-        assert_eq!(resources_cpu_mhz(0.1), 500); // 200 MHz < 500 floor
-        assert_eq!(resources_cpu_mhz(0.25), 500);
-        assert_eq!(resources_cpu_mhz(0.5), 1000);
-        assert_eq!(resources_cpu_mhz(2.0), 4000);
-        assert_eq!(resources_cpu_mhz(-1.0), 500);
-        assert_eq!(resources_cpu_mhz(f32::NAN), 500);
-        assert_eq!(resources_cpu_mhz(f32::INFINITY), 500);
+    fn nomad_cpu_advisory_is_500_mhz() {
+        // Bin-packing-only advisory; constant by design. See the doc
+        // on `NOMAD_CPU_MHZ_ADVISORY` for why scaling with cfg.cpus
+        // was removed (artificial 20-VM/worker placement cap).
+        assert_eq!(NOMAD_CPU_MHZ_ADVISORY, 500);
     }
 
     #[test]
@@ -3262,8 +3239,8 @@ mod tests {
         // M6: subnet base octet is paired between Rust and bash.
         // Default 99 keeps the historical 10.99/16 layout.
         assert_eq!(task["Env"]["ZSBX_SUBNET_BASE_OCTET"], "99");
-        // 2.0 vCPU advisory → 4000 MHz.
-        assert_eq!(task["Resources"]["CPU"], 4000);
+        // Constant 500 MHz advisory; see NOMAD_CPU_MHZ_ADVISORY.
+        assert_eq!(task["Resources"]["CPU"], 500);
         assert_eq!(task["Resources"]["MemoryMB"], 1024);
         // KillTimeout is 10 seconds in nanoseconds.
         assert_eq!(task["KillTimeout"], 10_000_000_000u64);
@@ -3333,19 +3310,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_id_accepts_lowercase_dns_subset() {
-        assert!(validate_id("alice", "user_id").is_ok());
-        assert!(validate_id("alice-1", "user_id").is_ok());
-        assert!(validate_id("0u", "user_id").is_ok());
+    fn validate_typed_id_accepts_typed_form() {
+        // Phase-1+2 wire shape: handlers and backends both speak
+        // `usr_<22-base62>` end-to-end. The typed-id check is the
+        // single source of truth.
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(validate_typed_id(&usr, "usr", "user_id").is_ok());
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(validate_typed_id(&prj, "prj", "project_id").is_ok());
     }
 
     #[test]
-    fn validate_id_rejects_bad_chars() {
-        assert!(validate_id("Alice", "user_id").is_err());
-        assert!(validate_id("alice_1", "user_id").is_err());
-        assert!(validate_id("", "user_id").is_err());
-        assert!(validate_id(&"a".repeat(51), "user_id").is_err());
-        assert!(validate_id("-alice", "user_id").is_err());
+    fn validate_typed_id_rejects_legacy_and_garbage() {
+        // Legacy DNS-1123 charset (no prefix) — wire migration is
+        // complete; refuse the old shape.
+        assert!(validate_typed_id("alice", "usr", "user_id").is_err());
+        assert!(validate_typed_id("alice-1", "usr", "user_id").is_err());
+        assert!(validate_typed_id("Alice", "usr", "user_id").is_err());
+        // Wrong prefix.
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(validate_typed_id(&usr, "prj", "project_id").is_err());
+        // Garbage / empty.
+        assert!(validate_typed_id("", "usr", "user_id").is_err());
+        assert!(validate_typed_id("usr_", "usr", "user_id").is_err());
+        assert!(validate_typed_id("usr_xx", "usr", "user_id").is_err());
     }
 
     // ─── FM-A: stale-tenant fingerprint check in wait_for_agent_livez ────

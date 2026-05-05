@@ -282,8 +282,8 @@ impl K8sBackend {
         user_id: &str,
         project_id: &str,
     ) -> Result<SandboxInfo, String> {
-        validate_id(user_id, "user_id")?;
-        validate_id(project_id, "project_id")?;
+        validate_typed_id(user_id, "usr", "user_id")?;
+        validate_typed_id(project_id, "prj", "project_id")?;
 
         // M7 parity with NomadCHBackend. Refuse new sandboxes if
         // the most recent probe failed — kubectl/apiserver outages
@@ -494,19 +494,15 @@ impl K8sBackend {
         // address (dev). The restart-restore path (when implemented
         // for k8s — see TODO in restore_from_sealed) reads it back.
         if let Some(persist) = &self.persist {
+            // v3: secrets only. Pg holds user_id, project_id, backend,
+            // agent_url, pubkey_fp/key_fp, created_at_secs.
+            let _ = agent_url_for_seal;
             let record = crate::persist::SealedAuth {
                 version: crate::persist::SEAL_VERSION,
                 sandbox_id: sandbox_id.to_string(),
-                user_id: user_id.to_string(),
-                project_id: project_id.to_string(),
-                backend: "k8s".to_string(),
                 signing_key_bytes: signing_key_for_seal.to_bytes(),
-                vm_index: None,
-                agent_url: Some(agent_url_for_seal),
-                pubkey_fp: key_fp.clone(),
-                created_at_secs: now,
                 preview_secrets: None,
-                preview_audit: Vec::new(),
+                boot_id: None,
             };
             if let Err(e) = persist.seal(sandbox_id, &record).await {
                 tracing::warn!(
@@ -757,29 +753,21 @@ impl K8sBackend {
         let Some(persist) = self.persist.clone() else {
             return Ok(false);
         };
-        let (sk_bytes, agent_url) = {
+        let _ = (info, audit); // round-8: legacy fields no longer sealed
+        let sk_bytes = {
             let guard = self.state.read().unwrap();
             let Some(s) = guard.get(&sandbox_id) else {
                 return Ok(false);
             };
-            (s.signing_key.to_bytes(), s.agent_url.clone())
+            s.signing_key.to_bytes()
         };
-        let pubkey_fp = sig::pubkey_fingerprint(
-            &SigningKey::from_bytes(&sk_bytes).verifying_key(),
-        );
+        // v3: secrets only.
         let record = crate::persist::SealedAuth {
             version: crate::persist::SEAL_VERSION,
             sandbox_id: sandbox_id.to_string(),
-            user_id: info.user_id.clone(),
-            project_id: info.project_id.clone(),
-            backend: "k8s".to_string(),
             signing_key_bytes: sk_bytes,
-            vm_index: None,
-            agent_url: Some(agent_url),
-            pubkey_fp,
-            created_at_secs: info.created_at_secs,
             preview_secrets: secrets,
-            preview_audit: audit,
+            boot_id: None,
         };
         persist
             .seal(sandbox_id, &record)
@@ -1474,52 +1462,43 @@ fn sanitize_path(p: &str) -> Result<String, String> {
     Ok(p.to_string())
 }
 
-/// Validate a user_id / project_id at the backend boundary.
+/// Validate a typed-id (`<prefix>_<base62-uuidv7>`) at the backend
+/// boundary.
 ///
-/// The HTTP handler (`is_safe_id`) is the primary gate; this
-/// repeats the rule **identically** as defense-in-depth for any
-/// future caller that bypasses the handler (programmatic backend
-/// use, integration tests, a mistakenly-added admin endpoint).
+/// The HTTP handler (`handlers::is_typed_id`) is the primary gate;
+/// this repeats the rule **identically** as defense-in-depth for
+/// any future caller that bypasses the handler (programmatic
+/// backend use, integration tests, a mistakenly-added admin
+/// endpoint).
 ///
-/// **Charset (mirrored, do not relax):** `[a-z0-9-]{1,50}` with
-/// the first char in `[a-z0-9]`. Underscore is intentionally
-/// excluded — previous versions accepted both `_` and uppercase
-/// and rewrote them in `user_pvc_name`, which collapsed distinct
-/// user_ids to the same PVC name and produced cross-user data
-/// bleed. After this, `user_id` and PVC name are 1:1.
-fn validate_id(id: &str, what: &'static str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 50 {
-        return Err(format!(
-            "{what} must be 1..=50 chars; got {} chars",
-            id.len()
-        ));
-    }
-    let mut chars = id.chars();
-    let first = chars.next().unwrap();
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return Err(format!(
-            "{what} must start with [a-z0-9]; got {id:?}"
-        ));
-    }
-    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err(format!(
-            "{what} must match [a-z0-9-]+ after first char; got {id:?}"
-        ));
-    }
-    Ok(())
+/// Phase-1+2 wire migration: previously this enforced the legacy
+/// DNS-1123 charset `[a-z0-9-]{1,50}`, which rejected typed-ids
+/// (they contain `_`) and 500'd every real HTTP create. The handler
+/// validates typed-id form upstream; this helper now validates the
+/// same shape so the boundary check is consistent end-to-end.
+fn validate_typed_id(
+    id: &str,
+    expected_prefix: &str,
+    what: &'static str,
+) -> Result<(), String> {
+    zeroship_core::typed_id::parse_with_prefix(id, expected_prefix)
+        .map(|_uuid| ())
+        .map_err(|e| format!("{what}: {e}"))
 }
 
-/// Stable PVC name derived from `user_id`. Because `validate_id`
-/// already restricts the input to `[a-z0-9-]`, this is now an
-/// identity-prefix function — no rewriting, no collisions.
+/// Stable PVC name derived from `user_id`'s embedded UUID. Typed-ids
+/// (`usr_<base62>`) are NOT DNS-1123 (`_` is forbidden), so we derive
+/// the PVC name from the UUID hex (`[0-9a-f-]{36}`) which IS DNS-1123.
+/// 1:1 by construction — base62 → uuid is bijective.
 fn user_pvc_name(user_id: &str) -> String {
-    debug_assert!(validate_id(user_id, "user_id").is_ok());
-    format!("zsbx-userhome-{user_id}")
+    let uuid = zeroship_core::typed_id::parse_with_prefix(user_id, "usr")
+        .expect("user_pvc_name: validate_typed_id must run before this");
+    format!("zsbx-userhome-{}", uuid.simple())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_path, user_pvc_name, validate_id};
+    use super::{sanitize_path, user_pvc_name, validate_typed_id};
 
     #[test]
     fn sanitize_rejects_parent() {
@@ -1544,59 +1523,58 @@ mod tests {
     }
 
     #[test]
-    fn validate_id_accepts_lowercase_dns_1123_subset() {
-        assert!(validate_id("alice", "user_id").is_ok());
-        assert!(validate_id("alice-1", "user_id").is_ok());
-        assert!(validate_id("u123", "user_id").is_ok());
-        assert!(validate_id("0alice", "user_id").is_ok());
+    fn validate_typed_id_accepts_typed_user_id() {
+        // Phase-1+2 wire shape: handlers and backends both speak
+        // `usr_<22-base62>` end-to-end. The typed-id check is the
+        // single source of truth; legacy `[a-z0-9-]+` ids are
+        // rejected uniformly.
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(validate_typed_id(&usr, "usr", "user_id").is_ok());
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(validate_typed_id(&prj, "prj", "project_id").is_ok());
     }
 
     #[test]
-    fn validate_id_rejects_bad_chars() {
-        // Underscore is intentionally rejected — see history note
-        // in `validate_id` doc.
-        assert!(validate_id("alice_1", "user_id").is_err());
-        // Uppercase rejected for the same reason.
-        assert!(validate_id("Alice", "user_id").is_err());
-        assert!(validate_id("ALICE", "user_id").is_err());
-        // Standard "obviously bad" cases.
-        assert!(validate_id("alice@example.com", "user_id").is_err());
-        assert!(validate_id("alice/bob", "user_id").is_err());
-        assert!(validate_id("alice bob", "user_id").is_err());
-        assert!(validate_id("", "user_id").is_err());
-        assert!(validate_id(&"a".repeat(51), "user_id").is_err());
-        // Leading dash / digit rule: dash-leading rejected.
-        assert!(validate_id("-alice", "user_id").is_err());
+    fn validate_typed_id_rejects_legacy_and_garbage() {
+        // Legacy DNS-1123 charset (no prefix) — the wire migration
+        // is complete; backends MUST refuse the old shape so a stale
+        // caller surfaces as 4xx, not silently writes a half-broken row.
+        assert!(validate_typed_id("alice", "usr", "user_id").is_err());
+        assert!(validate_typed_id("alice-1", "usr", "user_id").is_err());
+        assert!(validate_typed_id("Alice", "usr", "user_id").is_err());
+        // Wrong prefix (path-traversal-hardening boundary check).
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(validate_typed_id(&usr, "prj", "project_id").is_err());
+        // Garbage / empty.
+        assert!(validate_typed_id("", "usr", "user_id").is_err());
+        assert!(validate_typed_id("usr_", "usr", "user_id").is_err());
+        assert!(validate_typed_id("usr_xx", "usr", "user_id").is_err());
     }
 
-    /// Regression: `validate_id` and `user_pvc_name` together must
-    /// guarantee a 1:1 between user_id and PVC name. Distinct
-    /// user_ids that pass validation must produce distinct PVC
-    /// names. Previously `Alice` and `alice` (and `alice_1` /
-    /// `alice-1`) collapsed to the same PVC — cross-user data bleed.
+    /// Regression: `validate_typed_id` and `user_pvc_name` together
+    /// must guarantee a 1:1 between user_id and PVC name. Distinct
+    /// user_ids must produce distinct PVC names. The PVC name is
+    /// derived from the UUID hex (DNS-1123 by construction);
+    /// base62 → uuid is bijective so 1:1 is preserved.
     #[test]
     fn user_pvc_name_is_one_to_one() {
-        let cases = [
-            ("alice", "zsbx-userhome-alice"),
-            ("alice-1", "zsbx-userhome-alice-1"),
-            ("u123", "zsbx-userhome-u123"),
-            ("0a", "zsbx-userhome-0a"),
-        ];
-        for (input, expected) in cases {
-            assert!(validate_id(input, "user_id").is_ok());
-            let got = user_pvc_name(input);
-            assert_eq!(got, expected, "user_pvc_name({input:?})");
+        let mut inputs = Vec::new();
+        for _ in 0..5 {
+            inputs.push(zeroship_core::typed_id::generate("usr"));
+        }
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for u in &inputs {
+            assert!(validate_typed_id(u, "usr", "user_id").is_ok());
+            let got = user_pvc_name(u);
+            assert!(got.starts_with("zsbx-userhome-"), "{got}");
             assert!(got.len() <= 253, "{got} too long");
             assert!(
                 got.chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "{got} not DNS-1123: contains non-alphanum-or-dash"
             );
+            names.insert(got);
         }
-        // No two distinct valid inputs map to the same PVC name.
-        let inputs = ["alice", "alice-1", "alice-2", "u1", "u2"];
-        let names: std::collections::HashSet<String> =
-            inputs.iter().map(|s| user_pvc_name(s)).collect();
         assert_eq!(names.len(), inputs.len(), "PVC name collision: {names:?}");
     }
 }

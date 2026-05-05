@@ -217,6 +217,8 @@ fn make_state(
         unreachable!("test pinned to nomad-ch");
     }
     let registry = SandboxRegistry::new();
+    // NOTE: legacy hyphenated UUID form. The typed-id wire shape is
+    // covered in `tests/sandbox_typed_id_e2e.rs`.
     let info = SandboxInfo {
         sandbox_id: sandbox_id.to_string(),
         user_id: user_id.to_string(),
@@ -232,6 +234,11 @@ fn make_state(
         sandboxes: registry,
         backend,
         mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
+        // Phase-0 sandbox-pg-state: tests run pg-disabled.
+        database: None,
+        persist: None,
+        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admin_token: None,
     });
     (state, sandbox_id)
 }
