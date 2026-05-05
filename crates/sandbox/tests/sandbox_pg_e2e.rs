@@ -400,16 +400,20 @@ async fn update_status_increments_generation_and_cas_loses_on_stale() {
         .unwrap();
     // Generation starts at 0; first update bumps to 1.
     let new_gen = db
-        .update_sandbox_status(sandbox_uuid, SandboxStatus::Stopped, 0)
+        .update_sandbox_status(sandbox_uuid, SandboxStatus::Stopped, 0, None)
         .await
         .expect("first update");
     assert_eq!(new_gen, 1);
-    // Stale generation 0 misses the CAS.
+    // Stale generation 0 misses the CAS — round-1 fixer / IMPORTANT
+    // #7 promotes this to a typed `CasLost` variant.
     let err = db
-        .update_sandbox_status(sandbox_uuid, SandboxStatus::Lost, 0)
+        .update_sandbox_status(sandbox_uuid, SandboxStatus::Lost, 0, None)
         .await
         .expect_err("stale CAS must miss");
-    assert!(format!("{err:?}").contains("CAS missed"), "got {err:?}");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::CasLost { .. }),
+        "expected CasLost, got {err:?}"
+    );
 }
 
 #[compio::test]
@@ -526,7 +530,7 @@ async fn delete_sandbox_moves_row_to_tombstone() {
         .await
         .unwrap();
 
-    db.delete_sandbox(sandbox_uuid).await.expect("delete");
+    db.delete_sandbox(sandbox_uuid, None, None).await.expect("delete");
 
     let mut cfg = PoolConfig::default();
     cfg.max_size = 2;
@@ -568,7 +572,7 @@ async fn list_running_sandboxes_filters_by_status_and_host() {
         ids.push(sid);
     }
     // Stop one.
-    db.update_sandbox_status(ids[1], SandboxStatus::Stopped, 0)
+    db.update_sandbox_status(ids[1], SandboxStatus::Stopped, 0, None)
         .await
         .unwrap();
     let listed = db
@@ -938,14 +942,17 @@ async fn cas_lost_leadership_increments_metric_on_stale_generation() {
 
     // Now controller A wakes up (post-takeover) and tries to mark
     // the row 'stopped' with its stale generation=0. CAS misses;
-    // the API surfaces "CAS missed".
+    // round-1 fixer / IMPORTANT #7 surfaces this as the typed
+    // `CasLost` variant.
     let pre_lost = zeroship_sandbox::metrics::lost_leadership_value();
     let err = db
-        .update_sandbox_status(sid, SandboxStatus::Stopped, 0)
+        .update_sandbox_status(sid, SandboxStatus::Stopped, 0, None)
         .await
         .expect_err("stale CAS must miss after peer takeover");
-    let msg = format!("{err:?}");
-    assert!(msg.contains("CAS missed"), "expected CAS missed, got: {msg}");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::CasLost { .. }),
+        "expected CasLost, got {err:?}"
+    );
     // Bump the metric the way the live stop path does so we exercise
     // the integration counter (the inc happens in the handler, not
     // in update_sandbox_status itself).
@@ -1034,7 +1041,7 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
     // different fingerprint. The restore code path then marks the
     // row 'recreating' under the takeover-bumped generation. We
     // validate the CAS path here (the actual probe is in restore.rs).
-    db.update_sandbox_status(sid, SandboxStatus::Recreating, new_gen)
+    db.update_sandbox_status(sid, SandboxStatus::Recreating, new_gen, None)
         .await
         .expect("recreating CAS must hit");
 
@@ -1062,6 +1069,103 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
     assert_eq!(owner, my_host_typed);
     assert_eq!(status, "recreating");
     assert_eq!(gen, new_gen + 1, "recreating UPDATE bumps generation");
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / CRITICAL #3 — A controller that LOST the lease on
+// `stop` MUST NOT delete the row out from under the new owner. The
+// host_id fence is the SQL-level safety net.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for CRITICAL #3"]
+async fn delete_sandbox_with_host_fence_refuses_after_takeover() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Controller A creates the sandbox and owns the row.
+    let (a_uuid, a_typed) = inject_extra_host(&url, "host-a-fence").await;
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, a_uuid, &"0".repeat(32), Some("http://x"), None)
+        .await
+        .unwrap();
+
+    // Takeover bumps ownership to my_host.
+    age_heartbeat(&url, &a_typed, 120).await;
+    let taken = db
+        .takeover_sandboxes_from_host(&a_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert_eq!(taken.len(), 1);
+
+    // Controller A — still believing it owns the row — calls
+    // delete_sandbox with its own host_id as the fence. The fence
+    // misses (the row's host_id = my_host now); the DELETE returns
+    // 0 rows; we get NotFound. The row stays put for the new owner.
+    let err = db
+        .delete_sandbox(sid, Some(a_uuid), Some(&info.user_id))
+        .await
+        .expect_err("fence-mismatched delete must NOT yank the row");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::NotFound { .. }),
+        "expected NotFound, got {err:?}"
+    );
+
+    // Sanity: row still in pg, owned by my_host.
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT host_id FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .expect("row must still exist after fence-rejected delete");
+    let owner: String = row.get(0);
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+    assert_eq!(owner, my_host_typed, "ownership unchanged");
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / IMPORTANT #9 — tenant fence on update_sandbox_status.
+// A misrouted call asserting `expected_user_id=usr_bob` against a row
+// owned by `usr_alice` returns NotFound, not CasLost — the row is
+// invisible to the bob-scoped predicate.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for IMPORTANT #9"]
+async fn update_sandbox_status_tenant_fence_refuses_cross_user() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), None)
+        .await
+        .unwrap();
+
+    // Different tenant's typed-id.
+    let other_user = typed_id("usr");
+    let err = db
+        .update_sandbox_status(sid, SandboxStatus::Stopped, 0, Some(&other_user))
+        .await
+        .expect_err("cross-tenant update must miss");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::NotFound { .. }),
+        "expected NotFound (fence misses), got {err:?}"
+    );
+
+    // Same call with the correct user_id succeeds.
+    let new_gen = db
+        .update_sandbox_status(sid, SandboxStatus::Stopped, 0, Some(&info.user_id))
+        .await
+        .expect("matching tenant fence passes");
+    assert_eq!(new_gen, 1);
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1206,12 +1310,12 @@ async fn every_sandbox_status_value_passes_pg_check() {
             .unwrap();
         // First UPDATE (generation 0 → 1).
         let _ = db
-            .update_sandbox_status(sid, status, 0)
+            .update_sandbox_status(sid, status, 0, None)
             .await
             .unwrap_or_else(|e| panic!("status {} rejected by pg: {e:?}", status.as_str()));
         // Reset for next iteration: clear the row so the partial
         // unique index doesn't fire on the next insert.
-        let _ = db.delete_sandbox(sid).await;
+        let _ = db.delete_sandbox(sid, None, None).await;
     }
 }
 

@@ -148,6 +148,23 @@ pub enum DatabaseError {
     /// env vars, host_id parse, etc). Refuses to start.
     #[error("validation: {0}")]
     Validation(String),
+    /// Round-1 fixer / IMPORTANT #7: a CAS-guarded UPDATE matched
+    /// zero rows because the row's `generation` had advanced past
+    /// the caller's `expected_generation`. Distinct from `NotFound`
+    /// — the row exists, just at a generation we no longer own.
+    /// Carries the typed-id and the stale expected counter so the
+    /// caller's audit log surfaces a precise lost-leadership event.
+    #[error("CAS lost for sandbox {sandbox_id}: expected generation {expected_generation}")]
+    CasLost {
+        sandbox_id: String,
+        expected_generation: i64,
+    },
+    /// Round-1 fixer / IMPORTANT #7: the targeted row does not exist
+    /// (or has been tombstoned, or the tenant fence excluded it).
+    /// Carries the typed-id so the caller can include it in the
+    /// audit log without re-deriving the string.
+    #[error("not found: {sandbox_id}")]
+    NotFound { sandbox_id: String },
 }
 
 /// Result alias for the module.
@@ -1283,15 +1300,26 @@ impl Database {
     }
 
     /// CAS-guarded status update. Returns the new generation on
-    /// success; returns `Err(NotFound)` when the row is absent or the
-    /// CAS lost (caller's `expected_generation` was stale — in Phase 1
-    /// that's a reconciliation hint; in Phase 2 it's the lease-takeover
-    /// split-brain telemetry).
+    /// success.
+    ///
+    /// Round-1 fixer / IMPORTANT #7: the failure modes are typed —
+    /// `Err(CasLost)` when the row exists at a higher generation
+    /// (a peer took over via § 11.2), `Err(NotFound)` when the row
+    /// is absent (deleted, never existed, or filtered out by the
+    /// tenant fence). Pre-fix, both cases collapsed to
+    /// `Validation("CAS missed …")` and the handler matched on
+    /// substring. Today the handler matches on the variant.
+    ///
+    /// Round-1 fixer / IMPORTANT #9: `expected_user_id` is the
+    /// optional tenant fence. When `Some`, the WHERE clause appends
+    /// `AND user_id = $expected_user_id` so a misrouted call can't
+    /// modify rows owned by a different user.
     pub async fn update_sandbox_status(
         &self,
         sandbox_id: Uuid,
         status: SandboxStatus,
         expected_generation: i64,
+        expected_user_id: Option<&str>,
     ) -> Result<i64> {
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
@@ -1305,6 +1333,7 @@ impl Database {
             }
             _ => "",
         };
+        let expected_user_owned = expected_user_id.map(|s| s.to_string());
         let sql = format!(
             "UPDATE sandbox.sandboxes \
                 SET status = $1::TEXT, \
@@ -1313,18 +1342,47 @@ impl Database {
                     {stopped_at_clause} \
               WHERE sandbox_id = $2::TEXT \
                 AND generation = $3::BIGINT \
+                AND ($4::TEXT IS NULL OR user_id = $4::TEXT) \
                 AND deleted_at IS NULL \
               RETURNING generation"
         );
         let opt = client
-            .query_opt(&sql, &[&status.as_str().to_string(), &sandbox_id_typed, &expected_generation])
+            .query_opt(
+                &sql,
+                &[
+                    &status.as_str().to_string(),
+                    &sandbox_id_typed,
+                    &expected_generation,
+                    &expected_user_owned,
+                ],
+            )
             .await
             .map_err(DatabaseError::Pg)?;
-        match opt {
-            Some(row) => Ok(row.get::<_, i64>(0)),
-            None => Err(DatabaseError::Validation(format!(
-                "CAS missed for sandbox {sandbox_id_typed}: expected_generation={expected_generation}",
-            ))),
+        if let Some(row) = opt {
+            return Ok(row.get::<_, i64>(0));
+        }
+        // The CAS missed. Distinguish "row exists, different
+        // generation" (CasLost) from "row absent / wrong tenant"
+        // (NotFound) so the caller can audit-log precisely.
+        let lookup = client
+            .query_opt(
+                "SELECT generation FROM sandbox.sandboxes \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND ($2::TEXT IS NULL OR user_id = $2::TEXT) \
+                    AND deleted_at IS NULL",
+                &[&sandbox_id_typed, &expected_user_owned],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if lookup.is_some() {
+            Err(DatabaseError::CasLost {
+                sandbox_id: sandbox_id_typed,
+                expected_generation,
+            })
+        } else {
+            Err(DatabaseError::NotFound {
+                sandbox_id: sandbox_id_typed,
+            })
         }
     }
 
@@ -1387,31 +1445,83 @@ impl Database {
     /// tombstone keeps the operator's audit trail (and prevents the
     /// boot reconciler from re-INSERTing from a sealed-record orphan
     /// — though round-8 unlinks orphans rather than re-INSERTing).
-    pub async fn delete_sandbox(&self, sandbox_id: Uuid) -> Result<()> {
+    ///
+    /// `expected_host_id` is round-1 fixer / CRITICAL #3 ownership
+    /// fence: when `Some`, the DELETE is gated on `host_id =
+    /// $expected` so a controller that LOST the lease can't yank the
+    /// row out from under the legitimate new owner. The handler
+    /// passes its own host_id; admin-tooling (Phase 3) passes
+    /// `None` for cross-owner cleanup.
+    ///
+    /// `expected_user_id` is round-1 fixer / IMPORTANT #9 tenant
+    /// fence: when `Some`, both the tombstone and the DELETE are
+    /// gated on `user_id = $expected`. Defense in depth — the
+    /// in-memory registry already filters by owner, but a SQL-level
+    /// guard means a misrouted call can't leak a row across tenants.
+    ///
+    /// Returns `Err(DatabaseError::NotFound)` when the DELETE
+    /// matched 0 rows (either the row is gone or the fence rejected
+    /// our predicate). Caller distinguishes the legitimate-not-found
+    /// case from the contended case by checking `expected_*` and
+    /// re-reading the row.
+    pub async fn delete_sandbox(
+        &self,
+        sandbox_id: Uuid,
+        expected_host_id: Option<Uuid>,
+        expected_user_id: Option<&str>,
+    ) -> Result<()> {
         let pool = self.open_pool().await?;
         let mut client = pool.get().await.map_err(DatabaseError::Pg)?;
         let sandbox_id_typed = format!(
             "sbx_{}",
             zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
         );
+        let expected_host_typed = expected_host_id.map(|h| {
+            format!(
+                "hst_{}",
+                zeroship_core::typed_id::uuid_to_base62(&h)
+            )
+        });
+        let expected_user_owned = expected_user_id.map(|s| s.to_string());
         let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
         // Tombstone INSERT first (with the user_id from the row).
+        // The SELECT honours the same fences as the DELETE so we
+        // never tombstone a row we don't have authority over.
         tx.execute(
             "INSERT INTO sandbox.deleted_sandboxes (sandbox_id, user_id) \
              SELECT sandbox_id, user_id FROM sandbox.sandboxes \
               WHERE sandbox_id = $1::TEXT \
+                AND ($2::TEXT IS NULL OR host_id = $2::TEXT) \
+                AND ($3::TEXT IS NULL OR user_id = $3::TEXT) \
              ON CONFLICT (sandbox_id) DO NOTHING",
-            &[&sandbox_id_typed],
+            &[
+                &sandbox_id_typed,
+                &expected_host_typed,
+                &expected_user_owned,
+            ],
         )
         .await
         .map_err(DatabaseError::Pg)?;
-        tx.execute(
-            "DELETE FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
-            &[&sandbox_id_typed],
-        )
-        .await
-        .map_err(DatabaseError::Pg)?;
+        let n = tx
+            .execute(
+                "DELETE FROM sandbox.sandboxes \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND ($2::TEXT IS NULL OR host_id = $2::TEXT) \
+                    AND ($3::TEXT IS NULL OR user_id = $3::TEXT)",
+                &[
+                    &sandbox_id_typed,
+                    &expected_host_typed,
+                    &expected_user_owned,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
         tx.commit().await.map_err(DatabaseError::Pg)?;
+        if n == 0 {
+            return Err(DatabaseError::NotFound {
+                sandbox_id: sandbox_id_typed,
+            });
+        }
         Ok(())
     }
 

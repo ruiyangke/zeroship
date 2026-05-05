@@ -179,7 +179,7 @@ async fn process_pg_row(
                 "sandbox/restore: pg sandbox_id failed typed-id parse; marking lost"
             );
             let _ = database
-                .update_sandbox_status(sandbox_id_from_str_lossy(&row.sandbox_id), SandboxStatus::Lost, row.generation)
+                .update_sandbox_status(sandbox_id_from_str_lossy(&row.sandbox_id), SandboxStatus::Lost, row.generation, None)
                 .await;
             return RestoreOutcome::Corrupt;
         }
@@ -197,7 +197,7 @@ async fn process_pg_row(
                 "sandbox/restore: pg row has no sealed record on this host; marking lost"
             );
             let _ = database
-                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation)
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
                 .await;
             return RestoreOutcome::SealMissing;
         }
@@ -209,7 +209,7 @@ async fn process_pg_row(
                 "sandbox/restore: sealed record corrupt; marking lost"
             );
             let _ = database
-                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation)
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
                 .await;
             return RestoreOutcome::Corrupt;
         }
@@ -228,7 +228,7 @@ async fn process_pg_row(
         );
         let _ = std::fs::remove_file(&sealed_path);
         let _ = database
-            .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation)
+            .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation, None)
             .await;
         return RestoreOutcome::Mismatched;
     }
@@ -245,7 +245,7 @@ async fn process_pg_row(
                 "sandbox/restore: pg row has no agent_url; marking lost"
             );
             let _ = database
-                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation)
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
                 .await;
             return RestoreOutcome::Corrupt;
         }
@@ -301,7 +301,7 @@ async fn process_pg_row(
                         "sandbox/restore: backend.restore_from_pg_and_sealed failed; marking lost"
                     );
                     let _ = database
-                        .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation)
+                        .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Lost, row.generation, None)
                         .await;
                     RestoreOutcome::Corrupt
                 }
@@ -317,7 +317,7 @@ async fn process_pg_row(
             );
             let _ = std::fs::remove_file(&sealed_path);
             let _ = database
-                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation)
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation, None)
                 .await;
             RestoreOutcome::Mismatched
         }
@@ -329,7 +329,7 @@ async fn process_pg_row(
             );
             let _ = std::fs::remove_file(&sealed_path);
             let _ = database
-                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation)
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Recreating, row.generation, None)
                 .await;
             RestoreOutcome::Mismatched
         }
@@ -341,7 +341,7 @@ async fn process_pg_row(
                 "sandbox/restore: agent unreachable; marking unreachable; pg row + sealed kept"
             );
             let _ = database
-                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Unreachable, row.generation)
+                .update_sandbox_status(sandbox_id_uuid, SandboxStatus::Unreachable, row.generation, None)
                 .await;
             RestoreOutcome::Unreachable
         }

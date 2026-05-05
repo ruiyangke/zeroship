@@ -533,12 +533,20 @@ pub async fn stop_sandbox(
         // into the tombstone, mark it 'stopped' under the
         // generation we still believe we own. CAS-loss means a
         // peer took over (lease expired from our view); we log
-        // `lost-leadership`, increment the metric, and STILL
-        // proceed with the tombstone — the new owner will see
-        // status='stopped' on its next probe and clean up.
+        // `lost-leadership` and SKIP the pg-side delete — round-1
+        // fixer / CRITICAL #3: the row now belongs to the new owner
+        // and yanking it would corrupt their state. Local in-memory
+        // + sealed-record cleanup still proceeds.
+        let owner_user_id = info_for_audit.as_ref().map(|i| i.user_id.clone());
+        let mut cas_lost = false;
         if let Some(gen) = expected_generation {
             match db
-                .update_sandbox_status(id, crate::db::SandboxStatus::Stopped, gen)
+                .update_sandbox_status(
+                    id,
+                    crate::db::SandboxStatus::Stopped,
+                    gen,
+                    owner_user_id.as_deref(),
+                )
                 .await
             {
                 Ok(new_gen) => {
@@ -549,35 +557,67 @@ pub async fn stop_sandbox(
                         "sandbox/handlers: pg update_sandbox_status(stopped) ok"
                     );
                 }
+                Err(crate::db::DatabaseError::CasLost { sandbox_id: sid, expected_generation: eg }) => {
+                    // Lost-leadership: the row's generation is
+                    // ahead of ours, meaning a peer took over.
+                    tracing::warn!(
+                        sandbox_id = %sid,
+                        expected_generation = eg,
+                        "sandbox/handlers: lost-leadership on stop (CAS conflict); skipping pg-delete; local cleanup only"
+                    );
+                    crate::metrics::inc_lost_leadership("update_sandbox_status_stopped");
+                    cas_lost = true;
+                }
+                Err(crate::db::DatabaseError::NotFound { sandbox_id: sid }) => {
+                    tracing::info!(
+                        sandbox_id = %sid,
+                        "sandbox/handlers: stop saw row already gone; skipping pg-delete"
+                    );
+                    cas_lost = true;
+                }
                 Err(e) => {
-                    let err_msg = format!("{e:?}");
-                    if err_msg.contains("CAS missed") {
-                        // Lost-leadership: the row's generation is
-                        // ahead of ours, meaning a peer took over.
-                        tracing::warn!(
-                            sandbox_id = %id,
-                            expected_generation = gen,
-                            "sandbox/handlers: lost-leadership on stop (CAS conflict); proceeding with local cleanup"
-                        );
-                        crate::metrics::inc_lost_leadership("update_sandbox_status_stopped");
-                    } else {
-                        tracing::warn!(
-                            sandbox_id = %id,
-                            error = %e,
-                            "sandbox/handlers: pg update_sandbox_status(stopped) failed (non-fatal)"
-                        );
-                    }
+                    tracing::warn!(
+                        sandbox_id = %id,
+                        error = %e,
+                        "sandbox/handlers: pg update_sandbox_status(stopped) failed (non-fatal)"
+                    );
                 }
             }
         }
 
-        if let Err(e) = db.delete_sandbox(id).await {
-            tracing::warn!(
-                sandbox_id = %id,
-                error = %e,
-                "sandbox/handlers: pg delete_sandbox failed (non-fatal)"
-            );
+        // Round-1 fixer / CRITICAL #3: only issue the tombstone DELETE
+        // when we still own the row. CAS-loss means a peer is now
+        // authoritative; we MUST NOT yank their row.
+        if !cas_lost {
+            match db
+                .delete_sandbox(
+                    id,
+                    Some(db.host_id()),
+                    owner_user_id.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::db::DatabaseError::NotFound { sandbox_id: sid }) => {
+                    // Either the fence rejected (someone else owns it)
+                    // or the row is genuinely gone. Either way, no
+                    // further action needed.
+                    tracing::info!(
+                        sandbox_id = %sid,
+                        "sandbox/handlers: pg delete_sandbox saw 0 rows (fence or already gone)"
+                    );
+                    crate::metrics::inc_lost_leadership("delete_sandbox_fence");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox_id = %id,
+                        error = %e,
+                        "sandbox/handlers: pg delete_sandbox failed (non-fatal)"
+                    );
+                }
+            }
         }
+
         if let Some(info) = info_for_audit {
             let event = crate::db::Database::new_event(
                 &info.sandbox_id,
