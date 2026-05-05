@@ -165,7 +165,7 @@ impl FastcallType {
                 // prologue. Tradeoff documented in the macro design.
                 let #name = {
                     let __bytes_slice = unsafe { (&*#raw_name).as_bytes() };
-                    ::zeroship_runtime::byte_string::ByteString::from_bytes(__bytes_slice.to_vec())
+                    ::zeroship_runtime::macro_runtime::byte_string::ByteString::from_bytes(__bytes_slice.to_vec())
                 };
             },
             FastcallType::Void => {

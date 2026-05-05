@@ -154,6 +154,9 @@ pub mod core;
 pub use base::crypto as crypto_ops;  // back-compat shim — all existing
                                      // crate::crypto_ops::* paths keep working
 pub mod fetch_outcome;
+pub mod macro_runtime;  // stable re-export surface for runtime-macros emit
+                        // (Wave 5a, design §3.9). DO NOT bypass this from
+                        // the macro — see the module-level rustdoc.
 pub mod node;
 pub mod storage;
 pub mod transport;

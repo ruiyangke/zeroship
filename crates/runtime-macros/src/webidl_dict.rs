@@ -123,7 +123,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
             pub fn from_v8(
                 scope: &mut ::v8::PinScope,
                 value: ::v8::Local<::v8::Value>,
-            ) -> ::std::result::Result<Self, ::zeroship_runtime::state::OpError> {
+            ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
                 // Step 1: undefined / null → default-construct. Per
                 // WebIDL §3.10 step 1, this matches the "no value" path
                 // with all members at their declared defaults.
@@ -137,7 +137,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 let __obj: ::v8::Local<::v8::Object> = match value.try_into() {
                     Ok(o) => o,
                     Err(_) => return ::std::result::Result::Err(
-                        ::zeroship_runtime::state::OpError::type_error(
+                        ::zeroship_runtime::macro_runtime::state::OpError::type_error(
                             concat!(
                                 "Cannot convert value to dictionary `",
                                 stringify!(#name),
@@ -157,11 +157,11 @@ pub fn expand(input: TokenStream) -> TokenStream {
         // Blanket WebIdlConvertible impl so dicts compose inside
         // sequence<T>, record<K, V>, and other dicts. Just delegates
         // to the inherent `from_v8`.
-        impl #impl_generics ::zeroship_runtime::convert::WebIdlConvertible for #name #ty_generics #where_clause {
+        impl #impl_generics ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for #name #ty_generics #where_clause {
             fn from_v8(
                 scope: &mut ::v8::PinScope,
                 value: ::v8::Local<::v8::Value>,
-            ) -> ::std::result::Result<Self, ::zeroship_runtime::state::OpError> {
+            ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
                 <Self>::from_v8(scope, value)
             }
         }
@@ -236,9 +236,9 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
     );
     let convert_call = quote! {
         {
-            let __captured: ::std::result::Result<#ty, ::zeroship_runtime::state::OpError> = {
+            let __captured: ::std::result::Result<#ty, ::zeroship_runtime::macro_runtime::state::OpError> = {
                 ::v8::tc_scope!(let __tc, scope);
-                match <#ty as ::zeroship_runtime::convert::WebIdlConvertible>::from_v8(__tc, __v) {
+                match <#ty as ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible>::from_v8(__tc, __v) {
                     ::std::result::Result::Ok(__val) => ::std::result::Result::Ok(__val),
                     ::std::result::Result::Err(__inner_err) => {
                         // If the inner from_v8 left a pending V8
@@ -249,7 +249,7 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
                         if __tc.has_caught() {
                             let __exc = __tc.exception().expect("has_caught implies Some");
                             ::std::result::Result::Err(
-                                ::zeroship_runtime::state::OpError::js_value(
+                                ::zeroship_runtime::macro_runtime::state::OpError::js_value(
                                     __tc,
                                     __exc,
                                     #extraction_msg,
@@ -286,7 +286,7 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
                     ::std::option::Option::Some(__v) if !__v.is_undefined() => {
                         if __v.is_null() {
                             return ::std::result::Result::Err(
-                                ::zeroship_runtime::state::OpError::type_error(#null_msg),
+                                ::zeroship_runtime::macro_runtime::state::OpError::type_error(#null_msg),
                             );
                         }
                         #convert_call
