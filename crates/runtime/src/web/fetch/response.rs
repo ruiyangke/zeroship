@@ -28,12 +28,47 @@
 //!   a redirect response.
 //! - `Response.json(data, init?)` serializes via JSON.stringify and
 //!   sets Content-Type "application/json".
+//!
+//! ## Macro migration (MAC-01 Phase 3)
+//!
+//! Per design `docs/proposals/macro-v8-state.md` §7.3: the class is
+//! emitted via `#[v8_class] #[v8_state_marker(Response)] impl
+//! ResponseState`. The unit `Response` marker drives JS-class identity
+//! (install slot, brand check, callback names, `set_class_name`); the
+//! `ResponseState` struct carries the boxed state stored in V8 internal
+//! field 0. The constructor returns `Result<ResponseState, OpError>`
+//! and the eight getters / `clone` method dispatch through `&self`
+//! against the state.
+//!
+//! `install_global` remains hand-rolled because it must:
+//!   - install body consumer methods (`text` / `json` / `arrayBuffer`
+//!     / `bytes` / `blob` / `formData`) via the shared trait dispatch
+//!     (`install_body_methods::<Response>`) — those bypass the macro,
+//!   - install the three static methods (`error` / `redirect` / `json`)
+//!     via raw FunctionTemplates on the constructor function. The
+//!     macro's `#[v8_static_method]` exists (Phase 1 commit `950fe3c`)
+//!     but its codegen emits `<MarkerTy>::method(...)` for the call
+//!     expression, which under `#[v8_state_marker(Response)]` resolves
+//!     against the unit `Response` marker — where no method bodies
+//!     live. Per design §7.3.1 ("MAC-07 not yet supported"), the
+//!     statics ship as a post-install hook in this PR; lifting them
+//!     into the macro impl block is gated on a follow-up macro fix
+//!     (`gen_static_callback` should dispatch through `state_ty`,
+//!     mirroring `gen_method_callback`). Documented as a 3-line gap.
+//!   - stash the FunctionTemplate + prototype in a per-isolate
+//!     `ResponseTemplateSlot` for the kernel-side fast-path Response
+//!     builder (`build_kernel_response`).
 
 use std::cell::RefCell;
+
+use zeroship_runtime_macros::{
+    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker,
+};
 
 use crate::fetch_body::body::{Body, BodyImpl, BodySource};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
+use crate::state::OpError;
 
 // ---------------------------------------------------------------------------
 // Null-body status set per Fetch §5.5 step 7
@@ -81,9 +116,13 @@ impl Default for ResponseState {
 }
 
 // ---------------------------------------------------------------------------
-// Body trait impl
+// Body trait impl + JS-class identity marker
 // ---------------------------------------------------------------------------
 
+/// Unit marker recognised by `#[v8_state_marker(Response)]` and the
+/// `Body` / `BodyMarker` trait impls. The boxed state at V8 internal
+/// field 0 is `Box<ResponseState>`; the marker drives JS-class identity
+/// (install slot, brand check, callback names). See design §7.3.
 pub struct Response;
 
 impl BodyMarker for Response {
@@ -123,7 +162,15 @@ impl Body for Response {
     }
 }
 
-fn state_ptr(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> Option<*mut ResponseState> {
+/// Recover the boxed `ResponseState` raw pointer from V8 internal
+/// field 0. Returns `None` when the receiver isn't a native Response
+/// (the `is_native_response` / `try_native_response_*` consumers below
+/// rely on this lax check — the design §7.3.2 settles that the
+/// state-pointer accessor stays hand-rolled, NOT macro-emitted).
+pub(crate) fn state_ptr(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> Option<*mut ResponseState> {
     let ext = obj
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
@@ -220,7 +267,12 @@ pub fn try_native_response_websocket(
 }
 
 // ---------------------------------------------------------------------------
-// install_global — hand-rolled (no macro), same pattern as Request.
+// install_global — hand-rolled wrapper around the macro-emitted
+// `Response::install`. Adds:
+//   - the body consumer methods (text / json / arrayBuffer / bytes /
+//     blob / formData) via `install_body_methods::<Response>`,
+//   - the per-isolate `ResponseTemplateSlot` cache used by the kernel
+//     fast-path Response builder.
 // ---------------------------------------------------------------------------
 
 /// Per-isolate cache of the Response FunctionTemplate + prototype.
@@ -235,12 +287,10 @@ pub struct ResponseTemplateSlot {
 }
 
 pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
-    let class_tmpl = v8::FunctionTemplate::new(scope, response_constructor_callback);
-    let class_name = v8::String::new(scope, "Response").unwrap();
-    class_tmpl.set_class_name(class_name);
-    class_tmpl
-        .instance_template(scope)
-        .set_internal_field_count(1);
+    // Macro-emitted install: builds the FunctionTemplate, populates
+    // prototype with `clone` + the eight getters, sets Symbol.toStringTag
+    // = "Response", caches the template in `__InstallSlot_Response`.
+    let class_tmpl = Response::install(scope);
 
     let class_fn = class_tmpl.get_function(scope).unwrap();
 
@@ -248,19 +298,15 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     let our_proto_v = class_fn.get(scope, proto_key.into()).unwrap();
     let our_proto: v8::Local<v8::Object> = our_proto_v.try_into().unwrap();
 
-    install_response_getters(scope, our_proto);
-    install_method(scope, our_proto, "clone", response_clone_callback);
+    // Body consumer methods are NOT routed through the macro because
+    // they share a generic `T: Body + BodyMarker` dispatch that lives in
+    // `fetch_body::consumers`. Same shape as Request.
     install_body_methods::<Response>(scope, our_proto);
 
-    // Symbol.toStringTag — read-only, non-enumerable, configurable.
-    let tag_sym = v8::Symbol::get_to_string_tag(scope);
-    let tag_value = v8::String::new(scope, "Response").unwrap();
-    let mut tag_desc = v8::PropertyDescriptor::new_from_value(tag_value.into());
-    tag_desc.set_configurable(true);
-    tag_desc.set_enumerable(false);
-    our_proto.define_property(scope, tag_sym.into(), &tag_desc);
-
-    // Static methods on the constructor function.
+    // Static methods on the constructor function. Bailed from
+    // `#[v8_static_method]` per the doc-comment on the impl block —
+    // ship as a post-install hook until the macro learns to dispatch
+    // statics through `state_ty` under `#[v8_state_marker]`.
     install_static(scope, class_fn, "error", static_error_callback);
     install_static(scope, class_fn, "redirect", static_redirect_callback);
     install_static(scope, class_fn, "json", static_json_callback);
@@ -276,6 +322,18 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         class_tmpl: class_tmpl_g,
         prototype: proto_g,
     });
+}
+
+fn install_static(
+    scope: &mut v8::PinScope,
+    ctor: v8::Local<v8::Function>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let tmpl = v8::FunctionTemplate::new(scope, cb);
+    let func = tmpl.get_function(scope).unwrap();
+    ctor.set(scope, key.into(), func.into());
 }
 
 /// Build a Response wrapper directly from a (status, headers, body) tuple
@@ -366,205 +424,290 @@ pub fn build_kernel_response<'s>(
     Some(this_obj)
 }
 
-fn install_method(
-    scope: &mut v8::PinScope,
-    proto: v8::Local<v8::Object>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    let func = tmpl.get_function(scope).unwrap();
-    proto.set(scope, key.into(), func.into());
-}
+// ---------------------------------------------------------------------------
+// Macro-emitted class
+// ---------------------------------------------------------------------------
 
-fn install_static(
-    scope: &mut v8::PinScope,
-    ctor: v8::Local<v8::Function>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    let func = tmpl.get_function(scope).unwrap();
-    ctor.set(scope, key.into(), func.into());
-}
+#[v8_class]
+#[v8_state_marker(Response)]
+impl ResponseState {
+    /// `new Response(body?, init?)` — Fetch §5.5 17-step constructor.
+    ///
+    /// Status: spec range 200..=599 PLUS workerd-style 101 carve-out for
+    /// the WebSocket upgrade path (preserved verbatim per design §7.3.3).
+    /// statusText: validated as HTTP/1.1 reason-phrase (RFC 7230 §3.2.6
+    /// — HTAB / SP / VCHAR / obs-text).
+    /// `webSocket` extension preserved on `state.web_socket` so the
+    /// gateway can surface `Response.webSocket` for the upgrade dance
+    /// (D-13).
+    #[v8_constructor]
+    fn new<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        body: v8::Local<v8::Value>,
+        init: v8::Local<v8::Value>,
+    ) -> Result<ResponseState, OpError> {
+        let state = ResponseState::default();
 
-fn install_getter(
-    scope: &mut v8::PinScope,
-    proto: v8::Local<v8::Object>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    let getter_fn = tmpl.get_function(scope).unwrap();
-    let mut desc = v8::PropertyDescriptor::new_from_get_set(
-        getter_fn.into(),
-        v8::undefined(scope).into(),
-    );
-    desc.set_configurable(true);
-    desc.set_enumerable(true);
-    proto.define_property(scope, key.into(), &desc);
-}
+        let init_obj: Option<v8::Local<v8::Object>> = if init.is_undefined() {
+            None
+        } else {
+            v8::Local::<v8::Object>::try_from(init).ok()
+        };
 
-fn install_response_getters(scope: &mut v8::PinScope, proto: v8::Local<v8::Object>) {
-    install_getter(scope, proto, "type", type_getter);
-    install_getter(scope, proto, "url", url_getter);
-    install_getter(scope, proto, "redirected", redirected_getter);
-    install_getter(scope, proto, "status", status_getter);
-    install_getter(scope, proto, "ok", ok_getter);
-    install_getter(scope, proto, "statusText", status_text_getter);
-    install_getter(scope, proto, "headers", headers_getter);
-    install_getter(scope, proto, "webSocket", web_socket_getter);
+        // Step 1: status (default 200). Spec allows 200..=599; we additionally
+        // allow 101 as a workerd-style extension for the WebSocket upgrade
+        // path — the gateway returns `new Response(null, { status: 101,
+        // webSocket: client })` from the user's `fetch` handler. The polyfill
+        // had the same carve-out (`embed/fetch.js:246-249`).
+        if let Some(init) = init_obj {
+            let key = v8::String::new(scope, "status").unwrap();
+            if let Some(s_v) = init.get(scope, key.into()) {
+                if !s_v.is_undefined() {
+                    let n = s_v.number_value(scope).unwrap_or(0.0);
+                    let in_range = n == 101.0 || (n >= 200.0 && n <= 599.0);
+                    if n.is_nan() || !in_range {
+                        return Err(OpError::range_error("Invalid status code"));
+                    }
+                    *state.status.borrow_mut() = n as u16;
+                }
+            }
+        }
+
+        // Step 2: statusText. Validate per HTTP/1.1 reason-phrase ABNF
+        // (HTAB / SP / VCHAR / obs-text). Reject CR/LF/non-ASCII control.
+        if let Some(init) = init_obj {
+            let key = v8::String::new(scope, "statusText").unwrap();
+            if let Some(s_v) = init.get(scope, key.into()) {
+                if !s_v.is_undefined() {
+                    let s = s_v.to_rust_string_lossy(scope);
+                    if !is_valid_reason_phrase(&s) {
+                        return Err(OpError::type_error("Invalid statusText"));
+                    }
+                    *state.status_text.borrow_mut() = s;
+                }
+            }
+        }
+
+        // Build headers: from init.headers if present, else empty.
+        let headers_obj = build_response_headers(scope, init_obj)
+            .map_err(OpError::type_error)?;
+
+        // webSocket extension — preserve as-is for the gateway path.
+        if let Some(init) = init_obj {
+            let key = v8::String::new(scope, "webSocket").unwrap();
+            if let Some(ws_v) = init.get(scope, key.into()) {
+                if !ws_v.is_null_or_undefined() {
+                    if let Ok(o) = v8::Local::<v8::Object>::try_from(ws_v) {
+                        *state.web_socket.borrow_mut() = Some(v8::Global::new(scope, o));
+                    }
+                }
+            }
+        }
+
+        // Step 7: null-body status check.
+        let status_now = *state.status.borrow();
+        let body_is_null = body.is_null_or_undefined();
+        if !body_is_null && is_null_body_status(status_now) {
+            return Err(OpError::type_error(
+                "Response with null body status cannot have a body",
+            ));
+        }
+
+        // Body extraction. JsValue passthrough (custom user-thrown values
+        // from `extract_body`) is preserved automatically by the
+        // macro-emitted constructor wrapper — `OpErrorKind::JsValue`
+        // re-throws verbatim. Same for TypeError/RangeError/Error mapping.
+        if !body_is_null {
+            let extracted = extract_body(scope, body, false)?;
+            *state.body.borrow_mut() = extracted.body;
+            if let Some(ct) = extracted.content_type {
+                set_default_content_type(scope, headers_obj, &ct);
+            }
+        }
+
+        *state.headers.borrow_mut() = Some(v8::Global::new(scope, headers_obj));
+        Ok(state)
+    }
+
+    /// `type` — WebIDL `[SameObject]` not applicable (string).
+    #[v8_getter]
+    #[v8_name = "type"]
+    fn type_(&self) -> String {
+        self.response_type.borrow().clone()
+    }
+
+    #[v8_getter]
+    fn url(&self) -> String {
+        self.url.borrow().clone()
+    }
+
+    #[v8_getter]
+    fn redirected(&self) -> bool {
+        *self.redirected.borrow()
+    }
+
+    #[v8_getter]
+    fn status(&self) -> u32 {
+        *self.status.borrow() as u32
+    }
+
+    #[v8_getter]
+    fn ok(&self) -> bool {
+        let s = *self.status.borrow();
+        (200..300).contains(&s)
+    }
+
+    #[v8_getter]
+    #[v8_name = "statusText"]
+    fn status_text(&self) -> String {
+        self.status_text.borrow().clone()
+    }
+
+    /// `headers` — Fetch §5.5 `[SameObject]`. The hand-roll preserved
+    /// identity by storing the Headers wrapper as a single `Global` and
+    /// re-Localising it on every read (Globals lock to the same JS
+    /// object across reborrows). The macro path does the same — the
+    /// stored Global is set once at construction.
+    #[v8_getter]
+    fn headers<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        match self.headers.borrow().as_ref() {
+            Some(g) => v8::Local::new(scope, g.clone()).into(),
+            None => v8::null(scope).into(),
+        }
+    }
+
+    /// `webSocket` — workerd extension; null when absent.
+    #[v8_getter]
+    #[v8_name = "webSocket"]
+    fn web_socket<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+        match self.web_socket.borrow().as_ref() {
+            Some(g) => v8::Local::new(scope, g.clone()).into(),
+            None => v8::null(scope).into(),
+        }
+    }
+
+    /// `clone()` — Fetch §5.5. Build a fresh Response with copies of
+    /// status / statusText / headers / type / url / redirected, and
+    /// either tee the stream-bodied body or rebuild from the
+    /// rewindable source. We can't go through `new Response(this)`
+    /// since that constructor doesn't accept Response as input — so we
+    /// build via `globalThis.Response(body, init)` and patch the
+    /// type/url/redirected fields directly.
+    #[v8_method]
+    fn clone<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        if let Some(stream_g) = self.body.borrow().stream.borrow().clone() {
+            let stream = v8::Local::new(scope, stream_g);
+            let key = v8::String::new(scope, "locked").unwrap();
+            if let Some(v) = stream.get(scope, key.into()) {
+                if v.boolean_value(scope) {
+                    return Err(OpError::type_error("Cannot clone a disturbed Response"));
+                }
+            }
+        }
+
+        // For Response, we can't go through `new Response(this)` since
+        // the Response constructor doesn't accept Response as input.
+        // Build the clone field-by-field via `globalThis.Response`.
+        let global = scope.get_current_context().global(scope);
+        let class_key = v8::String::new(scope, "Response").unwrap();
+        let class_v = global.get(scope, class_key.into()).unwrap();
+        let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
+
+        // Body: tee if stream-bodied, re-build from source otherwise.
+        let body_is_stream = matches!(
+            self.body.borrow().source,
+            Some(crate::fetch_body::body::BodySource::Stream)
+        ) && self.body.borrow().stream.borrow().is_some();
+
+        let body_arg: v8::Local<v8::Value> = if body_is_stream {
+            let stream_g = self.body.borrow().stream.borrow().clone().unwrap();
+            let stream = v8::Local::new(scope, stream_g);
+            match tee_stream(scope, stream) {
+                Some((left, right)) => {
+                    *self.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, left));
+                    right.into()
+                }
+                None => {
+                    return Err(OpError::type_error("Failed to tee Response body"));
+                }
+            }
+        } else if let Some(src) = self.body.borrow().source.clone() {
+            match src {
+                crate::fetch_body::body::BodySource::Bytes(rc)
+                | crate::fetch_body::body::BodySource::Blob(rc, _)
+                | crate::fetch_body::body::BodySource::UrlSearchParams(rc)
+                | crate::fetch_body::body::BodySource::FormData(rc, _) => {
+                    let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
+                    let stream_local = v8::Local::new(scope, new_stream);
+                    stream_local.into()
+                }
+                crate::fetch_body::body::BodySource::Stream => v8::null(scope).into(),
+            }
+        } else {
+            v8::null(scope).into()
+        };
+
+        // Build init: { status, statusText, headers }.
+        let init = v8::Object::new(scope);
+        {
+            let key = v8::String::new(scope, "status").unwrap();
+            let v = v8::Integer::new_from_unsigned(scope, *self.status.borrow() as u32);
+            init.set(scope, key.into(), v.into());
+        }
+        {
+            let key = v8::String::new(scope, "statusText").unwrap();
+            let v = v8::String::new(scope, &self.status_text.borrow()).unwrap();
+            init.set(scope, key.into(), v.into());
+        }
+        if let Some(h_g) = self.headers.borrow().clone() {
+            let key = v8::String::new(scope, "headers").unwrap();
+            let v = v8::Local::new(scope, h_g);
+            init.set(scope, key.into(), v.into());
+        }
+
+        let args2 = [body_arg, init.into()];
+        let clone_obj = class_fn
+            .new_instance(scope, &args2)
+            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+
+        // Copy over `type`, `url`, `redirected`.
+        if let Some(clone_raw) = state_ptr(scope, clone_obj) {
+            let clone_state: &mut ResponseState = unsafe { &mut *clone_raw };
+            *clone_state.response_type.borrow_mut() = self.response_type.borrow().clone();
+            *clone_state.url.borrow_mut() = self.url.borrow().clone();
+            *clone_state.redirected.borrow_mut() = *self.redirected.borrow();
+        }
+
+        Ok(clone_obj)
+    }
+
+    // ---------------------------------------------------------------
+    // Static methods (WebIDL §3.7.4) — `Response.error()`,
+    // `Response.redirect(url, status?)`, `Response.json(data, init?)`.
+    //
+    // Bailed from `#[v8_static_method]` migration: the macro's static
+    // method codegen (`gen_static_callback`) emits the call expression
+    // `<#class_ty>::#method_name(...)`, where under
+    // `#[v8_state_marker(Response)]` `class_ty == Response` (the
+    // marker), but the actual fn body lives on `ResponseState` (the
+    // impl receiver). The mismatch is a 3-line macro fix (mirror
+    // `gen_method_callback`'s use of `state_ty`), but per design
+    // §7.3.1 we ship the post-install hook for this PR and migrate to
+    // `#[v8_static_method]` once that fix lands (tracked under
+    // MAC-07).
+    //
+    // The static callbacks live as free fns at module scope below,
+    // installed by `install_global` after the macro-emitted
+    // `Response::install` returns.
+    // ---------------------------------------------------------------
 }
 
 // ---------------------------------------------------------------------------
-// Constructor: new Response(body?, init?)
+// Hand-rolled helpers used by the constructor + static methods
 // ---------------------------------------------------------------------------
-
-fn response_constructor_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let this_obj = args.this();
-
-    let body_v = args.get(0);
-    let init_v = args.get(1);
-
-    let mut state = ResponseState::default();
-
-    let init_obj: Option<v8::Local<v8::Object>> = if init_v.is_undefined() {
-        None
-    } else {
-        v8::Local::<v8::Object>::try_from(init_v).ok()
-    };
-
-    // Step 1: status (default 200). Spec allows 200..=599; we additionally
-    // allow 101 as a workerd-style extension for the WebSocket upgrade
-    // path — the gateway returns `new Response(null, { status: 101,
-    // webSocket: client })` from the user's `fetch` handler. The polyfill
-    // had the same carve-out (`embed/fetch.js:246-249`).
-    if let Some(init) = init_obj {
-        let key = v8::String::new(scope, "status").unwrap();
-        if let Some(s_v) = init.get(scope, key.into()) {
-            if !s_v.is_undefined() {
-                let n = s_v.number_value(scope).unwrap_or(0.0);
-                let in_range = n == 101.0 || (n >= 200.0 && n <= 599.0);
-                if n.is_nan() || !in_range {
-                    let m = v8::String::new(scope, "Invalid status code").unwrap();
-                    let exc = v8::Exception::range_error(scope, m);
-                    scope.throw_exception(exc);
-                    return;
-                }
-                *state.status.borrow_mut() = n as u16;
-            }
-        }
-    }
-
-    // Step 2: statusText. Validate per HTTP/1.1 reason-phrase ABNF
-    // (HTAB / SP / VCHAR / obs-text). Reject CR/LF/non-ASCII control.
-    if let Some(init) = init_obj {
-        let key = v8::String::new(scope, "statusText").unwrap();
-        if let Some(s_v) = init.get(scope, key.into()) {
-            if !s_v.is_undefined() {
-                let s = s_v.to_rust_string_lossy(scope);
-                if !is_valid_reason_phrase(&s) {
-                    let m = v8::String::new(scope, "Invalid statusText").unwrap();
-                    let exc = v8::Exception::type_error(scope, m);
-                    scope.throw_exception(exc);
-                    return;
-                }
-                *state.status_text.borrow_mut() = s;
-            }
-        }
-    }
-
-    // Build headers: from init.headers if present, else empty.
-    let headers_obj = build_response_headers(scope, init_obj);
-    let headers_obj = match headers_obj {
-        Ok(h) => h,
-        Err(msg) => {
-            let m = v8::String::new(scope, &msg).unwrap();
-            let exc = v8::Exception::type_error(scope, m);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-
-    // webSocket extension — preserve as-is for the gateway path.
-    if let Some(init) = init_obj {
-        let key = v8::String::new(scope, "webSocket").unwrap();
-        if let Some(ws_v) = init.get(scope, key.into()) {
-            if !ws_v.is_null_or_undefined() {
-                if let Ok(o) = v8::Local::<v8::Object>::try_from(ws_v) {
-                    *state.web_socket.borrow_mut() = Some(v8::Global::new(scope, o));
-                }
-            }
-        }
-    }
-
-    // Step 7: null-body status check.
-    let status_now = *state.status.borrow();
-    let body_is_null = body_v.is_null_or_undefined();
-    if !body_is_null && is_null_body_status(status_now) {
-        let m = v8::String::new(
-            scope,
-            "Response with null body status cannot have a body",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, m);
-        scope.throw_exception(exc);
-        return;
-    }
-
-    // Body extraction.
-    if !body_is_null {
-        match extract_body(scope, body_v, false) {
-            Ok(extracted) => {
-                *state.body.borrow_mut() = extracted.body;
-                if let Some(ct) = extracted.content_type {
-                    set_default_content_type(scope, headers_obj, &ct);
-                }
-            }
-            Err(e) => {
-                // JsValue passthrough preserves user-thrown values.
-                if let crate::state::OpErrorKind::JsValue(global) = &e.kind {
-                    let local = v8::Local::new(scope, global);
-                    scope.throw_exception(local);
-                    return;
-                }
-                let m = v8::String::new(scope, &e.message).unwrap();
-                let exc = match &e.kind {
-                    crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, m),
-                    crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, m),
-                    _ => v8::Exception::error(scope, m),
-                };
-                scope.throw_exception(exc);
-                return;
-            }
-        }
-    }
-
-    *state.headers.borrow_mut() = Some(v8::Global::new(scope, headers_obj));
-
-    // Box up + install.
-    let boxed = Box::new(state);
-    let raw = Box::into_raw(boxed);
-    let raw_addr = raw as usize;
-    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
-    this_obj.set_internal_field(0, ext.into());
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        this_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut ResponseState));
-        }),
-    );
-    std::mem::forget(weak);
-}
 
 fn is_valid_reason_phrase(s: &str) -> bool {
     // RFC 7230: reason-phrase = *( HTAB / SP / VCHAR / obs-text ).
@@ -642,224 +785,6 @@ fn set_default_content_type(scope: &mut v8::PinScope, headers: v8::Local<v8::Obj
     let _ = set_fn.call(scope, headers.into(), &[n.into(), v.into()]);
 }
 
-// ---------------------------------------------------------------------------
-// Getter callbacks
-// ---------------------------------------------------------------------------
-
-fn brand_check(scope: &mut v8::PinScope, this: v8::Local<v8::Object>) -> Option<*mut ResponseState> {
-    state_ptr(scope, this).or_else(|| {
-        let m = v8::String::new(scope, "Illegal invocation").unwrap();
-        let exc = v8::Exception::type_error(scope, m);
-        scope.throw_exception(exc);
-        None
-    })
-}
-
-fn type_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    let s = state.response_type.borrow().clone();
-    let v = v8::String::new(scope, &s).unwrap();
-    rv.set(v.into());
-}
-
-fn url_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    let s = state.url.borrow().clone();
-    let v = v8::String::new(scope, &s).unwrap();
-    rv.set(v.into());
-}
-
-fn redirected_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    rv.set(v8::Boolean::new(scope, *state.redirected.borrow()).into());
-}
-
-fn status_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    rv.set(v8::Integer::new_from_unsigned(scope, *state.status.borrow() as u32).into());
-}
-
-fn ok_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    let s = *state.status.borrow();
-    rv.set(v8::Boolean::new(scope, s >= 200 && s < 300).into());
-}
-
-fn status_text_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    let s = state.status_text.borrow().clone();
-    let v = v8::String::new(scope, &s).unwrap();
-    rv.set(v.into());
-}
-
-fn headers_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    match state.headers.borrow().as_ref() {
-        Some(g) => {
-            let v = v8::Local::new(scope, g.clone());
-            rv.set(v.into());
-        }
-        None => rv.set(v8::null(scope).into()),
-    }
-}
-
-fn web_socket_getter(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let Some(raw) = brand_check(scope, args.this()) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-    match state.web_socket.borrow().as_ref() {
-        Some(g) => {
-            let v = v8::Local::new(scope, g.clone());
-            rv.set(v.into());
-        }
-        None => rv.set(v8::null(scope).into()),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// clone()
-// ---------------------------------------------------------------------------
-
-fn response_clone_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let this = args.this();
-    let Some(raw) = brand_check(scope, this) else { return };
-    let state: &ResponseState = unsafe { &*raw };
-
-    if let Some(stream_g) = state.body.borrow().stream.borrow().clone() {
-        let stream = v8::Local::new(scope, stream_g);
-        let key = v8::String::new(scope, "locked").unwrap();
-        if let Some(v) = stream.get(scope, key.into()) {
-            if v.boolean_value(scope) {
-                let m = v8::String::new(scope, "Cannot clone a disturbed Response").unwrap();
-                let exc = v8::Exception::type_error(scope, m);
-                scope.throw_exception(exc);
-                return;
-            }
-        }
-    }
-
-    // For Response, we can't go through `new Response(this)` since
-    // Response constructor doesn't accept Response as input. Build the
-    // clone field-by-field.
-    let global = scope.get_current_context().global(scope);
-    let class_key = v8::String::new(scope, "Response").unwrap();
-    let class_v = global.get(scope, class_key.into()).unwrap();
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-
-    // Body: tee if stream-bodied, re-build from source otherwise.
-    let body_is_stream = matches!(
-        state.body.borrow().source,
-        Some(crate::fetch_body::body::BodySource::Stream)
-    ) && state.body.borrow().stream.borrow().is_some();
-
-    let body_arg: v8::Local<v8::Value> = if body_is_stream {
-        let stream_g = state.body.borrow().stream.borrow().clone().unwrap();
-        let stream = v8::Local::new(scope, stream_g);
-        match tee_stream(scope, stream) {
-            Some((left, right)) => {
-                *state.body.borrow().stream.borrow_mut() = Some(v8::Global::new(scope, left));
-                right.into()
-            }
-            None => {
-                let m = v8::String::new(scope, "Failed to tee Response body").unwrap();
-                let exc = v8::Exception::type_error(scope, m);
-                scope.throw_exception(exc);
-                return;
-            }
-        }
-    } else if let Some(src) = state.body.borrow().source.clone() {
-        match src {
-            crate::fetch_body::body::BodySource::Bytes(rc)
-            | crate::fetch_body::body::BodySource::Blob(rc, _)
-            | crate::fetch_body::body::BodySource::UrlSearchParams(rc)
-            | crate::fetch_body::body::BodySource::FormData(rc, _) => {
-                let new_stream = crate::fetch_body::extract::build_byte_stream(scope, rc);
-                let stream_local = v8::Local::new(scope, new_stream);
-                stream_local.into()
-            }
-            crate::fetch_body::body::BodySource::Stream => v8::null(scope).into(),
-        }
-    } else {
-        v8::null(scope).into()
-    };
-
-    // Build init: { status, statusText, headers }.
-    let init = v8::Object::new(scope);
-    {
-        let key = v8::String::new(scope, "status").unwrap();
-        let v = v8::Integer::new_from_unsigned(scope, *state.status.borrow() as u32);
-        init.set(scope, key.into(), v.into());
-    }
-    {
-        let key = v8::String::new(scope, "statusText").unwrap();
-        let v = v8::String::new(scope, &state.status_text.borrow()).unwrap();
-        init.set(scope, key.into(), v.into());
-    }
-    if let Some(h_g) = state.headers.borrow().clone() {
-        let key = v8::String::new(scope, "headers").unwrap();
-        let v = v8::Local::new(scope, h_g);
-        init.set(scope, key.into(), v.into());
-    }
-
-    let args2 = [body_arg, init.into()];
-    let result = class_fn.new_instance(scope, &args2);
-    let Some(clone_obj) = result else { return };
-
-    // Copy over `type`, `url`, `redirected`.
-    let Some(clone_raw) = state_ptr(scope, clone_obj) else {
-        rv.set(clone_obj.into());
-        return;
-    };
-    let clone_state: &mut ResponseState = unsafe { &mut *clone_raw };
-    *clone_state.response_type.borrow_mut() = state.response_type.borrow().clone();
-    *clone_state.url.borrow_mut() = state.url.borrow().clone();
-    *clone_state.redirected.borrow_mut() = *state.redirected.borrow();
-
-    rv.set(clone_obj.into());
-}
-
 fn tee_stream<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<'s, v8::Object>,
@@ -875,7 +800,9 @@ fn tee_stream<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// Static methods
+// Static method callbacks — installed on the constructor function in
+// `install_global` (see the doc-comment on the macro impl block for the
+// rationale for keeping these hand-rolled).
 // ---------------------------------------------------------------------------
 
 fn static_error_callback(
@@ -910,7 +837,8 @@ fn static_error_callback(
 
     // Per Fetch §6.2.4 step 4: "Set response's headers' guard to
     // immutable." Seal the headers we minted above. WPT
-    // response-static-error.any.js verifies this.
+    // response-static-error.any.js verifies this. Preserved verbatim
+    // from the pre-migration hand-roll per design §7.3.
     if let Some(headers_g) = state.headers.borrow().clone() {
         let headers_local = v8::Local::new(scope, headers_g);
         crate::headers::seal_immutable(scope, headers_local);

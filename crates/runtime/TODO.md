@@ -206,6 +206,43 @@ MAC-02 (the `post_init` hook) shipped to unblock these. Status:
   lands. The bulk of the design's LoC savings live in method migration,
   not the constructor.
 
+**MAC-01 fetch class migration** (`#[v8_state_marker(MarkerTy)] impl StateTy`):
+
+Per design `docs/proposals/macro-v8-state.md` §7, the hand-rolled fetch
+classes migrate onto the macro under state-projection — the unit `Request`
+/ `Response` markers drive JS-class identity (install slot, brand check,
+callback names) while the boxed `RequestState` / `ResponseState`
+structures carry the per-instance state. Status:
+
+  - `Response` — `#[v8_class] #[v8_state_marker(Response)] impl
+    ResponseState`. Constructor + 8 getters + `clone()` migrate.
+    `install_global` shrinks to a hand-rolled wrapper around
+    `Response::install` that adds (a) the body consumer methods via
+    `install_body_methods::<Response>`, (b) the
+    `ResponseTemplateSlot` cache used by `build_kernel_response`, and
+    (c) the three static methods (`error` / `redirect` / `json`).
+    Static methods stayed hand-rolled in this PR — see the gap note
+    on the impl block: the macro's `gen_static_callback` emits
+    `<MarkerTy>::method(...)` for the call expression, which under
+    `#[v8_state_marker]` resolves against the unit marker rather
+    than the impl receiver. A 3-line macro fix (mirror
+    `gen_method_callback`'s use of `state_ty`) lifts them into the
+    macro impl block; tracked as a follow-up. `headers::seal_immutable`
+    on `Response.error()` survived the migration verbatim (preserved
+    inside the hand-rolled `static_error_callback`). LOC delta:
+    1137 → 1065 (-72; floor set by the spec walks + the static
+    method bodies retained per the macro gap above).
+
+  - `Request` — Phase 2, in progress on a separate worktree.
+
+**Macro follow-ups** (small, well-scoped fixes):
+
+  - `gen_static_callback` should dispatch through `state_ty` instead
+    of `class_ty` when `#[v8_state_marker]` is present. Mirrors the
+    existing `gen_method_callback` shape. Unblocks Response's three
+    static methods migrating onto `#[v8_static_method]` purely
+    additively.
+
 ## Memory footprint
 
 The runtime's per-isolate working set sits around 125 MB after warmup
