@@ -1065,6 +1065,95 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / CRITICAL #1 — typed-ids end-to-end. The handler
+// is supposed to mint sandbox_id as `sbx_<base62>` and pass typed-id
+// user_id / project_id straight through to insert_sandbox. This test
+// exercises the post-handler path: a SandboxInfo built with typed-id
+// fields lands a row in pg, and a SELECT count(*) sees exactly 1.
+// Pre-fix, the handler accepted human ids ("alice"), Database's own
+// parse_with_prefix rejected them, and the row never got written.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for CRITICAL #1"]
+async fn insert_sandbox_with_typed_ids_round_trips_to_pg_row() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+
+    // Build a SandboxInfo the way the post-fix handler does:
+    // sandbox_id = sbx_<base62>, user_id = usr_<base62>, project_id
+    // = prj_<base62>. All three pass parse_with_prefix.
+    let sandbox_uuid = Uuid::now_v7();
+    let info = SandboxInfo {
+        sandbox_id: format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_uuid)
+        ),
+        user_id: typed_id("usr"),
+        project_id: typed_id("prj"),
+        backend: "nomad-ch".into(),
+        backend_hint: "vm_index=42".into(),
+        created_at_secs: 1_700_000_000,
+        last_used_at_secs: 1_700_000_000,
+    };
+    db.insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), Some(42))
+        .await
+        .expect("typed-id insert lands");
+
+    // Assert exactly one row visible by sandbox_id.
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&test_url(), cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT count(*)::BIGINT FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    let n: i64 = row.get(0);
+    assert_eq!(n, 1, "row must land for typed-id input");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for CRITICAL #1"]
+async fn insert_sandbox_refuses_human_user_id() {
+    // Pre-fix the handler accepted human ids and Database silently
+    // failed. Today Database is the second line of defense:
+    // parse_with_prefix("usr") rejects "alice" before any SQL is
+    // issued.
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+
+    let sandbox_uuid = Uuid::now_v7();
+    let info = SandboxInfo {
+        sandbox_id: format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_uuid)
+        ),
+        user_id: "alice".into(), // <-- the historical foot-gun
+        project_id: typed_id("prj"),
+        backend: "nomad-ch".into(),
+        backend_hint: "x".into(),
+        created_at_secs: 1_700_000_000,
+        last_used_at_secs: 1_700_000_000,
+    };
+    let err = db
+        .insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), None)
+        .await
+        .expect_err("human user_id must be rejected");
+    let msg = format!("{err:?}");
+    // Either the prefix-mismatch path ("expected 'usr'") or the
+    // malformed-id path ("no prefix") is acceptable: both branches
+    // refuse the value before any SQL is issued.
+    assert!(
+        msg.contains("usr") || msg.contains("prefix") || msg.contains("typed ID"),
+        "error must indicate typed-id rejection; got {msg}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Round-1 fixer / CRITICAL #2 — every SandboxStatus passes the pg
 // CHECK. Migration 0002 widened the constraint to include
 // 'unreachable'. This guards against a future enum addition that

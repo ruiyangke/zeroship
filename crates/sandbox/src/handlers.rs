@@ -47,49 +47,19 @@ fn parse_uuid(s: &str) -> Result<Uuid, HttpResponse> {
     s.parse::<Uuid>().map_err(|_| err(400, "invalid sandbox id (not a uuid)"))
 }
 
-/// Charset for user_id and project_id at the HTTP boundary.
+/// Validate an HTTP-supplied typed-id at the boundary, asserting
+/// the prefix matches `expected_prefix` (e.g. `"usr"`, `"prj"`,
+/// `"sbx"`). Round-1 fixer / CRITICAL #1: every id that flows into
+/// pg, k8s label values, and sealed-record paths is now a typed-id
+/// (`<prefix>_<base62-uuidv7>`); `parse_with_prefix` is the
+/// path-traversal-hardening boundary check (Invariant 2 in the
+/// design doc).
 ///
-/// **Tighter than DNS-1123 on purpose:** these IDs flow into k8s
-/// resource names (PVC, Pod), label values, and YAML manifests.
-/// k8s label values are restricted to `(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?`
-/// (max 63 chars) and resource names to lowercase DNS-1123. We
-/// intersect both:
-///
-///   * lowercase a-z, digits 0-9, dash `-` only
-///   * must start with [a-z0-9] (DNS-1123 + k8s-label both demand)
-///   * length ≤ 50 (leaves headroom for prefixes like
-///     `zsbx-userhome-<id>` to stay under 253-char DNS-1123)
-///
-/// Underscore is NOT allowed: previous versions accepted it and
-/// `user_pvc_name` rewrote `_` → `-`, which collapsed `alice_1`
-/// and `alice-1` to the same PVC — cross-user data bleed.
-/// Uppercase is NOT allowed for the same reason: `Alice` and
-/// `alice` would collapse. Today the validator + `user_pvc_name`
-/// (lower-only, dash-only) are mutually self-consistent, so the
-/// 1:1 between `user_id` and PVC name is restored.
-fn is_safe_id_char(c: char) -> bool {
-    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-}
-
-/// Validate an HTTP-supplied id (user_id, project_id) at the
-/// boundary. `is_safe_id_char` enforces the per-character rule;
-/// this helper adds the boundary checks (non-empty, leading char,
-/// length cap).
-fn is_safe_id(id: &str) -> bool {
-    if id.is_empty() || id.len() > 50 {
-        return false;
-    }
-    let mut chars = id.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
-    };
-    // First char must be alphanumeric (k8s + DNS-1123).
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return false;
-    }
-    // Remaining chars: per-char rule.
-    chars.all(is_safe_id_char)
+/// Returns `Ok(())` on success; `Err(())` on any malformed input
+/// (callers map to a 400 with a generic message; the parse error is
+/// not echoed back to keep boundary noise out of the wire).
+fn is_typed_id(id: &str, expected_prefix: &str) -> bool {
+    zeroship_core::typed_id::parse_with_prefix(id, expected_prefix).is_ok()
 }
 
 fn infer_content_type(path: &str) -> &'static str {
@@ -149,18 +119,18 @@ pub async fn create_sandbox(
     if !auth::check(&req, &state) { return unauthorized(); }
 
     let user_id = body.user_id.trim().to_string();
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return err(
             400,
-            "invalid user_id: must be [a-z0-9-]{1,50} starting with [a-z0-9]",
+            "invalid user_id: must be a typed-id of the form usr_<base62>",
         );
     }
 
     let project_id = body.project_id.trim().to_string();
-    if !is_safe_id(&project_id) {
+    if !is_typed_id(&project_id, "prj") {
         return err(
             400,
-            "invalid project_id: must be [a-z0-9-]{1,50} starting with [a-z0-9]",
+            "invalid project_id: must be a typed-id of the form prj_<base62>",
         );
     }
 
@@ -197,14 +167,32 @@ pub async fn create_sandbox(
         max_attempts,
         total_budget,
         || async {
-            let sandbox_id = Uuid::new_v4();
+            // Round-1 fixer / CRITICAL #1: mint a UUIDv7 (typed-id
+            // backbone — the same UUIDv7 is what the typed-id wraps)
+            // rather than v4. The retry path mints a fresh id per
+            // attempt so a stale-tenant retry lands on a different
+            // vm_index for nomad-ch (FM-E).
+            let sandbox_id = Uuid::now_v7();
             let res = state.backend.create(sandbox_id, &user_id, &project_id).await;
             (sandbox_id, res)
         },
     )
     .await;
     match outcome {
-        CreateOutcome::Ok { sandbox_id, info } => {
+        CreateOutcome::Ok { sandbox_id, mut info } => {
+            // Round-1 fixer / CRITICAL #1: SandboxInfo's `sandbox_id`
+            // is the typed-id `sbx_<base62>` form everywhere the wire
+            // sees it (registry → handlers → pg → preview-token
+            // claims). The backends still take `Uuid` as their
+            // internal key (cheap to look up; sealed-record filename
+            // is `sha256(uuid_bytes).sealed`); but the public-facing
+            // string carries the typed prefix so pg's CHECK passes
+            // and `restore::process_pg_row::parse_with_prefix("sbx")`
+            // round-trips.
+            info.sandbox_id = format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+            );
             let stored = state.sandboxes.insert(sandbox_id, info.clone());
             // Round-8 Phase 1: pg is the system of record for non-secret
             // state. Write the sandbox row synchronously after create
@@ -425,7 +413,7 @@ pub async fn list_sandboxes(
             "list requires ?user_id=<id> — cross-user listing is not exposed",
         );
     };
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return err(400, "invalid user_id");
     }
     let filtered: Vec<_> = state
@@ -460,7 +448,7 @@ pub async fn get_sandbox(
     let Some(user_id) = query.into_inner().user_id else {
         return err(400, "get requires ?user_id=<id>");
     };
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return err(400, "invalid user_id");
     }
     match state.sandboxes.get(&id) {
@@ -499,7 +487,7 @@ fn require_owner(
             })
         })
         .unwrap_or_default();
-    if !is_safe_id(&user_id) {
+    if !is_typed_id(&user_id, "usr") {
         return Err(err(404, "sandbox not found"));
     }
     match state.sandboxes.get(&id) {
@@ -736,6 +724,37 @@ mod tests {
             created_at_secs: 0,
             last_used_at_secs: 0,
         }
+    }
+
+    // ─── Round-1 fixer / CRITICAL #1: typed-id validation ───────
+
+    #[test]
+    fn typed_id_validator_accepts_well_formed_typed_id() {
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(is_typed_id(&usr, "usr"));
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(is_typed_id(&prj, "prj"));
+    }
+
+    #[test]
+    fn typed_id_validator_refuses_human_style_ids() {
+        // Pre-CRITICAL-#1 the handler accepted these and the
+        // downstream Database::insert_sandbox silently failed because
+        // its own parse_with_prefix rejected them. Now we refuse at
+        // the handler boundary so a 400 surfaces immediately.
+        for id in ["alice", "bob", "myproj", "p", "u-1", ""] {
+            assert!(!is_typed_id(id, "usr"), "{id:?} must NOT pass usr typed-id check");
+        }
+    }
+
+    #[test]
+    fn typed_id_validator_refuses_wrong_prefix() {
+        // Right shape, wrong prefix — mirrors the path-traversal
+        // hardening posture from typed_id::ParseError::WrongPrefix.
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(!is_typed_id(&prj, "usr"));
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(!is_typed_id(&usr, "prj"));
     }
 
     // ─── FM-E: classifier ───────────────────────────────────────
