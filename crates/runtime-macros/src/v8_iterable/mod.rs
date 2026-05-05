@@ -157,6 +157,8 @@ pub(super) struct EmitCtx<'a> {
     pub iter_class_name_str: String,
     pub iter_to_string_tag_str: String,
     pub iter_install_slot_ty: Ident,
+    pub iter_brand_slot_ty: Ident,
+    pub iter_brand_check_fn: Ident,
     pub factory_keys_ident: Ident,
     pub factory_values_ident: Ident,
     pub factory_entries_ident: Ident,
@@ -197,6 +199,12 @@ pub(super) struct EmitCtx<'a> {
     pub for_each_brand_check: TokenStream2,
     pub for_each_external_recovery: TokenStream2,
     pub next_external_recovery: TokenStream2,
+    /// Brand check for `<Class>Iterator.prototype.next()`. Walks the
+    /// receiver's prototype chain looking for the cached
+    /// `<Class>Iterator.prototype` and throws TypeError on miss with
+    /// the shape `"<Class>Iterator.prototype.next called on
+    /// incompatible receiver"`. Closes Wave 10 NS6.
+    pub next_brand_check: TokenStream2,
 
     // Pre-rendered must_str token bindings for every literal V8 string
     // the iterable codegen emits. Centralised in Wave 9 NS5 / H10.
@@ -357,6 +365,15 @@ fn build_ctx<'a>(
         value_marshal::gen_to_v8(value_ty, &val_src, &val_out, attr.value_marshal.as_ref())?;
 
     let iter_install_slot_ty = format_ident!("__InstallSlot_{}", iter_class_ty);
+    let iter_brand_slot_ty = format_ident!("__BrandSlot_{}", iter_class_ty);
+    // Iterator-class brand-check helper. Walks `__this`'s prototype
+    // chain looking for the cached `<Class>Iterator.prototype`. Closes
+    // Wave 10 NS6: a caller could previously hand `<Class>Iterator
+    // .prototype.next` a *different* `#[v8_class]` wrapper as `this`
+    // (any wrapper has `internal_field(0) = External(Box<X>)`), causing
+    // the recovery `__ext.value() as *mut <Class>Iterator` to
+    // reinterpret a `Box<Other>` as `*mut <Class>Iterator` — UB.
+    let iter_brand_check_fn = format_ident!("__brand_check_{}", iter_class_ty);
 
     // Parent class's brand-check ident (see Wave 9 N1 note in
     // class_config.rs — the iterable codegen runs BEFORE ClassConfig
@@ -372,6 +389,25 @@ fn build_ctx<'a>(
         crate::v8_class::shared::recover_box::gen_recover_external();
     let next_external_recovery =
         crate::v8_class::shared::recover_box::gen_recover_external();
+
+    // Iterator-class brand check for `next()` — distinct from the
+    // generic "Illegal invocation" thrown by parent-class checks. The
+    // message shape matches the receiver-mismatch wording the v8
+    // built-in iterators use (e.g. `Map Iterator.prototype.next called
+    // on incompatible receiver`).
+    let iter_next_msg = format!(
+        "{}.prototype.next called on incompatible receiver",
+        iter_class_ty
+    );
+    let next_brand_check = quote! {
+        let __this = args.this();
+        if !#iter_brand_check_fn(scope, __this) {
+            let __msg = v8::String::new(scope, #iter_next_msg).unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
 
     // Pre-render must_str token bindings (Wave 9 NS5 / H10).
     let class_name_init = must_str(&scope_tok, &quote! { #iter_class_name_str });
@@ -417,6 +453,8 @@ fn build_ctx<'a>(
         iter_class_name_str,
         iter_to_string_tag_str,
         iter_install_slot_ty,
+        iter_brand_slot_ty,
+        iter_brand_check_fn,
         factory_keys_ident,
         factory_values_ident,
         factory_entries_ident,
@@ -441,6 +479,7 @@ fn build_ctx<'a>(
         for_each_brand_check,
         for_each_external_recovery,
         next_external_recovery,
+        next_brand_check,
         class_name_init,
         to_string_tag_init,
         next_key_init,

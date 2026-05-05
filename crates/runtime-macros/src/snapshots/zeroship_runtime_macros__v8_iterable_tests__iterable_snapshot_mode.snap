@@ -26,6 +26,93 @@ pub struct ReadOnlyMapIterator {
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
 pub struct __InstallSlot_ReadOnlyMapIterator(::v8::Global<::v8::FunctionTemplate>);
+#[doc(hidden)]
+#[allow(non_camel_case_types)]
+pub struct __BrandSlot_ReadOnlyMapIterator(::v8::Global<::v8::Object>);
+/// Brand-check helper for the iterator class: walks the
+/// prototype chain of `obj` looking for the cached
+/// `<Class>Iterator.prototype`. Returns true on match (the
+/// receiver IS a `<Class>Iterator`), false otherwise.
+///
+/// Closes Wave 10 NS6: the previous `next()` codegen relied
+/// solely on internal-field-0 being an `External`, which any
+/// `#[v8_class]` wrapper satisfies. A caller could pass a
+/// different wrapper as `this` and the recovery
+/// `__ext.value() as *mut <Class>Iterator` would reinterpret a
+/// `Box<Other>` as `*mut <Class>Iterator` — UB. The brand
+/// check pins the receiver to instances of THIS iterator class
+/// before the unsafe cast.
+///
+/// Walks at most 1024 prototype links — matches V8's internal
+/// `Object::PrototypeChainLength` sanity bound. Cycle creation
+/// is already blocked by ECMAScript §10.4.7.2 step 8; the cap
+/// is belt-and-braces for proxy-driven prototype chains.
+///
+/// The cached prototype is populated lazily on first call (NOT
+/// at install time) — eager `get_function(scope)` would freeze
+/// the FunctionTemplate's instance shape. Mirrors the parent-
+/// class `__brand_check_<Class>` helper in
+/// `v8_class/emit/brand.rs`.
+#[doc(hidden)]
+#[allow(non_snake_case, dead_code)]
+fn __brand_check_ReadOnlyMapIterator(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+) -> bool {
+    let cached_global: v8::Global<v8::Object> = if let Some(slot) = scope
+        .get_slot::<__BrandSlot_ReadOnlyMapIterator>()
+    {
+        slot.0.clone()
+    } else {
+        let tmpl_global = match scope.get_slot::<__InstallSlot_ReadOnlyMapIterator>() {
+            Some(s) => s.0.clone(),
+            None => return false,
+        };
+        let tmpl_local = v8::Local::new(scope, &tmpl_global);
+        let func = match tmpl_local.get_function(scope) {
+            Some(f) => f,
+            None => return false,
+        };
+        let proto_key = match v8::String::new(scope, "prototype") {
+            Some(s) => s,
+            None => return false,
+        };
+        let proto_v = match func.get(scope, proto_key.into()) {
+            Some(v) => v,
+            None => return false,
+        };
+        let proto: v8::Local<v8::Object> = match proto_v.try_into() {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        let g = v8::Global::new(scope, proto);
+        let g_clone = g.clone();
+        scope.set_slot(__BrandSlot_ReadOnlyMapIterator(g));
+        g_clone
+    };
+    let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
+    let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
+        Some(v) => v,
+        None => return false,
+    };
+    for _ in 0..1024 {
+        if current.is_null_or_undefined() {
+            return false;
+        }
+        let cur_obj: v8::Local<v8::Object> = match current.try_into() {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        if cur_obj == expected_proto {
+            return true;
+        }
+        current = match cur_obj.get_prototype(scope) {
+            Some(v) => v,
+            None => return false,
+        };
+    }
+    false
+}
 #[allow(non_snake_case, dead_code)]
 impl ReadOnlyMapIterator {
     /// Install the iterator class's FunctionTemplate. The
@@ -291,6 +378,16 @@ pub(crate) fn __ReadOnlyMap_iter_next(
     mut rv: v8::ReturnValue,
 ) {
     let __this = args.this();
+    if !__brand_check_ReadOnlyMapIterator(scope, __this) {
+        let __msg = v8::String::new(
+                scope,
+                "ReadOnlyMapIterator.prototype.next called on incompatible receiver",
+            )
+            .unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
     let __ext = match __this
         .get_internal_field(scope, 0)
         .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
