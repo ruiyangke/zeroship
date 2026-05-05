@@ -254,9 +254,10 @@ pub(crate) fn run_callback(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    // Brand check — exposed by the macro as `__zs_is_AsyncLocalStorage`.
+    // Brand check — typed entry point introduced in Wave 5c (design
+    // `docs/proposals/runtime-macros-refactor.md` §3.5).
     let this_v: v8::Local<v8::Value> = args.this().into();
-    if !__zs_is_AsyncLocalStorage(scope, this_v) {
+    if !AsyncLocalStorage::is_instance(scope, this_v) {
         let msg = v8::String::new(scope, "Illegal invocation").unwrap();
         let exc = v8::Exception::type_error(scope, msg);
         scope.throw_exception(exc);

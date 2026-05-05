@@ -225,9 +225,11 @@ impl RequestState {
         // local: cleaner than v1's two suggested options.
         let mut pending_ct: Option<String> = None;
 
-        // Step 6: parse `input` — string or Request.
+        // Step 6: parse `input` — string or Request. The brand check
+        // is the typed `Request::is_instance` introduced in Wave 5c
+        // (design `docs/proposals/runtime-macros-refactor.md` §3.5).
         let input_is_request =
-            input_v.is_object() && __zs_is_Request(scope, input_v);
+            input_v.is_object() && Request::is_instance(scope, input_v);
 
         let initial_url: String = if input_is_request {
             let req_obj: v8::Local<v8::Object> = match input_v.try_into() {
@@ -246,7 +248,7 @@ impl RequestState {
                     ));
                 }
             };
-            // SAFETY: `__zs_is_Request` confirmed the prototype-chain
+            // SAFETY: `Request::is_instance` confirmed the prototype-chain
             // brand; internal-field-0 holds a `Box<RequestState>`.
             let other: &RequestState = unsafe { &*raw };
             // Copy over scalar fields from the input Request.

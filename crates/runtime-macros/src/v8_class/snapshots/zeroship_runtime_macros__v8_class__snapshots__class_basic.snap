@@ -145,11 +145,11 @@ fn __brand_check_Foo(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bo
 /// Public brand check: is `v` an instance of this class (or a
 /// subclass via `#[v8_inherit]`) in the current isolate?
 ///
-/// Re-exports the macro's per-class brand-check via a stable
-/// `__zs_is_<Class>(scope, v: Local<Value>) -> bool` symbol so
-/// cross-class type queries (e.g. `is_blob_instance` /
-/// `is_form_data_instance` checks in a Request body coercion)
-/// don't have to hand-roll prototype-chain walks.
+/// **Deprecated**: prefer the typed `<Class>::is_instance`
+/// method emitted alongside this fn (Wave 5c, design §3.5).
+/// This symbol stays for back-compat with pre-Wave-5c callers;
+/// scheduled for removal in Wave 8 per the macro's
+/// `STABILITY.md`.
 ///
 /// Non-Object values (primitives, null, undefined) return
 /// `false` — the underlying `__brand_check_<Class>` requires
@@ -169,6 +169,33 @@ pub fn __zs_is_Foo(scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> bool {
         Err(_) => return false,
     };
     __brand_check_Foo(scope, obj)
+}
+#[allow(non_snake_case, dead_code)]
+impl Foo {
+    /// Brand-check: returns `true` iff `value` is an instance
+    /// of this class (or a subclass via `#[v8_inherit]`) in
+    /// the current isolate.
+    ///
+    /// Non-Object values (primitives, null, undefined) return
+    /// `false`, as does an isolate where the class hasn't been
+    /// installed. Spec alignment: WebIDL §3.7 brand identity.
+    ///
+    /// This is the stable entry point introduced in Wave 5c
+    /// (design `docs/proposals/runtime-macros-refactor.md` §3.5).
+    /// Prefer this over the legacy `__zs_is_<Class>` symbol —
+    /// the latter is deprecated and scheduled for removal in
+    /// Wave 8.
+    pub fn is_instance(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> bool {
+        __zs_is_Foo(scope, value)
+    }
+}
+#[allow(non_snake_case)]
+impl ::zeroship_runtime::macro_runtime::__private::Sealed for Foo {}
+#[allow(non_snake_case)]
+impl ::zeroship_runtime::macro_runtime::V8ClassInstance for Foo {
+    fn is_instance(scope: &mut ::v8::PinScope, value: ::v8::Local<::v8::Value>) -> bool {
+        <Self>::is_instance(scope, value)
+    }
 }
 #[allow(non_snake_case, dead_code)]
 impl Foo {

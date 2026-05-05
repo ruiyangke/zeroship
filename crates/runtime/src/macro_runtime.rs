@@ -134,3 +134,80 @@ pub mod dom {
 pub mod node_error {
     pub use crate::node_error::build_node_exception;
 }
+
+// ----- V8ClassInstance trait (Wave 5c, design §3.5) -----
+//
+// Stable typed brand-check entry point per `#[v8_class]`. Replaces the
+// underscored `__zs_is_<Class>` grep target with `<Class>::is_instance`
+// (the inherent method) plus a sealed trait `V8ClassInstance` that
+// downstream code can use as a generic bound (`fn check<T: V8ClassInstance>`).
+//
+// The macro emits BOTH:
+//   1. `impl <Class> { pub fn is_instance(scope, v) -> bool { ... } }`
+//   2. `impl V8ClassInstance for <Class> { ... }` (gated by Sealed)
+//
+// The inherent method is what callers usually want — `Request::is_instance(scope, v)`
+// reads naturally and doesn't require importing the trait. The trait
+// exists for the rare generic-over-class pattern (a brand-check
+// table indexed by class type) and enforces the macro-only
+// invariant via the `Sealed` super-trait below.
+//
+// Sealing keeps the trait macro-only: only the proc-macro can write
+// `impl Sealed for X` because `__private::Sealed` lives behind a
+// `__private` module name. The path is `pub` so the macro emit at
+// downstream-crate sites can name it; the underscored module name is
+// the convention that signals "look but don't touch."
+//
+// Closes F2 — third-party impls of the brand-check trait are unsound
+// (they'd have to fabricate a fake brand-check); sealing prevents that.
+
+#[doc(hidden)]
+pub mod __private {
+    /// Sealing super-trait. Only `runtime-macros` emits `impl Sealed
+    /// for <Class>`. The `pub` is needed so the macro's emitted impl
+    /// at user-crate sites can name the trait — but the `__private`
+    /// module name is doc-hidden and signals that user code MUST NOT
+    /// `impl Sealed for X`.
+    pub trait Sealed {}
+}
+
+/// WebIDL §3.7 brand check, generic over `#[v8_class]` types.
+///
+/// Returns `true` iff `value` is an instance of the implementing class
+/// in the current isolate (or a subclass via `#[v8_inherit]`). The
+/// underlying check walks the prototype chain comparing handle identity
+/// against the cached install slot.
+///
+/// # Usage
+///
+/// ```ignore
+/// // Inherent — preferred for the common case:
+/// if Request::is_instance(scope, value) { /* ... */ }
+///
+/// // Trait — for generic / table-driven dispatch:
+/// fn is_one_of<T: V8ClassInstance>(
+///     scope: &mut v8::PinScope,
+///     v: v8::Local<v8::Value>,
+/// ) -> bool {
+///     T::is_instance(scope, v)
+/// }
+/// ```
+///
+/// # Sealing
+///
+/// `V8ClassInstance: __private::Sealed` keeps this macro-only. Third-
+/// party impls would be unsound — they'd have to fabricate a brand
+/// check without owning the install slot.
+///
+/// # Stability
+///
+/// The trait, its method signature, and the sealing pattern are all
+/// part of `runtime-macros`'s STABILITY contract. See
+/// `crates/runtime-macros/STABILITY.md`.
+pub trait V8ClassInstance: __private::Sealed {
+    /// Brand-check: returns `true` iff `value` is an instance of this
+    /// class (or a subclass via `#[v8_inherit]`) in the current isolate.
+    /// Returns `false` for non-Object values and for isolates where
+    /// the class hasn't been installed.
+    fn is_instance(scope: &mut ::v8::PinScope, value: ::v8::Local<::v8::Value>) -> bool;
+}
