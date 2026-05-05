@@ -4,8 +4,11 @@
 //! under `web/`, Node.js APIs live here. Both call into shared
 //! algorithm backends (e.g. `crate::crypto_ops`) at the boundary.
 //!
-//! Currently hosts only `crypto` (the `node:crypto` surface), but
-//! is the natural home for future `node:*` modules implemented
-//! natively (e.g. `node:zlib`, `node:os`).
+//! Hosts:
+//! - `crypto` — the `node:crypto` surface.
+//! - `async_hooks` — `AsyncLocalStorage`, native because the
+//!   closure-based polyfill tore down stores before continuations
+//!   from native async work (`fetch`) resumed (ISS-01).
 
+pub mod async_hooks;
 pub mod crypto;

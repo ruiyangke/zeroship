@@ -694,6 +694,20 @@ pub fn load_polyfills_and_modules(
         crate::node::crypto::install_globals(scope, global);
     }
 
+    // Native node:async_hooks — `globalThis.__zsAsyncHooks` (ISS-01).
+    // Closes the gap that broke LangGraph's `interrupt()` after any
+    // `await fetch(...)` inside a node body. Backed by V8's
+    // `ContinuationPreservedEmbedderData` slot, which V8 propagates
+    // automatically across every async hop (await, microtask, .then).
+    // Must be installed BEFORE user/module code evaluates so
+    // `@langchain/core`'s singleton-init path picks up the real
+    // `AsyncLocalStorage` instead of falling back to its bundled
+    // `MockAsyncLocalStorage` shadow.
+    {
+        let global = scope.get_current_context().global(scope);
+        crate::node::async_hooks::install_globals(scope, global);
+    }
+
     // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).
     // Last surviving JS shim — too small to be worth the dedicated
     // V8 callback boilerplate (a native impl would need to capture
