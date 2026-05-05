@@ -43,17 +43,29 @@ use uuid::Uuid;
 // BEGIN/COMMIT) plus an idempotent guard around every CREATE so a
 // loser of a two-migrator race can replay safely (D-4 / § 7.1).
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "initial schema (hosts, sandboxes, shares, events, deleted_sandboxes)",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "initial schema (hosts, sandboxes, shares, events, deleted_sandboxes)",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        description: "sandboxes.status CHECK accepts 'unreachable'",
+        sql: include_str!("../migrations/0002_sandbox_status_unreachable.sql"),
+    },
+    Migration {
+        version: 3,
+        description: "shares.token_id CHECK accepts base64url alphabet",
+        sql: include_str!("../migrations/0003_share_token_id_alphabet.sql"),
+    },
+];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 1;
+pub const LATEST_MIGRATION_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
@@ -556,6 +568,36 @@ impl Database {
 // ────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────
+
+/// Shape check for `sandbox.shares.token_id`, mirroring migration
+/// 0003's CHECK (`^tok_[A-Za-z0-9_-]{20,40}$`). Belt-and-suspenders
+/// before the SQL round-trip so a malformed id surfaces a clean
+/// `Validation` error rather than a SQLSTATE 23514 buried in the
+/// pg driver wrapper.
+fn validate_share_token_id_shape(token_id: &str) -> Result<()> {
+    let suffix = match token_id.strip_prefix("tok_") {
+        Some(s) => s,
+        None => {
+            return Err(DatabaseError::Validation(format!(
+                "share token_id must start with 'tok_': {token_id:?}"
+            )));
+        }
+    };
+    if !(20..=40).contains(&suffix.len()) {
+        return Err(DatabaseError::Validation(format!(
+            "share token_id suffix length out of range (20..=40): {token_id:?}"
+        )));
+    }
+    if !suffix
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(DatabaseError::Validation(format!(
+            "share token_id suffix contains non-base64url chars: {token_id:?}"
+        )));
+    }
+    Ok(())
+}
 
 fn validate_dsn_scheme(dsn: &str) -> Result<()> {
     if dsn.starts_with("postgres://") || dsn.starts_with("postgresql://") {
@@ -1375,8 +1417,12 @@ impl Database {
 
     /// INSERT a share-token row (mint).
     pub async fn insert_share(&self, share: &ShareRow) -> Result<()> {
-        let _ = zeroship_core::typed_id::parse_with_prefix(&share.token_id, "tok")
-            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+        // `token_id` is `tok_<raw_tid>` where `tid` is a random
+        // base64url string from `preview_share::fresh_token_id`. It
+        // is NOT a typed-id (the suffix is not base62-encoded UUID
+        // bytes), so we apply only a shape check that mirrors the
+        // pg-side CHECK constraint (migration 0003).
+        validate_share_token_id_shape(&share.token_id)?;
         let _ = zeroship_core::typed_id::parse_with_prefix(&share.sandbox_id, "sbx")
             .map_err(|e| DatabaseError::Validation(e.to_string()))?;
         let pool = self.open_pool().await?;

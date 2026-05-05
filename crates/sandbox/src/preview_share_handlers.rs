@@ -256,14 +256,18 @@ pub async fn mint_share(
     // Round-8 Phase 1: per-token audit metadata moves to pg. Write
     // the share row synchronously; on Err log + continue.
     if let Some(db) = state.database.as_ref() {
-        let typed_token_id = format!("tok_{}", token_id.replace(['-', '_'], "x"));
+        // Migration 0003 widened the schema CHECK from base62 to
+        // base64url so we can store `tok_<raw_tid>` byte-exactly. The
+        // earlier `replace(['-','_'], "x")` munge collapsed distinct
+        // tokens whose raw tids differed only in `-` vs `_` (or
+        // happened to contain `x`); see CRITICAL #6 in the round-1
+        // fixer review.
+        let typed_token_id = format!("tok_{token_id}");
         let row = crate::db::ShareRow {
-            // Token-id storage in pg uses a tok_ typed-id wrapper to
-            // satisfy the schema CHECK; the canonical wire-stable
-            // form returned to the API caller is `shr_<raw_tid>`.
-            // Round-8: this is a placeholder mapping; Phase-1.1 will
-            // either change the schema to allow `shr_…` or move the
-            // pg-side typed-id to a hash of the raw `tid`.
+            // Storage form is `tok_<raw_tid>`; the API-returned
+            // `share_token_id` is `shr_<raw_tid>`. Same payload after
+            // the prefix, distinct prefixes to mark API surface vs
+            // storage surface.
             token_id: typed_token_id.clone(),
             sandbox_id: sandbox_id_str.clone(),
             port,

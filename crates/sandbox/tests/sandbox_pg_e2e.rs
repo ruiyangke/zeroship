@@ -1063,3 +1063,119 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
     assert_eq!(status, "recreating");
     assert_eq!(gen, new_gen + 1, "recreating UPDATE bumps generation");
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / CRITICAL #2 — every SandboxStatus passes the pg
+// CHECK. Migration 0002 widened the constraint to include
+// 'unreachable'. This guards against a future enum addition that
+// drifts from the schema.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for CRITICAL #2"]
+async fn every_sandbox_status_value_passes_pg_check() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+
+    // Every variant of `SandboxStatus`. Synced manually with the
+    // enum since the workspace doesn't pull `strum`. If a future
+    // commit adds a variant, the match below stops compiling and
+    // forces this list to update.
+    let all = [
+        SandboxStatus::Starting,
+        SandboxStatus::Running,
+        SandboxStatus::Stopping,
+        SandboxStatus::Stopped,
+        SandboxStatus::Lost,
+        SandboxStatus::Recreating,
+        SandboxStatus::Orphan,
+        SandboxStatus::Unreachable,
+    ];
+    // Compile-time guard: this match must be exhaustive. If a new
+    // variant lands, the test author must extend `all`.
+    fn _exhaustive(s: SandboxStatus) {
+        match s {
+            SandboxStatus::Starting => {}
+            SandboxStatus::Running => {}
+            SandboxStatus::Stopping => {}
+            SandboxStatus::Stopped => {}
+            SandboxStatus::Lost => {}
+            SandboxStatus::Recreating => {}
+            SandboxStatus::Orphan => {}
+            SandboxStatus::Unreachable => {}
+        }
+    }
+
+    for status in all {
+        // Each iteration mints a fresh sandbox (the partial unique
+        // index on (user_id, project_id) WHERE status IN
+        // ('starting','running','recreating') would otherwise
+        // refuse two rows in the active set).
+        let (info, sid) = fresh_info("alice");
+        db.insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), None)
+            .await
+            .unwrap();
+        // First UPDATE (generation 0 → 1).
+        let _ = db
+            .update_sandbox_status(sid, status, 0)
+            .await
+            .unwrap_or_else(|e| panic!("status {} rejected by pg: {e:?}", status.as_str()));
+        // Reset for next iteration: clear the row so the partial
+        // unique index doesn't fire on the next insert.
+        let _ = db.delete_sandbox(sid).await;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Round-1 fixer / CRITICAL #6 — base64url-alphabet token_ids that
+// differ only in `-` vs `_` insert as DISTINCT rows after migration
+// 0003. Pre-migration the handler munged both to `x` and the second
+// INSERT collided on the PK.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; round-1 fixer regression for CRITICAL #6"]
+async fn base64url_token_ids_with_dash_vs_underscore_are_distinct() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sandbox_uuid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), None)
+        .await
+        .unwrap();
+
+    // Two raw tids (24 chars each) that differ only at one position:
+    // '-' vs '_'. Both are valid base64url, both pass the migration
+    // 0003 CHECK, neither parses as base62.
+    let tid_a = "AAAAAAAAAAAA-AAAAAAAAAAA";
+    let tid_b = "AAAAAAAAAAAA_AAAAAAAAAAA";
+    assert_eq!(tid_a.len(), tid_b.len());
+
+    let row_a = ShareRow {
+        token_id: format!("tok_{tid_a}"),
+        sandbox_id: info.sandbox_id.clone(),
+        port: 5173,
+        scope: "ro".into(),
+        secret_version: 1,
+        issued_at_secs: 1_700_000_000,
+        expires_at_secs: 1_700_003_600,
+        iss: None,
+    };
+    let row_b = ShareRow {
+        token_id: format!("tok_{tid_b}"),
+        ..row_a.clone()
+    };
+
+    db.insert_share(&row_a).await.expect("row A inserts");
+    db.insert_share(&row_b).await.expect("row B inserts (distinct PK)");
+
+    let metas = db
+        .list_shares_for_sandbox(sandbox_uuid, 5173)
+        .await
+        .unwrap();
+    assert_eq!(metas.len(), 2, "two distinct rows must be visible");
+    let mut ids: Vec<&str> = metas.iter().map(|m| m.token_id.as_str()).collect();
+    ids.sort();
+    let mut want: Vec<&str> = vec![row_a.token_id.as_str(), row_b.token_id.as_str()];
+    want.sort();
+    assert_eq!(ids, want, "stored ids must round-trip byte-exact");
+}
