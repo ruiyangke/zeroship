@@ -7,8 +7,6 @@
 
 use std::time::Duration;
 
-use zeroship_runtime_macros::zeroship_op;
-
 use crate::state::SharedState;
 use crate::state::TimerCallback;
 
@@ -1344,7 +1342,9 @@ fn set_interval_callback(
 
 /// Install console, timers, fetch, URL, KV, crypto, env on the global object.
 ///
-/// Callbacks from `#[zeroship_op]` modules are referenced as `crate::{mod}::{fn}_callback`.
+/// Each free-function V8 callback is named `{fn}_callback` and lives
+/// alongside the helper it wraps; native classes come from
+/// `#[v8_class]` impl blocks via their per-class `install` fn.
 pub fn setup_globals(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
 
@@ -1823,14 +1823,32 @@ pub fn install_url_native(scope: &mut v8::PinScope) {
 /// Worker-internal `env_vars` (APP_ID, …) are deliberately NOT in this
 /// surface — that map is for plugin-internal state, not user-readable
 /// configuration.
-#[zeroship_op(state)]
-fn env_get(state: SharedState, key: String) -> Option<String> {
-    let s = state.borrow();
+fn env_get_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let key = args.get(0).to_rust_string_lossy(scope);
+
     // Vars first, then secrets override on collision (more sensitive
     // wins on the explicit surface).
-    s.env_app_vars
+    let s = state.borrow();
+    let value: Option<String> = s
+        .env_app_vars
         .get(&key)
         .cloned()
         .map(|v| s.env_app_secrets.get(&key).cloned().unwrap_or(v))
-        .or_else(|| s.env_app_secrets.get(&key).cloned())
+        .or_else(|| s.env_app_secrets.get(&key).cloned());
+
+    match value {
+        Some(v) => {
+            let v_v8 = v8::String::new(scope, &v).unwrap();
+            rv.set(v_v8.into());
+        }
+        None => rv.set(v8::null(scope).into()),
+    }
 }

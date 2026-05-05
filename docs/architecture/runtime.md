@@ -73,7 +73,7 @@ Registered via the `NativePlugin` trait. Each plugin owns a namespace:
 - `zeroship.kv.*` → `crates/plugin-kv`
 - `zeroship.storage.*` → `crates/plugin-storage`
 
-The `#[zeroship_op]` proc macro (`crates/runtime-macros`) generates the V8-FFI glue. See `docs/reference/plugin-system.md`.
+The `#[v8_class]` proc macro (`crates/runtime-macros`) generates the V8-FFI glue. See `docs/reference/plugin-system.md`.
 
 ## Module loading
 

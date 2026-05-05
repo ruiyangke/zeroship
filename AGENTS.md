@@ -86,7 +86,7 @@ crates/
 ├── compio-postgres/  PostgreSQL driver (compio-native, replaces sqlx)
 ├── compio-redis/     Redis driver (cluster-aware, compio-native)
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
-├── runtime-macros/   #[zeroship_op] proc macro
+├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── plugin-db/        zeroship.db.* native ops
 ├── plugin-kv/        zeroship.kv.* native ops
 ├── plugin-storage/   zeroship.storage.* native ops

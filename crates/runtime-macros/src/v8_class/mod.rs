@@ -11,11 +11,10 @@
 //! `Box<Self>` is stored as `External` and reclaimed via a guaranteed
 //! V8 weak-finalizer when the wrapper is GC'd.
 //!
-//! Reuses `gen_extract` + `gen_call_return` from the parent crate for
-//! argument and return marshaling, so the supported types match
-//! `#[zeroship_op]` (String, bool, u32, i32, f64, Vec<u8>, Option<T>,
-//! Result<T, OpError>, plus `v8::Local<v8::Value>` passthrough for
-//! union-typed args).
+//! Argument and return marshaling lives in the parent crate's
+//! `gen_extract` + `gen_call_return` helpers. Supported types: String,
+//! bool, u32, i32, f64, Vec<u8>, Option<T>, Result<T, OpError>, plus
+//! `v8::Local<v8::Value>` passthrough for union-typed args.
 //!
 //! ### Async methods (`#[v8_async_method]`)
 //!

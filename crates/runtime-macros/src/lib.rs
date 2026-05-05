@@ -1,20 +1,11 @@
 //! Proc macros for the zeroship runtime.
 //!
-//! Two macros live here:
-//!
-//! - [`zeroship_op`] — wraps a plain Rust function as a V8 free-function
-//!   callback. Handles argument extraction, state access, return value
-//!   marshaling, error throwing, and async-Promise plumbing.
-//! - [`v8_class`] — wraps an `impl` block as a V8 ObjectTemplate-backed
-//!   class. Methods, getters, setters, and constructors get auto-generated
-//!   callbacks; instance state lives in V8 internal fields.
+//! [`v8_class`] wraps an `impl` block as a V8 ObjectTemplate-backed
+//! class. Methods, getters, setters, constructors, and static methods
+//! get auto-generated callbacks; instance state lives in V8 internal
+//! fields.
 //!
 //! ```ignore
-//! // Free-function op:
-//! #[zeroship_op]
-//! fn url_can_parse(input: String, base: Option<String>) -> bool { ... }
-//!
-//! // Class:
 //! struct Headers { /* ... */ }
 //!
 //! #[v8_class]
@@ -39,15 +30,15 @@
 //!
 //! The class macro generates `Headers::install(scope) -> v8::Local<v8::FunctionTemplate>`
 //! that the runtime calls during `setup_globals` to wire the class onto
-//! `globalThis`.
+//! `globalThis`. Free-function V8 callbacks are written by hand in the
+//! runtime crate (see `crates/runtime/src/core/init.rs` for the
+//! patterns: extract `SharedState` via `scope.get_slot`, read JS args
+//! with `args.get(i)`, set the return via `rv.set(...)`).
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
-use syn::{
-    parse_macro_input, FnArg, GenericArgument, Ident, ItemFn, Pat, PathArguments, ReturnType,
-    Type, TypePath,
-};
+use quote::quote;
+use syn::{GenericArgument, Ident, PathArguments, ReturnType, Type, TypePath};
 
 mod v8_class;
 mod v8_iterable;
@@ -450,26 +441,6 @@ pub fn reject_shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-#[proc_macro_attribute]
-pub fn zeroship_op(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attr_str = attr.to_string();
-    let is_async = attr_str.contains("async");
-    let needs_state = attr_str.contains("state");
-
-    let input_fn = parse_macro_input!(item as ItemFn);
-
-    let result = if is_async {
-        generate_async(&input_fn)
-    } else {
-        generate_sync(needs_state, &input_fn)
-    };
-
-    match result {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Type helpers
 // ---------------------------------------------------------------------------
@@ -608,24 +579,6 @@ pub(crate) fn first_generic_arg(ty: &Type) -> Option<&Type> {
 pub(crate) struct Param {
     pub(crate) name: Ident,
     pub(crate) ty: Type,
-}
-
-pub(crate) fn parse_params(f: &ItemFn) -> Vec<Param> {
-    f.sig
-        .inputs
-        .iter()
-        .filter_map(|arg| {
-            if let FnArg::Typed(pt) = arg {
-                if let Pat::Ident(pi) = &*pt.pat {
-                    return Some(Param {
-                        name: pi.ident.clone(),
-                        ty: (*pt.ty).clone(),
-                    });
-                }
-            }
-            None
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,10 +1054,9 @@ fn gen_throw_error() -> TokenStream2 {
 
 /// Generate the function call + return value handling.
 ///
-/// `call` is the pre-built call expression (e.g. `my_fn(a, b)` or
-/// `__instance.method(a, b)`). Splitting this out lets both the
-/// `#[zeroship_op]` and `#[v8_class]` macros reuse the return-value
-/// marshaling logic with their respective call shapes.
+/// `call` is the pre-built call expression (e.g. `__instance.method(a,
+/// b)`). Used by `#[v8_class]` codegen to marshal whatever the user's
+/// method returned into the V8 `ReturnValue`.
 pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> TokenStream2 {
     match output {
         ReturnType::Default => quote! { #call; },
@@ -1248,147 +1200,5 @@ pub(crate) fn gen_call_return(call: &TokenStream2, output: &ReturnType) -> Token
                 _ => quote! { #call; },
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Sync callback generator
-// ---------------------------------------------------------------------------
-
-fn generate_sync(needs_state: bool, input_fn: &ItemFn) -> syn::Result<TokenStream2> {
-    let fn_name = &input_fn.sig.ident;
-    let callback_name = format_ident!("{}_callback", fn_name);
-
-    let params = parse_params(input_fn);
-    let js_start = usize::from(needs_state);
-
-    // State extraction
-    let state_code = if needs_state {
-        quote! {
-            let state: crate::state::SharedState = scope
-                .get_slot::<crate::state::SharedState>()
-                .expect("RuntimeState not in isolate slot")
-                .clone();
-        }
-    } else {
-        quote! {}
-    };
-
-    // JS arg extractions (skip state param)
-    let extractions: Vec<TokenStream2> = params[js_start..]
-        .iter()
-        .enumerate()
-        .map(|(i, p)| gen_extract(i, &p.name, &p.ty))
-        .collect();
-
-    // Call args (all params, including state)
-    let call_args: Vec<&Ident> = params.iter().map(|p| &p.name).collect();
-    let call = quote! { #fn_name(#(#call_args),*) };
-
-    let call_return = gen_call_return(&call, &input_fn.sig.output);
-
-    Ok(quote! {
-        #input_fn
-
-        #[allow(unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_name(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            mut rv: v8::ReturnValue,
-        ) {
-            #state_code
-            #(#extractions)*
-            #call_return
-        }
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Async callback generator
-// ---------------------------------------------------------------------------
-
-fn generate_async(input_fn: &ItemFn) -> syn::Result<TokenStream2> {
-    let fn_name = &input_fn.sig.ident;
-    let callback_name = format_ident!("{}_callback", fn_name);
-
-    let params = parse_params(input_fn);
-
-    // All params are JS args for async (state plumbing is auto-generated)
-    let extractions: Vec<TokenStream2> = params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| gen_extract(i, &p.name, &p.ty))
-        .collect();
-
-    let call_args: Vec<&Ident> = params.iter().map(|p| &p.name).collect();
-
-    // Check return type: String or Result<String, OpError>
-    let is_result = matches!(
-        output_outer_ident(&input_fn.sig.output),
-        Some(ref s) if s == "Result"
-    );
-
-    let send_result = if is_result {
-        quote! {
-            let __value = match #fn_name(#(#call_args),*).await {
-                Ok(__v) => __v,
-                Err(__e) => serde_json::json!({ "error": __e.message }).to_string(),
-            };
-        }
-    } else {
-        quote! {
-            let __value = #fn_name(#(#call_args),*).await;
-        }
-    };
-
-    Ok(quote! {
-        #input_fn
-
-        #[allow(unused_variables, unused_mut, clippy::needless_borrow)]
-        pub(crate) fn #callback_name(
-            scope: &mut v8::PinScope,
-            args: v8::FunctionCallbackArguments,
-            mut rv: v8::ReturnValue,
-        ) {
-            let __state: crate::state::SharedState = scope
-                .get_slot::<crate::state::SharedState>()
-                .expect("RuntimeState not in isolate slot")
-                .clone();
-
-            #(#extractions)*
-
-            // Create promise
-            let __resolver = v8::PromiseResolver::new(scope).unwrap();
-            let __promise = __resolver.get_promise(scope);
-            let __global_resolver = v8::Global::new(scope, __resolver);
-
-            let (__op_id, __request_id) = {
-                let mut __s = __state.borrow_mut();
-                let __id = __s.next_op_id;
-                __s.next_op_id += 1;
-                __s.pending_resolvers.insert(__id, __global_resolver);
-                (__id, __s.executing_request_id)
-            };
-
-            let __fut = Box::pin(async move {
-                #send_result
-                crate::state::OpResult::Completed {
-                    op_id: __op_id,
-                    value: __value,
-                    request_id: __request_id,
-                }
-            });
-
-            __state.borrow_mut().spawned_ops.push(__fut);
-
-            rv.set(__promise.into());
-        }
-    })
-}
-
-fn output_outer_ident(output: &ReturnType) -> Option<String> {
-    match output {
-        ReturnType::Default => None,
-        ReturnType::Type(_, ty) => type_ident(ty),
     }
 }
