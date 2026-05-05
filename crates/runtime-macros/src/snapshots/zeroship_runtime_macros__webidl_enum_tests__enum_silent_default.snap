@@ -1,0 +1,59 @@
+---
+source: crates/runtime-macros/src/webidl_enum_tests.rs
+assertion_line: 82
+expression: format_expansion(out)
+---
+impl RedirectMode {
+    /// WebIDL name → variant. None on unknown name (or
+    /// `Some(Self::default())` if the type carries
+    /// `#[webidl_enum(silent_default)]`).
+    ///
+    /// Codegen exhaustively maps the variant set; adding or
+    /// removing a variant updates this function automatically.
+    #[allow(dead_code)]
+    pub fn from_str(__s: &str) -> ::std::option::Option<Self> {
+        match __s {
+            "follow" => ::std::option::Option::Some(Self::Follow),
+            "error" => ::std::option::Option::Some(Self::Error),
+            "manual" => ::std::option::Option::Some(Self::Manual),
+            _ => {
+                ::std::option::Option::Some(
+                    <Self as ::core::default::Default>::default(),
+                )
+            }
+        }
+    }
+    /// Variant → WebIDL name. Round-trips with `from_str`.
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Follow => "follow",
+            Self::Error => "error",
+            Self::Manual => "manual",
+        }
+    }
+}
+impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for RedirectMode {
+    fn from_v8(
+        scope: &mut ::v8::PinScope,
+        value: ::v8::Local<::v8::Value>,
+    ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
+        let __opt_str: ::std::option::Option<::std::string::String> = {
+            ::v8::tc_scope!(let __tc, scope);
+            let __r = value.to_string(__tc).map(|__s| __s.to_rust_string_lossy(__tc));
+            let _ = __tc.exception();
+            __r
+        };
+        ::std::result::Result::Ok(
+            match __opt_str {
+                ::std::option::Option::Some(__rust_str) => {
+                    Self::from_str(&__rust_str)
+                        .unwrap_or_else(<Self as ::core::default::Default>::default)
+                }
+                ::std::option::Option::None => {
+                    <Self as ::core::default::Default>::default()
+                }
+            },
+        )
+    }
+}

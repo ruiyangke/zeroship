@@ -1,0 +1,86 @@
+---
+source: crates/runtime-macros/src/webidl_enum_tests.rs
+assertion_line: 44
+expression: format_expansion(out)
+---
+impl RequestMode {
+    /// WebIDL name → variant. None on unknown name (or
+    /// `Some(Self::default())` if the type carries
+    /// `#[webidl_enum(silent_default)]`).
+    ///
+    /// Codegen exhaustively maps the variant set; adding or
+    /// removing a variant updates this function automatically.
+    #[allow(dead_code)]
+    pub fn from_str(__s: &str) -> ::std::option::Option<Self> {
+        match __s {
+            "navigate" => ::std::option::Option::Some(Self::Navigate),
+            "same-origin" => ::std::option::Option::Some(Self::SameOrigin),
+            "no-cors" => ::std::option::Option::Some(Self::NoCors),
+            "cors" => ::std::option::Option::Some(Self::Cors),
+            _ => ::std::option::Option::None,
+        }
+    }
+    /// Variant → WebIDL name. Round-trips with `from_str`.
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Navigate => "navigate",
+            Self::SameOrigin => "same-origin",
+            Self::NoCors => "no-cors",
+            Self::Cors => "cors",
+        }
+    }
+}
+impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for RequestMode {
+    fn from_v8(
+        scope: &mut ::v8::PinScope,
+        value: ::v8::Local<::v8::Value>,
+    ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
+        let __coerced: ::std::result::Result<
+            ::std::string::String,
+            ::zeroship_runtime::macro_runtime::state::OpError,
+        > = {
+            ::v8::tc_scope!(let __tc, scope);
+            match value.to_string(__tc) {
+                ::std::option::Option::Some(__s) => {
+                    ::std::result::Result::Ok(__s.to_rust_string_lossy(__tc))
+                }
+                ::std::option::Option::None => {
+                    if __tc.has_caught() {
+                        let __exc = __tc.exception().expect("has_caught implies Some");
+                        ::std::result::Result::Err(
+                            ::zeroship_runtime::macro_runtime::state::OpError::js_value(
+                                __tc,
+                                __exc,
+                                concat!(
+                                    "Cannot convert value to enum `", stringify!(RequestMode),
+                                    "` (user code threw)",
+                                ),
+                            ),
+                        )
+                    } else {
+                        ::std::result::Result::Err(
+                            ::zeroship_runtime::macro_runtime::state::OpError::type_error(
+                                concat!(
+                                    "Cannot convert value to enum `", stringify!(RequestMode),
+                                    "` (ToString failed)",
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+        };
+        let __rust_str = __coerced?;
+        Self::from_str(&__rust_str)
+            .ok_or_else(|| {
+                ::zeroship_runtime::macro_runtime::state::OpError::type_error(
+                    format!(
+                        "Cannot convert value `{}` to enum `{}`. Expected one of: {}",
+                        __rust_str, stringify!(RequestMode),
+                        "'navigate', 'same-origin', 'no-cors', 'cors'",
+                    ),
+                )
+            })
+    }
+}

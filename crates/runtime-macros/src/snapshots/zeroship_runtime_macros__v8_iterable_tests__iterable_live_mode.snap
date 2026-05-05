@@ -1,0 +1,494 @@
+---
+source: crates/runtime-macros/src/v8_iterable_tests.rs
+assertion_line: 78
+expression: format_expansion(out)
+---
+/// Default-pair iterator companion for the parent class
+/// (live-mode). Holds a `Global<Object>` reference to the
+/// parent and re-reads `value_pairs()` on each `next()`
+/// call per WebIDL §3.7.10.2.
+#[doc(hidden)]
+#[allow(non_camel_case_types)]
+pub struct HeadersIterator {
+    /// Live-mode parent reference. The factory captures
+    /// this as a Global so the parent stays reachable for
+    /// the iterator's lifetime; `next()` re-localises and
+    /// recovers `&parent` per call to call `value_pairs()`
+    /// afresh.
+    __parent: ::v8::Global<::v8::Object>,
+    /// Current cursor into the live `value_pairs()` result.
+    /// Increments on each successful `next()`. Does NOT
+    /// reset when the parent shrinks below it; the
+    /// iterator simply reports `done`.
+    __index: usize,
+    /// Iterator kind — selects which of the (K, V) tuple to
+    /// surface as the `value` field of `IteratorResult`.
+    ///   0 = keys, 1 = values, 2 = entries
+    __kind: i32,
+}
+#[doc(hidden)]
+#[allow(non_camel_case_types)]
+pub struct __InstallSlot_HeadersIterator(::v8::Global<::v8::FunctionTemplate>);
+#[allow(non_snake_case, dead_code)]
+impl HeadersIterator {
+    /// Install the iterator class's FunctionTemplate. The
+    /// emitted shape mirrors `#[v8_class]` (one internal field
+    /// for the boxed instance, Symbol.toStringTag = "<Class>
+    /// Iterator", prototype chained to %IteratorPrototype% per
+    /// WebIDL §3.7.10.2). Idempotent per isolate.
+    pub fn install<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> v8::Local<'s, v8::FunctionTemplate> {
+        if let Some(cached) = scope.get_slot::<__InstallSlot_HeadersIterator>() {
+            return v8::Local::new(scope, cached.0.clone());
+        }
+        let __ctor_tmpl = v8::FunctionTemplate::new(scope, __zs_iter_construct_throws);
+        let __class_name = v8::String::new(scope, "HeadersIterator").unwrap();
+        __ctor_tmpl.set_class_name(__class_name);
+        __ctor_tmpl.instance_template(scope).set_internal_field_count(1);
+        let __proto = __ctor_tmpl.prototype_template(scope);
+        {
+            let __key = v8::String::new(scope, "next").unwrap();
+            let __fn_tmpl = v8::FunctionTemplate::new(scope, __Headers_iter_next);
+            __proto.set(__key.into(), __fn_tmpl.into());
+        }
+        {
+            let __tag_sym = v8::Symbol::get_to_string_tag(scope);
+            let __tag_value = v8::String::new(scope, "Headers Iterator").unwrap();
+            __proto
+                .set_with_attr(
+                    __tag_sym.into(),
+                    __tag_value.into(),
+                    v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
+                );
+        }
+        {
+            let __ctor_fn = __ctor_tmpl.get_function(scope).unwrap();
+            let __proto_key = v8::String::new(scope, "prototype").unwrap();
+            let __ctor_proto_v = __ctor_fn.get(scope, __proto_key.into()).unwrap();
+            let __ctor_proto: v8::Local<v8::Object> = __ctor_proto_v.try_into().unwrap();
+            let __js = v8::String::new(
+                    scope,
+                    "Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))",
+                )
+                .unwrap();
+            let __script = v8::Script::compile(scope, __js, None).unwrap();
+            let __iter_proto = __script.run(scope).unwrap();
+            __ctor_proto.set_prototype(scope, __iter_proto);
+        }
+        let __global = ::v8::Global::new(scope, __ctor_tmpl);
+        let __local = ::v8::Local::new(scope, __global.clone());
+        scope.set_slot(__InstallSlot_HeadersIterator(__global));
+        __local
+    }
+}
+/// `new <Class>Iterator()` is not user-callable per WebIDL —
+/// iterator objects are constructed by the parent's keys() /
+/// values() / entries() factories. The exposed constructor
+/// throws TypeError synchronously.
+#[doc(hidden)]
+#[allow(non_snake_case, unused_variables)]
+pub(crate) fn __zs_iter_construct_throws(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let __msg = v8::String::new(
+            scope,
+            concat!(
+                "Illegal constructor: ", "HeadersIterator",
+                " can only be created via the parent's keys() / values() / entries()",
+            ),
+        )
+        .unwrap();
+    let __exc = v8::Exception::type_error(scope, __msg);
+    scope.throw_exception(__exc);
+}
+/// Allocate an iterator instance with the given kind. In
+/// snapshot mode this clones `value_pairs()` and stashes the
+/// vec; in live mode this captures a `Global<Object>` of the
+/// parent and defers the value_pairs() reads to each `next()`.
+/// Brand-checks the receiver against the parent class.
+#[doc(hidden)]
+#[allow(non_snake_case, unused_variables, unused_mut)]
+fn __zs_iter_factory_impl(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+    __kind: i32,
+) {
+    let __this = args.this();
+    if !__brand_check_Headers(scope, __this) {
+        let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
+    let __ext = match __this
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    {
+        Some(e) => e,
+        None => {
+            let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
+    let __parent_global: ::v8::Global<::v8::Object> = ::v8::Global::new(scope, __this);
+    drop(__ext);
+    let __it_tmpl = HeadersIterator::install(scope);
+    let __it_inst_tmpl = __it_tmpl.instance_template(scope);
+    let __it_obj = match __it_inst_tmpl.new_instance(scope) {
+        Some(o) => o,
+        None => {
+            let __msg = v8::String::new(scope, "Failed to allocate iterator").unwrap();
+            let __exc = v8::Exception::error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
+    let __it_class_fn = __it_tmpl.get_function(scope).unwrap();
+    let __proto_key = v8::String::new(scope, "prototype").unwrap();
+    let __it_proto_v = __it_class_fn.get(scope, __proto_key.into()).unwrap();
+    __it_obj.set_prototype(scope, __it_proto_v);
+    let __boxed = ::std::boxed::Box::new(HeadersIterator {
+        __parent: __parent_global,
+        __index: 0,
+        __kind,
+    });
+    let __raw = ::std::boxed::Box::into_raw(__boxed);
+    let __raw_addr = __raw as usize;
+    let __ext = v8::External::new(scope, __raw as *mut ::std::ffi::c_void);
+    __it_obj.set_internal_field(0, __ext.into());
+    let __weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        __it_obj,
+        ::std::boxed::Box::new(move || unsafe {
+            drop(::std::boxed::Box::from_raw(__raw_addr as *mut HeadersIterator));
+        }),
+    );
+    ::std::mem::forget(__weak);
+    rv.set(__it_obj.into());
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub(crate) fn __Headers_iter_factory_keys(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    __zs_iter_factory_impl(scope, args, rv, 0i32);
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub(crate) fn __Headers_iter_factory_values(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    __zs_iter_factory_impl(scope, args, rv, 1i32);
+}
+#[doc(hidden)]
+#[allow(non_snake_case)]
+pub(crate) fn __Headers_iter_factory_entries(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    __zs_iter_factory_impl(scope, args, rv, 2i32);
+}
+/// `forEach(callback, thisArg?)`. Invokes `callback(value, key,
+/// this)` for each pair, where `this` is the parent collection
+/// instance.
+///
+/// In snapshot mode, `value_pairs()` is read once before the
+/// loop; mutations made by the callback do NOT show up in the
+/// remaining iterations. In live mode, `value_pairs()` is re-
+/// read between callbacks per WebIDL §3.7.10.3.
+#[doc(hidden)]
+#[allow(non_snake_case, unused_variables, unused_mut)]
+pub(crate) fn __Headers_for_each(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let __this = args.this();
+    if !__brand_check_Headers(scope, __this) {
+        let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
+    let __ext = match __this
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    {
+        Some(e) => e,
+        None => {
+            let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
+    let __cb_arg = args.get(0);
+    let __cb_fn: v8::Local<v8::Function> = match __cb_arg.try_into() {
+        Ok(f) => f,
+        Err(_) => {
+            let __msg = v8::String::new(scope, "forEach callback is not callable")
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
+    let __this_arg = args.get(1);
+    let mut __cursor: usize = 0;
+    let __inflight_addr = __ext.value() as usize;
+    ::std::thread_local! {
+        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::RefCell <
+        ::std::collections::HashSet < usize >, > =
+        ::std::cell::RefCell::new(::std::collections::HashSet::new());
+    }
+    let __already_inflight = __ZS_VALUE_PAIRS_INFLIGHT
+        .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
+    if __already_inflight {
+        let __msg = v8::String::new(
+                scope,
+                "re-entered `value_pairs` on Headers instance — concurrent &mut self callback",
+            )
+            .unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
+    struct __ReentryGuard(usize);
+    impl ::std::ops::Drop for __ReentryGuard {
+        fn drop(&mut self) {
+            __ZS_VALUE_PAIRS_INFLIGHT
+                .with(|__s| {
+                    __s.borrow_mut().remove(&self.0);
+                });
+        }
+    }
+    let __reentry_guard = __ReentryGuard(__inflight_addr);
+    loop {
+        let __pairs: ::std::vec::Vec<(ByteString, ByteString)> = {
+            let __instance_ptr: *mut Headers = __ext.value() as *mut Headers;
+            let __instance: &mut Headers = unsafe { &mut *__instance_ptr };
+            __instance.value_pairs()
+        };
+        if __cursor >= __pairs.len() {
+            break;
+        }
+        let (__k, __v): (ByteString, ByteString) = __pairs[__cursor].clone();
+        __cursor += 1;
+        drop(__pairs);
+        let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__k);
+        let __k_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
+                scope,
+                __bytes_ref,
+                v8::NewStringType::Normal,
+            )
+            .unwrap()
+            .into();
+        let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__v);
+        let __v_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
+                scope,
+                __bytes_ref,
+                v8::NewStringType::Normal,
+            )
+            .unwrap()
+            .into();
+        let __cb_args = [__v_v, __k_v, __this.into()];
+        if __cb_fn.call(scope, __this_arg, &__cb_args).is_none() {
+            return;
+        }
+    }
+}
+/// `<Class>Iterator.prototype.next()`. Returns `{ value, done }`
+/// per the JS Iterator protocol.
+///
+/// Snapshot mode walks the cached `__pairs` vector. Live mode
+/// re-localises the parent and calls `value_pairs()` afresh on
+/// each call, indexing at the current cursor.
+#[doc(hidden)]
+#[allow(non_snake_case, unused_variables, unused_mut)]
+pub(crate) fn __Headers_iter_next(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let __this = args.this();
+    let __ext = match __this
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    {
+        Some(e) => e,
+        None => {
+            let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
+    let __it: &mut HeadersIterator = unsafe {
+        &mut *(__ext.value() as *mut HeadersIterator)
+    };
+    let __idx = __it.__index;
+    let __kind = __it.__kind;
+    let __parent_global = __it.__parent.clone();
+    let _ = __it;
+    let __parent_local: ::v8::Local<::v8::Object> = ::v8::Local::new(
+        scope,
+        &__parent_global,
+    );
+    let __parent_ext = match __parent_local
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    {
+        Some(e) => e,
+        None => {
+            let __res = v8::Object::new(scope);
+            let __vk = v8::String::new(scope, "value").unwrap();
+            let __dk = v8::String::new(scope, "done").unwrap();
+            let __undef = v8::undefined(scope);
+            let __true = v8::Boolean::new(scope, true);
+            __res.set(scope, __vk.into(), __undef.into());
+            __res.set(scope, __dk.into(), __true.into());
+            rv.set(__res.into());
+            return;
+        }
+    };
+    let __inflight_addr = __parent_ext.value() as usize;
+    ::std::thread_local! {
+        static __ZS_VALUE_PAIRS_INFLIGHT : ::std::cell::RefCell <
+        ::std::collections::HashSet < usize >, > =
+        ::std::cell::RefCell::new(::std::collections::HashSet::new());
+    }
+    let __already_inflight = __ZS_VALUE_PAIRS_INFLIGHT
+        .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
+    if __already_inflight {
+        let __msg = v8::String::new(
+                scope,
+                "re-entered `value_pairs` on Headers instance — concurrent &mut self callback",
+            )
+            .unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
+    struct __ReentryGuard(usize);
+    impl ::std::ops::Drop for __ReentryGuard {
+        fn drop(&mut self) {
+            __ZS_VALUE_PAIRS_INFLIGHT
+                .with(|__s| {
+                    __s.borrow_mut().remove(&self.0);
+                });
+        }
+    }
+    let __reentry_guard = __ReentryGuard(__inflight_addr);
+    let __instance_ptr: *mut Headers = __parent_ext.value() as *mut Headers;
+    let __pairs: ::std::vec::Vec<(ByteString, ByteString)> = {
+        let __instance: &mut Headers = unsafe { &mut *__instance_ptr };
+        __instance.value_pairs()
+    };
+    drop(__parent_ext);
+    if __idx >= __pairs.len() {
+        let __res = v8::Object::new(scope);
+        let __vk = v8::String::new(scope, "value").unwrap();
+        let __dk = v8::String::new(scope, "done").unwrap();
+        let __undef = v8::undefined(scope);
+        let __true = v8::Boolean::new(scope, true);
+        __res.set(scope, __vk.into(), __undef.into());
+        __res.set(scope, __dk.into(), __true.into());
+        rv.set(__res.into());
+        return;
+    }
+    let (__k, __v): (ByteString, ByteString) = __pairs[__idx].clone();
+    {
+        let __it_again: &mut HeadersIterator = unsafe {
+            &mut *(__ext.value() as *mut HeadersIterator)
+        };
+        __it_again.__index = __idx + 1;
+    }
+    let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__k);
+    let __k_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
+            scope,
+            __bytes_ref,
+            v8::NewStringType::Normal,
+        )
+        .unwrap()
+        .into();
+    let __bytes_ref: &[u8] = ::std::convert::AsRef::as_ref(&__v);
+    let __v_v: v8::Local<v8::Value> = v8::String::new_from_one_byte(
+            scope,
+            __bytes_ref,
+            v8::NewStringType::Normal,
+        )
+        .unwrap()
+        .into();
+    let __value: v8::Local<v8::Value> = match __kind {
+        0i32 => __k_v,
+        1i32 => __v_v,
+        _ => {
+            let __arr = v8::Array::new(scope, 2);
+            __arr.set_index(scope, 0, __k_v);
+            __arr.set_index(scope, 1, __v_v);
+            __arr.into()
+        }
+    };
+    let __res = v8::Object::new(scope);
+    let __vk = v8::String::new(scope, "value").unwrap();
+    let __dk = v8::String::new(scope, "done").unwrap();
+    let __false = v8::Boolean::new(scope, false);
+    __res.set(scope, __vk.into(), __value);
+    __res.set(scope, __dk.into(), __false.into());
+    rv.set(__res.into());
+}
+#[allow(non_snake_case, dead_code)]
+impl Headers {
+    /// Called from `<Class>::install` to layer the iterable
+    /// surface (keys / values / entries / forEach / @@iterator)
+    /// onto the parent's prototype. Idempotent: safe to call
+    /// multiple times within an isolate; the second call
+    /// overwrites with identical templates.
+    ///
+    /// The macro hard-codes `entries()` as the @@iterator
+    /// alias per WebIDL §3.7.10 default-iterator semantics.
+    #[doc(hidden)]
+    pub(crate) fn __zs_install_iterable_methods<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        proto: v8::Local<'s, v8::ObjectTemplate>,
+    ) {
+        {
+            let __key = v8::String::new(scope, "keys").unwrap();
+            let __tmpl = v8::FunctionTemplate::new(scope, __Headers_iter_factory_keys);
+            proto.set(__key.into(), __tmpl.into());
+        }
+        {
+            let __key = v8::String::new(scope, "values").unwrap();
+            let __tmpl = v8::FunctionTemplate::new(scope, __Headers_iter_factory_values);
+            proto.set(__key.into(), __tmpl.into());
+        }
+        let __entries_tmpl = v8::FunctionTemplate::new(
+            scope,
+            __Headers_iter_factory_entries,
+        );
+        {
+            let __key = v8::String::new(scope, "entries").unwrap();
+            proto.set(__key.into(), __entries_tmpl.into());
+        }
+        {
+            let __key = v8::String::new(scope, "forEach").unwrap();
+            let __tmpl = v8::FunctionTemplate::new(scope, __Headers_for_each);
+            proto.set(__key.into(), __tmpl.into());
+        }
+        {
+            let __sym = v8::Symbol::get_iterator(scope);
+            proto.set(__sym.into(), __entries_tmpl.into());
+        }
+    }
+}

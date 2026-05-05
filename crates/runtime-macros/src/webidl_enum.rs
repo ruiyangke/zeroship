@@ -48,10 +48,24 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Variant};
+use syn::{Data, DeriveInput, Fields, Variant};
 
 pub fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+    expand_tokens(input.into()).into()
+}
+
+/// `proc_macro2::TokenStream` entry point — same logic as [`expand`]
+/// but operates on `TokenStream2` so unit tests in this crate (insta
+/// snapshots) can call it without going through the proc-macro driver.
+pub fn expand_tokens(input: TokenStream2) -> TokenStream2 {
+    let input: DeriveInput = match syn::parse2(input) {
+        Ok(parsed) => parsed,
+        Err(e) => return e.to_compile_error(),
+    };
+    expand_derive(input)
+}
+
+fn expand_derive(input: DeriveInput) -> TokenStream2 {
     let name = &input.ident;
 
     let variants = match &input.data {
@@ -61,8 +75,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 name,
                 "#[derive(WebIdlEnum)] requires an enum",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -73,8 +86,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 v,
                 "#[derive(WebIdlEnum)]: variants must be unit-style (no payload)",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     }
 
@@ -83,7 +95,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
     // behaviour.
     let flags = match parse_enum_flags(&input.attrs) {
         Ok(f) => f,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
 
     // Per-variant arms. Case-sensitive mode dispatches via a `match`
@@ -278,7 +290,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Type-level flags parsed from `#[webidl_enum(...)]` on the enum.

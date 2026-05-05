@@ -45,6 +45,17 @@ mod v8_iterable;
 mod webidl_dict;
 mod webidl_enum;
 
+// Wave 7 (F9) — insta snapshot tests for the WebIdl derives + v8_iterable.
+// Live as siblings of the production module so insta's default snapshot
+// resolution lands the .snap files in src/snapshots/. Mirrors
+// v8_class/snapshot_tests.rs which covers the v8_class derive.
+#[cfg(test)]
+mod v8_iterable_tests;
+#[cfg(test)]
+mod webidl_dict_tests;
+#[cfg(test)]
+mod webidl_enum_tests;
+
 // Re-exports for the v8_class emit submodules and WebIDL derives.
 // Codegen helpers (return-value marshalling, extract codegen, OpError
 // throw, must_str variants) all live in `codegen.rs`. Type-classifier

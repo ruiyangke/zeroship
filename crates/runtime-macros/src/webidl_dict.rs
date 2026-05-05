@@ -50,12 +50,26 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Field, Fields};
+use syn::{Data, DeriveInput, Field, Fields};
 
 use crate::must_str_abs;
 
 pub fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+    expand_tokens(input.into()).into()
+}
+
+/// `proc_macro2::TokenStream` entry point — same logic as [`expand`]
+/// but operates on `TokenStream2` so unit tests in this crate (insta
+/// snapshots) can call it without going through the proc-macro driver.
+pub fn expand_tokens(input: TokenStream2) -> TokenStream2 {
+    let input: DeriveInput = match syn::parse2(input) {
+        Ok(parsed) => parsed,
+        Err(e) => return e.to_compile_error(),
+    };
+    expand_derive(input)
+}
+
+fn expand_derive(input: DeriveInput) -> TokenStream2 {
     let name = &input.ident;
 
     // Reject anything that's not a struct with named fields. WebIDL
@@ -69,8 +83,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                     name,
                     "#[derive(WebIdlDict)] requires a struct with named fields",
                 )
-                .to_compile_error()
-                .into();
+                .to_compile_error();
             }
         },
         _ => {
@@ -78,8 +91,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 name,
                 "#[derive(WebIdlDict)] requires a struct (not enum / union)",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -91,7 +103,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
     let field_assignments: Vec<TokenStream2> = fields
         .iter()
@@ -167,7 +179,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Extract a single dictionary member.
