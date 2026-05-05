@@ -59,13 +59,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "shares.token_id CHECK accepts base64url alphabet",
         sql: include_str!("../migrations/0003_share_token_id_alphabet.sql"),
     },
+    Migration {
+        version: 4,
+        description: "Phase-3 role-grant tightening (sandbox_app no DELETE on events)",
+        sql: include_str!("../migrations/0004_role_split_phase3.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 3;
+pub const LATEST_MIGRATION_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
