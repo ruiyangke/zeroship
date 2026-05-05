@@ -1,0 +1,5 @@
+error: #[v8_inherit_intrinsic]: unrecognised value `ArrayPrototype` (expected "IteratorPrototype")
+  --> tests/compile_fail_marker_attr/v8_inherit_intrinsic_bad_value.rs:21:6
+   |
+21 | impl Bare {
+   |      ^^^^

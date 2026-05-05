@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 
+use quote::format_ident;
+
 use super::super::{ClassMethod, ConstDecl, MethodKind};
 
 /// Aggregate of everything the emit phase needs to render a single
@@ -78,6 +80,18 @@ pub(crate) struct ClassConfig<'a> {
     /// `<Class>::__zs_install_iterable_methods(scope, __proto)` to
     /// splice into the install fn body. `None` when absent.
     pub install_iterable_call: Option<proc_macro2::TokenStream>,
+
+    // ---- Cached idents (Wave 9 N1) ---------------------------------
+    /// Pre-computed `__brand_check_<Class>` ident. The format-ident
+    /// pattern is invoked at 6 emit sites (brand-check helper,
+    /// public_is, gen_recover_box, gen_async_method_callback,
+    /// gen_same_object_getter_callback, v8_iterable's parent brand
+    /// pass-through). Caching here means the `format_ident!` runs
+    /// once at config-build time; emit sites read the cached value.
+    /// Cosmetic/performance refinement — same ident, fewer
+    /// allocations. Closes N1 from
+    /// docs/reviews/runtime-macros-architecture-critique-2026-05-05-v2.md.
+    pub brand_check_ident: syn::Ident,
 }
 
 impl<'a> ClassConfig<'a> {
@@ -99,6 +113,7 @@ impl<'a> ClassConfig<'a> {
         iterable_codegen: proc_macro2::TokenStream,
         install_iterable_call: Option<proc_macro2::TokenStream>,
     ) -> Self {
+        let brand_check_ident = format_ident!("__brand_check_{}", class_ty);
         Self {
             class_ty,
             state_ty,
@@ -111,6 +126,7 @@ impl<'a> ClassConfig<'a> {
             consts,
             iterable_codegen,
             install_iterable_call,
+            brand_check_ident,
         }
     }
 

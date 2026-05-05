@@ -8,7 +8,7 @@
 //! recovery.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::helpers::{
     gen_param_extractions, method_callback_ident, parse_params_skipping_self,
@@ -95,7 +95,6 @@ pub(crate) fn gen_same_object_getter_callback(
         quote! { &*__instance }
     };
 
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     // §2.7 / §4.1 row 16: the Private symbol is keyed by
     // `(module_path, marker, method)` so two classes with same-named
     // markers in different modules can't collide on a single Private.
@@ -109,9 +108,25 @@ pub(crate) fn gen_same_object_getter_callback(
     // because the SameObject private-symbol cache check has to interleave
     // BETWEEN brand check and External recovery — `gen_recover_box`'s
     // all-in-one form would emit the wrong order for that.
-    let brand_check = recover_box::gen_brand_check_throw(&brand_check_fn);
+    // Wave 9 N1: brand-check ident from ClassConfig (cached at
+    // construction time), not recomputed here.
+    let brand_check = recover_box::gen_brand_check_throw(&cfg.brand_check_ident);
     let recover_external = recover_box::gen_recover_external();
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    // NS1: same `&mut *` vs `&*` switch as `gen_recover_box`. For
+    // `&self` SameObject getters (the common shape — `Request.headers`,
+    // `URL.searchParams`), materialise as `&Self` so a synchronous
+    // re-entry on the cache-miss path cannot manifest two `&mut Self`
+    // bindings from the same External pointer.
+    let materialise = if m.mut_receiver {
+        quote! {
+            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+        }
+    } else {
+        quote! {
+            let __instance = unsafe { &*(__ext.value() as *const #state_ty) };
+        }
+    };
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -179,7 +194,7 @@ pub(crate) fn gen_same_object_getter_callback(
             // it triggers), the second call would alias `&mut Self`.
             // No-op for the `&self` case (the common shape).
             #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+            #materialise
 
             #(#extractions)*
 

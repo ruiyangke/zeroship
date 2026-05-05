@@ -1,6 +1,5 @@
 ---
 source: crates/runtime-macros/src/v8_class/snapshot_tests.rs
-assertion_line: 65
 expression: format_expansion(out)
 ---
 impl Foo {
@@ -393,7 +392,7 @@ pub(crate) fn __Foo_value_callback(
             return;
         }
     };
-    let __instance = unsafe { &mut *(__ext.value() as *mut Foo) };
+    let __instance = unsafe { &*(__ext.value() as *const Foo) };
     let __r = <Foo>::value(&*__instance);
     rv.set(v8::Integer::new_from_unsigned(scope, __r).into());
 }

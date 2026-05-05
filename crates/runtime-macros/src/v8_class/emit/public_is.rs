@@ -20,7 +20,7 @@
 //! See `crates/runtime-macros/STABILITY.md` for the formal contract.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::shared::class_config::ClassConfig;
 
@@ -41,7 +41,8 @@ use super::super::shared::class_config::ClassConfig;
 /// owns the `try_from` gate and the brand-check call directly.
 pub(super) fn gen_public_is_fn(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    // Wave 9 N1: brand-check ident from ClassConfig.
+    let brand_check_fn = &cfg.brand_check_ident;
 
     quote! {
         // ----- Wave 5c, design §3.5 — typed brand-check API -----

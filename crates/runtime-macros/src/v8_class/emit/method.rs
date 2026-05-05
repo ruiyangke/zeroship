@@ -8,7 +8,7 @@
 //! the post-recovery body.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::helpers::{
     gen_param_extractions, method_callback_ident, outer_ident, parse_params_skipping_self,
@@ -63,8 +63,15 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // re-entry guard + unsafe `&mut Self` materialisation. See
     // `shared::recover_box::gen_recover_box` for the soundness
     // rationale and the byte-identity contract with the hand-rolled
-    // prologue this replaces.
-    let recover = recover_box::gen_recover_box(class_ty, state_ty, method_name, m.mut_receiver);
+    // prologue this replaces. Brand-check ident is cached on
+    // ClassConfig (Wave 9 N1) — read here, never recomputed.
+    let recover = recover_box::gen_recover_box(
+        class_ty,
+        state_ty,
+        method_name,
+        m.mut_receiver,
+        &cfg.brand_check_ident,
+    );
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -117,8 +124,15 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     };
     // WebIDL §3.7 brand check + Box<Self> recovery — same contract as
     // `gen_method_callback`. The setter discards the return value at
-    // the end; the prologue itself is byte-identical.
-    let recover = recover_box::gen_recover_box(class_ty, state_ty, method_name, m.mut_receiver);
+    // the end; the prologue itself is byte-identical. Brand-check
+    // ident from ClassConfig (Wave 9 N1).
+    let recover = recover_box::gen_recover_box(
+        class_ty,
+        state_ty,
+        method_name,
+        m.mut_receiver,
+        &cfg.brand_check_ident,
+    );
 
     // §13.1 fix: setters declared as `Result<(), OpError>` route an
     // `Err` arm through the standard 6-variant OpError dispatch so the
@@ -240,13 +254,13 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
     // Async paths can't take `&mut self` (rejected at `expand`) so no
     // re-entry guard is emitted. The brand-check + External-recovery
     // halves are byte-identical to the sync method's prologue; the
     // recovered `__ext.value()` is laundered through `usize` for the
-    // async future capture.
-    let brand_check = recover_box::gen_brand_check_throw(&brand_check_fn);
+    // async future capture. Brand-check ident is cached on
+    // ClassConfig (Wave 9 N1).
+    let brand_check = recover_box::gen_brand_check_throw(&cfg.brand_check_ident);
     let recover_external = recover_box::gen_recover_external();
     // §4.1 Wave 2 + critique C8: pre-fix this site `.expect`'d on the
     // SharedState slot lookup. A misconfigured runtime (slot not

@@ -22,6 +22,10 @@
 //!     `#[v8_to_string_tag(Foo)]` (missing `=` shape)
 //!   - `v8_inherit_intrinsic_non_string.rs` — `#[v8_inherit_intrinsic
 //!     = 42]` (non-string literal value)
+//!   - `v8_inherit_intrinsic_bad_value.rs`  — `#[v8_inherit_intrinsic
+//!     = "ArrayPrototype"]` (recognised SHAPE but unsupported VALUE;
+//!     Wave 9 NS2 moved the diagnostic out of the install fn body
+//!     and into the analyse phase)
 //!   - `v8_state_marker_missing_path.rs`   — `#[v8_state_marker]`
 //!     (bare attribute, no parenthesised marker)
 //!   - `v8_state_marker_non_path.rs`       — `#[v8_state_marker = "M"]`
@@ -39,6 +43,7 @@ fn marker_attr_compile_fail_snapshots() {
     t.compile_fail("tests/compile_fail_marker_attr/v8_name_non_string_lit.rs");
     t.compile_fail("tests/compile_fail_marker_attr/v8_to_string_tag_bare_ident.rs");
     t.compile_fail("tests/compile_fail_marker_attr/v8_inherit_intrinsic_non_string.rs");
+    t.compile_fail("tests/compile_fail_marker_attr/v8_inherit_intrinsic_bad_value.rs");
     t.compile_fail("tests/compile_fail_marker_attr/v8_state_marker_missing_path.rs");
     t.compile_fail("tests/compile_fail_marker_attr/v8_state_marker_non_path.rs");
     t.compile_fail("tests/compile_fail_marker_attr/v8_constructor_unknown_arg.rs");

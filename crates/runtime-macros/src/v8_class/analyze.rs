@@ -83,6 +83,28 @@ pub(super) fn analyze<'a>(
     let async_iterable_method = parsed_class_attrs.async_iterable;
     let const_decls = parsed_class_attrs.consts;
 
+    // Wave 9 NS2: validate `#[v8_inherit_intrinsic = "..."]` value at
+    // analyse time, NOT during emit. Previously the install fn body
+    // emitted `quote! { compile_error!(#msg); }` for unrecognised
+    // values — which DOES surface the right diagnostic but spliced
+    // INSIDE a fn body. Rustc's parser then trips on "expected
+    // expression" / "unused variable" follow-on errors that drown out
+    // the real one. Surfacing as `syn::Error::to_compile_error()` from
+    // `analyze` lets the proc-macro driver emit a single clean
+    // diagnostic with a span on the attribute, before any fn body is
+    // built. Closes NS2 from the v2 code-critic.
+    if let Some(ref value) = inherit_intrinsic {
+        if value != "IteratorPrototype" {
+            return Err(syn::Error::new_spanned(
+                &input.self_ty,
+                format!(
+                    "#[v8_inherit_intrinsic]: unrecognised value `{value}` (expected \"IteratorPrototype\")"
+                ),
+            )
+            .to_compile_error());
+        }
+    }
+
     // Validate that the named method actually exists in the impl block
     // — better error than waiting for the method-callback ident lookup
     // to fail at quote-expansion time. Match against the JS-visible
