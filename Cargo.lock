@@ -5744,6 +5744,7 @@ dependencies = [
  "tracing",
  "trybuild",
  "url",
+ "uuid",
  "v8",
  "zeroship-core",
  "zeroship-runtime-macros",
