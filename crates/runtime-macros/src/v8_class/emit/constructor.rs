@@ -1,0 +1,290 @@
+//! Constructor callback codegen + Box install/finalize helpers.
+//!
+//! Wave 3 commit 4 — relocated from `v8_class/method.rs:649-908` into
+//! the `emit/` cluster (design `docs/proposals/runtime-macros-refactor.md`
+//! §4.1, F3). Hosts:
+//!
+//! - `gen_constructor_callback` — user-defined `#[v8_constructor]`
+//! - `gen_default_constructor_callback` — `<State as Default>::default()`
+//! - `gen_must_new_prologue` — WebIDL §3.7.1 must-new guard
+//! - `gen_box_and_install_finalizer` — internal-field 0 setup +
+//!   guaranteed-finalizer registration
+
+use proc_macro2::TokenStream as TokenStream2;
+use quote::{format_ident, quote};
+
+use super::super::helpers::{
+    gen_param_extractions, outer_ident, parse_params_skipping_self,
+};
+use super::super::parse::{extract_callable_no_new, extract_post_init, extract_reject_shared};
+use super::super::shared::class_config::ClassConfig;
+use super::super::ClassMethod;
+
+/// WebIDL §3.7.1: every interface constructor MUST be called with `new`.
+/// Returns the `if !args.is_construct_call() { throw TypeError; return; }`
+/// prologue unless the class opts out via `#[v8_constructor(callable_no_new)]`.
+///
+/// Class-name interpolation in the message (e.g. `"Constructor Headers
+/// requires 'new'"`) lets WPT diagnose mistakes per-class. The
+/// `is_construct_call` flag is V8-native — it differentiates `new Foo()`
+/// (true) from `Foo()` and `Foo.call(...)` (false) without a runtime
+/// thunk in the user code.
+fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
+    if opt_out {
+        return quote! {};
+    }
+    let class_name_str = class_ty.to_string();
+    let msg = format!(
+        "Failed to construct '{class_name_str}': Please use the 'new' operator, this DOM object constructor cannot be called as a function."
+    );
+    quote! {
+        if !args.is_construct_call() {
+            let __msg = v8::String::new(scope, #msg).unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    }
+}
+
+/// User-defined constructor callback. Parses JS args, invokes the
+/// user's `#[v8_constructor]` fn, materialises a `Box<State>`, and
+/// installs it in internal field 0 with a guaranteed finalizer.
+/// Optional MAC-02 `post_init` hook fires after install.
+pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
+    let has_any_fastcall = cfg.has_any_fastcall;
+    let ctor_name = &c.func.sig.ident;
+    let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
+
+    // Constructors have no `self` receiver; the skipping-self helper
+    // works uniformly here since it just collects typed args.
+    let params = parse_params_skipping_self(c.func);
+    let reject_shared_names = extract_reject_shared(&c.func.attrs);
+    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
+
+    let is_result = matches!(
+        outer_ident(&c.func.sig.output).as_deref(),
+        Some("Result")
+    );
+
+    let make_instance = if is_result {
+        quote! {
+            let __instance: #state_ty = match <#state_ty>::#ctor_name(#(#call_args),*) {
+                Ok(__v) => __v,
+                Err(__err) => {
+                    // JsValue passthrough — preserves user-thrown
+                    // exception verbatim (Error subclass, .code, etc.).
+                    if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+                        let __local = v8::Local::new(scope, __global);
+                        scope.throw_exception(__local);
+                        return;
+                    }
+                    let __msg = v8::String::new(scope, &__err.message).unwrap();
+                    let __exc: v8::Local<v8::Value> = match &__err.kind {
+                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                            ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                        }
+                        ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                            ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+                        }
+                        ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                        ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+                    };
+                    scope.throw_exception(__exc);
+                    return;
+                }
+            };
+        }
+    } else {
+        quote! {
+            let __instance: #state_ty = <#state_ty>::#ctor_name(#(#call_args),*);
+        }
+    };
+
+    let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
+    let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
+
+    // MAC-02: post_init dispatch — runs AFTER box install, BEFORE the
+    // callback returns to V8. Hook signature is
+    // `fn(&mut PinScope, Local<Object>) -> Result<(), OpError>`.
+    //
+    // Behaviour matrix (design §5.2 / §5.3):
+    //   - must_new + post_init: must-new throws early, post_init never
+    //     runs. No special case in this code — must-new returns first.
+    //   - callable_no_new + post_init: hook only fires for `new Foo()`
+    //     (is_construct_call() == true). Bare `Foo()` skips the hook
+    //     to avoid writing private symbols on globalThis (the design
+    //     reverses the v1 "always run" decision; see §5.3).
+    //   - #[v8_inherit]: derived's hook runs; base's does NOT auto-chain
+    //     (V8's existing constructor semantics — derived is responsible
+    //     for invoking base setup explicitly; see §5.4 worked example).
+    //
+    // Box reclamation under failure (§5.9 / §4.4): when the hook returns
+    // Err, the macro throws a JS exception and returns. The box stays
+    // installed in field 0 until the V8 weak finalizer reclaims the
+    // wrapper on the next GC sweep. v1 ships with lazy drop; eager drop
+    // is deferred per the design's cost-benefit analysis. The
+    // user-visible contract: `Self::Drop` side-effects from a failed
+    // post_init may be delayed by up to one GC cycle.
+    let post_init = match extract_post_init(&c.func.attrs) {
+        Ok(None) => quote! {},
+        Err(e) => return e.to_compile_error(),
+        Ok(Some(hook_ident)) => {
+            // Mirror the make_instance Result arm verbatim — same five
+            // OpErrorKind variants from crates/runtime/src/core/state.rs
+            // (TypeError, RangeError, Error, DomException, NodeError, JsValue).
+            // Any addition there must be mirrored here.
+            quote! {
+                if args.is_construct_call() {
+                    match <#class_ty>::#hook_ident(scope, __this) {
+                        Ok(()) => {},
+                        Err(__err) => {
+                            if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
+                                let __exc = v8::Local::new(scope, __global);
+                                scope.throw_exception(__exc);
+                                return;
+                            }
+                            let __msg = v8::String::new(scope, &__err.message).unwrap();
+                            let __exc: v8::Local<v8::Value> = match __err.kind {
+                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
+                                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
+                                }
+                                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
+                                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
+                                }
+                                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
+                                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
+                            };
+                            scope.throw_exception(__exc);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_ident(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            _rv: v8::ReturnValue,
+        ) {
+            #must_new
+            let __this = args.this();
+
+            #(#extractions)*
+            #make_instance
+
+            #store
+            #post_init
+        }
+    }
+}
+
+/// Default-derived constructor callback — emitted when the user impl
+/// has no `#[v8_constructor]` attribute. Allocates a `<State as
+/// Default>::default()`, boxes it, and installs the finalizer.
+/// Always must-new (no opt-out path for default-derived constructors).
+pub(crate) fn gen_default_constructor_callback(cfg: &ClassConfig) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
+    let has_any_fastcall = cfg.has_any_fastcall;
+    let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
+    let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
+    // No method-level attrs to read — the Default-derived constructor
+    // is always must-new. The opt-out attribute requires a user-written
+    // `#[v8_constructor]`, by definition.
+    let must_new = gen_must_new_prologue(class_ty, false);
+
+    quote! {
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+        pub(crate) fn #callback_ident(
+            scope: &mut v8::PinScope,
+            args: v8::FunctionCallbackArguments,
+            _rv: v8::ReturnValue,
+        ) {
+            #must_new
+            let __this = args.this();
+            let __instance: #state_ty = <#state_ty as ::core::default::Default>::default();
+
+            #store
+        }
+    }
+}
+
+/// Box the instance, store the raw pointer in internal field 0, and
+/// register a guaranteed finalizer on the JS wrapper to reclaim the
+/// Box when V8 GCs the object.
+///
+/// When `has_any_fastcall` is true, the same raw pointer is also stored
+/// in slot 1 via `set_aligned_pointer_in_internal_field` so fastcall
+/// shims can recover `*const Self` without a scope (a single load,
+/// `get_aligned_pointer_from_internal_field(1, 0)`). Slot 0 keeps the
+/// External + finalizer for the standard wrapper teardown; slot 1 is
+/// scope-free and read-only from the fast path.
+///
+/// The pointer is captured as `usize` in the closure so we don't have
+/// to assert `Send` on a `*mut Self`; we cast back inside the closure
+/// where the type is statically known. The Weak handle is forgotten
+/// (via `mem::forget`) because dropping it would deregister the
+/// finalizer — `with_guaranteed_finalizer` ensures the closure runs
+/// on GC or isolate teardown regardless.
+fn gen_box_and_install_finalizer(state_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
+    let fastcall_slot1 = if has_any_fastcall {
+        quote! {
+            // tag = 0: must match the tag passed to
+            // get_aligned_pointer_from_internal_field in the fastcall
+            // shim. V8 uses the tag to distinguish embedder pointer
+            // categories — a mismatch returns null.
+            __this.set_aligned_pointer_in_internal_field(
+                1,
+                __raw_ptr as *const ::std::ffi::c_void,
+                0,
+            );
+        }
+    } else {
+        quote! {}
+    };
+    quote! {
+        let __boxed = Box::new(__instance);
+        let __raw_ptr = Box::into_raw(__boxed);
+        let __raw_addr = __raw_ptr as usize;
+
+        let __ext = v8::External::new(scope, __raw_ptr as *mut ::std::ffi::c_void);
+        __this.set_internal_field(0, __ext.into());
+
+        // Optional fastcall slot — set only when at least one method
+        // on the class is annotated with `#[v8_method(fastcall)]` /
+        // `#[v8_getter(fastcall)]`. Slot 1 holds the same Box raw
+        // pointer as slot 0's External, but stored as an aligned
+        // pointer so the fast-path shim can recover `*const Self`
+        // without a scope.
+        #fastcall_slot1
+
+        // SAFETY: __raw_addr was Box::into_raw'd from Box<#state_ty>;
+        // the finalizer closure casts back to the same type and drops
+        // the Box exactly once when V8 reclaims the JS wrapper.
+        let __weak = v8::Weak::with_guaranteed_finalizer(
+            scope,
+            __this,
+            Box::new(move || {
+                unsafe {
+                    drop(Box::from_raw(__raw_addr as *mut #state_ty));
+                }
+            }),
+        );
+        // Dropping the Weak removes the finalizer. The "guaranteed"
+        // variant fires on GC or isolate teardown anyway, so we leak
+        // the per-instance WeakData (~32 bytes) to keep the registration.
+        ::std::mem::forget(__weak);
+    }
+}

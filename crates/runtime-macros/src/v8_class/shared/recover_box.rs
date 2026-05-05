@@ -22,7 +22,7 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
-use super::super::method::gen_reentry_guard;
+use super::super::emit::reentry_guard::gen_reentry_guard;
 
 /// Emit the standalone brand-check prelude:
 ///

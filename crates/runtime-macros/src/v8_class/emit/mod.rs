@@ -24,17 +24,22 @@ use quote::quote;
 use syn::ItemImpl;
 
 use super::fastcall::gen_fastcall_callback;
-use super::method::{
-    gen_async_method_callback, gen_constructor_callback, gen_default_constructor_callback,
-    gen_method_callback, gen_same_object_getter_callback, gen_static_callback,
-};
 use super::shared::class_config::ClassConfig;
 use super::MethodKind;
+use constructor::{gen_constructor_callback, gen_default_constructor_callback};
+use getter::gen_same_object_getter_callback;
+use method::{gen_async_method_callback, gen_method_callback};
+use static_op::gen_static_callback;
 
 pub(super) mod brand;
+pub(super) mod constructor;
+pub(super) mod getter;
 pub(super) mod install;
+pub(super) mod method;
 pub(super) mod public_is;
+pub(super) mod reentry_guard;
 pub(super) mod slot_types;
+pub(super) mod static_op;
 
 /// Compose the full `#[v8_class]` expansion from a parsed-and-analysed
 /// [`ClassConfig`] plus the marker-stripped impl block. Caller passes

@@ -63,7 +63,6 @@ use crate::v8_iterable;
 mod emit;
 mod fastcall;
 mod helpers;
-mod method;
 mod parse;
 pub(crate) mod shared;
 
