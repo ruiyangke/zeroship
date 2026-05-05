@@ -64,6 +64,7 @@ mod fastcall;
 mod helpers;
 mod method;
 mod parse;
+pub(crate) mod shared;
 
 use fastcall::{fastcall_cfn_ident, gen_fastcall_callback, validate_fastcall_signature};
 use helpers::method_callback_ident;

@@ -81,7 +81,7 @@ use crate::gen_call_return;
 ///
 /// The caller must run this AFTER the External recovery and BEFORE
 /// the unsafe `&mut Self` materialisation.
-fn gen_reentry_guard(
+pub(super) fn gen_reentry_guard(
     class_ty: &syn::Ident,
     method_name: &syn::Ident,
     is_mut_self: bool,
@@ -175,8 +175,17 @@ pub(super) fn gen_method_callback(
 
     let _ = getter_args;
 
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
-    let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    // WebIDL §3.7 brand check + Box<Self> recovery + (optional)
+    // re-entry guard + unsafe `&mut Self` materialisation. See
+    // `shared::recover_box::gen_recover_box` for the soundness
+    // rationale and the byte-identity contract with the hand-rolled
+    // prologue this replaces.
+    let recover = super::shared::recover_box::gen_recover_box(
+        class_ty,
+        state_ty,
+        method_name,
+        m.mut_receiver,
+    );
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -185,39 +194,7 @@ pub(super) fn gen_method_callback(
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            // WebIDL §3.7 brand check: walk the prototype chain
-            // looking for the cached `Foo.prototype`. If absent, the
-            // receiver isn't a Foo (or a Foo subclass) — throwing
-            // "Illegal invocation" is mandatory before the unsafe
-            // internal-field deref. See `__brand_check_<ClassTy>`'s
-            // doc-comment for the soundness rationale.
-            let __this = args.this();
-            if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
-            }
-            // Brand check passed: internal field 0 is guaranteed to
-            // hold a `Box<#state_ty>` raw pointer (set in
-            // `gen_box_and_install_finalizer`). Recover the External.
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
-            // Re-entry guard for `&mut self` (no-op for `&self`). MUST
-            // run AFTER External recovery (we need the addr) and BEFORE
-            // the unsafe `&mut Self` materialisation (or we'd UB through
-            // an aliased pointer before the guard could fire).
-            #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+            #recover
 
             #(#extractions)*
             #call_return
@@ -310,6 +287,13 @@ pub(super) fn gen_same_object_getter_callback(
     // qualifier reflects where the class lives. Net string format:
     //   __zs_same_object_<crate::path::to::module>::<MarkerTy>_<method>
     let private_marker_method = format!("{}_{}", class_ty, method_name);
+    // Brand check + (cache-miss-path) External recovery + reentry guard
+    // are decomposed into the building blocks of `shared::recover_box`
+    // because the SameObject private-symbol cache check has to interleave
+    // BETWEEN brand check and External recovery — `gen_recover_box`'s
+    // all-in-one form would emit the wrong order for that.
+    let brand_check = super::shared::recover_box::gen_brand_check_throw(&brand_check_fn);
+    let recover_external = super::shared::recover_box::gen_recover_external();
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
 
     quote! {
@@ -322,13 +306,7 @@ pub(super) fn gen_same_object_getter_callback(
             // 1. Brand check before touching internal fields. Same
             //    contract as every other generated callback — see
             //    `__brand_check_<ClassTy>`'s doc-comment.
-            let __this = args.this();
-            if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
-            }
+            #brand_check
 
             // 2. Resolve the per-instance Private symbol for this
             //    getter. `Private::for_api` is interned by name across
@@ -363,17 +341,7 @@ pub(super) fn gen_same_object_getter_callback(
 
             // 4. Cache miss: recover Box<Self>, mint the value, stash,
             //    return.
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
+            #recover_external
             // Re-entry guard for `&mut self` SameObject getters. The
             // miss path runs the user method exactly once; if that body
             // re-enters the same instance (e.g. through a JS callback
@@ -476,6 +444,13 @@ pub(super) fn gen_async_method_callback(
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    // Async paths can't take `&mut self` (rejected at `expand`) so no
+    // re-entry guard is emitted. The brand-check + External-recovery
+    // halves are byte-identical to the sync method's prologue; the
+    // recovered `__ext.value()` is laundered through `usize` for the
+    // async future capture.
+    let brand_check = super::shared::recover_box::gen_brand_check_throw(&brand_check_fn);
+    let recover_external = super::shared::recover_box::gen_recover_external();
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -492,24 +467,8 @@ pub(super) fn gen_async_method_callback(
             //    than just verifying internal-field 0 is an External,
             //    so cross-class calls (`Foo.prototype.method.call(bar)`)
             //    fail before the unsafe deref.
-            let __this = args.this();
-            if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
-            }
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
+            #brand_check
+            #recover_external
             // Cast to usize so the future capture doesn't carry a raw
             // pointer (Rust treats `*mut T` as !Send/!Sync; the future
             // is single-thread either way, but cleaner to launder).
@@ -662,8 +621,15 @@ fn gen_setter_callback(
     } else {
         quote! { &*__instance }
     };
-    let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
-    let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    // WebIDL §3.7 brand check + Box<Self> recovery — same contract as
+    // `gen_method_callback`. The setter discards the return value at
+    // the end; the prologue itself is byte-identical.
+    let recover = super::shared::recover_box::gen_recover_box(
+        class_ty,
+        state_ty,
+        method_name,
+        m.mut_receiver,
+    );
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -672,30 +638,7 @@ fn gen_setter_callback(
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            // WebIDL §3.7 brand check — see method-callback prologue
-            // for the soundness rationale.
-            let __this = args.this();
-            if !#brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
-            }
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
-            // Re-entry guard for `&mut self` setters. See
-            // `gen_reentry_guard` doc-comment for the contract.
-            #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+            #recover
 
             #(#extractions)*
 

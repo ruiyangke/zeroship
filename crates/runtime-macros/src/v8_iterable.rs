@@ -560,6 +560,22 @@ pub(crate) fn generate(
     let iter_install_slot_ty = format_ident!("__InstallSlot_{}", iter_class_ty);
 
     let parent_brand_check_fn = format_ident!("__brand_check_{}", class_ty);
+    // Brand-check + External-recovery preamble — one canonical
+    // implementation in `v8_class::shared::recover_box`. Each callsite
+    // (factory, forEach, next) consumes only the parts it needs:
+    // factory + forEach use brand-check + External recovery; next
+    // skips the brand check (the iterator companion is hand-rolled
+    // and not registered through `#[v8_class]`).
+    let factory_brand_check =
+        crate::v8_class::shared::recover_box::gen_brand_check_throw(&parent_brand_check_fn);
+    let factory_external_recovery =
+        crate::v8_class::shared::recover_box::gen_recover_external();
+    let for_each_brand_check =
+        crate::v8_class::shared::recover_box::gen_brand_check_throw(&parent_brand_check_fn);
+    let for_each_external_recovery =
+        crate::v8_class::shared::recover_box::gen_recover_external();
+    let next_external_recovery =
+        crate::v8_class::shared::recover_box::gen_recover_external();
 
     let iter_kind_keys: i32 = 0;
     let iter_kind_values: i32 = 1;
@@ -1006,26 +1022,11 @@ pub(crate) fn generate(
         ) {
             // Brand check: the receiver MUST be a parent-class
             // instance. Reuses the parent's cached prototype chain
-            // walk emitted by `#[v8_class]`.
-            let __this = args.this();
-            if !#parent_brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
-            }
+            // walk emitted by `#[v8_class]`. Recovery preamble
+            // delegates to the shared helpers (design §3.8).
+            #factory_brand_check
             // Recover Box<#class_ty> from internal field 0.
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
+            #factory_external_recovery
 
             // Per-mode state-fetch: snapshot clones value_pairs() now;
             // live captures a Global<Object> of the parent.
@@ -1122,24 +1123,8 @@ pub(crate) fn generate(
             args: v8::FunctionCallbackArguments,
             _rv: v8::ReturnValue,
         ) {
-            let __this = args.this();
-            if !#parent_brand_check_fn(scope, __this) {
-                let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                let __exc = v8::Exception::type_error(scope, __msg);
-                scope.throw_exception(__exc);
-                return;
-            }
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
+            #for_each_brand_check
+            #for_each_external_recovery
 
             // Snapshot: bind __instance up-front (one read of
             // value_pairs() before the loop). Live: do not bind here;
@@ -1188,17 +1173,7 @@ pub(crate) fn generate(
             // is sufficient since the iterator class isn't exposed in
             // a way that lets users construct one with a different
             // box layout.
-            let __ext = match __this.get_internal_field(scope, 0)
-                .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
-            {
-                Some(e) => e,
-                None => {
-                    let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
-                    let __exc = v8::Exception::type_error(scope, __msg);
-                    scope.throw_exception(__exc);
-                    return;
-                }
-            };
+            #next_external_recovery
             let __it: &mut #iter_class_ty =
                 unsafe { &mut *(__ext.value() as *mut #iter_class_ty) };
 
