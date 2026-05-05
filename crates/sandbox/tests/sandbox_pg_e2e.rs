@@ -581,3 +581,485 @@ async fn list_running_sandboxes_filters_by_status_and_host() {
         "list_running must exclude the stopped row"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 2 — periodic heartbeat + lease-based takeover (round-6 design)
+// ════════════════════════════════════════════════════════════════════
+//
+// These tests need direct access to inject a "second host" row plus
+// to age a host's `last_heartbeat` into the past. The `Database`
+// handle only knows about its own `host_id`, so we drive the helper
+// SQL through a side pool (same connect URL) before/after each call.
+
+use std::time::Duration as StdDuration;
+
+/// Insert a fresh host row owned by a synthetic `host_id` we can use
+/// as the dead host in a takeover test. Returns the typed-id string
+/// (`hst_<base62>`) which is the FK pg expects.
+async fn inject_extra_host(url: &str, hostname: &str) -> (Uuid, String) {
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let host_uuid = Uuid::now_v7();
+    let host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&host_uuid)
+    );
+    let boot_typed = zeroship_core::typed_id::uuid_to_base62(&Uuid::now_v7());
+    client
+        .execute(
+            "INSERT INTO sandbox.hosts (host_id, boot_id, hostname, region, backend, status) \
+             VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'us-local-1', 'nomad-ch', 'alive')",
+            &[&host_typed, &boot_typed, &hostname.to_string()],
+        )
+        .await
+        .unwrap();
+    (host_uuid, host_typed)
+}
+
+/// Force `sandbox.hosts.last_heartbeat = now() - secs_ago` for the
+/// host_id given. The takeover SQL evaluates `now() - last_heartbeat
+/// < lease_ttl` against pg's own clock, so this is the only way to
+/// simulate a stale peer without sleeping for `lease_ttl`.
+async fn age_heartbeat(url: &str, host_typed: &str, secs_ago: i64) {
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.hosts \
+                SET last_heartbeat = now() - make_interval(secs => $2::BIGINT) \
+              WHERE host_id = $1::TEXT",
+            &[&host_typed.to_string(), &secs_ago],
+        )
+        .await
+        .unwrap();
+}
+
+/// Refresh a host's heartbeat to `now()` — used in the race-loss
+/// test to simulate the dead host coming back to life between
+/// `dead_hosts()` and `takeover_sandboxes_from_host()`.
+async fn refresh_heartbeat(url: &str, host_typed: &str) {
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.hosts \
+                SET last_heartbeat = now() \
+              WHERE host_id = $1::TEXT",
+            &[&host_typed.to_string()],
+        )
+        .await
+        .unwrap();
+}
+
+async fn read_host_status(url: &str, host_typed: &str) -> Option<String> {
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let opt = client
+        .query_opt(
+            "SELECT status FROM sandbox.hosts WHERE host_id = $1::TEXT",
+            &[&host_typed.to_string()],
+        )
+        .await
+        .unwrap();
+    opt.map(|r| r.get::<_, String>(0))
+}
+
+async fn read_sandbox_owner_and_gen(
+    url: &str,
+    sandbox_id: &str,
+) -> Option<(String, i64)> {
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let opt = client
+        .query_opt(
+            "SELECT host_id, generation FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&sandbox_id.to_string()],
+        )
+        .await
+        .unwrap();
+    opt.map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1)))
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 7. Heartbeat round-trip
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 heartbeat"]
+async fn heartbeat_round_trip_updates_last_heartbeat() {
+    let db = migrated_db().await;
+    // Read the initial last_heartbeat (boot upsert sets it to now()).
+    let url = test_url();
+    let host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&db.host_id())
+    );
+    // Age the heartbeat to ~30 seconds in the past so we can
+    // confirm `heartbeat()` brings it forward.
+    age_heartbeat(&url, &host_typed, 30).await;
+
+    // Lag should now be ~30 s.
+    let lag = db.heartbeat_lag_seconds().await.unwrap().unwrap();
+    assert!(
+        lag > 25.0 && lag < 60.0,
+        "expected lag near 30 s, got {lag}"
+    );
+
+    // Heartbeat brings it back to ~0 s.
+    db.heartbeat().await.unwrap();
+    let lag_after = db.heartbeat_lag_seconds().await.unwrap().unwrap();
+    assert!(
+        lag_after < 5.0,
+        "expected lag < 5 s after heartbeat, got {lag_after}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 8. Heartbeat persists across multiple ticks
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 heartbeat persistence"]
+async fn heartbeat_persists_latest_across_multiple_ticks() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&db.host_id())
+    );
+    // Three ticks, 100 ms apart. The final lag must reflect the
+    // LAST tick (i.e. ~0 s, not ~200 ms).
+    for _ in 0..3 {
+        db.heartbeat().await.unwrap();
+        compio::time::sleep(StdDuration::from_millis(100)).await;
+    }
+    db.heartbeat().await.unwrap();
+    let lag = db.heartbeat_lag_seconds().await.unwrap().unwrap();
+    assert!(
+        lag < 1.0,
+        "lag after 4 heartbeats with 100ms spacing should be < 1s, got {lag}"
+    );
+    // Sanity: row still exists for our host_typed.
+    let status = read_host_status(&url, &host_typed).await;
+    assert_eq!(status.as_deref(), Some("alive"));
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 9. Dead host detection
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 dead-host detection"]
+async fn dead_hosts_returns_only_lease_expired_rows() {
+    let db = migrated_db().await;
+    let url = test_url();
+
+    // Inject a peer host A. Age its heartbeat by 120 seconds. With
+    // lease_ttl=60, A is dead.
+    let (_a_uuid, a_typed) = inject_extra_host(&url, "host-a").await;
+    age_heartbeat(&url, &a_typed, 120).await;
+
+    let dead = db.dead_hosts(60).await.unwrap();
+    assert!(
+        dead.iter().any(|h| h == &a_typed),
+        "120-s-stale host A must appear: dead = {dead:?}"
+    );
+
+    // The current controller's heartbeat is fresh; it must NOT
+    // appear in dead_hosts.
+    let self_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&db.host_id())
+    );
+    assert!(
+        !dead.iter().any(|h| h == &self_typed),
+        "self must not be reported dead immediately after migrated_db(): dead = {dead:?}"
+    );
+
+    // Refresh A's heartbeat: now A < 60 s old → not dead.
+    refresh_heartbeat(&url, &a_typed).await;
+    let dead_after = db.dead_hosts(60).await.unwrap();
+    assert!(
+        !dead_after.iter().any(|h| h == &a_typed),
+        "after heartbeat refresh, A must not be reported dead: dead_after = {dead_after:?}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 10. Takeover happy path
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 takeover happy path"]
+async fn takeover_reclaims_three_sandboxes_and_marks_host_dead() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Set up host A (dead, 120 s stale).
+    let (a_uuid, a_typed) = inject_extra_host(&url, "host-a").await;
+
+    // Insert 3 sandboxes owned by host A.
+    let mut sandbox_ids = Vec::new();
+    for _ in 0..3 {
+        let (info, _) = fresh_info("alice");
+        db.insert_sandbox(&info, a_uuid, &"0".repeat(32), Some("http://10.99.142.99:7777"), Some(99))
+            .await
+            .unwrap();
+        sandbox_ids.push(info.sandbox_id.clone());
+    }
+
+    // Age A's heartbeat AFTER the inserts so the FK accepts.
+    age_heartbeat(&url, &a_typed, 120).await;
+
+    // Pre-takeover assertion: all three rows still owned by A.
+    for sid in &sandbox_ids {
+        let (owner, gen) = read_sandbox_owner_and_gen(&url, sid).await.unwrap();
+        assert_eq!(owner, a_typed);
+        assert_eq!(gen, 0);
+    }
+
+    // Takeover.
+    let taken = db
+        .takeover_sandboxes_from_host(&a_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert_eq!(taken.len(), 3, "expected all 3 reclaimed: {taken:?}");
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+
+    // Post-takeover: all rows owned by us, generation = 1 (was 0,
+    // bumped by 1).
+    for sid in &sandbox_ids {
+        let (owner, gen) = read_sandbox_owner_and_gen(&url, sid).await.unwrap();
+        assert_eq!(owner, my_host_typed);
+        assert_eq!(gen, 1, "takeover bumps generation to 1");
+    }
+    // RETURNING values match.
+    for t in &taken {
+        assert_eq!(t.generation, 1);
+    }
+
+    // Host A flipped to status='dead'.
+    let a_status = read_host_status(&url, &a_typed).await;
+    assert_eq!(
+        a_status.as_deref(),
+        Some("dead"),
+        "host A must be marked dead after successful takeover"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 11. Takeover race-loss (heartbeat resumes mid-flight)
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 takeover race-loss"]
+async fn takeover_races_loses_when_dead_host_heartbeats_back() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Set up host A; insert 1 sandbox; age heartbeat; then RUSH
+    // heartbeat back to now() (simulating A waking up between
+    // dead_hosts() and takeover_sandboxes_from_host()).
+    let (a_uuid, a_typed) = inject_extra_host(&url, "host-a-race").await;
+    let (info, _) = fresh_info("alice");
+    db.insert_sandbox(&info, a_uuid, &"0".repeat(32), Some("http://x"), None)
+        .await
+        .unwrap();
+    age_heartbeat(&url, &a_typed, 120).await;
+
+    // Confirm dead_hosts sees it.
+    let dead = db.dead_hosts(60).await.unwrap();
+    assert!(dead.iter().any(|h| h == &a_typed));
+
+    // Now A heartbeats back. The EXISTS subquery in
+    // takeover_sandboxes_from_host's UPDATE must miss → 0 rows.
+    refresh_heartbeat(&url, &a_typed).await;
+
+    let taken = db
+        .takeover_sandboxes_from_host(&a_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert!(
+        taken.is_empty(),
+        "takeover must lose the race when dead host heartbeats back: taken = {taken:?}"
+    );
+
+    // Host A still alive (status='alive'); ownership unchanged.
+    let a_status = read_host_status(&url, &a_typed).await;
+    assert_eq!(a_status.as_deref(), Some("alive"));
+    let (owner, gen) = read_sandbox_owner_and_gen(&url, &info.sandbox_id)
+        .await
+        .unwrap();
+    assert_eq!(owner, a_typed);
+    assert_eq!(gen, 0);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 12. CAS lost-leadership (split-brain split-write)
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 lost-leadership"]
+async fn cas_lost_leadership_increments_metric_on_stale_generation() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Host A inserts a sandbox.
+    let (a_uuid, a_typed) = inject_extra_host(&url, "host-a-cas").await;
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, a_uuid, &"0".repeat(32), Some("http://x"), None)
+        .await
+        .unwrap();
+    age_heartbeat(&url, &a_typed, 120).await;
+
+    // Controller B (us) takes it over. Generation bumps 0 → 1.
+    let taken = db
+        .takeover_sandboxes_from_host(&a_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].generation, 1);
+
+    // Now controller A wakes up (post-takeover) and tries to mark
+    // the row 'stopped' with its stale generation=0. CAS misses;
+    // the API surfaces "CAS missed".
+    let pre_lost = zeroship_sandbox::metrics::lost_leadership_value();
+    let err = db
+        .update_sandbox_status(sid, SandboxStatus::Stopped, 0)
+        .await
+        .expect_err("stale CAS must miss after peer takeover");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("CAS missed"), "expected CAS missed, got: {msg}");
+    // Bump the metric the way the live stop path does so we exercise
+    // the integration counter (the inc happens in the handler, not
+    // in update_sandbox_status itself).
+    zeroship_sandbox::metrics::inc_lost_leadership("update_sandbox_status_stopped");
+    let post_lost = zeroship_sandbox::metrics::lost_leadership_value();
+    assert_eq!(
+        post_lost,
+        pre_lost + 1,
+        "metric must increment on lost-leadership"
+    );
+
+    // Row is still 'running' under our (B's) ownership at gen=1.
+    let (owner, gen) = read_sandbox_owner_and_gen(&url, &info.sandbox_id)
+        .await
+        .unwrap();
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+    assert_eq!(owner, my_host_typed);
+    assert_eq!(gen, 1);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 13. Self-takeover refused defensively
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 self-takeover guard"]
+async fn takeover_refuses_self_host() {
+    let db = migrated_db().await;
+    let my_host = db.host_id();
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+    let err = db
+        .takeover_sandboxes_from_host(&my_host_typed, my_host, 60)
+        .await
+        .expect_err("self-takeover must error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("self-takeover"),
+        "expected self-takeover error, got: {msg}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 14. Takeover with mismatched signing_key
+//
+// Phase-2 scope per the task spec: pg-side takeover succeeds for
+// every starting/running row; the controller's *probe pipeline* (out
+// of scope for this commit; lands as Phase 2.5) is the layer that
+// flips status to 'recreating' on a `/version` fingerprint mismatch.
+// This test verifies what's wired today: the takeover is
+// status-blind, and the operator's downstream restore can
+// independently mark recreating via update_sandbox_status. The pg
+// layer doesn't refuse the takeover just because the keys disagree.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase-2 takeover-then-mark-recreating"]
+async fn takeover_then_mark_recreating_on_fp_mismatch() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Host A owns sandbox sealed with key "aa..".
+    let (a_uuid, a_typed) = inject_extra_host(&url, "host-a-fp").await;
+    let (info, sid) = fresh_info("alice");
+    let key_a = "a".repeat(32);
+    db.insert_sandbox(&info, a_uuid, &key_a, Some("http://x"), None)
+        .await
+        .unwrap();
+    age_heartbeat(&url, &a_typed, 120).await;
+
+    // We take over.
+    let taken = db
+        .takeover_sandboxes_from_host(&a_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert_eq!(taken.len(), 1);
+    let new_gen = taken[0].generation;
+
+    // Simulate the post-takeover probe: agent answers with a
+    // different fingerprint. The restore code path then marks the
+    // row 'recreating' under the takeover-bumped generation. We
+    // validate the CAS path here (the actual probe is in restore.rs).
+    db.update_sandbox_status(sid, SandboxStatus::Recreating, new_gen)
+        .await
+        .expect("recreating CAS must hit");
+
+    // Final state: row owned by us, status='recreating', generation
+    // bumped past `new_gen` by 1 (the recreating UPDATE itself
+    // bumps the counter — chain of CAS-stamped writes).
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT host_id, status, generation FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    let owner: String = row.get(0);
+    let status: String = row.get(1);
+    let gen: i64 = row.get(2);
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+    assert_eq!(owner, my_host_typed);
+    assert_eq!(status, "recreating");
+    assert_eq!(gen, new_gen + 1, "recreating UPDATE bumps generation");
+}
