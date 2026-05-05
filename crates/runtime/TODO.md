@@ -85,14 +85,36 @@ The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`,
   - TextDecoderOptions / TextDecodeOptions (shared by
     TextDecoder + TextDecoderStream) — `#[derive(WebIdlDict)]`
     (`9c16906`)
+  - **Request** (whole-class) — `#[v8_class]
+    #[v8_state_marker(Request)] impl RequestState`. MAC-01 Phase 2
+    per `docs/proposals/macro-v8-state.md` §7.2. The unit struct
+    `Request` continues to drive JS-class identity (install slot,
+    brand check, callback names, `Symbol.toStringTag`); the impl
+    block is on `RequestState` (the boxed state). Constructor +
+    15 simple getters + 2 lazy-mint getters (headers / signal,
+    plain `v8_getter` returning `Local<Object>` materialised from
+    the state's `Global<Object>` — see migration commit body for
+    why the macro's `same_object` flag is skipped for these two)
+    + `clone()` are macro-emitted. `state_ptr` (private) and
+    `build_kernel_request` (kernel fast-path) remain hand-rolled
+    per design §7.2.1. PENDING_CT thread-local replaced with a
+    local variable in the constructor body (the field-vs-local
+    discussion in §7.2.4 settled: local is cleanest because the
+    full state-build → headers-build → CT-apply flow stays
+    monolithic in the macro constructor body).
 
 **Deferred** (with reasons):
 
-  - `RequestInit` / `ResponseInit` — Request and Response are
-    hand-rolled, NOT `#[v8_class]`. Migrating the dict alone
-    doesn't help; the constructors need same-name getter+setter
-    pairing in `#[v8_class]`. Track via the macro's
-    `runtime-macros/TODO.md` Tier-4 work.
+  - `RequestInit` — Request migrated to `#[v8_class]` but the init
+    dict still parses through manual `get_init` / `copy_string_init`
+    helpers. The mode/credentials/cache/redirect/etc. fields are
+    `RefCell<String>` (not enums), and adding `WebIdlEnum` shapes
+    requires the parallel storage-shape change called out below.
+    Track via macros `Tier-4`.
+  - `ResponseInit` — Response is migrated in parallel (MAC-01
+    Phase 3); the init-dict migration is gated on the same
+    enum-or-string storage decision as `RequestInit` above.
+    Track via `runtime-macros/TODO.md` Tier-4 work.
   - `RequestMode` / `RequestCache` / `RequestRedirect` /
     `RequestCredentials` / `RequestDestination` / `ReferrerPolicy`
     / `ResponseType` — don't exist as Rust enums today (stored
