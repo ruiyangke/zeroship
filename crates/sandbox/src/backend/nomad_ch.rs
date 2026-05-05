@@ -1775,18 +1775,15 @@ fn cpus_boot(cpus: f32) -> u32 {
     if n < 1 { 1 } else { n as u32 }
 }
 
-/// Map `SandboxConfig.cpus` to the Nomad `Resources.CPU` advisory
-/// (MHz). Same floor philosophy as [`cpus_boot`]: we never want to
-/// emit `CPU=0` (rejected by some Nomad configs) when we're about
-/// to boot a real VM. Floor at 500 MHz (≈ 0.25 vCPU). NaN /
-/// negative → floor.
-pub(crate) fn resources_cpu_mhz(cpus: f32) -> u32 {
-    if !cpus.is_finite() {
-        return 500;
-    }
-    let mhz = cpus * 2000.0;
-    if mhz < 500.0 { 500 } else { mhz as u32 }
-}
+/// Nomad `Resources.CPU` advisory (MHz). Constant 500 MHz —
+/// neither raw_exec nor Cloud Hypervisor enforce CPU quota, so this
+/// number only feeds Nomad's bin-packing arithmetic. Scaling it with
+/// `cfg.cpus` artificially capped placement at 20 VMs/worker on
+/// n2-standard-32 (80,000 advertised MHz / 4,000) when the real
+/// binding constraints are tap count (12/worker today) and memory.
+/// Pinning at the floor lets bin-packing match physical limits.
+/// 500 MHz is the smallest plausible non-zero value Nomad accepts.
+pub(crate) const NOMAD_CPU_MHZ_ADVISORY: u32 = 500;
 
 // ─── Nomad job spec construction ────────────────────────────────
 
@@ -1881,17 +1878,10 @@ pub(crate) fn build_nomad_job_json(
                             cfg.nomad_ch.subnet_second_octet.to_string(),
                     },
                     "Resources": {
-                        // CPU is in MHz units in the Nomad API.
-                        // 1 vCPU ≈ 2000 MHz advisory; our
-                        // SandboxConfig.cpus is fractional so
-                        // multiply. Floor at 500 MHz (0.25 vCPU) for
-                        // the same reason cpus_boot floors at 1: a
-                        // misconfigured `cpus=0.0` (or a NaN slipping
-                        // past validation) would otherwise produce
-                        // CPU=0, which Nomad rejects on some configs
-                        // and is anyway nonsensical when we're about
-                        // to boot a VM with at least one vCPU.
-                        "CPU": resources_cpu_mhz(cfg.cpus),
+                        // CPU MHz is advisory under raw_exec + CH —
+                        // see `NOMAD_CPU_MHZ_ADVISORY`. Memory is the
+                        // real bin-packing input.
+                        "CPU": NOMAD_CPU_MHZ_ADVISORY,
                         "MemoryMB": cfg.memory_mb as u32,
                     },
                     "KillTimeout": 10_000_000_000u64,  // 10s, ns
@@ -3173,16 +3163,11 @@ mod tests {
     }
 
     #[test]
-    fn resources_cpu_mhz_floors_at_500() {
-        // I3: Resources.CPU floor matches cpus_boot's floor — no 0.
-        assert_eq!(resources_cpu_mhz(0.0), 500);
-        assert_eq!(resources_cpu_mhz(0.1), 500); // 200 MHz < 500 floor
-        assert_eq!(resources_cpu_mhz(0.25), 500);
-        assert_eq!(resources_cpu_mhz(0.5), 1000);
-        assert_eq!(resources_cpu_mhz(2.0), 4000);
-        assert_eq!(resources_cpu_mhz(-1.0), 500);
-        assert_eq!(resources_cpu_mhz(f32::NAN), 500);
-        assert_eq!(resources_cpu_mhz(f32::INFINITY), 500);
+    fn nomad_cpu_advisory_is_500_mhz() {
+        // Bin-packing-only advisory; constant by design. See the doc
+        // on `NOMAD_CPU_MHZ_ADVISORY` for why scaling with cfg.cpus
+        // was removed (artificial 20-VM/worker placement cap).
+        assert_eq!(NOMAD_CPU_MHZ_ADVISORY, 500);
     }
 
     #[test]
@@ -3254,8 +3239,8 @@ mod tests {
         // M6: subnet base octet is paired between Rust and bash.
         // Default 99 keeps the historical 10.99/16 layout.
         assert_eq!(task["Env"]["ZSBX_SUBNET_BASE_OCTET"], "99");
-        // 2.0 vCPU advisory → 4000 MHz.
-        assert_eq!(task["Resources"]["CPU"], 4000);
+        // Constant 500 MHz advisory; see NOMAD_CPU_MHZ_ADVISORY.
+        assert_eq!(task["Resources"]["CPU"], 500);
         assert_eq!(task["Resources"]["MemoryMB"], 1024);
         // KillTimeout is 10 seconds in nanoseconds.
         assert_eq!(task["KillTimeout"], 10_000_000_000u64);
