@@ -993,11 +993,17 @@ async fn takeover_refuses_self_host() {
         .takeover_sandboxes_from_host(&my_host_typed, my_host, 60)
         .await
         .expect_err("self-takeover must error");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("self-takeover"),
-        "expected self-takeover error, got: {msg}"
-    );
+    // Round-2 fixer / MINOR #4: pattern-match the typed variant
+    // instead of substring-matching the message string.
+    match err {
+        zeroship_sandbox::db::DatabaseError::SelfTakeoverRefused { host_id } => {
+            assert_eq!(
+                host_id, my_host_typed,
+                "self-takeover error must echo the typed-id host_id"
+            );
+        }
+        other => panic!("expected SelfTakeoverRefused, got: {other:?}"),
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────

@@ -495,11 +495,36 @@ async fn rehydrate_after_takeover(
                 );
                 metrics::inc_takeover_orphan();
             }
-            other => {
+            // Round-2 fixer / MINOR #3: pre-fix every non-Restored,
+            // non-SealMissing outcome was logged at info but no
+            // metric fired. Operators couldn't rate(...) over
+            // takeover-but-then-mismatched / unreachable / corrupt
+            // events. Today each outcome bumps a labelled counter.
+            restore::RestoreOutcome::Mismatched => {
+                tracing::warn!(
+                    sandbox_id = %ts.sandbox_id,
+                    "sandbox HA: takeover rehydrate fp mismatch / 401"
+                );
+                metrics::inc_takeover_mismatched();
+            }
+            restore::RestoreOutcome::Unreachable => {
+                tracing::warn!(
+                    sandbox_id = %ts.sandbox_id,
+                    "sandbox HA: takeover rehydrate agent unreachable"
+                );
+                metrics::inc_takeover_unreachable();
+            }
+            restore::RestoreOutcome::Corrupt => {
+                tracing::warn!(
+                    sandbox_id = %ts.sandbox_id,
+                    "sandbox HA: takeover rehydrate corrupt seal / typed-id / backend restore failed"
+                );
+                metrics::inc_takeover_corrupt();
+            }
+            restore::RestoreOutcome::BackendUnsupported => {
                 tracing::info!(
                     sandbox_id = %ts.sandbox_id,
-                    outcome = ?other,
-                    "sandbox HA: takeover rehydrate non-restored outcome"
+                    "sandbox HA: takeover rehydrate skipped (backend doesn't support restore)"
                 );
             }
         }

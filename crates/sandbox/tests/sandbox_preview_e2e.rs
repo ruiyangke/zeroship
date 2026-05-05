@@ -174,6 +174,12 @@ fn make_state(
         unreachable!("test pinned to nomad-ch");
     }
     let registry = SandboxRegistry::new();
+    // NOTE: this fixture keeps the legacy hyphenated UUID form for
+    // `info.sandbox_id` because the existing tests in this file
+    // build URLs from the bare `Uuid` struct. The typed-id wire
+    // shape returned by `POST /sandboxes` is exercised end-to-end
+    // by the dedicated regression test in
+    // `tests/sandbox_typed_id_e2e.rs` (Round-2 fixer / CRITICAL #1).
     let info = SandboxInfo {
         sandbox_id: sandbox_id.to_string(),
         user_id: user_id.to_string(),

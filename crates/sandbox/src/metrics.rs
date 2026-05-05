@@ -81,6 +81,36 @@ static CLOCK_REWIND: AtomicU64 = AtomicU64::new(0);
 /// future cross-host sealed sync (S3? gossip?) is Phase 3+.
 static TAKEOVER_ORPHAN: AtomicU64 = AtomicU64::new(0);
 
+/// `sandbox_ha_takeover_mismatched_total`. Counter — increments
+/// once per takeover-rehydrate where the sealed signing key
+/// disagreed with pg's `key_fp`, OR the agent's `/version` returned
+/// 401, OR the agent answered with a different fingerprint. Round-2
+/// fixer / MINOR #3: pre-fix these outcomes were silently dropped;
+/// today operators can rate(...) them to spot key-rotation issues.
+static TAKEOVER_MISMATCHED: AtomicU64 = AtomicU64::new(0);
+
+/// `sandbox_ha_takeover_unreachable_total`. Counter — increments
+/// once per takeover-rehydrate where the agent's `/version` probe
+/// timed out / returned a non-2xx non-401. Round-2 fixer / MINOR
+/// #3.
+static TAKEOVER_UNREACHABLE: AtomicU64 = AtomicU64::new(0);
+
+/// `sandbox_ha_takeover_corrupt_total`. Counter — increments once
+/// per takeover-rehydrate that hit a corrupt sealed record, an
+/// unparseable typed-id, or a backend.restore_from_pg_and_sealed
+/// failure. These are bug-grade events; healthy clusters don't see
+/// them. Round-2 fixer / MINOR #3.
+static TAKEOVER_CORRUPT: AtomicU64 = AtomicU64::new(0);
+
+/// `sandbox_corrupt_id_total`. Counter — increments when restore
+/// encounters a pg row whose `sandbox_id` doesn't parse as a
+/// typed-id. Round-2 fixer / MINOR #1: pre-fix `sandbox_id_from_str_lossy`
+/// silently swallowed the malformed id and fell back to
+/// `Uuid::nil()` for a no-op UPDATE; today the row is skipped and
+/// this counter fires so an alert can catch the drift between code
+/// and data.
+static SANDBOX_CORRUPT_ID: AtomicU64 = AtomicU64::new(0);
+
 // ────────────────────────────────────────────────────────────────────
 // Gauges
 // ────────────────────────────────────────────────────────────────────
@@ -147,10 +177,57 @@ pub fn inc_takeover_orphan() {
     TAKEOVER_ORPHAN.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Bump `sandbox_ha_takeover_mismatched_total` once. Round-2 fixer
+/// / MINOR #3.
+pub fn inc_takeover_mismatched() {
+    TAKEOVER_MISMATCHED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bump `sandbox_ha_takeover_unreachable_total` once. Round-2 fixer
+/// / MINOR #3.
+pub fn inc_takeover_unreachable() {
+    TAKEOVER_UNREACHABLE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bump `sandbox_ha_takeover_corrupt_total` once. Round-2 fixer /
+/// MINOR #3.
+pub fn inc_takeover_corrupt() {
+    TAKEOVER_CORRUPT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bump `sandbox_corrupt_id_total` once. Round-2 fixer / MINOR #1.
+pub fn inc_sandbox_corrupt_id() {
+    SANDBOX_CORRUPT_ID.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Test-only accessor for the takeover-orphan counter.
 #[doc(hidden)]
 pub fn takeover_orphan_value() -> u64 {
     TAKEOVER_ORPHAN.load(Ordering::Relaxed)
+}
+
+/// Test-only accessor for the takeover-mismatched counter.
+#[doc(hidden)]
+pub fn takeover_mismatched_value() -> u64 {
+    TAKEOVER_MISMATCHED.load(Ordering::Relaxed)
+}
+
+/// Test-only accessor for the takeover-unreachable counter.
+#[doc(hidden)]
+pub fn takeover_unreachable_value() -> u64 {
+    TAKEOVER_UNREACHABLE.load(Ordering::Relaxed)
+}
+
+/// Test-only accessor for the takeover-corrupt counter.
+#[doc(hidden)]
+pub fn takeover_corrupt_value() -> u64 {
+    TAKEOVER_CORRUPT.load(Ordering::Relaxed)
+}
+
+/// Test-only accessor for the sandbox-corrupt-id counter.
+#[doc(hidden)]
+pub fn sandbox_corrupt_id_value() -> u64 {
+    SANDBOX_CORRUPT_ID.load(Ordering::Relaxed)
 }
 
 /// Set `sandbox_ha_heartbeat_lag_seconds` to `secs`. NaN-safe; an
@@ -227,10 +304,35 @@ mod tests {
 
     #[test]
     fn lost_leadership_label_does_not_alter_counter_shape() {
-        let pre = lost_leadership_value();
-        inc_lost_leadership("update_status");
-        inc_lost_leadership("delete_sandbox");
-        assert_eq!(lost_leadership_value(), pre + 2);
+        // Round-2 fixer / IMPORTANT #6: pre-fix this test only
+        // verified the AGGREGATE counter incremented by 2 — a
+        // regression that collapsed the per-op breakdown into one
+        // bucket would have passed silently. The fix asserts each
+        // labelled op's per-bucket value too.
+        let pre_total = lost_leadership_value();
+        let pre_update = lost_leadership_value_for_op("test_op_update_status");
+        let pre_delete = lost_leadership_value_for_op("test_op_delete_sandbox");
+        inc_lost_leadership("test_op_update_status");
+        inc_lost_leadership("test_op_delete_sandbox");
+        assert_eq!(lost_leadership_value(), pre_total + 2, "aggregate must bump by 2");
+        assert_eq!(
+            lost_leadership_value_for_op("test_op_update_status"),
+            pre_update + 1,
+            "per-op breakdown must bump update_status bucket"
+        );
+        assert_eq!(
+            lost_leadership_value_for_op("test_op_delete_sandbox"),
+            pre_delete + 1,
+            "per-op breakdown must bump delete_sandbox bucket"
+        );
+        // A label that wasn't bumped MUST NOT have its bucket
+        // touched — guards against a regression that funnels every
+        // label into a single bucket.
+        assert_eq!(
+            lost_leadership_value_for_op("test_op_unrelated_op"),
+            0,
+            "untouched op label must stay at 0"
+        );
     }
 
     #[test]

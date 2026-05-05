@@ -221,14 +221,20 @@ async fn process_pg_row(
     let sandbox_id_uuid: Uuid = match zeroship_core::typed_id::parse(&row.sandbox_id) {
         Ok((_, uuid)) => uuid,
         Err(e) => {
-            tracing::warn!(
+            // Round-2 fixer / MINOR #1: pre-fix this fell back to
+            // `sandbox_id_from_str_lossy` → `Uuid::nil()` and fired
+            // an UPDATE that no-op'd against a real row but pretended
+            // to have marked it Lost. Today we skip the row entirely
+            // and bump `sandbox_corrupt_id_total` so an alert can
+            // catch a code/data drift (the only way to land here is
+            // if a binary that DOESN'T validate typed-id at insert
+            // wrote into the same pg).
+            tracing::error!(
                 sandbox_id = %row.sandbox_id,
                 error = %e,
-                "sandbox/restore: pg sandbox_id failed typed-id parse; marking lost"
+                "sandbox/restore: pg sandbox_id failed typed-id parse; SKIPPING row + bumping sandbox_corrupt_id_total"
             );
-            let _ = database
-                .update_sandbox_status(sandbox_id_from_str_lossy(&row.sandbox_id), SandboxStatus::Lost, row.generation, None)
-                .await;
+            crate::metrics::inc_sandbox_corrupt_id();
             return RestoreOutcome::Corrupt;
         }
     };
@@ -433,20 +439,10 @@ async fn process_pg_row(
     }
 }
 
-/// Best-effort lossy fallback for a sandbox_id string that already
-/// failed typed-id parse. We still want to mark the row 'lost'; pg's
-/// row PK is the typed-id string itself, so we re-derive the UUID
-/// part by parsing the suffix. Returns `Uuid::nil()` if even that
-/// fails — the UPDATE will then no-op against a real row, but that's
-/// acceptable for the corrupt-id case (which is always a bug, not a
-/// race).
-fn sandbox_id_from_str_lossy(s: &str) -> Uuid {
-    if let Some((_, suffix)) = s.split_once('_') {
-        Uuid::parse_str(suffix).unwrap_or(Uuid::nil())
-    } else {
-        Uuid::parse_str(s).unwrap_or(Uuid::nil())
-    }
-}
+// Round-2 fixer / MINOR #1: `sandbox_id_from_str_lossy` was removed —
+// see the corresponding `process_pg_row` arm above. It used to swallow
+// malformed ids and fire a no-op UPDATE; now we skip the row + emit
+// `sandbox_corrupt_id_total`.
 
 fn build_restored_info(row: &SandboxRow) -> SandboxInfo {
     SandboxInfo {
@@ -653,16 +649,10 @@ mod tests {
         assert_eq!(info.created_at_secs, 1_700_000_000);
     }
 
-    #[test]
-    fn sandbox_id_lossy_parses_typed_id_suffix() {
-        // typed-id's suffix is base62-encoded uuid bytes; can't be
-        // parsed as a hyphenated UUID. Lossy returns nil.
-        let id = sandbox_id_from_str_lossy("sbx_AbCdEf");
-        assert!(id.is_nil() || !id.is_nil()); // doesn't panic; that's the contract
-        // Plain hyphenated UUID: parses.
-        let id2 = sandbox_id_from_str_lossy("01234567-89ab-cdef-0123-456789abcdef");
-        assert!(!id2.is_nil());
-    }
+    // Round-2 fixer / MINOR #1: removed `sandbox_id_lossy_parses_typed_id_suffix`
+    // because the helper itself is gone. The new behaviour (skip + bump
+    // `sandbox_corrupt_id_total`) is exercised end-to-end in the pg-gated
+    // integration tests.
 
     #[test]
     fn sweep_orphan_sealed_unlinks_only_unconsumed() {

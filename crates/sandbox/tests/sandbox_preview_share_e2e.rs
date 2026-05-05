@@ -214,6 +214,8 @@ fn make_state_inner(
         unreachable!("test pinned to nomad-ch");
     }
     let registry = SandboxRegistry::new();
+    // NOTE: legacy hyphenated UUID form. The typed-id wire shape is
+    // covered in `tests/sandbox_typed_id_e2e.rs`.
     let info = SandboxInfo {
         sandbox_id: sandbox_id.to_string(),
         user_id: user_id.to_string(),

@@ -242,6 +242,14 @@ pub enum DatabaseError {
     /// audit log without re-deriving the string.
     #[error("not found: {sandbox_id}")]
     NotFound { sandbox_id: String },
+    /// Round-2 fixer / MINOR #4: dedicated variant for
+    /// `takeover_sandboxes_from_host`'s self-takeover guard. Pre-fix
+    /// this returned `Validation("refusing self-takeover: …")` and
+    /// the (sole) test substring-matched on the message. The typed
+    /// variant lets callers / tests pattern-match without coupling
+    /// to the message format.
+    #[error("self-takeover refused for host {host_id}")]
+    SelfTakeoverRefused { host_id: String },
 }
 
 /// Result alias for the module.
@@ -1328,9 +1336,11 @@ impl Database {
             zeroship_core::typed_id::uuid_to_base62(&my_host)
         );
         if dead_host_typed == my_host_typed {
-            return Err(DatabaseError::Validation(format!(
-                "refusing self-takeover: dead_host == my_host == {my_host_typed}",
-            )));
+            // Round-2 fixer / MINOR #4: typed variant; tests
+            // pattern-match instead of substring-matching the message.
+            return Err(DatabaseError::SelfTakeoverRefused {
+                host_id: my_host_typed,
+            });
         }
         // Validate dead_host shape (`hst_<base62>`). Belt-and-
         // suspenders — the WHERE clause already binds via $N, but
