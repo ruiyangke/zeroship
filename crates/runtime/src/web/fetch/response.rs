@@ -44,25 +44,21 @@
 //!   - install body consumer methods (`text` / `json` / `arrayBuffer`
 //!     / `bytes` / `blob` / `formData`) via the shared trait dispatch
 //!     (`install_body_methods::<Response>`) — those bypass the macro,
-//!   - install the three static methods (`error` / `redirect` / `json`)
-//!     via raw FunctionTemplates on the constructor function. The
-//!     macro's `#[v8_static_method]` exists (Phase 1 commit `950fe3c`)
-//!     but its codegen emits `<MarkerTy>::method(...)` for the call
-//!     expression, which under `#[v8_state_marker(Response)]` resolves
-//!     against the unit `Response` marker — where no method bodies
-//!     live. Per design §7.3.1 ("MAC-07 not yet supported"), the
-//!     statics ship as a post-install hook in this PR; lifting them
-//!     into the macro impl block is gated on a follow-up macro fix
-//!     (`gen_static_callback` should dispatch through `state_ty`,
-//!     mirroring `gen_method_callback`). Documented as a 3-line gap.
 //!   - stash the FunctionTemplate + prototype in a per-isolate
 //!     `ResponseTemplateSlot` for the kernel-side fast-path Response
 //!     builder (`build_kernel_response`).
+//!
+//! The three static methods (`error` / `redirect` / `json`) live on
+//! the impl block annotated with `#[v8_static_method]` — the macro
+//! installs them on the constructor FunctionTemplate (WebIDL §3.7.4)
+//! once `gen_static_callback` was fixed to dispatch through `state_ty`
+//! under `#[v8_state_marker]` (the call expression now resolves
+//! against `ResponseState`, where the bodies live).
 
 use std::cell::RefCell;
 
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker,
+    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker, v8_static_method,
 };
 
 use crate::fetch_body::body::{Body, BodyImpl, BodySource};
@@ -303,14 +299,6 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // `fetch_body::consumers`. Same shape as Request.
     install_body_methods::<Response>(scope, our_proto);
 
-    // Static methods on the constructor function. Bailed from
-    // `#[v8_static_method]` per the doc-comment on the impl block —
-    // ship as a post-install hook until the macro learns to dispatch
-    // statics through `state_ty` under `#[v8_state_marker]`.
-    install_static(scope, class_fn, "error", static_error_callback);
-    install_static(scope, class_fn, "redirect", static_redirect_callback);
-    install_static(scope, class_fn, "json", static_json_callback);
-
     let key = v8::String::new(scope, "Response").unwrap();
     global.set(scope, key.into(), class_fn.into());
 
@@ -322,18 +310,6 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
         class_tmpl: class_tmpl_g,
         prototype: proto_g,
     });
-}
-
-fn install_static(
-    scope: &mut v8::PinScope,
-    ctor: v8::Local<v8::Function>,
-    name: &str,
-    cb: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let key = v8::String::new(scope, name).unwrap();
-    let tmpl = v8::FunctionTemplate::new(scope, cb);
-    let func = tmpl.get_function(scope).unwrap();
-    ctor.set(scope, key.into(), func.into());
 }
 
 /// Build a Response wrapper directly from a (status, headers, body) tuple
@@ -687,22 +663,244 @@ impl ResponseState {
     // ---------------------------------------------------------------
     // Static methods (WebIDL §3.7.4) — `Response.error()`,
     // `Response.redirect(url, status?)`, `Response.json(data, init?)`.
-    //
-    // Bailed from `#[v8_static_method]` migration: the macro's static
-    // method codegen (`gen_static_callback`) emits the call expression
-    // `<#class_ty>::#method_name(...)`, where under
-    // `#[v8_state_marker(Response)]` `class_ty == Response` (the
-    // marker), but the actual fn body lives on `ResponseState` (the
-    // impl receiver). The mismatch is a 3-line macro fix (mirror
-    // `gen_method_callback`'s use of `state_ty`), but per design
-    // §7.3.1 we ship the post-install hook for this PR and migrate to
-    // `#[v8_static_method]` once that fix lands (tracked under
-    // MAC-07).
-    //
-    // The static callbacks live as free fns at module scope below,
-    // installed by `install_global` after the macro-emitted
-    // `Response::install` returns.
+    // Migrated to `#[v8_static_method]` once the macro learned to
+    // dispatch through `state_ty` under `#[v8_state_marker]` (the
+    // `gen_static_callback` fix that introduced this commit).
     // ---------------------------------------------------------------
+
+    /// `Response.error()` — Fetch §6.2.4. Returns a network-error
+    /// response: type "error", status 0, empty headers (sealed
+    /// immutable per step 4), null body.
+    #[v8_static_method]
+    fn error<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        // We can't call our constructor with status=0 (range check
+        // rejects). Build via a fresh instance (default 200/null body),
+        // then patch state to "error"/0.
+        let global = scope.get_current_context().global(scope);
+        let class_key = v8::String::new(scope, "Response").unwrap();
+        let class_v = global
+            .get(scope, class_key.into())
+            .ok_or_else(|| OpError::error("Response constructor missing"))?;
+        let class_fn: v8::Local<v8::Function> = class_v
+            .try_into()
+            .map_err(|_| OpError::error("Response is not a function"))?;
+
+        let null_v = v8::null(scope);
+        let init = v8::Object::new(scope);
+        let obj = class_fn
+            .new_instance(scope, &[null_v.into(), init.into()])
+            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+
+        let Some(raw) = state_ptr(scope, obj) else {
+            return Ok(obj);
+        };
+        let state: &mut ResponseState = unsafe { &mut *raw };
+        *state.response_type.borrow_mut() = "error".to_string();
+        *state.status.borrow_mut() = 0;
+        *state.status_text.borrow_mut() = String::new();
+        *state.body.borrow_mut() = BodyImpl::null();
+
+        // Per Fetch §6.2.4 step 4: "Set response's headers' guard to
+        // immutable." Seal the headers we minted above. WPT
+        // response-static-error.any.js verifies this.
+        if let Some(headers_g) = state.headers.borrow().clone() {
+            let headers_local = v8::Local::new(scope, headers_g);
+            crate::headers::seal_immutable(scope, headers_local);
+        }
+        Ok(obj)
+    }
+
+    /// `Response.redirect(url, status?)` — Fetch §6.2.4. Validates the
+    /// URL and status, returns a redirect response with `Location`
+    /// header set to the parsed URL.
+    #[v8_static_method]
+    fn redirect<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        url: v8::Local<v8::Value>,
+        status: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        let url_str = url.to_rust_string_lossy(scope);
+        if ada_url::Url::parse(&url_str, None).is_err() {
+            return Err(OpError::type_error("Invalid URL for Response.redirect"));
+        }
+
+        let status_code: u16 = if status.is_undefined() {
+            302
+        } else {
+            let n = status.number_value(scope).unwrap_or(0.0);
+            if n.is_nan() || n < 0.0 || n > 65535.0 {
+                return Err(OpError::range_error("Invalid status code for redirect"));
+            }
+            n as u16
+        };
+
+        if !is_redirect_status(status_code) {
+            return Err(OpError::range_error("Invalid status code for redirect"));
+        }
+
+        let global = scope.get_current_context().global(scope);
+        let class_key = v8::String::new(scope, "Response").unwrap();
+        let class_v = global
+            .get(scope, class_key.into())
+            .ok_or_else(|| OpError::error("Response constructor missing"))?;
+        let class_fn: v8::Local<v8::Function> = class_v
+            .try_into()
+            .map_err(|_| OpError::error("Response is not a function"))?;
+
+        let init = v8::Object::new(scope);
+        let st_key = v8::String::new(scope, "status").unwrap();
+        let st_val = v8::Integer::new_from_unsigned(scope, status_code as u32);
+        init.set(scope, st_key.into(), st_val.into());
+
+        let null_v = v8::null(scope);
+        let obj = class_fn
+            .new_instance(scope, &[null_v.into(), init.into()])
+            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+
+        // Set Location header.
+        if let Some(raw) = state_ptr(scope, obj) {
+            let state: &ResponseState = unsafe { &*raw };
+            if let Some(h_g) = state.headers.borrow().clone() {
+                let h = v8::Local::new(scope, h_g);
+                let set_key = v8::String::new(scope, "set").unwrap();
+                if let Some(set_v) = h.get(scope, set_key.into()) {
+                    if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
+                        let n = v8::String::new(scope, "Location").unwrap();
+                        let v = v8::String::new(scope, &url_str).unwrap();
+                        let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
+                    }
+                }
+            }
+        }
+
+        Ok(obj)
+    }
+
+    /// `Response.json(data, init?)` — Fetch §5.5. Serializes `data`
+    /// via JSON.stringify, builds a Response with the JSON body, and
+    /// sets Content-Type to "application/json" unless init.headers
+    /// already supplied one.
+    #[v8_static_method]
+    fn json<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        data: v8::Local<v8::Value>,
+        init: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        // Per Fetch §5.5 Response.json step 1: "serialize a JavaScript
+        // value to JSON bytes". Per the WHATWG Infra spec, this:
+        //   1. Sets `string` to JSON.stringify(value).
+        //   2. If `string` is undefined (i.e., `value` is a Symbol or
+        //      undefined or contains non-encodables), throw TypeError.
+        //   3. Otherwise, UTF-8 encode `string`.
+        //
+        // V8's JSON.stringify behaviour:
+        //   - Symbol value, undefined value, function value → returns
+        //     undefined (a JS undefined, NOT a throw).
+        //   - Circular reference, BigInt → throws TypeError.
+        //   - Object with throwing `toJSON` / getter → throws that
+        //     error.
+        //
+        // We test by running `JSON.stringify(value)` and checking the
+        // result.
+        // Use a TryCatch so that if JSON.stringify throws (e.g.
+        // circular reference, BigInt, throwing toJSON), we capture the
+        // actual exception value and re-throw it verbatim via
+        // OpError::js_value — preserving Error subclass identity,
+        // .code, .stack. Without this, the macro's gen_throw_error path
+        // would clobber the pending exception when synthesising its
+        // own.
+        let global = scope.get_current_context().global(scope);
+        let json_key = v8::String::new(scope, "JSON").unwrap();
+        let json_obj_v = global
+            .get(scope, json_key.into())
+            .ok_or_else(|| OpError::error("JSON missing"))?;
+        let json_obj: v8::Local<v8::Object> = json_obj_v
+            .try_into()
+            .map_err(|_| OpError::error("JSON is not an object"))?;
+        let stringify_key = v8::String::new(scope, "stringify").unwrap();
+        let stringify_v = json_obj
+            .get(scope, stringify_key.into())
+            .ok_or_else(|| OpError::error("JSON.stringify missing"))?;
+        let stringify_fn: v8::Local<v8::Function> = stringify_v
+            .try_into()
+            .map_err(|_| OpError::error("JSON.stringify is not a function"))?;
+
+        // Bridge tc_scope!'s borrow lifetime: capture the result + any
+        // exception as Globals inside the inner scope, then re-Localise
+        // back in the outer scope.
+        enum StringifyOutcome {
+            Ok(v8::Global<v8::Value>),
+            Threw(v8::Global<v8::Value>),
+        }
+        let outcome: StringifyOutcome = {
+            v8::tc_scope!(let tc, scope);
+            match stringify_fn.call(tc, json_obj.into(), &[data]) {
+                Some(v) => StringifyOutcome::Ok(v8::Global::new(tc, v)),
+                None => {
+                    let exc = tc.exception().unwrap_or_else(|| {
+                        let m = v8::String::new(tc, "JSON.stringify threw").unwrap();
+                        v8::Exception::error(tc, m)
+                    });
+                    StringifyOutcome::Threw(v8::Global::new(tc, exc))
+                }
+            }
+        };
+        let json_result_v: v8::Local<v8::Value> = match outcome {
+            StringifyOutcome::Ok(g) => v8::Local::new(scope, &g),
+            StringifyOutcome::Threw(g) => {
+                let exc = v8::Local::new(scope, &g);
+                return Err(OpError::js_value(scope, exc, "JSON.stringify threw"));
+            }
+        };
+        if json_result_v.is_undefined() {
+            return Err(OpError::type_error(
+                "Response.json: data is not JSON-serializable",
+            ));
+        }
+        let json_str: v8::Local<v8::String> = json_result_v
+            .try_into()
+            .map_err(|_| OpError::error("JSON.stringify did not return a string"))?;
+
+        let global = scope.get_current_context().global(scope);
+        let class_key = v8::String::new(scope, "Response").unwrap();
+        let class_v = global
+            .get(scope, class_key.into())
+            .ok_or_else(|| OpError::error("Response constructor missing"))?;
+        let class_fn: v8::Local<v8::Function> = class_v
+            .try_into()
+            .map_err(|_| OpError::error("Response is not a function"))?;
+
+        let obj = class_fn
+            .new_instance(scope, &[json_str.into(), init])
+            .ok_or_else(|| OpError::error("Response constructor failed"))?;
+
+        // Per Fetch §5.5 Response.json: invoke "initialize a response"
+        // with the body content-type set to "application/json". The
+        // "initialize a response" algorithm sets Content-Type ONLY IF
+        // the user's init.headers didn't supply one.
+        if let Some(raw) = state_ptr(scope, obj) {
+            let state: &ResponseState = unsafe { &*raw };
+            if let Some(h_g) = state.headers.borrow().clone() {
+                let h = v8::Local::new(scope, h_g);
+                let user_supplied_ct =
+                    init_supplied_content_type(scope, init).unwrap_or(false);
+                if !user_supplied_ct {
+                    let set_key = v8::String::new(scope, "set").unwrap();
+                    if let Some(set_v) = h.get(scope, set_key.into()) {
+                        if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
+                            let n = v8::String::new(scope, "Content-Type").unwrap();
+                            let v = v8::String::new(scope, "application/json").unwrap();
+                            let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(obj)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -797,226 +995,6 @@ fn tee_stream<'s>(
     let a = arr.get_index(scope, 0)?;
     let b = arr.get_index(scope, 1)?;
     Some((a.try_into().ok()?, b.try_into().ok()?))
-}
-
-// ---------------------------------------------------------------------------
-// Static method callbacks — installed on the constructor function in
-// `install_global` (see the doc-comment on the macro impl block for the
-// rationale for keeping these hand-rolled).
-// ---------------------------------------------------------------------------
-
-fn static_error_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    // Build a Response via our constructor with empty init then patch
-    // type/status to "error"/0.
-    let global = scope.get_current_context().global(scope);
-    let class_key = v8::String::new(scope, "Response").unwrap();
-    let class_v = global.get(scope, class_key.into()).unwrap();
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-
-    // We can't call our constructor with status=0 (range check rejects).
-    // Build via a fresh instance bypassing the constructor: invoke
-    // `class_fn` with a dummy 200/null body, then patch state.
-    let null_v = v8::null(scope);
-    let init = v8::Object::new(scope);
-    let result = class_fn.new_instance(scope, &[null_v.into(), init.into()]);
-    let Some(obj) = result else { return };
-
-    let Some(raw) = state_ptr(scope, obj) else {
-        rv.set(obj.into());
-        return;
-    };
-    let state: &mut ResponseState = unsafe { &mut *raw };
-    *state.response_type.borrow_mut() = "error".to_string();
-    *state.status.borrow_mut() = 0;
-    *state.status_text.borrow_mut() = String::new();
-    *state.body.borrow_mut() = BodyImpl::null();
-
-    // Per Fetch §6.2.4 step 4: "Set response's headers' guard to
-    // immutable." Seal the headers we minted above. WPT
-    // response-static-error.any.js verifies this. Preserved verbatim
-    // from the pre-migration hand-roll per design §7.3.
-    if let Some(headers_g) = state.headers.borrow().clone() {
-        let headers_local = v8::Local::new(scope, headers_g);
-        crate::headers::seal_immutable(scope, headers_local);
-    }
-    rv.set(obj.into());
-}
-
-fn static_redirect_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let url_v = args.get(0);
-    let status_v = args.get(1);
-
-    let url_str = url_v.to_rust_string_lossy(scope);
-    // Parse URL.
-    if ada_url::Url::parse(&url_str, None).is_err() {
-        let m = v8::String::new(scope, "Invalid URL for Response.redirect").unwrap();
-        let exc = v8::Exception::type_error(scope, m);
-        scope.throw_exception(exc);
-        return;
-    }
-
-    let status: u16 = if status_v.is_undefined() {
-        302
-    } else {
-        let n = status_v.number_value(scope).unwrap_or(0.0);
-        if n.is_nan() || n < 0.0 || n > 65535.0 {
-            let m = v8::String::new(scope, "Invalid status code for redirect").unwrap();
-            let exc = v8::Exception::range_error(scope, m);
-            scope.throw_exception(exc);
-            return;
-        }
-        n as u16
-    };
-
-    if !is_redirect_status(status) {
-        let m = v8::String::new(scope, "Invalid status code for redirect").unwrap();
-        let exc = v8::Exception::range_error(scope, m);
-        scope.throw_exception(exc);
-        return;
-    }
-
-    let global = scope.get_current_context().global(scope);
-    let class_key = v8::String::new(scope, "Response").unwrap();
-    let class_v = global.get(scope, class_key.into()).unwrap();
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-
-    let init = v8::Object::new(scope);
-    let st_key = v8::String::new(scope, "status").unwrap();
-    let st_val = v8::Integer::new_from_unsigned(scope, status as u32);
-    init.set(scope, st_key.into(), st_val.into());
-
-    let null_v = v8::null(scope);
-    let result = class_fn.new_instance(scope, &[null_v.into(), init.into()]);
-    let Some(obj) = result else { return };
-
-    // Set Location header.
-    let Some(raw) = state_ptr(scope, obj) else {
-        rv.set(obj.into());
-        return;
-    };
-    let state: &ResponseState = unsafe { &*raw };
-    if let Some(h_g) = state.headers.borrow().clone() {
-        let h = v8::Local::new(scope, h_g);
-        let set_key = v8::String::new(scope, "set").unwrap();
-        if let Some(set_v) = h.get(scope, set_key.into()) {
-            if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
-                let n = v8::String::new(scope, "Location").unwrap();
-                let v = v8::String::new(scope, &url_str).unwrap();
-                let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
-            }
-        }
-    }
-
-    rv.set(obj.into());
-}
-
-fn static_json_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let data_v = args.get(0);
-    let init_v = args.get(1);
-
-    // Per Fetch §5.5 Response.json step 1: "serialize a JavaScript
-    // value to JSON bytes". Per the WHATWG Infra spec, this:
-    //   1. Sets `string` to JSON.stringify(value).
-    //   2. If `string` is undefined (i.e., `value` is a Symbol or
-    //      undefined or contains non-encodables), throw TypeError.
-    //   3. Otherwise, UTF-8 encode `string`.
-    //
-    // V8's JSON.stringify behaviour:
-    //   - Symbol value, undefined value, function value → returns
-    //     undefined (a JS undefined, NOT a throw).
-    //   - Circular reference, BigInt → throws TypeError.
-    //   - Object with throwing `toJSON` / getter → throws that error.
-    //
-    // v8::json::stringify mirrors this: it returns `Some(JsString)`
-    // when JSON.stringify returned a string, `None` when JSON.stringify
-    // threw. To match the spec we need a third case: when JSON.stringify
-    // returned `undefined` (no exception), throw TypeError ourselves.
-    //
-    // We test by running `JSON.stringify(value)` and checking the result.
-    let json_result_v = {
-        let global = scope.get_current_context().global(scope);
-        let json_key = v8::String::new(scope, "JSON").unwrap();
-        let json_obj_v = global.get(scope, json_key.into()).unwrap();
-        let Ok(json_obj) = v8::Local::<v8::Object>::try_from(json_obj_v) else {
-            return;
-        };
-        let stringify_key = v8::String::new(scope, "stringify").unwrap();
-        let Some(stringify_v) = json_obj.get(scope, stringify_key.into()) else {
-            return;
-        };
-        let Ok(stringify_fn) = v8::Local::<v8::Function>::try_from(stringify_v) else {
-            return;
-        };
-        match stringify_fn.call(scope, json_obj.into(), &[data_v]) {
-            Some(v) => v,
-            None => {
-                // JSON.stringify threw — exception is on the isolate,
-                // propagate.
-                return;
-            }
-        }
-    };
-    if json_result_v.is_undefined() {
-        let m =
-            v8::String::new(scope, "Response.json: data is not JSON-serializable").unwrap();
-        let exc = v8::Exception::type_error(scope, m);
-        scope.throw_exception(exc);
-        return;
-    }
-    let Ok(json_str) = v8::Local::<v8::String>::try_from(json_result_v) else {
-        // Defensive: should not happen.
-        return;
-    };
-
-    let global = scope.get_current_context().global(scope);
-    let class_key = v8::String::new(scope, "Response").unwrap();
-    let class_v = global.get(scope, class_key.into()).unwrap();
-    let class_fn: v8::Local<v8::Function> = class_v.try_into().unwrap();
-
-    let result = class_fn.new_instance(scope, &[json_str.into(), init_v]);
-    let Some(obj) = result else { return };
-
-    // Per Fetch §5.5 Response.json: invoke "initialize a response"
-    // with the body content-type set to "application/json". The
-    // "initialize a response" algorithm sets Content-Type ONLY IF the
-    // user's init.headers didn't supply one. The Response constructor
-    // already runs `set_default_content_type` when extracting the
-    // body — but it uses the body-derived MIME (which for our string
-    // path is "text/plain;charset=UTF-8"). We replace that with
-    // "application/json" UNLESS init.headers explicitly provided a
-    // Content-Type.
-    if let Some(raw) = state_ptr(scope, obj) {
-        let state: &ResponseState = unsafe { &*raw };
-        if let Some(h_g) = state.headers.borrow().clone() {
-            let h = v8::Local::new(scope, h_g);
-            let user_supplied_ct =
-                init_supplied_content_type(scope, init_v).unwrap_or(false);
-            if !user_supplied_ct {
-                let set_key = v8::String::new(scope, "set").unwrap();
-                if let Some(set_v) = h.get(scope, set_key.into()) {
-                    if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
-                        let n = v8::String::new(scope, "Content-Type").unwrap();
-                        let v = v8::String::new(scope, "application/json").unwrap();
-                        let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
-                    }
-                }
-            }
-        }
-    }
-
-    rv.set(obj.into());
 }
 
 /// Inspect init?.headers to see whether the user supplied a
