@@ -35,6 +35,38 @@ and `list_all_sandboxes_inner`, idempotency-key support for `DELETE`,
 collectively MINOR #1/#2/#3/#6/#7 in the round-4 review. Bundle them with
 the JWT migration.
 
+### Controller pause/snapshot APIs (CH backend)
+
+Idle AI-builder workspaces today hold tap + memory + Nomad alloc forever. CH
+supports `VM.Pause`/`VM.Resume`/`VM.Snapshot`/`VM.Restore` over its REST
+socket — wiring it gives:
+- **Pause/Resume** — freezes vCPU; keeps RAM pinned, tap held. ~ms to
+  un-pause. Saves CPU only.
+- **Snapshot/Restore** — writes RAM+device-state to disk; releases the
+  alloc, tap, and RAM. Restore cold-starts in seconds (depends on workspace
+  size). Saves the full footprint at the cost of restore latency.
+
+Out-of-scope for the current branch because it requires:
+1. **Backend-trait additions** — `pause`/`resume`/`snapshot`/`restore` with
+   per-backend feasibility (NomadCh: yes; Docker: pause-only; K8s: N/A).
+2. **Agent-side proxy** — controller talks to wrapper-launched CH HTTP API;
+   today the agent doesn't expose `/vm.pause` etc.
+3. **Persistence schema** — `sandbox.sandboxes.state` needs `paused`,
+   `snapshotted` lifecycle states + transition guards. Interacts with the
+   Phase-2 lease-takeover semantics (a paused VM still heartbeats; a
+   snapshotted one doesn't, and "no heartbeat" must NOT trigger
+   takeover-on-unreachable for a deliberately-snapshotted sandbox).
+4. **Auth** — owner-only by default; admin-override flagged.
+5. **Idle auto-pause** — separate concern; needs a controller-side
+   activity tracker (last-request timestamp) and a sweep loop. Probably its
+   own follow-up.
+
+Best-path implementation: **fresh worktree off master with a design
+proposal first**, critic-loop, then code. The lease-takeover interaction
+needs design before code. Reference: round-1/2 of this branch's review
+loops on Phase-1/2 lease-takeover for the model the proposal should
+extend.
+
 ## P2
 
 (Backlog from prior rounds. Phase-5 production-hardening adds: per-operator
