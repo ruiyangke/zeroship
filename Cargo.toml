@@ -121,6 +121,13 @@ tracing-log = "0.2"
 tracing-logfmt = "0.3"
 tracing-bunyan-formatter = "0.3"
 
+# Bounded MPMC queue. Used by `crates/sandbox/src/db.rs` for the
+# Phase-1 worker queue (design § 14.14): handlers `try_send` writes
+# onto a bounded `flume` channel, a fixed pool of workers drains.
+# Phase 0 wires the dep but does not use the queue yet — declaring
+# it now eliminates a Phase-1 dep churn.
+flume = { version = "0.11", default-features = false, features = ["async"] }
+
 # Internal crates
 zeroship-core = { path = "crates/core" }
 zeroship-bundle = { path = "crates/bundle" }

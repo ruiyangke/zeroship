@@ -599,7 +599,7 @@ dependencies = [
  "compio-buf",
  "compio-log",
  "crossbeam-queue",
- "flume",
+ "flume 0.12.0",
  "futures-util",
  "io-uring",
  "io_uring_buf_ring",
@@ -723,7 +723,7 @@ dependencies = [
  "compio-log",
  "compio-net",
  "compio-runtime",
- "flume",
+ "flume 0.12.0",
  "futures-util",
  "libc",
  "quinn-proto",
@@ -1409,6 +1409,17 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flume"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "spin",
 ]
 
 [[package]]
@@ -5709,7 +5720,9 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "compio",
+ "compio-postgres",
  "ed25519-dalek",
+ "flume 0.11.1",
  "futures",
  "hex",
  "hmac 0.12.1",
@@ -5720,6 +5733,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subtle",
+ "thiserror 2.0.18",
  "tracing",
  "ureq",
  "uuid",
