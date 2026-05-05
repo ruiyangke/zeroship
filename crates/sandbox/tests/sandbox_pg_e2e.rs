@@ -1480,3 +1480,223 @@ async fn base64url_token_ids_with_dash_vs_underscore_are_distinct() {
     want.sort();
     assert_eq!(ids, want, "stored ids must round-trip byte-exact");
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Round-2 fixer / IMPORTANT #1 — host_id fence on update_sandbox_status
+// ────────────────────────────────────────────────────────────────────
+//
+// Per design D-14, every CAS UPDATE on ownership-relevant fields
+// must fence on (host_id, generation), not just generation. A
+// peer holding our database handle (or with a stale generation
+// value somehow agreeing on the integer) MUST NOT be able to flip
+// our row's status. This test inserts a row owned by host A,
+// then attempts to update_sandbox_status_with_host using a
+// DIFFERENT host's host_id at the same generation; expects CasLost.
+
+#[compio::test]
+#[ignore = "needs Postgres; Round-2 IMPORTANT #1 host_id fence"]
+async fn update_sandbox_status_fences_on_host_id() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Insert a sandbox owned by my_host at generation 0.
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, my_host, &"f".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Construct a different (synthetic) host_id and try to update
+    // the row pretending to BE that host. Pre-fix this would have
+    // succeeded because the WHERE clause only checked generation.
+    // Today the SQL fences on host_id; the call returns CasLost.
+    let (other_uuid, other_typed) = inject_extra_host(&url, "host-other-fence").await;
+    let err = db
+        .update_sandbox_status_with_host(
+            sid,
+            SandboxStatus::Stopped,
+            0,
+            other_uuid,
+            None,
+        )
+        .await
+        .expect_err("wrong-host CAS must fail");
+    match err {
+        zeroship_sandbox::db::DatabaseError::CasLost {
+            sandbox_id,
+            expected_generation,
+            observed_generation,
+            current_host_id,
+        } => {
+            assert_eq!(expected_generation, 0);
+            assert_eq!(
+                observed_generation, 0,
+                "observed_gen must echo pg's current generation"
+            );
+            // Round-2 fixer / IMPORTANT #5: CasLost carries the real
+            // current owner.
+            let my_host_typed = format!(
+                "hst_{}",
+                zeroship_core::typed_id::uuid_to_base62(&my_host)
+            );
+            assert_eq!(
+                current_host_id.as_deref(),
+                Some(my_host_typed.as_str()),
+                "current_host_id must surface the real owner"
+            );
+            assert_eq!(sandbox_id, info.sandbox_id);
+            // Touch other_typed so the unused-var clippy stays happy
+            // even though we don't assert on it directly.
+            let _ = other_typed;
+        }
+        other => panic!("expected CasLost, got: {other:?}"),
+    }
+
+    // The row's host_id and generation are unchanged (no UPDATE
+    // landed).
+    let (owner, gen) = read_sandbox_owner_and_gen(&url, &info.sandbox_id)
+        .await
+        .unwrap();
+    assert_eq!(gen, 0, "row generation must be unchanged");
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+    assert_eq!(owner, my_host_typed, "row owner must be unchanged");
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Round-2 fixer / CRITICAL #4 — draining hosts get taken over after
+// lease expiration
+// ────────────────────────────────────────────────────────────────────
+//
+// A host that started shutting down (status='draining') but died or
+// got OOM-killed mid-drain must NOT permanently orphan its sandboxes.
+// Pre-fix dead_hosts() filtered status='alive' so a draining host
+// whose lease expired stayed invisible to takeover forever. Today
+// dead_hosts() and the takeover EXISTS subquery accept both
+// 'alive' and 'draining'.
+
+#[compio::test]
+#[ignore = "needs Postgres; Round-2 CRITICAL #4 draining-host takeover"]
+async fn draining_host_with_expired_lease_is_taken_over() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    // Inject a peer host. Insert a sandbox owned by the peer.
+    let (peer_uuid, peer_typed) = inject_extra_host(&url, "host-draining").await;
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, peer_uuid, &"d".repeat(32), Some("http://drain"), Some(7))
+        .await
+        .unwrap();
+    let _ = sid;
+
+    // Flip the peer's status to 'draining' (the operator started a
+    // graceful shutdown) AND age the heartbeat past the lease so we
+    // simulate "host crashed mid-drain."
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.hosts \
+                SET status = 'draining', \
+                    drain_started_at = now(), \
+                    last_heartbeat = now() - make_interval(secs => 120) \
+              WHERE host_id = $1::TEXT",
+            &[&peer_typed.to_string()],
+        )
+        .await
+        .unwrap();
+
+    // dead_hosts MUST surface the draining peer.
+    let dead = db.dead_hosts(60).await.unwrap();
+    assert!(
+        dead.iter().any(|h| h == &peer_typed),
+        "draining host with expired lease must be in dead_hosts; got {dead:?}"
+    );
+
+    // Takeover succeeds and reclaims the sandbox.
+    let taken = db
+        .takeover_sandboxes_from_host(&peer_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert_eq!(
+        taken.len(),
+        1,
+        "draining host's sandbox must be reclaimable"
+    );
+    assert_eq!(taken[0].generation, 1, "takeover bumps generation");
+
+    // Peer's host status flips draining → dead.
+    let status = read_host_status(&url, &peer_typed).await.unwrap();
+    assert_eq!(
+        status, "dead",
+        "peer host must transition draining → dead during takeover"
+    );
+
+    // Sandbox row is now owned by us at gen=1.
+    let (owner, gen) = read_sandbox_owner_and_gen(&url, &info.sandbox_id)
+        .await
+        .unwrap();
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&my_host)
+    );
+    assert_eq!(owner, my_host_typed);
+    assert_eq!(gen, 1);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Round-2 fixer / IMPORTANT #2 — takeover SQL includes 'unreachable'
+// ────────────────────────────────────────────────────────────────────
+//
+// A row stamped 'unreachable' by a previous probe must STILL be
+// reclaimable after lease expiration on its host. Pre-fix the
+// takeover status filter excluded 'unreachable' so the row was
+// permanently degraded with no path back.
+
+#[compio::test]
+#[ignore = "needs Postgres; Round-2 IMPORTANT #2 unreachable takeover"]
+async fn takeover_includes_unreachable_status() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let my_host = db.host_id();
+
+    let (peer_uuid, peer_typed) = inject_extra_host(&url, "host-unreach").await;
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, peer_uuid, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Flip the row to 'unreachable' (CAS-correct against the row's
+    // current generation). The previous owner did this when its probe
+    // failed.
+    db.update_sandbox_status_with_host(
+        sid,
+        SandboxStatus::Unreachable,
+        0,
+        peer_uuid,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Peer's lease expires.
+    age_heartbeat(&url, &peer_typed, 120).await;
+
+    // Takeover MUST reclaim the unreachable row.
+    let taken = db
+        .takeover_sandboxes_from_host(&peer_typed, my_host, 60)
+        .await
+        .unwrap();
+    assert_eq!(
+        taken.len(),
+        1,
+        "unreachable row must be reclaimable; pre-fix it stayed orphan"
+    );
+    // Generation went 0 (insert) → 1 (unreachable flip) → 2 (takeover).
+    assert_eq!(taken[0].generation, 2);
+}
