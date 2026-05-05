@@ -381,3 +381,321 @@ fn explicit_snapshot_mode_ignores_post_factory_mutations() {
     );
     assert_eq!(s, "a=1,true");
 }
+
+// ---------------------------------------------------------------------------
+// `&mut self` value_pairs (MAC-09) — Headers' lazy sort cache shape.
+// Each call to value_pairs may rebuild a cache; live mode means we need
+// `&mut self` recovery on each next() and forEach iteration.
+// ---------------------------------------------------------------------------
+
+mod mut_live {
+    use super::*;
+
+    /// Mimics Headers' shape: a backing list + a lazy "sorted" cache
+    /// that's rebuilt the first time after each mutation. The cache is
+    /// invalidated by `append` and rebuilt on the first read after.
+    pub struct Bag {
+        pub entries: Vec<(ByteString, ByteString)>,
+        pub cache: Option<Vec<(ByteString, ByteString)>>,
+        /// Rebuild counter — exposed via JS so the test can prove the
+        /// macro's `&mut self` recovery actually populated the cache.
+        pub rebuilds: u32,
+    }
+
+    #[v8_class]
+    #[v8_iterable(key = ByteString, value = ByteString, mode = live)]
+    impl Bag {
+        #[v8_constructor]
+        fn new() -> Bag {
+            Bag {
+                entries: Vec::new(),
+                cache: None,
+                rebuilds: 0,
+            }
+        }
+
+        #[v8_method]
+        fn append(&mut self, k: ByteString, v: ByteString) {
+            self.entries.push((k, v));
+            // Mutation invalidates the lazy cache — exactly the
+            // Headers pattern.
+            self.cache = None;
+        }
+
+        /// Read-only counter exposing the rebuild hits to the test.
+        #[v8_method]
+        fn rebuilds(&self) -> u32 {
+            self.rebuilds
+        }
+
+        /// `&mut self` shape — each call lazily rebuilds the cache and
+        /// returns a fresh clone. The macro must recover via `*mut Self`
+        /// + `&mut *ptr` so this method is callable.
+        fn value_pairs(&mut self) -> Vec<(ByteString, ByteString)> {
+            if self.cache.is_none() {
+                self.cache = Some(self.entries.clone());
+                self.rebuilds += 1;
+            }
+            self.cache.as_ref().unwrap().clone()
+        }
+    }
+}
+
+#[test]
+fn mut_self_value_pairs_lazy_cache_rebuilds_after_mutation() {
+    let s = run_in_v8(
+        |scope, global| {
+            install_class::<mut_live::Bag>(mut_live::Bag::install, "Bag", scope, global);
+        },
+        r#"
+        const b = new Bag();
+        b.append("a", "1");
+        b.append("b", "2");
+        const it = b.entries();
+        const r1 = it.next();              // builds cache, rebuilds = 1
+        const r2 = it.next();              // hits cache, rebuilds still 1
+        b.append("c", "3");                // invalidates cache
+        const r3 = it.next();              // rebuilds = 2 (live mode)
+        `${r1.value.join("=")},${r2.value.join("=")},${r3.value.join("=")},${b.rebuilds()}`;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    // Each next() call invokes value_pairs() afresh; the FIRST and
+    // THIRD calls hit a cold cache (1 + 1 = 2 rebuilds), the SECOND
+    // hits the warm cache. After two appends + two next()s the cache
+    // is valid; after the third append the cache is invalidated and
+    // the third next() rebuilds it.
+    assert_eq!(s, "a=1,b=2,c=3,2");
+}
+
+#[test]
+fn mut_self_value_pairs_for_each_observes_mutations() {
+    // Reuses the same `Bag` from `mut_live`. forEach must re-call
+    // value_pairs(&mut self) per iteration.
+    let s = run_in_v8(
+        |scope, global| {
+            install_class::<mut_live::Bag>(mut_live::Bag::install, "Bag", scope, global);
+        },
+        r#"
+        const b = new Bag();
+        b.append("a", "1");
+        const seen = [];
+        b.forEach((v, k) => {
+            seen.push(`${k}=${v}`);
+            if (seen.length === 1) b.append("b", "2"); // live mode picks up
+        });
+        seen.join(",");
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "a=1,b=2");
+}
+
+// ---------------------------------------------------------------------------
+// `&self, scope` value_pairs (snapshot mode) — value_pairs reads the
+// scope to fetch state from a slot. Mirrors a class that needs the
+// scope to materialise its pair list (e.g. for slot-based fixtures).
+// ---------------------------------------------------------------------------
+
+mod scope_snapshot {
+    use super::*;
+
+    /// Marker stored on the scope slot — supplies the pairs.
+    pub struct Source {
+        pub pairs: Vec<(ByteString, ByteString)>,
+    }
+
+    pub struct Bag;
+
+    #[v8_class]
+    #[v8_iterable(key = ByteString, value = ByteString, mode = snapshot)]
+    impl Bag {
+        #[v8_constructor]
+        fn new() -> Bag {
+            Bag
+        }
+
+        /// `&self, scope` — proves the macro passes the outer scope
+        /// through. Without scope we couldn't reach `Source`.
+        fn value_pairs(
+            &self,
+            scope: &mut v8::PinScope,
+        ) -> Vec<(ByteString, ByteString)> {
+            scope
+                .get_slot::<Source>()
+                .map(|s| s.pairs.clone())
+                .unwrap_or_default()
+        }
+    }
+}
+
+#[test]
+fn ref_self_value_pairs_with_scope_is_passed_through() {
+    let s = run_in_v8(
+        |scope, global| {
+            scope.set_slot(scope_snapshot::Source {
+                pairs: vec![
+                    (
+                        ByteString::from_bytes(b"x".to_vec()),
+                        ByteString::from_bytes(b"1".to_vec()),
+                    ),
+                    (
+                        ByteString::from_bytes(b"y".to_vec()),
+                        ByteString::from_bytes(b"2".to_vec()),
+                    ),
+                ],
+            });
+            install_class::<scope_snapshot::Bag>(
+                scope_snapshot::Bag::install,
+                "Bag",
+                scope,
+                global,
+            );
+        },
+        r#"
+        const b = new Bag();
+        const out = [];
+        for (const [k, v] of b) out.push(`${k}=${v}`);
+        out.join(",");
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "x=1,y=2");
+}
+
+// ---------------------------------------------------------------------------
+// `&mut self, scope` value_pairs (live mode) — URLSearchParams shape:
+// `value_pairs` calls a scope-taking helper (sync_from_parent) and then
+// returns the pair list. Both `&mut self` AND `&mut PinScope` must be
+// recognized by the macro.
+// ---------------------------------------------------------------------------
+
+mod mut_scope_live {
+    use super::*;
+
+    /// Marker stashed on the scope slot — value_pairs pulls a fresh
+    /// "remote view" from here on each call to mimic
+    /// `sync_from_parent(scope)`.
+    pub struct Remote {
+        pub pairs: RefCell<Vec<(ByteString, ByteString)>>,
+    }
+
+    pub struct Bag {
+        /// Local mirror — `value_pairs` syncs into this from the
+        /// scope-stored remote, then returns it. `&mut self` is
+        /// required because `entries` is mutated during sync.
+        pub entries: Vec<(ByteString, ByteString)>,
+        /// Sync counter — exposed for verification.
+        pub syncs: u32,
+    }
+
+    #[v8_class]
+    #[v8_iterable(key = ByteString, value = ByteString, mode = live)]
+    impl Bag {
+        #[v8_constructor]
+        fn new() -> Bag {
+            Bag {
+                entries: Vec::new(),
+                syncs: 0,
+            }
+        }
+
+        #[v8_method]
+        fn syncs(&self) -> u32 {
+            self.syncs
+        }
+
+        /// `&mut self, scope` — full URLSearchParams shape.
+        fn value_pairs(
+            &mut self,
+            scope: &mut v8::PinScope,
+        ) -> Vec<(ByteString, ByteString)> {
+            // sync_from_parent: pull the remote pairs into the local
+            // mirror via the scope slot. This is the line that
+            // requires both `&mut self` AND `&mut PinScope`.
+            if let Some(remote) = scope.get_slot::<Remote>() {
+                self.entries = remote.pairs.borrow().clone();
+            }
+            self.syncs += 1;
+            self.entries.clone()
+        }
+    }
+}
+
+#[test]
+fn mut_self_with_scope_value_pairs_syncs_per_next() {
+    let s = run_in_v8(
+        |scope, global| {
+            scope.set_slot(mut_scope_live::Remote {
+                pairs: RefCell::new(vec![(
+                    ByteString::from_bytes(b"k".to_vec()),
+                    ByteString::from_bytes(b"v".to_vec()),
+                )]),
+            });
+            install_class::<mut_scope_live::Bag>(
+                mut_scope_live::Bag::install,
+                "Bag",
+                scope,
+                global,
+            );
+        },
+        r#"
+        const b = new Bag();
+        const it = b.entries();
+        const r1 = it.next();              // syncs the single pair
+        const r2 = it.next();              // done
+        // syncs() returns 2: one per next() call, both observed.
+        `${r1.value.join("=")},${r2.done},${b.syncs()}`;
+        "#,
+        |val, scope| js_string(val, scope),
+    );
+    assert_eq!(s, "k=v,true,2");
+}
+
+#[test]
+fn mut_self_with_scope_value_pairs_observes_remote_growth() {
+    // Run the test in two phases inside a single isolate via a
+    // bespoke harness — the standard `run_in_v8` only takes one
+    // script. We need to mutate the Remote between two next() calls.
+    use zeroship_runtime::init_v8;
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    let global = scope.get_current_context().global(scope);
+
+    scope.set_slot(mut_scope_live::Remote {
+        pairs: RefCell::new(vec![(
+            ByteString::from_bytes(b"a".to_vec()),
+            ByteString::from_bytes(b"1".to_vec()),
+        )]),
+    });
+    install_class::<mut_scope_live::Bag>(
+        mut_scope_live::Bag::install,
+        "Bag",
+        scope,
+        global,
+    );
+
+    // Phase 1: ask the iterator to yield one entry (live, but
+    // remote only has 1 pair).
+    let src1 = "globalThis.__b = new Bag(); globalThis.__it = __b.entries(); JSON.stringify(__it.next().value);";
+    let src1_v8 = v8::String::new(scope, src1).unwrap();
+    let r1 = v8::Script::compile(scope, src1_v8, None).unwrap().run(scope).unwrap();
+    let r1_s = r1.to_rust_string_lossy(scope);
+    assert_eq!(r1_s, r#"["a","1"]"#);
+
+    // Phase 2: grow the remote, then ask the iterator for another
+    // entry. Live mode means the cursor walks into the new entry.
+    let remote = scope.get_slot::<mut_scope_live::Remote>().unwrap();
+    remote.pairs.borrow_mut().push((
+        ByteString::from_bytes(b"b".to_vec()),
+        ByteString::from_bytes(b"2".to_vec()),
+    ));
+    let src2 = "JSON.stringify(__it.next().value);";
+    let src2_v8 = v8::String::new(scope, src2).unwrap();
+    let r2 = v8::Script::compile(scope, src2_v8, None).unwrap().run(scope).unwrap();
+    let r2_s = r2.to_rust_string_lossy(scope);
+    assert_eq!(r2_s, r#"["b","2"]"#);
+}
