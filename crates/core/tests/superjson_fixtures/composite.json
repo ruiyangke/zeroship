@@ -1,0 +1,1 @@
+{"json":{"d":"2026-01-01T00:00:00.000Z","n":"9007199254740993","m":[["k","v"]],"st":[1,2],"r":"/abc/g","u":"https://x.test/p?q=1","b":[1,2,3],"un":null,"plain":{"a":1,"b":[2,3]}},"meta":{"values":{"d":["Date"],"n":["bigint"],"m":["map"],"st":["set"],"r":["regexp"],"u":["URL"],"b":[["typed-array","Uint8Array"]],"un":["undefined"]},"v":1}}

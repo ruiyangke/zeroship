@@ -6,5 +6,7 @@ pub mod typed_id;
 pub mod crypto;
 pub mod observability;
 pub mod preview_ports;
+pub mod superjson;
 
+pub use superjson::Envelope;
 pub use types::*;
