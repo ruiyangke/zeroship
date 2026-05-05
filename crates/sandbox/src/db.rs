@@ -215,12 +215,26 @@ pub enum DatabaseError {
     /// zero rows because the row's `generation` had advanced past
     /// the caller's `expected_generation`. Distinct from `NotFound`
     /// — the row exists, just at a generation we no longer own.
-    /// Carries the typed-id and the stale expected counter so the
-    /// caller's audit log surfaces a precise lost-leadership event.
-    #[error("CAS lost for sandbox {sandbox_id}: expected generation {expected_generation}")]
+    ///
+    /// Round-2 fixer / IMPORTANT #5: extended to carry the
+    /// `observed_generation` (what pg currently has) and
+    /// `current_host_id` (who owns the row right now). Pre-fix the
+    /// audit log only said "expected 5" with no hint at "row is at
+    /// 9, owned by host_id Y" — operators triaging a split-brain
+    /// event had to manually open pg and re-read the row. Today the
+    /// error itself is self-contained.
+    #[error("CAS lost for sandbox {sandbox_id}: expected generation {expected_generation}, observed {observed_generation} (current host {current_host_id:?})")]
     CasLost {
         sandbox_id: String,
         expected_generation: i64,
+        observed_generation: i64,
+        /// Typed-id (`hst_<base62>`) of whoever currently owns the
+        /// row. `None` if the row's `host_id` was NULL or the
+        /// post-CAS lookup couldn't resolve it. The audit log
+        /// includes the optionality so operators can spot
+        /// "row is at gen 9 but no one claims it" cases (which
+        /// would indicate corruption).
+        current_host_id: Option<String>,
     },
     /// Round-1 fixer / IMPORTANT #7: the targeted row does not exist
     /// (or has been tombstoned, or the tenant fence excluded it).
@@ -1442,6 +1456,15 @@ impl Database {
     /// optional tenant fence. When `Some`, the WHERE clause appends
     /// `AND user_id = $expected_user_id` so a misrouted call can't
     /// modify rows owned by a different user.
+    ///
+    /// Back-compat wrapper for callers (restore, tests) that don't
+    /// have a host_id at hand. Forwards to
+    /// [`Self::update_sandbox_status_with_host`] with
+    /// `host_id = self.host_id()` — this controller's stable
+    /// identity. Round-2 fixer / IMPORTANT #1: every CAS UPDATE
+    /// fences on (host_id, generation) per design D-14, so a
+    /// misrouted call from a peer who lost its lease can never flip
+    /// our row.
     pub async fn update_sandbox_status(
         &self,
         sandbox_id: Uuid,
@@ -1449,11 +1472,43 @@ impl Database {
         expected_generation: i64,
         expected_user_id: Option<&str>,
     ) -> Result<i64> {
+        let host_id = self.host_id();
+        self.update_sandbox_status_with_host(
+            sandbox_id,
+            status,
+            expected_generation,
+            host_id,
+            expected_user_id,
+        )
+        .await
+    }
+
+    /// Round-2 fixer / IMPORTANT #1: CAS-guarded status update with
+    /// an explicit `(host_id, generation)` fence. Per design D-14,
+    /// every UPDATE on ownership-relevant fields MUST be guarded by
+    /// the host_id fence in addition to the generation counter — a
+    /// peer who somehow held a stale handle to this `Database` would
+    /// have the right generation only briefly (the takeover write
+    /// also bumps generation), but the host_id fence ensures that
+    /// even if generation collisions happen across hosts, the wrong
+    /// host can't move our row.
+    pub async fn update_sandbox_status_with_host(
+        &self,
+        sandbox_id: Uuid,
+        status: SandboxStatus,
+        expected_generation: i64,
+        host_id: Uuid,
+        expected_user_id: Option<&str>,
+    ) -> Result<i64> {
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
         let sandbox_id_typed = format!(
             "sbx_{}",
             zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&host_id)
         );
         let stopped_at_clause = match status {
             SandboxStatus::Stopped | SandboxStatus::Lost | SandboxStatus::Orphan => {
@@ -1470,6 +1525,7 @@ impl Database {
                     {stopped_at_clause} \
               WHERE sandbox_id = $2::TEXT \
                 AND generation = $3::BIGINT \
+                AND host_id = $5::TEXT \
                 AND ($4::TEXT IS NULL OR user_id = $4::TEXT) \
                 AND deleted_at IS NULL \
               RETURNING generation"
@@ -1482,6 +1538,7 @@ impl Database {
                     &sandbox_id_typed,
                     &expected_generation,
                     &expected_user_owned,
+                    &host_id_typed,
                 ],
             )
             .await
@@ -1490,11 +1547,17 @@ impl Database {
             return Ok(row.get::<_, i64>(0));
         }
         // The CAS missed. Distinguish "row exists, different
-        // generation" (CasLost) from "row absent / wrong tenant"
-        // (NotFound) so the caller can audit-log precisely.
+        // generation / different host" (CasLost) from "row absent /
+        // wrong tenant" (NotFound) so the caller can audit-log
+        // precisely.
+        //
+        // Round-2 fixer / IMPORTANT #5: the lookup also pulls
+        // `generation` and `host_id` so the `CasLost` variant can
+        // surface "row is at gen N, owned by host_id X" without the
+        // operator re-opening pg.
         let lookup = client
             .query_opt(
-                "SELECT generation FROM sandbox.sandboxes \
+                "SELECT generation, host_id FROM sandbox.sandboxes \
                   WHERE sandbox_id = $1::TEXT \
                     AND ($2::TEXT IS NULL OR user_id = $2::TEXT) \
                     AND deleted_at IS NULL",
@@ -1502,10 +1565,14 @@ impl Database {
             )
             .await
             .map_err(DatabaseError::Pg)?;
-        if lookup.is_some() {
+        if let Some(row) = lookup {
+            let observed_generation: i64 = row.get(0);
+            let current_host_id: Option<String> = row.try_get(1).ok();
             Err(DatabaseError::CasLost {
                 sandbox_id: sandbox_id_typed,
                 expected_generation,
+                observed_generation,
+                current_host_id,
             })
         } else {
             Err(DatabaseError::NotFound {

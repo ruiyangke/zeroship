@@ -542,13 +542,109 @@ pub async fn stop_sandbox(
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
     let info_for_audit = state.sandboxes.get(&id);
-    // Phase-2 HA: snapshot the in-memory `generation` BEFORE
-    // backend.stop so the CAS write below carries the value this
-    // controller still believes it owns. A peer takeover that
-    // already happened will have bumped the pg row past this value;
-    // our UPDATE will return 0 rows and we'll log lost-leadership
-    // before proceeding with local cleanup (§ 11.2).
+    // Phase-2 HA: snapshot the in-memory `generation` BEFORE any
+    // pg or backend write so the CAS-guarded UPDATEs below carry
+    // the value this controller still believes it owns. A peer
+    // takeover that already happened will have bumped the pg row
+    // past this value; our UPDATE returns CasLost and we abandon
+    // the destructive ops on this side (§ 11.2).
     let expected_generation = state.sandboxes.generation_for(&id);
+    let owner_user_id = info_for_audit.as_ref().map(|i| i.user_id.clone());
+
+    // Round-2 fixer / CRITICAL #2: pre-flight CAS Stopping fence.
+    //
+    // Pre-fix, we ran `backend.stop(id)` BEFORE asking pg whether
+    // we still own the row. If a peer had just taken over via
+    // lease expiration, the agent at the recycled vm_index now
+    // belongs to the new owner — and our `backend.stop` would have
+    // killed their runtime out from under them. The new owner's
+    // probe-and-register-one had succeeded; we just yanked it.
+    //
+    // The fix is to flip the row to `Stopping` under (host_id,
+    // generation) BEFORE touching the backend. CasLost ⇒ a peer
+    // owns it; we skip backend.stop AND skip the pg DELETE; the
+    // only thing we do is in-memory + sealed-record cleanup, which
+    // are local to this controller and don't affect the new owner.
+    //
+    // When pg is disabled (database=None) we skip the fence — that
+    // matches the dev / single-node deploy where there's no peer to
+    // race with anyway.
+    let mut cas_lost = false;
+    let mut new_generation: Option<i64> = None;
+    if let (Some(db), Some(gen)) = (state.database.as_ref(), expected_generation) {
+        match db
+            .update_sandbox_status_with_host(
+                id,
+                crate::db::SandboxStatus::Stopping,
+                gen,
+                db.host_id(),
+                owner_user_id.as_deref(),
+            )
+            .await
+        {
+            Ok(new_gen) => {
+                new_generation = Some(new_gen);
+                state.sandboxes.set_generation(&id, new_gen);
+                tracing::debug!(
+                    sandbox_id = %typed_sandbox_id(&id),
+                    old_generation = gen,
+                    new_generation = new_gen,
+                    "sandbox/handlers: pg pre-flight CAS Stopping ok"
+                );
+            }
+            Err(crate::db::DatabaseError::CasLost {
+                sandbox_id: sid,
+                expected_generation: eg,
+                observed_generation: og,
+                current_host_id: chi,
+            }) => {
+                tracing::warn!(
+                    sandbox_id = %sid,
+                    expected_generation = eg,
+                    observed_generation = og,
+                    current_host_id = ?chi,
+                    "sandbox/handlers: lost-leadership on stop pre-flight; skipping backend.stop AND pg-delete (peer owns it now)"
+                );
+                crate::metrics::inc_lost_leadership("update_sandbox_status_stopping");
+                cas_lost = true;
+            }
+            Err(crate::db::DatabaseError::NotFound { sandbox_id: sid }) => {
+                tracing::info!(
+                    sandbox_id = %sid,
+                    "sandbox/handlers: stop pre-flight saw row already gone; skipping backend.stop"
+                );
+                cas_lost = true;
+            }
+            Err(e) => {
+                // Pg failure on pre-flight: log, but treat as if
+                // CAS was OK so we don't strand the runtime. This
+                // is a deliberate availability-over-consistency
+                // choice — a flaky pg shouldn't lock-in stale
+                // sandboxes.
+                tracing::warn!(
+                    sandbox_id = %typed_sandbox_id(&id),
+                    error = %e,
+                    "sandbox/handlers: pg pre-flight CAS failed; proceeding with backend.stop"
+                );
+            }
+        }
+    }
+
+    // CAS-LOST PATH: skip backend.stop and pg-delete entirely.
+    // Local cleanup only — registry remove is safe (in-memory,
+    // local to this controller). Sealed record was sealed on the
+    // ORIGINAL owner's disk; the new owner has its own copy (or
+    // not, per Phase-2 v1 cross-host limitation). Leaving our
+    // local copy alone is the conservative choice; the orphan
+    // sweep at next boot would clean it up anyway.
+    if cas_lost {
+        state.sandboxes.remove(&id);
+        return HttpResponse::Ok().json(&serde_json::json!({
+            "stopped": true,
+            "sandbox_id": typed_sandbox_id(&id),
+            "lost_leadership": true,
+        }));
+    }
 
     if let Err(e) = state.backend.stop(id).await {
         // **Don't** swallow: surface so the operator sees the
@@ -564,55 +660,54 @@ pub async fn stop_sandbox(
     // Round-8 Phase 1: best-effort pg writes. Move the row to the
     // tombstone (deleted_sandboxes) and emit a stopped event.
     if let Some(db) = state.database.as_ref() {
-        // Phase-2 CAS-guarded status flip. Before we drop the row
-        // into the tombstone, mark it 'stopped' under the
-        // generation we still believe we own. CAS-loss means a
-        // peer took over (lease expired from our view); we log
-        // `lost-leadership` and SKIP the pg-side delete — round-1
-        // fixer / CRITICAL #3: the row now belongs to the new owner
-        // and yanking it would corrupt their state. Local in-memory
-        // + sealed-record cleanup still proceeds.
-        let owner_user_id = info_for_audit.as_ref().map(|i| i.user_id.clone());
-        let mut cas_lost = false;
-        if let Some(gen) = expected_generation {
+        // Final flip from `Stopping` → `Stopped` (records the
+        // stopped_at timestamp). We carry the generation that came
+        // back from the pre-flight UPDATE; if pre-flight wasn't run
+        // (no expected_generation), best-effort skip.
+        if let Some(gen) = new_generation {
             match db
-                .update_sandbox_status(
+                .update_sandbox_status_with_host(
                     id,
                     crate::db::SandboxStatus::Stopped,
                     gen,
+                    db.host_id(),
                     owner_user_id.as_deref(),
                 )
                 .await
             {
-                Ok(new_gen) => {
+                Ok(final_gen) => {
+                    state.sandboxes.set_generation(&id, final_gen);
                     tracing::debug!(
-                        sandbox_id = %id,
-                        old_generation = gen,
-                        new_generation = new_gen,
+                        sandbox_id = %typed_sandbox_id(&id),
+                        new_generation = final_gen,
                         "sandbox/handlers: pg update_sandbox_status(stopped) ok"
                     );
                 }
-                Err(crate::db::DatabaseError::CasLost { sandbox_id: sid, expected_generation: eg }) => {
-                    // Lost-leadership: the row's generation is
-                    // ahead of ours, meaning a peer took over.
+                Err(crate::db::DatabaseError::CasLost {
+                    sandbox_id: sid,
+                    expected_generation: eg,
+                    observed_generation: og,
+                    current_host_id: chi,
+                }) => {
+                    // Extremely rare: another controller squeezed in
+                    // between our pre-flight Stopping flip and this
+                    // final Stopped flip. We've already done the
+                    // backend.stop on what we owned at pre-flight
+                    // time; the new owner gets to clean up its own
+                    // view.
                     tracing::warn!(
                         sandbox_id = %sid,
                         expected_generation = eg,
-                        "sandbox/handlers: lost-leadership on stop (CAS conflict); skipping pg-delete; local cleanup only"
+                        observed_generation = og,
+                        current_host_id = ?chi,
+                        "sandbox/handlers: lost-leadership between Stopping and Stopped; skipping pg-delete"
                     );
                     crate::metrics::inc_lost_leadership("update_sandbox_status_stopped");
                     cas_lost = true;
                 }
-                Err(crate::db::DatabaseError::NotFound { sandbox_id: sid }) => {
-                    tracing::info!(
-                        sandbox_id = %sid,
-                        "sandbox/handlers: stop saw row already gone; skipping pg-delete"
-                    );
-                    cas_lost = true;
-                }
                 Err(e) => {
                     tracing::warn!(
-                        sandbox_id = %id,
+                        sandbox_id = %typed_sandbox_id(&id),
                         error = %e,
                         "sandbox/handlers: pg update_sandbox_status(stopped) failed (non-fatal)"
                     );
@@ -620,9 +715,10 @@ pub async fn stop_sandbox(
             }
         }
 
-        // Round-1 fixer / CRITICAL #3: only issue the tombstone DELETE
-        // when we still own the row. CAS-loss means a peer is now
-        // authoritative; we MUST NOT yank their row.
+        // Round-1 fixer / CRITICAL #3 + Round-2 fixer / CRITICAL #2:
+        // tombstone DELETE only when we still own the row. The row
+        // is `Stopping` at this point (in our view); host_id fence
+        // ensures no one else moves it.
         if !cas_lost {
             match db
                 .delete_sandbox(
@@ -645,7 +741,7 @@ pub async fn stop_sandbox(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        sandbox_id = %id,
+                        sandbox_id = %typed_sandbox_id(&id),
                         error = %e,
                         "sandbox/handlers: pg delete_sandbox failed (non-fatal)"
                     );
