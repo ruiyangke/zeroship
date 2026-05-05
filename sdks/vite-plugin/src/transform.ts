@@ -3,6 +3,35 @@ import { relative, extname } from "node:path";
 import MagicString from "magic-string";
 
 /**
+ * Source modules whose named exports the transform recognizes as RPC
+ * procedure wrappers (`procedure`/`query`/`mutation`/`stream`/
+ * `subscription`).
+ *
+ * `@zeroship/server` is the canonical home today (the wrappers ship
+ * alongside `defineApp`, `z`, and the SSR adapter). `@zeroship/rpc`
+ * is reserved for the Phase 2 split where the server-only authoring
+ * API separates from the build-time wrapper helpers; until then it
+ * resolves the same names.
+ */
+const WRAPPER_SOURCES = new Set([
+  "@zeroship/server",
+  "@zeroship/rpc",
+]);
+
+/** Names exported by {@link WRAPPER_SOURCES} that mark an export as RPC. */
+const WRAPPER_NAMES = new Set([
+  "procedure",
+  "query",
+  "mutation",
+  "stream",
+  "subscription",
+]);
+
+/** Wrapper-marker discriminator. `procedure` is generic; the others
+ *  imply a kind the transform reads statically. */
+type WrapperKind = "query" | "mutation" | "stream" | "subscription" | "procedure";
+
+/**
  * Per-procedure metadata stashed at transform time. Consumed by the
  * Phase 1 manifest emitter (`src/manifest.ts`) at closeBundle to build
  * the `manifest.resources` block.
@@ -144,6 +173,72 @@ function quickHasUseServerDirective(code: string): boolean {
   if (i >= code.length) return false;
   const head = code.slice(i, i + 12);
   return head === '"use server"' || head === "'use server'";
+}
+
+/**
+ * Per-file symbol table mapping locally-bound identifiers to the
+ * wrapper marker name they resolve to.
+ *
+ *   import { procedure, query as q } from "@zeroship/server";
+ *   // bindings: { procedure → "procedure", q → "query" }
+ *
+ * Only named imports from {@link WRAPPER_SOURCES} are recorded;
+ * default imports, namespace imports (`import * as ns`), and
+ * re-exports of wrapper names are NOT considered markers — the import
+ * must be a direct named import of a known wrapper from a known
+ * package, so the symbol table is decidable from the AST alone.
+ */
+function collectWrapperBindings(astBody: any[]): Map<string, WrapperKind> {
+  const bindings = new Map<string, WrapperKind>();
+  for (const node of astBody) {
+    if (node.type !== "ImportDeclaration") continue;
+    const sourceLit = node.source;
+    if (!sourceLit || typeof sourceLit.value !== "string") continue;
+    if (!WRAPPER_SOURCES.has(sourceLit.value)) continue;
+    for (const spec of node.specifiers || []) {
+      if (spec.type !== "ImportSpecifier") continue;
+      const imported = spec.imported?.name;
+      const local = spec.local?.name;
+      if (!imported || !local) continue;
+      if (!WRAPPER_NAMES.has(imported)) continue;
+      bindings.set(local, imported as WrapperKind);
+    }
+  }
+  return bindings;
+}
+
+/**
+ * Inspect a `VariableDeclarator` initializer to see if it's a wrapper
+ * call. Returns `{ kind, handler, configNode }` when the callee is an
+ * Identifier bound to a wrapper marker (per {@link
+ * collectWrapperBindings}); else `null`.
+ *
+ *   procedure(async (x) => x)              → { kind: "procedure", handler: ArrowFn,    configNode: undefined }
+ *   query(handler, { id: "list" })         → { kind: "query",     handler: Identifier, configNode: ObjectExpression }
+ *   list(...)                              → null   (callee is not bound to a wrapper)
+ *
+ * Member-expression callees (`mod.procedure(...)`, `pkg.query(...)`)
+ * are NOT recognized — wrappers must be bare identifier calls so they
+ * survive minification under a stable name AND so the static symbol
+ * table is enough to decide.
+ *
+ * The `configNode` is the second arg as an AST node (the literalize()
+ * pass converts it to a plain object). Returned UNINTERPRETED here so
+ * the caller can apply `allowSchemaProps: true` (preserves Zod
+ * `input` / `output` keys as marker sentinels).
+ */
+function matchWrapperCall(
+  init: any,
+  bindings: Map<string, WrapperKind>,
+): { kind: WrapperKind; handler: any; configNode: any } | null {
+  if (!init || init.type !== "CallExpression") return null;
+  const callee = init.callee;
+  if (!callee || callee.type !== "Identifier") return null;
+  const wrapper = bindings.get(callee.name);
+  if (!wrapper) return null;
+  const handler = init.arguments?.[0];
+  const configNode = init.arguments?.[1];
+  return { kind: wrapper, handler, configNode };
 }
 
 /** Shared runtime: emitted once per client bundle. Speaks the spec wire
@@ -480,19 +575,34 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    opts a file into RPC discovery.
         if (!detectFileLevelUseServer(ast)) return null;
 
-        // 4. Find server functions: every async-or-not function /
-        //    arrow / generator export at module scope. The file
-        //    declared `"use server"` at the top — every code path
-        //    below it is server-only — so any function export is a
-        //    server function.
+        // 4. Find server-procedure exports inside the server module.
         //
-        //    NOTE: this stage still implements the legacy "every
-        //    export is an RPC" semantics. The follow-up commit
-        //    (wrapper-marker detection) narrows this to "only exports
-        //    wrapped in `procedure()`/`query()`/`mutation()`/`stream()`/
-        //    `subscription()` are RPCs", closing ISS-02 fully.
+        //    The file already declared `"use server"` at the top — so
+        //    every code path below it is server-side — but unlike the
+        //    legacy path-convention behavior, NOT every export is
+        //    automatically an RPC. Only exports whose initializer is a
+        //    call to one of the wrapper markers (`procedure`, `query`,
+        //    `mutation`, `stream`, `subscription` imported from
+        //    `@zeroship/server` or `@zeroship/rpc`) are registered.
+        //
+        //    Plain `export function helper(...)` and `export const x =
+        //    ...` stay private; they survive in the server bundle and
+        //    are callable by other server code, but they are NOT
+        //    network-reachable. This closes the ISS-02 footgun: a
+        //    misplaced `export * from "./helpers"` no longer publishes
+        //    helpers as `/_zs/v1/<helperName>` endpoints.
+        const wrapperBindings = collectWrapperBindings(ast.body);
         interface ServerFn {
           name: string;
+          /** Wrapper kind from the marker call: query/mutation/stream/
+           *  subscription (an explicit kind), or "procedure" (generic
+           *  marker — kind comes from `inferKind()`). */
+          markerKind: WrapperKind;
+          /** Config object pulled from the wrapper's second argument,
+           *  e.g. `procedure(handler, { id: "x" })`. Already literalized
+           *  with `allowSchemaProps: true` so Zod `input` / `output`
+           *  call expressions survive as schema markers. */
+          wrapperConfig: Record<string, unknown> | undefined;
           node: any;
           isStream: boolean;
         }
@@ -503,37 +613,80 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           const decl = node.declaration;
           if (!decl) continue;
 
-          // export function name() { ... }
-          // export async function name() { ... }
-          // export async function* name() { ... }
-          if (decl.type === "FunctionDeclaration" && decl.id?.name) {
-            const name = decl.id.name;
-            serverFns.push({ name, node, isStream: !!decl.generator });
-          }
+          // Plain function declarations:
+          //   export function name() { ... }
+          //   export async function name() { ... }
+          //   export async function* name() { ... }
+          //
+          // These are NOT RPCs anymore (ISS-02). They stay in the
+          // server bundle as private helpers; the synthetic SSR
+          // entry's namespace iteration ignores them because they
+          // lack the wrapper-attached `__zsKind` / `config.kind` tag
+          // the dispatcher reads when registering procedures.
+          if (decl.type === "FunctionDeclaration") continue;
 
-          // export const name = () => { ... }
-          // export const name = async function() { ... }
-          // export const name = async function*() { ... }
-          if (decl.type === "VariableDeclaration") {
-            for (const d of decl.declarations || []) {
-              const name = d.id?.name;
-              if (!name || !d.init) continue;
-              // Skip the module-level `$config` declaration — it is
-              // metadata, not a server function. The manifest emitter
-              // reads it via collectConfig().
-              if (name === "$config") continue;
-              // Only treat as a server function if the initializer is
-              // actually a function (Arrow/Function/AsyncFunction).
-              const isFn =
-                d.init.type === "ArrowFunctionExpression" ||
-                d.init.type === "FunctionExpression";
-              if (!isFn) continue;
-              const isStream =
-                (d.init.type === "FunctionExpression" && !!d.init.generator) ||
-                (d.init.type === "ArrowFunctionExpression" && !!d.init.generator);
-              serverFns.push({ name, node, isStream });
-              break; // one removal per VariableDeclaration node
-            }
+          // Variable declarations: only those whose initializer is a
+          // call to a wrapper marker (`procedure`/`query`/`mutation`/
+          // `stream`/`subscription`) are registered.
+          //
+          //   export const list = query(async () => { ... });
+          //   export const greet = procedure(handler, { id: "greet" });
+          //
+          // Helpers stay private:
+          //
+          //   export const helper = async () => { ... };  // skipped
+          //   export const PI = 3.14;                      // skipped
+          //   export const $config = { auth: "user" };     // metadata
+          //                                                // (collectConfig)
+          if (decl.type !== "VariableDeclaration") continue;
+          for (const d of decl.declarations || []) {
+            const name = d.id?.name;
+            if (!name || !d.init) continue;
+            // Module-level `$config` is metadata, not a server function.
+            if (name === "$config") continue;
+
+            const wrapper = matchWrapperCall(d.init, wrapperBindings);
+            if (!wrapper) continue;
+
+            // The handler is the first argument of the wrapper call.
+            // Async-generator detection looks at the handler's shape;
+            // explicit `stream(...)` / `subscription(...)` wrappers
+            // pin `isStream: true` regardless (a stream wrapper around
+            // a plain async fn is rare but legal — the runtime treats
+            // the return value as the iterator).
+            const handler = wrapper.handler;
+            const handlerIsStream =
+              !!handler &&
+              ((handler.type === "FunctionExpression" && !!handler.generator) ||
+                (handler.type === "ArrowFunctionExpression" && !!handler.generator));
+            const isStream =
+              wrapper.kind === "stream" || wrapper.kind === "subscription"
+                ? true
+                : handlerIsStream;
+
+            // Literalize the wrapper's config arg (if any). Same
+            // shape as `<fn>.config = { ... }` assignments: top-level
+            // `input` / `output` may be Zod expressions, recorded as
+            // schema markers. Anything else is rejected at the
+            // manifest validation stage.
+            const wrapperConfigLit = wrapper.configNode
+              ? literalize(wrapper.configNode, { allowSchemaProps: true })
+              : undefined;
+            const wrapperConfig =
+              wrapperConfigLit &&
+              typeof wrapperConfigLit === "object" &&
+              !Array.isArray(wrapperConfigLit)
+                ? (wrapperConfigLit as Record<string, unknown>)
+                : undefined;
+
+            serverFns.push({
+              name,
+              markerKind: wrapper.kind,
+              wrapperConfig,
+              node,
+              isStream,
+            });
+            break; // one procedure per VariableDeclaration node
           }
         }
 
@@ -555,14 +708,34 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           const { perFn, moduleConfig } = collectConfig(ast.body);
           const slug = moduleSlug(root, id);
           for (const fn of serverFns) {
-            const cfg = perFn.get(fn.name);
+            // Config merge — legacy `<fn>.config = { ... }` assignment
+            // wins over the wrapper's second-arg config (legacy is
+            // explicit, so it gets last-write-wins precedence). Both
+            // shapes use the same authoring vocabulary; the result
+            // looks identical to downstream code.
+            const legacyCfg = perFn.get(fn.name);
+            const cfg: Record<string, unknown> | undefined =
+              fn.wrapperConfig || legacyCfg
+                ? { ...(fn.wrapperConfig ?? {}), ...(legacyCfg ?? {}) }
+                : undefined;
             const explicitKind = cfg?.kind as
               | "query"
               | "mutation"
               | "stream"
               | "subscription"
               | undefined;
-            const kind = explicitKind ?? inferKind(fn.name, fn.isStream);
+            // Kind resolution priority:
+            //   1. Explicit `kind` field on either the legacy
+            //      `<fn>.config = { kind: "..." }` assignment or the
+            //      wrapper's second-arg config.
+            //   2. Wrapper marker name — `query`/`mutation`/`stream`/
+            //      `subscription` imply a kind; the generic
+            //      `procedure()` marker doesn't (defers to step 3).
+            //   3. Name-based inference (`get*`/`list*`/etc → query,
+            //      default → mutation, async generator → stream).
+            const wrapperKind: "query" | "mutation" | "stream" | "subscription" | undefined =
+              fn.markerKind === "procedure" ? undefined : fn.markerKind;
+            const kind = explicitKind ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
             // Avoid duplicates if the transform fires twice (e.g., dev
             // server hot-reload). Replace existing record by key.
             const existingIdx = state.discoveredProcedures.findIndex(
@@ -582,16 +755,25 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           }
         }
 
-        // Resolve wireId per spec §2: explicit fn.config.id wins; default
-        // is bare exportName. Production-mode "missing id" check happens
-        // in manifest.ts; here we just pick the same shape so register
+        // Resolve wireId per spec §2: explicit `id` wins (looked up in
+        // both the wrapper's second-arg config AND the legacy `<fn>.
+        // config = { ... }` assignment); default is the bare export
+        // name. Production-mode "missing id" check happens in
+        // manifest.ts; here we just pick the same shape so register
         // and dispatch agree on the key.
         const { perFn: perFnForWireIds } = collectConfig(ast.body);
-        const wireIdFor = (fn: { name: string }) => {
-          const explicit = perFnForWireIds.get(fn.name)?.id;
-          return typeof explicit === "string" && explicit.length > 0
-            ? explicit
-            : fn.name;
+        const wireIdFor = (fn: ServerFn) => {
+          const legacyId = perFnForWireIds.get(fn.name)?.id;
+          const wrapperId = fn.wrapperConfig?.id;
+          // Legacy assignment wins over wrapper arg (matches the
+          // discovery-pass merge order — last-write-wins).
+          const explicit =
+            typeof legacyId === "string" && legacyId.length > 0
+              ? legacyId
+              : typeof wrapperId === "string" && wrapperId.length > 0
+                ? wrapperId
+                : undefined;
+          return explicit ?? fn.name;
         };
 
         // --- SERVER ENVIRONMENT ---------------------------------------------
@@ -609,12 +791,20 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         // entry's `import { fn as _pN }` resolves the import binding —
         // the patches are visible there.
         if (isServerEnv) {
-          // Resolve kind for SSR-side hook attachment.
+          // Resolve kind for SSR-side hook attachment. Same priority
+          // chain as the discovery pass: explicit `.kind` (legacy
+          // assignment OR wrapper arg) → wrapper marker name →
+          // name-based inference.
           const { perFn: perFnForKind } = collectConfig(ast.body);
-          const kindFor = (fn: { name: string; isStream: boolean }) => {
-            const explicit = perFnForKind.get(fn.name)?.kind as
+          const kindFor = (fn: ServerFn) => {
+            const legacyKind = perFnForKind.get(fn.name)?.kind as
               | "query" | "mutation" | "stream" | "subscription" | undefined;
-            return explicit ?? inferKind(fn.name, fn.isStream);
+            const wrapperArgKind = fn.wrapperConfig?.kind as
+              | "query" | "mutation" | "stream" | "subscription" | undefined;
+            const explicit = legacyKind ?? wrapperArgKind;
+            const wrapperKind: "query" | "mutation" | "stream" | "subscription" | undefined =
+              fn.markerKind === "procedure" ? undefined : fn.markerKind;
+            return explicit ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
           };
 
           const s = new MagicString(code);

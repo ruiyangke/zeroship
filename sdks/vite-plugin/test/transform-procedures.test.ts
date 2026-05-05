@@ -2,16 +2,18 @@
  * Phase 1 — transform stashes per-procedure metadata.
  *
  * Server-module discovery is via the file-level `"use server"`
- * directive (ISS-02 — the path convention is gone). A file is a server
- * module iff its first non-comment statement is the string-literal
- * expression `"use server"`. Files outside that gate pass through
- * untouched.
+ * directive (ISS-02 — the path convention is gone). Inside a server
+ * module, only exports whose initializer is a call to one of the
+ * wrapper markers (`procedure`/`query`/`mutation`/`stream`/
+ * `subscription`, imported from `@zeroship/server` or `@zeroship/rpc`)
+ * is registered as an RPC. Plain exports stay private to the server
+ * bundle.
  *
  * For every discovered procedure the transform records:
  *
  *   - filePath, exportName, moduleSlug
- *   - kind (inferred from name, or 'stream' for async generators,
- *     or pulled from .config.kind if explicit)
+ *   - kind (legacy `.config.kind` > wrapper-marker > name-based
+ *     inference; async generators default to "stream")
  *   - isStream (async-generator?)
  *   - config (parsed object literal of `<fnName>.config = {...}`)
  *   - moduleConfig (parsed object literal of module-level `$config`)
@@ -58,24 +60,25 @@ function makeState(): TransformState {
   };
 }
 
+function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
+  return typeof (plugin.transform as any) === "function"
+    ? (plugin.transform as any)
+    : (plugin.transform as any).handler;
+}
+
 describe("transform — procedure metadata", () => {
-  test("captures kind from `.config = { kind: 'mutation' }`", () => {
+  test("captures kind from `.config = { kind: 'mutation' }` (legacy shape)", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
-    // Wire up resolved root via configResolved
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-export async function add(input) { return input; }
+import { procedure } from "@zeroship/server";
+export const add = procedure(async (input) => input);
 add.config = { kind: "mutation", idempotent: true };
 `;
-    // Cast handler — depending on Vite version it can be an object or fn.
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/todos.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     const p = state.discoveredProcedures[0];
@@ -90,16 +93,16 @@ add.config = { kind: "mutation", idempotent: true };
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
+    // The generic `procedure()` marker leaves kind unset on .config;
+    // the transform falls back to name-based inference (get/list/find/
+    // search/count/read/fetch → query).
     const code = `"use server";
-export async function listTodos() { return []; }
-export async function getUser(id) { return { id }; }
-export async function searchPosts() { return []; }
+import { procedure } from "@zeroship/server";
+export const listTodos = procedure(async () => []);
+export const getUser = procedure(async (id) => ({ id }));
+export const searchPosts = procedure(async () => []);
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/api.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 3);
     const kinds = state.discoveredProcedures.map((p) => p.kind);
@@ -113,13 +116,10 @@ export async function searchPosts() { return []; }
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-export async function* logStream() { yield 1; yield 2; }
+import { procedure } from "@zeroship/server";
+export const logStream = procedure(async function* () { yield 1; yield 2; });
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/x.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/x.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].kind, "stream");
@@ -133,14 +133,11 @@ export async function* logStream() { yield 1; yield 2; }
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
+import { procedure } from "@zeroship/server";
 export const $config = { auth: "user", rateLimit: { rpm: 600, per: "user" } };
-export async function listTodos() { return []; }
+export const listTodos = procedure(async () => []);
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/x.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/x.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     const p = state.discoveredProcedures[0];
@@ -161,7 +158,8 @@ export async function listTodos() { return []; }
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-export async function listTodos(input) { return []; }
+import { procedure } from "@zeroship/server";
+export const listTodos = procedure(async (input) => []);
 listTodos.config = {
   id: "listTodos",
   idempotent: true,
@@ -169,18 +167,12 @@ listTodos.config = {
   output: z.array(z.object({ id: z.string() })),
 };
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/todos.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/todos.ts");
 
     assert.equal(state.discoveredProcedures.length, 1, "procedure recorded");
     const p = state.discoveredProcedures[0];
-    // Other config fields survived even with Zod call expressions present.
     assert.equal(p.config?.id, "listTodos", "id preserved");
     assert.equal(p.config?.idempotent, true, "idempotent preserved");
-    // input and output keys are present as opaque markers, not the AST.
     assert.ok(p.config?.input, "input key present");
     assert.ok(p.config?.output, "output key present");
     assert.equal(
@@ -195,30 +187,23 @@ listTodos.config = {
     );
   });
 
-  test("derives moduleSlug as `<dir-segments-joined-by-dash>-<basename>`", () => {
+  test("derives moduleSlug from the file path", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-export async function list() { return []; }
+import { procedure } from "@zeroship/server";
+export const list = procedure(async () => []);
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/todos.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/server/todos.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].moduleSlug, "src-server-todos");
   });
 
   // ── Directive-based discovery (ISS-02) ────────────────────────────────
-  //
-  // A file is a server module iff its FIRST non-comment statement is
-  // the string-literal expression `"use server"`. The path convention
-  // (`src/server.{ts,tsx,js,jsx}`, `src/server/**/*.{ts,...}`) is dead.
 
   test("directive: top-of-file `\"use server\"` opts the file in", () => {
     const state = makeState();
@@ -227,14 +212,11 @@ export async function list() { return []; }
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-export async function ping() { return "pong"; }
+import { procedure } from "@zeroship/server";
+export const ping = procedure(async () => "pong");
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
     // Path is irrelevant — even files outside src/server/ are eligible.
-    handler.call(ctx, code, "/r/src/api/ping.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/api/ping.ts");
 
     assert.equal(state.discoveredProcedures.length, 1, "ping discovered");
     assert.equal(state.discoveredProcedures[0].exportName, "ping");
@@ -247,14 +229,11 @@ export async function ping() { return "pong"; }
 
     const ctx = makeCtx("ssr");
     const code = `"use server";
-export async function deeplyNested() { return 42; }
+import { procedure } from "@zeroship/server";
+export const deeplyNested = procedure(async () => 42);
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
     // Outside src/server/ — discovered solely because of the directive.
-    handler.call(ctx, code, "/r/src/lib/api.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/lib/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 1, "discovered by directive");
     assert.equal(state.discoveredProcedures[0].exportName, "deeplyNested");
@@ -266,15 +245,11 @@ export async function deeplyNested() { return 42; }
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    // Even at the legacy path, with no directive the file passes through.
     const code = `
-export async function shouldNotBeDiscovered() { return 1; }
+import { procedure } from "@zeroship/server";
+export const shouldNotBeDiscovered = procedure(async () => 1);
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    const result = handler.call(ctx, code, "/r/src/server/api.ts");
+    const result = getHandler(plugin).call(ctx, code, "/r/src/server/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 0, "nothing discovered");
     assert.equal(result, null, "transform passes through (returns null)");
@@ -289,14 +264,8 @@ export async function shouldNotBeDiscovered() { return 1; }
     const code = `
 export async function unmigrated() { return 1; }
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/api.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/server/api.ts");
 
-    // Friendly migration hint for ISS-02: the file lives at the
-    // legacy server-module path but the directive is missing.
     assert.equal(ctx.warnings.length, 1, "one warning emitted");
     assert.match(
       ctx.warnings[0],
@@ -317,10 +286,7 @@ export async function unmigrated() { return 1; }
 
     const ctx = makeCtx("ssr");
     const code = `export async function unmigrated() { return 1; }`;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
+    const handler = getHandler(plugin);
     handler.call(ctx, code, "/r/src/server/api.ts");
     handler.call(ctx, code, "/r/src/server/api.ts");
     handler.call(ctx, code, "/r/src/server/api.ts");
@@ -328,7 +294,7 @@ export async function unmigrated() { return 1; }
     assert.equal(ctx.warnings.length, 1, "warning de-duped per file path");
   });
 
-  test("directive: NOT a directive when not at body[0] (semicolon, var first)", () => {
+  test("directive: NOT a directive when not at body[0] (var first)", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
@@ -342,11 +308,7 @@ const meaningful = true;
 "use server";
 export async function nope() { return 1; }
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    const result = handler.call(ctx, code, "/r/src/lib/x.ts");
+    const result = getHandler(plugin).call(ctx, code, "/r/src/lib/x.ts");
 
     assert.equal(state.discoveredProcedures.length, 0, "not a server module");
     assert.equal(result, null);
@@ -362,13 +324,10 @@ export async function nope() { return 1; }
 /* multi-line block
    comment */
 "use server";
-export async function ping() { return "pong"; }
+import { procedure } from "@zeroship/server";
+export const ping = procedure(async () => "pong");
 `;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/api/x.ts");
+    getHandler(plugin).call(ctx, code, "/r/src/api/x.ts");
 
     assert.equal(state.discoveredProcedures.length, 1);
     assert.equal(state.discoveredProcedures[0].exportName, "ping");
