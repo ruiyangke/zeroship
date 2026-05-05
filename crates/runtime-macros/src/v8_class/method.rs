@@ -28,6 +28,7 @@ use super::helpers::{
     gen_param_extractions, method_callback_ident, outer_ident, parse_params_skipping_self,
 };
 use super::parse::{extract_callable_no_new, extract_post_init, extract_reject_shared};
+use super::shared::class_config::ClassConfig;
 use super::{ClassMethod, MethodKind};
 use crate::gen_call_return;
 
@@ -132,11 +133,9 @@ pub(super) fn gen_reentry_guard(
     }
 }
 
-pub(super) fn gen_method_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
-    m: &ClassMethod,
-) -> TokenStream2 {
+pub(super) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -156,7 +155,7 @@ pub(super) fn gen_method_callback(
         MethodKind::Setter => {
             // Setters in V8 are called with one positional arg (the value).
             // We don't emit return marshaling — accessor setters discard.
-            return gen_setter_callback(class_ty, state_ty, m);
+            return gen_setter_callback(cfg, m);
         }
         _ => quote! {
             <#state_ty>::#method_name(#receiver_ref, #(#call_args),*)
@@ -257,10 +256,11 @@ pub(super) fn gen_method_callback(
 /// hand-roll their own private-symbol stash for now). The smoke test
 /// in `tests/v8_same_object_smoke.rs` proves the macro wiring works.
 pub(super) fn gen_same_object_getter_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
+    cfg: &ClassConfig,
     m: &ClassMethod,
 ) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -429,11 +429,9 @@ pub(super) fn gen_same_object_getter_callback(
 ///   - All future captures are owned (`Vec<u8>`, `String`, `Global<…>`,
 ///     scalar), never borrowed. The future is `'static + !Send`, which
 ///     matches the single-thread compio invariant.
-pub(super) fn gen_async_method_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
-    m: &ClassMethod,
-) -> TokenStream2 {
+pub(super) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -559,11 +557,9 @@ pub(super) fn gen_async_method_callback(
 /// extraction loop emits no args (the parser skips the receiver, and
 /// there's no receiver, so `params` is whatever args the user
 /// declared — typically zero for getters).
-pub(super) fn gen_static_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
-    m: &ClassMethod,
-) -> TokenStream2 {
+pub(super) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -603,11 +599,9 @@ pub(super) fn gen_static_callback(
     }
 }
 
-fn gen_setter_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
-    m: &ClassMethod,
-) -> TokenStream2 {
+fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -679,12 +673,10 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
     }
 }
 
-pub(super) fn gen_constructor_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
-    c: &ClassMethod,
-    has_any_fastcall: bool,
-) -> TokenStream2 {
+pub(super) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
+    let has_any_fastcall = cfg.has_any_fastcall;
     let ctor_name = &c.func.sig.ident;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
@@ -820,11 +812,10 @@ pub(super) fn gen_constructor_callback(
     }
 }
 
-pub(super) fn gen_default_constructor_callback(
-    class_ty: &syn::Ident,
-    state_ty: &syn::Ident,
-    has_any_fastcall: bool,
-) -> TokenStream2 {
+pub(super) fn gen_default_constructor_callback(cfg: &ClassConfig) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let state_ty = cfg.state_ty;
+    let has_any_fastcall = cfg.has_any_fastcall;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
     let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
     // No method-level attrs to read — the Default-derived constructor

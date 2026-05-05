@@ -7,9 +7,12 @@
 //!
 //! Wave 3 ships:
 //! - `recover_box` — the brand-check + External-recovery preamble.
+//! - `class_config` — the `ClassConfig` parameter object that closes
+//!   `gen_install`'s 10-arg signature (design §3.1, F4).
 //!
 //! Future waves migrate `must_str`, `op_error::gen_throw_op_error_arms`,
 //! and the `Cell<Option<usize>>` reentry guard here too. Per design §4.1
 //! the directory may relocate to `crate-root/shared/` in Wave 5.
 
+pub(crate) mod class_config;
 pub(crate) mod recover_box;

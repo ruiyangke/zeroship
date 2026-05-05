@@ -83,7 +83,7 @@ use parse::{
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MethodKind {
+pub(crate) enum MethodKind {
     Method,
     /// An async method — emits a callback that spawns a future via
     /// `state.spawned_ops` and returns a Promise. The user writes
@@ -105,16 +105,16 @@ enum MethodKind {
     StaticGetter,
 }
 
-struct ClassMethod<'a> {
-    kind: MethodKind,
-    func: &'a syn::ImplItemFn,
+pub(crate) struct ClassMethod<'a> {
+    pub(crate) kind: MethodKind,
+    pub(crate) func: &'a syn::ImplItemFn,
     /// Whether the receiver is `&mut self` (vs `&self`). Constructors
     /// have no receiver — we set this to false; it's unused for them.
-    mut_receiver: bool,
+    pub(crate) mut_receiver: bool,
     /// JS-visible name. Defaults to the Rust identifier; overridden by
     /// `#[v8_name = "..."]` on the method. Lets us install
     /// `delete_(&mut self)` under the JS name `delete`, etc.
-    js_name: String,
+    pub(crate) js_name: String,
     /// `#[v8_getter(same_object)]` — WebIDL `[SameObject]` semantics:
     /// the getter must return THE SAME JS object across reads on the
     /// same wrapper instance. The macro caches via a V8 private symbol
@@ -122,7 +122,7 @@ struct ClassMethod<'a> {
     /// returns `v8::Global<v8::Object>` (minted on first call); macro
     /// stashes it on the wrapper instance and returns the cached Local
     /// thereafter. Only meaningful for `MethodKind::Getter`.
-    same_object: bool,
+    pub(crate) same_object: bool,
     /// `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]` — emit a
     /// CFunction shim alongside the slow-path FunctionCallback so V8
     /// Turbofan can inline the typed-shape call at hot sites. See
@@ -130,22 +130,22 @@ struct ClassMethod<'a> {
     /// the codegen detail. Mutually compatible with `same_object` only
     /// in the negative — fastcall paths can't allocate and SameObject
     /// returns a Global<Object>, so the two flags are not co-applicable.
-    fastcall: bool,
+    pub(crate) fastcall: bool,
 }
 
 /// A single `#[v8_const(NAME = LIT)]` declaration.
-struct ConstDecl {
+pub(crate) struct ConstDecl {
     /// The JS-visible property name (Rust ident verbatim).
-    name: syn::Ident,
+    pub(crate) name: syn::Ident,
     /// The literal expression — quoted as-is so the literal's type
     /// suffix is preserved through expansion.
-    value: syn::ExprLit,
+    pub(crate) value: syn::ExprLit,
     /// Selected V8-side materialiser, derived from the literal suffix.
-    kind: ConstKind,
+    pub(crate) kind: ConstKind,
 }
 
 #[derive(Debug, Clone, Copy)]
-enum ConstKind {
+pub(crate) enum ConstKind {
     /// Suffix `u16` or `u32` → `v8::Integer::new_from_unsigned`.
     UInt,
     /// Suffix `i32` → `v8::Integer::new`.
@@ -359,52 +359,17 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         }
     }
 
-    let constructor = methods.iter().find(|m| m.kind == MethodKind::Constructor);
-    let regular: Vec<&ClassMethod> = methods
+    // Compute the global `has_any_fastcall` flag; the install fn
+    // needs it to decide on internal-field count and the per-method
+    // emit between `FunctionTemplate::new` and the fast-shim builder.
+    let has_any_fastcall = methods
         .iter()
         .filter(|m| m.kind != MethodKind::Constructor)
-        .collect();
-
-    // Per-method callback fns. Async methods take a different codegen
-    // path (spawn a future via `state.spawned_ops` and return a Promise
-    // immediately) but install on the prototype identically — async vs
-    // sync is opaque to V8. SameObject getters have their own codegen
-    // path that wraps the user method with private-symbol caching.
-    // Static methods / getters skip the brand check and internal-field
-    // deref entirely (no receiver) and install on the constructor
-    // template via `set_with_attr` / `set_accessor_property`.
-    let callbacks: Vec<TokenStream2> = regular
-        .iter()
-        .map(|m| match m.kind {
-            MethodKind::AsyncMethod => gen_async_method_callback(class_ty, state_ty, m),
-            MethodKind::Getter if m.same_object => {
-                gen_same_object_getter_callback(class_ty, state_ty, m)
-            }
-            MethodKind::StaticMethod | MethodKind::StaticGetter => {
-                gen_static_callback(class_ty, state_ty, m)
-            }
-            _ => gen_method_callback(class_ty, state_ty, m),
-        })
-        .collect();
-
-    // Fastcall shims — emitted alongside the slow-path FunctionCallback
-    // for methods/getters annotated with `#[v8_method(fastcall)]` or
-    // `#[v8_getter(fastcall)]`. The slow callback above is unchanged;
-    // V8 chooses fast vs slow at JIT time based on receiver shape and
-    // arg types.
-    let fastcall_callbacks: Vec<TokenStream2> = regular
-        .iter()
-        .filter(|m| m.fastcall)
-        .filter_map(|m| gen_fastcall_callback(class_ty, state_ty, m))
-        .collect();
-    let has_any_fastcall = regular.iter().any(|m| m.fastcall);
-
-    let constructor_callback = match constructor {
-        Some(c) => gen_constructor_callback(class_ty, state_ty, c, has_any_fastcall),
-        None => gen_default_constructor_callback(class_ty, state_ty, has_any_fastcall),
-    };
+        .any(|m| m.fastcall);
 
     // Impl-block-level overrides for class-wide install behaviour.
+    // These were 6 separate args to `gen_install` before Wave 3; now
+    // they're fields on the single `ClassConfig` parameter object.
     let to_string_tag_override = extract_to_string_tag(&input.attrs);
     let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
     let inherit_base = extract_inherit_base(&input.attrs);
@@ -472,24 +437,74 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         None
     };
 
-    // `Self::install(scope) -> v8::Local<v8::FunctionTemplate>`
+    // ----------------------------------------------------------------
+    // Build the ClassConfig parameter object (Wave 3 / design §3.1).
+    // Every emit helper from here on takes `&ClassConfig` as its first
+    // arg — closes F4's 10-arg `gen_install` signature and the
+    // `(class_ty, state_ty, ...)` repetition across every helper.
     //
-    // `constructor.is_some()` was wired into `gen_install` as
-    // `has_user_constructor` for a never-implemented default-Self
-    // codegen branch. Removed in this commit; if a future PR adds a
-    // generated default constructor, plumb it back through (or, per
-    // F4, fold it into a `ClassConfig` struct).
-    let install = gen_install(
+    // Once built, the bare `methods` Vec is moved into the cfg; the
+    // emit phase iterates `cfg.methods` / `cfg.regular()` exclusively
+    // from this point.
+    // ----------------------------------------------------------------
+    let cfg = shared::class_config::ClassConfig::new(
         class_ty,
-        &regular,
-        to_string_tag_override.as_deref(),
-        inherit_intrinsic.as_deref(),
-        inherit_base.as_ref(),
-        install_iterable_call.as_ref(),
-        async_iterable_method.as_deref(),
-        &const_decls,
+        state_ty,
+        methods,
         has_any_fastcall,
+        to_string_tag_override,
+        inherit_intrinsic,
+        inherit_base,
+        async_iterable_method,
+        const_decls,
+        iterable_codegen,
+        install_iterable_call,
     );
+
+    // Per-method callback fns. Async methods take a different codegen
+    // path (spawn a future via `state.spawned_ops` and return a Promise
+    // immediately) but install on the prototype identically — async vs
+    // sync is opaque to V8. SameObject getters have their own codegen
+    // path that wraps the user method with private-symbol caching.
+    // Static methods / getters skip the brand check and internal-field
+    // deref entirely (no receiver) and install on the constructor
+    // template via `set_with_attr` / `set_accessor_property`.
+    let regular = cfg.regular();
+    let callbacks: Vec<TokenStream2> = regular
+        .iter()
+        .map(|m| match m.kind {
+            MethodKind::AsyncMethod => gen_async_method_callback(&cfg, m),
+            MethodKind::Getter if m.same_object => {
+                gen_same_object_getter_callback(&cfg, m)
+            }
+            MethodKind::StaticMethod | MethodKind::StaticGetter => {
+                gen_static_callback(&cfg, m)
+            }
+            _ => gen_method_callback(&cfg, m),
+        })
+        .collect();
+
+    // Fastcall shims — emitted alongside the slow-path FunctionCallback
+    // for methods/getters annotated with `#[v8_method(fastcall)]` or
+    // `#[v8_getter(fastcall)]`. The slow callback above is unchanged;
+    // V8 chooses fast vs slow at JIT time based on receiver shape and
+    // arg types.
+    let fastcall_callbacks: Vec<TokenStream2> = regular
+        .iter()
+        .filter(|m| m.fastcall)
+        .filter_map(|m| gen_fastcall_callback(class_ty, state_ty, m))
+        .collect();
+
+    let constructor_callback = match cfg.constructor() {
+        Some(c) => gen_constructor_callback(&cfg, c),
+        None => gen_default_constructor_callback(&cfg),
+    };
+
+    let install = gen_install(&cfg);
+    // Iterable codegen (when `#[v8_iterable(...)]` is set on the impl
+    // block) is pre-built during ClassConfig construction. We bind it
+    // to a local here so the top-level `quote!` block can splice it in.
+    let iterable_codegen = &cfg.iterable_codegen;
 
     // Strip our marker attributes from the impl items so rustc doesn't
     // see unknown attributes after expansion. Keep everything else.
@@ -759,17 +774,18 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
 // install() codegen
 // ---------------------------------------------------------------------------
 
-fn gen_install(
-    class_ty: &syn::Ident,
-    methods: &[&ClassMethod],
-    to_string_tag_override: Option<&str>,
-    inherit_intrinsic: Option<&str>,
-    inherit_base: Option<&syn::Path>,
-    install_iterable_call: Option<&TokenStream2>,
-    async_iterable_method: Option<&str>,
-    const_decls: &[ConstDecl],
-    has_any_fastcall: bool,
-) -> TokenStream2 {
+fn gen_install(cfg: &shared::class_config::ClassConfig) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let has_any_fastcall = cfg.has_any_fastcall;
+    let to_string_tag_override = cfg.to_string_tag.as_deref();
+    let inherit_intrinsic = cfg.inherit_intrinsic.as_deref();
+    let inherit_base = cfg.inherit_base.as_ref();
+    let install_iterable_call = cfg.install_iterable_call.as_ref();
+    let async_iterable_method = cfg.async_iterable_method.as_deref();
+    let const_decls = cfg.consts.as_slice();
+    let methods: Vec<&ClassMethod> = cfg.regular();
+    let methods = methods.as_slice();
+
     let class_name_str = class_ty.to_string();
     let constructor_callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
@@ -809,12 +825,7 @@ fn gen_install(
     // by JS-name with their setter sibling, but the setter never has
     // fastcall (rejected at extract time — setters return ()). So we
     // only need to track per-method fastcall.
-    let mut fastcall_by_jsname: HashMap<String, &ClassMethod> = HashMap::new();
-    for m in methods {
-        if m.fastcall {
-            fastcall_by_jsname.insert(m.js_name.clone(), m);
-        }
-    }
+    let fastcall_by_jsname: HashMap<String, &ClassMethod> = cfg.fastcall_by_jsname();
 
     let proto_sets: Vec<TokenStream2> = methods
         .iter()
