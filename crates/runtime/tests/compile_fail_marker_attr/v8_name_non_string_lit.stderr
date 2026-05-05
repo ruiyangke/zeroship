@@ -1,0 +1,5 @@
+error: #[v8_name = "..."]: expected a string literal
+  --> tests/compile_fail_marker_attr/v8_name_non_string_lit.rs:17:17
+   |
+17 |     #[v8_name = 42]
+   |                 ^^

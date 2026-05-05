@@ -1,0 +1,5 @@
+error: #[v8_inherit_intrinsic = "..."]: expected a string literal
+  --> tests/compile_fail_marker_attr/v8_inherit_intrinsic_non_string.rs:13:26
+   |
+13 | #[v8_inherit_intrinsic = 42]
+   |                          ^^

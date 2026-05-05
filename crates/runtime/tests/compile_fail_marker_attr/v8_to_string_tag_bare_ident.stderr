@@ -1,0 +1,5 @@
+error: #[v8_to_string_tag = "..."]: expected `name = literal` shape
+  --> tests/compile_fail_marker_attr/v8_to_string_tag_bare_ident.rs:13:3
+   |
+13 | #[v8_to_string_tag(Foo)]
+   |   ^^^^^^^^^^^^^^^^^^^^^

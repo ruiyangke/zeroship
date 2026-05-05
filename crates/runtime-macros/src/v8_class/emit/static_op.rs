@@ -11,7 +11,6 @@ use quote::quote;
 use super::super::helpers::{
     gen_param_extractions, method_callback_ident, parse_params_skipping_self,
 };
-use super::super::parse::extract_reject_shared;
 use super::super::shared::class_config::ClassConfig;
 use super::super::ClassMethod;
 use crate::gen_call_return;
@@ -54,8 +53,8 @@ pub(crate) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // Static methods take no `self`, so `parse_params_skipping_self`
     // collects every param verbatim.
     let params = parse_params_skipping_self(m.func);
-    let reject_shared_names = extract_reject_shared(&m.func.attrs);
-    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    // Wave 4: pre-parsed by analyse phase; emit just reads.
+    let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     // Static method bodies live on the impl target (state_ty), which

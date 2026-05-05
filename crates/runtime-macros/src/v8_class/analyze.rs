@@ -20,9 +20,9 @@ use syn::{ImplItem, ItemImpl};
 
 use super::fastcall::validate_fastcall_signature;
 use super::parse::{
-    classify, extract_async_iterable, extract_consts, extract_fastcall, extract_inherit_base,
-    extract_inherit_intrinsic, extract_same_object, extract_to_string_tag, extract_v8_name,
-    has_any_receiver, has_mut_self, is_result_unit_return, is_unit_return,
+    classify, extract_callable_no_new, extract_fastcall, extract_post_init, extract_reject_shared,
+    extract_same_object, extract_v8_name, has_any_receiver, has_mut_self, is_result_unit_return,
+    is_unit_return, ParsedAttrs,
 };
 use super::shared::class_config::ClassConfig;
 use super::{ClassMethod, MethodKind};
@@ -40,6 +40,7 @@ pub(super) fn analyze<'a>(
     input: &'a ItemImpl,
     state_ty: &'a syn::Ident,
     marker_ty: &'a syn::Ident,
+    parsed_class_attrs: ParsedAttrs,
 ) -> Result<(ClassConfig<'a>, ItemImpl), TokenStream2> {
     // Most existing call sites read `class_ty` as the JS-identity ident
     // (install slot / brand check / callback names) — that's the
@@ -72,14 +73,15 @@ pub(super) fn analyze<'a>(
         .any(|m| m.fastcall);
 
     // Impl-block-level overrides for class-wide install behaviour.
-    // These were 6 separate args to `gen_install` before Wave 3; now
-    // they're fields on the single `ClassConfig` parameter object.
-    let to_string_tag_override = extract_to_string_tag(&input.attrs);
-    let inherit_intrinsic = extract_inherit_intrinsic(&input.attrs);
-    let inherit_base = extract_inherit_base(&input.attrs);
-    let async_iterable_method =
-        extract_async_iterable(&input.attrs).map_err(|e| e.to_compile_error())?;
-    let const_decls = extract_consts(&input.attrs).map_err(|e| e.to_compile_error())?;
+    // Wave 4: these used to be 6 separate `&[Attribute]` walks. Now
+    // they're delivered pre-parsed by the single-scan
+    // `parse::parse_attrs` (closes F8). The fields below are taken from
+    // the already-built `ParsedAttrs`.
+    let to_string_tag_override = parsed_class_attrs.to_string_tag;
+    let inherit_intrinsic = parsed_class_attrs.inherit_intrinsic;
+    let inherit_base = parsed_class_attrs.inherit_base;
+    let async_iterable_method = parsed_class_attrs.async_iterable;
+    let const_decls = parsed_class_attrs.consts;
 
     // Validate that the named method actually exists in the impl block
     // — better error than waiting for the method-callback ident lookup
@@ -156,7 +158,11 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
     for item in &input.items {
         if let ImplItem::Fn(func) = item {
             if let Some(kind) = classify(func) {
+                // Wave 4: per-method extracts now share the strict
+                // MarkerAttr error path. Surface malformed-shape errors
+                // via the proc-macro's compile-error stream.
                 let js_name = extract_v8_name(&func.attrs)
+                    .map_err(|e| e.to_compile_error())?
                     .unwrap_or_else(|| func.sig.ident.to_string());
                 let mut_recv = has_mut_self(func);
 
@@ -193,8 +199,8 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                     .to_compile_error());
                 }
 
-                let same_object_flag =
-                    matches!(kind, MethodKind::Getter) && extract_same_object(&func.attrs);
+                let same_object_flag = matches!(kind, MethodKind::Getter)
+                    && extract_same_object(&func.attrs).map_err(|e| e.to_compile_error())?;
 
                 // Compile-time guard: static methods / getters cannot
                 // have a receiver. WebIDL §3.7.4 static operations are
@@ -247,7 +253,7 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                 // Only valid on plain Method / Getter — not async, not
                 // setter, not constructor, not same_object.
                 let fastcall_flag = matches!(kind, MethodKind::Method | MethodKind::Getter)
-                    && extract_fastcall(&func.attrs);
+                    && extract_fastcall(&func.attrs).map_err(|e| e.to_compile_error())?;
 
                 if fastcall_flag {
                     // Compile-time guard 1: fastcall path can't take
@@ -282,6 +288,22 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                     }
                 }
 
+                // Wave 4: fold per-method attribute extracts into the
+                // ClassMethod record so emit-side helpers don't walk
+                // attrs again. Each extract uses the strict MarkerAttr
+                // error path — malformed shapes surface as compile-
+                // errors with the offending span.
+                let reject_shared_names =
+                    extract_reject_shared(&func.attrs).map_err(|e| e.to_compile_error())?;
+                let callable_no_new = matches!(kind, MethodKind::Constructor)
+                    && extract_callable_no_new(&func.attrs)
+                        .map_err(|e| e.to_compile_error())?;
+                let post_init = if matches!(kind, MethodKind::Constructor) {
+                    extract_post_init(&func.attrs).map_err(|e| e.to_compile_error())?
+                } else {
+                    None
+                };
+
                 methods.push(ClassMethod {
                     kind,
                     func,
@@ -289,6 +311,9 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                     js_name,
                     same_object: same_object_flag,
                     fastcall: fastcall_flag,
+                    reject_shared_names,
+                    callable_no_new,
+                    post_init,
                 });
             }
         }

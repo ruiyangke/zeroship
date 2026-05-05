@@ -66,7 +66,7 @@ pub(crate) mod shared;
 
 pub(crate) use ast::{ClassMethod, ConstDecl, ConstKind, MethodKind};
 
-use parse::{extract_state_marker, resolve_state_and_marker};
+use parse::resolve_state_and_marker;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -112,9 +112,17 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     // Without `#[v8_state_marker]`: state == marker == receiver
     // (byte-identical to today's emission, locked by insta snapshots).
     // With `#[v8_state_marker(M)] impl S`: state = S, marker = M.
-    let state_marker_path = extract_state_marker(&input.attrs);
+    //
+    // Wave 4: the impl-block-level extract is folded into a single-scan
+    // walk (`parse_attrs`) inside `analyze::analyze`. Read it through
+    // the new entry point so we get strict-error behaviour on malformed
+    // shapes (closes F5 + H5).
+    let parsed_class_attrs = match parse::parse_attrs(&input.attrs) {
+        Ok(p) => p,
+        Err(e) => return e.to_compile_error(),
+    };
     let (state_ty, marker_ty) =
-        match resolve_state_and_marker(receiver_ty, state_marker_path.as_ref()) {
+        match resolve_state_and_marker(receiver_ty, parsed_class_attrs.state_marker.as_ref()) {
             Ok(pair) => pair,
             Err(ts) => return ts,
         };
@@ -124,7 +132,7 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     // which folds method classification + per-attribute extraction +
     // iterable codegen + all compile-time guards into the
     // `ClassConfig` parameter object that the emit phase consumes.
-    match analyze::analyze(&input, state_ty, &marker_ty) {
+    match analyze::analyze(&input, state_ty, &marker_ty, parsed_class_attrs) {
         Ok((cfg, stripped_impl)) => emit::assemble_tokens(&cfg, &stripped_impl),
         Err(ts) => ts,
     }
