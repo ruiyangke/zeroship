@@ -358,3 +358,77 @@ fn run_callback_must_be_callable_throws_typeerror() {
     );
     assert_eq!(s, r#"{"threw":true}"#);
 }
+
+// ---------------------------------------------------------------------------
+// LangGraph-shaped integration test (the ISS-01 reproducer)
+// ---------------------------------------------------------------------------
+//
+// Mimics the pattern that triggers the bug in `@langchain/langgraph`:
+// a "RunnableCallable" wraps user code via `runWithConfig(config, fn)`
+// (which calls `als.run(runTree, fn)`); inside `fn` the user does
+// `await something()` and then calls a function that reads
+// `als.getStore()` (the equivalent of langgraph's `interrupt()`
+// reading `getRunnableConfig()`).
+//
+// Pre-fix: `getStore()` returned undefined → `interrupt()` threw
+// "Called interrupt() outside the context of a graph". Post-fix:
+// the slot value is preserved across the await.
+
+#[test]
+fn langgraph_shaped_runwithconfig_after_await_sees_config() {
+    let s = run_in_v8(
+        r#"
+        // Singleton ALS provider (same shape as @langchain/core's
+        // AsyncLocalStorageProviderSingleton).
+        const als = new AsyncLocalStorage();
+        function runWithConfig(config, fn) {
+            return als.run({ extra: { runnableConfig: config } }, fn);
+        }
+        function getRunnableConfig() {
+            return als.getStore()?.extra?.runnableConfig;
+        }
+        function interrupt(value) {
+            const cfg = getRunnableConfig();
+            if (!cfg) {
+                throw new Error("Called interrupt() outside the context of a graph.");
+            }
+            return { halted: true, value, cfg };
+        }
+        // Mimic an HTTP/native-async fetch that resolves via a
+        // microtask chain (Promise.resolve().then(...)).
+        function fakeFetch() {
+            return Promise.resolve("model-output");
+        }
+        // The "node body" — awaits then calls interrupt(). The naive
+        // single-node shape that ISS-01 made impossible.
+        async function nodeBody() {
+            const out = await fakeFetch();
+            // Pre-fix this would throw because the slot was reverted
+            // synchronously in the polyfill's `finally`.
+            return interrupt({ from: "node", model: out });
+        }
+        globalThis.__post_fix_outcome = null;
+        const p = runWithConfig({ thread_id: "t1" }, nodeBody);
+        p.then(
+            (v) => { globalThis.__post_fix_outcome = v; },
+            (e) => { globalThis.__post_fix_outcome = { error: e.message }; },
+        );
+        "marker";
+        "#,
+        |_val, scope| {
+            for _ in 0..10 {
+                scope.perform_microtask_checkpoint();
+            }
+            let global = scope.get_current_context().global(scope);
+            let key = v8::String::new(scope, "__post_fix_outcome").unwrap();
+            let v = global.get(scope, key.into()).unwrap();
+            v8::json::stringify(scope, v).unwrap().to_rust_string_lossy(scope)
+        },
+    );
+    assert!(s.contains(r#""halted":true"#), "expected halted; got {s}");
+    assert!(
+        s.contains(r#""thread_id":"t1""#),
+        "expected runnable config across await; got {s}"
+    );
+    assert!(!s.contains(r#""error":"#), "should not have rejected; got {s}");
+}

@@ -26,14 +26,17 @@ pointer for whoever picks it up.
 
 | Severity | Issues |
 |---|---|
-| medium-high | ISS-01 |
+| medium-high | ISS-01 (closed) |
 | medium | ISS-02 · ISS-09 · ISS-12 · ISS-13 · ISS-14 · ISS-15 · ISS-16 · ISS-17 · ISS-18 · ISS-20 · ISS-21 · ISS-23 · ISS-24 · ISS-25 · ISS-26 · ISS-28 |
 | low-medium | ISS-19 |
 | low | ISS-10 · ISS-11 · ISS-22 |
 
-All entries below are **open** as of 2026-05-01. The foundation-polish
-pass (plan-01 follow-on) promoted **ISS-14**, **ISS-16**, **ISS-19**,
-and **ISS-26** from "in-memory Map" to "KV-backed via `@zeroship/kv`"
+All entries below are **open** as of 2026-05-01 unless flagged
+otherwise. **ISS-01** closed 2026-05-04 (native `AsyncLocalStorage`
+backed by V8's `ContinuationPreservedEmbedderData`); see the entry
+for the implementing commit. The foundation-polish pass (plan-01
+follow-on) promoted **ISS-14**, **ISS-16**, **ISS-19**, and
+**ISS-26** from "in-memory Map" to "KV-backed via `@zeroship/kv`"
 without closing them — the real fix (Postgres-backed table /
 control-plane endpoint / object-store wiring) is still the listed
 **Fix path** for each. The KV step shrinks the visible blast radius
@@ -47,10 +50,37 @@ descending; ties broken by issue id). Anchor links are preserved by ID.
 
 ## ISS-01 · `node:async_hooks` / `AsyncLocalStorage` not propagated by `@zeroship/vite-plugin`
 
-**Status:** open
+**Status:** closed (2026-05-04, commits `bc9f18e` runtime + `da3fe20` vite-plugin)
 **Severity:** medium-high — forces unnatural code shapes for any agent doing structured human-in-the-loop
 **First observed:** 2026-05-01, building the project-creation wizard on plain LangGraph (`apps/zeroship-builder/src/server/_wizard.ts`)
 **Component:** `sdks/vite-plugin` (dev mode, RPC-handler module loading)
+
+### Resolution (2026-05-04)
+
+Native `AsyncLocalStorage` shipped at `crates/runtime/src/node/async_hooks/`,
+backed by V8's `ContinuationPreservedEmbedderData` slot — the slot
+V8 propagates automatically across every async hop (`await`,
+microtask, `.then`, generator yield, native-Promise resolution).
+The Vite plugin's `node:async_hooks` synthetic now re-exports the
+native class from `globalThis.__zsAsyncHooks.AsyncLocalStorage`,
+replacing the closure-based unenv polyfill that was the root of the
+synchronous-revert bug.
+
+Side effect: `@langchain/core`'s `MockAsyncLocalStorage` shadow is
+no longer reachable in practice — `langgraph`'s
+`initializeAsyncLocalStorageSingleton()` registers an instance of
+the (now-real) `AsyncLocalStorage` from `node:async_hooks` on
+module load.
+
+The `_wizard.ts` two-node `decide → act` workaround is no longer
+required by the runtime (the comment block in that file documents
+the change); collapsing it back into a single node is left to a
+follow-up PR.
+
+Tests: `crates/runtime/tests/async_local_storage.rs` covers basic
+`getStore`/`run`, nested `run`, post-await continuations, throw
+safety, and the LangGraph-shaped `runWithConfig + interrupt` pattern
+that was the original repro (12 tests, all pass).
 
 ### Symptom
 
