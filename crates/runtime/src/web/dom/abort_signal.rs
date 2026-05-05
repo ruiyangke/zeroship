@@ -47,7 +47,7 @@ use std::cell::{Cell, RefCell};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_constructor, v8_getter, v8_inherit, v8_method, v8_name,
+    v8_constructor, v8_getter, v8_inherit, v8_method, v8_name, v8_static_method,
 };
 
 use crate::state::{OpError, SharedState, TimerCallback};
@@ -164,6 +164,68 @@ impl AbortSignal {
             None => build_abort_error(scope).into(),
         };
         scope.throw_exception(exc);
+    }
+
+    // -----------------------------------------------------------------
+    // Static factories — DOM §3.3 (abort / timeout / any)
+    //
+    // The implementation lives in the `abort_static` / `timeout_static`
+    // / `any_static` free fns below (kept as `pub fn`s so the rest of
+    // the runtime can mint signals directly without going through V8).
+    // The macro-installed wrappers below are thin shims that bridge
+    // the V8 callback signature into those.
+    // -----------------------------------------------------------------
+
+    /// `AbortSignal.abort(reason?)` — DOM §3.3.
+    #[v8_static_method]
+    fn abort<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        reason: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Object> {
+        abort_static(scope, reason)
+    }
+
+    /// `AbortSignal.timeout(ms)` — DOM §3.3. Returns a fresh signal
+    /// that aborts after `ms` ms with a "TimeoutError" DOMException
+    /// reason.
+    ///
+    /// The timer setup runs synchronously inside `timeout_static`,
+    /// BEFORE the wrapper is returned — preserving the strong pin in
+    /// SharedState::timeout_pinned_signals (CRITICAL-9). Order
+    /// matters: pin first, then return, so any GC between the
+    /// callback's first "alloc the signal" step and "return to JS"
+    /// finds the wrapper anchored.
+    #[v8_static_method]
+    fn timeout<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        ms: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Object> {
+        // Per WebIDL [EnforceRange] unsigned long long: out-of-range
+        // throws TypeError. We're permissive here and just clamp; v1
+        // doesn't expose the EnforceRange surface in the macro.
+        let ms_n = if ms.is_number() {
+            let n = ms.number_value(scope).unwrap_or(0.0);
+            if n.is_nan() || n < 0.0 {
+                0
+            } else {
+                n as u64
+            }
+        } else {
+            let s = ms.to_rust_string_lossy(scope);
+            s.parse::<u64>().unwrap_or(0)
+        };
+        timeout_static(scope, ms_n)
+    }
+
+    /// `AbortSignal.any(signals)` — DOM §3.3.4. The dependent-source
+    /// bookkeeping (`source_signals` / `dependent_signals` lists) and
+    /// transitive-flattening logic live inside `any_static` below.
+    #[v8_static_method]
+    fn any<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        signals: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        any_static(scope, signals)
     }
 }
 
@@ -738,11 +800,6 @@ pub fn install_global<'s>(
     let tmpl = AbortSignal::install(scope);
     let class_fn = tmpl.get_function(scope).unwrap();
 
-    // Static methods on the constructor function.
-    install_static(scope, class_fn, "abort", abort_static_callback);
-    install_static(scope, class_fn, "timeout", timeout_static_callback);
-    install_static(scope, class_fn, "any", any_static_callback);
-
     // `onabort` is a WebIDL `attribute EventHandler` — an accessor
     // pair on the prototype. The `#[v8_class]` macro doesn't support
     // same-name getter+setter pairs (set_accessor_property calls
@@ -764,18 +821,6 @@ pub fn install_global<'s>(
 
     let key = v8::String::new(scope, "AbortSignal").unwrap();
     global.set(scope, key.into(), class_fn.into());
-}
-
-fn install_static<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    ctor_fn: v8::Local<v8::Function>,
-    name: &str,
-    callback: impl v8::MapFnTo<v8::FunctionCallback>,
-) {
-    let tmpl = v8::FunctionTemplate::new(scope, callback);
-    let func = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, name).unwrap();
-    ctor_fn.set(scope, key.into(), func.into());
 }
 
 // ---------------------------------------------------------------------------
@@ -876,67 +921,3 @@ fn onabort_setter_callback(
     *signal.onabort.borrow_mut() = Some(cb_global);
 }
 
-// ---------------------------------------------------------------------------
-// Hand-rolled static-method callbacks
-// ---------------------------------------------------------------------------
-
-fn abort_static_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let reason = args.get(0);
-    let signal = abort_static(scope, reason);
-    rv.set(signal.into());
-}
-
-fn timeout_static_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let ms_v = args.get(0);
-    // Per WebIDL [EnforceRange] unsigned long long: out-of-range
-    // throws TypeError. We're permissive here and just clamp; v1
-    // doesn't expose the EnforceRange surface in the macro.
-    let ms = if ms_v.is_number() {
-        let n = ms_v.number_value(scope).unwrap_or(0.0);
-        if n.is_nan() || n < 0.0 {
-            0
-        } else {
-            n as u64
-        }
-    } else {
-        let s = ms_v.to_rust_string_lossy(scope);
-        s.parse::<u64>().unwrap_or(0)
-    };
-    let signal = timeout_static(scope, ms);
-    rv.set(signal.into());
-}
-
-fn any_static_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let signals_arg = args.get(0);
-    match any_static(scope, signals_arg) {
-        Ok(signal) => rv.set(signal.into()),
-        Err(e) => {
-            // JsValue passthrough — preserves user-thrown exceptions
-            // verbatim (Error subclass, .code, etc.).
-            if let crate::state::OpErrorKind::JsValue(global) = &e.kind {
-                let local = v8::Local::new(scope, global);
-                scope.throw_exception(local);
-                return;
-            }
-            let m = v8::String::new(scope, &e.message).unwrap();
-            let exc = match &e.kind {
-                crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, m),
-                crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, m),
-                _ => v8::Exception::error(scope, m),
-            };
-            scope.throw_exception(exc);
-        }
-    }
-}
