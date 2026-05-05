@@ -104,6 +104,20 @@ pub(crate) fn gen_recover_external() -> TokenStream2 {
 /// emit. Sites that interleave bespoke logic between the steps
 /// (private-symbol cache-check, async resolver allocation, iterator
 /// state-fetch) compose the lower-level helpers above instead.
+///
+/// `mut_receiver` selects the Self materialisation form:
+///   - `true`  → `let __instance = unsafe { &mut *(__ext.value() as *mut Self) }`
+///     paired with the `&mut self` re-entry guard.
+///   - `false` → `let __instance = unsafe { &*(__ext.value() as *const Self) }`
+///     and the re-entry guard is a no-op (re-entry on `&self` is sound,
+///     multiple aliased shared references do not violate Rust's aliasing
+///     model). Closes NS1 from the v2 code-critic: pre-fix the macro
+///     unconditionally materialised `&mut *(__ext.value() as *mut Self)`
+///     for `&self` methods too, then reborrowed as `&Self` at the
+///     dispatch site. Two simultaneous synchronous re-entries on the
+///     same `&self` callback would manifest two `&mut Self` bindings
+///     from the same External pointer — a stacked-borrows violation
+///     even though the user-visible borrow at dispatch was shared.
 pub(crate) fn gen_recover_box(
     class_ty: &syn::Ident,
     state_ty: &syn::Ident,
@@ -114,10 +128,19 @@ pub(crate) fn gen_recover_box(
     let brand = gen_brand_check_throw(&brand_check_fn);
     let external = gen_recover_external();
     let reentry_guard = gen_reentry_guard(class_ty, method_name, mut_receiver);
+    let materialise = if mut_receiver {
+        quote! {
+            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+        }
+    } else {
+        quote! {
+            let __instance = unsafe { &*(__ext.value() as *const #state_ty) };
+        }
+    };
     quote! {
         #brand
         #external
         #reentry_guard
-        let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+        #materialise
     }
 }

@@ -112,6 +112,20 @@ pub(crate) fn gen_same_object_getter_callback(
     let brand_check = recover_box::gen_brand_check_throw(&brand_check_fn);
     let recover_external = recover_box::gen_recover_external();
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
+    // NS1: same `&mut *` vs `&*` switch as `gen_recover_box`. For
+    // `&self` SameObject getters (the common shape — `Request.headers`,
+    // `URL.searchParams`), materialise as `&Self` so a synchronous
+    // re-entry on the cache-miss path cannot manifest two `&mut Self`
+    // bindings from the same External pointer.
+    let materialise = if m.mut_receiver {
+        quote! {
+            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+        }
+    } else {
+        quote! {
+            let __instance = unsafe { &*(__ext.value() as *const #state_ty) };
+        }
+    };
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -179,7 +193,7 @@ pub(crate) fn gen_same_object_getter_callback(
             // it triggers), the second call would alias `&mut Self`.
             // No-op for the `&self` case (the common shape).
             #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
+            #materialise
 
             #(#extractions)*
 
