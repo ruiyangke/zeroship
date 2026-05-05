@@ -14,13 +14,13 @@
 
 -- Pg auto-names anonymous CHECKs as `<table>_<column>_check`. The
 -- 0001 migration declared an inline `CHECK (status IN (...))` so the
--- live constraint name is `sandboxes_status_check`. Drop both the
--- short-form auto-name AND the would-be-explicit name (idempotent
--- against re-runs).
+-- live constraint name is `sandboxes_status_check`. (Round-2 fixer /
+-- MINOR #5: pre-fix this also dropped `sandbox_sandboxes_status_check`
+-- which is unreachable — pg never auto-names with the schema prefix.
+-- The IF EXISTS made the redundant DROP a no-op, but the false
+-- second name was misleading; removed.)
 ALTER TABLE sandbox.sandboxes
     DROP CONSTRAINT IF EXISTS sandboxes_status_check;
-ALTER TABLE sandbox.sandboxes
-    DROP CONSTRAINT IF EXISTS sandbox_sandboxes_status_check;
 
 ALTER TABLE sandbox.sandboxes
     ADD CONSTRAINT sandboxes_status_check

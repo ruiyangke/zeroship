@@ -1278,10 +1278,21 @@ impl Database {
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
         let lease_ttl_i64 = i64::try_from(lease_ttl_secs)
             .map_err(|e| DatabaseError::Validation(format!("lease_ttl overflow: {e}")))?;
+        // Round-2 fixer / CRITICAL #4: include `status='draining'` in
+        // the dead-hosts filter. A draining host is in the middle of
+        // a graceful shutdown but its lease is still authoritative
+        // until it expires; if the host crashes mid-drain (or the
+        // drain grace is shorter than the lease_ttl), no other path
+        // ever transitions it to dead. Pre-fix, draining hosts whose
+        // heartbeat went silent stayed `'draining'` forever and
+        // their sandboxes were orphaned. Today the same lease-ttl
+        // expiration logic catches both alive and draining hosts;
+        // the takeover TX flips them to `'dead'` once it owns the
+        // sandboxes (see `takeover_sandboxes_from_host`).
         let rows = client
             .query(
                 "SELECT host_id FROM sandbox.hosts \
-                  WHERE status = 'alive' \
+                  WHERE status IN ('alive', 'draining') \
                     AND last_heartbeat < now() - make_interval(secs => $1::BIGINT)",
                 &[&lease_ttl_i64],
             )
@@ -1340,6 +1351,15 @@ impl Database {
         //       host heart-beated back to life between (1) and (2),
         //       the WHERE clause misses and we leave status='alive'.
         let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
+        // Round-2 fixer / CRITICAL #4: the EXISTS subquery accepts both
+        // `'alive'` and `'draining'` so a host that died mid-drain (or
+        // crashed shortly after the operator initiated drain) doesn't
+        // permanently orphan its sandboxes.
+        // Round-2 fixer / IMPORTANT #2: include `'unreachable'` in the
+        // status filter so a row whose previous probe failed gets a
+        // chance to be re-probed by the new owner; otherwise an
+        // unreachable row stays unreachable forever even after the host
+        // dies and a peer should reclaim it.
         let rows = tx
             .query(
                 "UPDATE sandbox.sandboxes \
@@ -1347,12 +1367,12 @@ impl Database {
                         generation = generation + 1, \
                         last_used_at = now() \
                   WHERE host_id = $2::TEXT \
-                    AND status IN ('starting', 'running') \
+                    AND status IN ('starting', 'running', 'unreachable') \
                     AND deleted_at IS NULL \
                     AND EXISTS ( \
                         SELECT 1 FROM sandbox.hosts \
                          WHERE host_id = $2::TEXT \
-                           AND status = 'alive' \
+                           AND status IN ('alive', 'draining') \
                            AND last_heartbeat < now() - make_interval(secs => $3::BIGINT) \
                     ) \
                   RETURNING sandbox_id, generation",
@@ -1376,11 +1396,15 @@ impl Database {
         // takeover above also conditioned on the same predicate, so
         // a takeover-with-zero-rows + still-alive host leaves the
         // host's status untouched as expected.
+        // Round-2 fixer / CRITICAL #4: the host-status flip also
+        // accepts both `'alive'` and `'draining'` as the prior state.
+        // A host that died mid-drain transitions draining → dead in
+        // one step here, exactly the same as alive → dead.
         tx.execute(
             "UPDATE sandbox.hosts \
                 SET status = 'dead' \
               WHERE host_id = $1::TEXT \
-                AND status = 'alive' \
+                AND status IN ('alive', 'draining') \
                 AND last_heartbeat < now() - make_interval(secs => $2::BIGINT)",
             &[&dead_host_typed.to_string(), &lease_ttl_i64],
         )
@@ -1645,6 +1669,14 @@ impl Database {
             "hst_{}",
             zeroship_core::typed_id::uuid_to_base62(&host_id)
         );
+        // Round-2 fixer / IMPORTANT #2: include `'unreachable'` rows
+        // in the boot-time restore set. A previous boot's probe might
+        // have stamped `'unreachable'` and there's no other path that
+        // ever flips it back; re-probing on each new boot is cheap
+        // (one signed /version round-trip per sandbox), and on
+        // probe-Ok `restore::probe_and_register_one` flips the row
+        // back to `'running'`. Without this, a single transient probe
+        // failure would degrade a sandbox forever.
         let rows = client
             .query(
                 "SELECT sandbox_id, user_id, project_id, backend, vm_index, \
@@ -1655,7 +1687,7 @@ impl Database {
                         EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
                    FROM sandbox.sandboxes \
                   WHERE host_id = $1::TEXT \
-                    AND status = 'running' \
+                    AND status IN ('running', 'unreachable') \
                     AND deleted_at IS NULL",
                 &[&host_id_typed],
             )

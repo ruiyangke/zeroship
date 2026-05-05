@@ -323,12 +323,49 @@ async fn process_pg_row(
                         let pv = crate::registry::PreviewSecrets::from_sealed(secrets);
                         registry.restore_preview_state(sandbox_id_uuid, Some(pv), Vec::new());
                     }
+                    // Round-2 fixer / IMPORTANT #2: a row that came
+                    // in as 'unreachable' now passes the probe — flip
+                    // it back to 'running' so subsequent dispatches
+                    // see the recovered state. We CAS on the row's
+                    // current generation; if a peer has moved past
+                    // us in the interim, we silently let the peer
+                    // own the transition.
+                    if matches!(row.status, SandboxStatus::Unreachable) {
+                        match database
+                            .update_sandbox_status(
+                                sandbox_id_uuid,
+                                SandboxStatus::Running,
+                                row.generation,
+                                None,
+                            )
+                            .await
+                        {
+                            Ok(new_gen) => {
+                                registry.set_generation(&sandbox_id_uuid, new_gen);
+                                tracing::info!(
+                                    sandbox_id = %row.sandbox_id,
+                                    old_status = "unreachable",
+                                    new_status = "running",
+                                    new_generation = new_gen,
+                                    "sandbox/restore: probe-Ok flipped unreachable → running"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::info!(
+                                    sandbox_id = %row.sandbox_id,
+                                    error = %e,
+                                    "sandbox/restore: unreachable→running flip skipped (CAS lost or pg err); registry hydration still applied"
+                                );
+                            }
+                        }
+                    }
                     tracing::info!(
                         sandbox_id = %row.sandbox_id,
                         user_id = %row.user_id,
                         project_id = %row.project_id,
                         agent_url = %agent_url,
                         generation = row.generation,
+                        prior_status = row.status.as_str(),
                         "sandbox/restore: restored from pg + sealed"
                     );
                     RestoreOutcome::Restored
