@@ -1744,6 +1744,12 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 pub fn install_dom(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::dom::install_globals(scope, global);
+    // Native RpcError (RPC v2 phase 1, Wave B). Installed AFTER `dom`
+    // so the platform's DOMException-style error envelopes share
+    // ordering: any path that depends on RpcError running after Error
+    // already exists on the global is fine because V8 wires the Error
+    // intrinsic before user-visible install hooks fire.
+    crate::rpc::install_global(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).

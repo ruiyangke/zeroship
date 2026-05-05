@@ -94,11 +94,11 @@ pub(super) fn analyze<'a>(
     // diagnostic with a span on the attribute, before any fn body is
     // built. Closes NS2 from the v2 code-critic.
     if let Some(ref value) = inherit_intrinsic {
-        if value != "IteratorPrototype" {
+        if value != "IteratorPrototype" && value != "Error" {
             return Err(syn::Error::new_spanned(
                 &input.self_ty,
                 format!(
-                    "#[v8_inherit_intrinsic]: unrecognised value `{value}` (expected \"IteratorPrototype\")"
+                    "#[v8_inherit_intrinsic]: unrecognised value `{value}` (expected \"IteratorPrototype\" or \"Error\")"
                 ),
             )
             .to_compile_error());
