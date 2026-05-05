@@ -885,7 +885,7 @@ impl NomadCHBackend {
         //    defense-in-depth.
         //
         //    Fence policy: poll /livez for up to
-        //    `host_fence_timeout_secs` (default 30s). Two
+        //    `host_fence_timeout_secs` (default 120s). Two
         //    consecutive failures (connect-refused, timeout, or 5xx)
         //    → "no agent listening" → release. If the fence times
         //    out, **leak** the vm_index — handing out a live IP is

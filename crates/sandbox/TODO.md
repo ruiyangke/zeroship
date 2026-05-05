@@ -35,6 +35,29 @@ and `list_all_sandboxes_inner`, idempotency-key support for `DELETE`,
 collectively MINOR #1/#2/#3/#6/#7 in the round-4 review. Bundle them with
 the JWT migration.
 
+### Burst-saturation tuning at high concurrent-stops/create
+
+Round-3 GCP stress (60-on-one-worker after the MHz=500 fix unlocked
+density past round-2's 16-cap):
+- 29/60 creates ok (the other 31 hit `alloc_running_timeout_secs=60s`
+  ceiling; CH boot under c=60 saturation took longer than 60s)
+- 29/29 stops ok with the new 120s `host_fence_timeout_secs` default
+  (was 30s — fence p99 measured at 100s, just inside the new budget)
+
+Two more knobs worth tuning together for production:
+1. **Bump `alloc_running_timeout_secs` 60 → 120 (or 180)** — matches
+   the spirit of the fence bump. CH boot p99 under burst is 60s on a
+   single n2-standard-32; placement+boot in <60s is unrealistic at
+   c=60.
+2. **Controller-side stop semaphore** (better long-term shape) — cap
+   concurrent host_fence polls at, say, 16 per worker. Avoids the
+   teardown stampede that pushed fence p99 to 100s.
+
+Out of scope for the immediate Phase-3 close — the MHz fix is the
+primary unlock; these are follow-ons that surface only at the new
+density. Capture in case a future 300-VM cluster-wide stress runs into
+them.
+
 ### Controller pause/snapshot APIs (CH backend)
 
 Idle AI-builder workspaces today hold tap + memory + Nomad alloc forever. CH
