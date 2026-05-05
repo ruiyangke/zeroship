@@ -11,13 +11,13 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
 use super::super::helpers::{
-    gen_param_extractions, method_callback_ident, parse_params_skipping_self,
+    gen_param_extractions, method_callback_ident, outer_ident, parse_params_skipping_self,
 };
 use super::super::parse::extract_reject_shared;
 use super::super::shared::class_config::ClassConfig;
 use super::super::shared::recover_box;
 use super::super::{ClassMethod, MethodKind};
-use crate::gen_call_return;
+use crate::{gen_call_return, must_str};
 
 /// Slow-path FunctionCallback for `#[v8_method]` and plain
 /// `#[v8_getter]` (without `same_object`). Brand-check + Box<Self>
@@ -84,6 +84,18 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 /// no return marshaling). Discards the user method's return value at
 /// the end; the V8 accessor protocol ignores anything a setter
 /// returns.
+///
+/// Setter return-shape contract (§13.1, enforced at the analyse phase
+/// by `is_unit_return` / `is_result_unit_return`):
+///   - `()` — call-and-discard.
+///   - `Result<(), OpError>` — Ok-discard, Err routed through the
+///     standard 6-variant `gen_throw_op_error_arms` dispatch. Pre-fix
+///     this site emitted `let _ = setter(...)` which silently swallowed
+///     the OpError — the §13.1 finding masked a real bug in
+///     `URL::set_href` and `WebSocketImpl::set_binary_type` whose Err
+///     arms were unobservable to JS.
+///   - Anything else — rejected at compile time in `analyze.rs`'s
+///     setter-shape validator.
 pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let state_ty = cfg.state_ty;
@@ -105,6 +117,35 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // the end; the prologue itself is byte-identical.
     let recover = recover_box::gen_recover_box(class_ty, state_ty, method_name, m.mut_receiver);
 
+    // §13.1 fix: setters declared as `Result<(), OpError>` route an
+    // `Err` arm through the standard 6-variant OpError dispatch so the
+    // user's error surfaces as a JS exception instead of being silently
+    // swallowed. Unit-returning setters fall through to a plain call
+    // (no Result match needed). The shape parser at the analyse site
+    // (analyze.rs) already rejects setters whose return type is neither
+    // `()` nor `Result<(), _>`, so this branch is exhaustive.
+    let is_result = matches!(
+        outer_ident(&m.func.sig.output).as_deref(),
+        Some("Result")
+    );
+    let invoke = if is_result {
+        let throw = crate::gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
+        quote! {
+            match <#state_ty>::#method_name(#receiver_ref, #(#call_args),*) {
+                ::std::result::Result::Ok(()) => {}
+                ::std::result::Result::Err(__err) => {
+                    #throw
+                    return;
+                }
+            }
+        }
+    } else {
+        // Setter returns `()` — call and ignore.
+        quote! {
+            <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+        }
+    };
+
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
         pub(crate) fn #callback_name(
@@ -116,8 +157,11 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
             #(#extractions)*
 
-            // Discard return — setters don't propagate values.
-            let _ = <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            // Setter dispatch — Ok-discard, Err-throw for Result-returning
+            // setters; plain call-and-discard for `()` setters. WebIDL
+            // §3.7.6 says the setter return value is unobservable to JS,
+            // so we never write to `rv`.
+            #invoke
         }
     }
 }
@@ -199,6 +243,18 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
     // async future capture.
     let brand_check = recover_box::gen_brand_check_throw(&brand_check_fn);
     let recover_external = recover_box::gen_recover_external();
+    // §4.1 Wave 2 + critique C8: pre-fix this site `.expect`'d on the
+    // SharedState slot lookup. A misconfigured runtime (slot not
+    // installed) would Rust-panic THROUGH V8's C++ frames, which on
+    // Linux is a SIGABRT (Rust's panic runtime can't unwind through an
+    // `extern "C"` boundary cleanly — same reasoning as the re-entry
+    // guard's V8-TypeError-not-panic doc-comment). Surface as a JS-side
+    // RangeError instead — exceptional but recoverable.
+    let scope_tok = quote! { scope };
+    let state_missing_msg_init = must_str(
+        &scope_tok,
+        &quote! { "internal error: SharedState not installed on isolate" },
+    );
 
     quote! {
         #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
@@ -243,10 +299,25 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
             // 4. Pull SharedState off the isolate slot. Cloned `Rc`,
             //    cheap. The future captures another clone; the
             //    callback can drop its handle freely.
-            let __state: ::zeroship_runtime::state::SharedState = scope
-                .get_slot::<::zeroship_runtime::state::SharedState>()
-                .expect("RuntimeState not in isolate slot")
-                .clone();
+            //
+            //    Pre-fix: `.expect("RuntimeState not in isolate slot")`
+            //    Rust-panicked here on a misconfigured runtime. Since
+            //    V8 callbacks are invoked through an `extern "C"`
+            //    boundary, a Rust panic abort is the default — SIGABRT
+            //    on Linux (same reason gen_reentry_guard throws a
+            //    V8 TypeError instead of panicking). Surface as a
+            //    JS-side RangeError so the user observes a recoverable
+            //    JS exception, NOT a crashed worker.
+            let __state: ::zeroship_runtime::state::SharedState =
+                match scope.get_slot::<::zeroship_runtime::state::SharedState>() {
+                    Some(__s) => __s.clone(),
+                    None => {
+                        let __msg = #state_missing_msg_init;
+                        let __exc = v8::Exception::range_error(scope, __msg);
+                        scope.throw_exception(__exc);
+                        return;
+                    }
+                };
             let __request_id = __state.borrow().executing_request_id;
 
             // 5. Build the future. The block keeps `wrapper_global`

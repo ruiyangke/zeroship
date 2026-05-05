@@ -19,6 +19,7 @@ use super::super::helpers::{
 use super::super::parse::{extract_callable_no_new, extract_post_init, extract_reject_shared};
 use super::super::shared::class_config::ClassConfig;
 use super::super::ClassMethod;
+use crate::gen_throw_op_error_arms;
 
 /// WebIDL §3.7.1: every interface constructor MUST be called with `new`.
 /// Returns the `if !args.is_construct_call() { throw TypeError; return; }`
@@ -71,31 +72,19 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     );
 
     let make_instance = if is_result {
+        // Routed through the shared `gen_throw_op_error_arms` helper —
+        // single source of truth for the 6-variant OpErrorKind dispatch
+        // (TypeError, RangeError, DomException, NodeError, Error,
+        // JsValue passthrough). The helper throws via
+        // `scope.throw_exception(...)` in both the JsValue and the
+        // typed-error branches; the macro emits `return;` after to
+        // unwind the V8 callback.
+        let throw = gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
         quote! {
             let __instance: #state_ty = match <#state_ty>::#ctor_name(#(#call_args),*) {
                 Ok(__v) => __v,
                 Err(__err) => {
-                    // JsValue passthrough — preserves user-thrown
-                    // exception verbatim (Error subclass, .code, etc.).
-                    if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
-                        let __local = v8::Local::new(scope, __global);
-                        scope.throw_exception(__local);
-                        return;
-                    }
-                    let __msg = v8::String::new(scope, &__err.message).unwrap();
-                    let __exc: v8::Local<v8::Value> = match &__err.kind {
-                        ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                            ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-                        }
-                        ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                            ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-                        }
-                        ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-                        ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
-                    };
-                    scope.throw_exception(__exc);
+                    #throw
                     return;
                 }
             };
@@ -135,34 +124,17 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
         Ok(None) => quote! {},
         Err(e) => return e.to_compile_error(),
         Ok(Some(hook_ident)) => {
-            // Mirror the make_instance Result arm verbatim — same five
-            // OpErrorKind variants from crates/runtime/src/core/state.rs
-            // (TypeError, RangeError, Error, DomException, NodeError, JsValue).
-            // Any addition there must be mirrored here.
+            // Routed through the shared `gen_throw_op_error_arms` helper
+            // — same 6-variant OpErrorKind dispatch as the make_instance
+            // Result arm above. Adding a 7th variant means editing one
+            // match in one helper.
+            let throw = gen_throw_op_error_arms(&quote! { scope }, &quote! { __err });
             quote! {
                 if args.is_construct_call() {
                     match <#class_ty>::#hook_ident(scope, __this) {
                         Ok(()) => {},
                         Err(__err) => {
-                            if let ::zeroship_runtime::state::OpErrorKind::JsValue(__global) = &__err.kind {
-                                let __exc = v8::Local::new(scope, __global);
-                                scope.throw_exception(__exc);
-                                return;
-                            }
-                            let __msg = v8::String::new(scope, &__err.message).unwrap();
-                            let __exc: v8::Local<v8::Value> = match __err.kind {
-                                ::zeroship_runtime::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::DomException(__name) => {
-                                    ::zeroship_runtime::dom::exception::build(scope, &__err.message, __name).into()
-                                }
-                                ::zeroship_runtime::state::OpErrorKind::NodeError(__code) => {
-                                    ::zeroship_runtime::node_error::build_node_exception(scope, __code, &__err.message)
-                                }
-                                ::zeroship_runtime::state::OpErrorKind::Error => v8::Exception::error(scope, __msg),
-                                ::zeroship_runtime::state::OpErrorKind::JsValue(_) => unreachable!(),
-                            };
-                            scope.throw_exception(__exc);
+                            #throw
                             return;
                         }
                     }

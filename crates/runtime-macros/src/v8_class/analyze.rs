@@ -22,7 +22,7 @@ use super::fastcall::validate_fastcall_signature;
 use super::parse::{
     classify, extract_async_iterable, extract_consts, extract_fastcall, extract_inherit_base,
     extract_inherit_intrinsic, extract_same_object, extract_to_string_tag, extract_v8_name,
-    has_any_receiver, has_mut_self,
+    has_any_receiver, has_mut_self, is_result_unit_return, is_unit_return,
 };
 use super::shared::class_config::ClassConfig;
 use super::{ClassMethod, MethodKind};
@@ -211,6 +211,34 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                         "#[v8_static_method] / #[v8_static_getter] cannot have a \
                          `self` receiver — static operations are invoked via \
                          `Class.method()` with no `this`",
+                    )
+                    .to_compile_error());
+                }
+
+                // Compile-time guard: setters whose return type is
+                // neither `()` nor `Result<(), OpError>` are rejected.
+                // WebIDL §3.7.6 attribute-setter semantics specify that
+                // V8's accessor setter ABI discards whatever the
+                // callback writes to `rv` — so a non-unit, non-Result
+                // return would have its value silently swallowed (the
+                // §13.1 finding from
+                // runtime-macros-architecture-critique-2026-05-05).
+                // `Result<(), OpError>` IS supported because
+                // `gen_setter_callback` honours it: an `Err` arm
+                // routes through `gen_throw_op_error_arms` and surfaces
+                // as a JS exception, matching the
+                // `#[v8_method]` Result-return contract.
+                if matches!(kind, MethodKind::Setter)
+                    && !is_unit_return(&func.sig.output)
+                    && !is_result_unit_return(&func.sig.output)
+                {
+                    return Err(syn::Error::new_spanned(
+                        &func.sig.output,
+                        "#[v8_setter] must return `()` or `Result<(), OpError>` \
+                         — V8 accessor setters discard the return value, so a \
+                         non-unit, non-Result return would have its value \
+                         silently swallowed. Use `Result<(), OpError>` if you \
+                         need to surface an error from the setter logic.",
                     )
                     .to_compile_error());
                 }
