@@ -82,6 +82,10 @@ zeroship-core = { workspace = true }
 # contract Wave A pinned in `crates/core/src/superjson.rs`.
 indexmap = { workspace = true }
 
+# UUIDv7 keys for the rpc::abort registry — `(app_id, request_id)` keys
+# the in-flight AbortController map walked by `entered_for_eviction`.
+uuid = { workspace = true }
+
 [[bin]]
 name = "zeroship-bench-server"
 path = "src/core/server.rs"

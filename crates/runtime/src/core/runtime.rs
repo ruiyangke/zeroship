@@ -184,6 +184,11 @@ pub struct Runtime {
     inner: Rc<RefCell<RuntimeInner>>,
     limits: RuntimeLimits,
     modules: Rc<Vec<ModuleEntry>>,
+    /// Multi-tenant identity. Set by the worker via `RuntimeBuilder::app_id`
+    /// so per-isolate registries (RPC abort, future telemetry) can key
+    /// entries by the same Uuid the cache uses. `None` for single-tenant
+    /// callers (the bench server, the dev `serve` CLI, most tests).
+    app_id: Option<uuid::Uuid>,
 }
 
 impl Runtime {
@@ -212,6 +217,53 @@ impl Runtime {
     /// Module list this runtime was built with.
     pub fn modules(&self) -> &[ModuleEntry] {
         self.modules.as_ref().as_slice()
+    }
+
+    /// Multi-tenant identity, if the builder was supplied one.
+    /// Used by `crate::rpc::abort` to key the in-flight controller
+    /// registry by `(app_id, request_id)`.
+    pub fn app_id(&self) -> Option<uuid::Uuid> {
+        self.app_id
+    }
+
+    /// Run `f` inside this isolate's HandleScope + Context. Wraps the
+    /// same primitive `enter_v8!` uses but exposes it to callers that
+    /// need to invoke V8 APIs from outside `call_fetch_handler`.
+    ///
+    /// Used by the worker's eviction path (see
+    /// `crates/worker/src/cache.rs::evict_lru`) to walk the abort
+    /// registry inside the about-to-be-disposed isolate's scope.
+    ///
+    /// The runtime borrows the inner `RefCell` for the duration of the
+    /// call — callers must not invoke another method that re-borrows
+    /// inside `f` (e.g. `call_fetch_handler` would reentrantly borrow_mut).
+    pub fn with_scope<R>(&self, f: impl FnOnce(&mut v8::PinScope) -> R) -> R {
+        let mut inner = self.inner.borrow_mut();
+        // Multi-tenant workers exit isolates between dispatches so other
+        // isolates can be entered on the same thread (`enter_depth == 0`).
+        // V8's HandleScope macro requires `Isolate::GetCurrent()` to be
+        // THIS isolate, so re-enter just-in-time and exit afterwards
+        // when we found ourselves in the exited state. Already-entered
+        // callers (e.g. inside `call_fetch_handler`) skip the toggle.
+        let entered_for_scope = if inner.enter_depth == 0 {
+            inner.enter_isolate();
+            true
+        } else {
+            false
+        };
+        let context_global = inner.context.clone();
+        let r = {
+            v8::scope!(let handle_scope, &mut inner.isolate);
+            let context = v8::Local::new(handle_scope, &context_global);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            let r = f(scope);
+            scope.perform_microtask_checkpoint();
+            r
+        };
+        if entered_for_scope {
+            inner.exit_isolate();
+        }
+        r
     }
 
     /// Wake the pump task immediately. Callers use this after flipping a
@@ -300,6 +352,7 @@ pub struct RuntimeBuilder {
     env_vars: HashMap<String, String>,
     limits: RuntimeLimits,
     plugins: Vec<Arc<dyn NativePlugin>>,
+    app_id: Option<uuid::Uuid>,
 }
 
 impl RuntimeBuilder {
@@ -352,22 +405,34 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Multi-tenant identity. The worker passes the same `Uuid` it uses
+    /// to key the per-thread isolate cache, so eviction can fire all
+    /// in-flight `AbortController`s for a single app via
+    /// `crate::rpc::abort::entered_for_eviction`.
+    pub fn app_id(mut self, id: uuid::Uuid) -> Self {
+        self.app_id = Some(id);
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
         let limits = self.limits;
         let modules_rc = Rc::new(self.modules);
+        let app_id = self.app_id;
         let inner = RuntimeInner::new_with_plugins(
             self.env_vars,
             limits.cpu_limit,
             limits.wall_timeout,
             limits.heap_limit_bytes,
             self.plugins,
+            app_id,
         );
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
             limits,
             modules: modules_rc,
+            app_id,
         }
     }
 }
@@ -401,6 +466,13 @@ struct PendingRequest {
     wall_start: Instant,
     cancel: CancelFlag,
     origin: PendingOrigin,
+    /// Wave E — keeps the per-request `AbortController` registered with
+    /// `crate::rpc::abort` until the promise settles. Drop unregisters
+    /// (covers normal settle, cancellation sweep, and pump-side
+    /// timeout / CPU termination removals). `None` for non-RPC paths
+    /// and for runtimes built without an `app_id`.
+    #[allow(dead_code)]
+    abort_guard: Option<crate::rpc::abort::AbortGuard>,
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +573,12 @@ pub(crate) struct RuntimeInner {
     /// deploy doesn't masquerade as "No default.fetch handler exported".
     init_error: Option<String>,
 
+    /// Multi-tenant identity. When `Some`, the RPC fast-path registers
+    /// every in-flight `AbortController` with `crate::rpc::abort` keyed
+    /// by `(app_id, request_id)` so the worker's eviction sweep can
+    /// fire them. `None` for single-tenant callers.
+    app_id: Option<uuid::Uuid>,
+
     /// Net depth of `enter_isolate`/`exit_isolate` pairs. Tracks whether
     /// the V8 isolate is currently the topmost-entered on its thread.
     ///
@@ -563,6 +641,7 @@ impl RuntimeInner {
         wall_timeout: Option<Duration>,
         heap_limit_bytes: Option<usize>,
         plugins: Vec<Arc<dyn NativePlugin>>,
+        app_id: Option<uuid::Uuid>,
     ) -> Self {
         init_v8();
 
@@ -659,6 +738,7 @@ impl RuntimeInner {
             pump_cpu_accumulated: Duration::ZERO,
             pump_wall_start: Instant::now(),
             init_error: None,
+            app_id,
             // `Isolate::new()` enters the isolate, so we boot with depth 1.
             enter_depth: 1,
         }
@@ -1247,6 +1327,12 @@ impl RuntimeInner {
         // inspect_response for Fetch). Default Fetch — only flipped
         // inside the RPC fast-path block.
         let mut pending_origin = PendingOrigin::Fetch;
+        // Wave E — when the RPC fast path returns a pending Promise,
+        // this carries the per-request `AbortGuard` from inside the
+        // V8 scope out to `store_fetch_pending`. Otherwise the guard
+        // would drop at the end of the `enter_v8!` block, leaving
+        // the registry empty for async procedures.
+        let mut pending_abort_guard: Option<crate::rpc::abort::AbortGuard> = None;
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| 'dispatch: {
                 let undefined = v8::undefined(scope).into();
@@ -1276,21 +1362,44 @@ impl RuntimeInner {
                     // On any build failure we drop ALS support and fall
                     // through to a no-ALS call (degrades to undefined for
                     // `__zeroshipGetRpcCtx`, never breaks the dispatch).
+                    //
+                    // Wave E — when `app_id` is configured (multi-tenant
+                    // worker), register the per-request AbortController
+                    // with `crate::rpc::abort` so the LRU eviction sweep
+                    // can fire `ctx.signal` for every in-flight procedure
+                    // before the isolate is disposed. The guard drops on
+                    // sync return / throw (registry self-cleans); on a
+                    // pending promise we hand it off to `store_fetch_pending`
+                    // via `pending_abort_guard` so the registry entry
+                    // survives until the promise settles.
                     let user_json = self.state.borrow().per_request_user.get(&request_id).cloned();
                     let rpc_ctx = build_rpc_context_from_request(
                         request_id, method, url, headers, user_json,
                     );
-                    let rpc_ctx_object = match rpc_ctx.build_js_object(scope) {
-                        Ok(handle) => Some(handle.ctx_object),
-                        Err(_) => None,
+                    let (rpc_ctx_object, mut local_abort_guard) = match rpc_ctx.build_js_object(scope) {
+                        Ok(handle) => {
+                            let guard = self.app_id.map(|aid| {
+                                crate::rpc::abort::register_in_flight(
+                                    scope,
+                                    aid,
+                                    request_id,
+                                    handle.abort_controller,
+                                )
+                            });
+                            (Some(handle.ctx_object), guard)
+                        }
+                        Err(_) => (None, None),
                     };
                     match call_rpc_inner(scope, rpc_fn, id_arg, input_arg, ctx_arg, rpc_ctx_object) {
                         RpcCallResult::Handled(res) => {
                             // If the call returned a pending promise,
                             // the pump must settle it as RPC (envelope-
                             // wrap the value, not inspect as Response).
+                            // Hand the AbortGuard off to the pump so the
+                            // registry entry survives across `await`s.
                             if res.is_err() {
                                 pending_origin = PendingOrigin::Rpc;
+                                pending_abort_guard = local_abort_guard.take();
                             }
                             break 'dispatch res;
                         }
@@ -1298,6 +1407,10 @@ impl RuntimeInner {
                         // wraps it in an SSE Response.
                         RpcCallResult::FallThrough => {}
                     }
+                    // Sync return / FallThrough: drop the guard at the
+                    // end of the V8 turn (the unused `_` binding here is
+                    // explicit — we want the Drop to run).
+                    drop(local_abort_guard);
                 }
 
                 let fetch_fast_result = if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
@@ -1439,8 +1552,16 @@ impl RuntimeInner {
                 // (logs, user, timers) alive: the pump still needs it
                 // when the promise settles. DO NOT call
                 // `discard_request_state` here — only after settle.
+                //
+                // `pending_abort_guard` is `Some` only on the RPC fast
+                // path with `app_id` configured; the guard rides
+                // alongside the PendingRequest entry and unregisters
+                // when the request settles or is cancelled.
                 self.clear_executing_request();
-                self.store_fetch_pending(request_id, promise, ctx, cpu_elapsed, wall_start, pending_origin)
+                self.store_fetch_pending(
+                    request_id, promise, ctx, cpu_elapsed, wall_start, pending_origin,
+                    pending_abort_guard,
+                )
             }
         }
     }
@@ -1456,6 +1577,7 @@ impl RuntimeInner {
         cpu_accumulated: Duration,
         wall_start: Instant,
         origin: PendingOrigin,
+        abort_guard: Option<crate::rpc::abort::AbortGuard>,
     ) -> crate::FetchOutcome {
         let (tx, rx) = channel::result_slot();
 
@@ -1467,6 +1589,7 @@ impl RuntimeInner {
             wall_start,
             cancel: ctx.cancel.clone(),
             origin,
+            abort_guard,
         });
         self.notify_pump();
 
