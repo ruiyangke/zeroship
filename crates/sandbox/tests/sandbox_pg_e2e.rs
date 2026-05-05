@@ -1700,3 +1700,240 @@ async fn takeover_includes_unreachable_status() {
     // Generation went 0 (insert) → 1 (unreachable flip) → 2 (takeover).
     assert_eq!(taken[0].generation, 2);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase 3 — pg role permission split (§ 13.2; spec § 4)
+// ════════════════════════════════════════════════════════════════════
+//
+// Each test below verifies one slice of the four-role least-privilege
+// invariant. The CI Postgres runs as superuser `postgres`; the tests
+// promote the three runtime roles to LOGIN with a known password and
+// connect as each role to assert its capability matrix:
+//
+//   1. sandbox_app DELETE FROM events             → SQLSTATE 42501
+//   2. sandbox_app DELETE FROM sandboxes          → succeeds
+//      (the controller's stop flow needs this; the design's NO-DELETE
+//      invariant applies only to the audit table, not to live state.)
+//   3. sandbox_audit SELECT FROM events           → SQLSTATE 42501
+//   4. sandbox_audit INSERT INTO events           → succeeds
+//   5. sandbox_gdpr SELECT FROM sandboxes         → succeeds
+//      (needs SELECT for the cascade WHERE chain)
+//   6. sandbox_gdpr INSERT INTO sandboxes         → SQLSTATE 42501
+//   7. sandbox_app UPDATE sandboxes               → succeeds
+
+const ROLE_TEST_PASSWORD: &str = "phase3roleperm";
+
+/// Promote the three runtime roles to LOGIN with a known password,
+/// against the test database. Idempotent. CI Postgres runs as the
+/// superuser `postgres`, so ALTER ROLE … LOGIN PASSWORD … is allowed.
+async fn promote_roles_to_login(url: &str) {
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    for role in ["sandbox_app", "sandbox_audit", "sandbox_gdpr"] {
+        let sql = format!(
+            "ALTER ROLE {role} WITH LOGIN PASSWORD '{ROLE_TEST_PASSWORD}'"
+        );
+        client.batch_execute(&sql).await.unwrap();
+    }
+}
+
+/// Build a DSN that targets the test pg as the given role.
+fn role_dsn(default_url: &str, role: &str) -> String {
+    // default_url shape: postgres://user:pass@host:port/db. Replace
+    // user:pass with role:ROLE_TEST_PASSWORD.
+    // Simple parse — we control the test fixture.
+    let (scheme, rest) = default_url.split_once("://").expect("scheme");
+    let (_userinfo, after) = rest.split_once('@').expect("userinfo@");
+    format!("{scheme}://{role}:{ROLE_TEST_PASSWORD}@{after}")
+}
+
+async fn assert_sqlstate_42501<F, Fut>(label: &str, op: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<u64, compio_postgres::Error>>,
+{
+    match op().await {
+        Ok(_) => panic!("{label}: expected 42501 (insufficient_privilege), got Ok"),
+        Err(e) => {
+            let code = e.code().map(|c| c.code()).unwrap_or("");
+            assert_eq!(
+                code, "42501",
+                "{label}: expected SQLSTATE 42501, got {code:?} ({e})"
+            );
+        }
+    }
+}
+
+#[compio::test]
+#[ignore = "needs Postgres + superuser; Phase-3 § 4 role permission split"]
+async fn role_sandbox_app_cannot_delete_events() {
+    let url = test_url();
+    let _db = migrated_db().await;
+    promote_roles_to_login(&url).await;
+
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    assert_sqlstate_42501("sandbox_app DELETE FROM events", || async {
+        client.execute("DELETE FROM sandbox.events", &[]).await
+    })
+    .await;
+}
+
+#[compio::test]
+#[ignore = "needs Postgres + superuser; Phase-3 § 4 role permission split"]
+async fn role_sandbox_audit_cannot_select_events() {
+    let url = test_url();
+    let _db = migrated_db().await;
+    promote_roles_to_login(&url).await;
+
+    let audit_dsn = role_dsn(&url, "sandbox_audit");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&audit_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    // SELECT returns query results; pg returns the SQLSTATE on the
+    // wire when the role lacks privilege. compio-postgres surfaces
+    // it via Error::code().
+    let res = client.query("SELECT * FROM sandbox.events", &[]).await;
+    match res {
+        Ok(_) => panic!("sandbox_audit SELECT FROM events: expected 42501, got Ok"),
+        Err(e) => {
+            let code = e.code().map(|c| c.code()).unwrap_or("");
+            assert_eq!(code, "42501", "expected 42501, got {code:?} ({e})");
+        }
+    }
+}
+
+#[compio::test]
+#[ignore = "needs Postgres + superuser; Phase-3 § 4 role permission split"]
+async fn role_sandbox_audit_can_insert_events() {
+    let url = test_url();
+    let db = migrated_db().await;
+    promote_roles_to_login(&url).await;
+
+    // Pre-seed a sandbox row + host so the INSERT's typed-id CHECKs
+    // pass and the user_id corresponds to a real owner.
+    let host_id = db.host_id();
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let audit_dsn = role_dsn(&url, "sandbox_audit");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&audit_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let event_id = typed_id("evt");
+    let n = client
+        .execute(
+            "INSERT INTO sandbox.events (event_id, sandbox_id, user_id, kind, ts, data) \
+             VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'role_perm_test', now(), '{}'::jsonb)",
+            &[&event_id, &info.sandbox_id, &info.user_id],
+        )
+        .await
+        .expect("audit role must be able to INSERT events");
+    assert_eq!(n, 1, "INSERT should affect 1 row");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres + superuser; Phase-3 § 4 role permission split"]
+async fn role_sandbox_gdpr_can_select_sandboxes() {
+    let url = test_url();
+    let db = migrated_db().await;
+    promote_roles_to_login(&url).await;
+
+    // Pre-seed so SELECT returns rows the GDPR cascade WHERE chain
+    // needs.
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, db.host_id(), &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let gdpr_dsn = role_dsn(&url, "sandbox_gdpr");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&gdpr_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let rows = client
+        .query("SELECT sandbox_id FROM sandbox.sandboxes", &[])
+        .await
+        .expect("gdpr role must SELECT sandboxes (cascade prerequisite)");
+    assert!(
+        !rows.is_empty(),
+        "gdpr SELECT must surface the seeded row"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres + superuser; Phase-3 § 4 role permission split"]
+async fn role_sandbox_gdpr_cannot_insert_sandboxes() {
+    let url = test_url();
+    let _db = migrated_db().await;
+    promote_roles_to_login(&url).await;
+
+    let gdpr_dsn = role_dsn(&url, "sandbox_gdpr");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&gdpr_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let sbx = typed_id("sbx");
+    let usr = typed_id("usr");
+    let prj = typed_id("prj");
+    let host_typed = format!("hst_{}", zeroship_core::typed_id::uuid_to_base62(&Uuid::now_v7()));
+
+    assert_sqlstate_42501(
+        "sandbox_gdpr INSERT sandboxes",
+        || async {
+            client
+                .execute(
+                    "INSERT INTO sandbox.sandboxes \
+                       (sandbox_id, user_id, project_id, backend, host_id, \
+                        status, key_fp, generation) \
+                     VALUES ($1::TEXT, $2::TEXT, $3::TEXT, 'docker', \
+                             $4::TEXT, 'running', $5::TEXT, 0)",
+                    &[&sbx, &usr, &prj, &host_typed, &"a".repeat(32)],
+                )
+                .await
+        },
+    )
+    .await;
+}
+
+#[compio::test]
+#[ignore = "needs Postgres + superuser; Phase-3 § 4 role permission split"]
+async fn role_sandbox_app_can_update_sandboxes() {
+    let url = test_url();
+    let db = migrated_db().await;
+    promote_roles_to_login(&url).await;
+
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, db.host_id(), &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let n = client
+        .execute(
+            "UPDATE sandbox.sandboxes SET last_used_at = now() WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .expect("sandbox_app must be able to UPDATE sandboxes");
+    assert_eq!(n, 1, "UPDATE should affect 1 row");
+}

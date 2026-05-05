@@ -114,6 +114,16 @@ pub struct DbConfig {
     /// `sslmode=verify-full`) lands with Phase 1's connection
     /// security review.
     pub dsn: String,
+    /// Phase-3 audit-role DSN. Connects as `sandbox_audit` and is used
+    /// exclusively for `INSERT INTO sandbox.events`. Falls back to
+    /// `dsn` (the app role) when `SANDBOX_DATABASE_URL_AUDIT` is unset
+    /// — the dev-convenience shape per § 13.2 last paragraph.
+    pub dsn_audit: String,
+    /// Phase-3 GDPR-role DSN. Connects as `sandbox_gdpr` for the
+    /// admin-handler GDPR cascade DELETE only; opened on demand at
+    /// request time, not at boot. Falls back to `dsn` when
+    /// `SANDBOX_DATABASE_URL_GDPR` is unset.
+    pub dsn_gdpr: String,
     /// Stable controller identity (`hst_<base62>`-derived UUID).
     /// Generated once and persisted at `<state_dir>/host_id` so the
     /// identity survives restarts; an operator who wants a fresh
@@ -136,6 +146,8 @@ impl std::fmt::Debug for DbConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbConfig")
             .field("dsn", &redact_dsn_for_debug(&self.dsn))
+            .field("dsn_audit", &redact_dsn_for_debug(&self.dsn_audit))
+            .field("dsn_gdpr", &redact_dsn_for_debug(&self.dsn_gdpr))
             .field("host_id", &self.host_id)
             .field("run_migrations", &self.run_migrations)
             .field("boot_timeout_secs", &self.boot_timeout_secs)
@@ -306,6 +318,13 @@ impl Database {
 
     /// Build with an explicit DSN — used by tests that want a
     /// per-test pg fixture without round-tripping through env.
+    ///
+    /// Phase-3: the audit + GDPR DSNs come from
+    /// `SANDBOX_DATABASE_URL_AUDIT` / `SANDBOX_DATABASE_URL_GDPR`
+    /// when set; both fall back to the primary DSN for dev
+    /// convenience (a single role for everything). In production
+    /// the operator sets all three so the role-isolation invariant
+    /// (§ 13.2) holds.
     pub async fn from_env_with_dsn(dsn: String) -> Result<Self> {
         validate_dsn_scheme(&dsn)?;
         let dsn = inject_password_if_configured(dsn)?;
@@ -344,8 +363,16 @@ impl Database {
         drop(client);
         drop(pool);
 
+        // Phase-3 split-role DSNs. Defaults to `dsn` (the app role)
+        // when unset — single-role-for-dev convenience documented in
+        // § 13.2 last paragraph; production sets all three.
+        let dsn_audit = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_AUDIT", &dsn)?;
+        let dsn_gdpr = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_GDPR", &dsn)?;
+
         let config = DbConfig {
             dsn,
+            dsn_audit,
+            dsn_gdpr,
             host_id,
             run_migrations,
             boot_timeout_secs,
@@ -376,14 +403,28 @@ impl Database {
         let _client = pool.get().await.map_err(DatabaseError::Pg)?;
         drop(_client);
         drop(pool);
+        let dsn_audit = dsn.clone();
+        let dsn_gdpr = dsn.clone();
         let config = DbConfig {
             dsn,
+            dsn_audit,
+            dsn_gdpr,
             host_id: Uuid::now_v7(),
             run_migrations,
             boot_timeout_secs,
             pool_max: 4,
         };
         Ok(Self { config })
+    }
+
+    /// Override the per-role DSNs after `from_test_config`. Used by
+    /// the role-permission integration tests to exercise the actual
+    /// `sandbox_app` / `sandbox_audit` / `sandbox_gdpr` connection
+    /// paths against a CI Postgres where each role exists.
+    #[doc(hidden)]
+    pub fn set_role_dsns_for_test(&mut self, audit: String, gdpr: String) {
+        self.config.dsn_audit = audit;
+        self.config.dsn_gdpr = gdpr;
     }
 
     /// Cheap accessor for the controller's stable identity.
@@ -425,6 +466,40 @@ impl Database {
         let mut cfg = PoolConfig::default();
         cfg.max_size = self.config.pool_max.max(2);
         Pool::connect_with_config(&self.config.dsn, cfg)
+            .await
+            .map_err(DatabaseError::Pg)
+    }
+
+    /// Phase-3: open a transient pool authenticated as the
+    /// `sandbox_app` role. Alias for `open_pool` — the controller's
+    /// default DML role. Exposed under a role-named accessor so
+    /// call sites read self-documenting.
+    pub async fn pool_app(&self) -> Result<Pool> {
+        self.open_pool().await
+    }
+
+    /// Phase-3: open a transient pool authenticated as the
+    /// `sandbox_audit` role. Used by `insert_event` once the audit
+    /// pipe is split from the controller; falls back to
+    /// `SANDBOX_DATABASE_URL` when `SANDBOX_DATABASE_URL_AUDIT` is
+    /// unset (dev convenience).
+    pub async fn pool_audit(&self) -> Result<Pool> {
+        let mut cfg = PoolConfig::default();
+        cfg.max_size = self.config.pool_max.max(2);
+        Pool::connect_with_config(&self.config.dsn_audit, cfg)
+            .await
+            .map_err(DatabaseError::Pg)
+    }
+
+    /// Phase-3: open a transient pool authenticated as the
+    /// `sandbox_gdpr` role. Opened on demand inside the GDPR-delete
+    /// admin handler and dropped at end-of-request; never cached
+    /// (§ 13.2).
+    pub async fn pool_gdpr(&self) -> Result<Pool> {
+        let mut cfg = PoolConfig::default();
+        // GDPR cascade is a single TX; one connection is enough.
+        cfg.max_size = 2;
+        Pool::connect_with_config(&self.config.dsn_gdpr, cfg)
             .await
             .map_err(DatabaseError::Pg)
     }
@@ -838,6 +913,27 @@ fn url_encode_password(s: &str) -> String {
         }
     }
     out
+}
+
+/// Phase-3: resolve an optional role-specific DSN env var. Returns
+/// the env var's value (validated as `postgres://` / `postgresql://`
+/// + password injection) when set, else falls back to `default_dsn`.
+///
+/// The fallback is the dev-convenience shape: a single role for
+/// every connection. Production sets `SANDBOX_DATABASE_URL_AUDIT`
+/// and `SANDBOX_DATABASE_URL_GDPR` so the role-isolation invariant
+/// (§ 13.2) holds.
+fn resolve_optional_role_dsn(env_var: &str, default_dsn: &str) -> Result<String> {
+    match std::env::var(env_var) {
+        Ok(v) if !v.is_empty() => {
+            validate_dsn_scheme(&v)?;
+            // Same password-file injection shape as the primary DSN —
+            // an operator who put the secret in `SANDBOX_DATABASE_PASSWORD_PATH`
+            // expects every role's DSN to pick it up.
+            inject_password_if_configured(v)
+        }
+        _ => Ok(default_dsn.to_string()),
+    }
 }
 
 /// HA env-var validator (Round-7 / R-NN; lands in Phase 0 even
@@ -2166,6 +2262,8 @@ mod tests {
     fn dbconfig_debug_redacts_uri_userinfo_password() {
         let cfg = DbConfig {
             dsn: "postgres://alice:supers3cret@db.example/zs".into(),
+            dsn_audit: "postgres://audit:audsec@db.example/zs".into(),
+            dsn_gdpr: "postgres://gdpr:gdsec@db.example/zs".into(),
             host_id: uuid::Uuid::nil(),
             run_migrations: false,
             boot_timeout_secs: 60,
@@ -2173,7 +2271,11 @@ mod tests {
         };
         let s = format!("{cfg:?}");
         assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("audsec"), "audit password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("gdsec"), "gdpr password must NOT appear in Debug; got {s}");
         assert!(s.contains("alice"), "user must remain visible: {s}");
+        assert!(s.contains("audit"), "audit user must remain visible: {s}");
+        assert!(s.contains("gdpr"), "gdpr user must remain visible: {s}");
         assert!(s.contains("<redacted>"), "redaction marker missing: {s}");
     }
 
@@ -2181,6 +2283,8 @@ mod tests {
     fn dbconfig_debug_redacts_query_password() {
         let cfg = DbConfig {
             dsn: "postgres://db.example/zs?sslmode=require&password=supers3cret".into(),
+            dsn_audit: "postgres://db.example/zs?sslmode=require&password=audsec".into(),
+            dsn_gdpr: "postgres://db.example/zs?sslmode=require&password=gdsec".into(),
             host_id: uuid::Uuid::nil(),
             run_migrations: false,
             boot_timeout_secs: 60,
@@ -2188,6 +2292,8 @@ mod tests {
         };
         let s = format!("{cfg:?}");
         assert!(!s.contains("supers3cret"), "password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("audsec"), "audit query password must NOT appear in Debug; got {s}");
+        assert!(!s.contains("gdsec"), "gdpr query password must NOT appear in Debug; got {s}");
         assert!(s.contains("sslmode=require"), "non-secret query params must remain: {s}");
     }
 
