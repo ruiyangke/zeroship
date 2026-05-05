@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "catalog:",
+    "@zeroship/server": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "openai": "^6.0.0",
     "react": "catalog:",
