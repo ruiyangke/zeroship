@@ -14,6 +14,7 @@ pub mod config;
 pub mod db;
 pub mod files;
 pub mod handlers;
+pub mod metrics;
 pub mod persist;
 pub mod preview;
 pub mod preview_share;
@@ -195,6 +196,23 @@ impl AppState {
         // at boot and stays true even if kubectl auth expires or
         // the cluster goes unreachable.
         start_health_loop(state.clone());
+
+        // Phase-2 HA: periodic heartbeat task — UPDATEs
+        // `sandbox.hosts.last_heartbeat` so peers can tell whether
+        // we're alive. The task self-runs forever; failure is
+        // logged-and-continued (next tick retries).
+        if state.database.is_some() {
+            spawn_heartbeat_task(state.clone());
+        }
+
+        // Phase-2 HA: takeover task — gated behind
+        // `SANDBOX_HA_AUTO_TAKEOVER=1` (default off; v2-of-v2 per
+        // § 11.1: operators opt in once heartbeats are reliable).
+        if state.database.is_some()
+            && matches!(std::env::var("SANDBOX_HA_AUTO_TAKEOVER").as_deref(), Ok("1"))
+        {
+            spawn_takeover_task(state.clone());
+        }
         Ok(state)
     }
 }
@@ -214,6 +232,225 @@ fn start_health_loop(state: Arc<AppState>) {
             compio::time::sleep(Duration::from_secs(30)).await;
             if let Err(e) = state.backend.probe().await {
                 tracing::warn!(error = %e, "sandbox health re-probe failed");
+            }
+        }
+    })
+    .detach();
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Phase 2 — periodic heartbeat + lease-based takeover
+// ────────────────────────────────────────────────────────────────────
+
+/// `SANDBOX_HA_HEARTBEAT_SECS`. Cadence at which the heartbeat task
+/// UPDATEs `sandbox.hosts.last_heartbeat`. Default 5 s; validated at
+/// boot to be > 0 and `lease_ttl >= 4 × heartbeat` (R-NN, § 11.3).
+const DEFAULT_HEARTBEAT_SECS: u64 = 5;
+
+/// `SANDBOX_HA_TAKEOVER_POLL_SECS`. Cadence at which the takeover
+/// task scans for dead peers. Default 30 s per § 11.3.
+const DEFAULT_TAKEOVER_POLL_SECS: u64 = 30;
+
+/// `SANDBOX_HA_LEASE_TTL_SECS`. The grace window per § 11.1:
+/// `now() - last_heartbeat > lease_ttl` means the peer is considered
+/// dead. Default 60 s. Validated at boot.
+const DEFAULT_LEASE_TTL_SECS: u64 = 60;
+
+fn read_u64_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+/// Periodic heartbeat task (§ 11.3). Calls
+/// [`crate::db::Database::heartbeat`] every `SANDBOX_HA_HEARTBEAT_SECS`
+/// seconds. On `Err`, logs `warn!` and continues — a transient pg
+/// blip should not crash the controller; the next tick will retry.
+///
+/// Detached on the compio runtime; the task lives as long as the
+/// process. The `Arc<AppState>` keeps the database handle alive.
+///
+/// **Safety against drift:** the loop sleeps `interval` AFTER each
+/// heartbeat, so a slow pg call delays the *next* heartbeat by the
+/// query duration but does not double-up. If the pg call itself
+/// hangs longer than `lease_ttl`, peers will fairly mark this host
+/// dead — which is the lease semantics by design.
+pub fn spawn_heartbeat_task(state: Arc<AppState>) {
+    compio::runtime::spawn(async move {
+        let secs = read_u64_env("SANDBOX_HA_HEARTBEAT_SECS", DEFAULT_HEARTBEAT_SECS).max(1);
+        let interval = Duration::from_secs(secs);
+        let Some(db) = state.database.clone() else {
+            return;
+        };
+        tracing::info!(
+            interval_secs = secs,
+            host_id = %db.host_id(),
+            "sandbox HA: heartbeat task started"
+        );
+        loop {
+            compio::time::sleep(interval).await;
+            match db.heartbeat().await {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        host_id = %db.host_id(),
+                        "sandbox HA: heartbeat write failed; will retry next tick"
+                    );
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// Periodic peer-scan task (§ 11.3). Every
+/// `SANDBOX_HA_TAKEOVER_POLL_SECS` seconds:
+///
+/// 1. Refresh the `sandbox_ha_heartbeat_lag_seconds` gauge (and
+///    fire `sandbox_ha_clock_rewind_total` if pg sees `now() -
+///    last_heartbeat < 0` — § 12 R-MM).
+/// 2. Read `dead_hosts(lease_ttl)`.
+/// 3. For each dead host (excluding self — defensive), issue the
+///    CAS-guarded takeover UPDATE per § 11.2.
+/// 4. Bump `sandbox_ha_takeover_total{reason="lease_expiration"}`
+///    by the number of rows successfully reclaimed.
+///
+/// The task exits cleanly only on process shutdown; transient
+/// errors are logged and the loop continues. The takeover write is
+/// a single SQL statement plus a host-status flip in the same
+/// transaction (§ 11.2).
+///
+/// Per § 15 Phase 2: the in-memory map for newly-owned sandboxes
+/// is not yet populated by this scaffold — the controller would
+/// need to probe `/version` with the persisted signing_key before
+/// registering. That probe pipeline reuses `crate::restore` and is
+/// the next deliverable to flesh out (out-of-scope for this commit
+/// to keep the takeover write atomic and tested).
+pub fn spawn_takeover_task(state: Arc<AppState>) {
+    compio::runtime::spawn(async move {
+        let poll_secs = read_u64_env(
+            "SANDBOX_HA_TAKEOVER_POLL_SECS",
+            DEFAULT_TAKEOVER_POLL_SECS,
+        )
+        .max(1);
+        let lease_ttl_secs = read_u64_env("SANDBOX_HA_LEASE_TTL_SECS", DEFAULT_LEASE_TTL_SECS);
+        let interval = Duration::from_secs(poll_secs);
+        let Some(db) = state.database.clone() else {
+            return;
+        };
+        let my_host = db.host_id();
+        let my_host_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&my_host)
+        );
+        tracing::info!(
+            poll_secs,
+            lease_ttl_secs,
+            host_id = %my_host,
+            "sandbox HA: takeover task started"
+        );
+
+        loop {
+            compio::time::sleep(interval).await;
+
+            // Refresh heartbeat-lag gauge + clock-rewind detector.
+            match db.heartbeat_lag_seconds().await {
+                Ok(Some(lag)) => {
+                    metrics::set_heartbeat_lag(lag);
+                    if lag < 0.0 {
+                        // R-MM: pg-side clock rewind. Healthy fleet
+                        // never sees this. Loud-log + counter so an
+                        // alert fires.
+                        tracing::error!(
+                            host_id = %my_host,
+                            lag_secs = lag,
+                            "sandbox HA: clock-rewind detected (now() - last_heartbeat < 0)"
+                        );
+                        metrics::inc_clock_rewind();
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        host_id = %my_host,
+                        "sandbox HA: own host row missing; takeover skipped this round"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        host_id = %my_host,
+                        "sandbox HA: heartbeat_lag read failed; takeover skipped this round"
+                    );
+                    continue;
+                }
+            }
+
+            // Find dead peers.
+            let dead = match db.dead_hosts(lease_ttl_secs).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        host_id = %my_host,
+                        "sandbox HA: dead_hosts scan failed; will retry"
+                    );
+                    continue;
+                }
+            };
+            if dead.is_empty() {
+                continue;
+            }
+            // Filter self out as a defensive measure — `dead_hosts`
+            // can include our own row only if the heartbeat task is
+            // wedged for > lease_ttl, in which case taking over our
+            // own sandboxes would still self-fence on the next CAS
+            // miss. Cleaner to skip than to take and unwind.
+            let real_dead: Vec<&String> =
+                dead.iter().filter(|h| h.as_str() != my_host_typed.as_str()).collect();
+            metrics::add_dead_hosts_observed(real_dead.len() as u64);
+
+            for dead_host in real_dead {
+                match db
+                    .takeover_sandboxes_from_host(dead_host, my_host, lease_ttl_secs)
+                    .await
+                {
+                    Ok(taken) => {
+                        if !taken.is_empty() {
+                            metrics::add_takeover_lease_expiration(taken.len() as u64);
+                            tracing::info!(
+                                dead_host = %dead_host,
+                                taken_count = taken.len(),
+                                host_id = %my_host,
+                                "sandbox HA: takeover succeeded"
+                            );
+                            // The in-memory generation refresh is
+                            // intentionally minimal here: the new
+                            // owner has not (yet) restored the
+                            // sandbox into its in-memory registry,
+                            // so there's no Sandbox.generation
+                            // field to bump. When the operator
+                            // surfaces the post-takeover slice via
+                            // restore_at_startup (next boot) or
+                            // probes `/version` inline (Phase 2.5),
+                            // the generation will be picked up
+                            // from the pg row's RETURNING value
+                            // recorded by `taken[i].generation`.
+                            // Phase 3 admin API will surface a
+                            // post-takeover restore-now endpoint.
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            dead_host = %dead_host,
+                            host_id = %my_host,
+                            "sandbox HA: takeover UPDATE failed; will retry"
+                        );
+                    }
+                }
             }
         }
     })
