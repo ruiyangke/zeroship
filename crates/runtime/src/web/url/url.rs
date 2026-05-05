@@ -26,7 +26,8 @@ use crate::url_native::search_params::URLSearchParams;
 
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_setter, v8_to_string_tag,
+    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_setter, v8_static_method,
+    v8_to_string_tag,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,10 +126,96 @@ impl URL {
     /// Uses ada-url's `can_parse` directly — no allocation on success
     /// or failure.
     ///
-    /// Note: this is a static method, not an instance method. The
-    /// macro emits an instance method by default; we install the
-    /// static separately in `install_global`.
-    // Marker — actual installation is in `install_global` below.
+    /// Static method on the class function (WebIDL §3.7.4) — installed
+    /// on `URL.canParse`, NOT on `URL.prototype.canParse`. The macro
+    /// installs static methods on the constructor FunctionTemplate.
+    #[v8_static_method]
+    #[v8_name = "canParse"]
+    fn can_parse(
+        scope: &mut v8::PinScope,
+        input: v8::Local<v8::Value>,
+        base: v8::Local<v8::Value>,
+    ) -> bool {
+        let Some(input) = read_usv_string(scope, input) else {
+            return false;
+        };
+        let base = if base.is_undefined() {
+            None
+        } else {
+            match read_usv_string(scope, base) {
+                Some(s) => Some(s),
+                None => return false,
+            }
+        };
+        ada_url::Url::can_parse(&input, base.as_deref())
+    }
+
+    /// `URL.parse(input, base?) → URL | null`. Newer WHATWG static
+    /// method (https://url.spec.whatwg.org/#dom-url-parse). Returns
+    /// null on parse failure (does NOT throw, unlike `new URL(...)`).
+    ///
+    /// Static method on the class function — installed on `URL.parse`.
+    #[v8_static_method]
+    fn parse<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        input: v8::Local<v8::Value>,
+        base: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        // C4: URL.parse must NEVER throw per §4.6. Every V8-fallible
+        // step (USVString conversion via `to_string`, which throws for
+        // Symbol; wrapper allocation, which can fail with OOM) runs
+        // inside a TryCatch. On any thrown exception we drop it and
+        // return null.
+
+        // Step 1: ToUSVString on input + base under a TryCatch. Symbol
+        // args throw inside `to_string`; the TryCatch absorbs that.
+        let strings: Option<(String, Option<String>)> = {
+            v8::tc_scope!(let tc, scope);
+            match read_usv_string(tc, input) {
+                None => None,
+                Some(input) => {
+                    if !base.is_undefined() {
+                        match read_usv_string(tc, base) {
+                            Some(b) => Some((input, Some(b))),
+                            None => None,
+                        }
+                    } else {
+                        Some((input, None))
+                    }
+                }
+            }
+        };
+        let Some((input_s, base_s)) = strings else {
+            return v8::null(scope).into();
+        };
+
+        // M6: parse ONCE — pre-fix called both `can_parse` (parse 1)
+        // and `new_instance` (parse 2 inside the macro-emitted
+        // constructor) on the success path. Now we parse directly via
+        // `ada_url::Url::parse`; on failure return null without
+        // entering V8 land at all.
+        let parsed = match ada_url::Url::parse(&input_s, base_s.as_deref()) {
+            Ok(u) => u,
+            Err(_) => return v8::null(scope).into(),
+        };
+
+        // Wrap the parsed URL in a fresh JS object using URL's
+        // instance template. We stamp internal field 0 with an
+        // External pointing at a fresh Box<URL>, and register the same
+        // weak finalizer so the Box is freed on GC.
+        let inst_global: Option<v8::Global<v8::Object>> = {
+            v8::tc_scope!(let tc, scope);
+            wrap_parsed_url(tc, parsed)
+        };
+
+        match inst_global {
+            Some(g) => {
+                let local = v8::Local::new(scope, &g);
+                local.into()
+            }
+            None => v8::null(scope).into(),
+        }
+    }
 
     /// `toString()` per §4.5 — alias for `href`.
     ///
@@ -393,124 +480,9 @@ pub fn install_global<'s>(
 
     let class_fn = tmpl.get_function(scope).unwrap();
 
-    // URL.canParse(input, base?) → boolean. Static method on the class
-    // function itself, NOT the prototype.
-    {
-        let f_tmpl = v8::FunctionTemplate::new(scope, can_parse_callback);
-        let f = f_tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "canParse").unwrap();
-        class_fn.set(scope, key.into(), f.into());
-    }
-
-    // URL.parse(input, base?) → URL | null. Static method (newer
-    // WHATWG spec). Returns null instead of throwing on parse failure.
-    {
-        let f_tmpl = v8::FunctionTemplate::new(scope, parse_callback);
-        let f = f_tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "parse").unwrap();
-        class_fn.set(scope, key.into(), f.into());
-    }
-
     let key = v8::String::new(scope, "URL").unwrap();
     global.set(scope, key.into(), class_fn.into());
     class_fn
-}
-
-/// `URL.canParse(input, base?) → boolean`. Static method.
-fn can_parse_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let input = match read_usv_string(scope, args.get(0)) {
-        Some(s) => s,
-        None => {
-            rv.set(v8::Boolean::new(scope, false).into());
-            return;
-        }
-    };
-    let base = if args.length() > 1 && !args.get(1).is_undefined() {
-        match read_usv_string(scope, args.get(1)) {
-            Some(s) => Some(s),
-            None => {
-                rv.set(v8::Boolean::new(scope, false).into());
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    rv.set(v8::Boolean::new(scope, ada_url::Url::can_parse(&input, base.as_deref())).into());
-}
-
-/// `URL.parse(input, base?) → URL | null`. Newer WHATWG static method
-/// (https://url.spec.whatwg.org/#dom-url-parse). Returns null on parse
-/// failure (does NOT throw, unlike `new URL(...)`).
-fn parse_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    // C4: URL.parse must NEVER throw per §4.6. Every V8-fallible step
-    // (USVString conversion via `to_string`, which throws for Symbol;
-    // wrapper allocation, which can fail with OOM) runs inside a
-    // TryCatch. On any thrown exception we drop it and return null.
-
-    // Step 1: ToUSVString on input + base under a TryCatch. Symbol
-    // args throw inside `to_string`; the TryCatch absorbs that.
-    let strings: Option<(String, Option<String>)> = {
-        v8::tc_scope!(let tc, scope);
-        match read_usv_string(tc, args.get(0)) {
-            None => None,
-            Some(input) => {
-                if args.length() > 1 && !args.get(1).is_undefined() {
-                    match read_usv_string(tc, args.get(1)) {
-                        Some(b) => Some((input, Some(b))),
-                        None => None,
-                    }
-                } else {
-                    Some((input, None))
-                }
-            }
-        }
-    };
-    let Some((input, base)) = strings else {
-        rv.set(v8::null(scope).into());
-        return;
-    };
-
-    // M6: parse ONCE — pre-fix called both `can_parse` (parse 1) and
-    // `new_instance` (parse 2 inside the macro-emitted constructor)
-    // on the success path. Now we parse directly via
-    // `ada_url::Url::parse`; on failure return null without entering
-    // V8 land at all.
-    let parsed = match ada_url::Url::parse(&input, base.as_deref()) {
-        Ok(u) => u,
-        Err(_) => {
-            rv.set(v8::null(scope).into());
-            return;
-        }
-    };
-
-    // Wrap the parsed URL in a fresh JS object using URL's instance
-    // template (same code path the macro-emitted constructor uses,
-    // minus the redundant parse). We stamp internal field 0 with an
-    // External pointing at a fresh Box<URL>, and register the same
-    // weak finalizer so the Box is freed on GC.
-    let inst_global: Option<v8::Global<v8::Object>> = {
-        v8::tc_scope!(let tc, scope);
-        wrap_parsed_url(tc, parsed)
-    };
-
-    match inst_global {
-        Some(g) => {
-            let local = v8::Local::new(scope, &g);
-            rv.set(local.into());
-        }
-        None => {
-            rv.set(v8::null(scope).into());
-        }
-    }
 }
 
 /// Helper for `URL.parse` (M6): allocate a JS object on URL's instance
