@@ -13,7 +13,6 @@ use quote::{format_ident, quote};
 use super::super::helpers::{
     gen_param_extractions, method_callback_ident, outer_ident, parse_params_skipping_self,
 };
-use super::super::parse::extract_reject_shared;
 use super::super::shared::class_config::ClassConfig;
 use super::super::shared::recover_box;
 use super::super::{ClassMethod, MethodKind};
@@ -35,8 +34,10 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    let reject_shared_names = extract_reject_shared(&m.func.attrs);
-    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    // Wave 4: pre-parsed by analyse phase; emit just reads. Closes F8
+    // for per-method walks (reject_shared used to be re-extracted at
+    // every emit site).
+    let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
@@ -104,8 +105,10 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     // Setters take exactly one logical param: the new value.
     let params = parse_params_skipping_self(m.func);
-    let reject_shared_names = extract_reject_shared(&m.func.attrs);
-    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    // Wave 4: pre-parsed by analyse phase; emit just reads. Closes F8
+    // for per-method walks (reject_shared used to be re-extracted at
+    // every emit site).
+    let extractions = gen_param_extractions(&params, &m.reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
         quote! { &mut *__instance }
@@ -231,8 +234,10 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    let reject_shared_names = extract_reject_shared(&m.func.attrs);
-    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    // Wave 4: pre-parsed by analyse phase; emit just reads. Closes F8
+    // for per-method walks (reject_shared used to be re-extracted at
+    // every emit site).
+    let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);

@@ -13,7 +13,6 @@ use quote::{format_ident, quote};
 use super::super::helpers::{
     gen_param_extractions, method_callback_ident, parse_params_skipping_self,
 };
-use super::super::parse::extract_reject_shared;
 use super::super::shared::class_config::ClassConfig;
 use super::super::shared::recover_box;
 use super::super::ClassMethod;
@@ -87,8 +86,8 @@ pub(crate) fn gen_same_object_getter_callback(
     // (+ optional synthetic `scope`). Extractions are emitted but
     // typically empty.
     let params = parse_params_skipping_self(m.func);
-    let reject_shared_names = extract_reject_shared(&m.func.attrs);
-    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    // Wave 4: pre-parsed by analyse phase; emit just reads.
+    let extractions = gen_param_extractions(&params, &m.reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
         quote! { &mut *__instance }

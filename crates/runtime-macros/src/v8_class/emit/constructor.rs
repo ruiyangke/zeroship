@@ -16,7 +16,6 @@ use quote::{format_ident, quote};
 use super::super::helpers::{
     gen_param_extractions, outer_ident, parse_params_skipping_self,
 };
-use super::super::parse::{extract_callable_no_new, extract_post_init, extract_reject_shared};
 use super::super::shared::class_config::ClassConfig;
 use super::super::ClassMethod;
 use crate::gen_throw_op_error_arms;
@@ -62,8 +61,8 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     // Constructors have no `self` receiver; the skipping-self helper
     // works uniformly here since it just collects typed args.
     let params = parse_params_skipping_self(c.func);
-    let reject_shared_names = extract_reject_shared(&c.func.attrs);
-    let extractions = gen_param_extractions(&params, &reject_shared_names);
+    // Wave 4: per-method extracts pre-parsed by analyse phase.
+    let extractions = gen_param_extractions(&params, &c.reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
 
     let is_result = matches!(
@@ -96,7 +95,7 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     };
 
     let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
-    let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
+    let must_new = gen_must_new_prologue(class_ty, c.callable_no_new);
 
     // MAC-02: post_init dispatch — runs AFTER box install, BEFORE the
     // callback returns to V8. Hook signature is
@@ -120,10 +119,9 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     // is deferred per the design's cost-benefit analysis. The
     // user-visible contract: `Self::Drop` side-effects from a failed
     // post_init may be delayed by up to one GC cycle.
-    let post_init = match extract_post_init(&c.func.attrs) {
-        Ok(None) => quote! {},
-        Err(e) => return e.to_compile_error(),
-        Ok(Some(hook_ident)) => {
+    let post_init = match c.post_init.as_ref() {
+        None => quote! {},
+        Some(hook_ident) => {
             // Routed through the shared `gen_throw_op_error_arms` helper
             // — same 6-variant OpErrorKind dispatch as the make_instance
             // Result arm above. Adding a 7th variant means editing one

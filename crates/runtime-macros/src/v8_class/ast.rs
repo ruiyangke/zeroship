@@ -56,6 +56,18 @@ pub(crate) struct ClassMethod<'a> {
     /// in the negative — fastcall paths can't allocate and SameObject
     /// returns a Global<Object>, so the two flags are not co-applicable.
     pub(crate) fastcall: bool,
+    /// `#[reject_shared(arg1, arg2, …)]` — set of parameter names that
+    /// should reject SharedArrayBuffer-backed views with TypeError. Per
+    /// WebIDL §3.2.21 (BufferSource without `[AllowShared]`). Pre-Wave-4
+    /// the emit phase walked `func.attrs` afresh per method; now the
+    /// analyse phase fills this once.
+    pub(crate) reject_shared_names: std::collections::HashSet<String>,
+    /// `#[v8_constructor(callable_no_new)]` — opt the constructor out of
+    /// the must-new guard. Only meaningful for `MethodKind::Constructor`.
+    pub(crate) callable_no_new: bool,
+    /// `#[v8_constructor(post_init = "fn_name")]` — MAC-02 hook ident.
+    /// Only meaningful for `MethodKind::Constructor`.
+    pub(crate) post_init: Option<syn::Ident>,
 }
 
 /// A single `#[v8_const(NAME = LIT)]` declaration.
