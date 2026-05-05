@@ -528,12 +528,22 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         /// match (the receiver IS a Foo, or a subclass via
         /// `#[v8_inherit]`), false otherwise.
         ///
-        /// Walks at most 32 prototype links (deep chains are typically
-        /// 1–3 hops; the cap protects against pathologically deep
-        /// chains a malicious caller could craft with
-        /// `Object.setPrototypeOf` loops). The cost is dwarfed by the
-        /// ~100ns V8 callback overhead — the brand check itself is
-        /// O(depth) Local pointer comparisons.
+        /// Walks at most 1024 prototype links — matching V8's own
+        /// internal `Object::PrototypeChainLength` sanity bound. The
+        /// cap is NOT a cycle defence: ECMAScript §10.4.7.2 step 8
+        /// already requires `Object.setPrototypeOf` to reject any
+        /// assignment that would create a cycle, so user JS cannot
+        /// construct one. The cap exists purely as a defence-in-depth
+        /// belt-and-braces against an underlying V8 bug or future
+        /// proxy-driven prototype chain that fakes infinite linear
+        /// depth. Real WebIDL inheritance chains are 1-3 hops; pure
+        /// prototypal chains rarely exceed 5; reaching the cap is a
+        /// pathological case for which "false" is the conservative
+        /// answer.
+        ///
+        /// The cost is dwarfed by the ~100ns V8 callback overhead —
+        /// the brand check itself is O(depth) Local pointer
+        /// comparisons.
         ///
         /// The cached prototype is populated lazily on first call —
         /// NOT in `install` — because eager `get_function(scope)` at
@@ -604,12 +614,14 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
             let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
             // Walk the [[Prototype]] chain. Each `get_prototype` call
             // can return null (chain root) or a Value (potentially an
-            // Object). Bail at depth 32 to bound worst-case cost.
+            // Object). The 1024 cap matches V8's internal sanity
+            // bound; cycle creation is already blocked by V8 (see
+            // doc-comment).
             let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
                 Some(v) => v,
                 None => return false,
             };
-            for _ in 0..32 {
+            for _ in 0..1024 {
                 if current.is_null_or_undefined() {
                     return false;
                 }
