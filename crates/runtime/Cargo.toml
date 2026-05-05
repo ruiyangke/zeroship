@@ -124,6 +124,18 @@ runtime_legacy_websocket = []
 # `#[v8_constructor(post_init = ...)]` error spans for malformed shapes
 # (MAC-02, design `docs/proposals/macro-constructor-post-init.md` §6.2).
 trybuild = "1.0"
+# Wave F (RPC v2 phase 1): microbench for `default.rpc(...)` dispatch.
+criterion = { workspace = true }
+
+# RPC v2 phase 1 — Wave F. Measures the production single-call dispatch
+# path (`extract_zs_v1_id` → `parse_envelope_body` → `RpcContext::build_js_object`
+# → `with_rpc_context_in_als` → `rpc_fn.call` → `classify_rpc_return`).
+# Per `docs/proposals/rpc-v2.md` §5, the result decides whether phase 1
+# stays on single-call or amends to a two-step `#[v8_method(fastcall)]`
+# enqueue ABI.
+[[bench]]
+name = "rpc_dispatch"
+harness = false
 
 [lints]
 workspace = true
