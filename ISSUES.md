@@ -26,22 +26,22 @@ pointer for whoever picks it up.
 
 | Severity | Issues |
 |---|---|
-| medium-high | ISS-01 (closed) |
-| medium | ISS-02 · ISS-09 · ISS-12 · ISS-13 · ISS-14 · ISS-15 · ISS-16 · ISS-17 · ISS-18 · ISS-20 · ISS-21 · ISS-23 · ISS-24 · ISS-25 · ISS-26 · ISS-28 |
+| medium | ISS-09 · ISS-12 · ISS-13 · ISS-14 · ISS-15 · ISS-16 · ISS-17 · ISS-18 · ISS-20 · ISS-21 · ISS-23 · ISS-24 · ISS-25 · ISS-26 · ISS-28 |
 | low-medium | ISS-19 |
 | low | ISS-10 · ISS-11 · ISS-22 |
+| closed | ISS-01 · ISS-02 |
 
-All entries below are **open** as of 2026-05-01 unless flagged
-otherwise. **ISS-01** closed 2026-05-04 (native `AsyncLocalStorage`
-backed by V8's `ContinuationPreservedEmbedderData`); see the entry
-for the implementing commit. The foundation-polish pass (plan-01
-follow-on) promoted **ISS-14**, **ISS-16**, **ISS-19**, and
-**ISS-26** from "in-memory Map" to "KV-backed via `@zeroship/kv`"
-without closing them — the real fix (Postgres-backed table /
-control-plane endpoint / object-store wiring) is still the listed
-**Fix path** for each. The KV step shrinks the visible blast radius
-(state survives HMR cycles in dev) but doesn't replace the real
-backing.
+All entries below are **open** as of 2026-05-01, except **ISS-01**
+(native `AsyncLocalStorage` backed by V8's `ContinuationPreservedEmbedderData`)
+and **ISS-02** (vite-plugin path-convention drop), both closed
+2026-05-04 — see the entries for implementing commits. The
+foundation-polish pass (plan-01 follow-on) promoted **ISS-14**,
+**ISS-16**, **ISS-19**, and **ISS-26** from "in-memory Map" to
+"KV-backed via `@zeroship/kv`" without closing them — the real fix
+(Postgres-backed table / control-plane endpoint / object-store
+wiring) is still the listed **Fix path** for each. The KV step
+shrinks the visible blast radius (state survives HMR cycles in dev)
+but doesn't replace the real backing.
 
 Entries are listed below in the same order as the index above (severity
 descending; ties broken by issue id). Anchor links are preserved by ID.
@@ -179,7 +179,7 @@ Reference implementation: `apps/zeroship-builder/src/server/_wizard.ts`
 
 ## ISS-02 · `@zeroship/vite-plugin` registers every exported function as an RPC procedure — no opt-in marker
 
-**Status:** open
+**Status:** closed (2026-05-04, see Fix landed below)
 **Severity:** medium — silently publishes internal helpers as public endpoints if a developer mis-routes an import
 **First observed:** 2026-05-01, while documenting the underscore-prefix file convention in `apps/zeroship-builder/src/server/`
 **Component:** `sdks/vite-plugin/src/rpc-registry.ts`
@@ -270,6 +270,26 @@ plugin) remains; the right fix is still in the vite-plugin.
   (the only thing standing between an internal helper and a public endpoint)
 - `apps/zeroship-builder/src/server/_*.ts` — the eight files that rely on
   the underscore-naming convention to stay private
+
+### Fix landed (2026-05-04)
+
+Two opt-in points replace the implicit path/every-export rule:
+
+- **File-level `"use server"` directive.** The path convention
+  (`src/server.{ts,...}` and `src/server/**`) is dropped. A file is a
+  server module iff it opens with the ECMAScript Directive Prologue
+  string-literal expression `"use server"` (commit `b1dd27b`).
+- **Wrapper markers.** Inside a server module, only exports whose
+  initializer is a call to one of `procedure` / `query` / `mutation` /
+  `stream` / `subscription` (imported from `@zeroship/server`) become
+  RPC endpoints. Plain helpers stay private to the server bundle —
+  even when they're `export`-ed for use by other server modules
+  (commit `d62d975`).
+
+Wrappers shipped in `@zeroship/server` (commit `1467976`); examples
+migrated (commit `d2aece8`); migration recipe in
+`docs/reference/vite-plugin.md`. Unmigrated files at the legacy path
+emit a one-time warning per file pointing to this entry.
 
 ---
 
