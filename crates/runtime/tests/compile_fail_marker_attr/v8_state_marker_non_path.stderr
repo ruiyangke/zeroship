@@ -1,0 +1,5 @@
+error: #[v8_state_marker(M)]: expected a type identifier
+  --> tests/compile_fail_marker_attr/v8_state_marker_non_path.rs:13:19
+   |
+13 | #[v8_state_marker = "Marker"]
+   |                   ^

@@ -1,0 +1,5 @@
+error: #[v8_constructor]: unknown flag — expected `callable_no_new` or `post_init = "..."`
+  --> tests/compile_fail_marker_attr/v8_constructor_unknown_arg.rs:18:22
+   |
+18 |     #[v8_constructor(unknown_flag)]
+   |                      ^^^^^^^^^^^^

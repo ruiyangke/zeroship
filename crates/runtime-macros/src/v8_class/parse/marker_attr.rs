@@ -275,10 +275,44 @@ impl MarkerAttr for CallableNoNewFlag {
         ) else {
             return Ok(());
         };
+        // Strict-by-default per H5: `CallableNoNewFlag` is the
+        // "validating" reader for `#[v8_constructor(...)]`. It walks
+        // every nested meta and enforces the known shapes:
+        //   - bare `callable_no_new` (Path)        — sets the flag
+        //   - `post_init = "..."`   (NameValue)    — owned by
+        //     `PostInitAttr`; we accept the shape here without consuming
+        //     the value (still validate it's NameValue at minimum).
+        // Anything else (`#[v8_constructor(unknown)]`,
+        // `#[v8_constructor(callable_no_new = true)]`) errors.
         for m in metas {
-            if let Meta::Path(p) = m {
-                if p.is_ident("callable_no_new") {
-                    self.0 = true;
+            match m {
+                Meta::Path(p) => {
+                    if p.is_ident("callable_no_new") {
+                        self.0 = true;
+                    } else {
+                        return Err(syn::Error::new_spanned(
+                            &p,
+                            "#[v8_constructor]: unknown flag — expected \
+                             `callable_no_new` or `post_init = \"...\"`",
+                        ));
+                    }
+                }
+                Meta::NameValue(nv) => {
+                    if !nv.path.is_ident("post_init") {
+                        return Err(syn::Error::new_spanned(
+                            &nv.path,
+                            "#[v8_constructor]: unknown name-value argument \
+                             — expected `post_init = \"...\"`",
+                        ));
+                    }
+                    // Value validation lives in `PostInitAttr::merge`.
+                }
+                Meta::List(l) => {
+                    return Err(syn::Error::new_spanned(
+                        &l.path,
+                        "#[v8_constructor]: unexpected nested list \
+                         — expected `callable_no_new` or `post_init = \"...\"`",
+                    ));
                 }
             }
         }
