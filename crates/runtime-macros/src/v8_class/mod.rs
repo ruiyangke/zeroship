@@ -472,10 +472,15 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
 
     // `Self::install(scope) -> v8::Local<v8::FunctionTemplate>`
+    //
+    // `constructor.is_some()` was wired into `gen_install` as
+    // `has_user_constructor` for a never-implemented default-Self
+    // codegen branch. Removed in this commit; if a future PR adds a
+    // generated default constructor, plumb it back through (or, per
+    // F4, fold it into a `ClassConfig` struct).
     let install = gen_install(
         class_ty,
         &regular,
-        constructor.is_some(),
         to_string_tag_override.as_deref(),
         inherit_intrinsic.as_deref(),
         inherit_base.as_ref(),
@@ -756,7 +761,6 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
 fn gen_install(
     class_ty: &syn::Ident,
     methods: &[&ClassMethod],
-    has_user_constructor: bool,
     to_string_tag_override: Option<&str>,
     inherit_intrinsic: Option<&str>,
     inherit_base: Option<&syn::Path>,
@@ -971,10 +975,6 @@ fn gen_install(
             }
         })
         .collect();
-
-    // If there's no user-defined constructor, still emit one that
-    // default-constructs `Self`. Requires `Self: Default`.
-    let _user_ctor_marker = has_user_constructor;
 
     // The literal that goes into Symbol.toStringTag. Defaults to the
     // Rust struct name; overridden by `#[v8_to_string_tag = "..."]`.

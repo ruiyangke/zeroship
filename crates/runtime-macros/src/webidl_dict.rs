@@ -50,9 +50,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{
-    parse_macro_input, Data, DeriveInput, Field, Fields, GenericParam, Lifetime, LifetimeParam,
-};
+use syn::{parse_macro_input, Data, DeriveInput, Field, Fields};
 
 use crate::must_str_abs;
 
@@ -105,18 +103,13 @@ pub fn expand(input: TokenStream) -> TokenStream {
 
     // Generics handling. The struct may carry a single lifetime param
     // `'s` (e.g. `Option<v8::Local<'s, v8::Value>>` fields). We pass
-    // generics straight through to the impl block.
+    // generics straight through to the impl block — both `from_v8`'s
+    // inherent fn and the `WebIdlConvertible` blanket impl pick up the
+    // same generics, so an explicit lifetime check is unnecessary at
+    // codegen time. (The pre-cleanup `has_lifetime` flag was reserved
+    // for a never-shipped branched-impl path; removed alongside the
+    // unused `Lifetime` / `LifetimeParam` syn imports.)
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
-    // For the WebIdlConvertible blanket impl, we need the same generics.
-    // If the type has a single lifetime, we re-use it; if it has none,
-    // we keep impl<…> empty and the trait method's lifetime erases.
-    let has_lifetime = input
-        .generics
-        .params
-        .iter()
-        .any(|p| matches!(p, GenericParam::Lifetime(_)));
-    let _ = has_lifetime; // suppress unused-warning if we don't branch here
 
     let expanded = quote! {
         impl #impl_generics #name #ty_generics #where_clause {
@@ -387,11 +380,4 @@ fn extract_enforce_range(_attrs: &[syn::Attribute]) -> bool {
 #[allow(dead_code)]
 fn extract_custom_extractor(_attrs: &[syn::Attribute]) -> Option<String> {
     None
-}
-
-// Suppress unused-warning on imports kept for forward-compat hooks.
-#[allow(dead_code)]
-fn _suppress_unused() {
-    let _ = std::any::type_name::<Lifetime>();
-    let _ = std::any::type_name::<LifetimeParam>();
 }
