@@ -1318,6 +1318,17 @@ pub fn install_native_streams(
 //     `pull`/`cancel` properties;
 //   - the iterator protocol is JS-native (no Rust crossing per chunk);
 //   - errors propagate through the Promise machinery automatically.
+//
+// MAC-01 bail (#170): not migrated to `#[v8_static_method]`. The
+// macro path requires the static body to live as a Rust callback
+// inside an `#[v8_class] impl Block` — but ReadableStream itself is
+// hand-rolled (not `#[v8_class]`-annotated, because every method
+// keys off `args.this()` and several use private symbols the macro
+// doesn't expose). Migrating `from` alone would either need a
+// per-call slot lookup + indirection (worse perf) or a full Rust
+// rewrite of the iterator-driven pull/cancel algorithm (large
+// rewrite, low value). Defer until ReadableStream as a whole moves
+// to the macro.
 
 fn install_readable_stream_from(
     scope: &mut v8::PinScope,
