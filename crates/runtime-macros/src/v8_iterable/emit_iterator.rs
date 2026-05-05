@@ -22,6 +22,7 @@ pub(super) fn gen_next_callback(ctx: &EmitCtx<'_>) -> TokenStream2 {
     let key_ty = ctx.key_ty;
     let value_ty = ctx.value_ty;
     let next_ident = &ctx.next_ident;
+    let next_brand_check = &ctx.next_brand_check;
     let next_external_recovery = &ctx.next_external_recovery;
     let key_src = &ctx.key_src;
     let val_src = &ctx.val_src;
@@ -169,15 +170,16 @@ pub(super) fn gen_next_callback(ctx: &EmitCtx<'_>) -> TokenStream2 {
             args: v8::FunctionCallbackArguments,
             mut rv: v8::ReturnValue,
         ) {
-            let __this = args.this();
-            // Brand-check against the iterator class (not the parent).
-            // We don't go through the macro's brand-check helper for
-            // the iterator class because we don't have one — the
-            // iterator is hand-rolled by this codegen, not by
-            // #[v8_class]. Simple internal-field-1-is-External check
-            // is sufficient since the iterator class isn't exposed in
-            // a way that lets users construct one with a different
-            // box layout.
+            // Brand-check the receiver against `<Class>Iterator
+            // .prototype` (Wave 10 NS6). Without this, a caller could
+            // hand any `#[v8_class]` wrapper to
+            // `<Class>Iterator.prototype.next.call(...)` — every
+            // wrapper has `internal_field(0) = External(Box<X>)`, so
+            // the bare External check below would pass and the
+            // recovery `__ext.value() as *mut <Class>Iterator` would
+            // reinterpret a `Box<Other>` as `*mut <Class>Iterator`,
+            // which is UB.
+            #next_brand_check
             #next_external_recovery
             let __it: &mut #iter_class_ty =
                 unsafe { &mut *(__ext.value() as *mut #iter_class_ty) };

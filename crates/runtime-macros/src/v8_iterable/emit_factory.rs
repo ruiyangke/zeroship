@@ -19,10 +19,13 @@ use super::EmitCtx;
 /// Emit the companion `<Class>Iterator` struct + its
 /// `__InstallSlot_<Class>Iterator` marker + the iterator class's
 /// `install` method (FunctionTemplate cache, prototype walk to
-/// %IteratorPrototype%).
+/// %IteratorPrototype%) + the `__BrandSlot_<Class>Iterator` marker +
+/// `__brand_check_<Class>Iterator` helper used by `next()`.
 pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
     let iter_class_ty = &ctx.iter_class_ty;
     let iter_install_slot_ty = &ctx.iter_install_slot_ty;
+    let iter_brand_slot_ty = &ctx.iter_brand_slot_ty;
+    let iter_brand_check_fn = &ctx.iter_brand_check_fn;
     let key_ty = ctx.key_ty;
     let value_ty = ctx.value_ty;
     let next_ident = &ctx.next_ident;
@@ -100,6 +103,100 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #iter_install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
+
+        // Per-isolate slot for the cached `<Class>Iterator.prototype`
+        // (used by `__brand_check_<Class>Iterator`). Lazily populated
+        // on first brand-check call. Closes Wave 10 NS6.
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        pub struct #iter_brand_slot_ty(::v8::Global<::v8::Object>);
+
+        /// Brand-check helper for the iterator class: walks the
+        /// prototype chain of `obj` looking for the cached
+        /// `<Class>Iterator.prototype`. Returns true on match (the
+        /// receiver IS a `<Class>Iterator`), false otherwise.
+        ///
+        /// Closes Wave 10 NS6: the previous `next()` codegen relied
+        /// solely on internal-field-0 being an `External`, which any
+        /// `#[v8_class]` wrapper satisfies. A caller could pass a
+        /// different wrapper as `this` and the recovery
+        /// `__ext.value() as *mut <Class>Iterator` would reinterpret a
+        /// `Box<Other>` as `*mut <Class>Iterator` — UB. The brand
+        /// check pins the receiver to instances of THIS iterator class
+        /// before the unsafe cast.
+        ///
+        /// Walks at most 1024 prototype links — matches V8's internal
+        /// `Object::PrototypeChainLength` sanity bound. Cycle creation
+        /// is already blocked by ECMAScript §10.4.7.2 step 8; the cap
+        /// is belt-and-braces for proxy-driven prototype chains.
+        ///
+        /// The cached prototype is populated lazily on first call (NOT
+        /// at install time) — eager `get_function(scope)` would freeze
+        /// the FunctionTemplate's instance shape. Mirrors the parent-
+        /// class `__brand_check_<Class>` helper in
+        /// `v8_class/emit/brand.rs`.
+        #[doc(hidden)]
+        #[allow(non_snake_case, dead_code)]
+        fn #iter_brand_check_fn(
+            scope: &mut v8::PinScope,
+            obj: v8::Local<v8::Object>,
+        ) -> bool {
+            let cached_global: v8::Global<v8::Object> =
+                if let Some(slot) = scope.get_slot::<#iter_brand_slot_ty>() {
+                    slot.0.clone()
+                } else {
+                    // Lazy fetch from the install slot. If that slot is
+                    // missing too, the iterator class wasn't installed
+                    // in this isolate — fall through to false.
+                    let tmpl_global = match scope.get_slot::<#iter_install_slot_ty>() {
+                        Some(s) => s.0.clone(),
+                        None => return false,
+                    };
+                    let tmpl_local = v8::Local::new(scope, &tmpl_global);
+                    let func = match tmpl_local.get_function(scope) {
+                        Some(f) => f,
+                        None => return false,
+                    };
+                    let proto_key = match v8::String::new(scope, "prototype") {
+                        Some(s) => s,
+                        None => return false,
+                    };
+                    let proto_v = match func.get(scope, proto_key.into()) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    let proto: v8::Local<v8::Object> = match proto_v.try_into() {
+                        Ok(o) => o,
+                        Err(_) => return false,
+                    };
+                    let g = v8::Global::new(scope, proto);
+                    let g_clone = g.clone();
+                    scope.set_slot(#iter_brand_slot_ty(g));
+                    g_clone
+                };
+            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
+            let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
+                Some(v) => v,
+                None => return false,
+            };
+            for _ in 0..1024 {
+                if current.is_null_or_undefined() {
+                    return false;
+                }
+                let cur_obj: v8::Local<v8::Object> = match current.try_into() {
+                    Ok(o) => o,
+                    Err(_) => return false,
+                };
+                if cur_obj == expected_proto {
+                    return true;
+                }
+                current = match cur_obj.get_prototype(scope) {
+                    Some(v) => v,
+                    None => return false,
+                };
+            }
+            false
+        }
 
         #[allow(non_snake_case, dead_code)]
         impl #iter_class_ty {
