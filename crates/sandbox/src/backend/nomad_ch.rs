@@ -378,8 +378,8 @@ impl NomadCHBackend {
         user_id: &str,
         project_id: &str,
     ) -> Result<SandboxInfo, String> {
-        validate_id(user_id, "user_id")?;
-        validate_id(project_id, "project_id")?;
+        validate_typed_id(user_id, "usr", "user_id")?;
+        validate_typed_id(project_id, "prj", "project_id")?;
 
         // M7 circuit-breaker. Pool exhaustion under partial-failure
         // storm: 50 concurrent stalled Nomad RPCs would saturate
@@ -2748,38 +2748,24 @@ fn sanitize_path(p: &str) -> Result<String, String> {
     Ok(p.to_string())
 }
 
-/// Validate user_id / project_id at the backend boundary.
-/// **Mirror of `k8s.rs::validate_id` — keep them in sync.** Both
-/// repeat the HTTP-handler rule as defense-in-depth; cross-module
-/// sharing is intentionally avoided in this PR (the deduplication
-/// belongs in a follow-up that consolidates the validate helpers
-/// once we have ≥ 3 backends needing them).
-fn validate_id(id: &str, what: &'static str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 50 {
-        return Err(format!(
-            "{what} must be 1..=50 chars; got {} chars",
-            id.len()
-        ));
-    }
-    let mut chars = id.chars();
-    // Defense-in-depth: the empty check above already guarantees
-    // chars.next() is Some, but using `?` propagates the empty-id
-    // error cleanly if a future refactor moves the length check
-    // around. Cheaper than `unwrap()` to reason about.
-    let first = chars
-        .next()
-        .ok_or_else(|| format!("{what} unexpectedly empty"))?;
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        return Err(format!(
-            "{what} must start with [a-z0-9]; got {id:?}"
-        ));
-    }
-    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err(format!(
-            "{what} must match [a-z0-9-]+ after first char; got {id:?}"
-        ));
-    }
-    Ok(())
+/// Validate a typed-id (`<prefix>_<base62-uuidv7>`) at the backend
+/// boundary. **Mirror of `k8s.rs::validate_typed_id` — keep them in
+/// sync.** Both repeat the HTTP-handler rule as defense-in-depth;
+/// cross-module sharing is intentionally avoided in this PR (the
+/// deduplication belongs in a follow-up that consolidates the validate
+/// helpers once we have ≥ 3 backends needing them).
+///
+/// Phase-1+2 wire migration: previously this enforced the legacy
+/// DNS-1123 charset `[a-z0-9-]{1,50}`, which rejected typed-ids
+/// (they contain `_`) and 500'd every real HTTP create.
+fn validate_typed_id(
+    id: &str,
+    expected_prefix: &str,
+    what: &'static str,
+) -> Result<(), String> {
+    zeroship_core::typed_id::parse_with_prefix(id, expected_prefix)
+        .map(|_uuid| ())
+        .map_err(|e| format!("{what}: {e}"))
 }
 
 #[cfg(test)]
@@ -3339,19 +3325,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_id_accepts_lowercase_dns_subset() {
-        assert!(validate_id("alice", "user_id").is_ok());
-        assert!(validate_id("alice-1", "user_id").is_ok());
-        assert!(validate_id("0u", "user_id").is_ok());
+    fn validate_typed_id_accepts_typed_form() {
+        // Phase-1+2 wire shape: handlers and backends both speak
+        // `usr_<22-base62>` end-to-end. The typed-id check is the
+        // single source of truth.
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(validate_typed_id(&usr, "usr", "user_id").is_ok());
+        let prj = zeroship_core::typed_id::generate("prj");
+        assert!(validate_typed_id(&prj, "prj", "project_id").is_ok());
     }
 
     #[test]
-    fn validate_id_rejects_bad_chars() {
-        assert!(validate_id("Alice", "user_id").is_err());
-        assert!(validate_id("alice_1", "user_id").is_err());
-        assert!(validate_id("", "user_id").is_err());
-        assert!(validate_id(&"a".repeat(51), "user_id").is_err());
-        assert!(validate_id("-alice", "user_id").is_err());
+    fn validate_typed_id_rejects_legacy_and_garbage() {
+        // Legacy DNS-1123 charset (no prefix) — wire migration is
+        // complete; refuse the old shape.
+        assert!(validate_typed_id("alice", "usr", "user_id").is_err());
+        assert!(validate_typed_id("alice-1", "usr", "user_id").is_err());
+        assert!(validate_typed_id("Alice", "usr", "user_id").is_err());
+        // Wrong prefix.
+        let usr = zeroship_core::typed_id::generate("usr");
+        assert!(validate_typed_id(&usr, "prj", "project_id").is_err());
+        // Garbage / empty.
+        assert!(validate_typed_id("", "usr", "user_id").is_err());
+        assert!(validate_typed_id("usr_", "usr", "user_id").is_err());
+        assert!(validate_typed_id("usr_xx", "usr", "user_id").is_err());
     }
 
     // ─── FM-A: stale-tenant fingerprint check in wait_for_agent_livez ────

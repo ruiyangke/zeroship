@@ -402,7 +402,7 @@ where
 ///     either way a fresh vm_index is the cheapest recovery)
 ///
 /// Non-retriable cases (configuration / serialization / pool):
-///   - validate_id failures
+///   - typed-id validation failures (`user_id: expected prefix 'usr'…`)
 ///   - "concurrent sandbox create" (per-user gate)
 ///   - "no free vm_index" (pool exhausted)
 ///   - "nomad-ch backend unhealthy" (probe loop sets the bit)
@@ -1014,7 +1014,9 @@ mod tests {
         assert!(!is_retriable_create_error(
             "nomad-ch backend unhealthy; refusing new sandboxes"
         ));
-        assert!(!is_retriable_create_error("validate_id: bad chars"));
+        assert!(!is_retriable_create_error(
+            "user_id: expected prefix 'usr', got 'alice'"
+        ));
     }
 
     // ─── FM-E: retry loop ───────────────────────────────────────
