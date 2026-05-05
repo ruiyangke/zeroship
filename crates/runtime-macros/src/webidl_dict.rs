@@ -50,12 +50,26 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Field, Fields};
+use syn::{Data, DeriveInput, Field, Fields};
 
 use crate::must_str_abs;
 
 pub fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+    expand_tokens(input.into()).into()
+}
+
+/// `proc_macro2::TokenStream` entry point — same logic as [`expand`]
+/// but operates on `TokenStream2` so unit tests in this crate (insta
+/// snapshots) can call it without going through the proc-macro driver.
+pub fn expand_tokens(input: TokenStream2) -> TokenStream2 {
+    let input: DeriveInput = match syn::parse2(input) {
+        Ok(parsed) => parsed,
+        Err(e) => return e.to_compile_error(),
+    };
+    expand_derive(input)
+}
+
+fn expand_derive(input: DeriveInput) -> TokenStream2 {
     let name = &input.ident;
 
     // Reject anything that's not a struct with named fields. WebIDL
@@ -69,8 +83,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                     name,
                     "#[derive(WebIdlDict)] requires a struct with named fields",
                 )
-                .to_compile_error()
-                .into();
+                .to_compile_error();
             }
         },
         _ => {
@@ -78,8 +91,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
                 name,
                 "#[derive(WebIdlDict)] requires a struct (not enum / union)",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -91,7 +103,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(v) => v,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
     let field_assignments: Vec<TokenStream2> = fields
         .iter()
@@ -167,7 +179,7 @@ pub fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Extract a single dictionary member.
@@ -204,6 +216,27 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
         .ident
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(field, "tuple struct fields not supported"))?;
+
+    // Reject reference-typed fields at derive time (H16). The
+    // extraction codegen reads each member as an OWNED value
+    // (`<T as WebIdlConvertible>::from_v8` returns `T`, never `&T`),
+    // and the final struct-build line `Self { #id, ... }` moves the
+    // owned value into the field — which fails type-check for a
+    // `&str` / `&[u8]` field with a confusing "expected &str, found
+    // String" error pointing at code the user did not write.
+    //
+    // Better: surface a clear compile error AT the field span naming
+    // the supported owned-type alternatives. A future extension could
+    // accept `&str` via a captured `'a` that ties into the dict's own
+    // generics, but no current consumer needs that and the cost is a
+    // genericised `from_v8` signature that pollutes call sites.
+    if matches!(field.ty, syn::Type::Reference(_)) {
+        return Err(syn::Error::new_spanned(
+            field,
+            "WebIdlDict fields cannot be reference types — use owned types like \
+             String, Vec<u8>, ByteString, or USVString",
+        ));
+    }
 
     // Default WebIDL name = field ident verbatim. Override via
     // `#[webidl_name = "..."]`. Useful when the JS-side name differs

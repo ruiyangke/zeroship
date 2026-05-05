@@ -146,9 +146,23 @@ pub(crate) fn gen_same_object_getter_callback(
 
             // 3. Cache hit short-circuit: if the wrapper has already
             //    minted a Same-Object value, return it without calling
-            //    user code. `get_private` returns Some(undefined) when
-            //    the slot was never written, so we filter both None
-            //    and undefined paths.
+            //    user code.
+            //
+            //    Sentinel rules: the SameObject cache stores ONLY
+            //    `v8::Local<v8::Object>` (the user method's
+            //    `Global<Object>` re-localised — see §4 below). The
+            //    private slot is never written with `null`, never
+            //    cleared, and only this codegen ever touches the
+            //    qualified key (the `module_path!()` prefix prevents
+            //    cross-class collisions). So three states exist:
+            //      - `None` — V8 says no slot at all (shouldn't happen
+            //        after first miss path runs, but defensive).
+            //      - `Some(undefined)` — V8's "slot present but
+            //        unset" sentinel; equivalent to None for us.
+            //      - `Some(non-undefined Object)` — a real cache hit.
+            //    `is_undefined()` therefore covers exactly the two
+            //    miss-paths; testing `is_null()` is unnecessary and
+            //    would be misleading (we never write null).
             if let Some(__cached) = __this.get_private(scope, __priv) {
                 if !__cached.is_undefined() {
                     rv.set(__cached);

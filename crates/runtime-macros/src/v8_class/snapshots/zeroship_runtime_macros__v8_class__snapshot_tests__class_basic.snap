@@ -1,10 +1,11 @@
 ---
-source: crates/runtime-macros/src/v8_class/mod.rs
+source: crates/runtime-macros/src/v8_class/snapshot_tests.rs
+assertion_line: 65
 expression: format_expansion(out)
 ---
-impl State {
-    fn new(start: u32) -> Result<State, OpError> {
-        Ok(State { value: start })
+impl Foo {
+    fn new(start: u32) -> Foo {
+        Foo { value: start }
     }
     fn touch(&mut self) -> u32 {
         self.value += 1;
@@ -12,6 +13,9 @@ impl State {
     }
     fn value(&self) -> u32 {
         self.value
+    }
+    fn set_value(&mut self, n: u32) {
+        self.value = n;
     }
 }
 /// Per-class isolate-slot marker holding the cached
@@ -22,7 +26,7 @@ impl State {
 /// [[FunctionPrototype]] and returns false).
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct __InstallSlot_Marker(::v8::Global<::v8::FunctionTemplate>);
+pub struct __InstallSlot_Foo(::v8::Global<::v8::FunctionTemplate>);
 /// Per-class isolate-slot marker holding `Foo.prototype` for
 /// WebIDL §3.7 brand checks. Captured eagerly during `install`
 /// (after `get_function`) and consulted by every method,
@@ -37,7 +41,7 @@ pub struct __InstallSlot_Marker(::v8::Global<::v8::FunctionTemplate>);
 /// arbitrary memory (UB).
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct __BrandSlot_Marker(::v8::Global<::v8::Object>);
+pub struct __BrandSlot_Foo(::v8::Global<::v8::Object>);
 /// Brand-check helper: walks the prototype chain of `this`
 /// looking for the cached `Foo.prototype`. Returns true on
 /// match (the receiver IS a Foo, or a subclass via
@@ -84,13 +88,13 @@ pub struct __BrandSlot_Marker(::v8::Global<::v8::Object>);
 /// function.
 #[doc(hidden)]
 #[allow(non_snake_case, dead_code)]
-fn __brand_check_Marker(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
+fn __brand_check_Foo(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
     let cached_global: v8::Global<v8::Object> = if let Some(slot) = scope
-        .get_slot::<__BrandSlot_Marker>()
+        .get_slot::<__BrandSlot_Foo>()
     {
         slot.0.clone()
     } else {
-        let tmpl_global = match scope.get_slot::<__InstallSlot_Marker>() {
+        let tmpl_global = match scope.get_slot::<__InstallSlot_Foo>() {
             Some(s) => s.0.clone(),
             None => return false,
         };
@@ -113,7 +117,7 @@ fn __brand_check_Marker(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) ->
         };
         let g = v8::Global::new(scope, proto);
         let g_clone = g.clone();
-        scope.set_slot(__BrandSlot_Marker(g));
+        scope.set_slot(__BrandSlot_Foo(g));
         g_clone
     };
     let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
@@ -139,36 +143,8 @@ fn __brand_check_Marker(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) ->
     }
     false
 }
-/// Public brand check: is `v` an instance of this class (or a
-/// subclass via `#[v8_inherit]`) in the current isolate?
-///
-/// **Deprecated**: prefer the typed `<Class>::is_instance`
-/// method emitted alongside this fn (Wave 5c, design §3.5).
-/// This symbol stays for back-compat with pre-Wave-5c callers;
-/// scheduled for removal in Wave 8 per the macro's
-/// `STABILITY.md`.
-///
-/// Non-Object values (primitives, null, undefined) return
-/// `false` — the underlying `__brand_check_<Class>` requires
-/// `Local<Object>`, so this wrapper does the
-/// `Local::<Object>::try_from` gate for the caller. Spec
-/// alignment: WebIDL §3.7 brand identity treats only objects
-/// as candidates.
-///
-/// Returns `false` if the class hasn't been installed in the
-/// current isolate (the install slot is empty), matching
-/// `__brand_check_<Class>`'s behaviour.
-#[doc(hidden)]
 #[allow(non_snake_case, dead_code)]
-pub fn __zs_is_Marker(scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> bool {
-    let obj: v8::Local<v8::Object> = match v.try_into() {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    __brand_check_Marker(scope, obj)
-}
-#[allow(non_snake_case, dead_code)]
-impl Marker {
+impl Foo {
     /// Brand-check: returns `true` iff `value` is an instance
     /// of this class (or a subclass via `#[v8_inherit]`) in
     /// the current isolate.
@@ -179,23 +155,27 @@ impl Marker {
     ///
     /// This is the stable entry point introduced in Wave 5c
     /// (design `docs/proposals/runtime-macros-refactor.md` §3.5).
-    /// Prefer this over the legacy `__zs_is_<Class>` symbol —
-    /// the latter is deprecated and scheduled for removal in
-    /// Wave 8.
+    /// The Wave 5c-era `__zs_is_<Class>` shim was removed in
+    /// Wave 8 — this method now owns the `Local<Value>::try_into`
+    /// gate that the shim used to wrap.
     pub fn is_instance(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> bool {
-        __zs_is_Marker(scope, value)
+        let obj: v8::Local<v8::Object> = match value.try_into() {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        __brand_check_Foo(scope, obj)
     }
 }
 #[allow(non_snake_case)]
-impl ::zeroship_runtime::macro_runtime::__private::Sealed for Marker {}
+impl ::zeroship_runtime::macro_runtime::__private::Sealed for Foo {}
 #[allow(non_snake_case)]
-impl ::zeroship_runtime::macro_runtime::V8ClassInstance for Marker {
+impl ::zeroship_runtime::macro_runtime::V8ClassInstance for Foo {
     fn is_instance(scope: &mut ::v8::PinScope, value: ::v8::Local<::v8::Value>) -> bool {
         <Self>::is_instance(scope, value)
     }
 }
 #[allow(non_snake_case, dead_code)]
-impl Marker {
+impl Foo {
     /// Install this class on the given V8 scope, returning the
     /// FunctionTemplate. The runtime calls this from
     /// `setup_globals` and uses the returned template to attach
@@ -212,32 +192,32 @@ impl Marker {
     pub fn install<'s>(
         scope: &mut v8::PinScope<'s, '_>,
     ) -> v8::Local<'s, v8::FunctionTemplate> {
-        if let Some(cached) = scope.get_slot::<__InstallSlot_Marker>() {
+        if let Some(cached) = scope.get_slot::<__InstallSlot_Foo>() {
             return v8::Local::new(scope, cached.0.clone());
         }
-        let __ctor_tmpl = v8::FunctionTemplate::new(
-            scope,
-            __Marker_constructor_callback,
-        );
-        let __class_name = v8::String::new(scope, "Marker").unwrap();
+        let __ctor_tmpl = v8::FunctionTemplate::new(scope, __Foo_constructor_callback);
+        let __class_name = v8::String::new(scope, "Foo").unwrap();
         __ctor_tmpl.set_class_name(__class_name);
         __ctor_tmpl.instance_template(scope).set_internal_field_count(1usize);
         let __proto = __ctor_tmpl.prototype_template(scope);
         {
             let __key = v8::String::new(scope, "touch").unwrap();
-            let __fn_tmpl = v8::FunctionTemplate::new(scope, __Marker_touch_callback);
+            let __fn_tmpl = v8::FunctionTemplate::new(scope, __Foo_touch_callback);
             __proto.set(__key.into(), __fn_tmpl.into());
         }
         {
             let __key = v8::String::new(scope, "value").unwrap();
-            let __getter_tmpl = v8::FunctionTemplate::new(
-                scope,
-                __Marker_value_callback,
-            );
+            let __getter_tmpl = v8::FunctionTemplate::new(scope, __Foo_value_callback);
             let __getter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(
                 __getter_tmpl,
             );
-            let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = None;
+            let __setter_tmpl = v8::FunctionTemplate::new(
+                scope,
+                __Foo_set_value_callback,
+            );
+            let __setter_arg: Option<v8::Local<v8::FunctionTemplate>> = Some(
+                __setter_tmpl,
+            );
             __proto
                 .set_accessor_property(
                     __key.into(),
@@ -248,7 +228,7 @@ impl Marker {
         }
         {
             let __tag_sym = v8::Symbol::get_to_string_tag(scope);
-            let __tag_value = v8::String::new(scope, "Marker").unwrap();
+            let __tag_value = v8::String::new(scope, "Foo").unwrap();
             __proto
                 .set_with_attr(
                     __tag_sym.into(),
@@ -258,12 +238,12 @@ impl Marker {
         }
         let __global = ::v8::Global::new(scope, __ctor_tmpl);
         let __local = ::v8::Local::new(scope, __global.clone());
-        scope.set_slot(__InstallSlot_Marker(__global));
+        scope.set_slot(__InstallSlot_Foo(__global));
         __local
     }
 }
 #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-pub(crate) fn __Marker_constructor_callback(
+pub(crate) fn __Foo_constructor_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
@@ -271,7 +251,7 @@ pub(crate) fn __Marker_constructor_callback(
     if !args.is_construct_call() {
         let __msg = v8::String::new(
                 scope,
-                "Failed to construct 'Marker': Please use the 'new' operator, this DOM object constructor cannot be called as a function.",
+                "Failed to construct 'Foo': Please use the 'new' operator, this DOM object constructor cannot be called as a function.",
             )
             .unwrap();
         let __exc = v8::Exception::type_error(scope, __msg);
@@ -280,55 +260,7 @@ pub(crate) fn __Marker_constructor_callback(
     }
     let __this = args.this();
     let start: u32 = args.get(0i32).uint32_value(scope).unwrap_or(0);
-    let __instance: State = match <State>::new(start) {
-        Ok(__v) => __v,
-        Err(__err) => {
-            if let ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(
-                __global,
-            ) = &(__err).kind
-            {
-                let __local = v8::Local::new(scope, __global);
-                (scope).throw_exception(__local);
-            } else {
-                let __msg = v8::String::new(scope, &(__err).message).unwrap();
-                let __exc: v8::Local<v8::Value> = match &(__err).kind {
-                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::TypeError => {
-                        v8::Exception::type_error(scope, __msg)
-                    }
-                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::RangeError => {
-                        v8::Exception::range_error(scope, __msg)
-                    }
-                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::DomException(
-                        __name,
-                    ) => {
-                        ::zeroship_runtime::macro_runtime::dom::exception::build(
-                                scope,
-                                &(__err).message,
-                                __name,
-                            )
-                            .into()
-                    }
-                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::NodeError(
-                        __code,
-                    ) => {
-                        ::zeroship_runtime::macro_runtime::node_error::build_node_exception(
-                            scope,
-                            __code,
-                            &(__err).message,
-                        )
-                    }
-                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::Error => {
-                        v8::Exception::error(scope, __msg)
-                    }
-                    ::zeroship_runtime::macro_runtime::state::OpErrorKind::JsValue(_) => {
-                        unreachable!()
-                    }
-                };
-                (scope).throw_exception(__exc);
-            }
-            return;
-        }
-    };
+    let __instance: Foo = <Foo>::new(start);
     let __boxed = Box::new(__instance);
     let __raw_ptr = Box::into_raw(__boxed);
     let __raw_addr = __raw_ptr as usize;
@@ -339,20 +271,20 @@ pub(crate) fn __Marker_constructor_callback(
         __this,
         Box::new(move || {
             unsafe {
-                drop(Box::from_raw(__raw_addr as *mut State));
+                drop(Box::from_raw(__raw_addr as *mut Foo));
             }
         }),
     );
     ::std::mem::forget(__weak);
 }
 #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-pub(crate) fn __Marker_touch_callback(
+pub(crate) fn __Foo_touch_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let __this = args.this();
-    if !__brand_check_Marker(scope, __this) {
+    if !__brand_check_Foo(scope, __this) {
         let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
         let __exc = v8::Exception::type_error(scope, __msg);
         scope.throw_exception(__exc);
@@ -372,43 +304,78 @@ pub(crate) fn __Marker_touch_callback(
     };
     let __inflight_addr = __ext.value() as usize;
     ::std::thread_local! {
-        static __INFLIGHT : ::std::cell::RefCell < ::std::collections::HashSet < usize >>
-        = ::std::cell::RefCell::new(::std::collections::HashSet::new());
+        static __INFLIGHT : ::std::cell::Cell < [::std::option::Option < usize >; 8] > =
+        ::std::cell::Cell::new([::std::option::Option::None; 8]);
     }
-    let __already_inflight = __INFLIGHT
-        .with(|__s| !__s.borrow_mut().insert(__inflight_addr));
-    if __already_inflight {
-        let __msg = v8::String::new(
-                scope,
-                "re-entered method `Marker::touch` on instance — concurrent &mut self callback",
-            )
-            .unwrap();
-        let __exc = v8::Exception::type_error(scope, __msg);
-        scope.throw_exception(__exc);
-        return;
+    let __slot_index: ::std::option::Option<usize> = __INFLIGHT
+        .with(|__s| {
+            let mut __arr = __s.get();
+            for __slot in __arr.iter() {
+                if *__slot == ::std::option::Option::Some(__inflight_addr) {
+                    return ::std::option::Option::None;
+                }
+            }
+            for __i in 0..__arr.len() {
+                if __arr[__i].is_none() {
+                    __arr[__i] = ::std::option::Option::Some(__inflight_addr);
+                    __s.set(__arr);
+                    return ::std::option::Option::Some(__i);
+                }
+            }
+            ::std::option::Option::Some(::std::usize::MAX)
+        });
+    match __slot_index {
+        ::std::option::Option::None => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entered method `Foo::touch` on instance — concurrent &mut self callback",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(::std::usize::MAX) => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entry depth exceeded for method `Foo::touch` (cap is 8 — a future raise requires a code change)",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(_) => {}
     }
     struct __ReentryGuard(usize);
     impl ::std::ops::Drop for __ReentryGuard {
         fn drop(&mut self) {
             __INFLIGHT
                 .with(|__s| {
-                    __s.borrow_mut().remove(&self.0);
+                    let mut __arr = __s.get();
+                    for __slot in __arr.iter_mut() {
+                        if *__slot == ::std::option::Option::Some(self.0) {
+                            *__slot = ::std::option::Option::None;
+                            break;
+                        }
+                    }
+                    __s.set(__arr);
                 });
         }
     }
     let __reentry_guard = __ReentryGuard(__inflight_addr);
-    let __instance = unsafe { &mut *(__ext.value() as *mut State) };
-    let __r = <State>::touch(&mut *__instance);
+    let __instance = unsafe { &mut *(__ext.value() as *mut Foo) };
+    let __r = <Foo>::touch(&mut *__instance);
     rv.set(v8::Integer::new_from_unsigned(scope, __r).into());
 }
 #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
-pub(crate) fn __Marker_value_callback(
+pub(crate) fn __Foo_value_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
     let __this = args.this();
-    if !__brand_check_Marker(scope, __this) {
+    if !__brand_check_Foo(scope, __this) {
         let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
         let __exc = v8::Exception::type_error(scope, __msg);
         scope.throw_exception(__exc);
@@ -426,7 +393,98 @@ pub(crate) fn __Marker_value_callback(
             return;
         }
     };
-    let __instance = unsafe { &mut *(__ext.value() as *mut State) };
-    let __r = <State>::value(&*__instance);
+    let __instance = unsafe { &mut *(__ext.value() as *mut Foo) };
+    let __r = <Foo>::value(&*__instance);
     rv.set(v8::Integer::new_from_unsigned(scope, __r).into());
+}
+#[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]
+pub(crate) fn __Foo_set_value_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let __this = args.this();
+    if !__brand_check_Foo(scope, __this) {
+        let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+        let __exc = v8::Exception::type_error(scope, __msg);
+        scope.throw_exception(__exc);
+        return;
+    }
+    let __ext = match __this
+        .get_internal_field(scope, 0)
+        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
+    {
+        Some(e) => e,
+        None => {
+            let __msg = v8::String::new(scope, "Illegal invocation").unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+    };
+    let __inflight_addr = __ext.value() as usize;
+    ::std::thread_local! {
+        static __INFLIGHT : ::std::cell::Cell < [::std::option::Option < usize >; 8] > =
+        ::std::cell::Cell::new([::std::option::Option::None; 8]);
+    }
+    let __slot_index: ::std::option::Option<usize> = __INFLIGHT
+        .with(|__s| {
+            let mut __arr = __s.get();
+            for __slot in __arr.iter() {
+                if *__slot == ::std::option::Option::Some(__inflight_addr) {
+                    return ::std::option::Option::None;
+                }
+            }
+            for __i in 0..__arr.len() {
+                if __arr[__i].is_none() {
+                    __arr[__i] = ::std::option::Option::Some(__inflight_addr);
+                    __s.set(__arr);
+                    return ::std::option::Option::Some(__i);
+                }
+            }
+            ::std::option::Option::Some(::std::usize::MAX)
+        });
+    match __slot_index {
+        ::std::option::Option::None => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entered method `Foo::set_value` on instance — concurrent &mut self callback",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(::std::usize::MAX) => {
+            let __msg = v8::String::new(
+                    scope,
+                    "re-entry depth exceeded for method `Foo::set_value` (cap is 8 — a future raise requires a code change)",
+                )
+                .unwrap();
+            let __exc = v8::Exception::type_error(scope, __msg);
+            scope.throw_exception(__exc);
+            return;
+        }
+        ::std::option::Option::Some(_) => {}
+    }
+    struct __ReentryGuard(usize);
+    impl ::std::ops::Drop for __ReentryGuard {
+        fn drop(&mut self) {
+            __INFLIGHT
+                .with(|__s| {
+                    let mut __arr = __s.get();
+                    for __slot in __arr.iter_mut() {
+                        if *__slot == ::std::option::Option::Some(self.0) {
+                            *__slot = ::std::option::Option::None;
+                            break;
+                        }
+                    }
+                    __s.set(__arr);
+                });
+        }
+    }
+    let __reentry_guard = __ReentryGuard(__inflight_addr);
+    let __instance = unsafe { &mut *(__ext.value() as *mut Foo) };
+    let n: u32 = args.get(0i32).uint32_value(scope).unwrap_or(0);
+    <Foo>::set_value(&mut *__instance, n);
 }

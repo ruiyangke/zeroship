@@ -1,0 +1,87 @@
+---
+source: crates/runtime-macros/src/webidl_dict_tests.rs
+assertion_line: 42
+expression: format_expansion(out)
+---
+impl RequestInit {
+    /// Parse a JS value as a WebIDL dictionary of this type.
+    ///
+    /// Returns `Self::default()` for `null` / `undefined`.
+    /// Returns `Err(TypeError)` if `value` is a non-null,
+    /// non-undefined non-Object, or if any member fails its
+    /// own conversion.
+    #[allow(unused_variables, clippy::needless_borrow)]
+    pub fn from_v8(
+        scope: &mut ::v8::PinScope,
+        value: ::v8::Local<::v8::Value>,
+    ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
+        if value.is_null_or_undefined() {
+            return ::std::result::Result::Ok(
+                <Self as ::core::default::Default>::default(),
+            );
+        }
+        let __obj: ::v8::Local<::v8::Object> = match value.try_into() {
+            Ok(o) => o,
+            Err(_) => {
+                return ::std::result::Result::Err(
+                    ::zeroship_runtime::macro_runtime::state::OpError::type_error(
+                        concat!(
+                            "Cannot convert value to dictionary `",
+                            stringify!(RequestInit), "` — value is not an object",
+                        ),
+                    ),
+                );
+            }
+        };
+        let method: Option<USVString> = {
+            let __key = ::v8::String::new(scope, "method").unwrap();
+            match __obj.get(scope, __key.into()) {
+                ::std::option::Option::Some(__v) if !__v.is_undefined() => {
+                    let __captured: ::std::result::Result<
+                        Option<USVString>,
+                        ::zeroship_runtime::macro_runtime::state::OpError,
+                    > = {
+                        ::v8::tc_scope!(let __tc, scope);
+                        match <Option<
+                            USVString,
+                        > as ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible>::from_v8(
+                            __tc,
+                            __v,
+                        ) {
+                            ::std::result::Result::Ok(__val) => {
+                                ::std::result::Result::Ok(__val)
+                            }
+                            ::std::result::Result::Err(__inner_err) => {
+                                if __tc.has_caught() {
+                                    let __exc = __tc
+                                        .exception()
+                                        .expect("has_caught implies Some");
+                                    ::std::result::Result::Err(
+                                        ::zeroship_runtime::macro_runtime::state::OpError::js_value(
+                                            __tc,
+                                            __exc,
+                                            "Cannot convert dictionary member 'method' (user code threw)",
+                                        ),
+                                    )
+                                } else {
+                                    ::std::result::Result::Err(__inner_err)
+                                }
+                            }
+                        }
+                    };
+                    __captured?
+                }
+                _ => <Option<USVString> as ::core::default::Default>::default(),
+            }
+        };
+        ::std::result::Result::Ok(Self { method })
+    }
+}
+impl ::zeroship_runtime::macro_runtime::convert::WebIdlConvertible for RequestInit {
+    fn from_v8(
+        scope: &mut ::v8::PinScope,
+        value: ::v8::Local<::v8::Value>,
+    ) -> ::std::result::Result<Self, ::zeroship_runtime::macro_runtime::state::OpError> {
+        <Self>::from_v8(scope, value)
+    }
+}

@@ -1,5 +1,5 @@
-//! Smoke tests for the public `__zs_is_<Class>(scope, value) -> bool`
-//! helper emitted alongside `<Class>::install`.
+//! Smoke tests for the public `<Class>::is_instance(scope, value) ->
+//! bool` brand-check entry point emitted alongside `<Class>::install`.
 //!
 //! Pre-extension, the macro emitted a private `__brand_check_<Class>`
 //! that took `Local<Object>` and was usable only inside the
@@ -10,11 +10,16 @@
 //! shadows the global, miss subclasses created via prototype-chaining,
 //! and don't share the cache the in-class brand check uses.
 //!
-//! The MAC-12 extension exposes `pub fn __zs_is_<Class>(scope: &mut
-//! PinScope, v: Local<Value>) -> bool` on the same module. Body
-//! delegates to `__brand_check_<Class>` after a `Local::<Object>::try_from`
-//! gate so non-Object values (primitives, null, undefined) return
-//! `false` instead of UB.
+//! The MAC-12 extension (Wave 5c) exposes the typed
+//! `<Class>::is_instance(scope, v) -> bool` method. Body delegates to
+//! `__brand_check_<Class>` after a `Local::<Object>::try_from` gate so
+//! non-Object values (primitives, null, undefined) return `false`
+//! instead of UB.
+//!
+//! Wave 8: the legacy underscored `__zs_is_<Class>` shim was removed
+//! per `crates/runtime-macros/STABILITY.md`. This test now exercises
+//! `<Class>::is_instance` directly — same observable behaviour, the
+//! only change is the call-site spelling.
 //!
 //! Coverage:
 //!   - matches a real instance of the class
@@ -102,10 +107,10 @@ mod cls {
 }
 
 // ---------------------------------------------------------------------------
-// Drive the public `__zs_is_<Class>` from a dedicated registered op:
+// Drive the public `<Class>::is_instance` from a dedicated registered op:
 // the test installs an op `_test_is_alpha(value)` that calls the
-// public helper and returns the boolean. JS code then exercises every
-// shape we want to cover.
+// typed entry point and returns the boolean. JS code then exercises
+// every shape we want to cover.
 // ---------------------------------------------------------------------------
 
 fn install_test_is_alpha(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
@@ -115,7 +120,7 @@ fn install_test_is_alpha(scope: &mut v8::PinScope, global: v8::Local<v8::Object>
         mut rv: v8::ReturnValue,
     ) {
         let v = args.get(0);
-        let r = cls::__zs_is_Alpha(scope, v);
+        let r = cls::Alpha::is_instance(scope, v);
         rv.set(v8::Boolean::new(scope, r).into());
     }
     let tmpl = v8::FunctionTemplate::new(scope, callback);
@@ -131,7 +136,7 @@ fn install_test_is_beta(scope: &mut v8::PinScope, global: v8::Local<v8::Object>)
         mut rv: v8::ReturnValue,
     ) {
         let v = args.get(0);
-        let r = cls::__zs_is_Beta(scope, v);
+        let r = cls::Beta::is_instance(scope, v);
         rv.set(v8::Boolean::new(scope, r).into());
     }
     let tmpl = v8::FunctionTemplate::new(scope, callback);

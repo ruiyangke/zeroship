@@ -1,0 +1,5 @@
+error: WebIdlDict fields cannot be reference types — use owned types like String, Vec<u8>, ByteString, or USVString
+  --> tests/compile_fail_webidl_dict/reference_type.rs:18:5
+   |
+18 |     name: &'a str,
+   |     ^^^^^^^^^^^^^

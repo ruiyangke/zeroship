@@ -20,10 +20,10 @@ breaking changes via this file plus `runtime-macros/TODO.md`.
 | `<ClassTy>::is_instance(scope, v) -> bool` | `pub` (inherent) | stable since Wave 5c | WebIDL §3.7 brand check. Preferred entry point for new consumer code. |
 | `<ClassTy>` impl `V8ClassInstance` | trait impl | stable since Wave 5c | Generic-over-class bound. Sealed; only the macro can satisfy it. |
 | `<ClassTy>` impl `__private::Sealed` | trait impl | private | Sealing supertrait of `V8ClassInstance`. User code MUST NOT impl this. |
-| `__zs_is_<ClassTy>` (free fn) | `pub` `#[doc(hidden)]` | **deprecated** | Pre-Wave-5c grep target. Scheduled for removal in Wave 8. New code SHOULD use `<ClassTy>::is_instance`. |
+| ~~`__zs_is_<ClassTy>` (free fn)~~ | ~~`pub` `#[doc(hidden)]`~~ | **removed in Wave 8** | Pre-Wave-5c grep target. Removed per the deprecation policy below. Any remaining call site MUST migrate to `<ClassTy>::is_instance`. |
 | `__InstallSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot wrapper for the cached `Global<FunctionTemplate>`. The hand-rolled `EventTarget` mirror in `crates/runtime/src/web/dom/event_target.rs` is the only known external consumer; new consumers MUST go through `<ClassTy>::install`. |
 | `__BrandSlot_<ClassTy>` (newtype) | `pub` `#[doc(hidden)]` | private; do not grep | Per-isolate slot for the cached prototype handle (used by `__brand_check_<ClassTy>`). Internal to the macro; never call. |
-| `__brand_check_<ClassTy>` | `pub(crate)` | private | Inner brand-check walker. Operates on `Local<Object>` (no value-shape gate). Internal helper for `__zs_is_<ClassTy>` and `<ClassTy>::is_instance`. |
+| `__brand_check_<ClassTy>` | `pub(crate)` | private | Inner brand-check walker. Operates on `Local<Object>` (no value-shape gate). Internal helper for `<ClassTy>::is_instance`. |
 
 ### Brand-check API choice
 
@@ -36,24 +36,30 @@ fn is_one_of<T: V8ClassInstance>(scope: &mut v8::PinScope, v: v8::Local<v8::Valu
     T::is_instance(scope, v)
 }
 
-// Deprecated, removed in Wave 8:
-if __zs_is_Request(scope, value) { /* ... */ }
+// Removed in Wave 8 (commit a8b50f8 — see git log for the exact
+// hash on master after merge):
+//   if __zs_is_Request(scope, value) { /* ... */ }   // ❌ no longer emitted
 ```
 
-### Wave 8 removal of `__zs_is_<ClassTy>`
+### Wave 8 removal of `__zs_is_<ClassTy>` — completed
 
 Per the design's deprecation policy (`docs/proposals/runtime-macros-
 refactor.md` §3.10):
 
-1. **Wave 5c (this wave)** — emit `<ClassTy>::is_instance` + the
-   `V8ClassInstance` trait alongside `__zs_is_<ClassTy>`. Deprecation
-   notice on the underscored symbol's rustdoc. Migrate all known
-   production callers (`request.rs`, `als.rs`).
-2. **Waves 6 / 7** — production code stays migrated; tests may
-   continue to exercise the legacy symbol.
-3. **Wave 8** — delete `__zs_is_<ClassTy>` from emit; update remaining
-   smoke tests to use the typed API. The legacy symbol disappears
-   from the emit contract entirely.
+1. **Wave 5c** — emit `<ClassTy>::is_instance` + the `V8ClassInstance`
+   trait alongside `__zs_is_<ClassTy>`. Deprecation notice on the
+   underscored symbol's rustdoc. All known production callers
+   (`request.rs`, `als.rs`) migrated.
+2. **Waves 6 / 7** — production code stayed migrated; only
+   `v8_brand_pub_smoke.rs` still exercised the legacy symbol.
+3. **Wave 8 (this wave)** — `__zs_is_<ClassTy>` deleted from emit
+   (`crates/runtime-macros/src/v8_class/emit/public_is.rs`).
+   `<ClassTy>::is_instance` now owns the `Local<Value>::try_into`
+   gate that used to live in the shim. The single remaining test
+   caller in `v8_brand_pub_smoke.rs` migrated to
+   `<Class>::is_instance(scope, v)`. Project-wide grep for `__zs_is_`
+   now returns ZERO matches outside this STABILITY.md and the
+   macro's internal documentation.
 
 ---
 
