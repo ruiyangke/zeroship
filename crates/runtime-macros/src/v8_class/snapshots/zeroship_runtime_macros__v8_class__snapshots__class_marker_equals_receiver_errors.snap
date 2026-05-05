@@ -1,0 +1,7 @@
+---
+source: crates/runtime-macros/src/v8_class/mod.rs
+expression: format_expansion(out)
+---
+::core::compile_error! {
+    "#[v8_state_marker]: marker type matches impl receiver — remove the attribute (use #[v8_class] alone for the no-op path)"
+}

@@ -1,0 +1,5 @@
+error: #[v8_state_marker]: marker type matches impl receiver — remove the attribute (use #[v8_class] alone for the no-op path)
+  --> tests/compile_fail_state_marker/marker_equals_state.rs:12:19
+   |
+12 | #[v8_state_marker(Foo)]
+   |                   ^^^

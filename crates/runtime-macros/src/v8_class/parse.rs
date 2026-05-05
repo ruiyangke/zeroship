@@ -371,6 +371,79 @@ pub(super) fn extract_inherit_base(attrs: &[Attribute]) -> Option<syn::Path> {
     None
 }
 
+/// Read `#[v8_state_marker(MarkerTy)]` from impl-block attributes.
+/// Returns the marker path (an explicit JS-facing marker type) when
+/// present, or `None` for the default no-attribute path where the impl
+/// receiver IS the boxed state AND the JS class identity (today's
+/// `class_ty == state_ty` shape).
+///
+/// MAC-01 Phase 1 (design `docs/proposals/macro-v8-state.md` §2.1, §4.2):
+/// the macro takes the marker type via this attribute and substitutes
+/// `*mut StateTy` for `*mut Self` in every internal-field cast, the
+/// finalizer's drop type, the constructor's `let __instance: StateTy`,
+/// and the per-method receiver dispatch. The `class_ty` ident continues
+/// to drive the install slot, brand-check, callback names, and
+/// JS-visible class name — those are MARKER-keyed (and equal to the
+/// receiver's ident under the no-attribute path).
+pub(super) fn extract_state_marker(attrs: &[Attribute]) -> Option<syn::Path> {
+    for attr in attrs {
+        if !attr.path().is_ident("v8_state_marker") {
+            continue;
+        }
+        if let Ok(path) = attr.parse_args::<syn::Path>() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Resolve the `(state_ty, marker_ty)` pair for codegen.
+///
+/// - With no `#[v8_state_marker]` attribute: both are the impl
+///   receiver's bare ident — byte-identical emission to today.
+/// - With `#[v8_state_marker(M)] impl S`: `state_ty = S`,
+///   `marker_ty = M`.
+///
+/// Errors (returned as a compile-error TokenStream the caller forwards
+/// directly into the proc-macro output):
+///  - The marker isn't a bare identifier — generics or path-qualified
+///    forms are forbidden in v1 (design §4.2). Use a `use` statement to
+///    bring the marker into scope at the impl site.
+///  - The marker matches the impl receiver — that's the no-attribute
+///    path, and the v1 strict policy rejects it (design §4.7) so a
+///    typo'd marker name doesn't silently turn into a no-op.
+pub(super) fn resolve_state_and_marker<'a>(
+    receiver_ty: &'a syn::Ident,
+    marker: Option<&syn::Path>,
+) -> Result<(&'a syn::Ident, syn::Ident), proc_macro2::TokenStream> {
+    let Some(path) = marker else {
+        // No-attribute path: state == marker == receiver. The codegen
+        // is byte-identical to today's emission (design §5.1).
+        return Ok((receiver_ty, receiver_ty.clone()));
+    };
+    let m_ident = match path.get_ident().cloned() {
+        Some(id) => id,
+        None => {
+            return Err(syn::Error::new_spanned(
+                path,
+                "#[v8_state_marker]: marker must be a bare type identifier \
+                 (no generics, no paths) — bring the type into scope with \
+                 a `use` statement above the impl block if it lives elsewhere",
+            )
+            .to_compile_error());
+        }
+    };
+    if &m_ident == receiver_ty {
+        return Err(syn::Error::new_spanned(
+            path,
+            "#[v8_state_marker]: marker type matches impl receiver — \
+             remove the attribute (use #[v8_class] alone for the no-op path)",
+        )
+        .to_compile_error());
+    }
+    Ok((receiver_ty, m_ident))
+}
+
 pub(super) fn has_mut_self(func: &ImplItemFn) -> bool {
     func.sig.inputs.iter().any(|arg| {
         matches!(

@@ -56,7 +56,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use std::collections::{HashMap, HashSet};
-use syn::{parse_macro_input, ImplItem, ItemImpl, Type};
+use syn::{ImplItem, ItemImpl, Type};
 
 use crate::v8_iterable;
 
@@ -73,8 +73,8 @@ use method::{
 };
 use parse::{
     classify, extract_async_iterable, extract_consts, extract_fastcall, extract_inherit_base,
-    extract_inherit_intrinsic, extract_same_object, extract_to_string_tag, extract_v8_name,
-    has_any_receiver, has_mut_self,
+    extract_inherit_intrinsic, extract_same_object, extract_state_marker, extract_to_string_tag,
+    extract_v8_name, has_any_receiver, has_mut_self, resolve_state_and_marker,
 };
 
 // ---------------------------------------------------------------------------
@@ -155,20 +155,60 @@ enum ConstKind {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemImpl);
+pub fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
+    expand_tokens(attr.into(), item.into()).into()
+}
 
-    let class_ty = match extract_class_ident(&input.self_ty) {
+/// proc-macro2 entry — same logic as [`expand`] but operates on
+/// `TokenStream2` so unit tests in this crate can call it without going
+/// through the proc-macro driver. Insta snapshots in
+/// `tests/v8_class_codegen_snapshot.rs` consume this entry.
+pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
+    let input: ItemImpl = match syn::parse2(item) {
+        Ok(parsed) => parsed,
+        Err(e) => return e.to_compile_error(),
+    };
+
+    let receiver_ty = match extract_class_ident(&input.self_ty) {
         Some(t) => t,
         None => {
             return syn::Error::new_spanned(
                 &input.self_ty,
                 "#[v8_class] requires a plain type, e.g. `impl Headers`",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
+
+    // MAC-01 Phase 1 (design `docs/proposals/macro-v8-state.md` §4.2):
+    // resolve `(state_ty, marker_ty)`.
+    //  - `state_ty` is what the box stored in V8 internal field 0
+    //    contains (`Box<StateTy>`). The macro emits casts as
+    //    `*mut StateTy` / `*const StateTy`, the constructor returns
+    //    `StateTy`, and per-method `&self` desugars against the impl
+    //    receiver — which IS `StateTy` under Option B.
+    //  - `marker_ty` drives JS-class identity: install/brand slots,
+    //    callback names, the install fn's enclosing impl, the
+    //    `set_class_name` literal, must-new/Symbol.toStringTag, and
+    //    iterable companion install.
+    //
+    // Without `#[v8_state_marker]`: state == marker == receiver
+    // (byte-identical to today's emission, locked by insta snapshots).
+    // With `#[v8_state_marker(M)] impl S`: state = S, marker = M.
+    let state_marker_path = extract_state_marker(&input.attrs);
+    let (state_ty, marker_ty) =
+        match resolve_state_and_marker(receiver_ty, state_marker_path.as_ref()) {
+            Ok(pair) => pair,
+            Err(ts) => return ts,
+        };
+    // Most existing call sites read `class_ty` as the JS-identity ident
+    // (install slot / brand check / callback names) — that's now the
+    // marker. Keep the local name to minimise diff churn; the only
+    // sites that switched to `state_ty` are the constructor's
+    // `let __instance` ascription, the box / finalizer drop type, and
+    // the per-method receiver cast + dispatch (rows 6-15, 17-18 in
+    // §4.1 of the design).
+    let class_ty = &marker_ty;
 
     let mut methods: Vec<ClassMethod> = Vec::new();
     for item in &input.items {
@@ -194,8 +234,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                          &self with Cell/RefCell on state that needs to mutate \
                          (borrow across .await is unsound under V8 re-entry)",
                     )
-                    .to_compile_error()
-                    .into();
+                    .to_compile_error();
                 }
 
                 // Compile-time guard: `#[v8_async_method]` requires the
@@ -209,8 +248,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         &func.sig.ident,
                         "#[v8_async_method] requires the method to be declared `async`",
                     )
-                    .to_compile_error()
-                    .into();
+                    .to_compile_error();
                 }
 
                 let same_object_flag =
@@ -232,8 +270,8 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                          `self` receiver — static operations are invoked via \
                          `Class.method()` with no `this`",
                     )
-                    .to_compile_error()
-                    .into();                }
+                    .to_compile_error();
+                }
 
                 // `#[v8_method(fastcall)]` / `#[v8_getter(fastcall)]`.
                 // Only valid on plain Method / Getter — not async, not
@@ -258,8 +296,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                              scope, so the slow path's per-method re-entrancy guard \
                              cannot be emitted)",
                         )
-                        .to_compile_error()
-                        .into();
+                        .to_compile_error();
                     }
                     if same_object_flag {
                         return syn::Error::new_spanned(
@@ -268,11 +305,10 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                              SameObject getters return a v8::Global<v8::Object> \
                              (allocates), and the fast path forbids allocation",
                         )
-                        .to_compile_error()
-                        .into();
+                        .to_compile_error();
                     }
                     if let Err(err) = validate_fastcall_signature(func) {
-                        return err.to_compile_error().into();
+                        return err.to_compile_error();
                     }
                 }
 
@@ -317,8 +353,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         m.js_name,
                     ),
                 )
-                .to_compile_error()
-                .into();
+                .to_compile_error();
             }
         }
     }
@@ -340,12 +375,14 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let callbacks: Vec<TokenStream2> = regular
         .iter()
         .map(|m| match m.kind {
-            MethodKind::AsyncMethod => gen_async_method_callback(class_ty, m),
-            MethodKind::Getter if m.same_object => gen_same_object_getter_callback(class_ty, m),
+            MethodKind::AsyncMethod => gen_async_method_callback(class_ty, state_ty, m),
+            MethodKind::Getter if m.same_object => {
+                gen_same_object_getter_callback(class_ty, state_ty, m)
+            }
             MethodKind::StaticMethod | MethodKind::StaticGetter => {
                 gen_static_callback(class_ty, m)
             }
-            _ => gen_method_callback(class_ty, m),
+            _ => gen_method_callback(class_ty, state_ty, m),
         })
         .collect();
 
@@ -357,13 +394,13 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fastcall_callbacks: Vec<TokenStream2> = regular
         .iter()
         .filter(|m| m.fastcall)
-        .filter_map(|m| gen_fastcall_callback(class_ty, m))
+        .filter_map(|m| gen_fastcall_callback(class_ty, state_ty, m))
         .collect();
     let has_any_fastcall = regular.iter().any(|m| m.fastcall);
 
     let constructor_callback = match constructor {
-        Some(c) => gen_constructor_callback(class_ty, c, has_any_fastcall),
-        None => gen_default_constructor_callback(class_ty, has_any_fastcall),
+        Some(c) => gen_constructor_callback(class_ty, state_ty, c, has_any_fastcall),
+        None => gen_default_constructor_callback(class_ty, state_ty, has_any_fastcall),
     };
 
     // Impl-block-level overrides for class-wide install behaviour.
@@ -372,11 +409,11 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let inherit_base = extract_inherit_base(&input.attrs);
     let async_iterable_method = match extract_async_iterable(&input.attrs) {
         Ok(opt) => opt,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
     let const_decls = match extract_consts(&input.attrs) {
         Ok(d) => d,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
 
     // Validate that the named method actually exists in the impl block
@@ -399,8 +436,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
                      `#[v8_method]` or `#[v8_async_method]` on this impl block)"
                 ),
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     }
 
@@ -409,12 +445,12 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // companion `<Class>Iterator` class.
     let iterable_attr = match v8_iterable::extract_iterable(&input.attrs) {
         Ok(opt) => opt,
-        Err(err) => return err.to_compile_error().into(),
+        Err(err) => return err.to_compile_error(),
     };
     let iterable_codegen = match iterable_attr.as_ref() {
-        Some(attr) => match v8_iterable::generate(class_ty, attr) {
+        Some(attr) => match v8_iterable::generate(class_ty, state_ty, attr) {
             Ok(ts) => ts,
-            Err(err) => return err.to_compile_error().into(),
+            Err(err) => return err.to_compile_error(),
         },
         None => quote! {},
     };
@@ -654,7 +690,7 @@ pub fn expand(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #iterable_codegen
     };
 
-    expanded.into()
+    expanded
 }
 
 fn extract_class_ident(ty: &Type) -> Option<&syn::Ident> {
@@ -674,7 +710,8 @@ fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
             || p.is_ident("v8_inherit")
             || p.is_ident("v8_iterable")
             || p.is_ident("v8_async_iterable")
-            || p.is_ident("v8_const"))
+            || p.is_ident("v8_const")
+            || p.is_ident("v8_state_marker"))
     });
     for item in &mut input.items {
         if let ImplItem::Fn(func) = item {
@@ -1212,5 +1249,123 @@ fn gen_install(
             scope.set_slot(#install_slot_ty(__global));
             __local
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Codegen snapshot tests (MAC-01 Phase 1)
+// ---------------------------------------------------------------------------
+//
+// Lock the macro's emission against unintended drift. Per design §5.1
+// / §6.4: the no-attribute path is required to be byte-identical to
+// pre-Phase-1 emission (modulo the qualified Private-symbol name in row
+// 16). The new `#[v8_state_marker]` path is also snapshotted so a
+// future change can detect drift in either direction.
+//
+// We snapshot the prettyplease-formatted output of `expand_tokens` so
+// the snapshot stays human-readable across rustc / quote tweaks. Bumps
+// require `cargo insta accept` with reviewer audit (design §8 settled-
+// question 9).
+#[cfg(test)]
+mod snapshots {
+    use super::expand_tokens;
+    use proc_macro2::TokenStream as TokenStream2;
+    use quote::quote;
+
+    /// Format the macro output through prettyplease so the snapshot
+    /// stays diff-friendly across whitespace tweaks in `quote!`.
+    fn format_expansion(out: TokenStream2) -> String {
+        // Parse the emitted tokens back as a `syn::File` so prettyplease
+        // can format them. The macro emits items at module scope.
+        let parsed: syn::File = syn::parse2(out).expect("macro output parses as items");
+        prettyplease::unparse(&parsed)
+    }
+
+    /// Insta inline snapshot for the no-attribute (control) shape — a
+    /// `#[v8_class] impl Foo { ... }` with one constructor + one method
+    /// + one getter + one setter. Locks the byte-identical-emission
+    /// invariant that the no-attribute path must satisfy
+    /// (design §5.1 over CloseEventState / AbortSignal / Blob).
+    #[test]
+    fn snapshot_class_basic() {
+        let item = quote! {
+            impl Foo {
+                #[v8_constructor]
+                fn new(start: u32) -> Foo {
+                    Foo { value: start }
+                }
+
+                #[v8_method]
+                fn touch(&mut self) -> u32 {
+                    self.value += 1;
+                    self.value
+                }
+
+                #[v8_getter]
+                fn value(&self) -> u32 {
+                    self.value
+                }
+
+                #[v8_setter]
+                #[v8_name = "value"]
+                fn set_value(&mut self, n: u32) {
+                    self.value = n;
+                }
+            }
+        };
+        let out = expand_tokens(quote! {}, item);
+        insta::assert_snapshot!("class_basic", format_expansion(out));
+    }
+
+    /// Insta inline snapshot for the new `#[v8_state_marker(Marker)]
+    /// impl State` shape. The marker (`Marker`) drives JS-class
+    /// identity; the receiver (`State`) drives the `Box<State>` payload
+    /// and per-method receiver type.
+    #[test]
+    fn snapshot_class_with_state_marker() {
+        let item = quote! {
+            #[v8_state_marker(Marker)]
+            impl State {
+                #[v8_constructor]
+                fn new(start: u32) -> Result<State, OpError> {
+                    Ok(State { value: start })
+                }
+
+                #[v8_method]
+                fn touch(&mut self) -> u32 {
+                    self.value += 1;
+                    self.value
+                }
+
+                #[v8_getter]
+                fn value(&self) -> u32 {
+                    self.value
+                }
+            }
+        };
+        let out = expand_tokens(quote! {}, item);
+        insta::assert_snapshot!("class_with_state_marker", format_expansion(out));
+    }
+
+    /// Hard-error snapshot: marker == receiver. Per design §4.7 the
+    /// macro emits a clear compile_error rather than silently treating
+    /// it as a no-op (which would mask a typo'd marker name).
+    #[test]
+    fn snapshot_class_marker_equals_receiver_errors() {
+        let item = quote! {
+            #[v8_state_marker(Foo)]
+            impl Foo {
+                #[v8_constructor]
+                fn new() -> Foo { Foo }
+            }
+        };
+        let out = expand_tokens(quote! {}, item);
+        // Compile-error tokens still parse as a valid syn::File (each
+        // `compile_error!(...)` is an item-level macro invocation), so
+        // prettyplease can format them.
+        insta::assert_snapshot!(
+            "class_marker_equals_receiver_errors",
+            format_expansion(out)
+        );
     }
 }

@@ -1,0 +1,5 @@
+error: #[v8_state_marker]: marker must be a bare type identifier (no generics, no paths) — bring the type into scope with a `use` statement above the impl block if it lives elsewhere
+  --> tests/compile_fail_state_marker/marker_path_qualified.rs:15:19
+   |
+15 | #[v8_state_marker(inner::Foo)]
+   |                   ^^^^^^^^^^
