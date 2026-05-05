@@ -226,6 +226,44 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Impl-block-level marker attribute: project the JS-facing class
+/// identity from a separate state struct. MAC-01 Phase 1.
+///
+/// Usage:
+/// ```ignore
+/// pub struct Request;                 // unit marker (JS class identity)
+///
+/// pub struct RequestState {           // boxed state in V8 internal field 0
+///     /* RefCell<...> for every spec field */
+/// }
+///
+/// #[v8_class]
+/// #[v8_state_marker(Request)]
+/// impl RequestState {
+///     #[v8_constructor]
+///     fn new(...) -> Result<RequestState, OpError> { /* ... */ }
+///
+///     #[v8_getter]
+///     fn method(&self) -> String { /* &self is &RequestState */ }
+/// }
+/// ```
+///
+/// The marker drives JS-class identity: `set_class_name("Request")`,
+/// install slot, brand check, callback names, `Symbol.toStringTag`. The
+/// state drives the `Box<StateTy>` stored in V8 internal field 0 and
+/// the per-method `&StateTy` / `&mut StateTy` receiver.
+///
+/// Without this attribute the macro behaves exactly as before (state
+/// == marker == receiver). Adding it is opt-in and additive — no
+/// existing class is affected.
+///
+/// See `docs/proposals/macro-v8-state.md` for the full design,
+/// substitution table, and migration plan for `Request` / `Response`.
+#[proc_macro_attribute]
+pub fn v8_state_marker(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// `#[derive(WebIdlDict)]` — generate a `from_v8(scope, value) ->
 /// Result<Self, OpError>` impl that reads the JS object's properties as
 /// the struct's named fields, per WebIDL §3.10 (dictionaries).

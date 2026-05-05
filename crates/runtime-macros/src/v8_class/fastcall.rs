@@ -450,7 +450,11 @@ fn fastcall_cinfo_ident(class_ty: &syn::Ident, method: &syn::Ident) -> syn::Iden
 /// a shape-mismatch deopt and falls through to the slow callback, which
 /// runs the prototype-walk brand check and throws "Illegal invocation".
 /// See the design doc for the chain-of-trust analysis.
-pub(super) fn gen_fastcall_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Option<TokenStream2> {
+pub(super) fn gen_fastcall_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    m: &ClassMethod,
+) -> Option<TokenStream2> {
     let method_name = &m.func.sig.ident;
     let fn_name = fastcall_fn_ident(class_ty, method_name);
     let cinfo_name = fastcall_cinfo_ident(class_ty, method_name);
@@ -553,7 +557,7 @@ pub(super) fn gen_fastcall_callback(class_ty: &syn::Ident, m: &ClassMethod) -> O
         /// finalizer for the standard wrapper teardown.
         ///
         /// SAFETY:
-        ///   - Slot 1 holds the `Box<#class_ty>` raw pointer set at
+        ///   - Slot 1 holds the `Box<#state_ty>` raw pointer set at
         ///     construction time. As long as the wrapper is reachable
         ///     by V8, the Box stays alive (slot 0's finalizer fires
         ///     only on GC of the wrapper).
@@ -575,7 +579,7 @@ pub(super) fn gen_fastcall_callback(class_ty: &syn::Ident, m: &ClassMethod) -> O
             let __raw: *const ::std::ffi::c_void = unsafe {
                 __recv.get_aligned_pointer_from_internal_field(1, 0)
             };
-            let __instance: &#class_ty = unsafe { &*(__raw as *const #class_ty) };
+            let __instance: &#state_ty = unsafe { &*(__raw as *const #state_ty) };
 
             // Per-arg adaptation from fast-API raw type to user method
             // expected type (no-op for primitives; Vec copy for
@@ -585,7 +589,7 @@ pub(super) fn gen_fastcall_callback(class_ty: &syn::Ident, m: &ClassMethod) -> O
             // Call the user method. The receiver is `&Self`; user
             // method's signature MUST match (validated at macro time
             // by `validate_fastcall_signature`).
-            let __r = <#class_ty>::#method_name(__instance, #(#arg_call_idents),*);
+            let __r = <#state_ty>::#method_name(__instance, #(#arg_call_idents),*);
 
             // Marshal the return value. For `Result`, this branches
             // Ok/Err; the Err arm allocates a CallbackScope and throws.

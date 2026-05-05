@@ -132,7 +132,11 @@ fn gen_reentry_guard(
     }
 }
 
-pub(super) fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+pub(super) fn gen_method_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    m: &ClassMethod,
+) -> TokenStream2 {
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -152,10 +156,10 @@ pub(super) fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Tok
         MethodKind::Setter => {
             // Setters in V8 are called with one positional arg (the value).
             // We don't emit return marshaling — accessor setters discard.
-            return gen_setter_callback(class_ty, m);
+            return gen_setter_callback(class_ty, state_ty, m);
         }
         _ => quote! {
-            <#class_ty>::#method_name(#receiver_ref, #(#call_args),*)
+            <#state_ty>::#method_name(#receiver_ref, #(#call_args),*)
         },
     };
 
@@ -195,7 +199,7 @@ pub(super) fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Tok
                 return;
             }
             // Brand check passed: internal field 0 is guaranteed to
-            // hold a `Box<#class_ty>` raw pointer (set in
+            // hold a `Box<#state_ty>` raw pointer (set in
             // `gen_box_and_install_finalizer`). Recover the External.
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
@@ -213,7 +217,7 @@ pub(super) fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Tok
             // the unsafe `&mut Self` materialisation (or we'd UB through
             // an aliased pointer before the guard could fire).
             #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
+            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
 
             #(#extractions)*
             #call_return
@@ -275,7 +279,11 @@ pub(super) fn gen_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Tok
 /// (Request.headers, Response.headers, URL.searchParams continue to
 /// hand-roll their own private-symbol stash for now). The smoke test
 /// in `tests/v8_same_object_smoke.rs` proves the macro wiring works.
-pub(super) fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+pub(super) fn gen_same_object_getter_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    m: &ClassMethod,
+) -> TokenStream2 {
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -294,7 +302,14 @@ pub(super) fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMe
     };
 
     let brand_check_fn = format_ident!("__brand_check_{}", class_ty);
-    let private_name = format!("__zs_same_object_{}_{}", class_ty, method_name);
+    // §2.7 / §4.1 row 16: the Private symbol is keyed by
+    // `(module_path, marker, method)` so two classes with same-named
+    // markers in different modules can't collide on a single Private.
+    // The `module_path!()` is resolved at the *user crate's* expansion
+    // site (we emit the call literally into the user's code), so the
+    // qualifier reflects where the class lives. Net string format:
+    //   __zs_same_object_<crate::path::to::module>::<MarkerTy>_<method>
+    let private_marker_method = format!("{}_{}", class_ty, method_name);
     let reentry_guard = gen_reentry_guard(class_ty, method_name, m.mut_receiver);
 
     quote! {
@@ -320,7 +335,18 @@ pub(super) fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMe
             //    the isolate, so the lookup is O(1) after the first
             //    call — V8 returns the same symbol object on repeat
             //    reads with the same name.
-            let __key_str = v8::String::new(scope, #private_name).unwrap();
+            //
+            //    Symbol name is qualified by `module_path!()` at the
+            //    user crate's expansion site so two classes with
+            //    same-named markers in different modules cannot share
+            //    a Private (design §2.7).
+            let __private_name = ::std::concat!(
+                "__zs_same_object_",
+                ::std::module_path!(),
+                "::",
+                #private_marker_method,
+            );
+            let __key_str = v8::String::new(scope, __private_name).unwrap();
             let __priv = v8::Private::for_api(scope, Some(__key_str));
 
             // 3. Cache hit short-circuit: if the wrapper has already
@@ -354,7 +380,7 @@ pub(super) fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMe
             // it triggers), the second call would alias `&mut Self`.
             // No-op for the `&self` case (the common shape).
             #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
+            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
 
             #(#extractions)*
 
@@ -362,7 +388,7 @@ pub(super) fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMe
             // own it after the call returns, so we can both stash it
             // (by re-Localising) and use the same Local for the rv.
             let __value: ::v8::Global<::v8::Object> =
-                <#class_ty>::#method_name(#receiver_ref, #(#call_args),*);
+                <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
             let __local: ::v8::Local<::v8::Object> = ::v8::Local::new(scope, &__value);
 
             // Stash on the wrapper. `set_private` is fallible (returns
@@ -435,7 +461,11 @@ pub(super) fn gen_same_object_getter_callback(class_ty: &syn::Ident, m: &ClassMe
 ///   - All future captures are owned (`Vec<u8>`, `String`, `Global<…>`,
 ///     scalar), never borrowed. The future is `'static + !Send`, which
 ///     matches the single-thread compio invariant.
-pub(super) fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+pub(super) fn gen_async_method_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    m: &ClassMethod,
+) -> TokenStream2 {
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -523,14 +553,14 @@ pub(super) fn gen_async_method_callback(class_ty: &syn::Ident, m: &ClassMethod) 
             let __fut = async move {
                 let _keepalive = __wrapper_global;
                 // SAFETY: __raw_addr was Box::into_raw'd from
-                // Box<#class_ty> at construction time; the keepalive
+                // Box<#state_ty> at construction time; the keepalive
                 // Global pins that allocation for as long as this
                 // future hasn't dropped. The macro's `expand` rejects
                 // `&mut self` async, so a `&Self` borrow is the only
                 // shape the user method takes — no aliasing risk
                 // even under V8 re-entry from microtasks.
-                let __instance: &#class_ty = unsafe { &*(__raw_addr as *mut #class_ty) };
-                let __result = <#class_ty>::#method_name(__instance, #(#call_args),*).await;
+                let __instance: &#state_ty = unsafe { &*(__raw_addr as *mut #state_ty) };
+                let __result = <#state_ty>::#method_name(__instance, #(#call_args),*).await;
                 let __value = ::zeroship_runtime::state::IntoResolveValue::into_resolve_value(__result);
                 ::zeroship_runtime::state::OpResult::JsValue {
                     resolver: __resolver_global,
@@ -605,7 +635,11 @@ pub(super) fn gen_static_callback(class_ty: &syn::Ident, m: &ClassMethod) -> Tok
     }
 }
 
-fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
+fn gen_setter_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    m: &ClassMethod,
+) -> TokenStream2 {
     let method_name = &m.func.sig.ident;
     let callback_name = method_callback_ident(class_ty, method_name);
 
@@ -652,12 +686,12 @@ fn gen_setter_callback(class_ty: &syn::Ident, m: &ClassMethod) -> TokenStream2 {
             // Re-entry guard for `&mut self` setters. See
             // `gen_reentry_guard` doc-comment for the contract.
             #reentry_guard
-            let __instance = unsafe { &mut *(__ext.value() as *mut #class_ty) };
+            let __instance = unsafe { &mut *(__ext.value() as *mut #state_ty) };
 
             #(#extractions)*
 
             // Discard return — setters don't propagate values.
-            let _ = <#class_ty>::#method_name(#receiver_ref, #(#call_args),*);
+            let _ = <#state_ty>::#method_name(#receiver_ref, #(#call_args),*);
         }
     }
 }
@@ -693,7 +727,12 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
     }
 }
 
-pub(super) fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod, has_any_fastcall: bool) -> TokenStream2 {
+pub(super) fn gen_constructor_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    c: &ClassMethod,
+    has_any_fastcall: bool,
+) -> TokenStream2 {
     let ctor_name = &c.func.sig.ident;
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
 
@@ -711,7 +750,7 @@ pub(super) fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod, h
 
     let make_instance = if is_result {
         quote! {
-            let __instance: #class_ty = match <#class_ty>::#ctor_name(#(#call_args),*) {
+            let __instance: #state_ty = match <#state_ty>::#ctor_name(#(#call_args),*) {
                 Ok(__v) => __v,
                 Err(__err) => {
                     // JsValue passthrough — preserves user-thrown
@@ -741,11 +780,11 @@ pub(super) fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod, h
         }
     } else {
         quote! {
-            let __instance: #class_ty = <#class_ty>::#ctor_name(#(#call_args),*);
+            let __instance: #state_ty = <#state_ty>::#ctor_name(#(#call_args),*);
         }
     };
 
-    let store = gen_box_and_install_finalizer(class_ty, has_any_fastcall);
+    let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
     let must_new = gen_must_new_prologue(class_ty, extract_callable_no_new(&c.func.attrs));
 
     // MAC-02: post_init dispatch — runs AFTER box install, BEFORE the
@@ -829,9 +868,13 @@ pub(super) fn gen_constructor_callback(class_ty: &syn::Ident, c: &ClassMethod, h
     }
 }
 
-pub(super) fn gen_default_constructor_callback(class_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
+pub(super) fn gen_default_constructor_callback(
+    class_ty: &syn::Ident,
+    state_ty: &syn::Ident,
+    has_any_fastcall: bool,
+) -> TokenStream2 {
     let callback_ident = format_ident!("__{}_constructor_callback", class_ty);
-    let store = gen_box_and_install_finalizer(class_ty, has_any_fastcall);
+    let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
     // No method-level attrs to read — the Default-derived constructor
     // is always must-new. The opt-out attribute requires a user-written
     // `#[v8_constructor]`, by definition.
@@ -846,7 +889,7 @@ pub(super) fn gen_default_constructor_callback(class_ty: &syn::Ident, has_any_fa
         ) {
             #must_new
             let __this = args.this();
-            let __instance: #class_ty = <#class_ty as ::core::default::Default>::default();
+            let __instance: #state_ty = <#state_ty as ::core::default::Default>::default();
 
             #store
         }
@@ -870,7 +913,7 @@ pub(super) fn gen_default_constructor_callback(class_ty: &syn::Ident, has_any_fa
 /// (via `mem::forget`) because dropping it would deregister the
 /// finalizer — `with_guaranteed_finalizer` ensures the closure runs
 /// on GC or isolate teardown regardless.
-fn gen_box_and_install_finalizer(class_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
+fn gen_box_and_install_finalizer(state_ty: &syn::Ident, has_any_fastcall: bool) -> TokenStream2 {
     let fastcall_slot1 = if has_any_fastcall {
         quote! {
             // tag = 0: must match the tag passed to
@@ -902,7 +945,7 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident, has_any_fastcall: bool) 
         // without a scope.
         #fastcall_slot1
 
-        // SAFETY: __raw_addr was Box::into_raw'd from Box<#class_ty>;
+        // SAFETY: __raw_addr was Box::into_raw'd from Box<#state_ty>;
         // the finalizer closure casts back to the same type and drops
         // the Box exactly once when V8 reclaims the JS wrapper.
         let __weak = v8::Weak::with_guaranteed_finalizer(
@@ -910,7 +953,7 @@ fn gen_box_and_install_finalizer(class_ty: &syn::Ident, has_any_fastcall: bool) 
             __this,
             Box::new(move || {
                 unsafe {
-                    drop(Box::from_raw(__raw_addr as *mut #class_ty));
+                    drop(Box::from_raw(__raw_addr as *mut #state_ty));
                 }
             }),
         );

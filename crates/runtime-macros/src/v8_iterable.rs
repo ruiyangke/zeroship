@@ -269,10 +269,15 @@ fn gen_to_v8(ty: &syn::Type, src_ident: &Ident, out_ident: &Ident) -> Result<Tok
 ///     `next()` yields `done`. If it grows, the cursor walks the new
 ///     entries — that's the spec behaviour.
 ///
-/// `class_ty` is the parent class ident (e.g. `Headers`).
+/// `class_ty` is the parent class JS-identity ident (e.g. `Headers`).
+/// `state_ty` is the type of the box stored in V8 internal field 0 of
+/// the parent — equal to `class_ty` under the no-attribute path, but
+/// distinct when the parent uses `#[v8_state_marker]` (MAC-01 Phase 1,
+/// design `docs/proposals/macro-v8-state.md` §2.9).
 /// `attr` is the parsed `#[v8_iterable(key=..., value=..., mode=...)]`.
 pub(crate) fn generate(
     class_ty: &Ident,
+    state_ty: &Ident,
     attr: &IterableAttr,
 ) -> Result<TokenStream2, syn::Error> {
     let key_ty = &attr.key_ty;
@@ -408,11 +413,11 @@ pub(crate) fn generate(
     } else {
         quote! {
             // SAFETY: the brand check above passed, so internal field
-            // 0 holds a Box<#class_ty> raw pointer placed there by
+            // 0 holds a Box<#state_ty> raw pointer placed there by
             // gen_box_and_install_finalizer. The borrow ends before we
             // touch `scope` again (the snapshot clone is the last use).
-            let __instance: &#class_ty =
-                unsafe { &*(__ext.value() as *const #class_ty) };
+            let __instance: &#state_ty =
+                unsafe { &*(__ext.value() as *const #state_ty) };
 
             // Snapshot the pairs. The macro requires the user to
             // define `value_pairs(&self) -> Vec<(K, V)>`. We clone the
@@ -488,11 +493,11 @@ pub(crate) fn generate(
                 }
             };
             // SAFETY: the parent's internal field 0 was populated by
-            // gen_box_and_install_finalizer with a Box<#class_ty>; the
+            // gen_box_and_install_finalizer with a Box<#state_ty>; the
             // Global pin keeps the wrapper alive for as long as this
             // iterator lives. value_pairs() takes &Self only.
-            let __instance: &#class_ty =
-                unsafe { &*(__parent_ext.value() as *const #class_ty) };
+            let __instance: &#state_ty =
+                unsafe { &*(__parent_ext.value() as *const #state_ty) };
             let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> =
                 __instance.value_pairs();
             // End the parent borrow before re-entering scope.
@@ -574,10 +579,11 @@ pub(crate) fn generate(
                 let __pairs: ::std::vec::Vec<(#key_ty, #value_ty)> = {
                     // Fresh `&Self` per iteration. The brand check at
                     // the top of the callback already established the
-                    // receiver is a #class_ty; we reload via the SAME
-                    // __ext (it still points at the same allocation).
-                    let __instance: &#class_ty =
-                        unsafe { &*(__ext.value() as *const #class_ty) };
+                    // receiver is a #class_ty wrapper; we reload via the
+                    // SAME __ext (it still points at the same Box<#state_ty>
+                    // allocation).
+                    let __instance: &#state_ty =
+                        unsafe { &*(__ext.value() as *const #state_ty) };
                     __instance.value_pairs()
                 };
                 if __cursor >= __pairs.len() {
@@ -621,8 +627,8 @@ pub(crate) fn generate(
         quote! {}
     } else {
         quote! {
-            let __instance: &#class_ty =
-                unsafe { &*(__ext.value() as *const #class_ty) };
+            let __instance: &#state_ty =
+                unsafe { &*(__ext.value() as *const #state_ty) };
         }
     };
 
@@ -755,7 +761,7 @@ pub(crate) fn generate(
                 scope.throw_exception(__exc);
                 return;
             }
-            // Recover Box<#class_ty> from internal field 0.
+            // Recover Box<#state_ty> from internal field 0.
             let __ext = match __this.get_internal_field(scope, 0)
                 .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())
             {
