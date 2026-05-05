@@ -1,12 +1,11 @@
 /**
  * Phase 1 — transform stashes per-procedure metadata.
  *
- * Server-module discovery is **purely path-based**: a file is a server
- * module iff it lives at `src/server.{ts,tsx,js,jsx}` (single-file
- * convention) or anywhere under `src/server/**` (directory convention).
- * The legacy `"use server"` directive is no longer accepted — files
- * outside the path convention pass through untouched even if they
- * declare `"use server"` at the top.
+ * Server-module discovery is via the file-level `"use server"`
+ * directive (ISS-02 — the path convention is gone). A file is a server
+ * module iff its first non-comment statement is the string-literal
+ * expression `"use server"`. Files outside that gate pass through
+ * untouched.
  *
  * For every discovered procedure the transform records:
  *
@@ -27,13 +26,10 @@ import assert from "node:assert/strict";
 import { transformPlugin, type TransformState } from "../src/transform.js";
 
 // Mimic the Rolldown transform context shape — `parse()` is the only
-// hook the transform calls. We use the runtime's `oxc` parser to keep
-// behavior aligned with production. For these tests we substitute a
-// quick-n-dirty acorn-like parse via JSON-schema-validator-of-ts is
-// overkill; the simplest path is to invoke the plugin's parse via a
-// very small acorn shim. We use Node's built-in `vm` and a minimal
-// ESTree builder via `acorn`.
-
+// hook the transform calls. We use Acorn here so the test's AST shape
+// matches what dev-mode Rolldown produces (acorn sets `.directive` on
+// directive-prologue ExpressionStatements; the transform's detector
+// handles both shapes).
 import { parse as acornParse } from "acorn";
 
 // Minimal context that mimics the Vite/Rolldown plugin invocation.
@@ -46,6 +42,11 @@ function makeCtx(envName: string) {
         sourceType: "module",
         allowImportExportEverywhere: true,
       });
+    },
+    // Capture pluginContext.warn() calls so tests can assert on them.
+    warnings: [] as string[],
+    warn(msg: string) {
+      this.warnings.push(msg);
     },
   };
 }
@@ -65,7 +66,7 @@ describe("transform — procedure metadata", () => {
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function add(input) { return input; }
 add.config = { kind: "mutation", idempotent: true };
 `;
@@ -89,7 +90,7 @@ add.config = { kind: "mutation", idempotent: true };
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function listTodos() { return []; }
 export async function getUser(id) { return { id }; }
 export async function searchPosts() { return []; }
@@ -111,7 +112,7 @@ export async function searchPosts() { return []; }
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function* logStream() { yield 1; yield 2; }
 `;
     const handler =
@@ -131,7 +132,7 @@ export async function* logStream() { yield 1; yield 2; }
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export const $config = { auth: "user", rateLimit: { rpm: 600, per: "user" } };
 export async function listTodos() { return []; }
 `;
@@ -159,7 +160,7 @@ export async function listTodos() { return []; }
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function listTodos(input) { return []; }
 listTodos.config = {
   id: "listTodos",
@@ -200,7 +201,7 @@ listTodos.config = {
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function list() { return []; }
 `;
     const handler =
@@ -213,105 +214,80 @@ export async function list() { return []; }
     assert.equal(state.discoveredProcedures[0].moduleSlug, "src-server-todos");
   });
 
-  // ── Path-based discovery (replaces the legacy "use server" directive) ────
+  // ── Directive-based discovery (ISS-02) ────────────────────────────────
   //
-  // A file is a server module iff its path matches one of:
-  //   - `src/server.{ts,tsx,js,jsx}`     single-file flat layout
-  //   - `src/server/**/*.{ts,tsx,js,jsx}` directory layout
-  //
-  // Anything outside that path is a client module and the transform
-  // passes it through untouched, even when the file declares
-  // `"use server"` at the top. The directive is no longer a marker.
+  // A file is a server module iff its FIRST non-comment statement is
+  // the string-literal expression `"use server"`. The path convention
+  // (`src/server.{ts,tsx,js,jsx}`, `src/server/**/*.{ts,...}`) is dead.
 
-  test("path-based: src/server.ts (single-file) IS a server module", () => {
+  test("directive: top-of-file `\"use server\"` opts the file in", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function ping() { return "pong"; }
 `;
     const handler =
       typeof (plugin.transform as any) === "function"
         ? (plugin.transform as any)
         : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server.ts");
+    // Path is irrelevant — even files outside src/server/ are eligible.
+    handler.call(ctx, code, "/r/src/api/ping.ts");
 
     assert.equal(state.discoveredProcedures.length, 1, "ping discovered");
     assert.equal(state.discoveredProcedures[0].exportName, "ping");
   });
 
-  test("path-based: src/server/foo/bar.ts IS a server module", () => {
+  test("directive: works for files anywhere in the project", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    const code = `
+    const code = `"use server";
 export async function deeplyNested() { return 42; }
 `;
     const handler =
       typeof (plugin.transform as any) === "function"
         ? (plugin.transform as any)
         : (plugin.transform as any).handler;
-    handler.call(ctx, code, "/r/src/server/foo/bar.ts");
+    // Outside src/server/ — discovered solely because of the directive.
+    handler.call(ctx, code, "/r/src/lib/api.ts");
 
-    assert.equal(state.discoveredProcedures.length, 1, "discovered nested");
+    assert.equal(state.discoveredProcedures.length, 1, "discovered by directive");
     assert.equal(state.discoveredProcedures[0].exportName, "deeplyNested");
   });
 
-  test("path-based: src/utils/helpers.ts is NOT a server module (no discovery)", () => {
+  test("directive: missing → file passes through (no discovery)", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    // Even with a "use server" directive (the v1 marker), this file is
-    // not in src/server/** — the v2 transform refuses to discover it.
-    const code = `"use server";
+    // Even at the legacy path, with no directive the file passes through.
+    const code = `
 export async function shouldNotBeDiscovered() { return 1; }
 `;
     const handler =
       typeof (plugin.transform as any) === "function"
         ? (plugin.transform as any)
         : (plugin.transform as any).handler;
-    const result = handler.call(ctx, code, "/r/src/utils/helpers.ts");
+    const result = handler.call(ctx, code, "/r/src/server/api.ts");
 
     assert.equal(state.discoveredProcedures.length, 0, "nothing discovered");
     assert.equal(result, null, "transform passes through (returns null)");
   });
 
-  test("path-based: src/client/Component.tsx is NOT a server module", () => {
+  test("directive: legacy path without directive emits a migration warning", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
     const code = `
-export async function pretendingToBeServer() { return 1; }
-`;
-    const handler =
-      typeof (plugin.transform as any) === "function"
-        ? (plugin.transform as any)
-        : (plugin.transform as any).handler;
-    const result = handler.call(ctx, code, "/r/src/client/Component.tsx");
-
-    assert.equal(state.discoveredProcedures.length, 0);
-    assert.equal(result, null, "client component passes through");
-  });
-
-  test("path-based: ignores leading `\"use server\"` directive (no longer a marker)", () => {
-    // A file inside src/server/** with a redundant "use server" directive
-    // still works — the directive is just dead bytes the build strips.
-    // But a file OUTSIDE src/server/** with the directive is not picked up.
-    const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
-    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
-
-    const ctx = makeCtx("ssr");
-    const code = `"use server";
-export async function add(input) { return input; }
+export async function unmigrated() { return 1; }
 `;
     const handler =
       typeof (plugin.transform as any) === "function"
@@ -319,9 +295,82 @@ export async function add(input) { return input; }
         : (plugin.transform as any).handler;
     handler.call(ctx, code, "/r/src/server/api.ts");
 
-    // The procedure is still discovered because the file lives in
-    // src/server/** — but the directive itself was ignored as a marker.
-    assert.equal(state.discoveredProcedures.length, 1, "still discovered by path");
-    assert.equal(state.discoveredProcedures[0].exportName, "add");
+    // Friendly migration hint for ISS-02: the file lives at the
+    // legacy server-module path but the directive is missing.
+    assert.equal(ctx.warnings.length, 1, "one warning emitted");
+    assert.match(
+      ctx.warnings[0],
+      /missing the `"use server"` directive/,
+      "warning mentions the directive",
+    );
+    assert.match(
+      ctx.warnings[0],
+      /ISS-02/,
+      "warning references the issue id",
+    );
+  });
+
+  test("directive: each legacy-path file warns once even on repeat transforms (HMR)", () => {
+    const state = makeState();
+    const plugin = transformPlugin("/_rpc", state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const ctx = makeCtx("ssr");
+    const code = `export async function unmigrated() { return 1; }`;
+    const handler =
+      typeof (plugin.transform as any) === "function"
+        ? (plugin.transform as any)
+        : (plugin.transform as any).handler;
+    handler.call(ctx, code, "/r/src/server/api.ts");
+    handler.call(ctx, code, "/r/src/server/api.ts");
+    handler.call(ctx, code, "/r/src/server/api.ts");
+
+    assert.equal(ctx.warnings.length, 1, "warning de-duped per file path");
+  });
+
+  test("directive: NOT a directive when not at body[0] (semicolon, var first)", () => {
+    const state = makeState();
+    const plugin = transformPlugin("/_rpc", state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const ctx = makeCtx("ssr");
+    // "use server" appears, but it's NOT body[0] — it follows a var
+    // declaration. Per ECMAScript Directive Prologue rules, this is
+    // not a directive; the file is a regular client module.
+    const code = `
+const meaningful = true;
+"use server";
+export async function nope() { return 1; }
+`;
+    const handler =
+      typeof (plugin.transform as any) === "function"
+        ? (plugin.transform as any)
+        : (plugin.transform as any).handler;
+    const result = handler.call(ctx, code, "/r/src/lib/x.ts");
+
+    assert.equal(state.discoveredProcedures.length, 0, "not a server module");
+    assert.equal(result, null);
+  });
+
+  test("directive: leading line + block comments are tolerated before the directive", () => {
+    const state = makeState();
+    const plugin = transformPlugin("/_rpc", state);
+    (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
+
+    const ctx = makeCtx("ssr");
+    const code = `// File header comment
+/* multi-line block
+   comment */
+"use server";
+export async function ping() { return "pong"; }
+`;
+    const handler =
+      typeof (plugin.transform as any) === "function"
+        ? (plugin.transform as any)
+        : (plugin.transform as any).handler;
+    handler.call(ctx, code, "/r/src/api/x.ts");
+
+    assert.equal(state.discoveredProcedures.length, 1);
+    assert.equal(state.discoveredProcedures[0].exportName, "ping");
   });
 });

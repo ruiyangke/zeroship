@@ -44,27 +44,106 @@ export interface TransformState {
 // --- AST helpers (work with Rolldown's Oxc/ESTree AST) ---
 
 /**
- * Path-based server-module predicate.
+ * File-level `"use server"` directive detector.
  *
- * v2 dropped the `"use server"` directive: a file is a server module
- * iff its path matches one of:
+ * ISS-02: the path convention (`src/server.{ts,tsx,js,jsx}` single-file
+ * layout, anything under `src/server/**` directory layout) is GONE.
+ * It silently turned every exported function — including helpers
+ * reached via `export * from "./helpers"` — into a public, network-
+ * reachable RPC endpoint.
  *
- *   - `<root>/src/server.{ts,tsx,js,jsx}`     single-file flat layout
- *   - `<root>/src/server/**\/*.{ts,tsx,js,jsx}` directory layout
+ * The replacement: a file is a server module iff it opens with the
+ * ECMAScript Directive Prologue string-literal expression statement
+ * `"use server"`. Per the spec, only string-literal expression
+ * statements at the top of the body count as directives, BEFORE the
+ * first non-string-expression statement. Comments are stripped by the
+ * parser; we just look at body[0].
  *
- * Anything else — even a file that opens with `"use server"` — is
- * client code and the transform passes it through. The directive is
- * no longer a marker.
+ * Note this is the FILE-level marker only (Phase 1). The function-level
+ * `"use server"` directive (Phase 2) lets a single file mix client and
+ * server code; until then a file is wholly server or wholly client.
  */
-export function isServerModulePath(root: string, filePath: string): boolean {
+export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
+  const body = ast.body;
+  if (!Array.isArray(body) || body.length === 0) return false;
+  const first = body[0] as
+    | {
+        type?: string;
+        directive?: string;
+        expression?: { type?: string; value?: unknown; raw?: string };
+      }
+    | undefined;
+  if (!first || first.type !== "ExpressionStatement") return false;
+  // Acorn (used in tests + dev-mode parse) sets `directive` on the
+  // ExpressionStatement when the expression is a directive prologue
+  // string literal. Rolldown/Oxc may not set it; fall back to inspecting
+  // the expression's literal value. Both shapes are normalized here.
+  if (typeof first.directive === "string") {
+    return first.directive === "use server";
+  }
+  const expr = first.expression;
+  if (!expr) return false;
+  if (expr.type !== "Literal" && expr.type !== "StringLiteral") return false;
+  return expr.value === "use server";
+}
+
+/**
+ * Path predicate for the legacy `src/server.{ts,tsx,js,jsx}` /
+ * `src/server/**` shape. The path convention itself is dead (ISS-02),
+ * but the predicate stays around so the transform can emit a friendly
+ * "you probably want a `"use server"` directive at the top of this
+ * file" hint when a developer trips over the breaking change.
+ */
+export function looksLikeLegacyServerPath(root: string, filePath: string): boolean {
   const rel = relative(root, filePath).replace(/\\/g, "/");
-  // Reject paths that escape the project root (relative starts with `..`).
   if (rel.startsWith("..")) return false;
-  // Single-file layout: src/server.{ts,tsx,js,jsx}.
   if (/^src\/server\.(ts|tsx|js|jsx)$/.test(rel)) return true;
-  // Directory layout: anything under src/server/.
   if (/^src\/server\//.test(rel) && /\.(ts|tsx|js|jsx)$/.test(rel)) return true;
   return false;
+}
+
+/**
+ * Cheap textual pre-filter for the `"use server"` directive. Skips
+ * the optional BOM/shebang, leading whitespace, and line/block
+ * comments, then checks whether the very next token is a string
+ * literal whose value is `use server`. This avoids the AST parse cost
+ * on the >99% of source files that don't open with the directive —
+ * `detectFileLevelUseServer()` is the source of truth.
+ *
+ * False positives (returns true when the AST detector would say no)
+ * are harmless: the parse runs and the AST detector decides
+ * authoritatively. False negatives would silently drop server
+ * modules; the walker below is conservative enough to handle every
+ * shape the parser tolerates at the directive position.
+ */
+function quickHasUseServerDirective(code: string): boolean {
+  let i = 0;
+  if (code.charCodeAt(0) === 0xfeff) i = 1;
+  if (code.startsWith("#!", i)) {
+    const nl = code.indexOf("\n", i);
+    i = nl < 0 ? code.length : nl + 1;
+  }
+  while (i < code.length) {
+    const c = code[i];
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      i++;
+      continue;
+    }
+    if (c === "/" && code[i + 1] === "/") {
+      const nl = code.indexOf("\n", i + 2);
+      i = nl < 0 ? code.length : nl + 1;
+      continue;
+    }
+    if (c === "/" && code[i + 1] === "*") {
+      const end = code.indexOf("*/", i + 2);
+      i = end < 0 ? code.length : end + 2;
+      continue;
+    }
+    break;
+  }
+  if (i >= code.length) return false;
+  const head = code.slice(i, i + 12);
+  return head === '"use server"' || head === "'use server'";
 }
 
 /** Shared runtime: emitted once per client bundle. Speaks the spec wire
@@ -332,6 +411,9 @@ function clientStreamStub(name: string, methodName: string): string {
 export function transformPlugin(_rpcEndpoint: string, state: TransformState): Plugin {
   const { serverFunctionMap } = state;
   let root = "";
+  // Track legacy-server-path files we've already warned about so HMR
+  // / repeat transforms don't spam the console.
+  const warnedLegacyPaths = new Set<string>();
 
   return {
     name: "zeroship:transform",
@@ -355,22 +437,60 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         const envName = this.environment?.name;
         const isServerEnv = envName === "zeroship" || envName === "ssr";
 
-        // 1. Server-module gate — purely path-based.
-        //    Files at `src/server.{ts,tsx,js,jsx}` or anywhere under
-        //    `src/server/` are server modules; everything else is client
-        //    code and the transform passes it through. The legacy
-        //    `"use server"` directive is no longer accepted.
-        if (!isServerModulePath(root, id)) return null;
+        // 1. Cheap textual pre-filter — skip files that obviously can't
+        //    be a server module without parsing. The directive must be
+        //    the first non-trivial token after the BOM / whitespace /
+        //    comments. This avoids the AST parse cost on the >99% of
+        //    source files that don't open with `"use server"`.
+        if (!quickHasUseServerDirective(code)) {
+          // Friendly hint for ISS-02 migration: a file at the legacy
+          // `src/server.{ts,...}` / `src/server/**` shape that's
+          // missing the directive is almost certainly an unmigrated
+          // server module. Emit one warning per file path per dev
+          // session so HMR doesn't spam.
+          if (
+            looksLikeLegacyServerPath(root, id) &&
+            !warnedLegacyPaths.has(id)
+          ) {
+            warnedLegacyPaths.add(id);
+            const rel = relative(root, id).replace(/\\/g, "/");
+            const msg =
+              `[zeroship:transform] ${rel} sits at the legacy server-module path ` +
+              `but is missing the \`"use server"\` directive. ` +
+              `Path-based discovery was dropped (see ISS-02): add ` +
+              `\`"use server";\` as the first line, then wrap each RPC ` +
+              `export with procedure()/query()/mutation()/stream() ` +
+              `from \`@zeroship/server\`. Untouched files will not be ` +
+              `published as RPC endpoints.`;
+            // pluginContext.warn is the structured Vite hook (carries
+            // the file id, surfaces in the dev overlay). Fall back to
+            // console.warn when running outside Vite (the test harness).
+            if (typeof this.warn === "function") this.warn(msg);
+            else console.warn(msg);
+          }
+          return null;
+        }
 
         // 2. Parse AST with Rolldown's built-in parser.
         const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
         const ast = this.parse(code, { lang: isTsx ? "tsx" : "ts" });
 
-        // 3. Find server functions: every async-or-not function /
-        //    arrow / generator export at module scope. Because the
-        //    file is wholly server-side (path convention), any
-        //    function export is a server function — there is no
-        //    "mixed" file shape in v2.
+        // 3. Server-module gate — file-level `"use server"` directive
+        //    (ISS-02). The path convention is gone; only this directive
+        //    opts a file into RPC discovery.
+        if (!detectFileLevelUseServer(ast)) return null;
+
+        // 4. Find server functions: every async-or-not function /
+        //    arrow / generator export at module scope. The file
+        //    declared `"use server"` at the top — every code path
+        //    below it is server-only — so any function export is a
+        //    server function.
+        //
+        //    NOTE: this stage still implements the legacy "every
+        //    export is an RPC" semantics. The follow-up commit
+        //    (wrapper-marker detection) narrows this to "only exports
+        //    wrapped in `procedure()`/`query()`/`mutation()`/`stream()`/
+        //    `subscription()` are RPCs", closing ISS-02 fully.
         interface ServerFn {
           name: string;
           node: any;
