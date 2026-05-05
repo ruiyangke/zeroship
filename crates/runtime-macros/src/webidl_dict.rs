@@ -217,6 +217,27 @@ fn gen_field_extraction(field: &Field) -> syn::Result<TokenStream2> {
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(field, "tuple struct fields not supported"))?;
 
+    // Reject reference-typed fields at derive time (H16). The
+    // extraction codegen reads each member as an OWNED value
+    // (`<T as WebIdlConvertible>::from_v8` returns `T`, never `&T`),
+    // and the final struct-build line `Self { #id, ... }` moves the
+    // owned value into the field — which fails type-check for a
+    // `&str` / `&[u8]` field with a confusing "expected &str, found
+    // String" error pointing at code the user did not write.
+    //
+    // Better: surface a clear compile error AT the field span naming
+    // the supported owned-type alternatives. A future extension could
+    // accept `&str` via a captured `'a` that ties into the dict's own
+    // generics, but no current consumer needs that and the cost is a
+    // genericised `from_v8` signature that pollutes call sites.
+    if matches!(field.ty, syn::Type::Reference(_)) {
+        return Err(syn::Error::new_spanned(
+            field,
+            "WebIdlDict fields cannot be reference types — use owned types like \
+             String, Vec<u8>, ByteString, or USVString",
+        ));
+    }
+
     // Default WebIDL name = field ident verbatim. Override via
     // `#[webidl_name = "..."]`. Useful when the JS-side name differs
     // from a Rust keyword or convention (e.g. JS `type` → Rust
