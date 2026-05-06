@@ -1,9 +1,11 @@
 //! `TransformStream` — spec §5.2.
 //!
-//! Hand-rolled rather than macro-driven, same reasoning as `readable.rs` /
-//! `writable.rs`: methods need `args.this()` for receiver checks against
-//! the wrapper's V8 identity, and our spec algorithms key off the priv-sym
-//! storage on the wrapper.
+//! Constructor migrated onto `#[v8_class]` + `#[v8_constructor(post_init = ...)]`
+//! per MAC-02. Per-instance getters (`readable` / `writable`) and the
+//! cross-module receiver checks still key off the priv-sym brand
+//! (`TS_BRAND`) because callers across `algorithms.rs` /
+//! `transform_controller.rs` hold raw `Local<Object>` and read the brand
+//! without going through the macro-cached prototype.
 //!
 //! IDL surface (§5.2):
 //! ```webidl
@@ -33,6 +35,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
+use zeroship_runtime_macros::{v8_class, v8_constructor};
+
+use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};
 use crate::streams::readable_default_controller::SizeAlgorithm;
 use crate::streams::slots;
@@ -44,6 +49,19 @@ const TS_BRAND: &str = "[[ts.brand]]";
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+/// Setup args stashed by the constructor body so `after_install` can
+/// finish wiring once the box is reachable via internal field 0. None
+/// for streams built via `from_native_transformer` (the Rust-side helper
+/// runs its own controller setup directly).
+#[allow(missing_debug_implementations)]
+struct PendingTransformSetup {
+    transformer: v8::Global<v8::Value>,
+    writable_hwm: f64,
+    writable_size: SizeAlgorithm,
+    readable_hwm: f64,
+    readable_size: SizeAlgorithm,
+}
 
 /// `Box<TSStreamState>` lives in the wrapper's V8 internal field 0.
 /// Per D-2 / §XV.5: this struct holds ONLY pure-Rust slots (the
@@ -62,18 +80,153 @@ pub struct TSStreamState {
     /// it for JS identity.
     pub bp_change_promise: RefCell<Option<v8::Global<v8::Promise>>>,
     pub bp_change_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
+    /// MAC-02 args plumbing — populated by the constructor body, consumed
+    /// (`take()`) by `after_install`. None on the `from_native_transformer`
+    /// path which wires the controller directly without the post_init hook.
+    pending_setup: RefCell<Option<PendingTransformSetup>>,
     /// D-18 budget guard.
     _budget: StreamBudgetGuard,
 }
 
 impl TSStreamState {
-    pub fn new(budget: StreamBudgetGuard) -> Self {
+    /// Allocate the boxed state with no pending setup — used by
+    /// `from_native_transformer` which drives controller setup directly
+    /// rather than through the macro's post_init hook.
+    fn new_for_internal(budget: StreamBudgetGuard) -> Self {
         Self {
             backpressure: Cell::new(false),
             bp_change_promise: RefCell::new(None),
             bp_change_resolver: RefCell::new(None),
+            pending_setup: RefCell::new(None),
             _budget: budget,
         }
+    }
+}
+
+#[v8_class]
+#[v8_to_string_tag = "TransformStream"]
+impl TSStreamState {
+    /// `new TransformStream(transformer?, writableStrategy?, readableStrategy?)` —
+    /// spec §5.2.4.
+    ///
+    /// Body covers the pre-box-install half:
+    ///   1. Allocate budget.
+    ///   2. Parse writableStrategy (default HWM = 1.0).
+    ///   3. Parse readableStrategy (default HWM = 0.0).
+    ///   4. Reject `transformer.readableType` / `writableType`
+    ///      (RangeError per §5.2.4 step 7+8).
+    ///
+    /// `after_install` runs the post-box-install half: brand priv-sym,
+    /// start_resolver, controller setup. Splitting at the V8-wrapper
+    /// boundary lets the macro install the Box first; only after that
+    /// can `set_up_transform_stream_default_controller_from_transformer`
+    /// drive `with_ts_state`-keyed algorithms.
+    #[v8_constructor(post_init = "after_install")]
+    fn new(
+        scope: &mut v8::PinScope,
+        transformer: v8::Local<v8::Value>,
+        writable_strategy: v8::Local<v8::Value>,
+        readable_strategy: v8::Local<v8::Value>,
+    ) -> Result<Self, OpError> {
+        // Budget guard first — limits per-isolate stream count (D-18).
+        let budget = try_alloc_stream().map_err(OpError::range_error)?;
+
+        // Spec §5.2.4 ordering: strategies converted before transformer
+        // dictionary lookup (writableStrategy default HWM = 1, readable
+        // default HWM = 0). `parse_strategy_local` returns OpError; user
+        // exceptions in size/highWaterMark accessors land as
+        // OpError::JsValue and the macro's throw arms re-throw verbatim.
+        let (writable_hwm, writable_size) =
+            crate::streams::readable::parse_strategy_local(scope, writable_strategy, 1.0)?;
+        let (readable_hwm, readable_size) =
+            crate::streams::readable::parse_strategy_local(scope, readable_strategy, 0.0)?;
+
+        // Spec §5.2.4 step 7+8: reject `readableType` / `writableType`.
+        // Use a tc_scope so a throwing user getter on the transformer
+        // dict surfaces as OpError::JsValue (verbatim re-throw) rather
+        // than a swallowed pending exception.
+        if let Ok(t_obj) = v8::Local::<v8::Object>::try_from(transformer) {
+            for key_name in ["readableType", "writableType"] {
+                v8::tc_scope!(let tc, scope);
+                let key = v8::String::new(tc, key_name).unwrap();
+                let v = t_obj.get(tc, key.into());
+                if tc.has_caught() {
+                    let exc = tc.exception().unwrap();
+                    return Err(OpError::js_value(
+                        tc,
+                        exc,
+                        format!("transformer.{key_name} getter threw"),
+                    ));
+                }
+                let Some(v) = v else {
+                    return Err(OpError::error(format!(
+                        "error reading transformer.{key_name}"
+                    )));
+                };
+                if !v.is_undefined() {
+                    return Err(OpError::range_error(format!(
+                        "TransformStream: transformer.{key_name} is reserved"
+                    )));
+                }
+            }
+        }
+
+        let transformer_g = v8::Global::new(scope, transformer);
+        Ok(Self {
+            backpressure: Cell::new(false),
+            bp_change_promise: RefCell::new(None),
+            bp_change_resolver: RefCell::new(None),
+            pending_setup: RefCell::new(Some(PendingTransformSetup {
+                transformer: transformer_g,
+                writable_hwm,
+                writable_size,
+                readable_hwm,
+                readable_size,
+            })),
+            _budget: budget,
+        })
+    }
+
+    /// Post_init: brand priv-sym, start_resolver alloc, controller setup
+    /// from the transformer dict. Runs AFTER the macro installed the Box
+    /// in field 0, so subsequent `with_ts_state` calls (driven by
+    /// `set_up_transform_stream_default_controller_from_transformer` →
+    /// `initialize_transform_stream` → `transform_stream_set_backpressure`)
+    /// can recover the boxed state.
+    ///
+    /// The TS_BRAND priv-sym MUST be set before any `with_ts_state` call
+    /// since `with_ts_state` brand-checks first (`is_transform_stream`).
+    /// Without the brand, the controller-setup path's backpressure init
+    /// would silently no-op.
+    pub(crate) fn after_install(
+        scope: &mut v8::PinScope,
+        this: v8::Local<v8::Object>,
+    ) -> Result<(), OpError> {
+        // Brand for cross-module `is_transform_stream` checks.
+        let tag = slots::private_sym(scope, TS_BRAND);
+        let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
+        this.set_private(scope, tag, true_v);
+
+        let setup = with_ts_state(scope, this, |s| s.pending_setup.borrow_mut().take())
+            .ok_or_else(|| OpError::error("after_install: with_ts_state returned None"))?
+            .ok_or_else(|| OpError::error("after_install: missing pending_setup"))?;
+        let transformer = v8::Local::new(scope, &setup.transformer);
+
+        // Owned by the post_init so a synchronous user `start()` throw
+        // surfaces as OpError::JsValue from the helper — the macro's
+        // throw arms re-throw verbatim, no sentinel-string dance.
+        let start_resolver = v8::PromiseResolver::new(scope)
+            .ok_or_else(|| OpError::error("PromiseResolver::new failed"))?;
+        crate::streams::transform_controller::set_up_transform_stream_default_controller_from_transformer(
+            scope,
+            this,
+            transformer,
+            start_resolver,
+            setup.writable_hwm,
+            setup.writable_size,
+            setup.readable_hwm,
+            setup.readable_size,
+        )
     }
 }
 
@@ -184,24 +337,26 @@ pub fn from_native_transformer<'s, T: NativeTransformer + 'static>(
 }
 
 /// Construct the bare `TransformStream` JS wrapper — no controller wired,
-/// no halves attached. Used by `from_native_transformer` and the user-visible
-/// constructor.
+/// no halves attached. Used by `from_native_transformer`. The macro's
+/// post_init path mints its own wrapper through the constructor callback;
+/// this helper is the parallel manual mint for the Rust-side path.
 fn build_stream_wrapper<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::Object> {
-    let tmpl = stream_class_template(scope);
+    let tmpl = TSStreamState::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let stream_obj = inst_tmpl.new_instance(scope).unwrap();
 
     let budget = try_alloc_stream().expect("from_native_transformer: budget exceeded");
-    let inst = TSStreamState::new(budget);
+    let inst = TSStreamState::new_for_internal(budget);
     let boxed = Box::new(inst);
     let raw_ptr = Box::into_raw(boxed);
     let raw_addr = raw_ptr as usize;
     let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
     stream_obj.set_internal_field(0, ext.into());
 
-    // Brand priv-sym for receiver checks.
+    // Brand priv-sym for receiver checks (keeps cross-module
+    // `is_transform_stream` happy without a separate macro brand check).
     let tag = slots::private_sym(scope, TS_BRAND);
     let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
     stream_obj.set_private(scope, tag, true_v);
@@ -224,180 +379,13 @@ fn build_stream_wrapper<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// Class template construction
-// ---------------------------------------------------------------------------
-
-fn stream_class_template<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-) -> v8::Local<'s, v8::FunctionTemplate> {
-    let ctor_tmpl = v8::FunctionTemplate::new(scope, constructor_callback);
-    let class_name = v8::String::new(scope, "TransformStream").unwrap();
-    ctor_tmpl.set_class_name(class_name);
-    ctor_tmpl
-        .instance_template(scope)
-        .set_internal_field_count(1);
-
-    let proto = ctor_tmpl.prototype_template(scope);
-
-    // readable getter (§5.2.5.1)
-    {
-        let key = v8::String::new(scope, "readable").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, readable_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-
-    // writable getter (§5.2.5.2)
-    {
-        let key = v8::String::new(scope, "writable").unwrap();
-        let getter_tmpl = v8::FunctionTemplate::new(scope, writable_getter_callback);
-        proto.set_accessor_property(
-            key.into(),
-            Some(getter_tmpl.into()),
-            None,
-            v8::PropertyAttribute::NONE,
-        );
-    }
-
-    let tag_sym = v8::Symbol::get_to_string_tag(scope);
-    let tag_value = v8::String::new(scope, "TransformStream").unwrap();
-    proto.set_with_attr(
-        tag_sym.into(),
-        tag_value.into(),
-        v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_ENUM,
-    );
-
-    ctor_tmpl
-}
-
-// ---------------------------------------------------------------------------
-// constructor — `new TransformStream(transformer?, writableStrategy?, readableStrategy?)`
+// `readable` getter (§5.2.5.1) and `writable` getter (§5.2.5.2)
 // ---------------------------------------------------------------------------
 //
-// Per spec §5.2.4:
-// 1. If transformer is missing, default to {}.
-// 2. Convert writableStrategy with default {} → ExtractHWM=1, ExtractSize=DefaultCount.
-// 3. Convert readableStrategy with default {} → ExtractHWM=0, ExtractSize=DefaultCount.
-// 4. Throw RangeError if transformer.readableType OR transformer.writableType
-//    is set (those slots are reserved for byte streams; not used in v1).
-// 5. Allocate a startPromise + resolver. Pass the promise to Initialize
-//    (so the readable/writable halves can wait on start), pass the resolver
-//    to the TS controller setup so its [[startAlgorithm]]'s outcome resolves it.
-// 6. Run SetUpTransformStreamDefaultControllerFromTransformer(stream,
-//    transformer).
-
-fn constructor_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    if !args.is_construct_call() {
-        let msg = v8::String::new(scope, "TransformStream: must be called with 'new'").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-
-    let stream_obj = args.this();
-    let transformer = args.get(0);
-    let writable_strategy = args.get(1);
-    let readable_strategy = args.get(2);
-
-    // Per spec: writableStrategy default HWM = 1.
-    let (writable_hwm, writable_size) =
-        match crate::streams::readable::parse_strategy_local(scope, writable_strategy, 1.0) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::streams::readable::throw_op_error(scope, &e);
-                return;
-            }
-        };
-    // Per spec: readableStrategy default HWM = 0.
-    let (readable_hwm, readable_size) =
-        match crate::streams::readable::parse_strategy_local(scope, readable_strategy, 0.0) {
-            Ok(v) => v,
-            Err(e) => {
-                crate::streams::readable::throw_op_error(scope, &e);
-                return;
-            }
-        };
-
-    // Reject readableType / writableType per spec §5.2.4 step 3 + 4.
-    if let Ok(t_obj) = v8::Local::<v8::Object>::try_from(transformer) {
-        for key_name in ["readableType", "writableType"] {
-            let key = v8::String::new(scope, key_name).unwrap();
-            let v = match t_obj.get(scope, key.into()) {
-                Some(v) => v,
-                None => return,
-            };
-            if !v.is_undefined() {
-                let msg = format!("TransformStream: transformer.{key_name} is reserved");
-                let v8_msg = v8::String::new(scope, &msg).unwrap();
-                let exc = v8::Exception::range_error(scope, v8_msg);
-                scope.throw_exception(exc);
-                return;
-            }
-        }
-    }
-
-    // Allocate budget + Box<TSStreamState>.
-    let budget = match try_alloc_stream() {
-        Ok(g) => g,
-        Err(m) => {
-            let msg = v8::String::new(scope, m).unwrap();
-            let exc = v8::Exception::range_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    let inst = TSStreamState::new(budget);
-    let boxed = Box::new(inst);
-    let raw_ptr = Box::into_raw(boxed);
-    let raw_addr = raw_ptr as usize;
-    let ext = v8::External::new(scope, raw_ptr as *mut std::ffi::c_void);
-    stream_obj.set_internal_field(0, ext.into());
-
-    let tag = slots::private_sym(scope, TS_BRAND);
-    let true_v: v8::Local<v8::Value> = v8::Boolean::new(scope, true).into();
-    stream_obj.set_private(scope, tag, true_v);
-
-    let weak = v8::Weak::with_guaranteed_finalizer(
-        scope,
-        stream_obj,
-        Box::new(move || unsafe {
-            drop(Box::from_raw(raw_addr as *mut TSStreamState));
-        }),
-    );
-    std::mem::forget(weak);
-
-    // The constructor owns the start_resolver so the start-throw path can
-    // surface the user's exception verbatim through OpError::JsValue —
-    // unblocking #200 (TransformStream macro migration). The helper rejects
-    // it on a synchronous throw before returning the captured exception.
-    let start_resolver = v8::PromiseResolver::new(scope).unwrap();
-    if let Err(e) =
-        crate::streams::transform_controller::set_up_transform_stream_default_controller_from_transformer(
-            scope,
-            stream_obj,
-            transformer,
-            start_resolver,
-            writable_hwm,
-            writable_size,
-            readable_hwm,
-            readable_size,
-        )
-    {
-        crate::streams::readable::throw_op_error(scope, &e);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `readable` getter (§5.2.5.1)
-// ---------------------------------------------------------------------------
+// Stay raw FunctionCallbacks — same rationale as the readers/writer (they
+// need direct `args.this()` access for priv-sym reads, which the macro's
+// `&self`-only getter shape doesn't surface). Migrating these onto
+// `#[v8_getter]` is part of the deferred per-method refactor.
 
 fn readable_getter_callback(
     scope: &mut v8::PinScope,
@@ -413,10 +401,6 @@ fn readable_getter_callback(
     }
     rv.set(readable_slot(scope, this));
 }
-
-// ---------------------------------------------------------------------------
-// `writable` getter (§5.2.5.2)
-// ---------------------------------------------------------------------------
 
 fn writable_getter_callback(
     scope: &mut v8::PinScope,
@@ -903,8 +887,38 @@ pub fn install_native_transform_stream(
     scope: &mut v8::PinScope,
     global: v8::Local<v8::Object>,
 ) {
-    let stream_tmpl = stream_class_template(scope);
-    let stream_class_fn = stream_tmpl.get_function(scope).unwrap();
+    // Macro-emitted FunctionTemplate carries the constructor + must-new
+    // prologue + Symbol.toStringTag. We patch in the readable / writable
+    // getters on the prototype because they stay raw FunctionCallbacks
+    // (need direct args.this() access for priv-sym reads). Same shape as
+    // the readers/writer install functions.
+    let tmpl = TSStreamState::install(scope);
+    let class_fn = tmpl.get_function(scope).unwrap();
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
+    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
+
+    install_proto_getter(scope, proto, "readable", readable_getter_callback);
+    install_proto_getter(scope, proto, "writable", writable_getter_callback);
+
     let key = v8::String::new(scope, "TransformStream").unwrap();
-    global.set(scope, key.into(), stream_class_fn.into());
+    global.set(scope, key.into(), class_fn.into());
+}
+
+fn install_proto_getter(
+    scope: &mut v8::PinScope,
+    proto: v8::Local<v8::Object>,
+    name: &str,
+    cb: impl v8::MapFnTo<v8::FunctionCallback>,
+) {
+    let key = v8::String::new(scope, name).unwrap();
+    let getter_tmpl = v8::FunctionTemplate::new(scope, cb);
+    let getter_fn = getter_tmpl.get_function(scope).unwrap();
+    let mut desc = v8::PropertyDescriptor::new_from_get_set(
+        getter_fn.into(),
+        v8::undefined(scope).into(),
+    );
+    desc.set_configurable(true);
+    desc.set_enumerable(true);
+    proto.define_property(scope, key.into(), &desc);
 }
