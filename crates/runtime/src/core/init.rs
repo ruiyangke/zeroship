@@ -152,23 +152,6 @@ function getRequestContext() {
 export { env, waitUntil, getRequest, getRequestContext };
 "#;
 
-/// Internal bootstrap-only module. NOT part of the stable user-facing API —
-/// only the runtime-synthesized `index.js` bootstrap imports from here. Kept
-/// in its own specifier so `import { __bindRequest } from "zeroship"` fails
-/// (users shouldn't poke at request-context plumbing).
-pub(crate) const ZEROSHIP_INTERNAL_MODULE_JS: &str = r#"
-// Bootstrap-only — NOT stable API. Users should not import this.
-export function __bindRequest(ctx, request) {
-    if (ctx == null) {
-        __zs_bind_request_ctx(null);
-        return;
-    }
-    // Attach the Request object to ctx so getRequest() can return it.
-    ctx.__zs_request = request;
-    __zs_bind_request_ctx(ctx);
-}
-"#;
-
 /// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
 /// wrapping the user's original entry (renamed internally to `__user__.js`).
 ///
@@ -202,7 +185,6 @@ export function __bindRequest(ctx, request) {
 /// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
 pub(crate) const BOOTSTRAP_JS: &str = r##"
 import * as user from "./__user__.js";
-import { __bindRequest } from "zeroship/internal";
 
 // Vercel AI-SDK Data Stream Protocol encoder.
 //
@@ -800,13 +782,12 @@ pub fn load_polyfills_and_modules(
     //   entries[0] = "index.js"            — BOOTSTRAP_JS (the new entry)
     //   entries[1] = "__user__.js"         — user's original entry (source preserved)
     //   entries[2] = "zeroship"            — env / waitUntil / getRequest facade
-    //   entries[3] = "zeroship/internal"   — bootstrap-only __bindRequest
-    //   entries[4..] = user's other modules (unchanged specifiers)
+    //   entries[3..] = user's other modules (unchanged specifiers)
     //
-    // The load_modules walker compiles BOOTSTRAP_JS first, discovers its two
-    // imports (`./__user__.js` + `zeroship/internal`) and transitively the
-    // user's `zeroship` imports, then instantiates + evaluates the bootstrap.
-    // The returned namespace is the bootstrap's, so ensure_initialized reads
+    // The load_modules walker compiles BOOTSTRAP_JS first, discovers its
+    // import (`./__user__.js`) and transitively the user's `zeroship`
+    // imports, then instantiates + evaluates the bootstrap. The returned
+    // namespace is the bootstrap's, so ensure_initialized reads
     // `default.fetch` off the bootstrap (not the user module) — exactly the
     // indirection we want.
     let wrapped = wrap_with_bootstrap(modules);
@@ -826,8 +807,8 @@ pub fn load_polyfills_and_modules(
 /// Rewrite the user's module list so the bootstrap is the new entry.
 ///
 /// The user's declared first module is renamed to `__user__.js`; a synthetic
-/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry, plus the two
-/// zeroship modules (`zeroship` and `zeroship/internal`).
+/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry, plus the
+/// `zeroship` facade module.
 ///
 /// **Collision**: the compiler always emits `index.js` as the user's entry,
 /// so a user entry actually named `__user__.js` is a bug if it happens. A
@@ -846,7 +827,7 @@ fn wrap_with_bootstrap(
         return Vec::new();
     }
 
-    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
+    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 2);
 
     // entry 0: bootstrap becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
@@ -867,16 +848,12 @@ fn wrap_with_bootstrap(
         source: user_entry.source.clone(),
     });
 
-    // entries 2-3: the zeroship facade + internal modules. Live in the
-    // module graph alongside the user's modules so `import ... from "zeroship"`
+    // entry 2: the zeroship facade module. Lives in the module graph
+    // alongside the user's modules so `import ... from "zeroship"`
     // resolves via the normal lookup path.
     out.push(ModuleEntry {
         specifier: "zeroship".into(),
         source: ZEROSHIP_MODULE_JS.into(),
-    });
-    out.push(ModuleEntry {
-        specifier: "zeroship/internal".into(),
-        source: ZEROSHIP_INTERNAL_MODULE_JS.into(),
     });
 
     // Remaining user modules — pass through unchanged. Their declared
