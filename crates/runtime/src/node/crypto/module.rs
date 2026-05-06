@@ -1,34 +1,119 @@
-//! Synthetic `node:crypto` ESM module — install path.
+//! Native `node:crypto` ESM module.
 //!
 //! Per `docs/proposals/node-crypto-native.md` §XI (D-N26).
 //!
-//! The single Rust↔JS boundary is `globalThis.__zeroship_node_crypto`
-//! — a plain object whose properties are the named exports. The
-//! Vite-side synthetic module (defined in
-//! `sdks/vite-plugin/src/node-compat.ts`) imports this object and
-//! re-exports each property as a named ESM export. So:
-//!
-//! ```javascript
-//! import { createHash, randomUUID } from "node:crypto";
-//! ```
-//!
-//! resolves to:
-//!
-//! ```javascript
-//! const { createHash, randomUUID } = globalThis.__zeroship_node_crypto;
-//! ```
-//!
-//! at the module-evaluation time of "node:crypto".
+//! The runtime resolves `import { createHash } from "node:crypto"` to a
+//! V8 `SyntheticModule` whose exports are populated lazily by
+//! [`evaluate`] on first import. Pre-D-N26 this went through a
+//! `globalThis.__zeroship_node_crypto` boundary object that the
+//! Vite-side virtual module re-exported; native synthetic modules
+//! eliminate the indirection.
 
 #![allow(unsafe_code)]
 
 use super::{cipher, hash, hmac, kdf, key_object, keygen, misc, random, sign_verify};
 
-/// Install `globalThis.__zeroship_node_crypto`. Called from
-/// `core/init.rs::setup_globals` alongside the other native installs.
-pub fn install_globals<'s>(
+/// Mint a synthetic ESM record for `node:crypto`. Called by the module
+/// loader's `resolve_native` when user code imports the specifier.
+pub fn synthetic_module<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<v8::Object>,
+) -> v8::Local<'s, v8::Module> {
+    let module_name = v8::String::new(scope, "node:crypto").unwrap();
+    let names = export_names();
+    let export_strings: Vec<v8::Local<v8::String>> = names
+        .iter()
+        .map(|n| v8::String::new(scope, n).unwrap())
+        .collect();
+    v8::Module::create_synthetic_module(scope, module_name, &export_strings, evaluate)
+}
+
+/// SyntheticModule evaluation — installs each export on the module.
+fn evaluate<'s>(
+    context: v8::Local<'s, v8::Context>,
+    module: v8::Local<'s, v8::Module>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    v8::callback_scope!(unsafe scope, context);
+
+    // Build a namespace-shaped Object once, then mirror its properties
+    // into both the module's named exports and the `default` export.
+    // Using an object as the staging area keeps the per-callback wire
+    // compatible with the previous `__zeroship_node_crypto` shape.
+    let ns = v8::Object::new(scope);
+    populate(scope, ns);
+
+    for name in export_names() {
+        if *name == "default" { continue; }
+        let key = v8::String::new(scope, name).unwrap();
+        let val = ns.get(scope, key.into()).unwrap_or_else(|| v8::undefined(scope).into());
+        let _ = module.set_synthetic_module_export(scope, key, val);
+    }
+
+    let default_key = v8::String::new(scope, "default").unwrap();
+    let _ = module.set_synthetic_module_export(scope, default_key, ns.into());
+
+    Some(v8::undefined(scope).into())
+}
+
+/// Names exported by `node:crypto`. The order matches the legacy
+/// `__zeroship_node_crypto` install order.
+fn export_names() -> &'static [&'static str] {
+    &[
+        "createHash",
+        "createHmac",
+        "randomBytes",
+        "randomFillSync",
+        "randomFill",
+        "randomInt",
+        "randomUUID",
+        "getRandomValues",
+        "pbkdf2Sync",
+        "pbkdf2",
+        "hkdfSync",
+        "hkdf",
+        "scryptSync",
+        "scrypt",
+        "createSecretKey",
+        "createPublicKey",
+        "createPrivateKey",
+        "KeyObject",
+        "PublicKeyObject",
+        "PrivateKeyObject",
+        "SecretKeyObject",
+        "createSign",
+        "createVerify",
+        "sign",
+        "verify",
+        "publicEncrypt",
+        "privateDecrypt",
+        "createCipheriv",
+        "createDecipheriv",
+        "createCipher",
+        "createDecipher",
+        "getCipherInfo",
+        "generateKeySync",
+        "generateKeyPairSync",
+        "timingSafeEqual",
+        "getHashes",
+        "getCiphers",
+        "getCurves",
+        "getFips",
+        "setFips",
+        "secureHeapUsed",
+        "webcrypto",
+        "subtle",
+        "fips",
+        "constants",
+        "default",
+    ]
+}
+
+/// Populate `obj` with the full `node:crypto` surface — factories,
+/// classes, WebCrypto bridge, and constants. Shared between the
+/// SyntheticModule eval path (via [`evaluate`]) and any direct-global
+/// call site (currently the `crypto_node` test harness).
+pub fn populate<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<v8::Object>,
 ) {
     // First install the Hash + Hmac classes so JS can `instanceof` them.
     let _hash_class = hash::Hash::install(scope);
@@ -40,9 +125,6 @@ pub fn install_globals<'s>(
     let _sign_class = sign_verify::Sign::install(scope);
     let _verify_class = sign_verify::Verify::install(scope);
     let _cipher_class = cipher::Cipher::install(scope);
-
-    // Build the boundary object.
-    let obj = v8::Object::new(scope);
 
     // -- Hash + Hmac factories --
     set_fn(scope, obj, "createHash", hash::create_hash_callback);
@@ -129,13 +211,11 @@ pub fn install_globals<'s>(
 
     // -- WebCrypto bridge (D-N16) --
     // `webcrypto` and `subtle` need object identity with globalThis.crypto.
-    // Read globalThis.crypto and assign property references.
+    let global = scope.get_current_context().global(scope);
     let crypto_key = v8::String::new(scope, "crypto").unwrap();
     if let Some(crypto_val) = global.get(scope, crypto_key.into()) {
         let webcrypto_key = v8::String::new(scope, "webcrypto").unwrap();
         obj.set(scope, webcrypto_key.into(), crypto_val);
-        // crypto.subtle (read once at install time; same identity
-        // because Crypto's [SameObject] caching).
         if let Ok(crypto_obj) = v8::Local::<v8::Object>::try_from(crypto_val) {
             let subtle_key = v8::String::new(scope, "subtle").unwrap();
             if let Some(subtle_val) = crypto_obj.get(scope, subtle_key.into()) {
@@ -167,10 +247,6 @@ pub fn install_globals<'s>(
     }
     let constants_k = v8::String::new(scope, "constants").unwrap();
     obj.set(scope, constants_k.into(), constants.into());
-
-    // Install the boundary object on globalThis.
-    let key = v8::String::new(scope, "__zeroship_node_crypto").unwrap();
-    global.set(scope, key.into(), obj.into());
 }
 
 fn set_fn<'s>(

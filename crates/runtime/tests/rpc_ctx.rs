@@ -274,8 +274,8 @@ fn user_async_local_storage_does_not_collide() {
     // owner expects — no leakage in either direction.
     let r = dispatch(
         m(r#"
+        import { AsyncLocalStorage } from "node:async_hooks";
         export function test() {
-            const AsyncLocalStorage = globalThis.__zsAsyncHooks.AsyncLocalStorage;
             const platformCtx = __zeroshipGetRpcCtx();
             const userAls = new AsyncLocalStorage();
             return userAls.run({ user: "store" }, () => {
