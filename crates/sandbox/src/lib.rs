@@ -376,6 +376,36 @@ impl AppState {
         // the cluster goes unreachable.
         start_health_loop(state.clone());
 
+        // Phase-2 HA: register THIS controller's host row before
+        // spawning the heartbeat task. Without this, the FK on
+        // `sandbox.sandboxes.host_id REFERENCES sandbox.hosts(host_id)`
+        // rejects every sandbox INSERT and the heartbeat UPDATE
+        // affects 0 rows forever (peers eventually see `last_heartbeat`
+        // way in the past and would treat us as dead — except there's
+        // no row, so `dead_hosts()` skips us too: silent corruption).
+        // `upsert_host` is INSERT … ON CONFLICT DO UPDATE so a clean
+        // restart with the same persisted host_id refreshes the row
+        // rather than failing. Failure aborts boot — without a host
+        // row, no sandbox op can succeed; better to fail loud at boot.
+        // Hostname source: `SANDBOX_HOSTNAME` env (operator override)
+        // → `/proc/sys/kernel/hostname` (Linux) → "unknown". Region is
+        // read by `upsert_host` itself from `SANDBOX_REGION`. The
+        // backend label comes from the live `Backend` instance, so it
+        // matches the CHECK constraint by construction.
+        if let Some(db) = state.database.as_ref() {
+            let hostname = read_hostname();
+            let backend_name = state.backend.name();
+            if let Err(e) = db.upsert_host(&hostname, backend_name).await {
+                return Err(format!("upsert_host({hostname}, {backend_name}): {e}"));
+            }
+            tracing::info!(
+                hostname = %hostname,
+                backend = %backend_name,
+                host_id = %db.host_id(),
+                "sandbox HA: host row registered"
+            );
+        }
+
         // Phase-2 HA: periodic heartbeat task — UPDATEs
         // `sandbox.hosts.last_heartbeat` so peers can tell whether
         // we're alive. The task self-runs forever; failure is
@@ -519,6 +549,28 @@ const DEFAULT_TAKEOVER_POLL_SECS: u64 = 30;
 /// `now() - last_heartbeat > lease_ttl` means the peer is considered
 /// dead. Default 60 s. Validated at boot.
 const DEFAULT_LEASE_TTL_SECS: u64 = 60;
+
+/// Best-effort hostname for `sandbox.hosts.hostname`. Operators can
+/// override via `SANDBOX_HOSTNAME` (useful in containers where the
+/// kernel hostname is the random container ID). Falls back to
+/// `/proc/sys/kernel/hostname` on Linux, then `"unknown"`. The column
+/// has no CHECK constraint — only NOT NULL — so any non-empty value
+/// is acceptable.
+fn read_hostname() -> String {
+    if let Ok(v) = std::env::var("SANDBOX_HOSTNAME") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let t = s.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    "unknown".to_string()
+}
 
 fn read_u64_env(name: &str, default: u64) -> u64 {
     std::env::var(name)
