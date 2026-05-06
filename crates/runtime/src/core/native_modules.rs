@@ -94,7 +94,10 @@ fn bridge_callback(
     rv.set(ns);
 }
 
-fn empty_resolve<'a>(
+/// No-op resolver used when instantiating modules that have no
+/// imports — synthetic modules and the dynamic-import bridge below.
+/// Public-in-crate so `dynamic_import.rs` can reuse it.
+pub(crate) fn empty_resolve<'a>(
     _context: v8::Local<'a, v8::Context>,
     _specifier: v8::Local<'a, v8::String>,
     _import_attributes: v8::Local<'a, v8::FixedArray>,

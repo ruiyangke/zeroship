@@ -705,6 +705,15 @@ impl RuntimeInner {
             heap_hit_counter as *mut std::ffi::c_void,
         );
 
+        // `await import(spec)` — resolves through the per-isolate module
+        // registry slot installed by `load_modules`. Bundle-resident
+        // only: unknown specifiers reject with TypeError. Hooked here
+        // (before any user JS) so the very first dynamic import goes
+        // through this path.
+        isolate.set_host_import_module_dynamically_callback(
+            crate::core::dynamic_import::host_import_module_dynamically_callback,
+        );
+
         // Create RuntimeState (no server_handle -- compio, not tokio)
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env_vars, None)));
         isolate.set_slot(state.clone());

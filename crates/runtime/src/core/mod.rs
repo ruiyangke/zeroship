@@ -6,6 +6,7 @@
 
 pub mod channel;
 pub mod dispatch;
+pub mod dynamic_import;
 pub mod init;
 pub mod modules;
 pub mod native_modules;
