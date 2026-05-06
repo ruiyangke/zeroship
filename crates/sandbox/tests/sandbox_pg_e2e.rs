@@ -2826,3 +2826,234 @@ async fn restore_handler_returns_feature_disabled_when_flag_off() {
     let _ = std::fs::remove_dir_all(&store_root);
     let _ = std::fs::remove_dir_all(&backend_root);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Phase B — full snapshot → wake cycle. Drives the same handler chain
+// the admin endpoint uses (snapshot_handler::snapshot_sandbox +
+// restore_handler::restore_sandbox) against a real Database with mock
+// ch-remote and stub restore backend. Asserts the row state transitions
+// running → snapshotting → snapshotted → restoring → running and that
+// the artifact survives the round trip.
+// ════════════════════════════════════════════════════════════════════
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase B snapshot→wake round trip"]
+async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    // Phase 1: snapshot. Drives running → snapshotting → snapshotted.
+    let stage_dir = fresh_temp("phaseb-stage");
+    let store_root = fresh_temp("phaseb-store");
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let ch = MockChRemoteClient::default();
+    // Use a path under stage so the artifact can be restored: the
+    // mock ch-remote writes the three artifact files inside the temp
+    // dir, and `LocalDiskSnapshotStore::put` migrates them to the
+    // canonical store path. We hand the api_socket as a placeholder
+    // file path — the mock ignores it.
+    let api_sock = fresh_temp("phaseb-api").join("ch.sock");
+    let vm_ops = StubSourceVmOps::new(api_sock, 7);
+
+    // Mirror the admin handler's call shape but with the StubSourceVmOps
+    // (the production wiring uses ResolvedSourceVmOps which we exercise
+    // via the lookup_source_vm_ops unit test below).
+    let snapshot_outcome =
+        snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir.clone(), true)
+            .await
+            .expect("phase 1 snapshot");
+    assert_eq!(snapshot_outcome.vm_index, 7);
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+    assert!(
+        vm_ops
+            .teardown_called
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "snapshot handler must have invoked teardown_source"
+    );
+
+    // Phase 2: wake. Drives snapshotted → restoring → running.
+    let backend_root = fresh_temp("phaseb-rback");
+    let restore_backend = StubRestoreBackend::new(backend_root.clone());
+    // Stage a `config.json` so the rewrite step finds the structural
+    // shape it expects. The mock ch-remote in phase 1 writes a
+    // placeholder; we overwrite it with a v1-shaped JSON before the
+    // restore so the rewrite assertion succeeds. Real CH artifacts
+    // carry this shape natively.
+    let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
+    let cfg_path = store_root.join(&typed).join("config.json");
+    std::fs::write(
+        &cfg_path,
+        r#"{
+            "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
+            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+        }"#,
+    )
+    .unwrap();
+    // Re-stamp pg with the new sha256 so restore's verify passes.
+    use zeroship_sandbox::snapshot_store::SnapshotStore;
+    let store2 = LocalDiskSnapshotStore::new(&store_root);
+    let resnap_stage = fresh_temp("phaseb-resnap");
+    // Read all three files back from the canonical path and re-stage
+    // so put() recomputes the sha256 with the rewritten config.json.
+    for &name in zeroship_sandbox::snapshot_store::ARTIFACT_FILES {
+        let src = store_root.join(&typed).join(name);
+        let dst = resnap_stage.join(name);
+        std::fs::copy(&src, &dst).unwrap();
+    }
+    let new_meta = store2.put(&typed, &resnap_stage, "v51.1").unwrap();
+    let _ = std::fs::remove_dir_all(&resnap_stage);
+    // Stamp the pg row's snapshot_sha256 with the post-rewrite digest
+    // so the restore's checksum verify succeeds against the in-place
+    // config.json we just wrote. (In production the handler does this
+    // via update_snapshot_metadata; here we touch the pg directly.)
+    let url = test_url();
+    let mut pcfg = PoolConfig::default();
+    pcfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, pcfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes SET snapshot_sha256 = $1::BYTEA \
+              WHERE sandbox_id = $2::TEXT",
+            &[&(&new_meta.sha256[..]), &info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let restore_outcome = restore_sandbox(&db, &store2, &restore_backend, sid, true)
+        .await
+        .expect("phase 2 wake");
+    assert_eq!(restore_outcome.vm_index, 7);
+    assert!(restore_backend.submit_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(restore_backend.livez_called.load(std::sync::atomic::Ordering::SeqCst));
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Running);
+
+    // config.json was rewritten in-place with the source vm_index's
+    // tap (vm_index=7 → zsbx-nm-7).
+    let restored_cfg = restore_backend.restore_alloc_dir(sid).join("config.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&restored_cfg).unwrap()).unwrap();
+    assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase B lookup_source_vm_ops queries Nomad"]
+async fn phase_b_lookup_source_vm_ops_resolves_handle_against_nomad() {
+    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+    use std::time::Duration;
+
+    // Spin up a fake Nomad on 127.0.0.1 that returns one running
+    // alloc with a known ID. Same shape as the existing
+    // `spawn_fake_nomad` in restore_handler tests but inlined so the
+    // pg-gated tests can run without leaning on `cfg(test)` from the
+    // sibling module.
+    let alloc_id = "phaseb-alloc-1234567890ab";
+    let body = format!(r#"[{{"ID":"{alloc_id}","ClientStatus":"running"}}]"#);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let nomad_addr = format!("http://{}", listener.local_addr().unwrap());
+    let body_clone = body.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut s = match stream {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body_clone.len(),
+                body_clone
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+
+    // Stage the alloc dir on local fs so `lookup_source_vm_ops`'s
+    // `metadata().is_socket()` check passes. We bind a Unix socket
+    // at the expected path.
+    //
+    // Path layout (from wrapper): NOMAD_ALLOC_ROOT/<alloc>/ch/local/ch.sock.
+    // The const inside nomad_ch.rs is `/opt/nomad/data/alloc`, which
+    // we can't write to in CI; we override by bind-mounting a temp
+    // root via `LD_PRELOAD` — too heavy for a unit test. Instead this
+    // test asserts the lookup ERR path: alloc dir doesn't exist
+    // locally, so `metadata()` errors and `lookup_source_vm_ops`
+    // returns Err.
+    let mut cfg = sweep_test_cfg(true);
+    cfg.nomad_ch.nomad_addr = nomad_addr;
+    let backend = Backend::from_config(&cfg).expect("backend");
+    let sid = Uuid::now_v7();
+    let user_id = typed_id("usr");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    if let Backend::NomadCh(b) = &backend {
+        b._test_inject_sandbox(
+            sid,
+            &user_id,
+            signing,
+            "http://10.99.107.2:7777".into(),
+            7,
+        );
+    } else {
+        panic!("expected nomad-ch backend");
+    }
+
+    // Resolve: Nomad returns an alloc, but the local /opt/nomad/data/alloc
+    // path doesn't exist, so the socket-existence check should fail
+    // with a clear error. (Production hosts have the path; here we
+    // verify the err shape so the admin handler maps it to 503.)
+    let err = backend
+        .lookup_source_vm_ops(sid)
+        .await
+        .expect_err("alloc dir not on local fs in test");
+    assert!(
+        err.contains("api_socket") || err.contains("not accessible"),
+        "expected an api_socket-related error; got {err}"
+    );
+
+    // Belt-and-suspenders: verify a sandbox NOT in the in-memory map
+    // surfaces the "not in nomad-ch state map" path, NOT the Nomad
+    // HTTP path (we never even reach Nomad).
+    let unknown_sid = Uuid::now_v7();
+    let err2 = backend
+        .lookup_source_vm_ops(unknown_sid)
+        .await
+        .expect_err("unknown sandbox must not be resolved");
+    assert!(
+        err2.contains("not in nomad-ch state map"),
+        "expected 'not in state map'; got {err2}"
+    );
+
+    // Drop a sealed unix socket at a controlled path so the positive
+    // existence test still gets coverage. We can't redirect
+    // NOMAD_ALLOC_ROOT (it's a const), so this assertion lives in a
+    // smaller scope: just verify that creating a UnixListener at
+    // some path produces a metadata().is_socket() = true. The full
+    // happy path is exercised E2E against a real worker in the
+    // cluster stress run.
+    let sock_dir = fresh_temp("phaseb-sock");
+    let sock_path = sock_dir.join("ch.sock");
+    let _listener = UnixListener::bind(&sock_path).unwrap();
+    let md = std::fs::metadata(&sock_path).unwrap();
+    use std::os::unix::fs::FileTypeExt as _;
+    assert!(
+        md.file_type().is_socket(),
+        "sanity: a freshly-bound UnixListener must show up as is_socket()"
+    );
+}

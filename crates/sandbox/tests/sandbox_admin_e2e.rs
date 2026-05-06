@@ -819,16 +819,23 @@ fn make_state_with_snapshot_wiring(
 }
 
 #[ntex::test]
-async fn snapshot_endpoint_returns_503_wiring_partial_when_enabled() {
-    // Phase A smoke: with snapshot_enabled = true and the trio
+async fn snapshot_endpoint_moves_past_501_when_enabled() {
+    // Phase B smoke: with snapshot_enabled = true and the trio
     // populated, the admin endpoint must not return 501
-    // feature_disabled (it should be 503 wiring_partial until the
-    // SourceVmOps follow-up lands).
+    // feature_disabled. With `database = None` (test shape), the
+    // handler returns 503 because the wiring requires a real pg
+    // handle to read/CAS the row. Production flips the bit through
+    // `AppState::from_config` so the trio + db land together.
+    //
+    // Pre-Phase-B this returned 503 `wiring_partial` from a
+    // hand-rolled short-circuit; Phase B replaced that short-circuit
+    // with the real handler call, so the failure mode now comes from
+    // the handler's own preflight (database missing → 503).
     let token = "admin-bearer-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let state = make_state_with_snapshot_wiring(Some(token.to_string()));
     let svc = make_app!(state);
 
-    let sid = format!("sbx_{}", uuid::Uuid::now_v7().simple());
+    let sid = zeroship_core::typed_id::generate("sbx");
     let req = test::TestRequest::default()
         .method(ntex::http::Method::POST)
         .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
@@ -838,12 +845,12 @@ async fn snapshot_endpoint_returns_503_wiring_partial_when_enabled() {
     assert_ne!(
         resp.status(),
         StatusCode::NOT_IMPLEMENTED,
-        "Phase A wiring must move past 501 feature_disabled"
+        "Phase B wiring must move past 501 feature_disabled"
     );
     assert_eq!(
         resp.status(),
         StatusCode::SERVICE_UNAVAILABLE,
-        "expected 503 wiring_partial; got {}",
+        "expected 503 (database None in test shape); got {}",
         resp.status()
     );
 }
@@ -856,7 +863,7 @@ async fn snapshot_endpoint_returns_501_when_disabled() {
     let state = make_state_with_admin_token(None, Some(token.to_string()));
     let svc = make_app!(state);
 
-    let sid = format!("sbx_{}", uuid::Uuid::now_v7().simple());
+    let sid = zeroship_core::typed_id::generate("sbx");
     let req = test::TestRequest::default()
         .method(ntex::http::Method::POST)
         .uri(&format!("/admin/sandboxes/{sid}/snapshot"))

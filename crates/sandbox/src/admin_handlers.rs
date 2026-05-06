@@ -1017,23 +1017,23 @@ async fn unlink_sealed_for_user(state: &AppState, sandbox_ids: &[String]) -> u64
 // Lifecycle:
 //   - PR 2c: 501 `feature_disabled` stubs
 //   - PR 3a-h: db + store + handler + sweep modules landed (unwired)
-//   - Phase A (this commit): wires `state.snapshot_store /
-//     ch_remote / restore_backend` into the snapshot/wake handlers
-//     when `SANDBOX_SNAPSHOT_ENABLED=true`. Cold-boot stays a 501
-//     stub until the cold-boot orchestration ships (separate
-//     follow-up — it's a different state machine).
-//
-// SourceVmOps wiring: the snapshot path needs an in-memory locator
-// for `(api_socket, vm_index)` keyed by sandbox_id, plus a teardown
-// hook. Plumbing those out of NomadCHBackend's private state map
-// requires public accessors that haven't landed yet — a follow-up
-// PR adds them. For Phase A, when wiring is enabled but SourceVmOps
-// is unavailable, the handler returns 503 `wiring_partial` rather
-// than 501, so operators can distinguish "feature off" from "feature
-// on but SourceVmOps not yet wired." A9 smoke test verifies the
-// 501 envelope is gone; full happy-path snapshot returns when the
-// SourceVmOps PR lands.
+//   - Phase A: wired `state.snapshot_store / ch_remote /
+//     restore_backend` into AppState; left a 503 `wiring_partial`
+//     short-circuit because `SourceVmOps` was not yet exposed from
+//     `NomadCHBackend`.
+//   - Phase B (this commit): `Backend::lookup_source_vm_ops` returns
+//     a resolved `SourceVmOpsHandle { api_socket, vm_index, alloc_dir }`
+//     so the snapshot handler can run end to end. The wake handler
+//     forwards to `restore_handler::restore_sandbox`. Cold-boot stays
+//     a 501 stub until the cold-boot orchestrator ships.
 // ────────────────────────────────────────────────────────────────────
+
+use crate::backend::nomad_ch::SourceVmOpsHandle;
+use crate::snapshot_handler::{
+    self, snap_stage_dir, SnapshotHandlerError, SourceVmOps,
+};
+use crate::restore_handler::{self, RestoreHandlerError};
+use uuid::Uuid;
 
 fn feature_disabled() -> HttpResponse {
     // 501 Not Implemented — matches § 10.0's `feature_disabled` envelope.
@@ -1044,51 +1044,244 @@ fn feature_disabled() -> HttpResponse {
     }))
 }
 
-fn wiring_partial(detail: &str) -> HttpResponse {
-    // 503 Service Unavailable — feature flag is on but the
-    // controller hasn't finished plumbing SourceVmOps into the
-    // backend. Operators see a distinct error code so this isn't
-    // confused with `feature_disabled` (off) or 5xx infra errors.
-    let mut resp = HttpResponse::ServiceUnavailable();
-    resp.json(&serde_json::json!({
-        "error": "wiring_partial",
-        "message": format!(
-            "snapshot/restore feature is enabled but the controller wiring is incomplete: {detail}"
-        )
-    }))
+/// Wire envelope for snapshot/wake errors. Maps the typed handler
+/// errors to the response shapes documented in proposal § 10.0.
+fn map_snapshot_error(e: SnapshotHandlerError) -> HttpResponse {
+    match e {
+        SnapshotHandlerError::FeatureDisabled => feature_disabled(),
+        SnapshotHandlerError::StateMismatch { current } => {
+            HttpResponse::Conflict().json(&serde_json::json!({
+                "error": "state_mismatch",
+                "current": current,
+                "expected": "running",
+            }))
+        }
+        SnapshotHandlerError::NotFound(id) => HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "not_found", "sandbox_id": id})),
+        SnapshotHandlerError::ChRemote(s) => err(500, format!("ch_remote: {s}")),
+        SnapshotHandlerError::Store(s) => err(500, format!("snapshot_store: {s}")),
+        SnapshotHandlerError::Database(d) => err(500, format!("database: {d}")),
+        SnapshotHandlerError::Internal(s) => err(500, format!("internal: {s}")),
+    }
 }
 
-pub async fn snapshot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
+fn map_restore_error(e: RestoreHandlerError) -> HttpResponse {
+    match e {
+        RestoreHandlerError::FeatureDisabled => feature_disabled(),
+        RestoreHandlerError::StateMismatch { current } => {
+            HttpResponse::Conflict().json(&serde_json::json!({
+                "error": "state_mismatch",
+                "current": current,
+                "expected": "snapshotted",
+            }))
+        }
+        RestoreHandlerError::NotFound(id) => HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "not_found", "sandbox_id": id})),
+        RestoreHandlerError::VmIndexUnavailable { requested } => {
+            HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": "vm_index_unavailable",
+                "requested": requested,
+            }))
+        }
+        RestoreHandlerError::SnapshotCorrupt => {
+            err(500, "snapshot_corrupt: row marked snapshotted_suspect")
+        }
+        RestoreHandlerError::Store(s) => err(500, format!("snapshot_store: {s}")),
+        RestoreHandlerError::Backend(s) => err(500, format!("restore_backend: {s}")),
+        RestoreHandlerError::ConfigRewrite(s) => err(500, format!("config_rewrite: {s}")),
+        RestoreHandlerError::Database(d) => err(500, format!("database: {d}")),
+        RestoreHandlerError::Internal(s) => err(500, format!("internal: {s}")),
+    }
+}
+
+/// Adapter: wrap the resolved `SourceVmOpsHandle` into a
+/// `SourceVmOps` trait impl that the snapshot handler consumes.
+///
+/// The trait's `locate_*` methods are sync and ignore the `sandbox_id`
+/// arg because we resolve the handle ahead of time (the lookup is
+/// async and HTTP-bound to Nomad).
+///
+/// `teardown_source` is a no-op here — the admin handler tears down
+/// the source explicitly after `snapshot_sandbox` returns success
+/// (see `snapshot_sandbox` below). Folding the teardown into the
+/// trait would force a sync→async bridge inside the snapshot handler;
+/// keeping it post-handler keeps both layers boring.
+struct ResolvedSourceVmOps {
+    handle: SourceVmOpsHandle,
+}
+
+impl SourceVmOps for ResolvedSourceVmOps {
+    fn locate_api_socket(&self, _sandbox_id: Uuid) -> Option<std::path::PathBuf> {
+        Some(self.handle.api_socket.clone())
+    }
+
+    fn locate_vm_index(&self, _sandbox_id: Uuid) -> Option<i16> {
+        i16::try_from(self.handle.vm_index).ok()
+    }
+
+    fn teardown_source(&self, _sandbox_id: Uuid) -> Result<(), String> {
+        // No-op: the admin handler runs the async backend teardown
+        // after `snapshot_sandbox` returns, so the snapshot handler
+        // doesn't need a sync→async bridge. The handler logs a
+        // warning if this returns Err, which we never do.
+        Ok(())
+    }
+}
+
+pub async fn snapshot_sandbox(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+) -> HttpResponse {
     if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     if !state.config.snapshot_enabled {
         return feature_disabled();
     }
-    // The store + ch + restore backend are populated together when
-    // snapshot_enabled = true. SourceVmOps is the missing piece —
-    // see module doc above.
-    if state.snapshot_store.is_some() {
-        return wiring_partial(
-            "SourceVmOps locator (api_socket + vm_index) not yet wired into NomadCHBackend",
-        );
+    let raw = path.into_inner();
+    let sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid sandbox_id"),
+    };
+
+    // The store + ch + db handles are present iff snapshot_enabled.
+    let (Some(store), Some(ch), Some(db)) = (
+        state.snapshot_store.as_ref(),
+        state.ch_remote.as_ref(),
+        state.database.as_ref(),
+    ) else {
+        return err(503, "snapshot wiring not initialized (database/store/ch_remote None)");
+    };
+
+    // Resolve the source VM identity BEFORE the destructive CAS so a
+    // missing alloc / unreachable Nomad surfaces as 503 with the row
+    // still `running`. (snapshot_handler also re-checks this inside
+    // its own resolve step but that one is sync — the async lookup
+    // here gives operators a clearer error path.)
+    let handle = match state.backend.lookup_source_vm_ops(sandbox_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "admin/snapshot: lookup_source_vm_ops failed; refusing snapshot"
+            );
+            return HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": "source_vm_unavailable",
+                "message": e,
+            }));
+        }
+    };
+
+    let stage_dir = snap_stage_dir(&state.config.snapshot_l1_root, sandbox_id);
+    let vm_ops = ResolvedSourceVmOps { handle };
+    let outcome = snapshot_handler::snapshot_sandbox(
+        db.as_ref(),
+        store.as_ref(),
+        ch.as_ref(),
+        &vm_ops,
+        sandbox_id,
+        stage_dir,
+        state.config.snapshot_enabled,
+    )
+    .await;
+    match outcome {
+        Ok(o) => {
+            // Source teardown — best-effort, post-snapshot. The pg row
+            // already reads `snapshotted` so a teardown failure here
+            // leaves a runtime-orphan that the next-boot orphan-prune
+            // sweeps. We log loudly + return 200 so the operator sees
+            // the snapshot succeeded.
+            if let Err(e) = state
+                .backend
+                .teardown_source_for_snapshot(sandbox_id)
+                .await
+            {
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "admin/snapshot: source teardown failed (non-fatal; orphan-prune will reclaim)"
+                );
+            }
+            HttpResponse::Ok().json(&serde_json::json!({
+                "sandbox_id": format!(
+                    "sbx_{}",
+                    zeroship_core::typed_id::uuid_to_base62(&o.sandbox_id)
+                ),
+                "generation": o.generation,
+                "vm_index": o.vm_index,
+                "snapshot": {
+                    "artifact_path": o.metadata.artifact_path,
+                    "sha256_hex": hex::encode(o.metadata.sha256),
+                    "ch_version": o.metadata.ch_version,
+                    "bytes": o.metadata.bytes,
+                },
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "admin/snapshot: handler failed"
+            );
+            map_snapshot_error(e)
+        }
     }
-    feature_disabled()
 }
 
-pub async fn wake_sandbox(req: HttpRequest, state: State) -> HttpResponse {
+pub async fn wake_sandbox(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+) -> HttpResponse {
     if let Err(r) = admin_check(&req, &state) {
         return r;
     }
     if !state.config.snapshot_enabled {
         return feature_disabled();
     }
-    if state.restore_backend.is_some() {
-        return wiring_partial(
-            "wake handler not yet wired through restore_handler::restore_sandbox",
+    let raw = path.into_inner();
+    let sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid sandbox_id"),
+    };
+    let (Some(store), Some(rb), Some(db)) = (
+        state.snapshot_store.as_ref(),
+        state.restore_backend.as_ref(),
+        state.database.as_ref(),
+    ) else {
+        return err(
+            503,
+            "wake wiring not initialized (database/store/restore_backend None)",
         );
+    };
+    let outcome = restore_handler::restore_sandbox(
+        db.as_ref(),
+        store.as_ref(),
+        rb.as_ref(),
+        sandbox_id,
+        state.config.snapshot_enabled,
+    )
+    .await;
+    match outcome {
+        Ok(o) => HttpResponse::Ok().json(&serde_json::json!({
+            "sandbox_id": format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&o.sandbox_id)
+            ),
+            "vm_index": o.vm_index,
+            "generation": o.generation,
+        })),
+        Err(e) => {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "admin/wake: handler failed"
+            );
+            map_restore_error(e)
+        }
     }
-    feature_disabled()
 }
 
 pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {

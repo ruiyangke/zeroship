@@ -102,10 +102,22 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Default Nomad alloc data root. Phase B's snapshot wiring derives
+/// `<NOMAD_ALLOC_ROOT>/<alloc-id>/ch/local/ch.sock` to reach
+/// cloud-hypervisor's API socket on the same worker. This matches
+/// Nomad's default `data_dir = /opt/nomad/data`; the path is wired
+/// here as a const because (a) it's already implicit in the wrapper's
+/// `ZSBX_RUNTIME=${NOMAD_TASK_DIR}` expansion that the controller
+/// reads back, and (b) the wider Nomad agent config isn't surfaced
+/// to the controller crate.
+const NOMAD_ALLOC_ROOT: &str = "/opt/nomad/data/alloc";
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -139,6 +151,30 @@ pub struct NomadCHBackend {
     /// [`crate::persist::Persistence`]. `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset.
     persist: Option<Arc<crate::persist::Persistence>>,
+}
+
+/// Phase B / snapshot wiring: resolved source-VM identity for a
+/// running sandbox. Returned by [`NomadCHBackend::lookup_source_vm_ops`]
+/// and consumed by the snapshot admin handler before it issues
+/// `ch-remote pause` + `ch-remote snapshot`.
+///
+/// All three fields are derived from the live Nomad alloc:
+///   - `api_socket` — path to cloud-hypervisor's HTTP API UDS,
+///     `<alloc_dir>/ch/local/ch.sock` (the wrapper's `${ZSBX_RUNTIME}/ch.sock`).
+///   - `vm_index` — pulled from the in-memory backend record (NOT from
+///     Nomad meta) so it stays consistent with the registry's view of
+///     the IP/MAC/tap derivation.
+///   - `alloc_dir` — Nomad's per-alloc data dir; passed through to the
+///     restore handler's `ZSBX_RESTORE_FROM` env if the operator wakes
+///     a same-worker snapshot. v1 doesn't restore from this dir
+///     directly (the snapshot store re-stages into a fresh `restore/`
+///     subdir), but capturing it now keeps the audit-log + future
+///     in-place restore optimisation cheap.
+#[derive(Debug, Clone)]
+pub struct SourceVmOpsHandle {
+    pub api_socket: PathBuf,
+    pub vm_index: u16,
+    pub alloc_dir: PathBuf,
 }
 
 /// Per-sandbox bookkeeping. Lives only in process memory; on
@@ -1420,6 +1456,115 @@ impl NomadCHBackend {
         _sealed: &crate::persist::SealedAuth,
     ) -> Result<super::SandboxAuth, String> {
         Err("restore_from_sealed: round-8 deprecated — use restore_from_pg_and_sealed".into())
+    }
+
+    /// Phase B: resolve the source VM's `(api_socket, vm_index, alloc_dir)`
+    /// for a sandbox the snapshot handler is about to pause+snapshot.
+    ///
+    /// Returns `Err` when:
+    ///   - The sandbox is unknown to this controller (lease-takeover
+    ///     orphan, or peer-owned).
+    ///   - Nomad is unreachable / returns no running alloc (the VM has
+    ///     already terminated).
+    ///   - The derived `ch.sock` path is not a Unix socket on local fs
+    ///     (the alloc is on a different worker — single-controller-per-
+    ///     -worker model means we cannot reach a remote socket).
+    ///
+    /// Caller (admin_handlers::snapshot_sandbox) maps the Err to a 503
+    /// CAS-rollback so the row stays `running` and operators can retry.
+    pub async fn lookup_source_vm_ops(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<SourceVmOpsHandle, String> {
+        // 1. Look up the in-memory sandbox record. We need the `job_id`
+        //    (to query Nomad for allocs) and the `vm_index` (which is
+        //    the same field the snapshot handler stamps onto the row).
+        let (job_id, vm_index) = {
+            let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+            let s = guard.get(&sandbox_id).ok_or_else(|| {
+                format!("lookup_source_vm_ops: sandbox {sandbox_id} not in nomad-ch state map")
+            })?;
+            (s.job_id.clone(), s.vm_index)
+        };
+
+        // 2. Query Nomad for the running alloc on this job. We mirror
+        //    the shape of `wait_for_alloc_running` but only need a
+        //    single-shot read — the snapshot handler is invoked while
+        //    the row is `running`, so by definition there's at least
+        //    one alloc and it's already past the `running` ClientStatus.
+        let url = format!(
+            "{}/v1/job/{}/allocations",
+            self.cfg.nomad_ch.nomad_addr, job_id
+        );
+        let resp = http_get_unsigned(&url, Duration::from_secs(5))
+            .await
+            .map_err(|e| {
+                format!("lookup_source_vm_ops: nomad GET {url}: {e}")
+            })?;
+        if resp.status != 200 {
+            return Err(format!(
+                "lookup_source_vm_ops: nomad GET {url} → status {}: {}",
+                resp.status,
+                resp.body.trim()
+            ));
+        }
+        let allocs: serde_json::Value = serde_json::from_str(&resp.body)
+            .map_err(|e| {
+                format!("lookup_source_vm_ops: parse alloc list: {e}")
+            })?;
+        let mut alloc_id: Option<String> = None;
+        for a in allocs.as_array().into_iter().flatten() {
+            let cs = a["ClientStatus"].as_str().unwrap_or("");
+            if cs == "running" {
+                if let Some(id) = a["ID"].as_str() {
+                    alloc_id = Some(id.to_string());
+                    break;
+                }
+            }
+        }
+        let alloc_id = alloc_id.ok_or_else(|| {
+            format!(
+                "lookup_source_vm_ops: no running alloc found for job {job_id} \
+                 (VM may have already terminated)"
+            )
+        })?;
+
+        // 3. Derive alloc_dir + api_socket. Same convention used by
+        //    Phase 3's stop path and the wrapper's `ZSBX_RUNTIME =
+        //    ${NOMAD_TASK_DIR}` expansion: the task is named "ch", so
+        //    the per-task dir is `<alloc_dir>/ch/local/`, and the
+        //    wrapper writes its API socket as `${ZSBX_RUNTIME}/ch.sock`.
+        let alloc_dir = PathBuf::from(NOMAD_ALLOC_ROOT).join(&alloc_id);
+        let api_socket = alloc_dir.join("ch").join("local").join("ch.sock");
+
+        // 4. Verify the socket exists locally. The single-controller-
+        //    per-worker model puts the alloc on the same host as us;
+        //    a missing socket means either (a) the alloc is on a
+        //    different worker (peer-owned via lease-takeover), or
+        //    (b) the wrapper has already torn down. Either case is
+        //    a snapshot-impossible signal.
+        match std::fs::metadata(&api_socket) {
+            Ok(md) => {
+                if !md.file_type().is_socket() {
+                    return Err(format!(
+                        "lookup_source_vm_ops: {} exists but is not a unix socket",
+                        api_socket.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "lookup_source_vm_ops: api_socket {} not accessible: {e}",
+                    api_socket.display()
+                ));
+            }
+        }
+
+        Ok(SourceVmOpsHandle {
+            api_socket,
+            vm_index,
+            alloc_dir,
+        })
     }
 
     /// Build a short prefix for agent-error log lines so a fleet-

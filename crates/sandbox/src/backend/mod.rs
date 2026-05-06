@@ -367,6 +367,52 @@ impl Backend {
         }
     }
 
+    /// Phase B snapshot wiring: resolve `(api_socket, vm_index, alloc_dir)`
+    /// for a running sandbox so the snapshot handler can `ch-remote
+    /// pause` + `ch-remote snapshot`.
+    ///
+    /// Only `nomad-ch` supports this in v1 — k8s/docker would each
+    /// need a different "where is the VM running?" lookup (kubelet
+    /// alloc lookup; container PID lookup) which Phase B does not
+    /// implement. The other variants return `Err` so admin handlers
+    /// can map to a 501 / 503 envelope.
+    pub async fn lookup_source_vm_ops(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<nomad_ch::SourceVmOpsHandle, String> {
+        match self {
+            Self::NomadCh(b) => b.lookup_source_vm_ops(sandbox_id).await,
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "lookup_source_vm_ops: backend {:?} doesn't support \
+                 snapshot/restore (Phase B nomad-ch-only)",
+                self.name()
+            )),
+        }
+    }
+
+    /// Phase B snapshot wiring: tear down the source VM after a
+    /// snapshot lands in pg. Mirrors [`Self::stop`] but the in-memory
+    /// state has already been removed by `lookup_source_vm_ops`'s
+    /// caller path. Idempotent + best-effort: any error is logged but
+    /// not propagated (the snapshot artifact is already authoritative).
+    ///
+    /// Today this just invokes the regular `stop` path on the nomad-ch
+    /// backend. The pg row is left in `snapshotted` state; only the
+    /// runtime objects (Nomad alloc, vm_index, host_dir) are reaped.
+    pub async fn teardown_source_for_snapshot(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<(), String> {
+        match self {
+            Self::NomadCh(b) => b.stop(sandbox_id).await,
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "teardown_source_for_snapshot: backend {:?} doesn't support \
+                 snapshot/restore (Phase B nomad-ch-only)",
+                self.name()
+            )),
+        }
+    }
+
     /// Round-8 Phase-1 restore. Pg row is canonical for non-secret
     /// fields; sealed record is canonical for the signing key. The
     /// boot loop has already probed the agent before this is called.
