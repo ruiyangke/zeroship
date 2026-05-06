@@ -2248,3 +2248,178 @@ async fn idle_eligible_sandboxes_respects_opt_in_and_threshold() {
         "opted-in stale row must surface"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3b — SnapshotHandler integration tests (mock ch-remote +
+// LocalDiskSnapshotStore + StubSourceVmOps; real Database).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 3, § 8.2 (rollback on mid-flight failure).
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::snapshot_handler::{
+    snapshot_sandbox, MockChRemoteClient, SnapshotHandlerError, StubSourceVmOps,
+};
+use zeroship_sandbox::snapshot_store::LocalDiskSnapshotStore;
+
+fn fresh_temp(suffix: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "zsbx-snap-handler-{}-{}-{}",
+        std::process::id(),
+        Uuid::now_v7().simple(),
+        suffix,
+    ));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b snapshot handler happy path"]
+async fn snapshot_handler_happy_path_records_artifact_and_tears_down_source() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage");
+    let store_root = fresh_temp("store");
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let ch = MockChRemoteClient::default();
+    let api_sock = fresh_temp("api").join("ch.sock");
+    let vm_ops = StubSourceVmOps::new(api_sock, 7);
+
+    let outcome = snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir.clone(), true)
+        .await
+        .expect("happy-path snapshot");
+    assert_eq!(outcome.vm_index, 7);
+    assert_eq!(outcome.metadata.ch_version, "v51.1");
+
+    // pg row must be in `snapshotted` with metadata populated.
+    let row = db
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+
+    // Source teardown was invoked.
+    assert!(
+        vm_ops
+            .teardown_called
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "teardown_source must have been invoked on success"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b state-mismatch refusal"]
+async fn snapshot_handler_refuses_non_running_state() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+    // Move out of running.
+    db.update_sandbox_status(sid, SandboxStatus::Stopping, 0, None)
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage2");
+    let store_root = fresh_temp("store2");
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let ch = MockChRemoteClient::default();
+    let vm_ops = StubSourceVmOps::new(fresh_temp("a").join("s"), 1);
+
+    let err = snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir, true)
+        .await
+        .expect_err("must refuse");
+    assert!(
+        matches!(err, SnapshotHandlerError::StateMismatch { .. }),
+        "{err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b rollback on ch-remote failure"]
+async fn snapshot_handler_rolls_back_on_ch_remote_failure() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage3");
+    let store_root = fresh_temp("store3");
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let mut ch = MockChRemoteClient::default();
+    ch.fail_snapshot = true; // pause succeeds, snapshot fails
+    let vm_ops = StubSourceVmOps::new(fresh_temp("b").join("s"), 1);
+
+    let err = snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir, true)
+        .await
+        .expect_err("must fail");
+    assert!(
+        matches!(err, SnapshotHandlerError::ChRemote(_)),
+        "{err:?}"
+    );
+
+    // Row must have rolled back to `running` with generation bumped
+    // twice (running→snapshotting→running).
+    let row = db
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.status, SandboxStatus::Running);
+    assert!(
+        row.generation >= 2,
+        "rollback should have bumped gen at least twice; got {}",
+        row.generation
+    );
+
+    // Teardown must NOT have run (we rolled back the snapshot).
+    assert!(
+        !vm_ops
+            .teardown_called
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "teardown_source must not run on rollback"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b feature flag off"]
+async fn snapshot_handler_returns_feature_disabled_when_flag_off() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage4");
+    let store_root = fresh_temp("store4");
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let ch = MockChRemoteClient::default();
+    let vm_ops = StubSourceVmOps::new(fresh_temp("c").join("s"), 1);
+
+    let err =
+        snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir, /* enabled = */ false)
+            .await
+            .expect_err("must refuse with flag off");
+    assert!(
+        matches!(err, SnapshotHandlerError::FeatureDisabled),
+        "{err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
