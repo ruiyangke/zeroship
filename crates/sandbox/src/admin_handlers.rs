@@ -1012,6 +1012,47 @@ async fn unlink_sealed_for_user(state: &AppState, sandbox_ids: &[String]) -> u64
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Snapshot/restore stub handlers (PR 2c).
+//
+// All return 501 `feature_disabled` per § 10.0 standard error envelope
+// (proposal docs/proposals/sandbox-snapshot-restore.md). Real handlers
+// land in PR 3 behind `SANDBOX_SNAPSHOT_ENABLED`. These exist now so
+// the routes are visible in main.rs / OpenAPI / runbook docs from
+// the moment migrations 0006+0007 ship; gateway-side wake-stream
+// integration can target a stable URL surface.
+// ────────────────────────────────────────────────────────────────────
+
+fn feature_disabled() -> HttpResponse {
+    // 501 Not Implemented — matches § 10.0's `feature_disabled` envelope.
+    let mut resp = HttpResponse::NotImplemented();
+    resp.json(&serde_json::json!({
+        "error": "feature_disabled",
+        "message": "snapshot/restore feature is not enabled (SANDBOX_SNAPSHOT_ENABLED=false)"
+    }))
+}
+
+pub async fn snapshot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    feature_disabled()
+}
+
+pub async fn wake_sandbox(req: HttpRequest, state: State) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    feature_disabled()
+}
+
+pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    feature_disabled()
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────
 
