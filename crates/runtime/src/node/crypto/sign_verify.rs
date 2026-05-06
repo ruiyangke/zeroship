@@ -1,7 +1,7 @@
 //! `Sign` / `Verify` classes + one-shot `crypto.sign` / `crypto.verify`
 //! + `crypto.publicEncrypt` / `crypto.privateDecrypt` (RSA-OAEP).
 //!
-//! Per `docs/proposals/node-crypto-native.md` §V.5 (D-N12) and §II.5.
+//! See `docs/proposals/node-crypto-native.md` §V.5 and §II.5.
 //!
 //! Architecture: `update()` buffers the message bytes (the existing
 //! `evp_ffi` helpers expect raw data and run the digest internally via

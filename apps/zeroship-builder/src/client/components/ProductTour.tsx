@@ -1,4 +1,4 @@
-// ─── ProductTour — skippable 4-step intro (spec §7.5) ───────────
+// ─── ProductTour — skippable 4-step intro (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.5) ───────────
 //
 // Each step targets a real DOM surface via testid. We measure the
 // target's bounding rect, render a 4px outlined frame around it, and

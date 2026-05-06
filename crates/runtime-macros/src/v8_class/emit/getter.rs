@@ -1,8 +1,7 @@
 //! `[SameObject]` getter codegen — `#[v8_getter(same_object)]`.
 //!
-//! Wave 3 commit 4 — relocated from `v8_class/method.rs:258-373` into
-//! the `emit/` cluster (design `docs/proposals/runtime-macros-refactor.md`
-//! §4.1, F3). Plain getters route through `emit/method.rs::gen_method_callback`;
+//! Split out from the old `v8_class/method.rs` mega-file. Plain
+//! getters route through `emit/method.rs::gen_method_callback`;
 //! only the SameObject variant lives here because it interleaves the
 //! private-symbol cache check between brand check and External
 //! recovery.
@@ -86,7 +85,7 @@ pub(crate) fn gen_same_object_getter_callback(
     // (+ optional synthetic `scope`). Extractions are emitted but
     // typically empty.
     let params = parse_params_skipping_self(m.func);
-    // Wave 4: pre-parsed by analyse phase; emit just reads.
+    // Pre-parsed by the analyze phase; emit just reads.
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
     let receiver_ref = if m.mut_receiver {
@@ -108,7 +107,7 @@ pub(crate) fn gen_same_object_getter_callback(
     // because the SameObject private-symbol cache check has to interleave
     // BETWEEN brand check and External recovery — `gen_recover_box`'s
     // all-in-one form would emit the wrong order for that.
-    // Wave 9 N1: brand-check ident from ClassConfig (cached at
+    // brand-check ident from ClassConfig (cached at
     // construction time), not recomputed here.
     let brand_check = recover_box::gen_brand_check_throw(&cfg.brand_check_ident);
     let recover_external = recover_box::gen_recover_external();

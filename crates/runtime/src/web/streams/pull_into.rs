@@ -25,7 +25,7 @@
 //! `transfer_array_buffer(scope, ab) → Local<ArrayBuffer>` per spec
 //! `TransferArrayBuffer` — produces a fresh ArrayBuffer with the same
 //! backing store, then detaches the source. Used by enqueue and respond
-//! paths to make the V8-side buffer JS-inaccessible during transfer (D-16).
+//! paths to make the V8-side buffer JS-inaccessible during transfer.
 
 // ---------------------------------------------------------------------------
 // ViewConstructor — typed-array kind enum
@@ -261,7 +261,7 @@ pub struct PullIntoDescriptor {
 /// shared_ref)` to construct a peer that shares the SharedRef, then call
 /// `.detach(None)` on the original to invalidate JS access.
 ///
-/// Per D-16: callers MUST verify `was_detached() == false` before calling
+/// Callers must verify `was_detached() == false` before calling
 /// `transfer_array_buffer`, otherwise the spec returns a TypeError.
 pub fn transfer_array_buffer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -355,4 +355,3 @@ mod tests {
         assert_eq!(ViewConstructor::BigInt64.element_size(), 8);
     }
 }
-

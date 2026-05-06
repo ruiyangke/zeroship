@@ -1,8 +1,8 @@
 //! `Hmac` class — `crypto.createHmac(algorithm, key, options?)`.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §V.3 (D-N10). Same
+//! See `docs/proposals/node-crypto-native.md` §V.3. Same
 //! surface as Hash: update + digest. **No `copy()`** — Hmac doesn't
-//! have one in Node (D-N10 + counter-citation against critic).
+//! have one in Node.
 //!
 //! Empty keys: per round-3 review (XVII.13b), Node silently accepts
 //! empty HMAC keys. We match (this is the Node-compat path; the

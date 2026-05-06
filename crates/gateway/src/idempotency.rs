@@ -355,8 +355,8 @@ pub enum DedupeDecision {
 // The pre-dispatch flow.
 // ---------------------------------------------------------------------------
 
-/// Apply the dedupe decision tree per spec §8. Caller wraps this in
-/// the appropriate HTTP response on `Hit` / `Conflict` / etc.
+/// Apply the dedupe decision tree. Caller wraps this in the appropriate
+/// HTTP response on `Hit` / `Conflict` / etc.
 ///
 /// `idempotency_key` is the value of the `Idempotency-Key` header, if
 /// any. `body` is the raw request bytes. `ttl_hours` is the resolved

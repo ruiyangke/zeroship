@@ -2,7 +2,7 @@
 //! `docs/proposals/webcrypto-native.md` §III.
 //!
 //! Each method synchronously executes the spec algorithm on the V8
-//! thread (D-29 v1), wrapping the result in a Promise via
+//! thread, wrapping the result in a Promise via
 //! `helpers::resolve_now` / `reject_now`. Validation failures throw
 //! synchronously at the promise-creation boundary (matches workerd /
 //! Chrome behaviour for spec steps 1–3 of each op).
@@ -32,7 +32,7 @@ impl Default for SubtleCrypto {
 #[v8_to_string_tag = "SubtleCrypto"]
 impl SubtleCrypto {
     /// `subtle.digest(algorithm, data) -> Promise<ArrayBuffer>` —
-    /// spec §32. Sync-on-V8-thread per D-29.
+    /// spec §32. Runs synchronously on the V8 thread.
     #[v8_method]
     fn digest<'s>(
         &self,

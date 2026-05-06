@@ -1,14 +1,13 @@
-//! Phase-2 preview-WebSocket e2e (preview-URL § II.1 + § II.2).
+//! Preview-WebSocket end-to-end tests (`preview-URL` § II.1 + § II.2).
 //!
-//! Coverage (matches the design doc's Phase 2 test plan, agent-side
-//! AND controller-side, lines 1931-1935):
+//! Coverage for both the agent-side and controller-side flow:
 //!
 //! - Round-trip splice: client opens a WS through the controller →
 //!   agent → upstream echo server; bytes flow both directions after 101.
 //! - Anonymous Upgrade through the controller → 401 uniform.
 //! - Wrong-creator Upgrade → 404 uniform.
 //! - Empty-body upgrade is signed under V1_1_Ws and accepted.
-//! - **CRITICAL** (round-2 D-14): a captured V1_1 HTTP signature on a
+//! - **CRITICAL** (round-2 WebSocket signature-separation rule): a captured V1_1 HTTP signature on a
 //!   body matching `b"sec-websocket-key=…"` MUST NOT validate as a
 //!   V1_1_Ws Upgrade.
 //! - Body-cap on Upgrade: a non-empty body → 400.
@@ -234,7 +233,7 @@ fn make_state(
         sandboxes: registry,
         backend,
         mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
-        // Phase-0 sandbox-pg-state: tests run pg-disabled.
+        // These tests run with pg disabled.
         database: None,
         persist: None,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -494,7 +493,7 @@ fn ws_wrong_creator_returns_404() {
 
 #[test]
 fn agent_ws_v1_1_http_signature_replay_rejected() {
-    // **CRITICAL forgery defense (D-14).** A V1_1 HTTP signature on
+    // **CRITICAL forgery defense (WebSocket signature-separation rule).** A V1_1 HTTP signature on
     // a body containing `b"sec-websocket-key=..."` MUST NOT validate
     // as a V1_1_Ws Upgrade. We hit the agent's WS port directly with
     // such a captured signature; the agent must 401.

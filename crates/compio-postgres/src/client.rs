@@ -1,9 +1,9 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Phase 4 surface: all user-facing query/prepare/execute/simple_query
-// methods now dispatch to the real `query.rs`/`prepare.rs`/`simple_query.rs`
-// modules. Transaction and copy methods are stubbed until Phase 5 lands
-// `transaction.rs`, `copy_in.rs`, and `copy_out.rs`.
+// The user-facing query/prepare/execute/simple_query methods dispatch to
+// the real `query.rs`/`prepare.rs`/`simple_query.rs` modules. Transaction
+// and COPY helpers are still stubbed until `transaction.rs`,
+// `copy_in.rs`, and `copy_out.rs` land.
 
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{SslMode, SslNegotiation};
@@ -205,8 +205,8 @@ impl InnerClient {
 }
 
 /// Captured by [`CancelToken`] so a cancel request can reach the same
-/// backend the original connection did. Phase 4's `cancel_query.rs`
-/// reconnects using these fields.
+/// backend the original connection did. `cancel_query.rs` reconnects
+/// using these fields.
 #[derive(Clone)]
 pub(crate) struct SocketConfig {
     pub addr: Addr,

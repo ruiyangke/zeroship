@@ -5,11 +5,11 @@
 // once in `client/api.ts` via `chatTransport(rpc.chat)`, so this
 // component never touches the wire.
 //
-// Plan 01.5: text-only mock. The visual chrome (header, ChatComposer,
-// error band) is unchanged from Plan 01. ChatMessages renders the v6
+// This started as a text-only mock. The visual chrome (header,
+// ChatComposer, error band) is still unchanged. ChatMessages renders the v6
 // `UIMessage[]` shape (parts: [{ type: "text", text }]).
 //
-// Plan 02 will dispatch custom `data-*` parts (survey, diff,
+// The renderer also handles custom `data-*` parts (survey, diff,
 // critic-round) into the assistant message renderer.
 
 import { useEffect, useRef, useState } from "react";
@@ -85,7 +85,7 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
     useChat({
       // appId is threaded through the transport's body so the server-
       // side data-part middleware can persist Critic-graded quality
-      // scorecards into the right project's KV slot (ISS-16 fix path).
+      // scorecards into the right project's KV slot.
       transport: chatTransport(rpc.chat, { appId }),
       onError: (err) => console.error("[chat]", err),
     });
@@ -135,7 +135,7 @@ export function ChatRail({ appName, appId, seedBrief }: ChatRailProps) {
 
   /** ↻ regenerate on the latest assistant turn. The SDK helper drops
    *  the trailing assistant message and re-runs the previous user
-   *  turn — exactly the spec §10.6 semantics. */
+   *  turn — exactly the `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §10.6 semantics. */
   function handleRegenerate() {
     if (busy) return;
     void regenerate();

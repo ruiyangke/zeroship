@@ -21,7 +21,7 @@
 //! `[Clamp]` is reserved for `WebSocket.close()`'s `code` argument
 //! (see `websocket/algorithms.rs::clamp_unsigned_short`).
 //!
-//! Examples (per critic MAJOR #28):
+//! Examples:
 //!   - `new CloseEvent("close", { code: 1.5 })` → code === 1 (truncate)
 //!   - `new CloseEvent("close", { code: -1 })` → code === 65535 (modulo)
 //!   - `new CloseEvent("close", { code: NaN })` → code === 0
@@ -68,9 +68,8 @@ impl Default for CloseEventState {
 ///   3. Let V be sign(V) × floor(|V|).
 ///   4. Let V be V modulo 2^16 (signed → unsigned wrap).
 ///
-/// Used by CloseEventInit.code parsing. Distinct from `[Clamp]` which
+/// Used by CloseEventInit.code parsing. Distinct from `[Clamp]`, which
 /// applies to `WebSocket.close()`'s code argument.
-/// (addresses critic MAJOR #28)
 pub(crate) fn convert_unsigned_short_modulo(
     scope: &mut v8::PinScope,
     value: v8::Local<v8::Value>,

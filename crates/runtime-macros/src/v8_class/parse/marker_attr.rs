@@ -1,7 +1,7 @@
 //! `MarkerAttr` trait + driver — closes F5 / H5-H7 (design
 //! `docs/proposals/runtime-macros-refactor.md` §3.2).
 //!
-//! Pre-Wave-4, `parse.rs` had 12 `extract_*` helpers each with subtly
+//! Earlier versions had 12 `extract_*` helpers, each with subtly
 //! different return shapes (`bool` / `Option<T>` / `Result<Option<T>>` /
 //! `HashSet<T>`) and inconsistent error policy (some silently fell back
 //! to None on malformed shape — H5; some emitted `compile_error!`). This

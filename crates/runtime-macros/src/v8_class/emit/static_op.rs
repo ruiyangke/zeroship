@@ -1,9 +1,7 @@
 //! Codegen for `#[v8_static_method]` and `#[v8_static_getter]` —
 //! WebIDL §3.7.4 static operations / attributes.
 //!
-//! Wave 3 commit 4 — relocated from `v8_class/method.rs:560-600` into
-//! the `emit/` cluster (design `docs/proposals/runtime-macros-refactor.md`
-//! §4.1, F3).
+//! Split out from the old `v8_class/method.rs` mega-file.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -36,8 +34,7 @@ use crate::gen_call_return;
 /// StateTy even though the macro keys the install on MarkerTy.
 /// Without `#[v8_state_marker]` the two are identical (state_ty ==
 /// class_ty), so this is a no-op for the common case but mandatory for
-/// state-marker support (Phase 1 commit `d4d65fd` + the static-method
-/// extension in `1a924d9`). The H12 finding flagged the name `state_ty`
+/// state-marker support. The H12 finding flagged the name `state_ty`
 /// as misleading on the static path (no instance state), but renaming
 /// would diverge from the instance/setter/async-method codegen paths
 /// that share the same parameter; keeping the cross-emit-site
@@ -53,7 +50,7 @@ pub(crate) fn gen_static_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // Static methods take no `self`, so `parse_params_skipping_self`
     // collects every param verbatim.
     let params = parse_params_skipping_self(m.func);
-    // Wave 4: pre-parsed by analyse phase; emit just reads.
+    // Pre-parsed by the analyze phase; emit just reads.
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
 
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();

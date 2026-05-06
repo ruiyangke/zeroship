@@ -212,7 +212,7 @@ fn respond_method_callback<'s>(
         scope.throw_exception(exc);
         return;
     };
-    // Detached check on the request's view buffer (D-16).
+    // Detached check on the request's view buffer.
     let view_v = slots::read_slot(scope, this, VIEW);
     if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(view_v) {
         if let Some(buffer) = view.buffer(scope) {
@@ -271,7 +271,7 @@ fn respond_with_new_view_callback<'s>(
         scope.throw_exception(exc);
         return;
     };
-    // D-16: detached check.
+    // Detached check.
     if let Some(buf) = view.buffer(scope) {
         if buf.was_detached() {
             let msg = v8::String::new(scope, "respondWithNewView: view's buffer is detached").unwrap();

@@ -461,8 +461,8 @@ fn abort_signal_dependent(name: &str, err: &str) -> bool {
         // Async iteration ([Symbol.asyncIterator]) — deferred per dispatch scope.
         || err.contains("is not iterable")
         || err.contains("Symbol.asyncIterator")
-        // Patched-global tests rely on internal slot identity (deferred to
-        // the polyfill cutover phase 3 D-19).
+        // Patched-global tests rely on internal slot identity and stay
+        // deferred until the native globals fully replace that path.
         || name.contains("patched-global")
 }
 

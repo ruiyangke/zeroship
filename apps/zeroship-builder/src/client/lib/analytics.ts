@@ -1,6 +1,6 @@
 // ─── analytics — telemetry emitter (V1 stub) ─────────────────────
 //
-// Per spec §8.2.8 + §28: tiny event emitter. V1 just logs to the
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.8 + §28: tiny event emitter. V1 just logs to the
 // console + keeps a ring-buffer of recent events for the dev events
 // badge to surface (DevEventsBadge component below the fold). A real
 // telemetry transport will land later; centralising it here means

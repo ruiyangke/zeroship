@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Plan 01.6 — workspace canvases (files, logs, env, settings).
+// Workspace canvases smoke test: files, logs, env, and settings.
 //
 // Strategy: probe the control plane up-front. If it's reachable we
 // create a fresh app and exercise each canvas against real data. If
@@ -58,7 +58,7 @@ async function selectPill(page: Page, pill: string): Promise<void> {
   await target.click();
 }
 
-test.describe("Plan 01.6 — workspace canvases", () => {
+test.describe("workspace canvases", () => {
   let app: CreatedApp | null = null;
 
   test.beforeAll(async () => {

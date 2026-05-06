@@ -162,7 +162,7 @@ pub(super) fn gen_param_extractions(
 /// in many shapes (with/without lifetime params, with/without the
 /// `v8::` prefix or the absolute `::v8::` form).
 ///
-/// Wave 9 H17: matches the LAST path segment only. Pre-fix any
+/// Matches the last path segment only. Earlier versions let any
 /// segment named `PinScope` along the path satisfied the predicate,
 /// so a hypothetical user `mod PinScope` (or a type alias `type
 /// SomePinScope = ...`) could spuriously activate the synthetic
@@ -183,9 +183,9 @@ fn is_pin_scope_ref(ty: &Type) -> bool {
 /// async event-dispatch paths). Distinct from `is_pin_scope_ref`:
 /// no reference form, just the bare `Local<Object>`.
 ///
-/// Wave 9 H17: same tightening as `is_pin_scope_ref` — match the
-/// LAST segment of the inner generic arg's path, not any segment.
-/// Pre-fix `v8::Local<some::Object<...>>` would have matched
+/// Same tightening as `is_pin_scope_ref`: match the last segment of
+/// the inner generic arg's path, not any segment. Earlier versions
+/// let `v8::Local<some::Object<...>>` match
 /// erroneously.
 fn is_wrapper_local(ty: &Type) -> bool {
     let Type::Path(tp) = ty else {
@@ -283,7 +283,7 @@ fn is_local_value(ty: &Type) -> bool {
 }
 
 /// True iff `ty` is a path type whose LAST segment ident equals
-/// `target`. Tightened in Wave 9 H17 from the prior
+/// `target`. Tightened from the prior
 /// `type_path_contains_segment`, which matched any segment along
 /// the path. The terminal-segment check is sufficient for the macro's
 /// type predicates (we accept any prefix path the user might spell —

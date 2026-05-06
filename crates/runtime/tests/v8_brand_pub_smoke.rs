@@ -10,13 +10,13 @@
 //! shadows the global, miss subclasses created via prototype-chaining,
 //! and don't share the cache the in-class brand check uses.
 //!
-//! The MAC-12 extension (Wave 5c) exposes the typed
+//! The public-brand-check extension exposes the typed
 //! `<Class>::is_instance(scope, v) -> bool` method. Body delegates to
 //! `__brand_check_<Class>` after a `Local::<Object>::try_from` gate so
 //! non-Object values (primitives, null, undefined) return `false`
 //! instead of UB.
 //!
-//! Wave 8: the legacy underscored `__zs_is_<Class>` shim was removed
+//! The legacy underscored `__zs_is_<Class>` shim was removed
 //! per `crates/runtime-macros/STABILITY.md`. This test now exercises
 //! `<Class>::is_instance` directly — same observable behaviour, the
 //! only change is the call-site spelling.

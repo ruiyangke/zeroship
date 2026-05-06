@@ -1,7 +1,7 @@
 // Client entry — bootstrap React at /, render a primitive client-side
 // "router" so links inside the SPA don't trigger full reloads.
 //
-// Phase 5: mount `<ZeroshipProvider>` at the root. The provider:
+// Mount `<ZeroshipProvider>` at the root. The provider:
 //   - wraps `<QueryClientProvider>` for React Query,
 //   - stashes the QueryClient on `_hookRegistry.queryClient` so
 //     `listTodos.invalidate()` and `rpcInvalidate("todos.")` work

@@ -33,8 +33,8 @@
 //! ## Scope of this crate
 //!
 //! This crate handles the wire shape only — it does not reconstruct V8 rich
-//! types. Wave C consumes the meta map and revives `Date`, `BigInt`, `Map`,
-//! etc. inside the V8 isolate.
+//! types. The runtime consumes the meta map and revives `Date`, `BigInt`,
+//! `Map`, etc. inside the V8 isolate.
 
 use indexmap::IndexMap;
 use serde_json::{json, Map as JsonMap, Value};
@@ -107,7 +107,8 @@ pub enum Error {
 /// Wrap a plain `serde_json::Value` as an envelope.
 ///
 /// This crate does not introspect the value for rich types — input is assumed
-/// to already be a JSON shadow. Wave C produces shadows from V8 values.
+/// to already be a JSON shadow. The runtime produces those shadows from V8
+/// values.
 #[must_use]
 pub fn encode(value: Value) -> Envelope {
     Envelope { json: value, meta: None }

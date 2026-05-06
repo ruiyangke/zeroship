@@ -1,4 +1,4 @@
-// `@`-mention dropdown for the ChatComposer (spec §10.2 / §10 plan).
+// `@`-mention dropdown for the ChatComposer (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §10.2 / §10 plan).
 //
 // Three context kinds:
 //   - file   → autocomplete file paths from the sandbox (`listSandboxFiles`).

@@ -1,5 +1,5 @@
 /**
- * Phase 3 — RpcError parsing and code propagation.
+ * RpcError parsing and code propagation.
  *
  * The wire ships structured error envelopes:
  *

@@ -9,19 +9,19 @@
 // ## Architecture
 //
 //   loop {
-//       // Phase 1: drain any `pending_responses` batches that couldn't
+//       // Step 1: drain any `pending_responses` batches that couldn't
 //       //          land on their sender (bounded mpsc::channel(1) was
 //       //          full). This MUST run before any more reads so the
 //       //          next batch for the same request can't shadow them.
-//       // Phase 2: if terminating & no in-flight responses, flush +
+//       // Step 2: if terminating & no in-flight responses, flush +
 //       //          shutdown + return.
-//       // Phase 3: while responses are in-flight, reads must complete
+//       // Step 3: while responses are in-flight, reads must complete
 //       //          atomically (no racing against the receiver) — compio
 //       //          io_uring cancellation is best-effort, and a dropped
 //       //          Submit may still complete in the kernel with its
 //       //          owned buffer lost. Between messages we opportunistic-
 //       //          ally drain queued requests via `try_recv()`.
-//       // Phase 4: idle (no in-flight work) — await a new request with
+//       // Step 4: idle (no in-flight work) — await a new request with
 //       //          `.next().await`. Unsolicited server messages arriving
 //       //          while idle stay in the kernel socket buffer and are
 //       //          picked up on the next read. (We explicitly do not
@@ -150,8 +150,9 @@ where
     /// Drive the connection until the client is dropped and all
     /// outstanding requests have completed, or a fatal I/O error occurs.
     pub async fn run(mut self) -> Result<(), Error> {
-        // Phase 1: drain any async messages captured during handshake
-        // (e.g., notices from `read_info`).
+        // Drain any async messages captured during handshake
+        // (for example notices from `read_info`) before entering the
+        // main loop.
         while let Some(msg) = self.delayed_notices.pop_front() {
             route_async(&mut self.parameters, self.async_sender.as_ref(), msg)?;
         }

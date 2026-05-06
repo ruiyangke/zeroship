@@ -27,9 +27,9 @@
 //! - `[[stream]]`                    → V8 priv sym `[[bc.streamObj]]`
 //! - `[[pendingPullIntos]]`          → Rust VecDeque<PullIntoDescriptor>
 //!
-//! Per D-2: `[[byobRequest]]` lives ONLY in the V8 private symbol.
-//! Per D-15: `respond(0)` gates on stream `[[state]]`, NOT closeRequested.
-//! Per D-16: every BufferSource path checks `was_detached`.
+//! `[[byobRequest]]` lives only in the V8 private symbol.
+//! `respond(0)` gates on stream `[[state]]`, not `closeRequested`.
+//! Every BufferSource path checks `was_detached`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -472,7 +472,7 @@ pub fn readable_byte_stream_controller_close(
 }
 
 // ---------------------------------------------------------------------------
-// Enqueue paths (D-16 detached-buffer checks throughout)
+// Enqueue paths with detached-buffer checks throughout
 // ---------------------------------------------------------------------------
 
 /// `ReadableByteStreamControllerEnqueue(controller, chunk)` — §3.11.x.
@@ -480,7 +480,7 @@ pub fn readable_byte_stream_controller_close(
 /// Spec steps:
 ///   1. If queue is empty AND closeRequested is true → return.
 ///   2. View args: buffer = chunk.[[ArrayBuffer]], byteOffset, byteLength.
-///   3. If IsDetachedBuffer(buffer) → throw TypeError. (D-16)
+///   3. If IsDetachedBuffer(buffer) → throw TypeError.
 ///   4. transferredBuffer = TransferArrayBuffer(buffer).
 ///   5. If pendingPullIntos non-empty:
 ///        firstPending = front; if its buffer is detached → TypeError.
@@ -523,7 +523,7 @@ pub fn readable_byte_stream_controller_enqueue<'s>(
         .buffer(scope)
         .ok_or_else(|| make_type_error_g(scope, "chunk view has no buffer"))?;
 
-    // D-16: detached check.
+    // Detached check.
     if is_detached_buffer(buffer) {
         return Err(make_type_error_g(scope, "chunk's buffer is detached"));
     }
@@ -545,7 +545,7 @@ pub fn readable_byte_stream_controller_enqueue<'s>(
     })
     .unwrap_or(false);
     if needs_first_refresh {
-        // Detached check on the first descriptor's buffer (D-16).
+        // Detached check on the first descriptor's buffer.
         let first_buf = with_controller_state(scope, controller, |s| {
             s.pending_pull_intos.borrow().front().map(|d| d.buffer.clone())
         })
@@ -1236,11 +1236,11 @@ pub fn readable_byte_stream_controller_pull_into<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// Respond paths (D-15 critical fix)
+// Respond paths
 // ---------------------------------------------------------------------------
 
 /// `ReadableByteStreamControllerRespond(controller, bytesWritten)` —
-/// spec §3.11.x. **D-15 CRITICAL**: gates on stream `[[state]]`, NOT on
+/// spec §3.11.x. Gate on stream `[[state]]`, not on
 /// controller `closeRequested`. After `controller.close()` with non-empty
 /// queue, `closeRequested == true` but state is still `readable` —
 /// `respond(0)` MUST throw TypeError in that window.
@@ -1258,7 +1258,7 @@ pub fn readable_byte_stream_controller_respond<'s>(
     let stream_state = with_rs_state(scope, stream, |s| s.state.get())
         .ok_or_else(|| make_type_error_g(scope, "stream has no state"))?;
 
-    // D-15: gate on stream state.
+    // Gate on stream state.
     if stream_state == StreamState::Closed {
         if bytes_written != 0 {
             return Err(make_type_error_g(
@@ -1288,7 +1288,7 @@ pub fn readable_byte_stream_controller_respond<'s>(
         }
     }
 
-    // Detached check on first descriptor's buffer (D-16).
+    // Detached check on first descriptor's buffer.
     let first_buf_g = with_controller_state(scope, controller, |s| {
         s.pending_pull_intos.borrow().front().map(|d| d.buffer.clone())
     })

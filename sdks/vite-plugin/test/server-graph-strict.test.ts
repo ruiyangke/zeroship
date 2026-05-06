@@ -1,6 +1,5 @@
 /**
- * RPC v2 Phase 2 — strict-mode posture resolution + dev-vs-production
- * gate behavior (proposal §1).
+ * Strict-mode posture resolution + dev-vs-production gate behavior.
  *
  *   - "auto" (default): strict in production, lenient in dev.
  *   - "always": strict regardless of mode.

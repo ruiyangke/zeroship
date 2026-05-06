@@ -3,7 +3,7 @@
 //! Implementation mirrors WHATWG's reference implementation
 //! (`reference-implementation/lib/abstract-ops/readable-streams.js` —
 //! `ReadableStreamPipeTo`) one-to-one. The 14-step algorithm + handler
-//! installation order is critical: per CRITICAL #8 (streams round-1)
+//! installation order is critical:
 //! we install the four shutdown handlers in spec order:
 //!   1. abortAlgorithm (signal)
 //!   2. isOrBecomesErrored(source) — forward-error
@@ -12,7 +12,7 @@
 //!   5. synchronous backward-close check (dest closed/closing at start)
 //!   6. spawn pipeLoop with setPromiseIsHandledToTrue
 //!
-//! Per CRITICAL #20: PipeState borrow protocol. PipeState is held via
+//! PipeState borrow protocol: PipeState is held via
 //! `Rc<PipeState>`; mutable bookkeeping (current_write, signal_listener)
 //! lives in interior `RefCell`s. Each top-level callback drops its
 //! borrow before calling out to user code (writer.write, reader.read,
@@ -47,7 +47,7 @@ use crate::streams::writable_writer::{
 ///
 /// Ownership: `Rc<PipeState>` so multiple async callbacks can hold a
 /// reference. All mutable fields are `Cell` (Copy types) or `RefCell`
-/// (non-Copy). The borrow-acquire-release protocol (CRITICAL #20) is
+/// (non-Copy). The borrow-acquire-release protocol is
 /// strictly observed: callbacks never hold a `borrow_mut()` across a
 /// `.then()` / `await` boundary.
 #[allow(missing_debug_implementations)]
@@ -660,7 +660,7 @@ impl ReadRequestNative for PipeReadRequest {
     ) {
         let PipeReadRequest { pipe_state, loop_resolver } = *self;
 
-        // CRITICAL: capture currentWrite BEFORE recursing or yielding,
+        // Capture currentWrite before recursing or yielding,
         // so the source.closed handler — which fires AS A QUEUED
         // MICROTASK after closedPromise resolved during pull_steps —
         // sees the new write Promise when it runs `wait_for_writes_to_finish`.
@@ -894,7 +894,7 @@ fn finalize(
 }
 
 // ---------------------------------------------------------------------------
-// pipe_native_internal — Rust-only internal pipe (D-10)
+// pipe_native_internal — Rust-only internal pipe
 // ---------------------------------------------------------------------------
 
 /// Pipe options for `pipe_native_internal` and `pipeThrough`.

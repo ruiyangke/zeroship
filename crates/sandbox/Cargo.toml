@@ -35,7 +35,7 @@ bytes = { workspace = true }
 # private key; only the public half ships to the Pod).
 ed25519-dalek = { workspace = true }
 # XChaCha20-Poly1305 AEAD for sealed-record persistence; see
-# crates/sandbox/src/persist.rs and the preview-URL design § II.0.
+# crates/sandbox/src/persist.rs and the `docs/proposals/sandbox-preview-urls.md` § II.0.
 chacha20poly1305 = { workspace = true }
 base64 = { workspace = true }
 # Sync HTTP client (blocking) for talking to the in-VM agent. Run

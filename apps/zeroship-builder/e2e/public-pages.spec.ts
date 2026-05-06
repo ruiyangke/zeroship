@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 01 — public surfaces (per spec §5).
+// Public-surface smoke test.
 //
 // Marketing landing, pricing, skill catalogue, public templates,
 // about, changelog, and the legal stubs all render *without* an
@@ -8,7 +8,7 @@ import { test, expect } from "@playwright/test";
 // sandbox controller — these are pure UI smoke tests against the
 // vanilla `npm run dev` worktree.
 
-test.describe("Plan 01 — public pre-auth surfaces", () => {
+test.describe("public pre-auth surfaces", () => {
   test("/ renders the marketing landing", async ({ page }) => {
     await page.goto("/");
     await expect(page.getByTestId("marketing-page")).toBeVisible();
@@ -40,7 +40,7 @@ test.describe("Plan 01 — public pre-auth surfaces", () => {
     // At least one skill card visible from the static seed list.
     await expect(page.getByTestId("skill-card:auth")).toBeVisible();
     await expect(page.getByTestId("skill-card:payments")).toBeVisible();
-    // "Add to project" is disabled (registry not wired — ISS-13).
+    // "Add to project" is disabled because the registry action is not wired yet.
     const addBtn = page.getByTestId("skill-add:auth");
     await expect(addBtn).toBeVisible();
     await expect(addBtn).toBeDisabled();

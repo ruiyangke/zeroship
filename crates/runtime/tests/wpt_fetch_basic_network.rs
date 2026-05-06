@@ -10,12 +10,12 @@
 //! Coverage:
 //!
 //!   * `request-headers.any.js`     — outbound header correctness
-//!     (Content-Type, Content-Length, Origin per D-16, Accept-Encoding).
+//!     (Content-Type, Content-Length, Origin, Accept-Encoding).
 //!   * `request-upload.any.js`      — POST body bytes sent intact.
 //!   * `response-null-body.any.js`  — null-body status (101/103/204/205/304)
-//!     surface as null body. (D-13, fetch spec §6.5).
-//!   * `mode-no-cors.any.js`        — mode is parsed but bypassed (D-3).
-//!   * `keepalive.any.js`           — keepalive parsed but ignored (D-3).
+//!     surface as null body (fetch spec §6.5).
+//!   * `mode-no-cors.any.js`        — mode is parsed but bypassed.
+//!   * `keepalive.any.js`           — keepalive parsed but ignored.
 //!   * `historical.any.js`          — superseded API surface (frozen).
 //!
 //! Pass criterion: ≥75% of cases per the brief (and this doc).
@@ -237,8 +237,8 @@ fn fmt_fail(
 fn wpt_fetch_basic_request_headers() {
     let mut results: Vec<(String, Outcome)> = Vec::new();
 
-    // GET — no body, no Content-Type, no Origin (D-16 appends Origin
-    // only for non-GET/HEAD).
+    // GET — no body, no Content-Type, no Origin. Origin is only
+    // appended for non-GET/HEAD requests.
     //
     // Note: hyper auto-injects `Content-Length: 0` on body-less
     // requests. WPT's `inspect-headers.py` ignores or filters this
@@ -254,7 +254,7 @@ fn wpt_fetch_basic_request_headers() {
                 let has_origin = c.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("origin"));
                 let has_ct = c.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
                 if has_origin {
-                    Outcome::Fail("GET: Origin header should NOT be set (D-16)".to_string())
+                    Outcome::Fail("GET: Origin header should not be set".to_string())
                 } else if has_ct {
                     Outcome::Fail("GET: Content-Type set on body-less request".to_string())
                 } else {
@@ -266,7 +266,7 @@ fn wpt_fetch_basic_request_headers() {
         results.push(("GET no body has no Origin/CT".to_string(), outcome));
     }
 
-    // POST with body — Content-Length set, body bytes match. D-16:
+    // POST with body — Content-Length set, body bytes match, and
     // Origin present.
     {
         let body = b"Request's body";
@@ -296,7 +296,7 @@ fn wpt_fetch_basic_request_headers() {
                 } else if ct != Some("text/plain;charset=UTF-8") {
                     Outcome::Fail(format!("POST: Content-Type {:?}", ct))
                 } else if origin.is_none() {
-                    Outcome::Fail("POST: Origin header missing (D-16 requires)".to_string())
+                    Outcome::Fail("POST: Origin header missing".to_string())
                 } else {
                     Outcome::Pass
                 }
@@ -332,7 +332,7 @@ fn wpt_fetch_basic_request_headers() {
         results.push(("POST with empty body".to_string(), outcome));
     }
 
-    // PUT with body — Origin should be present (D-16).
+    // PUT with body — Origin should be present.
     {
         let body = b"Put body";
         let server = start_server(vec![ServerResponse::ok(b"ok", "text/plain")]);
@@ -551,7 +551,7 @@ fn wpt_fetch_basic_response_null_body() {
 }
 
 // ---------------------------------------------------------------------------
-// keepalive.any.js: keepalive parsed but ignored (D-3)
+// keepalive.any.js: keepalive parsed but ignored
 // ---------------------------------------------------------------------------
 //
 // The native FetchRequest doesn't have a keepalive field — keepalive is
@@ -581,7 +581,7 @@ fn wpt_fetch_basic_keepalive_no_op() {
 }
 
 // ---------------------------------------------------------------------------
-// mode-no-cors equivalent — D-3 says mode is ignored
+// mode-no-cors equivalent — mode is ignored
 // ---------------------------------------------------------------------------
 //
 // The native FetchRequest doesn't have a mode field — mode is stored on
@@ -594,7 +594,7 @@ fn wpt_fetch_basic_mode_no_cors_bypass() {
     let mut results: Vec<(String, Outcome)> = Vec::new();
 
     // Cross-origin (different host:port) should succeed — there's no
-    // CORS preflight, no opaque-response shaping, etc. Per D-3.
+    // CORS preflight, no opaque-response shaping, etc.
     {
         let final_server = start_server(vec![ServerResponse::ok(b"cross-origin OK", "text/plain")]);
         // Ask another server to redirect us cross-origin.
@@ -604,7 +604,7 @@ fn wpt_fetch_basic_mode_no_cors_bypass() {
             Ok(r) => Outcome::Fail(format!("status={} body={:?}", r.status, String::from_utf8_lossy(&r.body))),
             Err(e) => Outcome::Fail(format!("errored: {e}")),
         };
-        results.push(("cross-origin GET succeeds (D-3 bypass)".to_string(), outcome));
+        results.push(("cross-origin GET succeeds".to_string(), outcome));
     }
 
     finish("mode-no-cors", &results);

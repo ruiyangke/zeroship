@@ -34,7 +34,7 @@ pub enum EventKind {
     RateLimited,
     /// Period rollover completed.
     PeriodRollover,
-    /// Plan was changed.
+    /// Pricing tier changed.
     PlanChanged,
     /// Spending limit reached.
     SpendingLimitHit,

@@ -10,18 +10,18 @@
 //!
 //! ## Key correctness fixes vs the JS polyfill
 //!
-//! - **ByteString validation** (BLOCKER-2): code units > 0xFF throw
+//! - **ByteString validation**: code units > 0xFF throw
 //!   TypeError before any storage write. The JS polyfill silently
 //!   coerced via `String(value)` which lossily round-tripped non-Latin-1
 //!   bytes.
-//! - **Normalize-then-validate** (BLOCKER-3): Fetch §2.2.1 step 1 of
+//! - **Normalize-then-validate**: Fetch §2.2.1 step 1 of
 //!   `append`/`set` is *normalize value*, then validate. The polyfill
 //!   validated the raw value, rejecting `"hello\r\n"` instead of
 //!   stripping outer ws first.
-//! - **Validate name on delete/has/get** (BLOCKER-4): Fetch §2.2.1
+//! - **Validate name on delete/has/get**: Fetch §2.2.1
 //!   step 1 of each calls validate(name, ""). The polyfill skipped
 //!   this check, silently no-op'ing on bad names.
-//! - **Live iteration** (BLOCKER-1): per WebIDL §3.7.10.2, iterator
+//! - **Live iteration**: per WebIDL §3.7.10.2, iterator
 //!   `next()` re-reads "value pairs to iterate over" on every call.
 //!   Mutation between calls IS observable. The polyfill snapshotted
 //!   keys at iterator construction.
@@ -62,7 +62,7 @@ use zeroship_runtime_macros::{
 ///     TypeError. Set on `Response.error()` headers per Fetch §6.2.4.
 ///
 /// The `request` / `response` guards (forbidden-header-name filtering)
-/// are deferred — see fetch-native v2 D-17.
+/// are deferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeadersGuard {
     #[default]
@@ -154,8 +154,8 @@ impl Headers {
     ///
     /// v1 enforces step 1 (always) and step 2 (immutable guard, used
     /// for `Response.error()`). Steps 3-4 (request/response guards)
-    /// are deferred per design D-17 — they only filter, never throw,
-    /// so future guard expansion stays back-compatible.
+    /// are deferred because they only filter, never throw, so future
+    /// guard expansion stays back-compatible.
     fn validate(&self, name: &[u8], value: &[u8]) -> Result<bool, OpError> {
         if !is_header_name(name) || !is_header_value(value) {
             return Err(OpError::type_error("Invalid header name or value"));
@@ -749,9 +749,9 @@ pub struct HeadersTemplateSlot {
 /// `#[v8_iterable(mode = live)]` attribute on the impl block emits
 /// keys / values / entries / forEach / [@@iterator] onto the prototype
 /// automatically — no hand-rolled iterator factory left in this file.
-/// (Pre-MAC-09 the iterator factories needed `args.this()` to capture
-/// the parent receiver into a `Global<Object>`; now the macro does that
-/// internally per WebIDL §3.7.10.)
+/// Earlier versions had to capture `args.this()` manually into a
+/// `Global<Object>`; the macro now does that internally per WebIDL
+/// §3.7.10.
 pub fn install_global<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,

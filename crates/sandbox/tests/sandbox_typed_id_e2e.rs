@@ -1,8 +1,8 @@
-//! Round-2 fixer / CRITICAL #1 regression test — typed-id round-trip.
+//! regression test — typed-id round-trip.
 //!
 //! `POST /sandboxes` returns `sandbox_id: "sbx_<base62>"`. Every
 //! follow-up call (GET / DELETE / exec / file-tree / files /
-//! preview-share) MUST accept that exact string back. Round-1's
+//! preview-share) MUST accept that exact string back. The earlier
 //! handler regression (`parse_uuid` → `s.parse::<Uuid>()`) rejected
 //! the typed-id and 400'ed every follow-up. This test would have
 //! caught the regression — it would have been impossible to ship.
@@ -215,7 +215,7 @@ async fn get_round_trips_typed_id() {
         "GET on typed-id sandbox MUST return 200 (round-2 fixer / CRITICAL #1)"
     );
 
-    // Round-2 fixer / IMPORTANT #3: the sandbox_id in the response
+    // : the sandbox_id in the response
     // body MUST be the same `sbx_<base62>` form the caller passed in
     // (not a hyphenated UUID). Audit tools that join on payload-id
     // depend on this consistency.
@@ -467,7 +467,7 @@ async fn list_share_typed_id_passes_parse_layer() {
 /// `DELETE /sandboxes/{typed_id}` — the stop endpoint reaches into
 /// the backend. We accept any non-400 response (ok / 5xx); what we
 /// reject is parse-layer 400. Also asserts the response payload
-/// echoes the typed-id form (IMPORTANT #3).
+/// echoes the typed-id form.
 #[ntex::test]
 async fn stop_typed_id_passes_parse_and_response_uses_typed_id() {
     let (state, _uuid, sandbox_typed, user_typed) =
@@ -489,14 +489,15 @@ async fn stop_typed_id_passes_parse_and_response_uses_typed_id() {
     );
 
     if resp.status() == StatusCode::OK {
-        // IMPORTANT #3: the response sandbox_id must echo the typed-id
-        // form, not a hyphenated UUID. Round-1 returned the wrong shape.
+        // The response sandbox_id must echo the typed-id form, not a
+        // hyphenated UUID. The earlier implementation returned the
+        // wrong shape here.
         let body = test::read_body(resp).await;
         let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(
             v.get("sandbox_id").and_then(|x| x.as_str()),
             Some(sandbox_typed.as_str()),
-            "stop response sandbox_id must round-trip the typed-id form (IMPORTANT #3)"
+            "stop response sandbox_id must round-trip the typed-id form"
         );
     }
 }

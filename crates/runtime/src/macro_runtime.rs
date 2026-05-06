@@ -23,7 +23,7 @@
 //! `::zeroship_runtime::<m>::<Item>` → `::zeroship_runtime::macro_runtime::<m>::<Item>`.
 //! We deliberately mirror the original module shape in the
 //! sub-module names so the substitution stays mechanical and the
-//! Wave-5b snapshot diff is purely path-swap (no semantic change).
+//! snapshot diff is purely a path swap, not a semantic change.
 //!
 //! # Stability
 //!
@@ -135,13 +135,13 @@ pub mod node_error {
     pub use crate::node_error::build_node_exception;
 }
 
-// ----- V8ClassInstance trait (Wave 5c, design §3.5) -----
+// ----- V8ClassInstance trait -----
 //
-// Stable typed brand-check entry point per `#[v8_class]`. Wave 5c
-// introduced `<Class>::is_instance` (the inherent method) + a sealed
-// trait `V8ClassInstance` that downstream code can use as a generic
-// bound (`fn check<T: V8ClassInstance>`). Wave 8 removed the legacy
-// underscored `__zs_is_<Class>` shim per the macro's STABILITY.md.
+// Stable typed brand-check entry point per `#[v8_class]`.
+// `<Class>::is_instance` is the inherent method, and the sealed
+// `V8ClassInstance` trait gives downstream code a generic bound
+// (`fn check<T: V8ClassInstance>`). The legacy underscored
+// `__zs_is_<Class>` shim has been removed per the macro's STABILITY.md.
 //
 // The macro emits BOTH:
 //   1. `impl <Class> { pub fn is_instance(scope, v) -> bool { ... } }`

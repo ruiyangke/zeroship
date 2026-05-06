@@ -1,11 +1,7 @@
-//! AST types shared between parse + emit phases of `#[v8_class]`.
+//! AST types shared between parse and emit phases of `#[v8_class]`.
 //!
-//! Wave 3 commit 5 — extracted from `mod.rs` (design
-//! `docs/proposals/runtime-macros-refactor.md` §4.1, F7). The design
-//! lists this content under `parse/ast.rs` in the post-Wave-4 layout;
-//! Wave 3 lifts it out of `mod.rs` to keep the file under the size
-//! budget (target ≤300 LOC after Wave 3, ≤150 LOC by Wave 6). Wave 4
-//! may relocate the file under a `parse/` directory.
+//! Extracted from `mod.rs` during the refactor that split the macro
+//! into smaller parse and emit units.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MethodKind {
@@ -58,14 +54,15 @@ pub(crate) struct ClassMethod<'a> {
     pub(crate) fastcall: bool,
     /// `#[reject_shared(arg1, arg2, …)]` — set of parameter names that
     /// should reject SharedArrayBuffer-backed views with TypeError. Per
-    /// WebIDL §3.2.21 (BufferSource without `[AllowShared]`). Pre-Wave-4
-    /// the emit phase walked `func.attrs` afresh per method; now the
+    /// WebIDL §3.2.21 (BufferSource without `[AllowShared]`). Earlier
+    /// versions walked `func.attrs` afresh per method; now the
     /// analyse phase fills this once.
     pub(crate) reject_shared_names: std::collections::HashSet<String>,
     /// `#[v8_constructor(callable_no_new)]` — opt the constructor out of
     /// the must-new guard. Only meaningful for `MethodKind::Constructor`.
     pub(crate) callable_no_new: bool,
-    /// `#[v8_constructor(post_init = "fn_name")]` — MAC-02 hook ident.
+    /// `#[v8_constructor(post_init = "fn_name")]` — post-init hook
+    /// ident.
     /// Only meaningful for `MethodKind::Constructor`.
     pub(crate) post_init: Option<syn::Ident>,
 }

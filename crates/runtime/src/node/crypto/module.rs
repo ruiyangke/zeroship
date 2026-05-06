@@ -1,10 +1,10 @@
 //! Native `node:crypto` ESM module.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §XI (D-N26).
+//! See `docs/proposals/node-crypto-native.md` §XI.
 //!
 //! The runtime resolves `import { createHash } from "node:crypto"` to a
 //! V8 `SyntheticModule` whose exports are populated lazily by
-//! [`evaluate`] on first import. Pre-D-N26 this went through a
+//! [`evaluate`] on first import. Earlier versions went through a
 //! `globalThis.__zeroship_node_crypto` boundary object that the
 //! Vite-side virtual module re-exported; native synthetic modules
 //! eliminate the indirection.
@@ -209,7 +209,7 @@ pub fn populate<'s>(
     set_fn(scope, obj, "setFips", misc::set_fips_callback);
     set_fn(scope, obj, "secureHeapUsed", misc::secure_heap_used_callback);
 
-    // -- WebCrypto bridge (D-N16) --
+    // -- WebCrypto bridge --
     // `webcrypto` and `subtle` need object identity with globalThis.crypto.
     let global = scope.get_current_context().global(scope);
     let crypto_key = v8::String::new(scope, "crypto").unwrap();

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 03.1 spine: Home → /new wizard → BriefCard → createApp →
+// Workspace creation spine: Home → /new wizard → BriefCard → createApp →
 // /p/:appId/preview → ChatRail seeded with a first user message
 // derived from the brief → Builder reply.
 //
@@ -34,7 +34,7 @@ async function probe(url: string): Promise<boolean> {
   }
 }
 
-test.describe("Plan 03.1 spine — home → wizard → workspace", () => {
+test.describe("spine — home → wizard → workspace", () => {
   test("shell renders without an API key", async ({ page }) => {
     // Home: project gallery + new-project prompt. Just assert the
     // surface renders — we don't drive the submit here because
@@ -42,7 +42,7 @@ test.describe("Plan 03.1 spine — home → wizard → workspace", () => {
     // race in dev that's flaky after the wizard test mutates the
     // module graph. The wizard surface is exercised directly below.
     //
-    // Note: `/` is the public marketing page (per spec §5.1). The
+    // Note: `/` is the public marketing page (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.1). The
     // authed gallery (Home) lives at `/home` behind AuthGuard; in
     // dev, devBypass lets us land on it without a real session.
     await page.goto("/home");

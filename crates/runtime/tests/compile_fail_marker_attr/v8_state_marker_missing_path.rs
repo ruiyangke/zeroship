@@ -4,7 +4,7 @@
 //! `V8StateMarkerAttr::merge` rejects with:
 //!   "#[v8_state_marker(M)]: expected a type identifier"
 //!
-//! (Pre-Wave-4 this would silently treat the marker as absent — the
+//! (Earlier versions silently treated the marker as absent — the
 //! state-marker path requires a marker, so a bare attribute is a
 //! likely typo for either `#[v8_state_marker(MyMarker)]` or `#[v8_class]`
 //! alone.)

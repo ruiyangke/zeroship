@@ -1,5 +1,5 @@
 "use server";
-// Phase B.2: data-part emitter middleware.
+// Data-part emitter middleware.
 //
 // deepagents/LangChain runs every tool call through `wrapToolCall`
 // hooks installed via `createMiddleware`. We sit in that seam and emit
@@ -14,7 +14,7 @@
 // per chat turn, inside the `execute({writer})` closure, and feeds the
 // result into `createDeepAgent`.
 //
-// Tool taxonomy (per spec §4.8.9 G4):
+// Tool taxonomy:
 //   write_file, edit_file → emit `data-diff` (custom data part) here.
 //                           The translator's streamEvents loop SKIPS
 //                           emitting native tool-call chunks for these
@@ -52,13 +52,13 @@
 //                           chunks are emitted by the translator from
 //                           on_tool_start / on_tool_end events.
 //
-// "before" content for diffs: Phase B.2 ships before="" (empty). To
-// fetch the on-disk file we'd need backend access here; deepagents
-// doesn't currently expose the backend instance through the tool-call
-// request. Phase B.3 may inject backend via context schema, at which
-// point this can show real before/after diffs. For now the DiffCard
-// renders an "all added" diff for write_file (matches the user
-// experience of seeing a freshly-written file).
+// "before" content for diffs currently ships as `before=""`. To fetch
+// the on-disk file we'd need backend access here; deepagents doesn't
+// currently expose the backend instance through the tool-call request.
+// If the backend is later injected through the context schema, this can
+// show real before/after diffs. For now the DiffCard renders an
+// "all added" diff for `write_file`, which matches the user experience
+// of seeing a freshly-written file.
 
 import type { AgentMiddleware } from "langchain";
 import type { UIMessageStreamWriter } from "ai";
@@ -69,13 +69,13 @@ import type { UIMessageStreamWriter } from "ai";
 // `sdks/zeroship-stub/index.js`.
 import { waitUntil } from "zeroship";
 
-// emit helper is shared with the wizard runtime (per spec §4.8.2b /
+// emit helper is shared with the wizard runtime (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b /
 // §8.2.7). The wizard calls it directly from its node body; Builder
 // goes through this middleware. Same chunk shape on the wire.
 import { emitDataSurvey, type SurveyInput } from "./_survey_wire.js";
-// Quality-scoreboard updater (per ISS-16 fix path). Lives in
-// `_agent_writes.ts` (underscore-prefixed) so it stays out of the
-// public RPC surface — only the server middleware writes here.
+// Quality-scoreboard updater. Lives in `_agent_writes.ts`
+// (underscore-prefixed) so it stays out of the public RPC surface —
+// only the server middleware writes here.
 import { setQualityFromCritic } from "./_agent_writes.js";
 
 /**
@@ -213,9 +213,9 @@ export async function dataPartMiddleware(
               // Stream closed — drop. The Command still propagates back
               // to the LLM as a ToolMessage so Builder can react.
             }
-            // ISS-16 fix path: persist the Critic-graded scorecard into
-            // the per-app KV slot so HealthCanvas reflects the live
-            // grades on its next refetch. Fire-and-forget via
+            // Persist the Critic-graded scorecard into the per-app KV
+            // slot so HealthCanvas reflects the live grades on its
+            // next refetch. Fire-and-forget via
             // waitUntil() so the SSE stream isn't held open by the KV
             // round-trip — the user-visible part is the chat receipt
             // already emitted above.

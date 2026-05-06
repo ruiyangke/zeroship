@@ -12,9 +12,9 @@ use crate::user_auth;
 
 /// Decide whether `req` satisfies `policy.auth`. `Anon` always passes
 /// (validate() enforces `publicly_accessible: true`). `User` and `Admin`
-/// require a verifiable `__zs_session` cookie. Phase 2 doesn't yet
-/// distinguish admin from user roles — that ships with the auth tier
-/// rework. For now both require a session.
+/// require a verifiable `__zs_session` cookie. The gateway does not yet
+/// distinguish admin from user roles, so for now both simply require a
+/// session.
 pub(super) fn auth_satisfied(
     req: &HttpRequest,
     policy: &crate::compiled::EffectivePolicy,

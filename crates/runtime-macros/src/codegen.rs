@@ -2,12 +2,11 @@
 //! tokens consumed by the slow-path `FunctionCallback` codegen in
 //! `v8_class::emit::method` / `static_op`.
 //!
-//! Wave 4 cleanup commit (design `docs/proposals/runtime-macros-
-//! refactor.md` §3.7 follow-up): split out from `lib.rs` so the latter
-//! can shrink toward its ≤500 LOC target. The helpers live here as a
-//! cohesive unit because they share the same `rv: ReturnValue` /
-//! `scope: &mut PinScope` ABI assumption — they're emit-time-only and
-//! never evaluated at macro time.
+//! Split out from `lib.rs` so the return-value marshalling helpers live
+//! together. The helpers share the same `rv: ReturnValue` /
+//! `scope: &mut PinScope` ABI assumption, so keeping them in one file
+//! makes the emit-side contract easier to maintain. They are
+//! emit-time-only and never evaluated at macro time.
 //!
 //! All quoted snippets bind in scope:
 //!   - `scope`  (the V8 scope, `&mut PinScope`)
@@ -123,7 +122,7 @@ pub(crate) fn gen_extract_throw() -> TokenStream2 {
 }
 
 /// Emit the per-arg extraction tokens for the slow-path
-/// FunctionCallback. Wave 4b — delegates to the table-driven
+/// FunctionCallback. Delegates to the table-driven
 /// [`super::known_type::KnownType`] classifier (design §3.7, closes
 /// F10 / H8). The body here is a thin shim: classify the type once,
 /// ask the variant for its emission. The 13-arm string-keyed dispatch

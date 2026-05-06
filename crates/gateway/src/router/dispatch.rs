@@ -333,12 +333,12 @@ async fn execute_resource_tree(
         .map(|s| s.to_string());
 
     // 2. Method-vs-kind gate (RPC procedures only).
-    //    Spec §7.1: `kind: "mutation"` cannot be served via GET.
-    //    Phase 7 — `kind: "subscription"` requires GET + Upgrade
-    //    headers; we surface 405 for the wrong method and 426
-    //    UPGRADE_REQUIRED when Upgrade headers are missing. The
-    //    actual handshake runs in `proxy_subscription_upgrade` once
-    //    we get past the rest of the pre-dispatch checks.
+    //    `kind: "mutation"` cannot be served via GET, and
+    //    `kind: "subscription"` requires GET + Upgrade headers. We
+    //    surface 405 for the wrong method and 426 UPGRADE_REQUIRED
+    //    when Upgrade headers are missing. The actual handshake runs
+    //    in `proxy_subscription_upgrade` once we get past the rest of
+    //    the pre-dispatch checks.
     if let Some(kind) = policy.kind {
         let method = req.method();
         let allow = match kind {
@@ -371,11 +371,11 @@ async fn execute_resource_tree(
         }
     }
 
-    // 3. Auth gate. `anon` always passes (subject to publicly_accessible
-    //    being set, which is enforced at validate-time). `user`/`admin`
-    //    require a session cookie — Phase 2 reuses the existing
-    //    `__zs_session` extraction; richer admin-vs-user role checks
-    //    will arrive when the auth tier ships.
+    // 3. Auth gate. `anon` always passes (subject to
+    //    `publicly_accessible` being set, which is enforced at
+    //    validate-time). `user`/`admin` require a session cookie.
+    //    Richer admin-vs-user role checks will arrive with the auth
+    //    tier.
     if !auth_satisfied(&req, policy, &state.config.auth_secret, app_id) {
         return HttpResponse::Unauthorized()
             .json(&serde_json::json!({"error": "authentication required"}));
@@ -435,9 +435,7 @@ async fn execute_resource_tree(
     //    rejects with the right error envelope.
     //
     //    Only mutations enter the dedupe path. Queries are inherently
-    //    safe (the spec doesn't apply idempotency to them); streams /
-    //    subscriptions don't dedupe either — Phase 6 is out of scope
-    //    for those.
+    //    safe; streams and subscriptions do not use dedupe either.
     let idempotency_handle = if policy.idempotent
         && matches!(policy.kind, Some(ProcedureKind::Mutation) | None)
         && matches!(policy.action, ResolvedAction::WorkerRpc)
@@ -470,13 +468,11 @@ async fn execute_resource_tree(
     // 8. Execute the resolved action.
     let mut response = match &policy.action {
         ResolvedAction::WorkerRpc | ResolvedAction::WorkerSsr => {
-            // Phase 7: subscription procedures need a WebSocket-aware
-            // proxy path. Idempotency is bypassed (already enforced
-            // above). Affinity routing uses (app_id, principal) so
-            // reconnects from the same caller pin the same worker —
-            // critical for per-user subscription state to survive
-            // reconnect (spec §16 #4). The transparent WS proxy
-            // itself is wired in `proxy::forward_subscription`.
+            // Subscription procedures need a WebSocket-aware proxy
+            // path. Idempotency is bypassed (already enforced above).
+            // Affinity routing uses `(app_id, principal)` so reconnects
+            // from the same caller pin the same worker. The transparent
+            // WS proxy itself is wired in `proxy::forward_subscription`.
             if matches!(policy.kind, Some(ProcedureKind::Subscription)) {
                 handle_subscription_dispatch(
                     req,
@@ -512,9 +508,10 @@ async fn execute_resource_tree(
                 .finish()
         }
         ResolvedAction::Rewrite { to } => {
-            // Phase 2: rewrite forwards under the new path; recursion
-            // not yet supported (would need to re-enter lookup_resource
-            // with hop-limiting). Pass-through to worker for now.
+            // Rewrite forwards under the new path. Recursive rewrites
+            // are not yet supported because they would need to re-enter
+            // `lookup_resource` with hop limiting. Pass through to the
+            // worker for now.
             let _ = to;
             handle_dispatch(
                 req,
@@ -528,8 +525,8 @@ async fn execute_resource_tree(
             .await
         }
         ResolvedAction::Static { try_chain } => {
-            // For Phase 2 we resolve the first asset that exists in
-            // `assets` / `runtime_assets`. The legacy walker has more
+            // Resolve the first asset that exists in `assets` /
+            // `runtime_assets`. The legacy walker has more
             // sophisticated `$path` / `[capture]` substitution; for the
             // resource-tree path the build emits literal templates.
             serve_resource_tree_static(
@@ -563,7 +560,7 @@ async fn execute_resource_tree(
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency dedupe (spec §8) — pre/post worker hooks
+// Idempotency dedupe — pre/post worker hooks
 // ---------------------------------------------------------------------------
 
 /// Outcome of [`handle_idempotency_pre_dispatch`]. The caller either
@@ -596,7 +593,7 @@ fn dispatch_path_wire_id(dispatch_path: &str) -> Option<&str> {
 }
 
 /// Build the standard `application/zs-error+json` envelope for an
-/// idempotency rejection. Mirrors the spec §6 error code table.
+/// idempotency rejection.
 fn build_zs_error_response(
     status: ntex::http::StatusCode,
     code: &str,
@@ -649,9 +646,9 @@ pub(super) fn build_replay_response(
 }
 
 /// Resolve the per-procedure inflight wait timeout. Bounded by the
-/// procedure's declared timeout (spec §7) when present, and capped at
-/// `DEFAULT_INFLIGHT_WAIT_MS` (~30s) — letting dedupe contention block
-/// a worker thread for longer than the handler itself could run is
+/// procedure's declared timeout when present, and capped at
+/// `DEFAULT_INFLIGHT_WAIT_MS` (~30s). Letting dedupe contention block a
+/// worker thread for longer than the handler itself could run is
 /// pointless.
 fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
     match policy.timeout_ms {
@@ -660,9 +657,9 @@ fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
     }
 }
 
-/// Spec §8 pre-dispatch hook: extract `Idempotency-Key`, hash body,
-/// consult store, decide. Only called for `idempotent: true`
-/// mutations; the caller filters by policy.
+/// Pre-dispatch idempotency hook: extract `Idempotency-Key`, hash the
+/// body, consult the store, and decide. Only called for
+/// `idempotent: true` mutations; the caller filters by policy.
 pub(super) async fn handle_idempotency_pre_dispatch(
     req: &HttpRequest,
     state: &GateState,
@@ -746,8 +743,8 @@ pub(super) async fn handle_idempotency_pre_dispatch(
         }
         Err(e) => {
             // Store error → log and fail closed. A degraded dedupe
-            // backend MUST NOT silently let through duplicate
-            // mutations; spec §8 is explicit that this is unsafe.
+            // backend must not silently let duplicate mutations
+            // through.
             tracing::error!(error = %e, "gateway: idempotency store error");
             IdempotencyOutcome::ReturnNow(build_zs_error_response(
                 ntex::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -847,7 +844,7 @@ pub(super) async fn capture_response_for_idempotency(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7 — subscription dispatch (WebSocket-aware)
+// Subscription dispatch (WebSocket-aware)
 // ---------------------------------------------------------------------------
 
 /// Forward a `kind: "subscription"` GET-with-Upgrade request through the
@@ -1654,7 +1651,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 7 — subscription gating + session affinity
+    // Subscription gating + session affinity
     // -----------------------------------------------------------------------
 
     fn subscription_resource() -> ResourceEntry {

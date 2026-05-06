@@ -1,8 +1,8 @@
-//! Table-driven fast-API type classifier (Wave 4b — design
-//! `docs/proposals/runtime-macros-refactor.md` §3.7).
+//! Table-driven fast-API type classifier.
 //!
-//! Pre-Wave-4b `fastcall_arg_mapping` and `fastcall_return_mapping`
-//! were two parallel string-keyed `match` tables (see the parent
+//! Earlier versions used `fastcall_arg_mapping` and
+//! `fastcall_return_mapping` as two parallel string-keyed `match`
+//! tables (see the parent
 //! mod.rs's `arg_mapping` / `return_mapping` history). Each new
 //! supported type meant editing two tables, and a typo in one (e.g.
 //! `"u32"` vs `"U32"`) silently degraded the case to the catchall
@@ -33,7 +33,7 @@ use syn::{Ident, Type};
 
 /// A V8 fast-API type the macro knows how to translate to/from the
 /// user method's Rust signature. The variants intentionally cover the
-/// pre-Wave-4b string-keyed cases plus `Void` for the return position.
+/// previous string-keyed cases plus `Void` for the return position.
 ///
 /// Use [`FastcallType::from_arg_ty`] for argument positions and
 /// [`FastcallType::from_return_ty`] for return positions; mismatched

@@ -1,6 +1,6 @@
 // ─── Pricing — public pricing surface (`/pricing`) ──────────────
 //
-// Per spec §5.2. Three-tier card grid (Free / Maker / Pro), each
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.2. Three-tier card grid (Free / Maker / Pro), each
 // with title, big serif price, italic tagline, bullet list, and a
 // primary "Choose" button that routes to /signup?plan=<tier>.
 //

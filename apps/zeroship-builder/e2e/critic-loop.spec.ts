@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 02 Phase B.3: Builder calls task("critic", …) after a write
+// After a write, Builder calls `task("critic", …)`
 // batch and the v6 stream surfaces a `data-critic-round` chunk that
 // the client renders as a CriticRoundCard. This smoke test drives a
 // real Builder turn that is engineered to require at least one
@@ -30,7 +30,7 @@ async function probe(url: string): Promise<boolean> {
   }
 }
 
-test.describe("Plan 02 Phase B.3 — critic loop wires into the chat stream", () => {
+test.describe("critic loop wires into the chat stream", () => {
   test("Builder writes a file → task(\"critic\") → CriticRoundCard renders", async ({
     page,
   }, testInfo) => {

@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Plan 01.7 — Plan + Health canvases (spec §9.8 + §9.9).
+// Roadmap and Health canvas smoke test.
 //
 // Strategy mirrors workspace-canvases.spec.ts: probe the control
 // plane up-front, create a fresh app if it's reachable, otherwise
@@ -59,7 +59,7 @@ async function selectPill(page: Page, pill: string): Promise<void> {
   await target.click();
 }
 
-test.describe("Plan 01.7 — Plan + Health canvases", () => {
+test.describe("Plan + Health canvases", () => {
   let app: CreatedApp | null = null;
 
   test.beforeAll(async () => {

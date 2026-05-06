@@ -100,8 +100,7 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         }
     };
 
-    // MAC-01 Phase 1 (design `docs/proposals/macro-v8-state.md` §4.2):
-    // resolve `(state_ty, marker_ty)`.
+    // Resolve `(state_ty, marker_ty)`.
     //  - `state_ty` is what the box stored in V8 internal field 0
     //    contains (`Box<StateTy>`). The macro emits casts as
     //    `*mut StateTy` / `*const StateTy`, the constructor returns
@@ -116,7 +115,7 @@ pub fn expand_tokens(_attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     // (byte-identical to today's emission, locked by insta snapshots).
     // With `#[v8_state_marker(M)] impl S`: state = S, marker = M.
     //
-    // Wave 4: the impl-block-level extract is folded into a single-scan
+    // The impl-block-level extract is folded into a single-scan
     // walk (`parse_attrs`) inside `analyze::analyze`. Read it through
     // the new entry point so we get strict-error behaviour on malformed
     // shapes (closes F5 + H5).

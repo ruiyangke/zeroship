@@ -2,10 +2,10 @@
 //! setter (silent no-op on unknown), EventHandler IDL null-coercion,
 //! attribute readback stability.
 //!
-//! Per the v2 design:
-//!   - binaryType: silent no-op on unknown values (D-7, MAJOR #16).
+//! Coverage:
+//!   - binaryType: silent no-op on unknown values.
 //!   - EventHandler IDL: non-callable assignment coerces to null per
-//!     HTML §8.1.5.1 step 4 (MAJOR #15) — must NOT throw.
+//!     HTML §8.1.5.1 step 4 — must NOT throw.
 
 #![cfg(feature = "runtime_native_websocket")]
 #![allow(unsafe_code)]
@@ -44,7 +44,7 @@ fn js_string(val: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> String {
 
 #[test]
 fn binary_type_default_is_blob() {
-    // D-7: spec default is "blob" (NOT "arraybuffer" — the polyfill
+    // Spec default is "blob" (NOT "arraybuffer" — the polyfill
     // defaulted wrong).
     let s = run_in_v8(
         r#"
@@ -84,10 +84,9 @@ fn binary_type_set_arraybuffer_round_trip() {
 
 #[test]
 fn binary_type_set_unknown_value_silent_no_op() {
-    // Per D-7 + WPT `binaryType-wrong-value.any.js`: setter on unknown
-    // value is a SILENT no-op (current value retained); MUST NOT
-    // throw. Matches undici, workerd, and the existing polyfill.
-    // (addresses critic MAJOR #16)
+    // WPT `binaryType-wrong-value.any.js`: setter on an unknown value
+    // is a silent no-op (current value retained); it must not throw.
+    // Matches undici, workerd, and the existing polyfill.
     let s = run_in_v8(
         r#"
         const ws = new WebSocket("wss://example.com");
@@ -121,7 +120,7 @@ fn binary_type_set_unknown_does_not_throw() {
 }
 
 // ---------------------------------------------------------------------------
-// EventHandler IDL — HTML §8.1.5.1 (MAJOR #15)
+// EventHandler IDL — HTML §8.1.5.1
 // ---------------------------------------------------------------------------
 
 #[test]

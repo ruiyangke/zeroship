@@ -1,10 +1,9 @@
 //! Hand-written tests for the native `Headers` class and its iterator.
 //!
 //! These tests drive the JS surface through a real V8 isolate. WPT
-//! conformance lives in `wpt_headers.rs`; this file covers the design's
-//! BLOCKER/MAJOR list explicitly, plus the algorithm-shape regressions
-//! the JS polyfill made (case-preserve, normalize-then-validate,
-//! Set-Cookie special cases).
+//! conformance lives in `wpt_headers.rs`; this file covers the
+//! highest-risk algorithm-shape regressions from the JS polyfill
+//! (case-preserve, normalize-then-validate, Set-Cookie special cases).
 //!
 //! Pattern matches `wpt_text_encoding.rs` / `v8_class_smoke.rs`: we use
 //! a shared `run_in_v8` harness, install `globalThis.Headers`, and
@@ -244,7 +243,7 @@ fn append_value_with_inner_crlf_throws() {
     assert_eq!(s, "TypeError");
 }
 
-// BLOCKER-4 / MAJOR-14: validate name on delete/has/get.
+// Validate header names on delete/has/get.
 
 #[test]
 fn delete_invalid_name_throws() {
@@ -288,7 +287,7 @@ fn get_invalid_name_throws() {
     assert_eq!(s, "TypeError");
 }
 
-// BLOCKER-2: ByteString boundary — code units > 0xFF throw TypeError.
+// ByteString boundary — code units > 0xFF throw TypeError.
 
 #[test]
 fn bytestring_high_codeunit_throws_at_construct() {
@@ -333,7 +332,7 @@ fn bytestring_high_codeunit_throws_at_append_name() {
 }
 
 // ---------------------------------------------------------------------------
-// Normalize-then-validate (BLOCKER-3)
+// Normalize-then-validate
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -468,7 +467,7 @@ fn iteration_emits_each_set_cookie_separately() {
 }
 
 // ---------------------------------------------------------------------------
-// Iteration: keys / values / entries / forEach + LIVE iteration (BLOCKER-1)
+// Iteration: keys / values / entries / forEach + LIVE iteration
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -535,12 +534,12 @@ fn iterator_proto_chain_to_iterator_prototype() {
     assert_eq!(s, "yes");
 }
 
-// BLOCKER-1: live iteration. The two header-setcookie.any.js cases
+// Live iteration. The two header-setcookie.any.js cases
 // cited verbatim in the design doc.
 
 #[test]
 fn live_iteration_after_append_set_cookie() {
-    // From header-setcookie.any.js, paraphrased per design BLOCKER-1.
+    // From `header-setcookie.any.js`, paraphrased for this harness.
     // Initial: [["fizz","buzz"], ["X-Header","test"]] -> sorted lowercase:
     //   "fizz"=buzz, "x-header"=test
     // it.next() -> ["fizz", "buzz"]
@@ -606,7 +605,7 @@ fn live_iteration_with_set_cookie_replacements() {
 }
 
 // ---------------------------------------------------------------------------
-// Symbol-keyed record (MAJOR-8)
+// Symbol-keyed record
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -628,7 +627,7 @@ fn symbol_key_record_throws_typeerror() {
     assert_eq!(s, "TypeError");
 }
 
-// MAJOR-7: GetMethod semantics — non-callable @@iterator throws TypeError.
+// GetMethod semantics — non-callable @@iterator throws TypeError.
 
 #[test]
 fn non_callable_iterator_throws_typeerror() {

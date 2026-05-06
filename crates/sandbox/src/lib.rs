@@ -41,25 +41,23 @@ pub struct AppState {
     pub config: SandboxConfig,
     pub sandboxes: SandboxRegistry,
     pub backend: Backend,
-    /// Phase-3 mint-side rate limiter. `Some` in production; `None`
+    /// Mint-side rate limiter. `Some` in production; `None`
     /// for tests that build `AppState` directly without
     /// `from_config`. Handlers that consume it `expect()` on `Some`.
     pub mint_rate_limiter: Option<MintRateLimiter>,
-    /// Phase-0 pg-backed non-secret state handle (sandbox-pg-state
-    /// design § 8.2). `None` is the disabled-by-absence shape:
+    /// Pg-backed non-secret state handle (`docs/proposals/sandbox-pg-state.md`
+    /// §8.2). `None` is the disabled-by-absence shape:
     /// `SANDBOX_DATABASE_URL` is unset, so pg integration is off.
-    /// In Phase 0, the handle exists but no live call sites consume
-    /// it — Phase 1 wires `insert_sandbox` / `record_event` into
-    /// the backends. The schema is brought to
+    /// The schema is brought to
     /// [`LATEST_MIGRATION_VERSION`] before this state ships.
     pub database: Option<Arc<Database>>,
-    /// Round-1 fixer / CRITICAL #4: shared sealed-record persistence
-    /// handle, plumbed for the Phase-2.5 takeover-rehydrate path.
+    /// Shared sealed-record persistence handle, reused by startup
+    /// restore and post-takeover rehydrate.
     /// `None` mirrors the pre-fix disabled shape — the handle exists
     /// only when `SANDBOX_PERSIST_AUTH=1` was set and a key file is
     /// readable.
     pub persist: Option<Arc<Persistence>>,
-    /// Round-1 fixer / IMPORTANT #8: graceful-shutdown flag observed
+    /// Graceful-shutdown flag observed
     /// by the periodic background tasks (heartbeat, takeover-scan,
     /// health-probe). [`AppState::trigger_shutdown`] flips this to
     /// `true` and atomically marks the host row `'draining'` in pg
@@ -68,7 +66,7 @@ pub struct AppState {
     /// exits cleanly when set; the next deploy can then drop the
     /// process without leaving phantom heartbeat traffic.
     pub shutdown: Arc<AtomicBool>,
-    /// Round-3 / Phase-3 CRITICAL #3: admin bearer token, read ONCE
+    /// Admin bearer token, read once
     /// at boot from `SANDBOX_ADMIN_TOKEN_PATH`. `None` is the
     /// disabled-by-absence shape: the env is unset, so every
     /// `/admin/*` endpoint 503s with `"admin api disabled"`. `Some`
@@ -79,7 +77,7 @@ pub struct AppState {
     /// reads this field in O(1) and constant-time-compares against
     /// the request bearer.
     ///
-    /// Round-4 / MINOR #5: wrapped in `zeroize::Zeroizing<String>` so
+    /// Wrapped in `zeroize::Zeroizing<String>` so
     /// the heap allocation is scrubbed on drop. A core dump or
     /// `/proc/<pid>/mem` read after process exit can't trivially
     /// recover the bearer. (Live-process reads are still a concern,
@@ -89,7 +87,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Round-1 fixer / IMPORTANT #8: signal background tasks to
+    /// Signal background tasks to
     /// exit cleanly. Best-effort UPDATEs `sandbox.hosts.status =
     /// 'draining'` for THIS host so peers know we're going away
     /// before our heartbeat goes silent (without that hint, peers
@@ -146,19 +144,15 @@ impl AppState {
         let persist: Option<Arc<Persistence>> =
             Persistence::from_env()?.map(Arc::new);
 
-        // Phase-0 pg-backed state: build BEFORE the backend probe so
+        // Build pg-backed state before the backend probe so
         // the schema reaches the right version before any backend op
-        // could try to write. Pg-required features stay dormant in
-        // Phase 0 — the handle is plumbed-but-unused; Phase 1 wires
-        // call sites. (`docs/proposals/sandbox-pg-state.md` § 15
-        // Phase 0.)
+        // could try to write.
         let database: Option<Arc<Database>> = match Database::from_env().await {
             Ok(opt) => opt.map(Arc::new),
             Err(e) => {
-                // Dev escape hatch: SANDBOX_PG_OPTIONAL=1 (D-11)
-                // logs and continues with pg disabled. Production
-                // refuses to boot; the operator must fix the
-                // config.
+                // Dev escape hatch: `SANDBOX_PG_OPTIONAL=1` logs and
+                // continues with pg disabled. Production refuses to
+                // boot until the operator fixes the config.
                 if matches!(std::env::var("SANDBOX_PG_OPTIONAL").as_deref(), Ok("1")) {
                     tracing::warn!(
                         error = %e,
@@ -213,12 +207,12 @@ impl AppState {
         }
         let registry = SandboxRegistry::new();
 
-        // Sealed-record restore (preview-URL § II.0 §4 + § II.5).
+        // Sealed-record restore (preview-URL design).
         // Reuses the shared `persist` handle built above so we don't
         // re-open the AEAD key file or re-read the env. `None` is the
         // disabled/no-op shape — feature-flagged behind
         // `SANDBOX_PERSIST_AUTH=1`; default OFF.
-        // Round-8 Phase-1: restart-restore is pg-driven. We need both
+        // Restart restore is pg-driven. We need both
         // a Database handle (for the host-scoped query) and a
         // Persistence handle (for the sealed-record secret material).
         // When either is missing, restore is skipped — the controller
@@ -257,7 +251,7 @@ impl AppState {
                 ),
             }
         }
-        // Round-3 / Phase-3 CRITICAL #3: read admin bearer ONCE at
+        // Read the admin bearer once at
         // boot. Previously every `/admin/*` request stat()+read()'d
         // the file (slow-FS DoS amplification; fail-open on chmod
         // error). Boot-time read is fail-loud — a misconfigured
@@ -265,8 +259,8 @@ impl AppState {
         // process. "Disabled because env-unset" stays `None`; the
         // file existing-but-misconfigured is `Err`.
         //
-        // Round-4 / MINOR #4: env resolution happens here, then the
-        // pure `load_admin_token` reads/validates the path. Tests can
+        // Env resolution happens here, then the pure
+        // `load_admin_token` reads and validates the path. Tests can
         // call `load_admin_token(Some(&path))` directly without
         // mutating process env (the env-mutation tests stay only on
         // the production wiring at `from_env`-shaped boundaries).
@@ -295,7 +289,7 @@ impl AppState {
         // the cluster goes unreachable.
         start_health_loop(state.clone());
 
-        // Phase-2 HA: periodic heartbeat task — UPDATEs
+        // Periodic heartbeat task. Updates
         // `sandbox.hosts.last_heartbeat` so peers can tell whether
         // we're alive. The task self-runs forever; failure is
         // logged-and-continued (next tick retries).
@@ -303,7 +297,7 @@ impl AppState {
             spawn_heartbeat_task(state.clone());
         }
 
-        // Phase-2 HA: takeover task — gated behind
+        // Takeover task. Gated behind
         // `SANDBOX_HA_AUTO_TAKEOVER=1` (default off; v2-of-v2 per
         // § 11.1: operators opt in once heartbeats are reliable).
         if state.database.is_some()
@@ -315,11 +309,11 @@ impl AppState {
     }
 }
 
-/// Round-3 / Phase-3 CRITICAL #3: read the admin bearer ONCE at
+/// Read the admin bearer once at
 /// boot. Mirrors `Persistence::AeadKey::from_path`.
 ///
-/// Round-4 / MINOR #4: this is now a pure function over an optional
-/// path. The production caller in `AppState::from_config` resolves
+/// This is a pure function over an optional path. The production
+/// caller in `AppState::from_config` resolves
 /// `SANDBOX_ADMIN_TOKEN_PATH` first then passes the path here, so
 /// tests can drive the loader with a `tempfile::NamedTempFile` path
 /// without mutating process env.
@@ -330,8 +324,8 @@ impl AppState {
 ///   - ANYTHING else → `Err(...)` (refuse to boot loudly)
 ///
 /// Distinguishes "admin API disabled" (legitimate config) from
-/// "admin token misconfigured" (operator error) — Round-2 leaked
-/// the latter as a silent fail-open via `.ok()?` on metadata().
+/// "admin token misconfigured" (operator error). Misconfiguration
+/// should fail loudly instead of turning into a silent fail-open.
 pub(crate) fn load_admin_token(
     path: Option<&std::path::Path>,
 ) -> Result<Option<String>, String> {
@@ -379,7 +373,7 @@ pub(crate) fn load_admin_token(
 fn start_health_loop(state: Arc<AppState>) {
     compio::runtime::spawn(async move {
         loop {
-            // Round-1 fixer / IMPORTANT #8: top-of-loop shutdown
+            // Top-of-loop shutdown
             // check. The previous iteration's sleep will have
             // returned by now; if shutdown was signalled during it,
             // exit before the next probe.
@@ -400,12 +394,12 @@ fn start_health_loop(state: Arc<AppState>) {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Phase 2 — periodic heartbeat + lease-based takeover
+// Heartbeat And Takeover
 // ────────────────────────────────────────────────────────────────────
 
 /// `SANDBOX_HA_HEARTBEAT_SECS`. Cadence at which the heartbeat task
-/// UPDATEs `sandbox.hosts.last_heartbeat`. Default 5 s; validated at
-/// boot to be > 0 and `lease_ttl >= 4 × heartbeat` (R-NN, § 11.3).
+/// updates `sandbox.hosts.last_heartbeat`. Default 5 s; validated at
+/// boot to be > 0 and `lease_ttl >= 4 × heartbeat`.
 const DEFAULT_HEARTBEAT_SECS: u64 = 5;
 
 /// `SANDBOX_HA_TAKEOVER_POLL_SECS`. Cadence at which the takeover
@@ -450,7 +444,7 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
             "sandbox HA: heartbeat task started"
         );
         loop {
-            // Round-1 fixer / IMPORTANT #8: shutdown check.
+            // Shutdown check.
             if state.shutdown_requested() {
                 tracing::info!(
                     host_id = %db.host_id(),
@@ -477,8 +471,6 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
     .detach();
 }
 
-/// Round-1 fixer / CRITICAL #4: post-takeover registry rehydrate.
-///
 /// For each newly-owned sandbox the takeover SQL produced, run the
 /// boot-time probe-and-register pipeline against the local sealed
 /// record. The new owner ends up with an in-memory registry entry
@@ -487,9 +479,9 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
 /// classifies things — code path is shared via
 /// `restore::probe_and_register_one`).
 ///
-/// Phase-2 v1 limitation: the new owner's persist dir might not
-/// have the sealed record (cross-host sealed sync ships in Phase
-/// 3+). When the seal is missing, the row is marked `lost` and we
+/// Current limitation: the new owner's persist dir might not have the
+/// sealed record. When the seal is missing, the row is marked `lost`
+/// and we
 /// bump `sandbox_ha_takeover_orphan_total`.
 ///
 /// **Does nothing** when:
@@ -497,7 +489,7 @@ pub fn spawn_heartbeat_task(state: Arc<AppState>) {
 ///     off — e.g. SANDBOX_PERSIST_AUTH != 1). Without sealed
 ///     records there's no way to recover the signing key, so the
 ///     row stays `running` in pg and the operator will see a
-///     stale-row alert via the Phase-3 admin tooling. This is the
+///     stale-row alert via the admin tooling. This is the
 ///     same behaviour as the pre-fix code, just with the no-op
 ///     made explicit.
 ///   - state.database is None (covered upstream by the
@@ -585,15 +577,12 @@ async fn rehydrate_after_takeover(
             restore::RestoreOutcome::SealMissing => {
                 tracing::warn!(
                     sandbox_id = %ts.sandbox_id,
-                    "sandbox HA: takeover rehydrate seal missing on this host (Phase 3+ adds cross-host sync)"
+                    "sandbox HA: takeover rehydrate seal missing on this host (cross-host sync is still missing)"
                 );
                 metrics::inc_takeover_orphan();
             }
-            // Round-2 fixer / MINOR #3: pre-fix every non-Restored,
-            // non-SealMissing outcome was logged at info but no
-            // metric fired. Operators couldn't rate(...) over
-            // takeover-but-then-mismatched / unreachable / corrupt
-            // events. Today each outcome bumps a labelled counter.
+            // Every non-restored outcome also bumps a labeled counter
+            // so operators can alert on takeover failures by class.
             restore::RestoreOutcome::Mismatched => {
                 tracing::warn!(
                     sandbox_id = %ts.sandbox_id,
@@ -628,9 +617,9 @@ async fn rehydrate_after_takeover(
 /// Periodic peer-scan task (§ 11.3). Every
 /// `SANDBOX_HA_TAKEOVER_POLL_SECS` seconds:
 ///
-/// 1. Refresh the `sandbox_ha_heartbeat_lag_seconds` gauge (and
-///    fire `sandbox_ha_clock_rewind_total` if pg sees `now() -
-///    last_heartbeat < 0` — § 12 R-MM).
+/// 1. Refresh the `sandbox_ha_heartbeat_lag_seconds` gauge and fire
+///    `sandbox_ha_clock_rewind_total` if pg sees
+///    `now() - last_heartbeat < 0`.
 /// 2. Read `dead_hosts(lease_ttl)`.
 /// 3. For each dead host (excluding self — defensive), issue the
 ///    CAS-guarded takeover UPDATE per § 11.2.
@@ -640,14 +629,7 @@ async fn rehydrate_after_takeover(
 /// The task exits cleanly only on process shutdown; transient
 /// errors are logged and the loop continues. The takeover write is
 /// a single SQL statement plus a host-status flip in the same
-/// transaction (§ 11.2).
-///
-/// Per § 15 Phase 2: the in-memory map for newly-owned sandboxes
-/// is not yet populated by this scaffold — the controller would
-/// need to probe `/version` with the persisted signing_key before
-/// registering. That probe pipeline reuses `crate::restore` and is
-/// the next deliverable to flesh out (out-of-scope for this commit
-/// to keep the takeover write atomic and tested).
+/// transaction.
 pub fn spawn_takeover_task(state: Arc<AppState>) {
     compio::runtime::spawn(async move {
         let poll_secs = read_u64_env(
@@ -673,7 +655,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
         );
 
         loop {
-            // Round-1 fixer / IMPORTANT #8: shutdown check.
+            // Shutdown check.
             if state.shutdown_requested() {
                 tracing::info!(
                     host_id = %my_host,
@@ -691,7 +673,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
                 Ok(Some(lag)) => {
                     metrics::set_heartbeat_lag(lag);
                     if lag < 0.0 {
-                        // R-MM: pg-side clock rewind. Healthy fleet
+                        // Pg-side clock rewind. Healthy fleet
                         // never sees this. Loud-log + counter so an
                         // alert fires.
                         tracing::error!(
@@ -744,7 +726,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
             metrics::add_dead_hosts_observed(real_dead.len() as u64);
 
             for dead_host in real_dead {
-                // Round-1 fixer / IMPORTANT #8: shutdown check
+                // Shutdown check
                 // inside the inner loop so a slow takeover scan
                 // doesn't ignore the flag while iterating dead
                 // peers.
@@ -764,8 +746,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
                                 host_id = %my_host,
                                 "sandbox HA: takeover succeeded"
                             );
-                            // Round-1 fixer / CRITICAL #4: Phase 2.5
-                            // post-takeover rehydrate. For each taken
+                            // Post-takeover rehydrate. For each taken
                             // sandbox, fetch the full pg row, run the
                             // probe-and-classify pipeline against the
                             // new owner's local sealed record, and
@@ -792,10 +773,10 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / IMPORTANT #8 — shutdown-flag unit tests.
+// Shutdown-Flag Unit Tests
 // ────────────────────────────────────────────────────────────────────
 //
-// Round-2 fixer / CRITICAL #3: the binary's main loop now wires
+// The binary's main loop wires
 // SIGINT/SIGTERM → ntex `run()` returns → `trigger_shutdown()` →
 // `SANDBOX_HA_DRAIN_GRACE_SECS` (default 30s) of grace for the
 // background tasks to observe the flag and exit. This is a
@@ -814,8 +795,7 @@ pub fn spawn_takeover_task(state: Arc<AppState>) {
 // The pg-side `set_host_draining` UPDATE is exercised by the
 // pg-gated integration test in tests/sandbox_pg_e2e.rs.
 // ────────────────────────────────────────────────────────────────────
-// Round-4 / MINOR #4 — boot-loader unit tests (pure function, no env
-// mutation; we just feed a path to the loader).
+// Boot-Loader Unit Tests
 // ────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod boot_loader_tests {

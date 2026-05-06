@@ -178,7 +178,7 @@ impl Backend {
     /// handle. The same handle is cloned (`Arc::clone`) into all three
     /// backend variants so the file I/O state (sealed-records dir +
     /// AEAD key) lives in one place. `None` disables seal-on-create
-    /// and delete-on-stop entirely (Phase 0 default off behaviour).
+    /// and delete-on-stop entirely, which is still the default.
     pub fn from_config_with_persist(
         cfg: &SandboxConfig,
         persist: Option<std::sync::Arc<crate::persist::Persistence>>,
@@ -343,14 +343,14 @@ impl Backend {
     /// signed-`/version` probed the agent and confirmed the
     /// fingerprint.
     ///
-    /// Phase-0 status: only nomad-ch implements full backend-state
+    /// Current status: only nomad-ch implements full backend-state
     /// rehydration (the structural model + the integration-test
-    /// target per the design's Phase-0 plan). Docker and K8s return
+    /// target from the initial design). Docker and K8s return
     /// `Err` until their re-derive paths land — `agent_url` is not
     /// deterministic for those backends (Docker: bridge IP requires
     /// `docker inspect`; K8s: requires `kubectl get pod -o jsonpath`)
-    /// and Phase 0 doesn't ship that re-derive code yet. Tracked as
-    /// a Phase-1 follow-up.
+    /// and this code does not ship that re-derive path yet. Tracked
+    /// as follow-up work.
     pub async fn restore_from_sealed(
         &self,
         sandbox_id: Uuid,
@@ -367,7 +367,7 @@ impl Backend {
         }
     }
 
-    /// Round-8 Phase-1 restore. Pg row is canonical for non-secret
+    /// Pg row is canonical for non-secret
     /// fields; sealed record is canonical for the signing key. The
     /// boot loop has already probed the agent before this is called.
     pub async fn restore_from_pg_and_sealed(
@@ -406,7 +406,7 @@ impl Backend {
     ///   OR sandbox unknown to the backend; nothing written. Caller
     ///   treats both as best-effort no-ops.
     /// - `Err(e)` — backend was supposed to seal but I/O / encryption
-    ///   failed. Caller logs at WARN and proceeds (Phase-3 mint MUST
+    ///   failed. Caller logs at WARN and proceeds (mint MUST
     ///   NOT fail an API call on seal failure — the record's
     ///   in-memory state is still authoritative for live traffic).
     ///

@@ -14,7 +14,7 @@ const queryClient = new QueryClient({
 // In dev (`isDevAutoAuth()` returns true) the provider short-circuits
 // to a synthetic user — no /auth/userinfo round-trip and no login
 // gate. Production-side auth flows (Login / Signup / OAuth) live in
-// the orphan tree and Plan 03.2 wires them up.
+// the orphan tree and a later cleanup wires them up.
 //
 // The root ErrorBoundary catches any render-phase crash so the app
 // shows an editorial wall instead of a blank white page. Per-canvas

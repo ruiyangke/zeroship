@@ -1,4 +1,4 @@
-//! Phase-3 share-token e2e (preview-URL § II.4 + § II.6 + § III).
+//! Share-token end-to-end tests (`preview-URL` § II.4 + § II.6 + § III).
 //!
 //! Tests both the API surface (POST/GET/DELETE /share) and the
 //! validate-side surface (`?t=...` cookie-conversion + cookie auth on
@@ -8,7 +8,7 @@
 //! is wired up via `ntex::web::test` so the handlers see real route
 //! matching.
 //!
-//! Coverage (matches the doc's Phase 3 test plan + round-6 additions):
+//! Coverage:
 //!
 //! - Mint → exchange → fetch (green path).
 //! - Tamper byte → 401.
@@ -17,12 +17,12 @@
 //!   cookie-conversion `?t=` → 403 `scope_forbidden` (UX-helpful).
 //! - Cross-sandbox: token for sbx-A used against sbx-B → 401.
 //! - Path scope: token against `/sandboxes/{id}/exec` → 401.
-//! - Round-6 CRITICAL-3 cookie-after-revoke.
-//! - Round-6 CRITICAL-2 authorize ownership across two sandboxes.
-//! - Round-6 H4 401-vs-404 oracle.
-//! - Round-6 H5 HMAC-input invariant (two field-orders).
-//! - Round-6 H7 iss claim audit-only (with + without).
-//! - Round-6 LOW-3 separator (`~` vs `.` vs `~~`).
+//! - Cookie-auth fails after revoke.
+//! - Ownership checks across two sandboxes.
+//! - Existing-vs-fabricated slug oracle stays uniform.
+//! - HMAC input is stable across field order.
+//! - `iss` remains audit-only, with and without the claim.
+//! - Token separator handling (`~` vs `.` vs `~~`).
 //! - 1 KiB raw-token cap.
 //! - deny_unknown_fields rejects extra field.
 //! - HMAC constant-time compare smoke.
@@ -233,7 +233,7 @@ fn make_state_inner(
         mint_rate_limiter: Some(
             zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
         ),
-        // Phase-0 sandbox-pg-state: tests run pg-disabled.
+        // These tests run with pg disabled.
         database: None,
         persist: None,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -242,7 +242,7 @@ fn make_state_inner(
     (state, sandbox_id)
 }
 
-/// Build the test app with all relevant Phase-3 routes.
+/// Build the test app with all relevant share-token routes.
 macro_rules! make_app {
     ($state:expr) => {
         test::init_service(
@@ -517,7 +517,7 @@ async fn list_share_returns_audit_metadata() {
 
 #[ntex::test]
 async fn delete_share_zero_grace_invalidates_existing_cookie() {
-    // Round-6 CRITICAL-3 cookie-after-revoke: mint, convert to cookie,
+    // cookie-after-revoke: mint, convert to cookie,
     // hit (200), DELETE all tokens, hit with cached cookie → 401
     // code:"revoked".
     let sk = SigningKey::from_bytes(&[5u8; 32]);
@@ -791,7 +791,7 @@ async fn token_with_extra_field_rejected_via_deny_unknown_fields() {
 
 #[ntex::test]
 async fn separator_dot_rejected_separator_double_tilde_rejected() {
-    // Round-6 LOW-3: parser accepts `payload~sig`, rejects
+    // : parser accepts `payload~sig`, rejects
     // `payload.sig` (legacy separator), rejects `payload~sig~extra`.
     let sk = SigningKey::from_bytes(&[32u8; 32]);
     let agent = FixtureAgent::spawn(AgentReply { status: 200, body: vec![] });
@@ -829,7 +829,7 @@ async fn separator_dot_rejected_separator_double_tilde_rejected() {
 
 #[ntex::test]
 async fn missing_sec_fetch_site_returns_400_client_too_old() {
-    // Round-6 H6 fail-closed: cookie-conversion endpoint without
+    // fail-closed: cookie-conversion endpoint without
     // Sec-Fetch-* triple → 400 code:"client_too_old".
     let sk = SigningKey::from_bytes(&[33u8; 32]);
     let agent = FixtureAgent::spawn(AgentReply { status: 200, body: vec![] });
@@ -848,7 +848,7 @@ async fn missing_sec_fetch_site_returns_400_client_too_old() {
 
 #[ntex::test]
 async fn missing_iss_validates_token_with_iss_records_value() {
-    // Round-6 H7 — audit-only at v7. Token without iss validates;
+    // — audit-only at v7. Token without iss validates;
     // token with iss records iss in the audit row.
     let sk = SigningKey::from_bytes(&[34u8; 32]);
     let agent = FixtureAgent::spawn(AgentReply { status: 200, body: b"ok".to_vec() });
@@ -930,7 +930,7 @@ async fn missing_iss_validates_token_with_iss_records_value() {
 
 #[ntex::test]
 async fn hmac_input_invariant_pinned_via_two_field_orders() {
-    // Round-6 H5: validator hashes the on-wire bytes; two tokens with
+    // : validator hashes the on-wire bytes; two tokens with
     // different field orders both validate iff the validator is wire-
     // byte-faithful.
     let sk = SigningKey::from_bytes(&[35u8; 32]);
@@ -974,10 +974,10 @@ async fn hmac_input_invariant_pinned_via_two_field_orders() {
 
 #[ntex::test]
 async fn anonymous_existing_vs_fabricated_byte_identical_modulo_slug() {
-    // Round-6 H4 oracle: anonymous against existing-vs-fabricated slug
+    // oracle: anonymous against existing-vs-fabricated slug
     // produces byte-identical 401 bodies (modulo `next` echoing the
     // slug). v1 controller's body has no `login_url` containing the
-    // slug — Phase 4 wires that — so we just assert the bodies are
+    // slug — that DNS wiring does not exist yet — so we just assert the bodies are
     // identical and the status is 401 in both cases.
     let sk = SigningKey::from_bytes(&[36u8; 32]);
     let agent = FixtureAgent::spawn(AgentReply { status: 200, body: vec![] });
@@ -1052,7 +1052,7 @@ async fn share_token_not_accepted_against_exec_or_files_endpoints() {
 
 #[ntex::test]
 async fn cross_creator_authorize_returns_404_uniform() {
-    // Round-6 CRITICAL-2 authorize ownership: creator-A's bearer
+    // authorize ownership: creator-A's bearer
     // against creator-B's preview URL → 404 (uniform, no oracle).
     let sk_a = SigningKey::from_bytes(&[40u8; 32]);
     let sk_b = SigningKey::from_bytes(&[41u8; 32]);
@@ -1114,7 +1114,7 @@ async fn mint_endpoint_seals_preview_state_to_disk() {
     assert_eq!(reread.sandbox_id, id.to_string());
     let ring = reread.preview_secrets.expect("ring sealed on mint");
     assert_eq!(ring.sv_current, 1);
-    // Round-8: per-token audit metadata is now a `sandbox.shares`
+    // per-token audit metadata is now a `sandbox.shares`
     // pg row; the sealed record holds the secret ring only.
     let _ = std::fs::remove_dir_all(&persist_dir);
 }
@@ -1165,7 +1165,7 @@ async fn delete_endpoint_seals_post_rotate_state_to_disk() {
         ring.sv_current, 2,
         "DELETE bumps secret_version_current to 2"
     );
-    // Round-8: audit table is in pg now; the sealed record only
+    // audit table is in pg now; the sealed record only
     // carries the secret ring after the rotate.
     let _ = std::fs::remove_dir_all(&persist_dir);
 }

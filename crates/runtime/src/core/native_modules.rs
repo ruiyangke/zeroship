@@ -17,7 +17,7 @@
 #![allow(unsafe_code)]
 
 /// Resolve a bare `node:*` specifier to a synthetic module, or `None`
-/// if it's not one we own. Called from both the Phase 2 import-graph
+/// if it's not one we own. Called from both the eager import-graph
 /// walker and the V8 resolve callback.
 pub fn resolve_native<'s>(
     scope: &mut v8::PinScope<'s, '_>,

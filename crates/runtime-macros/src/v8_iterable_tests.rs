@@ -1,6 +1,6 @@
 //! Insta snapshot tests for `#[v8_iterable(...)]` codegen.
 //!
-//! Wave 7 commit 2 (F9) — locks the v8_iterable codegen's emit shape
+//! Locks the `v8_iterable` codegen's emit shape
 //! against drift, mirroring the pattern in
 //! `v8_class/snapshot_tests.rs`.
 //!

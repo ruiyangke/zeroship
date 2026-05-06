@@ -1,10 +1,10 @@
 //! `Hash` class — `crypto.createHash(algorithm, options?)`.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §V.2 (D-N9). Exposes:
+//! See `docs/proposals/node-crypto-native.md` §V.2. Exposes:
 //! - `update(data, inputEncoding?)` returns `this` for chaining
 //! - `digest(outputEncoding?)` returns Buffer or string per encoding
 //! - `copy(options?)` returns a fresh Hash with the same in-progress
-//!   state (Hash.copy exists; Hmac.copy does NOT — D-N10)
+//!   state (Hash.copy exists; Hmac.copy does not)
 //!
 //! Throws `ERR_CRYPTO_HASH_FINALIZED` on update / digest after digest.
 
@@ -80,7 +80,7 @@ impl Hash {
     }
 
     /// `hash.copy(options?)` — fresh Hash with cloned in-progress state.
-    /// Per D-N9 + Node parity. The `options` arg is currently ignored
+    /// Matches Node's API surface. The `options` arg is currently ignored
     /// (Node uses it for outputLength on XOF hashes — we don't ship
     /// SHAKE/XOF in Stage B).
     #[v8_method]

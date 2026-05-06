@@ -1,4 +1,4 @@
-//! Phase-3 admin/operator API end-to-end tests.
+//! Admin/operator API end-to-end tests.
 //!
 //! Pg-gated tests need a live Postgres at PG_TEST_URL (defaults to
 //! the docker-compose fixture); pure-auth tests run without pg by
@@ -100,14 +100,13 @@ fn make_state_with_admin_token(
         database,
         persist: None,
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        // Round-4 / MINOR #5: admin_token is now Zeroizing-wrapped so
-        // the heap allocation is scrubbed on drop.
+        // `admin_token` is `Zeroizing`-wrapped so the heap allocation
+        // is scrubbed on drop.
         admin_token: admin_token.map(zeroize::Zeroizing::new),
     })
 }
 
-// Round-4 / MINOR #4: `AdminTokenFile`, `EnvGuard`, and `ENV_LOCK`
-// (Round-3 boot-loader env-mutation harness) are gone. The
+// `AdminTokenFile`, `EnvGuard`, and `ENV_LOCK` are gone. The
 // `load_admin_token` function is now pure — it takes an
 // `Option<&Path>` — so its tests live inline in `lib.rs` and don't
 // need to mutate process env. The integration tests in this file
@@ -158,8 +157,8 @@ macro_rules! make_app {
 
 #[ntex::test]
 async fn admin_disabled_when_token_unset() {
-    // Round-3 / Phase-3 CRITICAL #3: admin token is read ONCE at
-    // boot; tests inject it directly via make_state_with_admin_token.
+    // Admin token is read once at boot; tests inject it directly via
+    // `make_state_with_admin_token`.
     // `None` is the disabled-by-absence shape.
     let state = make_state(None);
     let svc = make_app!(state);
@@ -200,9 +199,8 @@ async fn admin_401_with_wrong_bearer() {
 
 #[ntex::test]
 async fn admin_401_with_wrong_bearer_same_length() {
-    // Round-3 / Phase-3 CRITICAL #1: bearer compare must be
-    // constant-time even when the lengths match. A wrong bearer of
-    // the same length must 401 (not 200, not 5xx).
+    // Bearer compare must behave the same when lengths match. A wrong
+    // bearer of the same length must still 401.
     let token = "right-token-1234567890";
     let wrong = "wrong-token-9876543210";
     assert_eq!(token.len(), wrong.len(), "test fixture lengths must match");
@@ -620,20 +618,20 @@ async fn admin_sandbox_detail_returns_pg_row_and_in_memory_flag() {
 }
 
 // Boot-time admin-token loader tests now live inline in lib.rs's
-// `#[cfg(test)] mod tests` (Round-4 / MINOR #4 — `load_admin_token` is
-// `pub(crate)` and pure, takes a path argument; no env mutation).
+// `#[cfg(test)] mod tests` because `load_admin_token` is `pub(crate)`,
+// pure, and takes a path argument without mutating process env.
 
 // ────────────────────────────────────────────────────────────────────
-// Round-4 regression tests
+// Regression tests
 // ────────────────────────────────────────────────────────────────────
 
-/// Round-4 / IMPORTANT #3 regression: the `gdpr.delete_user` audit row
+/// Regression test: the `gdpr.delete_user` audit row
 /// must NOT surface in `GET /admin/users/{user_id}/export`. Pre-fix,
 /// the export's events query selected every row WHERE user_id = $1, so
 /// after a GDPR delete the user could re-discover their own erasure
 /// record on a subsequent export.
 #[ntex::test]
-#[ignore = "needs Postgres; Round-4 IMPORTANT #3 — export filters audit row"]
+#[ignore = "needs Postgres; export filters audit row"]
 async fn admin_user_export_after_gdpr_delete_excludes_audit_row() {
     let db = migrated_db().await;
     let user_a = zeroship_core::typed_id::generate("usr");
@@ -679,14 +677,14 @@ async fn admin_user_export_after_gdpr_delete_excludes_audit_row() {
     );
 }
 
-/// Round-4 / IMPORTANT #4 regression: `DELETE /admin/users/{user_id}`
+/// Regression test: `DELETE /admin/users/{user_id}`
 /// for a user with ZERO sandboxes must not write a synthetic
 /// `sbx_<random>` id into `sandbox.events`. Pre-fix, the audit row
 /// minted a never-existed typed-id and inserted it as `events.sandbox_id`,
 /// polluting `idx_events_sandbox_ts` with an unmatchable key. Post-fix
 /// (migration 0005) the column is NULLable and the audit row writes NULL.
 #[ntex::test]
-#[ignore = "needs Postgres; Round-4 IMPORTANT #4 — no synthetic sandbox_id"]
+#[ignore = "needs Postgres; no synthetic sandbox_id"]
 async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
     let db = migrated_db().await;
     let user_a = zeroship_core::typed_id::generate("usr");

@@ -104,9 +104,9 @@ async fn main() -> std::io::Result<()> {
     // Idle GC sweep — kills runtimes idle longer than `idle_timeout_secs`.
     registry::start_idle_gc(state.clone());
 
-    // Preview WebSocket-Upgrade forwarder (Phase 2). Bound on a
+    // Preview WebSocket-Upgrade forwarder. Bound on a
     // separate port (default 9092; configurable via
-    // `SANDBOX_PREVIEW_WS_PORT`) per the proposal's Phase-2 fallback
+    // `SANDBOX_PREVIEW_WS_PORT`) per the proposal's fallback
     // ("the controller listens on a separate port for Upgrade
     // forwarding"). The HTTP path on `config.port` continues to handle
     // /sandboxes/{id}/preview/{port}/{path*} non-Upgrade traffic.
@@ -123,8 +123,8 @@ async fn main() -> std::io::Result<()> {
     let bind = format!("0.0.0.0:{}", config.port);
     tracing::info!(bind = %bind, "sandbox listening");
 
-    // Round-2 fixer / CRITICAL #3: keep a strong handle to AppState
-    // so we can call `trigger_shutdown()` AFTER ntex's `server.run()`
+    // Keep a strong handle to `AppState` so we can call
+    // `trigger_shutdown()` after ntex's `server.run()`
     // returns. ntex installs its own SIGINT/SIGTERM handler — when
     // those signals arrive, `run()` stops accepting and waits for
     // in-flight requests to drain, then returns. We then flip the
@@ -135,7 +135,7 @@ async fn main() -> std::io::Result<()> {
     // see the `'draining'` host status until after ntex has finished
     // draining HTTP. A pre-drain notification would require a signal
     // handler that runs BEFORE ntex's, which compio doesn't yet
-    // expose. Tracked as a follow-up; not blocking for Round-2.
+    // expose. Tracked as follow-up work.
     let shutdown_state = state.clone();
 
     let server_result = web::server(async move || {
@@ -186,7 +186,7 @@ async fn main() -> std::io::Result<()> {
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
             )
-            // Phase-3 admin / operator API. Auth is the
+            // Admin / operator API. Auth is the
             // SANDBOX_ADMIN_TOKEN_PATH bearer (NOT SANDBOX_TOKEN);
             // when the path is unset every endpoint 503s with
             // "admin api disabled". See `admin_handlers.rs` for the
@@ -219,7 +219,7 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/admin/hosts")
                     .route(web::get().to(admin_handlers::list_hosts)),
             )
-            // Phase-3 share-token mint/list/revoke (§ III). The
+            // Share-token mint/list/revoke (§ III). The
             // `/share` resource is registered BEFORE the catch-all
             // `/preview/{port}/{path}*` so ntex matches the more
             // specific routes first.

@@ -1,6 +1,6 @@
 //! `BodyImpl`, `BodySource`, and the shared `Body` trait.
 //!
-//! The two-headed body model (D-2 / design §III) holds:
+//! The two-headed body model holds:
 //!
 //! - **`stream`** — a JS-visible ReadableStream Global. Returned from
 //!   `request.body` / `response.body`. Locked / disturbed semantics
@@ -13,7 +13,7 @@
 //!       re-extract from `source` at each hop.
 //!     - **Clone**: `request.clone()` / `response.clone()` tee the
 //!       stream and clone the source via Rc — both halves usable
-//!       independently, no double consumption (D-8).
+//!       independently, no double consumption.
 //! - **`length`** — the body's known byte length for Content-Length,
 //!   if computable up front. None for ReadableStream-backed bodies and
 //!   for FormData entries that include Blob/File parts (the length
@@ -26,7 +26,7 @@ use std::rc::Rc;
 // BodySource — the cheap-clone snapshot
 // ---------------------------------------------------------------------------
 
-/// Per design §III: the original body input, kept on the Rust side as
+/// The original body input, kept on the Rust side as
 /// `Rc<Vec<u8>>` so `clone()` is constant-time (refcount bump) and
 /// redirect rewinding can re-hand bytes to the next hop without
 /// allocating a fresh body each time.
@@ -66,11 +66,11 @@ impl BodySource {
 // BodyImpl — Rust-side body state shared by Request and Response
 // ---------------------------------------------------------------------------
 
-/// Per design §III.1, the body state stored alongside a Request or
+/// The body state stored alongside a Request or
 /// Response wrapper. The wrapper's V8 internal field 0 holds a
 /// Box<RequestState> / Box<ResponseState> that owns the BodyImpl.
 ///
-/// **D-2 single-source rule**: the stream is the SOURCE OF TRUTH for
+/// The stream is the SOURCE OF TRUTH for
 /// "body bytes still to read" once a consumer starts. The `source`
 /// is only consulted by extract_body / clone / redirect-rewind. The
 /// `length` is read by Content-Length sets (extract_body sets it on

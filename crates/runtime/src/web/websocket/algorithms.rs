@@ -1,8 +1,8 @@
 //! Spec-named algorithms for the native WebSocket impl.
 //!
-//! Per D-22, every named algorithm in WHATWG §3.1 / §4 + RFC 6455 §7
-//! gets a Rust function with the same name in `snake_case`. This file
-//! holds the cross-class operations; class-local methods live on
+//! Every named algorithm in WHATWG §3.1 / §4 and RFC 6455 §7 gets a
+//! Rust function with the same name in `snake_case`. This file holds
+//! the cross-class operations; class-local methods live on
 //! `WebSocketImpl` directly.
 //!
 //! Inventory (per design §IX):
@@ -12,10 +12,10 @@
 //!   step 1-2 validation (allowed code ranges, 123-byte reason cap).
 //! - `parse_and_validate_protocols` — WHATWG §3.1 step 9 (RFC 7230
 //!   token rule, no duplicates).
-//! - `read_websocket_init` — D-28 dictionary parser (origin,
+//! - `read_websocket_init` — extension-dictionary parser (origin,
 //!   maxMessageSize, maxFrameSize, pingIntervalMs).
 //! - `set_event_handler` / `get_event_handler` — HTML §8.1.5.1
-//!   EventHandler IDL semantics with null-coercion (critic MAJOR #15).
+//!   EventHandler IDL semantics with null-coercion.
 
 use std::collections::HashSet;
 
@@ -52,8 +52,6 @@ use super::{WebSocketImpl, WsCachedHandles};
 ///
 /// Distinct from the default-case `unsigned short` conversion used by
 /// CloseEventInit.code (modulo 2^16 wrap, no clamping).
-///
-/// (addresses critic CRITICAL #2)
 pub fn clamp_unsigned_short(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> u16 {
     // Step 1: ToNumber. V8's `number_value` runs ECMAScript ToNumber.
     let n = value.number_value(scope).unwrap_or(f64::NAN);
@@ -221,11 +219,11 @@ pub fn parse_and_validate_protocols(
 }
 
 // ---------------------------------------------------------------------------
-// read_websocket_init — D-28 dictionary parser.
+// Read the WebSocket extension dictionary.
 // ---------------------------------------------------------------------------
 
-/// Parsed `WebSocketInit` dictionary (the v1 extension dict, NOT in the
-/// WHATWG spec). Per D-28: `signal`, `origin`, `maxMessageSize`,
+/// Parsed `WebSocketInit` dictionary (the extension dict, not in the
+/// WHATWG spec): `signal`, `origin`, `maxMessageSize`,
 /// `maxFrameSize`, `pingIntervalMs`.
 ///
 /// `signal` is read but NOT yet wired through the connect task — that
@@ -298,7 +296,6 @@ fn cached_ws_obj<'s>(
 /// `slot_picker` selects the storage slot in `WsCachedHandles` for the
 /// specific event (on_open / on_message / on_error / on_close).
 ///
-/// (addresses critic MAJOR #15)
 pub fn set_event_handler<F>(
     scope: &mut v8::PinScope,
     impl_: &WebSocketImpl,

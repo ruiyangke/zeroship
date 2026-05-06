@@ -98,7 +98,7 @@ pub struct HttpResult {
 
 /// Embedded WebSocket/WebSocketPair polyfill (depends on the native
 /// EventTarget installed by `install_dom`).
-// websocket polyfill JS deleted in cutover landing 3 (D-25): the
+// The websocket polyfill JS has been deleted: the
 // native WebSocket / WebSocketPair classes + native MessageEvent /
 // CloseEvent / EventTarget are the sole providers. The previous
 // `embed/websocket.js` polyfill is gone; if a future emergency
@@ -141,7 +141,7 @@ function getRequest() {
     return req;
 }
 
-// RPC v2 phase 1 (Wave D) — ALS-backed per-request context. Returns
+// RPC v2 ALS-backed per-request context. Returns
 // the frozen `ctx` object during a `default.rpc(...)` call and
 // `undefined` outside one. The npm `@zeroship/server` package layers
 // `user()` / `request()` / `idempotencyKey()` etc. on top of this.
@@ -278,7 +278,7 @@ function errorResponse(err) {
     });
 }
 
-// ── Phase 7 — Subscription wire dispatch ─────────────────────────────────
+// ── Subscription wire dispatch ────────────────────────────────────────────
 //
 // Subscription procedures are async generators wired over WebSocket per
 // `docs/proposals/rpc-v2.md` §6 (Subscription wire). Frame protocol:
@@ -603,7 +603,7 @@ async function fallbackFetch(request) {
 }
 
 export default {
-    // Phase 7: subscription dispatch. Caller hands in (name, input,
+    // Subscription dispatch. Caller hands in (name, input,
     // server-side WebSocket already accepted). Used by the kernel's
     // WS-upgrade path; tests can drive this directly via the
     // runtime's WebSocketPair primitive.
@@ -652,8 +652,8 @@ pub fn load_polyfills_and_modules(
     //   1. Native URL (ada-url backed) — installed before any other
     //      polyfill so other JS code that may reference it (websocket.js)
     //      sees the native class.
-    //   2. Native Crypto / SubtleCrypto / CryptoKey — D-23 landing 3
-    //      retired the old `crypto.js` polyfill; native is the only
+    //   2. Native Crypto / SubtleCrypto / CryptoKey. The old
+    //      `crypto.js` polyfill is gone; native is the only
     //      path now. Then the inline setImmediate / clearImmediate
     //      shim runs (last surviving JS in init).
     //   3. Native Headers / Streams / Blob / TextEncoderStream — must
@@ -668,7 +668,7 @@ pub fn load_polyfills_and_modules(
     //      EventTarget prototype (not the now-deleted polyfill's).
     install_url_native(scope);
 
-    // Native WebCrypto (D-23 landing 3: native is the only path).
+    // Native WebCrypto. This is now the only path.
     // The `embed/crypto.js` polyfill has been removed.
     {
         let global = scope.get_current_context().global(scope);
@@ -682,9 +682,8 @@ pub fn load_polyfills_and_modules(
     //     import { createHash } from "node:crypto";
     //     import { AsyncLocalStorage } from "node:async_hooks";
     //
-    // Per D-N26 (crypto) and ISS-01 (async_hooks). Exports are
-    // populated lazily by the modules' `evaluate` callbacks on first
-    // import.
+    // Exports are populated lazily by the modules' `evaluate`
+    // callbacks on first import.
     //
     // `__zeroshipNodeBuiltin(spec)` — single-function bridge consumed
     // by vite-plugin's dev `fetchModule` (ModuleRunner can't issue
@@ -719,8 +718,9 @@ pub fn load_polyfills_and_modules(
     // Native Headers per WHATWG Fetch §2.2.
     install_headers(scope);
 
-    // Native WHATWG Streams (D-19, design
-    // `docs/proposals/streams-native.md`). ReadableStream, WritableStream,
+    // Native WHATWG Streams. See
+    // `docs/proposals/streams-native.md`. ReadableStream,
+    // WritableStream,
     // TransformStream, *Controller, *Reader, *Writer, BYOBReader,
     // BYOBRequest, and the async-iter prototype patches are all
     // native-backed.
@@ -757,8 +757,8 @@ pub fn load_polyfills_and_modules(
     // fetch global (constructor calls `globalThis.fetch(...)`).
     install_eventsource(scope);
 
-    // Native WebSocket — D-25 cutover landing 1: gated behind
-    // `runtime_native_websocket` feature flag. When ON, install BEFORE
+    // Native WebSocket, gated behind the `runtime_native_websocket`
+    // feature flag. When ON, install BEFORE
     // the polyfill so `globalThis.WebSocket` is the native class; the
     // polyfill's setup detects the native marker and skips its
     // assignment. When OFF, the polyfill is the sole provider.
@@ -1448,10 +1448,10 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // DOMException("DataCloneError") on non-cloneable values.
     crate::structured_clone::install_global(scope, global);
 
-    // (`__rawFetch` was the V8 callback the JS polyfill in `embed/fetch.js`
-    // dispatched into. Both were removed at D-23 step 3 — `globalThis.fetch`
-    // is now the native callback installed by
-    // `crate::fetch_native::install_fetch_global`. See ADR D-23.)
+    // (`__rawFetch` was the V8 callback the JS polyfill in
+    // `embed/fetch.js` dispatched into. Both were removed;
+    // `globalThis.fetch` is now the native callback installed by
+    // `crate::fetch_native::install_fetch_global`.)
 
     // (URL parsing is now part of native URL — see install_url_native.
     // __urlParse / __urlCanParse callbacks are no longer needed.)
@@ -1728,15 +1728,15 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 pub fn install_dom(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::dom::install_globals(scope, global);
-    // Native RpcError (RPC v2 phase 1, Wave B). Installed AFTER `dom`
+    // Native RpcError. Installed AFTER `dom`
     // so the platform's DOMException-style error envelopes share
     // ordering: any path that depends on RpcError running after Error
     // already exists on the global is fine because V8 wires the Error
     // intrinsic before user-visible install hooks fire.
     crate::rpc::install_global(scope, global);
-    // RPC v2 phase 1 (Wave D) — install `__zeroshipGetRpcCtx` so the
-    // `getRequestContext` export in the `zeroship` JS module can read
-    // the per-request platform ctx out of V8's embedder-data slot.
+    // Install `__zeroshipGetRpcCtx` so the `getRequestContext` export
+    // in the `zeroship` JS module can read the per-request platform
+    // ctx out of V8's embedder-data slot.
     crate::rpc::install_dispatch_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
@@ -1753,7 +1753,7 @@ pub fn install_dom(scope: &mut v8::PinScope) {
 /// *DefaultController, *DefaultWriter, *DefaultReader, BYOBReader,
 /// BYOBRequest, the async-iter prototype patches,
 /// ByteLengthQueuingStrategy, and CountQueuingStrategy. See
-/// `docs/proposals/streams-native.md` for the design (D-19 cutover).
+/// `docs/proposals/streams-native.md` for the design.
 pub fn install_native_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::streams::install_native_streams(scope, global);

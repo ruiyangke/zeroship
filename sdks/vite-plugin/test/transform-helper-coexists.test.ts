@@ -1,8 +1,7 @@
 /**
- * ISS-02 — `procedure()` exports + plain helpers coexist in one
- * server module.
+ * `procedure()` exports + plain helpers coexist in one server module.
  *
- * The whole point of ISS-02 is making this safe: a developer can mix
+ * The goal is making this safe: a developer can mix
  * RPC procedures and internal helpers in the same file, and only
  * the wrapped exports become public endpoints. Helpers stay private
  * to the server bundle even though they're `export`-ed at the module
@@ -101,7 +100,8 @@ export const provision = procedure(async (req) => ({ provisioned: req }));
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
-    // The original ISS-02 footgun: `export * from "./helpers"`
+    // The original path-based auto-publish footgun:
+    // `export * from "./helpers"`
     // silently published every helper as `/_zs/v1/<helperName>`.
     // Now: the re-exported helpers are not wrapper calls in THIS
     // file's AST, so they're not registered.

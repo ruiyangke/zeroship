@@ -1,12 +1,11 @@
-//! Phase-1 preview-proxy e2e (preview-URL § II.2).
+//! Preview-proxy end-to-end tests (`preview-URL` § II.2).
 //!
 //! Runs the controller's `preview_proxy` handler end-to-end against
 //! a fixture HTTP "agent" — there's no real microVM in the test
 //! environment, so we mock the agent with a thread-driven
 //! `TcpListener` that verifies our signed v1.1 requests and replies.
 //!
-//! Coverage (matches the design doc's Phase 1 test plan, controller
-//! side):
+//! Coverage for the controller-side preview proxy:
 //!
 //! - 200 round-trip: authed creator → request flows end-to-end.
 //! - 401 anonymous: no bearer, uniform body.
@@ -179,7 +178,7 @@ fn make_state(
     // build URLs from the bare `Uuid` struct. The typed-id wire
     // shape returned by `POST /sandboxes` is exercised end-to-end
     // by the dedicated regression test in
-    // `tests/sandbox_typed_id_e2e.rs` (Round-2 fixer / CRITICAL #1).
+    // `tests/sandbox_typed_id_e2e.rs` ().
     let info = SandboxInfo {
         sandbox_id: sandbox_id.to_string(),
         user_id: user_id.to_string(),
@@ -195,8 +194,8 @@ fn make_state(
         sandboxes: registry,
         backend,
         mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
-        // Phase-0 sandbox-pg-state: tests run pg-disabled. The
-        // backends never read this field in Phase 0, so `None` is
+        // These tests run with pg disabled. The backends never read
+        // this field in the current configuration, so `None` is
         // the live shape AppState::from_config picks when
         // SANDBOX_DATABASE_URL is absent.
         database: None,
@@ -305,7 +304,7 @@ async fn anonymous_returns_401_uniform() {
 #[ntex::test]
 async fn wrong_creator_returns_404_not_403() {
     // Creator-A owns the sandbox; creator-B attempts to access.
-    // MUST 404 (round-6 H4 — no 403 oracle). Audit-log the actual
+    // MUST 404 (uniform-auth rule — no 403 oracle). Audit-log the actual
     // reason (we don't capture audit here; the eprintln in
     // preview.rs is enough for spot checks).
     let sk = SigningKey::from_bytes(&[9u8; 32]);
@@ -351,7 +350,7 @@ async fn port_deny_at_controller_defense_in_depth() {
             .to_request();
         let resp = test::call_service(&app, req).await;
         // 404 — the uniform "denied" response covers port-deny too,
-        // per the coalesced authorize check (round-6 H4).
+        // per the coalesced authorize check (uniform-auth rule).
         assert_eq!(
             resp.status(),
             StatusCode::NOT_FOUND,

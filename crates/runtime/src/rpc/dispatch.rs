@@ -1,5 +1,5 @@
-//! RPC v2 phase 1 — Wave D: ALS-backed `ctx`, frozen Headers/URL,
-//! kernel ALS install/restore.
+//! RPC v2 ALS-backed `ctx`, frozen Headers/URL wrappers, and kernel
+//! ALS install/restore.
 //!
 //! See `docs/proposals/rpc-v2.md` §3 (Ambient context). This file holds
 //! the small Rust surface that builds the per-request `ctx` JS object,
@@ -24,8 +24,8 @@
 //! during a procedure call, and `undefined` otherwise. The npm
 //! `@zeroship/server` package wraps this into `user()`, `request()`,
 //! `idempotencyKey()`, `traceId()`, `signal()` — the helpers from §3 of
-//! the proposal. Phase 1 ships only the primitive; helper UX is npm-
-//! package work.
+//! the proposal. The native runtime ships only the primitive; helper UX
+//! lives in the npm package.
 
 #![allow(unsafe_code)]
 
@@ -57,7 +57,7 @@ pub struct RpcContext {
 
 /// Resolved JS objects for a built `ctx`. The handle owns the
 /// AbortController + signal locals so the dispatch path can register
-/// abort algorithms when Wave E lands the eviction-abort wiring.
+/// eviction-time abort handlers.
 pub struct RpcContextHandle<'s> {
     pub ctx_object: v8::Local<'s, v8::Object>,
     #[allow(dead_code)]

@@ -24,7 +24,7 @@
  * `useQuery` / `useMutation` / `useInfiniteQuery` / `useSuspenseQuery`
  * + `useStream` (custom) + `queryClient` (set by `<ZeroshipProvider>`).
  *
- * `useSubscription` lands in Phase 7 (parallel work).
+ * `useSubscription` is reserved for the planned WebSocket transport.
  *
  * The slots are typed as `Function | undefined` rather than the precise
  * `useQuery<TData, TError>(...)` signatures because:

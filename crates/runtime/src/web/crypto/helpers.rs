@@ -11,7 +11,7 @@
 //! - `vec_to_uint8array` — wrap Rust bytes as a fresh `Uint8Array`
 //!   (the spec return shape for `digest`, `encrypt`, `sign`, etc.).
 //! - `resolve_now` / `reject_now` — synchronous resolution helpers for
-//!   the v1 "sync-on-V8-thread" execution model (D-29).
+//!   the v1 "sync-on-V8-thread" execution model.
 
 use crate::state::OpError;
 
@@ -211,8 +211,8 @@ pub fn vec_to_uint8array_typed<'s>(
 }
 
 /// Synchronously resolve a fresh Promise with the given JS value.
-/// (D-29 v1: every WebCrypto op runs on the V8 thread; the microtask
-/// hop happens via V8's promise-resolution semantics.)
+/// Every WebCrypto op runs on the V8 thread; the microtask hop happens
+/// via V8's promise-resolution semantics.
 pub fn resolve_now<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     value: v8::Local<'s, v8::Value>,

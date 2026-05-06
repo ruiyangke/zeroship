@@ -44,22 +44,20 @@ pub struct GateState {
     /// short-circuits without the global bucket lookup.
     pub per_rule_rate_limits: enforce::PerRuleRateLimitRegistry,
     pub concurrency: enforce::ConcurrencyRegistry,
-    /// Content-addressed blob store. Phase 4 of the artifact rollout —
-    /// the gateway fetches asset bytes here directly instead of round-
-    /// tripping through the control plane.
+    /// Content-addressed blob store. The gateway fetches asset bytes
+    /// here directly instead of round-tripping through the control
+    /// plane.
     pub blob_store: Arc<dyn BlobStore>,
-    /// In-memory LRU cache in front of `blob_store`. Phase A of the
-    /// zero-copy plan.
+    /// In-memory LRU cache in front of `blob_store`.
     pub blob_cache: blob_cache::BlobCache,
-    /// On-disk LRU cache underneath `blob_cache`. Phase B of the
-    /// zero-copy plan — large blobs that don't fit in memory land
-    /// here, and `serve_static_hit` mmaps them on serve so the
-    /// userspace → kernel copy goes away.
+    /// On-disk LRU cache underneath `blob_cache`. Large blobs that
+    /// do not fit in memory land here, and `serve_static_hit` mmaps
+    /// them on serve so the userspace → kernel copy goes away.
     pub disk_cache: blob_cache::DiskBlobCache,
-    /// KV-backed dedupe table per spec §8 (Idempotency). The gateway
-    /// consults this BEFORE forwarding `idempotent: true` mutations
-    /// to the worker; on a hit it returns the stored response without
-    /// touching V8.
+    /// KV-backed dedupe table for idempotent RPC mutations. The
+    /// gateway consults this before forwarding `idempotent: true`
+    /// mutations to the worker; on a hit it returns the stored
+    /// response without touching V8.
     pub idempotency_store: std::sync::Arc<dyn idempotency::IdempotencyStore>,
 }
 

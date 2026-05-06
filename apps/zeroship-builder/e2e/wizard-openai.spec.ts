@@ -6,7 +6,7 @@ const HAS_KEY = !!process.env.OPENAI_API_KEY;
 // round-trip, so the wall budget is generous.
 const STEP_TIMEOUT = 60_000;
 
-test.describe("Plan 02 wizard surface (real OpenAI clarifier)", () => {
+test.describe("wizard surface (real OpenAI clarifier)", () => {
   test("renders the /new page even without an API key", async ({ page }) => {
     await page.goto("/new");
     await expect(page.getByTestId("wizard-prompt")).toBeVisible();

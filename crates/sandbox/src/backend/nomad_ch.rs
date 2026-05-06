@@ -135,7 +135,7 @@ pub struct NomadCHBackend {
     /// because the only writer is the periodic probe and reads are
     /// rare; Mutex is simpler and the contention is irrelevant.
     last_probe_err: Arc<Mutex<Option<String>>>,
-    /// Sealed-record persistence (preview-URL § II.0 §4). See
+    /// Sealed-record persistence (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). See
     /// [`crate::persist::Persistence`]. `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset.
     persist: Option<Arc<crate::persist::Persistence>>,
@@ -247,7 +247,7 @@ impl VmIndexAllocator {
     }
 
     /// Mark `i` as in-use without taking it from the free list. Used
-    /// by the controller's restart-restore path (preview-URL § II.0):
+    /// by the controller's restart-restore path (`docs/proposals/sandbox-preview-urls.md` § II.0):
     /// a sealed record's `vm_index` must be claimed in the allocator
     /// before normal `alloc()` traffic resumes — otherwise a fresh
     /// `create()` could hand the same index to a new sandbox while
@@ -736,7 +736,7 @@ impl NomadCHBackend {
 
         let now = unix_now();
 
-        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // Seal the per-sandbox auth to disk (`docs/proposals/sandbox-preview-urls.md` § II.0 §4).
         // BEST-EFFORT: a seal failure does NOT fail create() — the
         // sandbox is live and usable; persistence is for restart
         // resilience only. Log loudly so operators see when the
@@ -1016,11 +1016,11 @@ impl NomadCHBackend {
             );
         }
 
-        // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
+        // Delete the sealed record (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). BEST-EFFORT:
         // a delete failure is logged but does NOT fail stop(). The next
         // boot's restore loop probes the sandbox's `/version`, finds it
         // unreachable (the VM is gone), and leaves the file in place
-        // for periodic prune (Phase 5) to mop up.
+        // for a future prune pass to mop up.
         if let Some(persist) = &self.persist {
             if let Err(e) = persist.delete(sandbox_id).await {
                 tracing::warn!(
@@ -1273,7 +1273,7 @@ impl NomadCHBackend {
     /// Marked `pub` rather than `pub(crate)` so integration tests
     /// in `tests/` can call it; the `#[cfg(any(test, feature =
     /// "test-support"))]` gate would be cleaner if we want to
-    /// strip it from production binaries — Phase 1 leaves it
+    /// strip it from production binaries — the current code leaves it
     /// unconditionally public with a "tests only" doc-comment
     /// (the function name self-identifies as test scaffolding).
     pub fn _test_inject_sandbox(
@@ -1343,7 +1343,7 @@ impl NomadCHBackend {
     /// schema violation for a `backend = "nomad-ch"` record), if
     /// the index is outside the configured pool, or if the
     /// in-memory map already has an entry for `sandbox_id`.
-    /// Round-8 Phase-1 restore. Pg row is canonical for `user_id`,
+    /// Pg row is canonical for `user_id`,
     /// `backend`, `vm_index`, `agent_url`, `key_fp`; sealed record is
     /// canonical for `signing_key_bytes`. Boot loop has already
     /// signed-`/version` probed the agent before calling this.
@@ -1410,7 +1410,7 @@ impl NomadCHBackend {
         })
     }
 
-    /// Legacy v2-shape restore. Round-8 keeps this so existing tests
+    /// Legacy v2-shape restore. Keep this so existing tests
     /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
     /// through [`Self::restore_from_pg_and_sealed`].
     #[allow(dead_code)]
@@ -2745,7 +2745,7 @@ fn sanitize_path(p: &str) -> Result<String, String> {
 /// deduplication belongs in a follow-up that consolidates the validate
 /// helpers once we have ≥ 3 backends needing them).
 ///
-/// Phase-1+2 wire migration: previously this enforced the legacy
+/// Typed-id wire migration: previously this enforced the legacy
 /// DNS-1123 charset `[a-z0-9-]{1,50}`, which rejected typed-ids
 /// (they contain `_`) and 500'd every real HTTP create.
 fn validate_typed_id(
@@ -3311,7 +3311,7 @@ mod tests {
 
     #[test]
     fn validate_typed_id_accepts_typed_form() {
-        // Phase-1+2 wire shape: handlers and backends both speak
+        // Handlers and backends both speak
         // `usr_<22-base62>` end-to-end. The typed-id check is the
         // single source of truth.
         let usr = zeroship_core::typed_id::generate("usr");
@@ -3631,7 +3631,8 @@ mod tests {
         );
     }
 
-    /// Phase-0 surface check (preview-URL design § II.0): the
+    /// Surface check for preview auth plumbing (`preview-URL` design
+    /// § II.0): the
     /// nomad-ch backend's `session_auth` lifts `signing_key`,
     /// `agent_url`, and a derived `pubkey_fp` into the
     /// backend-agnostic `SandboxAuth` envelope. Missing-id surfaces

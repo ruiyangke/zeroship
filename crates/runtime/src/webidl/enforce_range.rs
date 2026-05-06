@@ -51,7 +51,7 @@ impl From<EnforceRangeU64> for u64 {
 ///
 /// Used by the WebCrypto IDL surface (`Pbkdf2Params.iterations`,
 /// `RsaKeyGenParams.modulusLength`, `subtle.deriveBits.length`,
-/// `AesCtrParams.length`). See `docs/proposals/webcrypto-native.md` D-20.
+/// `AesCtrParams.length`). See `docs/proposals/webcrypto-native.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnforceRangeU32(pub u32);
 

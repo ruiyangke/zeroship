@@ -452,7 +452,7 @@ fn dependent_event_order_after_root_event() {
 }
 
 // ---------------------------------------------------------------------------
-// MAJOR-40: abort algorithms run BEFORE the abort event
+// Abort algorithms run BEFORE the abort event
 // ---------------------------------------------------------------------------
 //
 // We can observe this from JS via AbortSignal.any: when root aborts,

@@ -30,7 +30,7 @@
 //! byte is XOR'd with `mask[i % 4]`. The mask key is 4 bytes of strong
 //! randomness, picked per frame.
 //!
-//! Permessage-deflate is OFF (we offer no extensions per CRITICAL #7), so
+//! Permessage-deflate is off because we offer no extensions, so
 //! RSV1/RSV2/RSV3 are always zero.
 
 #![cfg(feature = "runtime_native_websocket")]

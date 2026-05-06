@@ -1,13 +1,13 @@
 //! Native `node:crypto`.
 //!
-//! Per `docs/proposals/node-crypto-native.md`. The Stage 1 plan ships
-//! Hash / Hmac / random / KDFs / timingSafeEqual / WebCrypto bridge in
-//! Stage B; KeyObject + Sign / Verify + Cipher / Decipher in Stage C.
+//! See `docs/proposals/node-crypto-native.md`. The current module ships
+//! Hash / Hmac / random / KDFs / timingSafeEqual / the WebCrypto bridge,
+//! plus KeyObject, Sign / Verify, and Cipher / Decipher.
 //!
 //! # Module layout
 //!
 //! - `buffer` — Buffer / Uint8Array / DataView / ArrayBuffer / string
-//!   input coercion + Buffer-shaped output emission (D-N7).
+//!   input coercion + Buffer-shaped output emission.
 //! - `encoding` — utf8 / hex / base64 / base64url / latin1 / binary /
 //!   ascii / utf16le named-encoding registry.
 //! - `hash` — `Hash` class + `createHash(name, options?)` factory.
@@ -27,7 +27,7 @@
 //! import { createHash, randomUUID } from "node:crypto";
 //! ```
 //!
-//! Resolved by `core::native_modules::resolve_native`. Per D-N26.
+//! Resolved by `core::native_modules::resolve_native`.
 
 pub mod buffer;
 pub mod encoding;

@@ -1320,7 +1320,7 @@ fn heavy_payload_instances_all_finalize() {
 
 // ---------------------------------------------------------------------------
 // Test 14: #[reject_shared] — SAB-backed views throw TypeError before
-//                            any user code runs (BLOCKER-5)
+//                            any user code runs
 // ---------------------------------------------------------------------------
 //
 // Per WebIDL §3.2.21 BufferSource handling: an `[AllowShared]` IDL

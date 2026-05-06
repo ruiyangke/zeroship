@@ -1,7 +1,7 @@
 //! Streaming + one-shot digest contexts.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §I.5 (D-N2). The
-//! kernel's `DigestContext` wraps `aws_lc_rs::digest::Context`
+//! See `docs/proposals/node-crypto-native.md` §I.5. The kernel's
+//! `DigestContext` wraps `aws_lc_rs::digest::Context`
 //! incrementally; the one-shot helper is what WebCrypto's
 //! `subtle.digest()` calls. Stage A: SHA-1/256/384/512 (the four
 //! hashes in WebCrypto), plus the broader Node hash family
@@ -34,7 +34,7 @@ pub enum KernelHashAlgo {
 impl KernelHashAlgo {
     /// Map a Node-style or WebCrypto-style algorithm name to the
     /// kernel enum. Case-insensitive (Node lowercases names by
-    /// convention; WebCrypto uses canonical "SHA-256"). Per D-N18.
+    /// convention; WebCrypto uses canonical "SHA-256").
     pub fn from_str(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "sha1" | "sha-1" | "rsa-sha1" => Some(Self::Sha1),
@@ -108,7 +108,7 @@ pub const HASH_NAMES: &[&str] = &[
     "sha3-512",
 ];
 
-/// Streaming digest. Wraps aws-lc-rs's `digest::Context`. Per D-N2.
+/// Streaming digest. Wraps aws-lc-rs's `digest::Context`.
 ///
 /// Once `finalize()` runs the context refuses further `update()` and
 /// further `finalize()` per Node parity (`ERR_CRYPTO_HASH_FINALIZED`).
@@ -152,7 +152,7 @@ impl DigestContext {
         Ok(snapshot.finish().as_ref().to_vec())
     }
 
-    /// Clone the in-progress state for `Hash.copy()` (D-N9).
+    /// Clone the in-progress state for `Hash.copy()`.
     pub fn clone_state(&self) -> Self {
         Self {
             inner: self.inner.clone(),

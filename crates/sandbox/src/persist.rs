@@ -1,4 +1,4 @@
-//! Sealed-record persistence for `SandboxAuth` (preview-URL § II.0).
+//! Sealed-record persistence for `SandboxAuth` (`docs/proposals/sandbox-preview-urls.md` § II.0).
 //!
 //! The controller mints per-sandbox Ed25519 keypairs at
 //! `Backend::create` time. Without persistence, a controller restart
@@ -43,7 +43,7 @@
 //!
 //! - Key source: file mount only — `SANDBOX_AEAD_KEY_PATH`. The
 //!   `SANDBOX_AEAD_KEY` env-var sourcing is **not supported** here;
-//!   per round-6 H8 of the design doc, env-var sourcing leaks via
+//!   per file-mounted AEAD key rule of the design doc, env-var sourcing leaks via
 //!   `/proc/<pid>/environ`. The constructor refuses an env-only
 //!   path.
 //! - Feature-flag: the call sites only invoke this module when
@@ -78,7 +78,7 @@ use zeroship_sandbox_agent::sig;
 /// surfaced via the operator's "unknown record" runbook — never
 /// silently downgraded.
 ///
-/// **v3 (Phase 1, pg-as-system-of-record).** Round-8 schema shrink.
+/// **v3 (pg-as-system-of-record).** Schema shrink.
 /// Pg is the system of record for non-secret state from day 1, so
 /// sealed records hold secrets only — `signing_key_bytes` and
 /// `preview_secrets`. The legacy fields (`user_id`, `project_id`,
@@ -92,8 +92,8 @@ use zeroship_sandbox_agent::sig;
 ///
 /// **v1 → v2 (legacy).** v2 added `preview_secrets` + `preview_audit`.
 /// v3 keeps `preview_secrets` (it's secret) and drops `preview_audit`
-/// (now a pg row in `sandbox.shares`). v1 reader stayed in v2 for
-/// back-compat; round-8 keeps that compat one more step (v1 + v2
+/// (now a pg row in `sandbox.shares`). The v1 reader stayed in v2 for
+/// back-compat; this keeps that compat one more step (v1 + v2
 /// records both deserialize through the v3 struct).
 pub const SEAL_VERSION: u8 = 3;
 
@@ -111,7 +111,7 @@ pub const AEAD_KEY_LEN: usize = 32;
 
 /// Per-sandbox auth record persisted to disk.
 ///
-/// **v3 (round-8, Phase 1).** Holds secret material only:
+/// **v3.** Holds secret material only:
 /// `signing_key_bytes` and `preview_secrets`. Pg owns every other
 /// piece of per-sandbox state (`user_id`, `project_id`, `backend`,
 /// `vm_index`, `agent_url`, `key_fp`, `created_at`, share-token audit
@@ -127,7 +127,7 @@ pub const AEAD_KEY_LEN: usize = 32;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedAuth {
     pub version: u8,
-    /// Round-8: kept as the join key during restart-restore. The
+    /// Kept as the join key during restart-restore. The
     /// caller computes the sealed filename from the sandbox UUID
     /// (SHA-256-truncated) and passes the typed-id back via this
     /// field after decrypt; pg's `sandboxes.sandbox_id` row is the
@@ -144,7 +144,7 @@ pub struct SealedAuth {
     /// the field entirely (via `skip_serializing_if`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_secrets: Option<SealedPreviewSecrets>,
-    /// Round-8 addition: monotonically-increasing per-process boot
+    /// Monotonically-increasing per-process boot
     /// counter. Set by the controller when sealing; the boot-time
     /// reconciler reads this to tell "sealed in this controller's
     /// lifetime" (orphan from a partially-cancelled create here)
@@ -184,8 +184,8 @@ pub struct SealedPreviewSecrets {
     pub grace_until_unix: Option<u64>,
 }
 
-/// On-disk audit-log entry per minted share token. **Round-8 Phase 1:
-/// no longer carried inside `SealedAuth`** — share-token audit metadata
+/// On-disk audit-log entry per minted share token. **No longer carried
+/// inside `SealedAuth`** — share-token audit metadata
 /// is now a `sandbox.shares` row in pg. The struct is retained for
 /// v2-record back-compat (the v2 deserializer would otherwise refuse
 /// to round-trip records that carried `preview_audit`) and for the
@@ -209,7 +209,7 @@ pub struct SealedAuditEntry {
 }
 
 impl SealedAuth {
-    /// Round-8 v3 builder: the sealed record holds only the secret
+    /// The sealed record holds only the secret
     /// material the controller can't reproduce from pg. Pg holds
     /// `user_id`, `project_id`, `backend`, `vm_index`, `agent_url`,
     /// `key_fp`, `created_at` — they don't pass through here.
@@ -297,7 +297,7 @@ fn sha256_hex_truncated(bytes: &[u8], hex_len: usize) -> String {
 }
 
 /// AEAD key wrapper. Owns the 32 bytes; redacting Debug. Constructed
-/// from `SANDBOX_AEAD_KEY_PATH` only (round-6 H8: env-var sourcing
+/// from `SANDBOX_AEAD_KEY_PATH` only (file-mounted AEAD key rule: env-var sourcing
 /// removed intentionally).
 pub struct AeadKey {
     bytes: [u8; AEAD_KEY_LEN],
@@ -322,7 +322,7 @@ impl AeadKey {
     /// Read a 32-byte AEAD key from `path`. The file MUST be exactly
     /// 32 bytes. On Unix the file's mode is checked: anything other
     /// than `0400` is refused so a wider permission can't sneak past
-    /// review (round-6 H8).
+    /// review (file-mounted AEAD key rule).
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path = path.as_ref();
         let meta = std::fs::metadata(path)
@@ -542,7 +542,8 @@ pub struct UnsealedRecord {
 
 /// Best-effort sealed-record facility shared across backends.
 ///
-/// Phase-0 lifecycle wiring (preview-URL § II.0 §4): each backend's
+/// Lifecycle wiring for preview auth persistence (`preview-URL` § II.0 §4):
+/// each backend's
 /// `create()` calls [`Persistence::seal`] after the sandbox is live;
 /// each `stop()` calls [`Persistence::delete`] before returning. The
 /// boot-path's restore loop reads the same files back via
@@ -590,7 +591,7 @@ impl Persistence {
     ///   `lib.rs`).
     /// - `SANDBOX_PERSIST_DIR` — parent dir; default
     ///   `/var/lib/zeroship/sandbox`.
-    /// - `SANDBOX_AEAD_KEY_PATH` — file-mount only (round-6 H8;
+    /// - `SANDBOX_AEAD_KEY_PATH` — file-mount only (file-mounted AEAD key rule;
     ///   env-var sourcing intentionally not supported because procfs
     ///   leaks).
     ///
@@ -602,7 +603,7 @@ impl Persistence {
             return Ok(None);
         }
         let key_path = std::env::var("SANDBOX_AEAD_KEY_PATH").map_err(|_| {
-            "SANDBOX_AEAD_KEY_PATH not set (file-mount only — see preview-URL § IX.a)"
+            "SANDBOX_AEAD_KEY_PATH not set (file-mount only — see `docs/proposals/sandbox-preview-urls.md` § IX.a)"
                 .to_string()
         })?;
         let key = AeadKey::from_path(&key_path)?;
@@ -817,7 +818,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Round-6 CRITICAL-3 path-traversal regression. A
+    /// path-traversal regression. A
     /// stringly-typed path that `seal_filename_for_str` should
     /// REJECT (not parseable as UUID); the typed `seal_filename_for`
     /// path is unreachable for non-UUID inputs at compile time. The

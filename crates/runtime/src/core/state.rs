@@ -49,8 +49,6 @@ pub enum OpErrorKind {
     /// `"SyntaxError"`). The macro's `gen_throw_error` arm constructs a
     /// real `globalThis.DOMException(message, name)` instance via the
     /// native `DOMException` class installed in `setup_globals`.
-    ///
-    /// Per `docs/proposals/webcrypto-native.md` D-6.
     DomException(&'static str),
     /// A Node.js-style error code (e.g. `"ERR_CRYPTO_HASH_FINALIZED"`,
     /// `"ERR_INVALID_ARG_TYPE"`). The macro's `gen_throw_error` arm
@@ -58,8 +56,6 @@ pub enum OpErrorKind {
     /// per-code class table (see `core/error.rs::node_error_class_for`)
     /// and assigns the `code` property as a static string. npm packages
     /// branch on `e.code === "ERR_..."`.
-    ///
-    /// Per `docs/proposals/node-crypto-native.md` D-N32 / §VII.3a.
     NodeError(&'static str),
     /// A pre-built JS exception value, captured from a user-thrown
     /// exception in a nested V8 callback (custom `toString`,
@@ -124,8 +120,6 @@ impl OpError {
     /// arm picks Error / TypeError / RangeError per the per-code table
     /// at `crate::node_error::class_for(code)` and sets `e.code = code`
     /// on the resulting JS exception.
-    ///
-    /// Per `docs/proposals/node-crypto-native.md` D-N32.
     pub fn node(code: &'static str, msg: impl Into<String>) -> Self {
         Self {
             kind: OpErrorKind::NodeError(code),
@@ -662,11 +656,10 @@ pub struct SpawnedTimer {
 /// runtime loop. Used by [`OpResult::JsValue`] so async class methods can
 /// hand back arbitrary V8 chunks (not just UTF-8 strings).
 ///
-/// Per streams design D-3: the existing `OpResult::Completed.value: String`
-/// channel is wrong for streams (it round-trips chunks through UTF-8 and
-/// silently mangles binary). Either we add this variant or maintain an
-/// out-of-band registry; the variant is simpler and reuses the existing
-/// dispatch loop in `runtime.rs`.
+/// The existing `OpResult::Completed.value: String` channel is wrong for
+/// streams because it round-trips chunks through UTF-8 and silently
+/// mangles binary. This variant keeps the dispatch loop in `runtime.rs`
+/// but lets async class methods resolve or reject with real JS values.
 pub enum ResolveValue {
     /// Resolve with `undefined`.
     Undefined,
@@ -793,8 +786,6 @@ pub enum OpResult {
     /// than a UTF-8 string. The resolver is stored directly on the
     /// variant (vs the `pending_resolvers` map keyed by op-id) so the
     /// runtime loop can resolve it without an extra lookup.
-    ///
-    /// Streams design §VII.5 / D-3.
     JsValue {
         resolver: v8::Global<v8::PromiseResolver>,
         value: ResolveValue,

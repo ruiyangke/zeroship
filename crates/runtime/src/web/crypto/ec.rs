@@ -1,5 +1,6 @@
-//! ECDSA + ECDH per spec §§23-24. D-4 fixed-length r∥s wire format.
-//! D-13 ECDH deriveBits. D-14 P-521 support.
+//! ECDSA + ECDH per spec §§23-24.
+//! Includes fixed-length `r∥s` signatures, ECDH `deriveBits`, and
+//! P-521 support.
 
 #![allow(dead_code)]
 
@@ -15,7 +16,7 @@ use crate::state::OpError;
 use aws_lc_rs::encoding::AsDer;
 
 // -----------------------------------------------------------------------------
-// ECDSA sign/verify — D-4 FIXED_SIGNING wire format
+// ECDSA sign/verify — fixed-length signature wire format
 // -----------------------------------------------------------------------------
 
 pub fn sign_ecdsa<'s>(
@@ -166,7 +167,7 @@ fn ecdsa_verify_alg(
 }
 
 // -----------------------------------------------------------------------------
-// ECDH deriveBits (D-13)
+// ECDH deriveBits
 // -----------------------------------------------------------------------------
 
 pub fn ecdh_derive_bits<'s>(

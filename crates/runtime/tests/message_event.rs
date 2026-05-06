@@ -5,7 +5,7 @@
 //!   - data identity (object readback-stability)
 //!   - origin / lastEventId defaults
 //!   - source always null
-//!   - ports identity (FrozenArray cache, addresses critic MAJOR #27)
+//!   - ports identity (FrozenArray cache)
 //!   - instanceof MessageEvent && instanceof Event
 //!   - initMessageEvent legacy method
 
@@ -168,7 +168,7 @@ fn message_event_instanceof_event() {
 }
 
 // ---------------------------------------------------------------------------
-// ports identity (critic MAJOR #27)
+// ports identity
 // ---------------------------------------------------------------------------
 
 #[test]

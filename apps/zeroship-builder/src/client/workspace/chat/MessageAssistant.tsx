@@ -49,7 +49,7 @@ export function MessageAssistant({
               ),
               // Inline `code` stays subtle; block code uses `pre` from
               // the prose- styles above. shiki-driven highlighting is
-              // ISS-27 — see plan §10.4 / spec §4.8.4.
+              // This action is still pending server support.
               code: ({ children, className }) => {
                 const isBlock = (className ?? "").startsWith("language-");
                 if (isBlock) {

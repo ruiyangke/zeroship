@@ -1,5 +1,5 @@
 /**
- * Phase 3 — typed client surface.
+ * Typed client surface.
  *
  *   const rpc = client<App>({ baseUrl, ... });
  *   await rpc.todos.list.query({ limit: 50 });
@@ -146,8 +146,8 @@ describe("client — typed proxy surface", () => {
     assert.ok(spy.calls[0].url.includes("/_zs/v1/todos.list"));
   });
 
-  test("stream returns an async-iter (Phase 4)", async () => {
-    // Phase 4 — stream() now returns an AsyncIterableIterator that
+  test("stream returns an async-iter", async () => {
+    // `stream()` returns an AsyncIterableIterator that
     // consumes the AI-SDK Data Stream protocol response. The full
     // wire / parser tests live in test/stream.test.ts; here we just
     // smoke-test the proxy → handle → streamCall plumbing.
@@ -177,7 +177,7 @@ describe("client — typed proxy surface", () => {
     void ({} as App);
   });
 
-  test("subscribe throws UNIMPLEMENTED in Phase 3", async () => {
+  test("subscribe throws UNIMPLEMENTED", async () => {
     const rpc = client({
       baseUrl: "https://api.test",
       fetch: async () =>
@@ -186,8 +186,9 @@ describe("client — typed proxy surface", () => {
           headers: { "Content-Type": "application/json" },
         }),
     });
-    // Phase 3 stubbed `subscribe()` to throw UNIMPLEMENTED; Phase 7 ships
-    // the real WebSocket transport. Asserting the surface remains callable.
+    // `subscribe()` currently throws UNIMPLEMENTED until the
+    // WebSocket transport lands. This asserts the surface remains
+    // callable.
     const typed = rpc as unknown as {
       x: { subscribe: (input?: unknown, opts?: unknown) => unknown };
     };

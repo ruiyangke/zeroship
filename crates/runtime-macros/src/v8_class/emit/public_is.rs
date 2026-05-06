@@ -1,15 +1,10 @@
 //! Public brand-check entry point for `#[v8_class]` types.
 //!
-//! Wave 3 commit 3 — extracted from `mod.rs`'s 195-line megaquote
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1, F3).
-//! Wave 5c — added the typed `<Class>::is_instance` and the sealed
-//! `V8ClassInstance` trait impl alongside the legacy underscored
-//! `__zs_is_<Class>` (design §3.5, closes F2).
-//! Wave 8 — removed the deprecated `__zs_is_<Class>` shim per
-//! `crates/runtime-macros/STABILITY.md`'s removal schedule. Callers
-//! migrated to the typed `<Class>::is_instance` entry point.
+//! This file emits the typed `<Class>::is_instance` API and the sealed
+//! `V8ClassInstance` trait impl. The older underscored
+//! `__zs_is_<Class>` shim has been removed.
 //!
-//! Symbol matrix (post Wave 8):
+//! Symbol matrix:
 //!
 //! | Symbol | Visibility | Purpose | Stability |
 //! |---|---|---|---|
@@ -27,7 +22,7 @@ use super::super::shared::class_config::ClassConfig;
 /// Emit the public brand-check entry points for a class:
 ///
 /// 1. `impl <Class> { pub fn is_instance(scope, v) -> bool { ... } }`
-///    — the stable inherent method (Wave 5c, design §3.5). Calls
+///    — the stable inherent method. Calls
 ///    `__brand_check_<Class>` directly after the
 ///    `Local::<Object>::try_from` fast-fail for non-Object values.
 /// 2. `impl ::zeroship_runtime::macro_runtime::__private::Sealed for <Class>`
@@ -36,16 +31,16 @@ use super::super::shared::class_config::ClassConfig;
 ///    `T: V8ClassInstance` while preventing third-party impls
 ///    (Sealed lives in a private module).
 ///
-/// Wave 8: the legacy `pub fn __zs_is_<Class>` shim is no longer
-/// emitted. `<Class>::is_instance` IS the public entry — it now
+/// The legacy `pub fn __zs_is_<Class>` shim is no longer emitted.
+/// `<Class>::is_instance` is the public entry point and now
 /// owns the `try_from` gate and the brand-check call directly.
 pub(super) fn gen_public_is_fn(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
-    // Wave 9 N1: brand-check ident from ClassConfig.
+    // Brand-check identifier cached on ClassConfig.
     let brand_check_fn = &cfg.brand_check_ident;
 
     quote! {
-        // ----- Wave 5c, design §3.5 — typed brand-check API -----
+        // ----- Typed brand-check API -----
 
         #[allow(non_snake_case, dead_code)]
         impl #class_ty {
@@ -57,11 +52,9 @@ pub(super) fn gen_public_is_fn(cfg: &ClassConfig) -> TokenStream2 {
             /// `false`, as does an isolate where the class hasn't been
             /// installed. Spec alignment: WebIDL §3.7 brand identity.
             ///
-            /// This is the stable entry point introduced in Wave 5c
-            /// (design `docs/proposals/runtime-macros-refactor.md` §3.5).
-            /// The Wave 5c-era `__zs_is_<Class>` shim was removed in
-            /// Wave 8 — this method now owns the `Local<Value>::try_into`
-            /// gate that the shim used to wrap.
+            /// This is the stable public entry point. The old
+            /// `__zs_is_<Class>` shim has been removed, so this method
+            /// now owns the `Local<Value>::try_into` gate directly.
             pub fn is_instance(
                 scope: &mut v8::PinScope,
                 value: v8::Local<v8::Value>,

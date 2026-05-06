@@ -132,10 +132,11 @@ async fn main() -> std::io::Result<()> {
         LocalFs::new(&bundles_dir).expect("failed to initialise bundle store"),
     ) as Arc<dyn BundleStore + Send + Sync>;
 
-    // Phase 2: BlobStore lives alongside the legacy BundleStore on the
-    // same root. New `.zship` deploys land in `<bundles_dir>/blobs/`
-    // and `<bundles_dir>/manifests/`; legacy `<bundles_dir>/<app_id>/...`
-    // files stay where they are until phase 4 retires the BundleStore.
+    // BlobStore lives alongside the legacy BundleStore on the same
+    // root. New `.zship` deploys land in `<bundles_dir>/blobs/` and
+    // `<bundles_dir>/manifests/`; legacy `<bundles_dir>/<app_id>/...`
+    // files stay where they are until the old BundleStore path is
+    // retired.
     let blob_root = PathBuf::from(&bundles_dir);
     let blob_store: Arc<dyn BlobStore> = Arc::new(
         LocalDiskBlobStore::new(blob_root)

@@ -49,8 +49,8 @@ pub enum DecodedFrame {
     Pong(Vec<u8>),
     /// Peer Close — caller emits CloseEvent and writes Close echo via
     /// the writer task. `code` and `reason` per RFC 6455 §5.5.1; if
-    /// the peer sent an empty payload, code=1005 (sentinel — see
-    /// CRITICAL #6, never serialise on the wire).
+    /// the peer sent an empty payload, code=1005 (sentinel value,
+    /// never serialized on the wire).
     Close { code: u16, reason: String },
 }
 

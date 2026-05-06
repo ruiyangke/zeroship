@@ -471,7 +471,7 @@ impl Registry {
     /// Fetch the raw manifest JSON for an app, if it has one. Used by
     /// the legacy `internal::get_asset` shim while the gateway still
     /// asks the control plane for asset bytes.
-    /// TODO(phase 4): remove once the gateway switches to BlobStore directly.
+    /// Remove this once the gateway switches to BlobStore directly.
     pub async fn get_manifest_json(&self, id: &Uuid) -> Result<Option<String>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn

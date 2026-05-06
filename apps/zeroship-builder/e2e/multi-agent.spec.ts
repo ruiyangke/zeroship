@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 01 multi-agent fleet smoke test. Reviewer / PM / SRE are V1
+// Multi-agent fleet smoke test. Reviewer / PM / SRE are V1
 // SubAgents wired into Builder via deepagents. Each is invoked when
 // Builder hits a matching prompt:
 //   - "deploy / review" → task("reviewer", …) → data-reviewer-round
@@ -33,7 +33,7 @@ async function probe(url: string): Promise<boolean> {
   }
 }
 
-test.describe("Plan 01 — multi-agent fleet (Reviewer / PM / SRE)", () => {
+test.describe("multi-agent fleet (Reviewer / PM / SRE)", () => {
   test.beforeEach(async ({}, testInfo) => {
     testInfo.setTimeout(STEP_TIMEOUT + 30_000);
   });

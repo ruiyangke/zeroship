@@ -1,12 +1,12 @@
 /**
- * RPC v2 Phase 1 follow-up — wireId default is just `<exportName>`.
+ * wireId default is just `<exportName>`.
  *
- * The Phase 1 default of `<moduleSlug>.<exportName>` leaked file
+ * The earlier default of `<moduleSlug>.<exportName>` leaked file
  * structure to the wire. The corrected default uses just the export
  * name. Path-derived slugs are gone from wireId derivation entirely
  * (they remain only for diagnostic messages).
  *
- * Spec §2:
+ * `docs/proposals/rpc-v2.md` §2:
  *   1. fn.config.id (explicit)            wins
  *   2. <exportName> alone                  — default
  */

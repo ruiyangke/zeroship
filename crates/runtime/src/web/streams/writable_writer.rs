@@ -15,14 +15,14 @@
 //! };
 //! ```
 //!
-//! Storage (D-2 audit):
+//! Storage:
 //! - `[[stream]]`         → V8 priv sym `[[stream]]` on the writer wrapper (SLOT)
 //! - `[[closedPromise]]`  → V8 priv sym `[[closedPromise]]` (SLOT for getter)
 //!   + paired Resolver in Rust state (so we can resolve/reject the promise)
 //! - `[[readyPromise]]`   → V8 priv sym `[[readyPromise]]` (SLOT for getter)
 //!   + paired Resolver in Rust state
 //!
-//! Promise lifecycle (CRITICAL #44 / design §II.10):
+//! Promise lifecycle:
 //! `EnsureReadyPromiseRejected` and `EnsureClosedPromiseRejected` need to
 //! REPLACE the promise wholesale if the existing one is settled. We track
 //! "settled" by clearing the Resolver after first resolve/reject. When the
@@ -50,7 +50,7 @@ const WRITER_BRAND: &str = "[[ws.writer.brand]]";
 /// in internal field 0; reclaimed by the V8 weak finalizer registered via
 /// the `#[v8_class]` macro.
 ///
-/// MAC-02 migration: parallels the readers. Self::new validates the
+/// This parallels the readers. Self::new validates the
 /// stream argument and stashes it in `pending_stream` for the post_init
 /// hook (`after_install`) to consume. The hook does box-install-dependent
 /// setup: WRITER_BRAND priv-sym, [[stream]] / stream.[[writer]] wires,

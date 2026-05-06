@@ -1,22 +1,12 @@
 //! Re-entry guard for `&mut self` callbacks.
 //!
-//! Wave 3 commit 4 — relocated from `v8_class/method.rs:84-133`
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1, F3).
-//! Wave 2 deliberately bailed on the `Cell<Option<usize>>` (single-slot)
-//! migration after pinning a soundness gap on 3-deep nesting (`a → b → a`
-//! cross-instance). The HashSet variant shipped unchanged through
-//! Waves 3-7.
-//!
-//! Wave 8 (closes design §13 / C5/H13): replace the heap-allocating
-//! `RefCell<HashSet<usize>>` with a fixed-capacity stack-resident
-//! `Cell<[Option<usize>; 8]>` (closes design amendment after Wave 2's
-//! bail). The 8-slot cap covers re-entry depths well beyond the
-//! 3-deep regression test (Wave 2 found `a → b → a` was the worst
-//! case in real consumers — Headers, FormData, URLSearchParams). The
-//! membership check is a 8-element scan (branchless `.iter().any`),
-//! the insert finds the first `None` slot, the remove clears the
-//! matching slot. All operations are heap-free; no `HashSet` allocator
-//! pressure on the per-isolate thread.
+//! Relocated from `v8_class/method.rs` when the emitter was split into
+//! smaller modules. The current implementation uses a fixed-capacity,
+//! stack-resident `Cell<[Option<usize>; 8]>` instead of the older
+//! heap-allocating `RefCell<HashSet<usize>>`. The 8-slot cap covers
+//! re-entry depths well beyond the `a → b → a` regression that exposed
+//! the single-slot design's soundness gap, and the scan-based approach
+//! avoids allocator traffic on the isolate thread.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -55,7 +45,7 @@ use quote::quote;
 /// (the panic still propagates to V8 cleanly because it fires before
 /// the unsafe `&mut Self` materialisation).
 ///
-/// **Why fixed-cap multi-slot beats single-slot Cell.** Wave 2 bailed
+/// **Why fixed-cap multi-slot beats single-slot Cell.** Earlier
 /// on `Cell<Option<usize>>` because saving the prior addr on entry
 /// and restoring it on exit fails for the cross-instance case
 /// `a → b → a`: when `b.method()` returns, the slot was restored to

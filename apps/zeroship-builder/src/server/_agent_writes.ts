@@ -1,7 +1,6 @@
 "use server";
 // Server-internal writes for agent surfaces — kept out of the public
-// RPC namespace by the underscore-prefix file convention (see ISS-02
-// in ISSUES.md).
+// RPC namespace by the underscore-prefix file convention.
 //
 // The chat middleware (`_middleware.ts`) calls these after every
 // agent SubAgent dispatch to persist round-by-round state into the
@@ -44,8 +43,7 @@ const DIMENSION_LABELS: Record<string, string> = {
 };
 
 /**
- * Map a per-dimension issue list to a letter grade per ISS-16's
- * stated mapping:
+ * Map a per-dimension issue list to the current scoreboard mapping:
  *   0 issues          → A
  *   1 medium          → B
  *   1 high            → C
@@ -58,7 +56,7 @@ const DIMENSION_LABELS: Record<string, string> = {
  *
  * Exported so unit tests / future tools can assert the mapping
  * directly. NOT a public RPC because this module is underscore-
- * prefixed (per the file-naming convention; see ISSUES.md ISS-02).
+ * prefixed by design.
  */
 export function gradeFromIssues(issues: CriticIssue[]): QualityGrade {
   let crit = 0;

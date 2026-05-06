@@ -1,4 +1,4 @@
-// ─── PlanCanvas — PM agent's home (spec §9.8) ───────────────────
+// ─── PlanCanvas — PM agent's home (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.8) ───────────────────
 //
 // Three stacked sections inside one scrolling canvas:
 //   1. Issues — status-grouped list (Open / In Progress / Done) with
@@ -7,7 +7,7 @@
 //      counts. Tomato accent for the current milestone.
 //   3. Deployments — single-row "current deploy" V1; reads
 //      `app.deploy_hash` + `app.updated_at`. Multi-row history lands
-//      with ISSUES.md ISS-15.
+//      with the current in-memory implementation.
 //
 // All backend writes go through the in-memory stub in
 // `src/server/agents.ts` — see its header for the V1 caveat.
@@ -52,7 +52,7 @@ export function PlanCanvas({ appId, app }: PlanCanvasProps) {
 //
 // Spec §13: PM agent has a digest mode that produces a 1-3 sentence
 // project narrative + 1-3 ranked next moves. The scheduled-worker
-// shape (cron) lives behind ISS-28, but the proc itself works on
+// shape (cron) is not wired yet, but the proc itself works on
 // demand — this surfaces a button so creators can pull the digest
 // without waiting for the cron to land. The panel renders the
 // last-fetched digest inline so a refresh (or revisit) keeps the
@@ -436,7 +436,7 @@ function RoadmapSection({ appId }: { appId: string }) {
           const current = i === 0;
           // V1: we attribute every issue to v0.1 (the only milestone
           // we have data for). v0.2 / v0.3 stay empty until a real
-          // milestones table lands (see ISSUES.md ISS-14).
+          // milestones table is not wired yet.
           const milestoneTotal = current ? total : 0;
           const milestoneDone = current ? done : 0;
           const ratio =
@@ -527,7 +527,7 @@ function DeploymentsSection({ app }: { app?: AppRecord }) {
         </div>
       )}
       <div className="mt-3 font-serif italic text-[12px] text-pencil">
-        Multi-row history is tracked as ISS-15 in ISSUES.md.
+        Full deployment history is not wired yet.
       </div>
     </section>
   );

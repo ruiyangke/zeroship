@@ -50,8 +50,8 @@ impl AppMeter {
         }
     }
 
-    /// Restore counters from the warm tier after a restart (crash recovery, spec §4.6).
-    /// Populates atomic counters from a stored HashMap so enforcement resumes
+    /// Restore counters from the warm tier after a restart. Populates
+    /// atomic counters from a stored HashMap so enforcement resumes
     /// from where it left off, not from zero.
     pub fn from_stored(plan: QuotaPlan, plugin_resources: &[MeterResource], stored: &HashMap<String, u64>) -> Self {
         let meter = Self::with_resources(plan, plugin_resources);
@@ -280,9 +280,9 @@ impl MeterRegistry {
         Some(old)
     }
 
-    /// Recover counters from the warm tier after a restart (spec §4.6).
-    /// For each app in the store, loads the stored counters and populates
-    /// the hot-tier atomics so enforcement resumes from the last-flushed state.
+    /// Recover counters from the warm tier after a restart. For each app
+    /// in the store, load the stored counters and populate the hot-tier
+    /// atomics so enforcement resumes from the last-flushed state.
     pub async fn recover_from_store(
         &self,
         store: &dyn crate::core::meter_store::MeterStore,

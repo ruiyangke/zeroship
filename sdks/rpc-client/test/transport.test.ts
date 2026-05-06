@@ -1,5 +1,5 @@
 /**
- * Phase 3 — transport behavior.
+ * Transport behavior.
  *
  *   query     → GET /_zs/v1/<id>?input=<base64url-superjson>
  *   query (>6KB)

@@ -1,5 +1,5 @@
-//! Phase-3 controller-side mint/list/revoke handlers
-//! (preview-URL § III "API specification").
+//! Controller-side mint/list/revoke handlers
+//! (`docs/proposals/sandbox-preview-urls.md` §III "API specification").
 //!
 //! All four endpoints live under `/sandboxes/{id}/preview/{port}/share`:
 //!
@@ -7,22 +7,23 @@
 //! - `GET` — list audit-metadata for tokens this sandbox has issued.
 //! - `DELETE` — rotate the secret + clear `previous` (zero-grace);
 //!   wipes the audit table.
-//! - `DELETE /{token_id}` — per-token revoke. **Phase 5** — returns
+//! - `DELETE /{token_id}` — per-token revoke. Returns
 //!   `501 Not Implemented` with `code: "deferred-to-phase-5"` so the
-//!   API surface is reserved.
+//!   API surface is reserved until per-token revoke is implemented.
 //!
 //! ## Auth
 //!
 //! Every handler reuses the existing `?user_id=<id>` ownership gate
 //! that `require_owner` provides for the rest of the controller's
 //! API. Coalesced 404 on auth-failure / not-owner / sandbox-not-found
-//! per round-6 H4. The bearer-token check fires before that.
+//! per uniform-auth rule. The bearer-token check fires before that.
 //!
 //! ## Rate-limit
 //!
 //! `POST` is rate-limited at 100 mints / sandbox / day via a simple
-//! in-memory token bucket (preview-URL § VI R-14). Production-grade
-//! quota tracking lives elsewhere; this is the v1 minimum.
+//! in-memory token bucket (`docs/proposals/sandbox-preview-urls.md`
+//! §VI). Production-grade quota tracking lives elsewhere; this is the
+//! minimum controller-side guard.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ use zeroship_core::preview_ports::{is_proxyable_port, DEFAULT_DENY};
 
 type State = web::types::State<Arc<AppState>>;
 
-/// Per-sandbox-per-day mint cap (§ VI R-14).
+/// Per-sandbox-per-day mint cap.
 const PER_SANDBOX_DAILY_MINT_CAP: u32 = 100;
 
 /// In-memory token bucket. Keyed on `sandbox_id`. Refills at midnight
@@ -90,7 +91,8 @@ pub struct MintBody {
     pub scope: String,
     /// Optional issuer typed-id (creator's `usr_…`). Recorded into
     /// the audit log; written into the token's `iss` claim if
-    /// present. Phase-5 GA promotes this to a hard requirement.
+    /// present. A later GA pass can promote this to a hard
+    /// requirement.
     #[serde(default)]
     pub iss: Option<String>,
 }
@@ -156,7 +158,7 @@ fn authorize_owner(
         // succeeded had user_id been present.
         return Err(not_found());
     }
-    // Round-2 fixer / CRITICAL #1: accept the typed-id form returned
+    // : accept the typed-id form returned
     // by `POST /sandboxes` AND the bare UUID form for back-compat.
     // Both map to 404 (uniform-no-existence-oracle) on parse failure.
     let id: Uuid = zeroship_core::typed_id::parse_with_prefix(sandbox_id_str, "sbx")
@@ -259,15 +261,14 @@ pub async fn mint_share(
     // logged and swallowed.
     persist_preview_state(&state, id).await;
 
-    // Round-8 Phase 1: per-token audit metadata moves to pg. Write
-    // the share row synchronously; on Err log + continue.
+    // Per-token audit metadata now lives in pg. Write the share row
+    // synchronously; on error, log and continue.
     if let Some(db) = state.database.as_ref() {
         // Migration 0003 widened the schema CHECK from base62 to
         // base64url so we can store `tok_<raw_tid>` byte-exactly. The
         // earlier `replace(['-','_'], "x")` munge collapsed distinct
         // tokens whose raw tids differed only in `-` vs `_` (or
-        // happened to contain `x`); see CRITICAL #6 in the round-1
-        // fixer review.
+        // happened to contain `x`).
         let typed_token_id = format!("tok_{token_id}");
         let row = crate::db::ShareRow {
             // Storage form is `tok_<raw_tid>`; the API-returned
@@ -290,8 +291,8 @@ pub async fn mint_share(
                 "sandbox/preview_share: pg insert_share failed (non-fatal)"
             );
         }
-        // Round-1 fixer / MINOR #22: skip the audit event entirely
-        // when the registry has no record of the sandbox owner. The
+        // Skip the audit event entirely when the registry has no
+        // record of the sandbox owner. The
         // pre-fix synthetic `usr_unknown` would have failed the
         // user_id CHECK on sandbox.events anyway (the row's
         // user_id must match `^usr_[0-9A-Za-z]{20,40}$`); falling
@@ -330,7 +331,7 @@ pub async fn mint_share(
         "expires_at_unix": claims.exp,
         "scope": claims.scope,
         "secret_version": ring.sv_current,
-        // Public share URL — Phase 4 lands real DNS; until then we
+        // Public share URL — real DNS is not wired yet, so we
         // emit the canonical pattern so the UI can render-and-copy.
         "share_url": format!(
             "https://preview-{slug}-{port}.preview.zeroship.dev/__zsbx_share?t={token}",
@@ -405,8 +406,8 @@ pub async fn revoke_all_share(
     // § II.4 "Revocation".
     persist_preview_state(&state, id).await;
 
-    // Round-8 Phase 1: pg-side rotation revokes every existing share
-    // row for this sandbox so the validator can refuse them.
+    // Pg-side rotation revokes every existing share row for this
+    // sandbox so the validator can refuse them.
     if let Some(db) = state.database.as_ref() {
         if let Err(e) = db.rotate_share_secret(id).await {
             tracing::warn!(
@@ -444,7 +445,7 @@ async fn persist_preview_state(state: &Arc<AppState>, sandbox_id: Uuid) {
         Ok(true) => {}
         Ok(false) => {
             // Persistence disabled OR sandbox-id not in backend's
-            // session map. Phase-3 boots with persistence off by
+            // session map. Persistence is off by
             // default; this is the normal path for that mode.
         }
         Err(e) => {
@@ -457,8 +458,8 @@ async fn persist_preview_state(state: &Arc<AppState>, sandbox_id: Uuid) {
     }
 }
 
-/// `DELETE /sandboxes/{id}/preview/{port}/share/{token_id}` — Phase 5
-/// per-token revoke stub (preview-URL § II.4 "Per-token revocation").
+/// `DELETE /sandboxes/{id}/preview/{port}/share/{token_id}` — per-token
+/// revoke stub (`preview-URL` § II.4 "Per-token revocation").
 /// Returns 501 with `code: "deferred-to-phase-5"` so the API surface
 /// is reserved without claiming functionality v1 doesn't have.
 pub async fn revoke_one_share(
@@ -482,9 +483,9 @@ pub async fn revoke_one_share(
 
 /// Render a sandbox slug for the public preview hostname. Mirrors
 /// `preview::compute_preview_host` — DNS labels are case-insensitive
-/// AND the slug is restricted to lowercase alphanumeric + `-` (round-6
-/// CRITICAL-5). For v1 we lower-case + strip non-alphanumerics; Phase-4
-/// wires the typed-id lowercase emitter directly.
+/// AND the slug is restricted to lowercase alphanumeric + `-`. For v1
+/// we lower-case + strip non-alphanumerics; a later DNS pass can wire
+/// the typed-id lowercase emitter directly.
 fn sandbox_slug(id: &str) -> String {
     id.chars()
         .filter(|c| c.is_ascii_alphanumeric())

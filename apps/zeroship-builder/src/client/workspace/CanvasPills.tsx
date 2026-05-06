@@ -15,7 +15,7 @@ const ALL_PILLS = [
 export type CanvasPillId = (typeof ALL_PILLS)[number];
 
 /**
- * Three tiers per spec §1.5 / §3.2. Each progressively reveals more
+ * Three tiers per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §1.5 / §3.2. Each progressively reveals more
  * canvases. The tier is set at the workspace level and persisted in
  * localStorage. Plain progressive disclosure — Maker is the default,
  * +Data adds the database-shaped surfaces, +Code unlocks everything

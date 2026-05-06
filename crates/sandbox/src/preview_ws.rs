@@ -1,21 +1,22 @@
 //! Controller-side WebSocket-Upgrade forwarder for the preview proxy.
 //!
 //! See `docs/proposals/sandbox-preview-urls.md` § II.2 (controller
-//! endpoint must handle Upgrade) and D-14 (V1_1_Ws canonical with
+//! endpoint must handle Upgrade) and WebSocket signature-separation rule (V1_1_Ws canonical with
 //! `ED25519-V1.1-WS` domain-separator).
 //!
 //! ## Implementation choice — separate compio TCP listener
 //!
 //! ntex's connection-hijack surface (`HttpRequest::head().take_io()`)
 //! doesn't compose cleanly with a compio TcpStream upstream splice.
-//! Per the proposal's Phase 2 plan: "If ntex's surface is too awkward,
+//! The proposal explicitly allows a raw-socket fallback when ntex's
+//! surface is too awkward:
 //! fall back to a compio raw-socket path (the controller listens on a
 //! separate port for Upgrade forwarding, …). Document the chosen
 //! approach in code comments." We take that path; the controller
 //! exposes a dedicated WS port (default 9092 — `SANDBOX_PORT + 1` by
 //! convention; configurable via `SANDBOX_PREVIEW_WS_PORT`).
 //!
-//! Phase 4 lands public DNS at `*.preview.zeroship.dev`; until then
+//! Public DNS at `*.preview.zeroship.dev` is not wired yet, so
 //! the WS port is reachable directly for integration testing.
 //!
 //! ## Wire flow
@@ -38,7 +39,7 @@
 //! ```
 //!
 //! Post-Upgrade frames are TCP-spliced through the controller and
-//! agent (D-8). Header rewriting on a 101 is irrelevant — the
+//! agent (post-upgrade TCP-splice rule). Header rewriting on a 101 is irrelevant — the
 //! response is `101 Switching Protocols` with minimal headers, no
 //! Set-Cookie/Location/Refresh to rewrite.
 
@@ -167,7 +168,7 @@ async fn handle_connection(
     let user_id = extract_user_id_from_query(&raw_path);
 
     // Coalesced authorize: principal-OK + sandbox-exists + ownership +
-    // port-allowed. Any failure → uniform 401/404 (round-6 H4).
+    // port-allowed. Any failure → uniform 401/404 (uniform-auth rule).
     let info_opt = state.sandboxes.get(&sandbox_id);
     let port_allowed = is_proxyable_port(port, DEFAULT_DENY);
 
@@ -465,7 +466,7 @@ fn parse_preview_path(path: &str) -> Option<(Uuid, u16, String)> {
     let stripped = no_query.strip_prefix("/sandboxes/")?;
     // sandbox-id /preview/ port / sub_path
     let (id_str, rest) = stripped.split_once('/')?;
-    // Round-2 fixer / CRITICAL #1: WS-Upgrade preview URLs carry the
+    // : WS-Upgrade preview URLs carry the
     // same `sbx_<base62>` typed-id as the HTTP path. Accept that form
     // and fall back to bare UUID for back-compat.
     let sandbox_id: Uuid = zeroship_core::typed_id::parse_with_prefix(id_str, "sbx")
@@ -646,7 +647,8 @@ fn build_outbound_request(
 
 /// Compute the preview hostname pattern. Mirrors the function in
 /// `preview.rs`; duplicated here to avoid pulling the whole HTTP
-/// handler module in. Phase 4 will expose this from a shared helper.
+/// handler module in. A later public-DNS pass can expose this from a
+/// shared helper.
 fn compute_preview_host(sandbox_id: &Uuid, port: u16) -> String {
     let s = sandbox_id.to_string();
     let slug: String = s

@@ -3,10 +3,10 @@
 //!
 //! These tests drive the JS surface through a real V8 isolate. WPT
 //! conformance lives in `wpt_fetch_body.rs`; this file covers the
-//! design's CRITICAL list (C-10 dispatch order, C-11 USVString
-//! conversion, MAJOR-25 consumer error shapes) plus the behavioural
-//! shape we want for v1 (length, content-type defaults, stream
-//! disturbed/locked rejection).
+//! native body behaviors we care about most: dispatch order,
+//! USVString conversion, consumer error shapes, and the behavioural
+//! shape we want for the current implementation (length,
+//! content-type defaults, stream disturbed/locked rejection).
 //!
 //! We exercise extract_body through `new Request(..., { body })` and
 //! `new Response(body)` since extract_body itself is a private path —
@@ -447,13 +447,13 @@ fn usv_string_replaces_lone_surrogates() {
 }
 
 // ---------------------------------------------------------------------------
-// Consumer error shapes (MAJOR-25)
+// Consumer error shapes
 // ---------------------------------------------------------------------------
 
 #[test]
 fn json_consumer_rejects_with_syntax_error_on_bad_json() {
-    // Per MAJOR-25 / WHATWG Fetch: response.json() rejects with
-    // SyntaxError (JSON.parse semantics), NOT TypeError.
+    // Per WHATWG Fetch, response.json() rejects with SyntaxError
+    // (JSON.parse semantics), not TypeError.
     let s = run_async_in_v8(
         r#"
         const r = new Response("not json {{");

@@ -1,7 +1,7 @@
 //! `await import(specifier)` — V8 host callback that resolves dynamic
 //! imports against the per-isolate module registry installed by
-//! `load_modules`. Phase 1: bundle-resident only (no fetch, no
-//! compile-on-demand).
+//! `load_modules`. This coverage is limited to bundle-resident
+//! modules (no fetch, no compile-on-demand).
 //!
 //! Covers:
 //!   - Static + dynamic imports of the same module yield the SAME

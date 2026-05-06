@@ -1,6 +1,6 @@
 //! Insta snapshot tests for `#[derive(WebIdlEnum)]` codegen.
 //!
-//! Wave 7 commit 2 (F9) — locks the WebIdlEnum derive's emit shape
+//! Locks the WebIdlEnum derive's emit shape
 //! against drift, mirroring the pattern in
 //! `v8_class/snapshot_tests.rs`.
 //!

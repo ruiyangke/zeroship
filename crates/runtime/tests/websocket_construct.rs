@@ -73,7 +73,7 @@ fn ws_construct_basic() {
         js_string,
     );
     // Per WHATWG §3.1: readyState=0 (CONNECTING) synchronously,
-    // binaryType="blob" by default (D-7), bufferedAmount=0.
+    // binaryType="blob" by default, bufferedAmount=0.
     assert_eq!(
         s,
         r#"{"url":"wss://example.com/path","readyState":0,"protocol":"","extensions":"","bufferedAmount":0,"binaryType":"blob"}"#
@@ -369,12 +369,12 @@ fn ws_protocol_non_ascii_throws() {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocketInit dictionary (D-28)
+// WebSocketInit dictionary
 // ---------------------------------------------------------------------------
 
 #[test]
 fn ws_init_accepts_origin() {
-    // The init dict's `origin` member is opt-in per CRITICAL #3 — its
+    // The init dict's `origin` member is opt-in. Its
     // observable effect is on the wire, not on the instance. Just
     // verify the constructor accepts it without throwing.
     let s = run_in_v8(
@@ -479,12 +479,12 @@ fn ws_close_idempotent_after_closing() {
 }
 
 // ---------------------------------------------------------------------------
-// accept() — workerd extension (D-21)
+// accept() — workerd extension
 // ---------------------------------------------------------------------------
 
 #[test]
 fn ws_accept_on_client_socket_throws() {
-    // Per D-21: client-side WebSocket throws TypeError on accept().
+    // Client-side WebSocket throws TypeError on accept().
     let s = run_in_v8(
         r#"
         const ws = new WebSocket("wss://example.com");

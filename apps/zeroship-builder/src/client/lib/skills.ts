@@ -1,8 +1,8 @@
 // ─── Skill catalogue (static) ───────────────────────────────────
 //
-// Per spec §5.3. The Skills surface is V1: a catalogue, not a real
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.3. The Skills surface is V1: a catalogue, not a real
 // add-to-project flow. The backend (skill registry, install action,
-// per-project skill manifest) is tracked as ISS-13 in /ISSUES.md.
+// per-project skill manifest) is not wired yet.
 // Until then we ship a static list so the marketing surface lands.
 
 export type SkillCategory =

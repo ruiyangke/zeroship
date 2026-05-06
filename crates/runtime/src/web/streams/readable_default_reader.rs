@@ -43,8 +43,8 @@ use crate::streams::slots::{self, CLOSED_PROMISE, CONTROLLER, READER, STORED_ERR
 /// internal field 0; reclaimed by the V8 weak finalizer registered via the
 /// `#[v8_class]` macro.
 ///
-/// MAC-02 migration: `#[v8_class] + #[v8_constructor(post_init = ...)]`
-/// drives box install. The constructor body (Self::new) validates the
+/// `#[v8_class] + #[v8_constructor(post_init = ...)]` drives box
+/// install. The constructor body (Self::new) validates the
 /// stream argument and stashes it in `pending_stream` so the post_init
 /// hook can run `ReaderGenericInitialize` after the box is reachable via
 /// field 0.

@@ -1,5 +1,4 @@
-//! Smoke tests for `#[v8_state_marker(MarkerTy)]` — MAC-01 Phase 1
-//! (design `docs/proposals/macro-v8-state.md`).
+//! Smoke tests for `#[v8_state_marker(MarkerTy)]`.
 #![allow(unsafe_code)]
 //!
 //! The attribute lets a class separate its JS-facing identity (the
@@ -679,9 +678,9 @@ fn finalizer_drops_state_type_on_gc() {
 // ourselves to verifying the macro EMITS the async callback shape and
 // that calling it returns a Promise.
 //
-// Note: the v8_async_method_smoke.rs test exercises full async resolution
-// via the runtime's pump. For Phase 1 we just confirm the substitution
-// site emits compilable code that returns a Promise from JS.
+// Note: v8_async_method_smoke.rs exercises full async resolution via
+// the runtime's pump. Here we only confirm that the substitution site
+// emits compilable code that returns a Promise from JS.
 
 mod async_method_state {
     use super::*;
@@ -724,8 +723,8 @@ fn async_method_compiles_under_state_projection() {
     // requires a full Runtime (the macro's emitted callback reads the
     // SharedState slot to spawn the future onto the pump), which is
     // overkill for this smoke test — full async dispatch with state
-    // projection lives in v8_async_method_smoke.rs once Phase 2/3
-    // migrates Request/Response.
+    // projection lives in v8_async_method_smoke.rs once that coverage
+    // grows to the Request/Response path.
     //
     // What this test proves: the macro's gen_async_method_callback
     // emitted `let __instance: &#state_ty = unsafe { &*(__raw_addr as
@@ -888,7 +887,7 @@ mod reentrancy_state {
 fn reentrancy_guard_fires_under_state_projection() {
     // We don't trigger the reentrancy path here — that requires a
     // user JS callback re-entering the same instance, which adds
-    // complexity beyond the Phase 1 smoke test. The relevant
+    // complexity beyond this smoke test. The relevant
     // soundness invariant (the guard set is keyed by External pointer
     // value, NOT by the state type) is exercised by the existing
     // v8_reentrancy_smoke.rs tests using a no-attr class. This test

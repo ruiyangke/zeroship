@@ -1,6 +1,6 @@
 // ─── About — public manifesto (`/about`) ────────────────────────
 //
-// Per spec §5.5. Editorial single-column page. One or two paragraphs
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.5. Editorial single-column page. One or two paragraphs
 // of voice — the philosophy, the why, the bet. Not a press kit.
 
 import { Link } from "react-router-dom";

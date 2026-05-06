@@ -1,12 +1,11 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Phase 4 port: this file is a near-verbatim translation of tokio-postgres's
-// `prepare.rs`. The logic — Parse + Describe + Sync, parameter/column
-// resolution, recursive type info via pg_catalog — is protocol + SQL, so
-// only the I/O glue has to change. The recursive helpers (`prepare_rec`,
-// `get_type_rec`) remain boxed futures because the recursion between
-// `prepare` ↔ `get_type` ↔ `prepare_rec` cannot be expressed as a plain
-// async fn (Rust has no syntactic support for recursive `async fn`).
+// Near-verbatim translation of tokio-postgres's `prepare.rs`. The logic
+// — Parse + Describe + Sync, parameter/column resolution, recursive type
+// info via pg_catalog — is protocol + SQL, so only the I/O glue changes.
+// The recursive helpers (`prepare_rec`, `get_type_rec`) remain boxed
+// futures because the recursion between `prepare` ↔ `get_type` ↔
+// `prepare_rec` cannot be expressed as a plain async fn.
 
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;

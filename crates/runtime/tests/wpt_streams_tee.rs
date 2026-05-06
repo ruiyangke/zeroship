@@ -9,7 +9,8 @@
 //!
 //! Deferred:
 //!   - byte-stream tee tests (lands with BYOB byte streams)
-//!   - patched-global teeing (deferred to D-19 polyfill cutover phase 3)
+//!   - patched-global teeing (deferred until the native globals fully
+//!     replace the patched-global path)
 
 #![allow(unsafe_code)]
 

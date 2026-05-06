@@ -3,7 +3,7 @@
 // returns 4xx/5xx, the auth resolver fails, the network drops, or any
 // underlying transport problem occurs.
 //
-// Wire envelope (per spec §6 Errors):
+// Wire envelope (`docs/proposals/rpc-v2.md` §6, "Errors"):
 //
 //   { code, message, details?, retryable, trace_id? }
 //
@@ -14,8 +14,8 @@
 // a useful code instead of a bare HTTP number.
 
 /**
- * Fixed gRPC-inspired enum (spec §6). The wire ships these strings;
- * the client never invents codes.
+ * Fixed gRPC-inspired enum. `docs/proposals/rpc-v2.md` §6 defines the
+ * wire strings; the client never invents codes.
  */
 export type ErrorCode =
   | "UNAUTHENTICATED"
@@ -51,7 +51,7 @@ export const ErrorCode: Readonly<Record<ErrorCode, ErrorCode>> = Object.freeze({
   UNIMPLEMENTED: "UNIMPLEMENTED",
 });
 
-/** Default retryability per spec §6 (table). */
+/** Default retryability from `docs/proposals/rpc-v2.md` §6. */
 const RETRYABLE_BY_CODE: Readonly<Record<ErrorCode, boolean>> = Object.freeze({
   UNAUTHENTICATED: false,
   PERMISSION_DENIED: false,

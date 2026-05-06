@@ -1,11 +1,10 @@
 //! `next()` + `forEach` callbacks for the iterable surface.
 //!
-//! Wave 9 split — extracted from `v8_iterable.rs`'s 1,368-LOC god
-//! file (per design + v2 architecture-critic R2). This file owns the
-//! emit shape for the iterator-side callbacks: the `<Class>Iterator
-//! .prototype.next()` callback and the parent class's `forEach`. The
-//! companion class struct + factory callbacks + install bridge live
-//! in `emit_factory.rs`.
+//! Split out from the old monolithic `v8_iterable.rs`. This file owns
+//! the emit shape for the iterator-side callbacks: the
+//! `<Class>Iterator.prototype.next()` callback and the parent class's
+//! `forEach`. The companion class struct, factory callbacks, and
+//! install bridge live in `emit_factory.rs`.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -171,7 +170,7 @@ pub(super) fn gen_next_callback(ctx: &EmitCtx<'_>) -> TokenStream2 {
             mut rv: v8::ReturnValue,
         ) {
             // Brand-check the receiver against `<Class>Iterator
-            // .prototype` (Wave 10 NS6). Without this, a caller could
+            // .prototype`. Without this, a caller could
             // hand any `#[v8_class]` wrapper to
             // `<Class>Iterator.prototype.next.call(...)` — every
             // wrapper has `internal_field(0) = External(Box<X>)`, so

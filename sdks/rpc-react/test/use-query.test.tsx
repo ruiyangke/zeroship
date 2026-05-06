@@ -1,5 +1,5 @@
 /**
- * Phase 5 — `proc.useQuery(...)` happy path.
+ * `proc.useQuery(...)` happy path.
  *
  * Mount a tiny component that calls a query procedure built by
  * `__makeProcedure` from rpc-client. The test asserts:

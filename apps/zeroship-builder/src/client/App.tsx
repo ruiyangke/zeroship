@@ -22,7 +22,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* ─── Public surfaces (per spec §5) ───────────────────── */}
+        {/* ─── Public surfaces (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5) ───────────────────── */}
         {/* `/` is the marketing landing for unauthed visitors. The
             authed gallery (project list) lives at `/home` behind
             AuthGuard. Post-login redirects target `/home`. */}
@@ -40,7 +40,7 @@ export default function App() {
         <Route path="/signup" element={<Signup />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
 
-        {/* Onboarding intent picker — first run after signup (spec §7.1).
+        {/* Onboarding intent picker — first run after signup (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1).
             Public so the post-signup hand-off doesn't race with auth
             propagation; the page itself doesn't need a session. */}
         <Route path="/onboarding/intent" element={<OnboardingIntent />} />
@@ -48,7 +48,7 @@ export default function App() {
         {/* Authed gallery — formerly `/`. */}
         <Route path="/home" element={<AuthGuard><Home /></AuthGuard>} />
 
-        {/* Pre-coding clarification flow per spec §8.2.7 / §4.8.2b.
+        {/* Pre-coding clarification flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7 / §4.8.2b.
             PUBLIC by design — the wizard collects a brief without auth,
             and only Begin → createApp triggers a 401 when the user
             isn't signed in. */}

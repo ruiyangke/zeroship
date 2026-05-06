@@ -219,7 +219,7 @@ fn seconds_until_period_reset() -> u64 {
 
 /// POST /rpc — dispatch with quota check + metering + response headers.
 ///
-/// Enforcement pipeline per spec §4.1:
+/// Enforcement pipeline:
 /// 1. Rate limit → 2. Concurrency guard → 3. Spending limit →
 /// 4. Quota check → 5. Dispatch → 6. Record usage → 7. Response headers
 async fn handle_rpc(
@@ -397,7 +397,8 @@ async fn handle_rpc(
                 add_header(&mut headers, "x-spending-warning", "Approaching spending limit");
             }
 
-            // Quota warning headers (spec §8.2) — computed post-dispatch from snapshot
+            // Quota warning headers, computed post-dispatch from the
+            // latest usage snapshot.
             let usage_snapshot = meter.counters.snapshot();
             for (resource, quota) in &meter.plan.quotas {
                 if let Some(max) = quota.max {

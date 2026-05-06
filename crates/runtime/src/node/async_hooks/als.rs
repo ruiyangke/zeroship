@@ -1,10 +1,10 @@
 //! Native `AsyncLocalStorage` per Node.js `node:async_hooks`.
 //!
 //! Replaces the closure-based polyfill described in
-//! `docs/reference/node-compat.md`'s old §"node:async_hooks" — which
+//! `docs/reference/node-compat.md`'s old §"node:async_hooks" — it
 //! reverted state synchronously in `try { fn(...) } finally { ... }`
 //! and therefore tore down the store before any awaited continuation
-//! resumed (ISS-01).
+//! resumed.
 //!
 //! ## Storage layout
 //!

@@ -110,7 +110,7 @@ export function SurveyCard({ survey, onSubmit, onSkip, surveyId = "anon" }: Surv
                 className="w-full px-2 py-1.5 border border-rule bg-paper-2 rounded font-sans text-[13px] focus:outline-none focus:border-ink resize-none"
               />
             )}
-            {/* multi_choice / scale / image_upload — covered in Plan 02 */}
+            {/* multi_choice / scale / image_upload are not rendered yet */}
           </div>
         ))}
       </div>

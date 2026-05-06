@@ -1,7 +1,7 @@
 //! Hand-written tests for `WebSocket.close()` validation.
 //!
 //! Per WHATWG §3.1 close algorithm + the v2 design's [Clamp]
-//! correctness (CRITICAL #2):
+//! correctness:
 //!   - `code` is `[Clamp] unsigned short`: NaN→0, sign-aware clamp
 //!     to [0,65535], banker's rounding for .5 ties.
 //!   - Close-code validation: 1000 OR 3000-4999; everything else
@@ -85,7 +85,7 @@ fn close_with_4999_is_allowed() {
 #[test]
 fn close_with_no_args_is_allowed() {
     // Per WHATWG §3.1: code is optional. None on the wire = empty
-    // payload Close frame per RFC 6455 §5.5.1 (CRITICAL #6).
+    // payload Close frame per RFC 6455 §5.5.1.
     let s = run_in_v8(
         r#"
         const ws = new WebSocket("wss://example.com");
@@ -178,8 +178,9 @@ fn close_with_65535_throws() {
 }
 
 // ---------------------------------------------------------------------------
-// [Clamp] correctness (CRITICAL #2 — the v1 design used uint32().min(65535)
-// which is wrong vs WebIDL ConvertToInt[Clamp]).
+// [Clamp] correctness.
+// Earlier versions used `uint32().min(65535)`, which does not match
+// WebIDL's `ConvertToInt[Clamp]`.
 // ---------------------------------------------------------------------------
 
 #[test]

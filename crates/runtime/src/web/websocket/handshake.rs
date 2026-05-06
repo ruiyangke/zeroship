@@ -1,32 +1,30 @@
 //! RFC 6455 §4.1 client-side WebSocket handshake.
 //!
-//! Drives the connect spawn from `WebSocketImpl::new` (§V.3) on a
-//! compio task. SSRF discipline mirrors fetch's two-phase guard:
+//! Drives the connect spawn from `WebSocketImpl::new` on a compio
+//! task. SSRF discipline mirrors fetch's two-step guard:
 //!
-//!   Phase 1 — string-level: `crate::fetch::validate_url` rejects
+//!   1. String-level validation: `crate::fetch::validate_url` rejects
 //!     literal private / loopback / link-local IPs in the URL itself.
-//!   Phase 2 — DNS resolution: `crate::fetch::resolve_and_check_ssrf`
+//!   2. DNS resolution: `crate::fetch::resolve_and_check_ssrf`
 //!     resolves the hostname and revalidates each candidate against
 //!     the blocklist; the returned `SocketAddr` is what we hand
 //!     `TcpStream::connect`. This closes the "DNS rebinding" hole
 //!     where a public hostname resolves to `127.0.0.1` between the
-//!     URL check and the actual connect (design CRITICAL #8).
+//!     URL check and the actual connect.
 //!
 //! Header validation:
 //!   - Sec-WebSocket-Accept: COMPUTE the expected digest ourselves and
 //!     reject any mismatch (RFC 6455 §4.1 step 6.5).
-//!   - Sec-WebSocket-Protocol: any echo MUST be in the offered set
-//!     (CRITICAL #9).
+//!   - Sec-WebSocket-Protocol: any echo MUST be in the offered set.
 //!   - Sec-WebSocket-Extensions: any non-empty value HARD-FAILS — we
-//!     offer none (RFC 6455 §9.1, design CRITICAL #7).
+//!     offer none (RFC 6455 §9.1).
 //!
-//! Origin is opt-in only per RFC 6455 §10.2 (CRITICAL #3) — emitted
+//! Origin is opt-in only per RFC 6455 §10.2 — emitted
 //! only when `WebSocketInit.origin` was explicitly set.
 //!
 //! Permessage-deflate: not enabled — we send no Sec-WebSocket-Extensions
 //! header, and any RSV1=1 frame hard-fails at the in-tree framer
-//! (`frame_reader::DecodeError::NonZeroReserved` — defence in depth,
-//! design MAJOR #18).
+//! (`frame_reader::DecodeError::NonZeroReserved`).
 //!
 //! ## Why we hand-roll the HTTP handshake (instead of using compio_ws)
 //!
@@ -111,13 +109,12 @@ pub enum HandshakeError {
     AcceptMismatch,
     /// Sec-WebSocket-Protocol value isn't valid UTF-8.
     InvalidSubprotocol,
-    /// Server echoed a subprotocol that wasn't in our offered set
-    /// (RFC 6455 §4.1 — design CRITICAL #9).
+    /// Server echoed a subprotocol that wasn't in our offered set.
     UnrequestedSubprotocol(String),
     /// Sec-WebSocket-Extensions has a non-UTF-8 / malformed value.
     InvalidExtensions,
     /// Server returned ANY Sec-WebSocket-Extensions value — we offered
-    /// none (RFC 6455 §9.1 — design CRITICAL #7).
+    /// none.
     UnrequestedExtensions(String),
     /// Response header section exceeded MAX_RESPONSE_BYTES.
     ResponseTooLarge,
@@ -174,7 +171,7 @@ impl std::error::Error for HandshakeError {}
 // HandshakeOptions — minimal, threaded through from the constructor
 // ---------------------------------------------------------------------------
 
-/// Options derived from `WebSocketInit` (D-28) + `protocols` arg.
+/// Options derived from `WebSocketInit` and the `protocols` argument.
 pub struct HandshakeOptions {
     pub protocols: Vec<String>,
     /// Opt-in Origin header per RFC 6455 §10.2 — emitted ONLY when set.
@@ -211,8 +208,8 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 /// Run RFC 6455 §4.1 client handshake on `url`.
 ///
 /// Steps:
-///   1. SSRF phase 1: `validate_url` rejects literal blocked IPs.
-///   2. SSRF phase 2: `resolve_and_check_ssrf` validates the resolved
+///   1. String-level SSRF validation rejects literal blocked IPs.
+///   2. DNS-level SSRF validation checks the resolved address and
 ///      SocketAddr and we connect to that address directly.
 ///   3. Generate Sec-WebSocket-Key (16 random bytes, base64).
 ///   4. Build the GET request with Upgrade/Connection/Sec-WebSocket-*
@@ -228,10 +225,10 @@ pub async fn run_handshake(
     url: url::Url,
     opts: HandshakeOptions,
 ) -> Result<Established, HandshakeError> {
-    // Phase 1: string-level SSRF.
+    // String-level SSRF validation.
     crate::fetch::validate_url(url.as_str()).map_err(HandshakeError::Ssrf)?;
 
-    // Phase 2: DNS revalidation.
+    // DNS revalidation.
     let host = url.host_str().ok_or(HandshakeError::MissingHost)?.to_string();
     let port = url
         .port_or_known_default()
@@ -473,8 +470,7 @@ where
         return Err(HandshakeError::AcceptMismatch);
     }
 
-    // Subprotocol echo MUST be in our offered set (RFC 6455 §4.1 —
-    // design CRITICAL #9).
+    // Subprotocol echo MUST be in our offered set.
     let protocol = match lookup_header(&headers_owned, "sec-websocket-protocol") {
         None => String::new(),
         Some(server_pick) => {
@@ -487,7 +483,7 @@ where
     };
 
     // Any non-empty Sec-WebSocket-Extensions is a violation — we offer
-    // none (RFC 6455 §9.1 — design CRITICAL #7).
+    // none.
     let extensions = match lookup_header(&headers_owned, "sec-websocket-extensions") {
         None => String::new(),
         Some(raw) => {

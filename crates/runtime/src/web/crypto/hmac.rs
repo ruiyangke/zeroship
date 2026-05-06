@@ -1,5 +1,5 @@
-//! HMAC — sign/verify/generateKey/importKey/exportKey. Per
-//! `docs/proposals/webcrypto-native.md` §IV.8 (D-19 default block size).
+//! HMAC — sign/verify/generateKey/importKey/exportKey. See
+//! `docs/proposals/webcrypto-native.md` §IV.8.
 
 #![allow(dead_code)]
 
@@ -53,8 +53,8 @@ pub fn generate_key<'s>(
     let hash = hash.ok_or_else(|| {
         OpError::dom("NotSupportedError", "HMAC requires 'hash' field")
     })?;
-    // length: optional. If absent, default to hash block size in bits
-    // (D-19 — spec §31.4.3 step 2).
+    // length: optional. If absent, default to the hash block size in
+    // bits (spec §31.4.3 step 2).
     let length_key = v8::String::new(scope, "length").unwrap();
     let length_bits = match alg_obj.get(scope, length_key.into()) {
         Some(v) if !v.is_undefined() && !v.is_null() => {

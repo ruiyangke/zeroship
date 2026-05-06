@@ -1,6 +1,6 @@
 "use server";
 // Builder chat — routed through deepagents (server-side agent runtime,
-// design §4.8 Foundation Decision #8) and translated to AI SDK v6 UI
+// `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8 Foundation Decision #8) and translated to AI SDK v6 UI
 // Message Stream Protocol on the wire. The kernel forwards the Response's
 // SSE bytes verbatim to the v6 `useChat` client.
 //
@@ -14,15 +14,15 @@
 //
 // --- Stream translator: deepagents/LangGraph events → AI SDK v6 ---------
 //
-// This is the seam committed to in design §4.8.4b — the agent runtime
+// This is the seam committed to in `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.4b — the agent runtime
 // upstream (deepagents → LangGraph → LangChain models) is converted to
 // AI SDK v6 wire format on the way out so that the existing `useChat`
 // v6 client keeps working unchanged.
 //
-// Phase A handles text events only (single text-start → text-delta* →
-// text-end per chat-model run). Phase B will add tool input/output events
-// and custom data parts (Survey, Diff, CriticRound) without touching the
-// client.
+// The current translator handles text events only (single text-start →
+// text-delta* → text-end per chat-model run). Tool input/output events
+// and custom data parts (Survey, Diff, CriticRound) are layered on
+// around it without changing the client contract.
 //
 // Investigation note: AI SDK v6 ships no built-in LangChain adapter
 // (verified by absence of any `LangChain*` export in
@@ -30,7 +30,7 @@
 // translator is hand-rolled. If a future v6 release adds an official
 // adapter, prefer it over this module.
 //
-// G3 — Resume protocol (post-`interruptOn` halt). Wire shapes:
+// Resume protocol (post-`interruptOn` halt). Wire shapes:
 //
 //   Normal turn body:
 //     { json: { messages: UIMessage[], id: string } }
@@ -43,13 +43,12 @@
 // the same thread_id. The interrupted run picks up where it left off
 // (the deepagents middleware emits new chunks; the translator forwards
 // them as additional UI message parts on the same assistant turn).
-// `token` is opaque on the wire — Phase B.1 will mint it inside the
-// `ask_survey` interrupt handler so the client can echo it back, but
-// the server only needs `id` (= thread_id) to find the right thread to
-// resume.
+// `token` is opaque on the wire. The `ask_survey` interrupt handler
+// mints it so the client can echo it back, but the server only needs
+// `id` (= thread_id) to find the right thread to resume.
 //
-// G2 (Plan 02 Phase B.0): the chat handler runs through the RPC fast
-// path, which does NOT construct a Request — so we can't read
+// The chat handler runs through the RPC fast path, which does NOT
+// construct a Request, so we can't read
 // `request.signal`. Instead we mint our own AbortController and abort
 // it when the response body's ReadableStream is cancelled (which the
 // V8 runtime does when the SSE consumer disconnects). The signal is
@@ -95,7 +94,7 @@ export interface BuilderTurnInput {
    * (the chat thread): one project may host multiple threads but the
    * scorecard / issues / health belong to the project. The middleware
    * uses this to persist Critic-graded scorecards into the right KV
-   * slot (per ISS-16 fix path). Optional — missing → side-effect skipped.
+   * slot. Optional — missing → side-effect skipped.
    */
   appId?: string;
 }
@@ -110,7 +109,7 @@ export interface BuilderTurnInput {
  */
 export type BuilderTurnMode = "fresh" | "resume";
 
-// G1: process-local in-memory checkpointer. deepagents' middleware
+// Process-local in-memory checkpointer. deepagents' middleware
 // state (todos, virtual fs, summarised history) lives outside the
 // LangChain `messages` array, so without a checkpointer it's
 // discarded between turns and Builder loses context. Module-level
@@ -120,7 +119,7 @@ export type BuilderTurnMode = "fresh" | "resume";
 // DEV-ONLY. The MemorySaver maps thread_id → state in-memory; data
 // vanishes on worker restart and isn't shared across workers.
 // Production needs a Postgres-backed BaseCheckpointSaver writing to
-// the control plane DB (deferred to Plan 03+ — see spec §4.8.9 G1).
+// the control plane DB once durable checkpoint storage is wired.
 //
 // Lazy-loaded at first chat call so non-chat server functions don't
 // pay the @langchain/langgraph dep cost on cold isolates.
@@ -140,7 +139,7 @@ async function getCheckpointer(): Promise<
 // per call (which would drop state every turn).
 const DEFAULT_THREAD_ID = "builder-default";
 
-// G2: An optional AbortSignal lets the chat handler tear down the LLM
+// An optional AbortSignal lets the chat handler tear down the LLM
 // HTTP call when the SSE consumer disconnects. The signal threads
 // through `agent.streamEvents({ signal })` — LangChain respects it
 // natively (RunnableConfig.signal). Without this plumbing the OpenAI
@@ -151,7 +150,7 @@ async function buildTranslatedStream(
   signal?: AbortSignal,
 ) {
   // Lazy imports — keep non-chat server functions free of the deepagents
-  // dep tree (per design §4.8.5: server bundle weight mitigation).
+  // dep tree (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.5: server bundle weight mitigation).
   const { createDeepAgent } = await import("deepagents");
   const { ChatOpenAI } = await import("@langchain/openai");
   const { HumanMessage, AIMessage, ToolMessage } = await import(
@@ -166,9 +165,9 @@ async function buildTranslatedStream(
     );
   }
 
-  // gpt-5.4-mini — V1 standard across all SubAgents per spec §4.8.9 G6.
-  // The model is parameterised here so a future phase can swap providers
-  // (Anthropic via @langchain/anthropic) without touching the translator.
+  // Keep the same model family across Builder and the subagents for now.
+  // The model is parameterised here so a later provider swap
+  // (`@langchain/anthropic`, etc.) does not require translator changes.
   const model = new ChatOpenAI({
     model: "gpt-5.4-mini",
     temperature: 0.2,
@@ -178,8 +177,8 @@ async function buildTranslatedStream(
 
   const threadId = input.id ?? DEFAULT_THREAD_ID;
 
-  // Phase B.1: acquire a sandbox for this Builder thread BEFORE
-  // constructing the agent so the backend instance can be wired into
+  // Acquire a sandbox for this Builder thread BEFORE constructing the
+  // agent so the backend instance can be wired into
   // `createDeepAgent`. The lookup is idempotent at the wire (the
   // controller dedups on (user_id, project_id)) and cached
   // process-locally.
@@ -194,8 +193,8 @@ async function buildTranslatedStream(
   const sandbox = await getOrCreateSandboxFor(threadId);
   const backend = new ZeroshipSandboxBackend({ id: sandbox.id });
 
-  // G1: pass a process-local MemorySaver as the checkpointer so
-  // middleware state survives across turns scoped by thread_id.
+  // Pass a process-local MemorySaver as the checkpointer so middleware
+  // state survives across turns scoped by `thread_id`.
   const checkpointer = await getCheckpointer();
 
   const mode: BuilderTurnMode = input.resume ? "resume" : "fresh";
@@ -207,8 +206,8 @@ async function buildTranslatedStream(
   // agent and same thread_id, so the checkpointer ties them together.
   let streamInput: { messages: unknown[] } | InstanceType<typeof Command>;
   if (mode === "resume") {
-    // Defensive: Phase B.0 has nothing emitting interruptOn yet, so
-    // hitting this branch with no live thread will throw inside
+    // Defensive: if this branch is hit with no live thread,
+    // `streamEvents` will throw inside
     // streamEvents. We catch it inside the SSE writer so the client
     // sees a structured error rather than a connection drop.
     streamInput = new Command({ resume: input.resume!.value });
@@ -220,15 +219,15 @@ async function buildTranslatedStream(
     streamInput = { messages: langchainMessages };
   }
 
-  // Phase B.2: import the data-part emitter middleware factory. The
-  // middleware itself needs the per-request v6 writer, so we
+  // Import the data-part emitter middleware factory. The middleware
+  // itself needs the per-request v6 writer, so we
   // instantiate it inside `execute({writer})` below.
   const { dataPartMiddleware } = await import("./_middleware.js");
 
   return createUIMessageStream({
     async execute({ writer }) {
-      // Phase B.2: deepagents activates its built-in fs/exec tools
-      // (`ls`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
+      // deepagents activates its built-in fs/exec tools (`ls`,
+      // `read_file`, `write_file`, `edit_file`, `grep`, `glob`,
       // `execute`) automatically when `backend:` is configured — they're
       // rewritten on top of the backend's protocol methods.
       //
@@ -338,7 +337,7 @@ async function buildTranslatedStream(
             }
             break;
 
-          // Phase B.2: native tool-call chunks. AI SDK v6 names these
+          // Native tool-call chunks. AI SDK v6 names these
           // `tool-input-available` and `tool-output-available` (see
           // node_modules/ai/dist/index.d.ts:2093-2122). The client's
           // ChatMessages dispatcher pairs them by toolCallId into a
@@ -415,8 +414,8 @@ async function buildTranslatedStream(
 
 // --- helpers --------------------------------------------------------------
 
-// G7: convert AI SDK v6 UIMessage[] → LangChain BaseMessage[]. The
-// converter must round-trip not only text but also the model's
+// Convert AI SDK v6 UIMessage[] → LangChain BaseMessage[]. The converter
+// must round-trip not only text but also the model's
 // tool-call history, otherwise the next turn's LLM doesn't see "what
 // tools did I just call and what did they return", and the agent
 // will repeat or get confused.
@@ -428,7 +427,7 @@ async function buildTranslatedStream(
 //   - { type: "dynamic-tool", toolName, toolCallId,
 //       state, input, output? }                          → same shape, name from `toolName`
 //   - { type: "data-*", ... }                            → UI-only; stripped here
-//   - { type: "reasoning", ... }                         → not surfaced to model (Phase B may revisit)
+//   - { type: "reasoning", ... }                         → not surfaced to model for now
 //
 // Tool-call lifecycle states (from `UIToolInvocation` in
 // node_modules/ai/dist/index.d.ts:1694):
@@ -443,9 +442,9 @@ async function buildTranslatedStream(
 // LangChain's expected shape: AIMessage with tool_calls → ToolMessage(s)
 // keyed by `tool_call_id`.
 //
-// Phase B.0 has no tools emitting these parts yet, so the tool-call
-// branch is exercise-only at type level. Phase B.1's `write_file` /
-// `ask_survey` will be the first to populate it.
+// Not every tool emits these parts yet, so some of this branch is still
+// exercised mainly by type coverage. `write_file` and `ask_survey` are
+// the first concrete producers.
 function convertUIMessagesToLangChain(
   messages: UIMessage[],
   ctors: {
@@ -540,8 +539,8 @@ function convertUIMessagesToLangChain(
       }
 
       // data-* parts are intentionally dropped — they're UI-only
-      // (DiffCard, IssueCard, CriticRoundCard etc., per spec §4.8.3.3
-      // / G4) and would only confuse the LLM if echoed back.
+      // (DiffCard, IssueCard, CriticRoundCard etc., per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.3.3
+      // and would only confuse the LLM if echoed back.
 
       out.push(
         new AIMessage({
@@ -630,7 +629,7 @@ function extractTextDelta(event: {
   // string (most providers) or an array of content parts
   // (`{ type: "text"; text: string } | { type: "tool_use"; ... }`). The
   // OpenAI provider in our setup uses the string form, but we handle both
-  // so this translator survives a model swap (e.g., to Anthropic in Phase B).
+  // so this translator survives a model swap (for example to Anthropic).
   const content = event?.data?.chunk?.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {

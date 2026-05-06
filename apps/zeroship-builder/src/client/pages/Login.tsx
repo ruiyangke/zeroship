@@ -147,7 +147,7 @@ function Field({
 
 function sanitizeReturn(raw: string | null): string {
   // Post-login default lands in the authed gallery at /home — `/` is
-  // the public marketing page now (per spec §5.1). The catch-all path
+  // the public marketing page now (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.1). The catch-all path
   // for an empty/unsafe `return` param therefore points at /home.
   if (!raw) return "/home";
   if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/home";

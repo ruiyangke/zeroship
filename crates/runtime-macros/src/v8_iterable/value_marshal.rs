@@ -1,9 +1,7 @@
 //! Per-yield value marshalling for the iterable codegen.
 //!
-//! Wave 9 split — extracted from `crates/runtime-macros/src/v8_iterable.rs`'s
-//! 1,368-LOC god file to mirror the v8_class/ layout (per
-//! `docs/proposals/runtime-macros-refactor.md` Wave 9 architectural
-//! decomposition + the v2 architecture-critic R2 recommendation).
+//! Split out from the old monolithic `v8_iterable.rs` to mirror the
+//! `v8_class/` layout.
 //!
 //! Two responsibilities:
 //!   1. [`SupportedTy`] + [`classify_ty`] — recognise the K/V types
@@ -11,7 +9,7 @@
 //!   2. [`gen_to_v8`] — emit the K-or-V → `v8::Local<v8::Value>`
 //!      conversion tokens, picking either the built-in classifier
 //!      branch or a user-supplied `value_marshal = some_fn` free
-//!      function (MAC-09 part A).
+//!      function.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -64,8 +62,8 @@ pub(super) fn classify_ty(ty: &syn::Type) -> Option<SupportedTy> {
 ///
 /// When `marshal` is `Some(path)`, the macro emits a call to the
 /// user-supplied free function instead of selecting a built-in
-/// classifier. Used for the `value_marshal = ident` attribute (Part
-/// (A) of MAC-09) so consumers like `FormDataIterator` can yield a
+/// classifier. Used for the `value_marshal = ident` attribute so
+/// consumers like `FormDataIterator` can yield a
 /// `(USVString or File)` union without baking that into the macro.
 pub(super) fn gen_to_v8(
     ty: &syn::Type,

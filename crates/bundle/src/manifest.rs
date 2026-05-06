@@ -302,7 +302,7 @@ impl Manifest {
                     ));
                 }
             }
-            // Idempotency TTL band: spec §8 — [1, 168] hours.
+            // Idempotency TTL band: [1, 168] hours.
             if let Some(h) = entry.idempotency_ttl_hours {
                 if !(1..=168).contains(&h) {
                     return Err(format!(

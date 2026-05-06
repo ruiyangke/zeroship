@@ -1,6 +1,6 @@
 /**
- * ISS-02 — files at the legacy `src/server/...` path that haven't
- * been migrated.
+ * Files at the legacy `src/server/...` path that have not been
+ * migrated.
  *
  * Two cases — both yield ZERO discovered procedures (this is the
  * breaking change):
@@ -48,7 +48,7 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
     : (plugin.transform as any).handler;
 }
 
-describe("ISS-02 breaking change — unmigrated server modules", () => {
+describe("unmigrated server modules", () => {
   test("legacy path, no directive, no wrappers → 0 discovered + migration warning", () => {
     const state = makeState();
     const plugin = transformPlugin("/_rpc", state);
@@ -58,7 +58,8 @@ describe("ISS-02 breaking change — unmigrated server modules", () => {
     const code = `
 import { z } from "@zeroship/server";
 
-// What pre-ISS-02 code looked like — every export auto-published as RPC.
+// What the old path-based auto-publish behavior looked like: every
+// export became an RPC endpoint.
 export async function listTodos() {
   return [];
 }
@@ -80,7 +81,7 @@ addTodo.config = { id: "addTodo" };
     assert.equal(ctx.warnings.length, 1, "one migration warning emitted");
     assert.match(ctx.warnings[0], /\"use server\"/);
     assert.match(ctx.warnings[0], /procedure\(\)/);
-    assert.match(ctx.warnings[0], /ISS-02/);
+    assert.match(ctx.warnings[0], /Path-based discovery was dropped/);
   });
 
   test("directive present, no wrappers → 0 discovered (wrappers required)", () => {

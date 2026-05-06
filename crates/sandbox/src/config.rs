@@ -324,7 +324,7 @@ pub struct NomadCHConfig {
     /// (default 120). Set to 0 to disable the fence entirely (NOT
     /// recommended in production — restores the FM-F race).
     ///
-    /// Was 30s pre-Phase-3 stress run; bumped to 120s after measuring
+    /// Was 30s before the latest stress run; bumped to 120s after measuring
     /// 30-way concurrent stop on a single n2-standard-32 worker:
     /// fence p95=29s, max=31.1s — i.e., 30s is too tight when many CH
     /// processes tear down concurrently (worker IO/CPU contention

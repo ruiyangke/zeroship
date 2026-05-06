@@ -1,4 +1,4 @@
-//! Wave E — RPC v2 phase 1 eviction-time abort tests.
+//! Eviction-time abort tests for RPC.
 //!
 //! Covers the per-isolate `AbortRegistry` from
 //! `crates/runtime/src/rpc/abort.rs`: register-on-dispatch, fire-on-

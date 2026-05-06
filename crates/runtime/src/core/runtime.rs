@@ -515,7 +515,7 @@ struct PendingRequest {
     wall_start: Instant,
     cancel: CancelFlag,
     origin: PendingOrigin,
-    /// Wave E — keeps the per-request `AbortController` registered with
+    /// Keeps the per-request `AbortController` registered with
     /// `crate::rpc::abort` until the promise settles. Drop unregisters
     /// (covers normal settle, cancellation sweep, and pump-side
     /// timeout / CPU termination removals). `None` for non-RPC paths
@@ -1502,8 +1502,8 @@ impl RuntimeInner {
         // inspect_response for Fetch). Default Fetch — only flipped
         // inside the RPC fast-path block.
         let mut pending_origin = PendingOrigin::Fetch;
-        // Wave E — when the RPC fast path returns a pending Promise,
-        // this carries the per-request `AbortGuard` from inside the
+        // When the RPC fast path returns a pending Promise, this
+        // carries the per-request `AbortGuard` from inside the
         // V8 scope out to `store_fetch_pending`. Otherwise the guard
         // would drop at the end of the `enter_v8!` block, leaving
         // the registry empty for async procedures.
@@ -1532,14 +1532,14 @@ impl RuntimeInner {
                         }
                     };
 
-                    // Wave D — build the per-request RpcContext + JS object,
-                    // and let `call_rpc_inner` install it in the ALS slot.
+                    // Build the per-request RpcContext + JS object, and
+                    // let `call_rpc_inner` install it in the ALS slot.
                     // On any build failure we drop ALS support and fall
                     // through to a no-ALS call (degrades to undefined for
                     // `__zeroshipGetRpcCtx`, never breaks the dispatch).
                     //
-                    // Wave E — when `app_id` is configured (multi-tenant
-                    // worker), register the per-request AbortController
+                    // When `app_id` is configured (multi-tenant worker),
+                    // register the per-request AbortController
                     // with `crate::rpc::abort` so the LRU eviction sweep
                     // can fire `ctx.signal` for every in-flight procedure
                     // before the isolate is disposed. The guard drops on
@@ -1965,8 +1965,8 @@ impl RuntimeInner {
                 self.drain_new_tasks_into(work);
             }
             OpResult::JsValue { resolver, value, request_id } => {
-                // Class-method async result: resolve/reject the bound resolver
-                // with a real V8 value. Streams design D-3 / §VII.5.
+                // Class-method async result: resolve/reject the bound
+                // resolver with a real V8 value.
                 if let Some(rid) = request_id {
                     let cancel = self.pending_requests.get(&rid).map(|r| r.cancel.clone());
                     let mut s = self.state.borrow_mut();
@@ -3128,9 +3128,9 @@ fn rpc_invalid_argument_response(message: &str) -> DispatchResult {
     })
 }
 
-/// Map the kernel's per-request inputs into a Wave-D `RpcContext`.
+/// Map the kernel's per-request inputs into an `RpcContext`.
 ///
-/// Field mapping per the proposal §3 + the Wave D brief:
+/// Field mapping:
 ///   - `request_id`  → `req_<n>` derived from the kernel's monotonic
 ///     counter (UUIDv7-shaped placeholder; full request-id propagation
 ///     from the gateway is a follow-up).
@@ -3181,11 +3181,11 @@ fn build_rpc_context_from_request(
 ///
 /// `als_ctx_object`, when `Some`, is installed into V8's
 /// `ContinuationPreservedEmbedderData` slot under the platform's
-/// RPC-ctx Symbol for the duration of the call (Wave D). The slot is
+/// RPC-ctx Symbol for the duration of the call. The slot is
 /// restored on every exit path (sync return, JS throw, panic). When
 /// `None`, the call runs without an ALS frame — used by paths that
 /// don't have a populated `RpcContext` yet (synthetic-entry tests
-/// pre-Wave-D wire).
+/// using the older wire shape).
 fn call_rpc_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     rpc_fn: v8::Local<'s, v8::Function>,

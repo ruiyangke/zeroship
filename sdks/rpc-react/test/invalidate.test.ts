@@ -1,7 +1,7 @@
 /**
- * Phase 5 — `rpcInvalidate("prefix.")` for prefix-based bulk invalidation.
+ * `rpcInvalidate("prefix.")` for prefix-based bulk invalidation.
  *
- * Per spec §10:
+ * `docs/proposals/rpc-v2.md` §10 defines this surface:
  *
  *   import { rpcInvalidate } from "@zeroship/rpc-react";
  *   await rpcInvalidate("todos.");   // all queries with id starting with "todos."

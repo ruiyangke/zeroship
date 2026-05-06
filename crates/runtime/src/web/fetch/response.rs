@@ -14,12 +14,12 @@
 //!   - type: String — "default" / "error" / "basic" / "cors" / "opaque"
 //!     / "opaqueredirect"; v1 only emits "default" and "error".
 //!   - url: String — the LAST URL in request's URL list, fragment-
-//!     stripped, per D-30. v1 ships empty by default.
+//!     stripped. v1 ships empty by default.
 //!   - redirected: bool
 //!   - ok: bool — derived (status in 200..300)
 //!   - headers: Global<Object>
 //!   - web_socket: Option<Global<Object>> — workerd extension preserved
-//!     for the gateway upgrade path (D-13).
+//!     for the gateway upgrade path.
 //!
 //! ## Static methods
 //!
@@ -29,16 +29,13 @@
 //! - `Response.json(data, init?)` serializes via JSON.stringify and
 //!   sets Content-Type "application/json".
 //!
-//! ## Macro migration (MAC-01 Phase 3)
-//!
-//! Per design `docs/proposals/macro-v8-state.md` §7.3: the class is
-//! emitted via `#[v8_class] #[v8_state_marker(Response)] impl
-//! ResponseState`. The unit `Response` marker drives JS-class identity
-//! (install slot, brand check, callback names, `set_class_name`); the
-//! `ResponseState` struct carries the boxed state stored in V8 internal
-//! field 0. The constructor returns `Result<ResponseState, OpError>`
-//! and the eight getters / `clone` method dispatch through `&self`
-//! against the state.
+//! The class is emitted via `#[v8_class] #[v8_state_marker(Response)]
+//! impl ResponseState`. The unit `Response` marker drives JS-class
+//! identity (install slot, brand check, callback names,
+//! `set_class_name`); the `ResponseState` struct carries the boxed
+//! state stored in V8 internal field 0. The constructor returns
+//! `Result<ResponseState, OpError>` and the eight getters / `clone`
+//! method dispatch through `&self` against the state.
 //!
 //! `install_global` remains hand-rolled because it must:
 //!   - install body consumer methods (`text` / `json` / `arrayBuffer`
@@ -207,7 +204,7 @@ pub(crate) fn state_ptr(
 }
 
 // ---------------------------------------------------------------------------
-// Public surface used by `crate::http::inspect_response` (D-23 landing 2a).
+// Public surface used by `crate::http::inspect_response`.
 //
 // The kernel inspects a Response object after the user's handler resolves.
 // `try_native_response_body` returns a structured view of the body so the
@@ -444,7 +441,7 @@ impl ResponseState {
     /// — HTAB / SP / VCHAR / obs-text).
     /// `webSocket` extension preserved on `state.web_socket` so the
     /// gateway can surface `Response.webSocket` for the upgrade dance
-    /// (D-13).
+    ///.
     #[v8_constructor]
     fn new<'s>(
         scope: &mut v8::PinScope<'s, '_>,

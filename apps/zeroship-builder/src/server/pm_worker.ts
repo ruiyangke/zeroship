@@ -15,7 +15,7 @@
 // responsible for posting the digest back into the thread (that
 // avoids a second wire trip and keeps this proc stateless).
 //
-// What's deferred (tracked as ISS-28):
+// Still deferred:
 //   - The cron itself. There's no scheduler in `crates/control` yet
 //     that polls projects and POSTs to this endpoint. Until that
 //     lands, callers are external (curl from a cron, manual hits
@@ -25,12 +25,11 @@
 //     custom data parts (data-pm-recommendation) — needs the chat
 //     thread runtime to accept "out-of-band assistant turn" writes.
 //
-// Why this isn't `_pm_worker.ts`: per ISS-02 the vite-plugin's RPC
-// discovery loop publishes every export from any file re-exported by
-// `server.ts`. The underscore prefix is the project-side opt-out
-// convention (see `_pm.ts` etc.). This file IS meant to be a public
-// RPC endpoint, so it lives without the prefix and gets re-exported
-// from `server.ts` deliberately.
+// Why this isn't `_pm_worker.ts`: files re-exported by `server.ts` are
+// treated as public RPC modules. The underscore prefix is the project-
+// side opt-out convention (see `_pm.ts` etc.). This file IS meant to be
+// a public RPC endpoint, so it lives without the prefix and gets
+// re-exported from `server.ts` deliberately.
 //
 // Wire convention (single-input object, per the rest of `server/`):
 //   POST /_zs/v1/pm.digest
@@ -90,9 +89,9 @@ export interface PMDigestInput {
  *   1. Snapshot the project: open issues, quality scorecard, last
  *      deploy hash (best-effort; failures degrade to "no data").
  *   2. Render that snapshot into a digest-shaped user prompt.
- *   3. Invoke the same model the chat-mode PM SubAgent uses
- *      (gpt-5.4-mini per spec §4.8.9 G6) with the PM_PROMPT system
- *      prompt and structured-output binding.
+ *   3. Invoke the same model the chat-mode PM subagent uses
+ *      (`gpt-5.4-mini`) with the `PM_PROMPT` system prompt and
+ *      structured-output binding.
  *   4. Return the parsed JSON.
  *
  * No retries on model failure (V1) — the cron will hit again on the

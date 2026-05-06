@@ -1,7 +1,7 @@
 //! `ReadableStreamDefaultTee` — spec §3.5.2.
 //!
 //! Per design §X.1: each branch is an INDEPENDENT ReadableStream with
-//! its own controller AND its own queue (D-11). The two branches share
+//! its own controller AND its own queue. The two branches share
 //! a SINGLE source-side reader via a SHARED `pullAlgorithm`. There is
 //! no shared queue.
 //!
@@ -10,8 +10,8 @@
 //! controllers (delayed so that source-side synchronous errors win the
 //! race over synchronously-available reads — see ref impl comment).
 //!
-//! Per CRITICAL #6 (streams round-1): tee MUST NOT use a shared queue;
-//! that's the v1 design's "wrong way" that was corrected to D-11's
+//! tee must not use a shared queue;
+//! that's the old design's "wrong way" that was corrected to
 //! "independent queues, shared pullAlgorithm".
 
 use std::cell::{Cell, RefCell};

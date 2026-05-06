@@ -161,11 +161,11 @@ test.describe("Account page sections", () => {
     await expect(page.getByTestId("account-logout")).toBeVisible();
   });
 
-  test("account page deferred sections reference ISS-10/11/12", async ({ page }) => {
+  test("account page deferred sections explain what is still missing", async ({ page }) => {
     await page.goto("/account");
-    await expect(page.getByTestId("account-sessions")).toContainText("ISS-10");
-    await expect(page.getByTestId("account-2fa")).toContainText("ISS-11");
-    await expect(page.getByTestId("account-delete")).toContainText("ISS-12");
+    await expect(page.getByTestId("account-sessions")).toContainText("control plane exposes a real sessions list");
+    await expect(page.getByTestId("account-2fa")).toContainText("TOTP enrollment and recovery codes are not wired yet");
+    await expect(page.getByTestId("account-delete")).toContainText("Self-serve account deletion is not wired yet");
   });
 });
 
@@ -199,7 +199,7 @@ test.describe("Skills page", () => {
     const cards = page.locator('[data-testid^="skill-card:"]');
     const count = await cards.count();
     expect(count).toBeGreaterThanOrEqual(4);
-    // Add buttons all disabled (registry not wired — ISS-13).
+    // Add buttons are all disabled because the registry action is not wired yet.
     const addBtns = page.locator('[data-testid^="skill-add:"]');
     const addCount = await addBtns.count();
     for (let i = 0; i < addCount; i++) {

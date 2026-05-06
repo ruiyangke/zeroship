@@ -1,8 +1,8 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Phase 4 port: verbatim translation. The simple query protocol is a
-// single `Query` frontend message producing a mixed stream of
-// RowDescription / DataRow / CommandComplete terminated by ReadyForQuery.
+// Verbatim translation. The simple query protocol is a single `Query`
+// frontend message producing a mixed stream of RowDescription / DataRow /
+// CommandComplete terminated by ReadyForQuery.
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;

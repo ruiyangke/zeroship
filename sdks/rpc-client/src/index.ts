@@ -1,13 +1,13 @@
 //
-// Public surface of `@zeroship/rpc-client`. Phase 3 ships:
+// Public surface of `@zeroship/rpc-client`:
 //
 //   - `client<App>(opts)` — the typed client builder
 //   - `RpcError` + `ErrorCode` — structured failure model
 //   - `typeMarker<T>()` — phantom-type helper for the App-type fallback
 //
-// Streams (Phase 4), React Query bindings (Phase 5), subscriptions
-// (Phase 8) are NOT exported. Calling `.stream()` / `.subscribe()` on
-// any procedure handle throws UNIMPLEMENTED today.
+// React Query bindings live in `@zeroship/rpc-react`, and WebSocket
+// subscriptions are not exported here yet. Calling `.subscribe()` on a
+// procedure handle throws `UNIMPLEMENTED` today.
 
 export { client } from "./client.js";
 export type {
@@ -28,7 +28,7 @@ export type { Transformer } from "./encoding.js";
 
 export { newUuidV7 } from "./idempotency.js";
 
-// Phase 5 — `__makeProcedure` and the closure-private hook registry.
+// `__makeProcedure` and the closure-private hook registry.
 //
 // `__makeProcedure(call, meta)` wraps a raw HTTP-RPC closure in a
 // callable + hooks-on-function object. The vite-plugin's client

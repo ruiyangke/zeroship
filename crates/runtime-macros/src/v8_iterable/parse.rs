@@ -1,10 +1,8 @@
 //! Attribute parsing + signature inspection for `#[v8_iterable]`.
 //!
-//! Wave 9 split (per design `docs/proposals/runtime-macros-refactor.md`
-//! Wave 9 god-file decomposition + the v2 architecture-critic R2).
-//! Pre-Wave-9 these types lived alongside the codegen in
-//! `crates/runtime-macros/src/v8_iterable.rs` (1,368 LOC). The Wave 9
-//! split mirrors `v8_class/`'s parse/emit/shared layout.
+//! Split out from the old monolithic `v8_iterable.rs` so parsing and
+//! signature inspection live beside the rest of the iterable helper
+//! modules. The layout mirrors `v8_class/`'s parse/emit/shared split.
 //!
 //! Two responsibilities:
 //!   1. Parse `#[v8_iterable(key = ..., value = ..., mode = ..., …)]`

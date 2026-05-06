@@ -1,13 +1,13 @@
 /**
- * Phase 3 — idempotency-key generation.
+ * Idempotency-key generation.
  *
  *   - Mutations whose App type marks `idempotent: true` get an
  *     `Idempotency-Key: <uuidv7>` header on every `mutation()` call.
  *   - Queries never get the header.
  *   - Mutations not marked idempotent never get the header.
  *
- * Phase 3 doesn't retry — but the kernel will dedupe by idempotency key
- * when present, so the spec wants this header set up forward-compat.
+ * The client itself does not retry, but the gateway can dedupe by
+ * idempotency key when present, so the header is still load-bearing.
  */
 
 import { test, describe } from "node:test";

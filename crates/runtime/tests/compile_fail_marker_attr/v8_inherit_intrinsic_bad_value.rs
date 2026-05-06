@@ -1,10 +1,10 @@
 //! Compile-fail: `#[v8_inherit_intrinsic = "ArrayPrototype"]` —
 //! recognised SHAPE (string literal) but unsupported VALUE.
 //!
-//! Pre-Wave-9 the macro emitted `quote! { compile_error!(<msg>); }`
+//! Earlier versions emitted `quote! { compile_error!(<msg>); }`
 //! INSIDE the `install` fn body — rustc would surface the right
 //! diagnostic but follow it with a slew of "expected expression" /
-//! "unused variable" cascading errors. Wave 9 NS2 moved the
+//! "unused variable" cascading errors. The diagnostic now lives
 //! validation into `analyze.rs`'s pre-emit gate so the diagnostic is
 //! a single clean `syn::Error::to_compile_error()` with a span on
 //! the impl block. This fixture pins the post-fix shape: ONE error,

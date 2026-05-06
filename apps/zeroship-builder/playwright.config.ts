@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 // ─── e2e config ──────────────────────────────────────────────────
 //
-// Plan 02 tests (chat-openai.spec.ts) run against the worktree's
+// `chat-openai.spec.ts` runs against the worktree's
 // dev server on :5173. The zeroship vite-plugin spins an in-process
 // V8 runtime that handles `/_zs/v1/chat` directly.
 //

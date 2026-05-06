@@ -24,7 +24,7 @@ impl Default for Crypto {
 #[v8_class]
 #[v8_to_string_tag = "Crypto"]
 impl Crypto {
-    /// `getRandomValues(arr)` — spec §10.1.1. (D-21.)
+    /// `getRandomValues(arr)` — spec §10.1.1.
     #[v8_method]
     #[v8_name = "getRandomValues"]
     fn get_random_values<'s>(
@@ -33,7 +33,7 @@ impl Crypto {
         array: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         // Step 1: type filter — reject Float32Array, Float64Array,
-        // DataView, and any non-typed-array. (D-21 — fixes critic #25.)
+        // DataView, and any non-typed-array.
         if !is_allowed_typed_array(array) {
             return Err(OpError::dom(
                 "TypeMismatchError",
@@ -45,7 +45,7 @@ impl Crypto {
         let view: v8::Local<v8::ArrayBufferView> = array.try_into().unwrap();
         let byte_len = view.byte_length();
 
-        // Step 2: quota — DOMException QuotaExceededError (D-21 fix #26).
+        // Step 2: quota — DOMException QuotaExceededError.
         if byte_len > 65536 {
             return Err(OpError::dom(
                 "QuotaExceededError",

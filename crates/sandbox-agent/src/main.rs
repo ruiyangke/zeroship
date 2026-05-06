@@ -87,7 +87,7 @@ async fn run() -> Result<(), String> {
     let bind = format!("0.0.0.0:{port}");
     info!(bind = %bind, workspace = %workspace.display(), "agent listening");
 
-    // WebSocket Upgrade handler — Phase 2. Bound on a separate port
+    // WebSocket Upgrade handler. Bound on a separate port
     // (default 7778; configurable via `SANDBOX_AGENT_WS_PORT`) and
     // serves ONLY `/proxy/{port}/{path*}` Upgrade requests verified
     // under the V1_1_Ws canonical (ED25519-V1.1-WS domain tag). The
@@ -97,7 +97,7 @@ async fn run() -> Result<(), String> {
     // (`HttpRequest::head().take_io()`) doesn't compose cleanly with
     // a compio TcpStream upstream splice; the proposal explicitly
     // permits a separate compio listener for the WS path
-    // (`docs/proposals/sandbox-preview-urls.md` Phase 2 plan, "If
+    // (`docs/proposals/sandbox-preview-urls.md`, "If
     // ntex's surface is too awkward, fall back to a compio raw-socket
     // path"). We take that path.
     let ws_port = proxy_ws::ws_port_from_env();
@@ -175,7 +175,7 @@ async fn run() -> Result<(), String> {
                     .route(web::put().to(handlers::write_file))
                     .route(web::delete().to(handlers::delete_file)),
             )
-            // Sandbox preview proxy (preview-URL § II.1, Phase 1).
+            // Sandbox preview proxy (`docs/proposals/sandbox-preview-urls.md` §II.1).
             // ANY /proxy/{port}/{path*} forwards to 127.0.0.1:{port}
             // inside the VM. Verify is via v1.1 canonical (path+query,
             // ED25519-V1.1 domain tag); the dispatcher in

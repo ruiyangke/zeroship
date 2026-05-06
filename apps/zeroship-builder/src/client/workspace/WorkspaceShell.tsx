@@ -106,7 +106,7 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
     enabled: !!appId,
   });
 
-  // First-deploy celebration (spec §7.4). Fires when:
+  // First-deploy celebration (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.4). Fires when:
   //   - we have an app id,
   //   - the app's deploy_hash transitions from missing to present,
   //   - and we haven't celebrated this app before on this browser.
@@ -226,14 +226,12 @@ export function WorkspaceShell({ appId: appIdProp, projectName: projectNameProp 
               onDismiss={() => setShowLiveBanner(false)}
             />
           )}
-          {/* Files / Logs / Env / Settings ship in Plan 01.6.
-              Plan / Health ship in Plan 01.7. Data / Media ship in
-              Plan 01.8 (this commit) over in-memory stubs (ISS-20 →
-              ISS-26). Each canvas is wrapped in its own ErrorBoundary
-              so a render crash in one pane doesn't blank the whole
-              workspace — the user can switch tabs out of the broken
-              one. The catch-all at the bottom keeps each pill clickable
-              when an appId isn't available. */}
+          {/* Each canvas is wrapped in its own ErrorBoundary so a render
+              crash in one pane does not blank the whole workspace. The
+              Data and Media surfaces still sit on temporary in-memory
+              backends, so keeping the failure domain small matters.
+              The catch-all at the bottom keeps each pill clickable
+              when an appId is not available. */}
           {active === "preview" && (
             <ErrorBoundary label="the preview"><PreviewCanvasStub /></ErrorBoundary>
           )}
@@ -361,4 +359,3 @@ function TierToggle({
     </button>
   );
 }
-

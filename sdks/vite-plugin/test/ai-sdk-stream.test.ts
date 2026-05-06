@@ -1,5 +1,5 @@
 /**
- * Phase 4 — synthetic-entry SSE encoding.
+ * Synthetic-entry SSE encoding.
  *
  * The synthetic SSR entry's `_zsFetch` path catches handlers that
  * return an async iterator and frames them per the Vercel AI-SDK Data

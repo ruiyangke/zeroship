@@ -1,9 +1,7 @@
 //! Native WebSocket per WHATWG WebSockets §3.1 + RFC 6455.
 //!
-//! This module ships in three landings (D-25):
-//!   1. behind a feature flag, polyfill default — current state.
-//!   2. flip default to native (cutover landing 2).
-//!   3. delete polyfill (cutover landing 3).
+//! This module is the native implementation that replaces the older
+//! polyfill.
 //!
 //! ## Layout
 //!
@@ -65,8 +63,8 @@ impl Default for ReadyState {
     }
 }
 
-/// `BinaryType` enum per WHATWG §3.1. Default is "blob" per spec
-/// (NOT "arraybuffer" — the polyfill defaulted wrong; see D-7).
+/// `BinaryType` enum per WHATWG §3.1. Default is `"blob"`, not
+/// `"arraybuffer"`.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum BinaryType {
     Blob,
@@ -80,8 +78,7 @@ impl Default for BinaryType {
 }
 
 /// Send queue entry — one entry per `send()` call until the send pump
-/// drains it. Per critic MAJOR #6 + #19 (Blob deferral / variant
-/// inventory).
+/// drains it.
 pub enum WsFrame {
     /// USVString-converted text frame.
     Text(String),
@@ -97,8 +94,7 @@ pub enum WsFrame {
     },
     /// Close frame. `code: None` means "send Close with empty payload"
     /// per RFC 6455 §5.5.1 — code 1005 is RESERVED as an internal
-    /// sentinel and MUST NOT appear on the wire (RFC 6455 §7.4.1,
-    /// addresses critic CRITICAL #6).
+    /// sentinel and MUST NOT appear on the wire (RFC 6455 §7.4.1).
     Close {
         code: Option<u16>,
         reason: String,
@@ -127,9 +123,8 @@ pub struct WsCachedHandles {
     pub ws_obj: Option<v8::Global<v8::Object>>,
     /// EventHandler IDL attribute slots. Stored separately from
     /// `addEventListener`-installed listeners; the setter installs an
-    /// internal listener that delegates to the stored function. v1
-    /// stores them here for synchronous null-coercion (HTML §8.1.5.1
-    /// step 4 — addresses critic MAJOR #15).
+    /// internal listener that delegates to the stored function. The
+    /// cache stores them here for synchronous null-coercion.
     pub on_open: Option<v8::Global<v8::Function>>,
     pub on_message: Option<v8::Global<v8::Function>>,
     pub on_error: Option<v8::Global<v8::Function>>,
@@ -174,13 +169,13 @@ pub struct WebSocketImpl {
     pub protocol: RefCell<String>,
 
     /// Spec `[[extensions]]` — the negotiated extensions header.
-    /// Empty until the handshake completes (and v1 always stays empty
-    /// because we offer no extensions per critic CRITICAL #7).
+    /// Empty until the handshake completes. We do not offer
+    /// extensions, so it normally stays empty.
     pub extensions: RefCell<String>,
 
     /// Spec `[[bufferedAmount]]` — bytes queued for send. Bumped by
     /// `send()`, decremented by the send pump as frames go over the
-    /// wire. (D-6)
+    /// wire.
     ///
     /// `Rc<Cell<u64>>` so the network task can hold a clone and
     /// decrement after a successful write without any pointer dance
@@ -197,7 +192,7 @@ pub struct WebSocketImpl {
     /// floor; the JS observable is `bufferedAmount` stuck at the
     /// high-water mark. Cleared by the pump when the queue drops
     /// below 50% of the cap (8 MiB hysteresis). NEVER observable
-    /// from JS. (addresses critic MAJOR #11)
+    /// from JS.
     ///
     /// `Rc<Cell<bool>>` for the same reason as `buffered_amount`.
     pub full: Rc<Cell<bool>>,
@@ -224,23 +219,22 @@ pub struct WebSocketImpl {
     /// `accepted` flag (workerd extension) — true after `accept()`.
     /// Required for WebSocketPair[1] before message delivery starts.
     /// Pre-set to true for client-side `new WebSocket(url)` because
-    /// the user never calls accept() on a client socket (and accept()
-    /// throws TypeError on a client socket per D-21).
+    /// the user never calls accept() on a client socket (and
+    /// `accept()` throws TypeError on a client socket).
     pub accepted: Cell<bool>,
 
-    /// Optional explicit Origin header per RFC 6455 §10.2 / D-28. Default
-    /// None = no Origin on the wire. Only populated when the
+    /// Optional explicit Origin header per RFC 6455 §10.2. `None`
+    /// means no Origin on the wire. Only populated when the
     /// constructor was given a `WebSocketInit.origin` member.
-    /// (addresses critic CRITICAL #3)
     pub explicit_origin: RefCell<Option<String>>,
 
-    /// `WebSocketInit.maxMessageSize` per D-28 — passed into
-    /// tungstenite's `WebSocketConfig` at handshake time.
+    /// `WebSocketInit.maxMessageSize`, passed into tungstenite's
+    /// `WebSocketConfig` at handshake time.
     pub max_message_size: Cell<u32>,
-    /// `WebSocketInit.maxFrameSize` per D-28.
+    /// `WebSocketInit.maxFrameSize`.
     pub max_frame_size: Cell<u32>,
-    /// `WebSocketInit.pingIntervalMs` per D-28 — drives the per-WS
-    /// keepalive timer in step 5.
+    /// `WebSocketInit.pingIntervalMs`, which drives the per-socket
+    /// keepalive timer.
     pub ping_interval_ms: Cell<u32>,
 
     /// Send-pump notification flag + waker (mirrors the polyfill's
@@ -381,10 +375,10 @@ impl WebSocketImpl {
         *impl_.url_serialized.borrow_mut() = url_record.as_str().to_string();
         *impl_.url.borrow_mut() = Some(url_record.clone());
         impl_.ready_state.set(ReadyState::Connecting);
-        impl_.binary_type.set(BinaryType::Blob); // D-7 spec default
+        impl_.binary_type.set(BinaryType::Blob); // Spec default.
         impl_.accepted.set(true); // client-mode: implicitly accepted
 
-        // Read the optional WebSocketInit dictionary (D-28).
+        // Read the optional WebSocketInit dictionary.
         let init = algorithms::read_websocket_init(scope, init_arg)?;
         *impl_.explicit_origin.borrow_mut() = init.origin.clone();
         impl_.max_message_size.set(init.max_message_size);
@@ -505,10 +499,10 @@ impl WebSocketImpl {
     }
 
     /// `socket.binaryType = "blob" | "arraybuffer"` — silent no-op on
-    /// unknown values per D-7 / WPT `binaryType-wrong-value.any.js`.
+    /// unknown values, matching WPT `binaryType-wrong-value.any.js`.
     /// undici and workerd both ship the silent-no-op behaviour; the
     /// strict-throw path is gated behind a non-default Cargo feature
-    /// for WPT-update tracking only. (addresses critic MAJOR #16)
+    /// for WPT-update tracking only.
     #[v8_setter]
     #[v8_name = "binaryType"]
     fn set_binary_type(
@@ -533,8 +527,7 @@ impl WebSocketImpl {
     // Per HTML §8.1.5.1 step 4: a non-callable assignment coerces to
     // null (NOT TypeError). We store the raw user function (or None)
     // and install/remove an internal listener via the same EventTarget
-    // listener path that `addEventListener` uses. (addresses critic
-    // MAJOR #15)
+    // listener path that `addEventListener` uses.
     //
     // The setter installs the handler via the EventTarget listener
     // list so dispatchEvent finds it; the getter returns the stored
@@ -605,11 +598,10 @@ impl WebSocketImpl {
 
     /// `socket.send(data)` — WHATWG §3.1.
     ///
-    /// Step 1: throw InvalidStateError if CONNECTING (per the live
-    /// spec; D-6 references the spec amendment that made this throw).
+    /// Step 1: throw InvalidStateError if CONNECTING.
     /// Step 2: silent no-op for CLOSING / CLOSED.
-    /// Step 3-6: type-dispatch in spec order — String → Blob → ArrayBuffer
-    /// → ArrayBufferView. (addresses critic CRITICAL #1)
+    /// Step 3-6: type-dispatch in spec order — String → Blob →
+    /// ArrayBuffer → ArrayBufferView.
     ///
     /// In the step-2 skeleton, OPEN is never reached — the connect
     /// task is stubbed. Tests that need OPEN behaviour drive it via
@@ -631,7 +623,7 @@ impl WebSocketImpl {
             return Ok(());
         }
 
-        // [[full]] flag check per RFC 6455 §6.1 + D-6 / critic MAJOR #11.
+        // `[[full]]` flag check per RFC 6455 §6.1.
         if self.full.get() {
             return Ok(());
         }
@@ -654,9 +646,8 @@ impl WebSocketImpl {
         //   step 5: data is an ArrayBuffer object
         //   step 6: data is an ArrayBufferView object
         //
-        // Type-test by branding (V8 internal slots / IsBlob), NOT by
-        // toString — the v1 design's "Blob with custom toString hazard"
-        // was a non-issue. (addresses critic CRITICAL #1)
+        // Type-test by branding (V8 internal slots / IsBlob), not by
+        // `toString`.
         if data.is_string() {
             let s_v8 = data.to_string(scope).ok_or_else(|| {
                 OpError::error("WebSocket.send: string conversion failed")
@@ -712,7 +703,7 @@ impl WebSocketImpl {
     /// `socket.close(code?, reason?)` — WHATWG §3.1.
     ///
     /// Step 1 (validate code): present and not 1000 nor 3000-4999 →
-    /// InvalidAccessError. (D-8)
+    /// InvalidAccessError.
     /// Step 2 (validate reason): UTF-8 encoded length > 123 bytes →
     /// SyntaxError.
     /// Step 3 (state transition): CLOSING/CLOSED → no-op; CONNECTING →
@@ -722,8 +713,7 @@ impl WebSocketImpl {
     /// The `code` argument is `[Clamp] unsigned short` — runs through
     /// `clamp_unsigned_short` which implements WebIDL ConvertToInt's
     /// `[Clamp]` case: NaN → 0, then sign-aware clamp to [0, 65535],
-    /// then round-half-to-even for the .5 tie case. (addresses critic
-    /// CRITICAL #2)
+    /// then round-half-to-even for the .5 tie case.
     #[v8_method]
     fn close(
         &self,
@@ -732,8 +722,7 @@ impl WebSocketImpl {
         reason: v8::Local<v8::Value>,
     ) -> Result<(), OpError> {
         // [Clamp] conversion. `undefined` means "no code arg" — passed
-        // through as `Option::None` so the wire frame is empty
-        // (CRITICAL #6: NEVER serialise 1005).
+        // through as `Option::None` so the wire frame is empty.
         let code_opt: Option<u16> = if code.is_undefined() {
             None
         } else {
@@ -813,7 +802,7 @@ impl WebSocketImpl {
         }
     }
 
-    /// `socket.accept()` — workerd extension (D-21). Required by
+    /// `socket.accept()` — workerd extension. Required by
     /// `WebSocketPair[1]` to begin local message delivery; throws
     /// TypeError on a client-side socket. Transitions readyState
     /// CONNECTING → OPEN and queues an `open` event for dispatch on

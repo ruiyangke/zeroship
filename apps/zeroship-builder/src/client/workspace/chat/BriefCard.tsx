@@ -6,10 +6,10 @@
 //
 // Begin is a callback prop because brief-rendered surfaces differ:
 //   - WizardPage hits createApp + sessionStorage stash + navigate to
-//     /p/<id>/preview (per spec §8.2.4)
+//     /p/<id>/preview (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.4)
 //   - Future preview/embed contexts may just close
 //
-// Per spec §8.2.7: "After submit: the survey card collapses to a
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7: "After submit: the survey card collapses to a
 // one-line summary…". Same intent here for the terminal brief — once
 // the user clicks Begin, the card stays as a record but the button
 // disables. The parent page is responsible for navigating away (so

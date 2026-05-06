@@ -5,27 +5,26 @@
 // background worker that scans logs + perf for concerning signals on
 // a cron.
 //
-// V1 surface: ONE RPC procedure (`sreMonitor`) that an external cron
-// (or the future control-plane scheduler — see ISS-28) hits per app.
+// Current surface: ONE RPC procedure (`sreMonitor`) that an external
+// cron (or a future control-plane scheduler) hits per app.
 // Synchronous from the caller's POV — gathers the recent log slice,
 // fires the SubAgent's model with a monitor-shaped prompt once,
 // parses the structured response, returns it. No streaming and no
 // chat-thread side-effect at this layer; the cron is responsible for
 // pushing significant findings back to the project chat.
 //
-// What's deferred (tracked as ISS-28):
+// Still deferred:
 //   - The cron itself (no scheduler in `crates/control` yet).
 //   - Posting findings into the chat thread as data-sre-finding
 //     parts.
-//   - Real perf data (HealthCanvas Performance section is currently
-//     gated on ISS-18); for now perf context is a placeholder string
-//     so the prompt structure is in place when the real pipe lands.
+//   - Real perf data. For now perf context is a placeholder string so
+//     the prompt structure is in place when the real metrics pipeline
+//     lands.
 //
-// Naming (no underscore prefix): per ISS-02, files re-exported by
-// `server.ts` get every export auto-registered as a public RPC
-// procedure. This file IS meant to be public; the underscore opt-out
-// is reserved for internal helpers (`_sre.ts`, `_translator.ts`,
-// etc.).
+// Naming (no underscore prefix): files re-exported by `server.ts` get
+// their exports registered as public RPC procedures. This file IS meant
+// to be public; the underscore opt-out is reserved for internal helpers
+// (`_sre.ts`, `_translator.ts`, etc.).
 //
 // Wire convention (single-input object):
 //   POST /_zs/v1/sre.monitor
@@ -87,12 +86,12 @@ export interface SREMonitorInput {
  *      (Real "last hour" windowing lives behind the control plane —
  *      for now we take what `getAppLogs` returns and tell the model
  *      that's the available window.)
- *   2. Synthesize a perf-context line. Real perf data needs ISS-18;
- *      until then this is a placeholder so the prompt is structurally
+ *   2. Synthesize a perf-context line. Until the real metrics pipeline
+ *      lands, this is a placeholder so the prompt is structurally
  *      complete.
- *   3. Invoke the same model the chat-mode SRE SubAgent uses
- *      (gpt-5.4-mini per spec §4.8.9 G6) with SRE_PROMPT + structured
- *      output binding. The prompt steers the model toward
+ *   3. Invoke the same model the chat-mode SRE subagent uses
+ *      (`gpt-5.4-mini`) with `SRE_PROMPT` plus structured output
+ *      binding. The prompt steers the model toward
  *      multi-finding output (vs the single-card chat shape).
  *   4. Return the parsed JSON.
  *
@@ -122,10 +121,10 @@ export async function sreMonitor(input: SREMonitorInput): Promise<SREMonitorResu
   const contextText = renderHealthContext({
     appId: input.appId,
     logs,
-    // Placeholder until ISS-18 (perf metering pipeline) ships. The
-    // shape stays the same (a labelled block) so swapping in the real
+    // Placeholder until the performance metrics pipeline is wired. The
+    // shape stays the same (a labelled block) so swapping in real
     // p50/p95/error-rate numbers is a one-line change later.
-    perfNote: "Performance metrics: <pipeline not wired — see ISS-18>",
+    perfNote: "Performance metrics: <pipeline not wired yet>",
   });
 
   // functionCalling vs jsonSchema strict — same rationale as

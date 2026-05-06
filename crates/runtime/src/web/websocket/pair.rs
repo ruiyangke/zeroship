@@ -20,8 +20,7 @@ use super::WsFrame;
 
 /// Move queued frames from sender (`from_id`) to peer (`to_id`).
 /// Each frame becomes a Message/Close event on the peer's queue.
-/// Decrement the sender's bufferedAmount by the bytes written
-/// (the design's "pair-drain" signal — MAJOR #19).
+/// Decrement the sender's bufferedAmount by the bytes written.
 pub fn deliver_to_peer(
     state: &SharedState,
     from_id: u32,

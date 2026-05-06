@@ -1,11 +1,10 @@
 //! Slow-path FunctionCallback codegen for plain methods, setters, and
 //! async methods.
 //!
-//! Wave 3 commit 4 — relocated from `v8_class/method.rs` into the
-//! `emit/` cluster (design `docs/proposals/runtime-macros-refactor.md`
-//! §4.1, F3). Each callback shares the same brand-check + External
-//! recovery preamble (via `shared::recover_box`) and diverges only in
-//! the post-recovery body.
+//! Relocated from `v8_class/method.rs` into the `emit/` cluster. Each
+//! callback shares the same brand-check and External-recovery preamble
+//! (via `shared::recover_box`) and diverges only in the
+//! post-recovery body.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -34,7 +33,7 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    // Wave 4: pre-parsed by analyse phase; emit just reads. Closes F8
+    // Pre-parsed by the analyse phase; emit just reads.
     // for per-method walks (reject_shared used to be re-extracted at
     // every emit site).
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
@@ -63,8 +62,8 @@ pub(crate) fn gen_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // re-entry guard + unsafe `&mut Self` materialisation. See
     // `shared::recover_box::gen_recover_box` for the soundness
     // rationale and the byte-identity contract with the hand-rolled
-    // prologue this replaces. Brand-check ident is cached on
-    // ClassConfig (Wave 9 N1) — read here, never recomputed.
+    // prologue this replaces. ClassConfig caches the brand-check
+    // identifier, so read it here and never recompute it.
     let recover = recover_box::gen_recover_box(
         class_ty,
         state_ty,
@@ -112,7 +111,7 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
 
     // Setters take exactly one logical param: the new value.
     let params = parse_params_skipping_self(m.func);
-    // Wave 4: pre-parsed by analyse phase; emit just reads. Closes F8
+    // Pre-parsed by the analyse phase; emit just reads.
     // for per-method walks (reject_shared used to be re-extracted at
     // every emit site).
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
@@ -125,7 +124,7 @@ pub(crate) fn gen_setter_callback(cfg: &ClassConfig, m: &ClassMethod) -> TokenSt
     // WebIDL §3.7 brand check + Box<Self> recovery — same contract as
     // `gen_method_callback`. The setter discards the return value at
     // the end; the prologue itself is byte-identical. Brand-check
-    // ident from ClassConfig (Wave 9 N1).
+    // Identifier cached on ClassConfig.
     let recover = recover_box::gen_recover_box(
         class_ty,
         state_ty,
@@ -248,7 +247,7 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
 
     // Skip the receiver param when extracting JS args.
     let params = parse_params_skipping_self(m.func);
-    // Wave 4: pre-parsed by analyse phase; emit just reads. Closes F8
+    // Pre-parsed by the analyse phase; emit just reads.
     // for per-method walks (reject_shared used to be re-extracted at
     // every emit site).
     let extractions = gen_param_extractions(&params, &m.reject_shared_names);
@@ -259,10 +258,10 @@ pub(crate) fn gen_async_method_callback(cfg: &ClassConfig, m: &ClassMethod) -> T
     // halves are byte-identical to the sync method's prologue; the
     // recovered `__ext.value()` is laundered through `usize` for the
     // async future capture. Brand-check ident is cached on
-    // ClassConfig (Wave 9 N1).
+    // ClassConfig cache.
     let brand_check = recover_box::gen_brand_check_throw(&cfg.brand_check_ident);
     let recover_external = recover_box::gen_recover_external();
-    // §4.1 Wave 2 + critique C8: pre-fix this site `.expect`'d on the
+    // Earlier versions `.expect`'d on the
     // SharedState slot lookup. A misconfigured runtime (slot not
     // installed) would Rust-panic THROUGH V8's C++ frames, which on
     // Linux is a SIGABRT (Rust's panic runtime can't unwind through an

@@ -120,13 +120,13 @@ pub fn load_modules(
 
     let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
 
-    // Phase 1: Compile entry module
+    // Compile the entry module.
     let entrypoint = &entries[0].specifier;
     let entry_source = sources.get(entrypoint)
         .ok_or_else(|| format!("Entrypoint not found: {entrypoint}"))?;
     let entry_module = compile_module(scope, entrypoint, entry_source)?;
 
-    // Phase 2: Discover and compile all transitive imports (BFS)
+    // Discover and compile all transitive imports (BFS).
     //
     // V8's resolve_callback can't compile modules — it must return
     // an already-compiled module. So we walk the import graph here,
@@ -198,7 +198,7 @@ pub fn load_modules(
     // Store registry in isolate slot for the resolve callback
     scope.set_slot(registry.clone());
 
-    // Phase 3: Instantiate entrypoint
+    // Instantiate the entrypoint.
     // resolve_callback only does lookups — all modules are pre-compiled.
     {
         let reg = registry.borrow();
@@ -212,7 +212,7 @@ pub fn load_modules(
         }
     }
 
-    // Phase 4: Evaluate
+    // Evaluate.
     let eval_rejection: Option<v8::Global<v8::Value>> = {
         let reg = registry.borrow();
         let module_global = reg.compiled.get(entrypoint).unwrap();
@@ -273,7 +273,7 @@ pub fn load_modules(
         return Err(format!("Evaluate rejected: {entrypoint}"));
     }
 
-    // Phase 5: Extract namespace
+    // Extract the namespace.
     let namespace = {
         let reg = registry.borrow();
         let module_global = reg.compiled.get(entrypoint).unwrap();
@@ -287,7 +287,8 @@ pub fn load_modules(
 
 /// V8 resolve callback — lookups only, never compiles.
 ///
-/// All transitively imported modules are pre-compiled in Phase 2.
+/// All transitively imported modules are pre-compiled before
+/// `instantiate_module`.
 fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,
@@ -321,8 +322,9 @@ fn resolve_callback<'a>(
         }
     }
 
-    // Fallback for native modules — Phase 2 should have pre-registered
-    // these, but this guards against unusual entry shapes.
+    // Fallback for native modules. The eager import walk should have
+    // pre-registered these already, but this guards against unusual
+    // entry shapes.
     if let Some(m) = super::native_modules::resolve_native(scope, &spec) {
         registry
             .borrow_mut()

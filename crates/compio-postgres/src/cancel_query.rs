@@ -1,7 +1,7 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Phase 4 port: verbatim. Routes through Phase 2's `connect_socket` and
-// this phase's `cancel_query_raw`.
+// Verbatim translation. Routes through `connect_socket` and
+// `cancel_query_raw`.
 
 use crate::client::SocketConfig;
 use crate::config::{SslMode, SslNegotiation};

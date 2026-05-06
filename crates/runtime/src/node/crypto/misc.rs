@@ -6,7 +6,7 @@
 use crate::crypto_ops::digest::HASH_NAMES;
 
 /// `timingSafeEqual(a, b) -> boolean`.
-/// Per D-N31, the lengths must match (non-CT pre-check); the
+/// The lengths must match as a non-constant-time pre-check; the
 /// equal-length compare uses aws-lc-rs's constant-time primitive.
 /// Throws `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH` if lengths differ.
 pub(crate) fn timing_safe_equal_callback(
@@ -66,7 +66,7 @@ pub(crate) fn timing_safe_equal_callback(
     rv.set(v8::Boolean::new(scope, equal).into());
 }
 
-/// `getHashes() -> string[]`. Per D-N28; iterates the kernel registry.
+/// `getHashes() -> string[]`. Iterates the kernel registry.
 pub(crate) fn get_hashes_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
@@ -112,7 +112,7 @@ pub(crate) fn get_curves_callback(
     rv.set(arr.into());
 }
 
-/// `getFips() -> 0`. Per D-N25 — FIPS toggle is build-time.
+/// `getFips() -> 0`. FIPS toggle is build-time.
 pub(crate) fn get_fips_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
@@ -121,7 +121,7 @@ pub(crate) fn get_fips_callback(
     rv.set(v8::Integer::new(scope, 0).into());
 }
 
-/// `setFips(boolean)` — throws if `true`. Per D-N25.
+/// `setFips(boolean)` — throws if `true`.
 pub(crate) fn set_fips_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -139,7 +139,7 @@ pub(crate) fn set_fips_callback(
     // setFips(false) is a no-op (already non-FIPS).
 }
 
-/// `secureHeapUsed()` — stub returning zero values per D-N25.
+/// `secureHeapUsed()` — stub returning zero values.
 pub(crate) fn secure_heap_used_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,

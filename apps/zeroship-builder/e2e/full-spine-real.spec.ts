@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 03.1+04 — full real-LLM spine smoke test.
+// Full real-LLM spine smoke test.
 //
 // Drives the entire creator flow with no mocks:
 //   1. /new → enter idea → Begin

@@ -1,10 +1,10 @@
 //! Streaming HMAC.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §V.3 (D-N10). Wraps
+//! See `docs/proposals/node-crypto-native.md` §V.3. Wraps
 //! `aws_lc_rs::hmac::Context` for incremental update; `hmac_one_shot`
 //! is the WebCrypto path.
 //!
-//! Note: per D-N10 / round-3 review: Node SILENTLY ACCEPTS empty
+//! Note: Node silently accepts empty
 //! HMAC keys (special-cases `key_len == 0` by re-binding `key = ""`
 //! and forwards to HMAC_Init_ex per `crypto_hmac.cc:78-91`). We match
 //! Node — empty key is permitted here. The defense-in-depth check
@@ -36,7 +36,7 @@ fn aws_alg(algo: KernelHashAlgo) -> Result<lc_hmac::Algorithm, KernelError> {
     }
 }
 
-/// Streaming HMAC. Per D-N10 — Node has Hmac.update + digest, NO
+/// Streaming HMAC. Node has Hmac.update + digest, but no
 /// `Hmac.copy()` (Hash has copy; Hmac does not — quirk of OpenSSL
 /// EVP_MD_CTX vs HMAC_CTX). We match.
 pub struct HmacContext {
@@ -49,7 +49,7 @@ impl HmacContext {
     pub fn new(algo: KernelHashAlgo, key: &[u8]) -> Result<Self, KernelError> {
         let alg = aws_alg(algo)?;
         // aws-lc-rs's hmac::Key::new accepts empty keys; matches Node
-        // (D-N10 round-3 review).
+        // Match Node's empty-key behavior.
         let key = lc_hmac::Key::new(alg, key);
         let inner = lc_hmac::Context::with_key(&key);
         Ok(Self {

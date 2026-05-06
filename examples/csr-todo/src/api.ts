@@ -4,7 +4,7 @@
 // (`/_zs/v1/<id>` with `{ json, meta? }` superjson envelope). The
 // runtime's synthetic-entry serves both the new wire and the legacy
 // `/_rpc/` shape; we use the new one and ship a hooks-on-function
-// surface to React (Phase 5 §10).
+// surface to React.
 
 import {
   client,
@@ -24,7 +24,7 @@ export const rpc = client<App>({
   transformer: "superjson",
 });
 
-// ── Phase 5 — hooks-on-function pattern (§10) ───────────────────────
+// ── Hooks-On-Function Pattern ────────────────────────────────────────
 
 const listTodosCaller: ProcedureCaller<{ limit?: number }, Todo[]> = (input) =>
   rpc.listTodos.query(input);

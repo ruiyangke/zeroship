@@ -1,12 +1,13 @@
 /**
- * RPC v2 Phase 2 — synthetic SSR entry fed by a ServerBinding map.
+ * Synthetic SSR entry fed by a `ServerBinding` map.
  *
  * When the plugin has run the reference-graph walk it hands the
  * generator a `Map<string, ServerBinding>`. The output emits one
  * namespace import per target file and a static `_procedures` literal
- * keyed by wireId. Per proposal §5, the generated code is structurally
- * compatible with `__dispatchRpc` — until the upstream stub ships,
- * we keep the inline Phase-1 dispatch behavior with a TODO.
+ * keyed by wireId. `docs/proposals/rpc-v2.md` §5 requires the
+ * generated code to stay structurally compatible with `__dispatchRpc`;
+ * until the upstream stub ships, we keep the older inline dispatch
+ * behavior with a TODO.
  */
 
 import { test, describe } from "node:test";
@@ -32,13 +33,13 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
   return out;
 }
 
-describe("buildServerEntrySource — Phase 2 binding-fed emission", () => {
-  test("empty bindings: falls back to Phase 1 namespace-walk shape", () => {
+describe("buildServerEntrySource — binding-fed emission", () => {
+  test("empty bindings: falls back to the namespace-walk shape", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: new Map(),
     });
-    // Phase 1 shape — runtime loop over _zsUser.
+    // Fallback shape — runtime loop over _zsUser.
     assert.match(code, /for \(const _k of Object\.keys\(_zsUser\)\)/);
   });
 
@@ -73,7 +74,7 @@ describe("buildServerEntrySource — Phase 2 binding-fed emission", () => {
     assert.match(code, /"b1":\s*_user_TARGET_1_\.b1/);
   });
 
-  test("default export shape carries fetch + rpc per proposal §5", () => {
+  test("default export shape carries fetch + rpc per docs/proposals/rpc-v2.md §5", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([

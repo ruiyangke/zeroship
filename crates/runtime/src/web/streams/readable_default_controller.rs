@@ -85,7 +85,7 @@ impl DefaultControllerState {
 // SizeAlgorithm — spec §6.2 / §6.3 + user-supplied
 // ---------------------------------------------------------------------------
 
-/// Size algorithm enum (D-2: pure-Rust slot for default streams; the
+/// Size algorithm enum (pure-Rust slot for default streams; the
 /// `Js` variant carries a `v8::Global<Function>` for user callbacks).
 #[allow(missing_debug_implementations)]
 pub enum SizeAlgorithm {

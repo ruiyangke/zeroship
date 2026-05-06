@@ -383,7 +383,7 @@ fn explicit_snapshot_mode_ignores_post_factory_mutations() {
 }
 
 // ---------------------------------------------------------------------------
-// `&mut self` value_pairs (MAC-09) — Headers' lazy sort cache shape.
+// `&mut self` value_pairs — Headers' lazy sort cache shape.
 // Each call to value_pairs may rebuild a cache; live mode means we need
 // `&mut self` recovery on each next() and forEach iteration.
 // ---------------------------------------------------------------------------
@@ -775,7 +775,7 @@ fn mut_self_with_scope_value_pairs_observes_remote_growth() {
         global,
     );
 
-    // Phase 1: ask the iterator to yield one entry (live, but
+    // Step 1: ask the iterator to yield one entry (live, but
     // remote only has 1 pair).
     let src1 = "globalThis.__b = new Bag(); globalThis.__it = __b.entries(); JSON.stringify(__it.next().value);";
     let src1_v8 = v8::String::new(scope, src1).unwrap();
@@ -783,7 +783,7 @@ fn mut_self_with_scope_value_pairs_observes_remote_growth() {
     let r1_s = r1.to_rust_string_lossy(scope);
     assert_eq!(r1_s, r#"["a","1"]"#);
 
-    // Phase 2: grow the remote, then ask the iterator for another
+    // Step 2: grow the remote, then ask the iterator for another
     // entry. Live mode means the cursor walks into the new entry.
     let remote = scope.get_slot::<mut_scope_live::Remote>().unwrap();
     remote.pairs.borrow_mut().push((

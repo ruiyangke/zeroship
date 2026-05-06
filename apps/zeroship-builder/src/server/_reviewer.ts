@@ -3,7 +3,7 @@
 // have agreed the change is internally OK; Reviewer's job is the
 // orthogonal "should this leave the workshop?" pass.
 //
-// Per spec §11 (role table) + §11.2 (pre-deploy gate matrix) + §4.8.3.2
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §11 (role table) + §11.2 (pre-deploy gate matrix) + §4.8.3.2
 // (deepagents fleet mapping):
 //
 //   - SubAgent (one-shot, like Critic but lighter — no iteration loop).
@@ -71,9 +71,10 @@ export const reviewer: SubAgent = {
     "approved, Builder must fix the blockers or escalate to the user " +
     "before deploying.",
   systemPrompt: REVIEWER_PROMPT,
-  // Per spec §4.8.9 G6 — V1 standard across the whole fleet. Reviewer's
+  // Keep the same model family across the fleet for now. Reviewer's
   // workload is similar in shape to Critic's (one-shot structured
-  // review of a code diff) so model parity is the right starting point.
+  // review of a code diff), so model parity is the right starting
+  // point.
   model: "openai:gpt-5.4-mini",
   // No tools — Reviewer judges what Builder hands over via the task
   // input. See header comment for the rationale.

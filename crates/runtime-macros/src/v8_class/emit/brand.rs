@@ -1,7 +1,6 @@
 //! Brand-check helper codegen.
 //!
-//! Wave 3 commit 3 — extracted from `mod.rs`'s 195-line megaquote
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1, F3).
+//! Split out from the old monolithic emit assembly.
 //! Emits the per-class `__brand_check_<Class>` fn used by every
 //! method/getter/setter callback prologue (via
 //! `shared::recover_box`) before the unsafe internal-field deref.
@@ -34,7 +33,7 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let install_slot_ty = format_ident!("__InstallSlot_{}", class_ty);
     let brand_slot_ty = format_ident!("__BrandSlot_{}", class_ty);
-    // Wave 9 N1: brand-check ident from ClassConfig (computed once at
+    // brand-check ident from ClassConfig (computed once at
     // ClassConfig::new). This emit site DEFINES the fn — the cached
     // ident is what every consumer reads.
     let brand_check_fn = &cfg.brand_check_ident;

@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Plan 01.8 — Data + Media canvases (spec §9.3 + §9.4).
+// Data and Media canvas smoke test.
 //
 // Strategy mirrors plan-health.spec.ts: probe the control plane,
 // create a fresh app if it's reachable, otherwise skip cleanly so
@@ -56,7 +56,7 @@ async function selectPill(page: Page, pill: string): Promise<void> {
   await target.click();
 }
 
-test.describe("Plan 01.8 — Data + Media canvases", () => {
+test.describe("Data + Media canvases", () => {
   let app: CreatedApp | null = null;
 
   test.beforeAll(async () => {

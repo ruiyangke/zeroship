@@ -1,7 +1,6 @@
 //! Attribute parsing and method classification for `#[v8_class]`.
 //!
-//! Wave-4 layout (design `docs/proposals/runtime-macros-refactor.md`
-//! §3.2 / §3.6):
+//! Current layout:
 //! - [`marker_attr`] — `MarkerAttr` trait + `extract_marker_attr<T>`
 //!   driver + per-attribute impls (closes F5 / H5-H7).
 //! - This module — `MethodKind` classifier (`classify`),
@@ -10,9 +9,9 @@
 //!   helpers (`emit::method`, `emit::constructor`, `emit::getter`,
 //!   `emit::static_op`) that walk method-attrs in isolation.
 //!
-//! The class-level single-scan parser ([`parse_attrs`]) lives below;
-//! pre-Wave-4 the impl-block-level extracts walked the slice once each
-//! (6+ walks). Now: ONE walk that builds [`ParsedAttrs`].
+//! The class-level single-scan parser ([`parse_attrs`]) lives below.
+//! Earlier versions walked the impl-block attribute slice once per
+//! extractor; now one walk builds [`ParsedAttrs`].
 
 pub(crate) mod marker_attr;
 
@@ -64,7 +63,7 @@ pub(super) fn classify(func: &ImplItemFn) -> Option<MethodKind> {
 // Per-method extracts (used by emit/{method,constructor,getter,static_op}.rs)
 //
 // These are thin wrappers over `extract_marker_attr<T>` that preserve
-// the pre-Wave-4 surface for emit-side callers that walk method-attrs
+// the earlier surface for emit-side callers that walk method attrs
 // in isolation. The class-level single-scan walk lives in
 // [`parse_attrs`].
 // ---------------------------------------------------------------------------
@@ -115,10 +114,10 @@ pub(super) fn extract_post_init(attrs: &[Attribute]) -> syn::Result<Option<syn::
 // ---------------------------------------------------------------------------
 
 /// All impl-block-level attribute values for a `#[v8_class]` impl block,
-/// extracted in a SINGLE walk (design §3.6 — closes F8).
+/// extracted in a single walk.
 ///
-/// Pre-Wave-4 the impl-block-level extracts walked the attribute slice
-/// once each (6+ walks). This struct carries the same data with one
+/// Earlier versions walked the attribute slice once per extractor
+/// (6+ walks). This struct carries the same data with one
 /// walk.
 #[derive(Default)]
 pub(super) struct ParsedAttrs {

@@ -1,6 +1,6 @@
 // ─── Templates — public gallery (`/templates`) ──────────────────
 //
-// Per spec §5.4. Filter chips by category + grid of TemplateCards.
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.4. Filter chips by category + grid of TemplateCards.
 // Public route — uses PublicNav (not TopBar/PageFrame which expect
 // an authed user). Click any card → /new?template=<slug>; the
 // wizard reads the param and pre-fills the brief.

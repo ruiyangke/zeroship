@@ -35,7 +35,7 @@
 //! the inherited methods read the right Event state.
 //!
 //! `EventTarget.dispatchEvent` similarly invokes `event_from_obj` on
-//! the event arg to set target/currentTarget/eventPhase. With the
+//! the event arg to set target/currentTarget and the dispatch phase. With the
 //! repr(C) layout, dispatching a CustomEvent works without any
 //! special-casing in the dispatcher.
 //!

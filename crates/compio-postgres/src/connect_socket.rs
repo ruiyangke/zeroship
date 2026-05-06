@@ -6,10 +6,10 @@
 //   - `socket2::SockRef` for keepalive and TCP_USER_TIMEOUT works unchanged
 //     because compio exposes `AsRawFd` on its sockets.
 //
-// We accept the same `Addr` input the upstream source does, but construct
-// it via the configurable path in Phase 3's `connect.rs` (which owns DNS
-// resolution). This keeps the "dial + tune the socket" responsibility
-// isolated in one file — matching the upstream layering.
+// We accept the same `Addr` input the upstream source does, but build it
+// through `connect.rs`, which owns DNS resolution. That keeps the
+// "dial + tune the socket" responsibility isolated in one file,
+// matching the upstream layering.
 
 use crate::client::Addr;
 use crate::keepalive::KeepaliveConfig;

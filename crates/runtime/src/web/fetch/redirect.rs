@@ -14,13 +14,13 @@
 //! | 307    | Method preserved                      | preserved     |
 //! | 308    | Method preserved                      | preserved     |
 //!
-//! Per design D-11/D-12, when the response is 307/308 and the request
+//! When the response is 307/308 and the request
 //! body source is `BodySource::Stream` (non-rewindable), the redirect is
 //! a network error: we can't replay the bytes.
 //!
 //! ## Cross-origin Authorization stripping
 //!
-//! Per Fetch §5.6 step 13 (CRITICAL fix from v2 critic round): on a
+//! Per Fetch §5.6 step 13, on a
 //! cross-origin redirect, ONLY the `Authorization` header is removed.
 //! `Cookie`, `Host`, `Proxy-Authorization` are forbidden headers anyway
 //! (set by the user agent, not user code), so we never put them on the

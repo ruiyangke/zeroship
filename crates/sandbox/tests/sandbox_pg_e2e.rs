@@ -1,4 +1,4 @@
-//! Phase-0 sandbox-pg-state integration tests.
+//! Sandbox pg-state integration tests.
 //!
 //! These tests need a live Postgres. They are marked `#[ignore]` by
 //! default so `cargo test -p zeroship-sandbox` stays self-contained;
@@ -10,10 +10,9 @@
 //!     cargo test -p zeroship-sandbox --test sandbox_pg_e2e -- --ignored --test-threads=1
 //! ```
 //!
-//! Each test creates a unique schema, points the migration runner at
-//! it via the proposal's "schema name is configurable" hatch
-//! (Phase 0 hard-codes `sandbox`; we run each test against a fresh
-//! database state by `DROP SCHEMA sandbox CASCADE` before the test).
+//! Each test creates a unique schema. The code still hard-codes the
+//! `sandbox` schema name, so the fixture resets the database with
+//! `DROP SCHEMA sandbox CASCADE` before each test.
 //! Tests are serialised via `--test-threads=1` to avoid stomping on
 //! each other's schema reset.
 
@@ -289,7 +288,7 @@ async fn ensure_schema_at_version_times_out_without_migrator() {
 #[ignore = "needs Postgres"]
 async fn pool_baseline_handles_16_concurrent_ping() {
     let url = test_url();
-    // Build a pool sized to the design's D-17 default.
+    // Build a pool with the default 16-connection test budget.
     let mut cfg = PoolConfig::default();
     cfg.max_size = 16;
     let pool = Pool::connect_with_config(&url, cfg)
@@ -318,7 +317,7 @@ async fn pool_baseline_handles_16_concurrent_ping() {
 fn _no_tls_anchor(_t: NoTls) {}
 
 // ════════════════════════════════════════════════════════════════════
-// Phase 1 — pg-write round-trips (round-8: pg as system of record)
+// Pg write round-trips
 // ════════════════════════════════════════════════════════════════════
 
 use uuid::Uuid;
@@ -587,7 +586,7 @@ async fn list_running_sandboxes_filters_by_status_and_host() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Phase 2 — periodic heartbeat + lease-based takeover (round-6 design)
+// Periodic heartbeat and lease-based takeover
 // ════════════════════════════════════════════════════════════════════
 //
 // These tests need direct access to inject a "second host" row plus
@@ -941,9 +940,8 @@ async fn cas_lost_leadership_increments_metric_on_stale_generation() {
     assert_eq!(taken[0].generation, 1);
 
     // Now controller A wakes up (post-takeover) and tries to mark
-    // the row 'stopped' with its stale generation=0. CAS misses;
-    // round-1 fixer / IMPORTANT #7 surfaces this as the typed
-    // `CasLost` variant.
+    // the row 'stopped' with its stale generation=0. CAS misses and
+    // returns the typed `CasLost` variant.
     let pre_lost = zeroship_sandbox::metrics::lost_leadership_value();
     let err = db
         .update_sandbox_status(sid, SandboxStatus::Stopped, 0, None)
@@ -993,8 +991,8 @@ async fn takeover_refuses_self_host() {
         .takeover_sandboxes_from_host(&my_host_typed, my_host, 60)
         .await
         .expect_err("self-takeover must error");
-    // Round-2 fixer / MINOR #4: pattern-match the typed variant
-    // instead of substring-matching the message string.
+    // Pattern-match the typed variant instead of depending on the
+    // formatted error string.
     match err {
         zeroship_sandbox::db::DatabaseError::SelfTakeoverRefused { host_id } => {
             assert_eq!(
@@ -1009,10 +1007,9 @@ async fn takeover_refuses_self_host() {
 // ────────────────────────────────────────────────────────────────────
 // 14. Takeover with mismatched signing_key
 //
-// Phase-2 scope per the task spec: pg-side takeover succeeds for
-// every starting/running row; the controller's *probe pipeline* (out
-// of scope for this commit; lands as Phase 2.5) is the layer that
-// flips status to 'recreating' on a `/version` fingerprint mismatch.
+// Pg-side takeover succeeds for every starting/running row. The
+// controller's probe pipeline is the layer that flips status to
+// `recreating` on a `/version` fingerprint mismatch.
 // This test verifies what's wired today: the takeover is
 // status-blind, and the operator's downstream restore can
 // independently mark recreating via update_sandbox_status. The pg
@@ -1078,10 +1075,10 @@ async fn takeover_then_mark_recreating_on_fp_mismatch() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / IMPORTANT #8 — set_host_draining marks the host
-// row 'draining' so peers see drain-intent before our heartbeat
-// goes silent. Without this, a graceful shutdown looks like a
-// crash to peers and they wait the full lease_ttl before noticing.
+// `set_host_draining` marks the host row `draining` so peers see the
+// drain intent before our heartbeat goes silent. Without this, a
+// graceful shutdown looks like a crash and peers wait the full
+// lease TTL before reacting.
 // ────────────────────────────────────────────────────────────────────
 
 #[compio::test]
@@ -1133,8 +1130,8 @@ async fn set_host_draining_flips_status_and_stamps_drain_started() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / CRITICAL #4 — get_sandbox_row round-trip. The
-// post-takeover rehydrate path uses this to fetch the full row by
+// `get_sandbox_row` must round-trip the full row. The post-takeover
+// rehydrate path uses this to fetch the full row by
 // typed-id-derived UUID; if it ever returns the wrong row (or
 // fails to parse a column), the entire rehydrate pipeline silently
 // no-ops and every HTTP request to the taken sandbox 404s.
@@ -1180,8 +1177,8 @@ async fn get_sandbox_row_round_trips_full_field_set() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / CRITICAL #3 — A controller that LOST the lease on
-// `stop` MUST NOT delete the row out from under the new owner. The
+// A controller that lost the lease on `stop` must not delete the row
+// out from under the new owner. The
 // host_id fence is the SQL-level safety net.
 // ────────────────────────────────────────────────────────────────────
 
@@ -1241,8 +1238,8 @@ async fn delete_sandbox_with_host_fence_refuses_after_takeover() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / IMPORTANT #9 — tenant fence on update_sandbox_status.
-// A misrouted call asserting `expected_user_id=usr_bob` against a row
+// Tenant fence on `update_sandbox_status`. A misrouted call asserting
+// `expected_user_id=usr_bob` against a row
 // owned by `usr_alice` returns NotFound, not CasLost — the row is
 // invisible to the bob-scoped predicate.
 // ────────────────────────────────────────────────────────────────────
@@ -1277,8 +1274,8 @@ async fn update_sandbox_status_tenant_fence_refuses_cross_user() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / CRITICAL #1 — typed-ids end-to-end. The handler
-// is supposed to mint sandbox_id as `sbx_<base62>` and pass typed-id
+// Typed IDs must round-trip end to end. The handler
+// is supposed to mint `sandbox_id` as `sbx_<base62>` and pass typed-id
 // user_id / project_id straight through to insert_sandbox. This test
 // exercises the post-handler path: a SandboxInfo built with typed-id
 // fields lands a row in pg, and a SELECT count(*) sees exactly 1.
@@ -1366,8 +1363,8 @@ async fn insert_sandbox_refuses_human_user_id() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / CRITICAL #2 — every SandboxStatus passes the pg
-// CHECK. Migration 0002 widened the constraint to include
+// Every `SandboxStatus` value must pass the pg CHECK. Migration 0002
+// widened the constraint to include
 // 'unreachable'. This guards against a future enum addition that
 // drifts from the schema.
 // ────────────────────────────────────────────────────────────────────
@@ -1428,8 +1425,8 @@ async fn every_sandbox_status_value_passes_pg_check() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-1 fixer / CRITICAL #6 — base64url-alphabet token_ids that
-// differ only in `-` vs `_` insert as DISTINCT rows after migration
+// Base64url token IDs that differ only in `-` vs `_` must insert as
+// distinct rows after migration
 // 0003. Pre-migration the handler munged both to `x` and the second
 // INSERT collided on the PK.
 // ────────────────────────────────────────────────────────────────────
@@ -1482,10 +1479,10 @@ async fn base64url_token_ids_with_dash_vs_underscore_are_distinct() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-2 fixer / IMPORTANT #1 — host_id fence on update_sandbox_status
+// `update_sandbox_status` must fence on `host_id`
 // ────────────────────────────────────────────────────────────────────
 //
-// Per design D-14, every CAS UPDATE on ownership-relevant fields
+// Per design WebSocket signature-separation rule, every CAS UPDATE on ownership-relevant fields
 // must fence on (host_id, generation), not just generation. A
 // peer holding our database handle (or with a stale generation
 // value somehow agreeing on the integer) MUST NOT be able to flip
@@ -1533,8 +1530,7 @@ async fn update_sandbox_status_fences_on_host_id() {
                 observed_generation, 0,
                 "observed_gen must echo pg's current generation"
             );
-            // Round-2 fixer / IMPORTANT #5: CasLost carries the real
-            // current owner.
+            // `CasLost` includes the real current owner.
             let my_host_typed = format!(
                 "hst_{}",
                 zeroship_core::typed_id::uuid_to_base62(&my_host)
@@ -1566,8 +1562,7 @@ async fn update_sandbox_status_fences_on_host_id() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-2 fixer / CRITICAL #4 — draining hosts get taken over after
-// lease expiration
+// Draining hosts must become reclaimable after lease expiration
 // ────────────────────────────────────────────────────────────────────
 //
 // A host that started shutting down (status='draining') but died or
@@ -1650,7 +1645,7 @@ async fn draining_host_with_expired_lease_is_taken_over() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Round-2 fixer / IMPORTANT #2 — takeover SQL includes 'unreachable'
+// Takeover SQL includes `unreachable`
 // ────────────────────────────────────────────────────────────────────
 //
 // A row stamped 'unreachable' by a previous probe must STILL be
@@ -1702,7 +1697,7 @@ async fn takeover_includes_unreachable_status() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Phase 3 — pg role permission split (§ 13.2; spec § 4)
+// Pg role permission split between the runtime roles.
 // ════════════════════════════════════════════════════════════════════
 //
 // Each test below verifies one slice of the four-role least-privilege

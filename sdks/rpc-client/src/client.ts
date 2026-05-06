@@ -142,7 +142,8 @@ export interface ProcedureType<
  * `stream` returns an async-iter consuming the AI-SDK Data Stream
  * Protocol response. `streamUrl` gives the URL form for handing to
  * ai-sdk's `useChat`. `subscribe` opens a WebSocket subscription
- * and dispatches `{"t":"data"}` frames to `onData` (Phase 7).
+ * and dispatches `{"t":"data"}` frames to `onData` once the
+ * WebSocket transport is enabled.
  */
 export interface ProcedureHandle<TIn = unknown, TOut = unknown> {
   query(input?: TIn, opts?: CallOptions): Promise<TOut>;

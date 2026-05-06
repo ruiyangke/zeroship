@@ -81,7 +81,7 @@ pub(crate) struct ClassConfig<'a> {
     /// splice into the install fn body. `None` when absent.
     pub install_iterable_call: Option<proc_macro2::TokenStream>,
 
-    // ---- Cached idents (Wave 9 N1) ---------------------------------
+    // ---- Cached idents ---------------------------------------------
     /// Pre-computed `__brand_check_<Class>` ident. The format-ident
     /// pattern is invoked at 6 emit sites (brand-check helper,
     /// public_is, gen_recover_box, gen_async_method_callback,

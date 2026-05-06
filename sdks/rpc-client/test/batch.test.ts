@@ -1,5 +1,5 @@
 /**
- * Phase 3 — auto-batching for queries.
+ * Auto-batching for queries.
  *
  *   const rpc = client({ batch: true, ... });
  *   const [a, b, c] = await Promise.all([

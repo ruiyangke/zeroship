@@ -10,7 +10,7 @@
 //!   - `AbortController` / `AbortSignal` (DOM §3.3) — cooperative
 //!     cancellation. AbortSignal inherits EventTarget.
 //!
-//! Per fetch-native v2 fix MAJOR-41: these live under `dom/`, NOT
+//! These live under `dom/`, not
 //! under `fetch/`, because they are shared across many Web APIs.
 //!
 //! ## Install order

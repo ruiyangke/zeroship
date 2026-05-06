@@ -3,7 +3,7 @@ import type { Todo } from "../server";
 import { listTodos } from "../api";
 
 export function App({ navigate }: { navigate: (to: string) => void }) {
-  // Phase 5 — hooks-on-function pattern (§10):
+  // Hooks-on-function pattern:
   //
   //   import { listTodos } from "../api";
   //   listTodos.useQuery({ limit: 50 })

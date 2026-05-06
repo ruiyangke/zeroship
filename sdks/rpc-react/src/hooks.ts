@@ -40,7 +40,7 @@ _hookRegistry.useSuspenseQuery = useSuspenseQuery as unknown as Function;
 // support but it's not stable at the time of writing).
 _hookRegistry.useStream = useStream as unknown as Function;
 
-// ── useSubscription stub — Phase 7 replaces this ──────────────────
+// ── useSubscription stub ───────────────────────────────────────────
 //
 // We install a stub that throws UNIMPLEMENTED with a clear "land in a
 // follow-up" message so procedures declared `kind: "subscription"`
@@ -50,7 +50,7 @@ class UnimplementedError extends Error {
   readonly code = "UNIMPLEMENTED";
   constructor() {
     super(
-      "useSubscription is not implemented yet — WebSocket subscriptions land in a follow-up phase. Track Phase 7 of the RPC v2 rollout for the full implementation.",
+      "useSubscription is not implemented yet. The planned WebSocket subscription transport is documented in docs/proposals/rpc-v2.md §6.",
     );
     this.name = "UnimplementedError";
   }

@@ -1,12 +1,13 @@
 /**
- * Phase 5 — `__makeServerProcedure` SSR adapter.
+ * `__makeServerProcedure` SSR adapter.
  *
  * The vite-plugin's SSR-enabled-app variant wraps each procedure with
  * `__makeServerProcedure(impl, meta)` so the same `list.useQuery(...)`
- * call works on both server and client (per spec §5 + §10's SSR sub-
- * section). On the server, the hook must call `impl(input)` directly
- * (no HTTP) and stash the result in the per-request QueryClient so
- * `dehydrate(qc)` ships it to the client for hydration.
+ * call works on both server and client. The SSR shape is documented in
+ * `docs/proposals/rpc-v2.md` §5 and §10. On the server, the hook must
+ * call `impl(input)` directly (no HTTP) and stash the result in the
+ * per-request QueryClient so `dehydrate(qc)` ships it to the client
+ * for hydration.
  *
  * Tests cover:
  *

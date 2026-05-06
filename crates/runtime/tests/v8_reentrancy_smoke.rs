@@ -16,7 +16,7 @@
 //! clear message and return BEFORE the unsafe `&mut Self`
 //! materialisation. On scope exit (RAII drop guard): remove.
 //!
-//! Wave 2 explored a single-slot `Cell<Option<usize>>` as a memory
+//! Earlier versions explored a single-slot `Cell<Option<usize>>` as a memory
 //! optimisation but reverted the migration after discovering a
 //! soundness gap for the 3-deep nesting case `a → b → a` (see
 //! `nested_cross_instance_then_same_instance_throws` below — the
@@ -328,7 +328,7 @@ fn guard_releases_after_throw() {
 }
 
 // ---------------------------------------------------------------------------
-// Restore-prior nesting: A → B → A. With the post-Wave-2 single-slot
+// Restore-prior nesting: A → B → A. With the single-slot
 // `Cell<Option<usize>>`, the guard's correctness depends on the drop
 // guard restoring the PRIOR value (not just None) so that, after the
 // inner B-call's drop guard fires, the slot is `Some(a_addr)` again —

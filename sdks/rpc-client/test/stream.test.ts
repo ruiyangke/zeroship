@@ -1,5 +1,5 @@
 /**
- * Phase 4 — client stream() async-iterator API.
+ * Client `stream()` async-iterator API.
  *
  * Surface:
  *

@@ -1,11 +1,11 @@
 "use server";
 // System prompts for the Builder agent stack.
 //
-// Phase B.0 has only the top-level Builder prompt. As the SubAgent
-// lineup lands (Critic in Phase B.2, Reviewer / PM / SRE later) each
-// gets its own export here. Keeping prompts in a single module keeps
-// the translator focused on stream plumbing and lets us iterate on
-// wording without touching the agent-construction code.
+// This module currently starts with the top-level Builder prompt. As the
+// subagent lineup grows, each role gets its own export here. Keeping
+// prompts in one module keeps the translator focused on stream plumbing
+// and lets us iterate on wording without touching the agent-construction
+// code.
 //
 // Conventions:
 // - Each prompt is a const string export named `<ROLE>_SYSTEM`.
@@ -114,7 +114,7 @@ Each of these returns structured JSON the UI renders as a card —
 calling them is visible to the user, just like Critic.`;
 
 // Wizard runs *before* a project exists — pure clarification, no
-// coding. Per spec §4.8.2b it's a separate runtime (plain LangGraph,
+// coding. Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b it's a separate runtime (plain LangGraph,
 // no deepagents). Job: refine the user's free-text idea into a
 // concrete brief that Builder can pick up. Loop ends when the brief
 // is concrete enough — measured by the LLM, capped at 5 rounds.
@@ -275,4 +275,3 @@ Return ONLY structured output matching the schema:
 If the evidence in the question is insufficient, say so plainly in diagnosis ("Insufficient data — enable structured logging on /api/checkout and reproduce the failure"), set severity to "info" or "warning" depending on the user's framing, and put the next investigation step in recommendation. NEVER guess from nothing.
 
 No prose, no preamble — just the JSON.`;
-

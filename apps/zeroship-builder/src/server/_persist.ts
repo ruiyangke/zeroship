@@ -6,7 +6,8 @@
 // HMR module re-evaluations, so KV state survives "save the file →
 // dev refreshes the bundle" cycles. Module-level Maps in agents.ts
 // don't, which was the whole motivation for moving these stubs to
-// KV (per ISSUES.md ISS-14, ISS-19, ISS-26).
+// KV so these stubs survive hot reloads instead of resetting every time
+// the module is re-evaluated.
 //
 // Wire fallthrough: if `@zeroship/kv` throws (env.kv missing — e.g.
 // a future test harness without KvPlugin registered), we silently
@@ -15,9 +16,9 @@
 // unchanged in either case.
 //
 // Naming: underscore-prefixed so the vite-plugin's RPC discovery
-// loop (per ISS-02) does NOT publish anything from this module as
-// a public endpoint. Only re-exported by other server-modules; the
-// `server.ts` barrel does NOT re-export this file.
+// logic does NOT publish anything from this module as a public
+// endpoint. Only re-exported by other server modules; the `server.ts`
+// barrel does NOT re-export this file.
 
 import { kv } from "@zeroship/kv";
 
@@ -60,7 +61,7 @@ async function probeKv(): Promise<boolean> {
 /**
  * Read a JSON-serializable value at `key`, returning `fallback` if
  * either KV says null or the wire fails. Errors are swallowed — the
- * canvas always renders something (per spec §26 empty/error states),
+ * canvas always renders something (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §26 empty/error states),
  * and a transient KV blip should degrade to "fresh project state"
  * rather than a render crash.
  */

@@ -27,7 +27,7 @@
 //! is `true` and subsequent `write/finish` are silent no-ops returning
 //! `Ok(empty)`. `Drop` after either is safe.
 //!
-//! ## Trailing-byte detection (BLOCKER-1)
+//! ## Trailing-byte detection
 //!
 //! flate2's writers swallow trailing data: `ZlibDecoder` / `GzDecoder`
 //! return `Ok(0)` for any bytes past stream-end and `finish()` does
@@ -42,10 +42,8 @@
 //!
 //! ## Design references
 //!
-//! Decisions D-1 through D-15 of
-//! `docs/proposals/compression-streams-native.md`. The TODO markers
-//! in this file point back at design sections that depend on the
-//! native-streams or native-fetch sibling projects.
+//! `docs/proposals/compression-streams-native.md` records the design
+//! tradeoffs that shaped this implementation.
 
 use std::io::Write;
 
@@ -84,8 +82,9 @@ pub enum CodecMode {
 /// site by the wrappers in `error_mapping` below — never directly by
 /// the codec impls themselves.
 ///
-/// Per design D-15: a single Rust variant set; the JS side has *two*
-/// wrapper functions (`throw_input_type_error` for the always-TypeError
+/// A single Rust variant set backs the JS surface. The JS side has
+/// *two* wrapper functions (`throw_input_type_error` for the
+/// always-TypeError
 /// cases, `throw_decode_data_error` for the decode-data cases that
 /// flip to `DOMException("DataError")` if whatwg/compression issue #51
 /// lands and we toggle `DECODE_ERROR_USES_DOMEXCEPTION`).
@@ -110,8 +109,8 @@ pub enum CodecError {
     Backend(String),
 
     /// `build_codec_chain` was called with a coding name we don't
-    /// support (per design D-9: unknown coding produces a fetch
-    /// network error, not a silent passthrough). Carries the offending
+    /// support. The fetch path treats unknown codings as a network
+    /// error, not a silent passthrough. Carries the offending
     /// coding name so the error surface can repeat it back to the user.
     UnknownCoding(String),
 }
@@ -136,7 +135,7 @@ impl std::error::Error for CodecError {}
 /// scenario) and the caller should surface `CodecError::TrailingBytes`.
 ///
 /// `finish` is called exactly once on the success path; subsequent
-/// calls return `Ok(empty)` (BLOCKER-2). `cancel` is idempotent.
+/// calls return `Ok(empty)`. `cancel` is idempotent.
 pub trait Codec: Send {
     fn write(&mut self, chunk: &[u8]) -> Result<(Vec<u8>, usize), CodecError>;
     fn finish(&mut self) -> Result<Vec<u8>, CodecError>;
@@ -145,7 +144,7 @@ pub trait Codec: Send {
 }
 
 // ---------------------------------------------------------------------------
-// Error-type policy (D-15)
+// Error-type policy
 // ---------------------------------------------------------------------------
 
 /// When the WHATWG Compression spec issue #51 lands and decode-data
@@ -161,8 +160,8 @@ pub trait Codec: Send {
 pub const DECODE_ERROR_USES_DOMEXCEPTION: bool = false;
 
 /// Build a JS-side error message for a "wrong input type" condition
-/// (e.g. SAB-backed view, non-BufferSource chunk). Always a TypeError
-/// regardless of D-15. The actual `throw` lives in the V8 class layer
+/// (e.g. SAB-backed view, non-BufferSource chunk). Always a TypeError.
+/// The actual `throw` lives in the V8 class layer
 /// in a sibling project; this is the message + classification helper
 /// the codec layer exposes today.
 pub fn throw_input_type_error(msg: &str) -> ThrownError {
@@ -172,8 +171,8 @@ pub fn throw_input_type_error(msg: &str) -> ThrownError {
     }
 }
 
-/// Build a JS-side error for a `CodecError`. Per D-15, the
-/// classification flips for `DecodeData` / `Truncated` / `TrailingBytes`
+/// Build a JS-side error for a `CodecError`. The classification flips
+/// for `DecodeData` / `Truncated` / `TrailingBytes`
 /// based on `DECODE_ERROR_USES_DOMEXCEPTION`.
 pub fn throw_decode_data_error(err: &CodecError) -> ThrownError {
     let is_decode = matches!(
@@ -487,9 +486,8 @@ impl Codec for InflateDecoder {
             return Ok((Vec::new(), 0));
         }
         // If we already saw stream-end, any further bytes are trailing
-        // data — report zero consumption so the call site surfaces
-        // TrailingBytes (per design D-3 / WHATWG decompress-and-enqueue
-        // step 6).
+        // data. Report zero consumption so the call site surfaces
+        // `TrailingBytes`.
         if self.reached_end {
             return Ok((Vec::new(), 0));
         }
@@ -667,8 +665,9 @@ fn raw_deflate_decoder() -> InflateDecoder {
 // Brotli encoder + decoder
 // ---------------------------------------------------------------------------
 
-/// Brotli encoder. Quality=4, lgwin=22 per design D-12 — trades ~2%
-/// ratio for ~3x throughput vs quality=6, while still beating gzip's
+/// Brotli encoder. Quality=4 and `lgwin=22` trade ~2% compression
+/// ratio for ~3x throughput versus quality=6, while still beating
+/// gzip's
 /// default quality. Buffer size 4096 is the rust-brotli example
 /// default; larger buffers don't help at our typical chunk sizes.
 struct BrotliEncoder {
@@ -808,7 +807,7 @@ impl Codec for BrotliDecoder {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-coding chain helper (RFC 9110 §8.4.1, design MAJOR-6)
+// Multi-coding chain helper
 // ---------------------------------------------------------------------------
 
 /// Build a chain of decoders for a `Content-Encoding` header value.
@@ -826,8 +825,8 @@ impl Codec for BrotliDecoder {
 ///
 /// Recognised coding names (case-insensitive): `gzip`, `x-gzip`,
 /// `deflate`, `deflate-raw`, `br`, `identity`. Anything else returns
-/// `Err(CodecError::UnknownCoding)` per design D-9 (server-sent
-/// unknown coding is a network error, never silent passthrough).
+/// `Err(CodecError::UnknownCoding)`. Server-sent unknown codings are
+/// treated as a network error, never a silent passthrough.
 ///
 /// `identity` is a no-op pass-through codec — see `IdentityCodec`
 /// below. Skipped at chain-construction time: an `identity` coding
@@ -900,12 +899,12 @@ impl Codec for IdentityCodec {
 }
 
 // ---------------------------------------------------------------------------
-// Lenient deflate fallback (design MAJOR-14, fetch path only)
+// Lenient deflate fallback for the fetch path
 // ---------------------------------------------------------------------------
 
 /// Decode a `Content-Encoding: deflate` body that may be either
-/// zlib-wrapped (RFC 1950) or raw DEFLATE (RFC 1951). Per design D-6,
-/// this is the *fetch path* policy — public
+/// zlib-wrapped (RFC 1950) or raw DEFLATE (RFC 1951). This is the
+/// *fetch path* policy; public
 /// `DecompressionStream("deflate")` stays strict zlib.
 ///
 /// Strategy: try strict zlib first; on failure, try raw DEFLATE.

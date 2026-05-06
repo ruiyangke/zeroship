@@ -79,8 +79,8 @@ pub struct AppState {
     pub google_oauth: Option<oauth::GoogleConfig>,
     pub vfs: Arc<dyn BundleStore + Send + Sync>,
     /// Content-addressed blob store. Backs `.zship` ingestion. The
-    /// gateway reads asset bytes from its own `BlobStore` instance
-    /// (Phase 4), so no asset-serving HTTP shim lives here.
+    /// gateway reads asset bytes from its own `BlobStore` instance,
+    /// so no asset-serving HTTP shim lives here.
     pub blob_store: Arc<dyn BlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,

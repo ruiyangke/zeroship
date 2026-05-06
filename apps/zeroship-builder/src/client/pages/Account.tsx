@@ -1,11 +1,11 @@
 // ─── Account — profile + plan + sessions + 2FA + sign out ──────
 //
-// Per spec §6.5. V1 sections:
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §6.5. Current sections:
 //   · Identity     — name + email (read-only; no edit endpoint yet).
 //   · Plan         — free plan + usage + upgrade CTA.
-//   · Sessions     — list of active sessions (deferred · ISS-10).
-//   · Two-factor   — TOTP enrollment (deferred · ISS-11).
-//   · Delete       — wipe the account (deferred · ISS-12).
+//   · Sessions     — list of active sessions (stubbed for now).
+//   · Two-factor   — TOTP enrollment (not wired yet).
+//   · Delete       — wipe the account (not wired yet).
 //   · Sign out     — calls AuthContext.logout, redirects to /login.
 
 import { useEffect, useMemo, useState } from "react";
@@ -67,14 +67,14 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
         <DeferredSection
           title="Two-factor auth"
           helper="Add a second step (TOTP) to keep your projects safe."
-          issue="ISS-11"
+          pendingMessage="TOTP enrollment and recovery codes are not wired yet."
           testId="account-2fa"
         />
 
         <DeferredSection
           title="Delete account"
           helper="Wipe your projects, sessions, and identity for good."
-          issue="ISS-12"
+          pendingMessage="Self-serve account deletion is not wired yet."
           testId="account-delete"
           tone="danger"
         />
@@ -92,10 +92,10 @@ export function Account({ onLogout }: { onLogout?: () => void }) {
 /**
  * Sessions block — V1 client-only view of "this browser's session".
  * Reads (or seeds) a localStorage timestamp for the start of the
- * current session and renders a single-row table per spec §6.5. The
+ * current session and renders a single-row table per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §6.5. The
  * "sign out everywhere" affordance is wired to the same logout path
  * AuthContext exposes (in dev that's a no-op; in prod it'll revoke
- * once ISS-10's control-plane endpoint lands and the SDK switches to
+ * once the control-plane sessions endpoint lands and the SDK switches to
  * the real list). Self-revoke shouldn't actually do anything in dev —
  * we surface it as "sign out" since that's all we can do client-side.
  */
@@ -161,8 +161,8 @@ function SessionsSection() {
           </button>
         </div>
         <div className="mt-2 font-serif italic text-[12px] text-pencil">
-          Multi-device list is tracked as ISS-10 — landing with the
-          control-plane sessions endpoint.
+          Extra devices will appear here once the control plane exposes
+          a real sessions list.
         </div>
       </div>
     </Section>
@@ -214,9 +214,9 @@ function Section({
 }
 
 function DeferredSection({
-  title, helper, issue, testId, tone,
+  title, helper, pendingMessage, testId, tone,
 }: {
-  title: string; helper: string; issue: string; testId: string; tone?: "danger";
+  title: string; helper: string; pendingMessage: string; testId: string; tone?: "danger";
 }) {
   return (
     <Section
@@ -227,7 +227,7 @@ function DeferredSection({
         className="border border-dashed border-rule bg-paper-2 px-4 py-3 font-serif italic text-[13.5px] text-ink-soft leading-[1.55]"
         data-testid={testId}
       >
-        Coming soon — see <code className="font-mono not-italic text-[12px]">ISSUES.md</code> {issue}.
+        Coming soon — {pendingMessage}
       </div>
     </Section>
   );

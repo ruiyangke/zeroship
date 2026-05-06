@@ -9,7 +9,7 @@
 use zeroship_runtime_macros::WebIdlEnum;
 
 // ---------------------------------------------------------------------------
-// Branded box (D-10) — unspoofable instanceof check
+// Branded box — unspoofable instanceof check
 // ---------------------------------------------------------------------------
 
 /// Tag byte at the head of every `Box<BrandedBox<CryptoKeyState>>`.
@@ -134,7 +134,7 @@ impl HashAlgo {
     }
 
     /// Block size in bits — used by HMAC `generateKey` default
-    /// per spec §31.4.3 step 2 (D-19).
+    /// per spec §31.4.3 step 2.
     pub fn block_size_bits(self) -> u32 {
         match self {
             HashAlgo::Sha1 | HashAlgo::Sha256 => 512,

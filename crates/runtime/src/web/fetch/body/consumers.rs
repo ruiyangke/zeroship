@@ -5,7 +5,7 @@
 //!
 //! - `text()` — UTF-8 decode (replace invalid bytes with U+FFFD).
 //! - `json()` — UTF-8 decode + JSON.parse. Rejects with **SyntaxError**
-//!   on parse fail (v2 fix MAJOR-25 — NOT TypeError).
+//!   on parse fail, not TypeError.
 //! - `arrayBuffer()` — return ArrayBuffer over the bytes. Rejects with
 //!   **RangeError** if total exceeds 2GB (V8's `safe_integer` ceiling
 //!   for ArrayBuffer length).
@@ -42,7 +42,7 @@ use super::body_stream::read_all_bytes;
 
 /// Maximum body size for `arrayBuffer()` — 2 GiB minus 1 byte. V8's
 /// ArrayBuffer length is a `safe_integer` and the practical max for a
-/// 32-bit indexed buffer is `i32::MAX`. Per MAJOR-25 the rejection on
+/// 32-bit indexed buffer is `i32::MAX`. The rejection on
 /// overflow is `RangeError`, not TypeError.
 pub const MAX_ARRAY_BUFFER_BYTES: usize = i32::MAX as usize;
 
@@ -1473,7 +1473,7 @@ fn settle_outer(scope: &mut v8::PinScope, state: &MapState, bytes: Vec<u8>) {
             };
             // v8::json::parse returns None and leaves the exception on
             // the isolate. Use a tc_scope to convert that exception
-            // into a SyntaxError-shaped rejection per MAJOR-25.
+            // into a SyntaxError-shaped rejection.
             let parsed: Option<v8::Global<v8::Value>> = {
                 v8::tc_scope!(let tc, scope);
                 match v8::json::parse(tc, json_str) {

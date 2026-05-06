@@ -1,6 +1,6 @@
 //! Bad-port blocklist per WHATWG Fetch §4.3 (https://fetch.spec.whatwg.org/#bad-port).
 //!
-//! Per design D-19 (v2 critical fix): we use the SPEC list verbatim — 83 ports
+//! We use the spec list verbatim — 83 ports
 //! including port 0 — NOT the 82-port subset undici ships. The spec table is
 //! the authoritative source and incorporates ports added since undici last
 //! audited.

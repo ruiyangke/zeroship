@@ -1,5 +1,5 @@
 //! RSA-OAEP / RSASSA-PKCS1-v1_5 / RSA-PSS — sign/verify/encrypt/decrypt
-//! + key gen + import/export. D-15 keygen, D-16 variable PSS salt.
+//! plus key generation, import/export, and variable PSS salt lengths.
 //! Per `docs/proposals/webcrypto-native.md` §IV.7.
 
 #![allow(dead_code)]
@@ -96,7 +96,7 @@ pub fn verify_pkcs1(
 }
 
 // =============================================================================
-// RSA-PSS sign / verify (D-16 variable salt)
+// RSA-PSS sign / verify with variable salt lengths
 // =============================================================================
 
 pub fn sign_pss<'s>(
@@ -253,7 +253,7 @@ fn read_optional_label(
 }
 
 // =============================================================================
-// generateKey (D-15)
+// generateKey
 // =============================================================================
 
 pub fn generate_key<'s>(

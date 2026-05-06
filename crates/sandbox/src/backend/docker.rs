@@ -6,7 +6,7 @@
 //! host bind-mount path (no `docker exec` round-trip needed for
 //! files — the workspace is the same file on both sides).
 //!
-//! ## Phase 0 of the preview-URL feature (round-1 § II.0)
+//! ## Preview-URL support
 //!
 //! Each container now also receives a freshly-minted Ed25519 keypair
 //! at create-time. The **public** key is written to
@@ -60,9 +60,9 @@ pub struct DockerBackend {
     /// Per-sandbox bookkeeping. Keyed by sandbox_id; populated on
     /// `create`, dropped on `stop`.
     pub(crate) state: Arc<RwLock<HashMap<Uuid, DockerSandbox>>>,
-    /// Sealed-record persistence (preview-URL § II.0 §4). `None` when
+    /// Sealed-record persistence (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset — backend operates exactly as
-    /// it did pre-Phase-0. When `Some`, `create()` seals the per-
+    /// it did before persistence wiring. When `Some`, `create()` seals the per-
     /// sandbox auth on success and `stop()` deletes the file. Both
     /// are best-effort: a seal/delete failure is logged, never fatal.
     pub(crate) persist: Option<Arc<crate::persist::Persistence>>,
@@ -163,7 +163,7 @@ impl DockerBackend {
         std::fs::create_dir_all(&workspace)
             .map_err(|e| format!("create workspace: {e}"))?;
 
-        // Mint a per-sandbox Ed25519 keypair (preview-URL § II.0).
+        // Mint a per-sandbox Ed25519 keypair (`docs/proposals/sandbox-preview-urls.md` § II.0).
         // The signing key never leaves this process; the matching
         // **public** key is written to a per-sandbox host directory
         // and bind-mounted read-only at `/run/keys` inside the
@@ -204,7 +204,7 @@ impl DockerBackend {
         // similarly so long as the controller has an interface on
         // the same network — operator's responsibility, identical to
         // nomad-ch's "controller has L3 to the tap subnets" model
-        // (preview-URL design § II.0.0).
+        // (`docs/proposals/sandbox-preview-urls.md` § II.0.0).
         let agent_url = match inspect_container_ip(&container_name, &self.cfg.network).await {
             Ok(ip) => format!("http://{ip}:{AGENT_PORT}"),
             Err(e) => {
@@ -250,7 +250,7 @@ impl DockerBackend {
             },
         );
 
-        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // Seal the per-sandbox auth to disk (`docs/proposals/sandbox-preview-urls.md` § II.0 §4).
         // BEST-EFFORT: a seal failure does NOT fail create(). Only
         // the agent-launch path produces a sealable record (signing
         // key + agent_url both present); when `docker inspect`
@@ -316,7 +316,7 @@ impl DockerBackend {
         }
         let stop_res = stop_container(&sandbox.container_name).await;
 
-        // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
+        // Delete the sealed record (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). BEST-EFFORT:
         // delete failures are logged but never fail stop().
         if let Some(persist) = &self.persist {
             if let Err(e) = persist.delete(sandbox_id).await {
@@ -510,7 +510,7 @@ async fn run_container(
     // on K8s (ConfigMap-projected volume) and nomad-ch (virtio-fs
     // share). The `:ro` flag prevents the agent (or any in-container
     // process) from writing to it; the rust-side `write_pubkey_file`
-    // already chmodded the host file to 0400. (preview-URL § II.0
+    // already chmodded the host file to 0400. (`docs/proposals/sandbox-preview-urls.md` § II.0
     // key-share invariants table.)
     let keys_arg = format!(
         "{}:/run/keys:ro",
@@ -661,7 +661,7 @@ fn write_pubkey_file(dir: &std::path::Path, pubkey_b64: &str) -> Result<(), Stri
     // 0400 — read-only, owner-only. The container bind-mount is
     // additionally `:ro` so the in-container agent (UID 0 inside
     // the container by default) can't rewrite it from inside. See
-    // preview-URL design § II.0 key-share invariants table.
+    // `docs/proposals/sandbox-preview-urls.md` § II.0 key-share invariants table.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(super::short_id("short"), "short");
     }
 
-    /// Phase-0: Docker has no agent-launch path yet, so
+    /// Docker has no agent-launch path yet, so
     /// `session_auth` cleanly errors instead of silently misbehaving.
     /// Distinguishes "no such sandbox" from "no agent path on docker"
     /// so the controller's audit log says the right thing.

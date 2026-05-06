@@ -21,9 +21,10 @@
 //!
 //! ## What this is NOT
 //!
-//! - **WebSocket** — Phase 2 handles Upgrade. v1 ships HTTP-only.
-//! - **Streaming** — for Phase 1 the agent buffers the upstream body
-//!   before responding to the controller; Phase 2 reworks for a
+//! - **WebSocket** — this handler is HTTP-only; Upgrade requests are
+//!   handled by `proxy_ws`.
+//! - **Streaming** — today the agent buffers the upstream body
+//!   before responding to the controller; a later pass can rework this
 //!   streaming pipe (see § II.1 "Body streaming").
 //!
 //! ## How the host-rewrite token gets here
@@ -56,7 +57,7 @@ use zeroship_core::preview_ports::{is_proxyable_port, DEFAULT_DENY};
 /// the canonical-string includes the body hash, so we have to buffer
 /// the whole body to compute SHA-256 before we can verify the
 /// signature. Larger uploads are steered through `zeroship.storage`
-/// presigned URLs (see § VI R-2 of the design doc).
+/// presigned URLs (see `docs/proposals/sandbox-preview-urls.md` §VI).
 ///
 /// Default 100 MiB; configurable via `SANDBOX_AGENT_PROXY_MAX_BODY_BYTES`.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 100 * 1024 * 1024;
@@ -110,7 +111,7 @@ pub async fn proxy_http(
 
     // Defense-in-depth port deny (controller also checks; agent is
     // the last line). The dynamic deny-list is not yet wired through
-    // sandbox config in Phase 1 — DEFAULT_DENY ships everywhere.
+    // sandbox config today — DEFAULT_DENY ships everywhere.
     if !is_proxyable_port(port, DEFAULT_DENY) {
         return err(StatusCode::BAD_REQUEST, "port not allowed");
     }

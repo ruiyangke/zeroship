@@ -1,5 +1,5 @@
 /**
- * RPC v2 Phase 1 follow-up — collision detection.
+ * wireId collision detection.
  *
  * With the default wireId being just `<exportName>`, two server
  * modules that both export `add` (and neither pins `fn.config.id`)

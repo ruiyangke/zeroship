@@ -1,6 +1,6 @@
 // Chat messages renderer for the workspace ChatRail.
 //
-// Plan 02 Phase B.2+ dispatches several families of v6 message parts:
+// The assistant renderer dispatches several families of v6 message parts:
 //   - text                       → MessageAssistant text (concatenated)
 //   - tool-<name> / dynamic-tool → <Receipt> (one per toolCallId)
 //   - data-diff                  → <DiffCard>

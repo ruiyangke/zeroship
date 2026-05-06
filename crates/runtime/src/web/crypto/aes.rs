@@ -15,7 +15,7 @@ use crate::enforce_range::read_enforce_range_u32;
 use crate::state::OpError;
 
 // =============================================================================
-// AES-GCM (D-17 variable IV, D-18 variable tag) — §IV.2
+// AES-GCM with variable IV and tag lengths — §IV.2
 // =============================================================================
 
 pub fn encrypt_gcm<'s>(
@@ -106,7 +106,7 @@ fn aes_gcm_encrypt(
     if iv.len() == 12 {
         // High-level aws-lc-rs path. Produces full 128-bit tag; we
         // truncate to `tag_bits/8` post-encrypt per spec §29.4.1
-        // step 7 (D-18).
+        // step 7.
         let nonce_arr: [u8; 12] = iv.try_into().unwrap();
         let nonce = Nonce::assume_unique_for_key(nonce_arr);
         let mut buf = data.to_vec();
@@ -504,7 +504,7 @@ fn aes_cipher_alg(
 }
 
 // =============================================================================
-// AES-CTR — §27 (D-11)
+// AES-CTR — §27
 // =============================================================================
 
 pub fn encrypt_ctr<'s>(
@@ -589,7 +589,7 @@ fn aes_ctr(
 }
 
 // =============================================================================
-// AES-KW — §30 (D-12). Uses `aws_lc_rs::aead::AES_*_KW` per RFC 3394.
+// AES-KW — §30. Uses `aws_lc_rs::aead::AES_*_KW` per RFC 3394.
 // =============================================================================
 
 pub fn aes_kw_wrap(key_bytes: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, OpError> {

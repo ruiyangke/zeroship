@@ -63,7 +63,7 @@ pub async fn http_network_fetch(
     // Headers — clone the request headers, then layer on our defaults.
     let mut req_headers = request.headers.clone();
 
-    // Default Accept-Encoding (D-15).
+    // Default Accept-Encoding.
     if !has_accept_encoding(&req_headers) {
         let scheme = ada_url::Url::parse(&request.url, None)
             .map(|u| u.protocol().trim_end_matches(':').to_lowercase())
@@ -79,7 +79,7 @@ pub async fn http_network_fetch(
         });
     }
 
-    // Origin header (D-16).
+    // Origin header.
     append_origin_if_needed(&mut req_headers, &request.method, &request.url, "");
 
     for (k, v) in &req_headers {

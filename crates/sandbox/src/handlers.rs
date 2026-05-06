@@ -44,7 +44,7 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
 }
 
 /// Parse a sandbox id from an HTTP path segment into the embedded
-/// UUID. Round-2 fixer / CRITICAL #1: the API returns `sbx_<base62>`
+/// UUID. : the API returns `sbx_<base62>`
 /// from `POST /sandboxes`; every follow-up call (GET / DELETE / exec
 /// / files / preview / share) MUST accept that same string back. The
 /// pre-fix `s.parse::<Uuid>()` rejected it and 400ed every follow-up
@@ -75,7 +75,7 @@ fn parse_sandbox_id_to_uuid(s: &str) -> Result<Uuid, HttpResponse> {
 
 /// Validate an HTTP-supplied typed-id at the boundary, asserting
 /// the prefix matches `expected_prefix` (e.g. `"usr"`, `"prj"`,
-/// `"sbx"`). Round-1 fixer / CRITICAL #1: every id that flows into
+/// `"sbx"`). : every id that flows into
 /// pg, k8s label values, and sealed-record paths is now a typed-id
 /// (`<prefix>_<base62-uuidv7>`); `parse_with_prefix` is the
 /// path-traversal-hardening boundary check (Invariant 2 in the
@@ -89,7 +89,7 @@ fn is_typed_id(id: &str, expected_prefix: &str) -> bool {
 }
 
 /// Render an internal `Uuid` to the canonical wire form
-/// `sbx_<base62>`. Round-2 fixer / IMPORTANT #3: every HTTP response
+/// `sbx_<base62>`. : every HTTP response
 /// + log line that surfaces a sandbox id MUST use this — pre-fix the
 /// stop endpoint emitted a hyphenated UUID while create emitted a
 /// typed-id, so audit tools that joined on payload-id broke.
@@ -202,7 +202,7 @@ pub async fn create_sandbox(
         max_attempts,
         total_budget,
         || async {
-            // Round-1 fixer / CRITICAL #1: mint a UUIDv7 (typed-id
+            // : mint a UUIDv7 (typed-id
             // backbone — the same UUIDv7 is what the typed-id wraps)
             // rather than v4. The retry path mints a fresh id per
             // attempt so a stale-tenant retry lands on a different
@@ -215,7 +215,7 @@ pub async fn create_sandbox(
     .await;
     match outcome {
         CreateOutcome::Ok { sandbox_id, mut info } => {
-            // Round-1 fixer / CRITICAL #1: SandboxInfo's `sandbox_id`
+            // : SandboxInfo's `sandbox_id`
             // is the typed-id `sbx_<base62>` form everywhere the wire
             // sees it (registry → handlers → pg → preview-token
             // claims). The backends still take `Uuid` as their
@@ -229,12 +229,12 @@ pub async fn create_sandbox(
                 zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
             );
             let stored = state.sandboxes.insert(sandbox_id, info.clone());
-            // Round-8 Phase 1: pg is the system of record for non-secret
-            // state. Write the sandbox row synchronously after create
+            // Pg is the system of record for non-secret state. Write
+            // the sandbox row synchronously after create
             // succeeds; on Err, log + continue (sandbox is live in
             // memory; pg will reconcile on next boot).
             if let Some(db) = state.database.as_ref() {
-                // Round-2 fixer / MINOR #2: hold session_auth's result
+                // : hold session_auth's result
                 // once and destructure both fields. Pre-fix called
                 // session_auth twice — wasted RTT and inconsistent
                 // failure handling between the two calls.
@@ -285,8 +285,8 @@ pub async fn create_sandbox(
     }
 }
 
-/// Parse `vm_index=<int>` out of a `backend_hint` string. Round-8
-/// Phase 1: the nomad-ch backend embeds vm_index in its hint; the
+/// Parse `vm_index=<int>` out of a `backend_hint` string. The
+/// nomad-ch backend embeds vm_index in its hint; the
 /// docker / k8s backends don't. Returns `None` for any miss.
 fn parse_vm_index_hint(hint: &str) -> Option<i32> {
     hint.split_whitespace()
@@ -540,7 +540,7 @@ pub async fn stop_sandbox(
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
     let info_for_audit = state.sandboxes.get(&id);
-    // Phase-2 HA: snapshot the in-memory `generation` BEFORE any
+    // Snapshot the in-memory `generation` before any
     // pg or backend write so the CAS-guarded UPDATEs below carry
     // the value this controller still believes it owns. A peer
     // takeover that already happened will have bumped the pg row
@@ -549,7 +549,7 @@ pub async fn stop_sandbox(
     let expected_generation = state.sandboxes.generation_for(&id);
     let owner_user_id = info_for_audit.as_ref().map(|i| i.user_id.clone());
 
-    // Round-2 fixer / CRITICAL #2: pre-flight CAS Stopping fence.
+    // : pre-flight CAS Stopping fence.
     //
     // Pre-fix, we ran `backend.stop(id)` BEFORE asking pg whether
     // we still own the row. If a peer had just taken over via
@@ -632,7 +632,7 @@ pub async fn stop_sandbox(
     // Local cleanup only — registry remove is safe (in-memory,
     // local to this controller). Sealed record was sealed on the
     // ORIGINAL owner's disk; the new owner has its own copy (or
-    // not, per Phase-2 v1 cross-host limitation). Leaving our
+    // not, given the current cross-host limitation). Leaving our
     // local copy alone is the conservative choice; the orphan
     // sweep at next boot would clean it up anyway.
     if cas_lost {
@@ -655,7 +655,7 @@ pub async fn stop_sandbox(
     }
     state.sandboxes.remove(&id);
 
-    // Round-8 Phase 1: best-effort pg writes. Move the row to the
+    // Best-effort pg writes. Move the row to the
     // tombstone (deleted_sandboxes) and emit a stopped event.
     if let Some(db) = state.database.as_ref() {
         // Final flip from `Stopping` → `Stopped` (records the
@@ -713,7 +713,7 @@ pub async fn stop_sandbox(
             }
         }
 
-        // Round-1 fixer / CRITICAL #3 + Round-2 fixer / CRITICAL #2:
+        // + :
         // tombstone DELETE only when we still own the row. The row
         // is `Stopping` at this point (in our view); host_id fence
         // ensures no one else moves it.
@@ -764,7 +764,7 @@ pub async fn stop_sandbox(
         }
     }
 
-    // Round-2 fixer / IMPORTANT #3: emit the SAME id form `POST
+    // : emit the SAME id form `POST
     // /sandboxes` returned (`sbx_<base62>`). Pre-fix the stop
     // response leaked a hyphenated UUID, so audit tools that joined
     // on payload-id broke at every stop.
@@ -902,7 +902,7 @@ mod tests {
         }
     }
 
-    // ─── Round-2 fixer / CRITICAL #1: parse_sandbox_id_to_uuid ──
+    // ─── : parse_sandbox_id_to_uuid ──
 
     #[test]
     fn parse_sandbox_id_accepts_typed_id() {
@@ -952,7 +952,7 @@ mod tests {
         assert_eq!(parsed, uuid);
     }
 
-    // ─── Round-1 fixer / CRITICAL #1: typed-id validation ───────
+    // ─── : typed-id validation ───────
 
     #[test]
     fn typed_id_validator_accepts_well_formed_typed_id() {

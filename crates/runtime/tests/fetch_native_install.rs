@@ -1,11 +1,11 @@
 //! Smoke tests for the `globalThis.fetch` install path.
 //!
-//! Per D-23 step 2c the native install is unconditional — these tests
-//! exercise the hand-rolled callback directly without flipping any
-//! env-var gate. The historical `ZEROSHIP_NATIVE_FETCH` set call
-//! survives below because some sister tests share the same `init_v8`
-//! state and a stale unset would change behaviour for them; the call
-//! is now a no-op for `install_fetch_global` itself.
+//! The native install is unconditional, so these tests exercise the
+//! hand-rolled callback directly without flipping any env-var gate.
+//! The historical `ZEROSHIP_NATIVE_FETCH` set call survives below
+//! because some sister tests share the same `init_v8` state and a
+//! stale unset would change behaviour for them; the call is now a
+//! no-op for `install_fetch_global` itself.
 //!
 //! Coverage:
 //!   1. `install_fetch_global` registers `globalThis.fetch` as a
@@ -45,10 +45,9 @@ fn run_in_v8<F, R>(src: &str, f: F) -> R
 where
     F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
 {
-    // The gate is gone after D-23 step 2c — install_fetch_global is
-    // unconditional. The set_var call is a no-op kept for symmetry with
-    // legacy tests that may still reference the var via shared
-    // process-wide state.
+    // install_fetch_global is unconditional now. The set_var call is a
+    // no-op kept for symmetry with legacy tests that may still
+    // reference the var via shared process-wide state.
     unsafe { std::env::set_var("ZEROSHIP_NATIVE_FETCH", "1"); }
     init_v8();
     let mut isolate = v8::Isolate::new(v8::CreateParams::default());

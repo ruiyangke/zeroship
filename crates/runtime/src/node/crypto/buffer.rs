@@ -1,7 +1,7 @@
 //! Buffer / Uint8Array / DataView / ArrayBuffer / string input
 //! coercion + Buffer-shaped output emission.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §I.6 (D-N7).
+//! See `docs/proposals/node-crypto-native.md` §I.6.
 //!
 //! - `extract_input(value, encoding?)` — coerce a JS value to `Vec<u8>`
 //!   per Node's documented rule: when the value is a Buffer / TypedArray

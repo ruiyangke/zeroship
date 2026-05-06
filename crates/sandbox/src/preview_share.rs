@@ -1,5 +1,5 @@
 //! Preview share-token format + mint/list/revoke handlers
-//! (preview-URL § II.4 + § III).
+//! (`docs/proposals/sandbox-preview-urls.md` § II.4 + § III).
 //!
 //! ## Token wire format
 //!
@@ -31,9 +31,9 @@
 //!
 //! Notes for reviewers:
 //!
-//! - **Wire-stable.** `~` separator (round-6 LOW-3, not `.` — JWT
+//! - **Wire-stable.** `~` separator (not `.` — avoids JWT
 //!   confusion); base64url no-pad alphabet `A-Za-z0-9_-`.
-//! - **HMAC-input invariant** (round-6 H5). The validator hashes the
+//! - **HMAC-input invariant** (on-wire HMAC-input rule). The validator hashes the
 //!   on-wire `payload_b` ASCII bytes; canonicalizing the JSON before
 //!   HMAC verification breaks every issued token. Pinned via test.
 //! - **Hardening caps.** Raw token ≤ 1 KiB, decoded payload ≤ 4 KiB,
@@ -61,7 +61,7 @@ pub const PAYLOAD_BYTES_MAX: usize = 4096;
 
 /// Validate-side ceiling on `exp - iat`. Defends against a controller
 /// bug that would mint a 10-year token by checking BOTH at mint time
-/// (the API layer) AND at validate time. (§ II.4 round-6 LOW-4)
+/// (the API layer) and at validate time (`docs/proposals/sandbox-preview-urls.md` §II.4).
 pub const TTL_CEILING_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Mint-side ceiling on `expires_in_secs`. Matches `TTL_CEILING_SECS`
@@ -84,7 +84,7 @@ pub struct TokenClaims {
     pub aud: String,
     pub sbx: String,
     pub port: u16,
-    /// Audit-only at v7 (round-6 H7). Optional so legacy mints that
+    /// Audit-only at v7 (audit-only issuer rule). Optional so legacy mints that
     /// didn't set it still validate; recorded in the audit log when
     /// present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,7 +103,7 @@ pub struct TokenClaims {
 pub enum TokenError {
     /// Raw token exceeded `TOKEN_RAW_MAX` before decode.
     RawTooLong,
-    /// Separator missing or doubled (round-6 LOW-3).
+    /// Separator missing or doubled.
     BadSeparator,
     /// `payload_b` or `sig_b` failed base64url decode.
     Base64,
@@ -244,7 +244,7 @@ pub fn validate_token(
         return Err(TokenError::RawTooLong);
     }
 
-    // 1. Split on `~`. Exactly one `~` allowed (round-6 LOW-3).
+    // 1. Split on `~`. Exactly one `~` is allowed.
     let (payload_b, sig_b) = match raw_token.split_once('~') {
         Some(p) => p,
         None => return Err(TokenError::BadSeparator),
@@ -293,7 +293,7 @@ pub fn validate_token(
         .secret_for_version(claims.sv)
         .ok_or(TokenError::Revoked)?;
 
-    // 6. HMAC over the on-wire `payload_b` ASCII bytes (round-6 H5).
+    // 6. HMAC over the on-wire `payload_b` ASCII bytes (on-wire HMAC-input rule).
     //    Do NOT re-serialize the parsed claims and hash that.
     let mut mac = HmacSha256::new_from_slice(&secret).expect("HMAC keylen");
     mac.update(payload_b.as_bytes());
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(err.wire_code(), "revoked");
     }
 
-    /// Round-6 H5 — the validator MUST hash on-wire bytes, not
+    /// — the validator MUST hash on-wire bytes, not
     /// re-encode JSON. Two tokens with different field orders both
     /// validate iff the validator is wire-byte-faithful.
     #[test]
@@ -660,7 +660,7 @@ mod tests {
         }
     }
 
-    /// Round-6 H7: token without `iss` validates (legacy compat).
+    /// : token without `iss` validates (legacy compat).
     #[test]
     fn missing_iss_validates() {
         let secret = [0xab; 32];

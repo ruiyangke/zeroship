@@ -1,8 +1,6 @@
 //! Native `fetch()` global function and the V8 entry layer.
 //!
-//! Per design fetch-native v2 §V (main fetch algorithm) + §VI (executor).
-//! Replaces the JS polyfill `fetch()` in `embed/fetch.js` per D-22 once
-//! the cutover lands. For now, install behind `ZEROSHIP_NATIVE_FETCH=1`.
+//! Replaces the JS polyfill `fetch()` in `embed/fetch.js`.
 //!
 //! ## Module structure
 //!
@@ -10,9 +8,9 @@
 //!                      http_redirect_fetch (no V8 entry)
 //! - `http_network`   — http_network_fetch wrapper around cyper
 //! - `redirect`       — method/body mutation + same-origin checks
-//! - `content_encoding` — Content-Encoding decode hook (D-15 + D-9)
-//! - `data_url`       — data: URL processor (D-21)
-//! - `bad_ports`      — Fetch §4.3 bad-port table (83 ports, D-19)
+//! - `content_encoding` — Content-Encoding decode hook
+//! - `data_url`       — data: URL processor
+//! - `bad_ports`      — Fetch §4.3 bad-port table
 //!
 //! ## Wiring
 //!
@@ -20,8 +18,8 @@
 //! with a hand-rolled V8 callback that:
 //!
 //!   1. Synchronously coerces input to a Request.
-//!   2. Synchronously checks `signal.aborted` per Fetch §5.1 step 7
-//!      (CRITICAL #6 — NOT after enqueueing).
+//!   2. Synchronously checks `signal.aborted` per Fetch §5.1 step 7,
+//!      not after enqueueing work.
 //!   3. Drains the request body to bytes (rewindable BodySource → Vec).
 //!   4. Spawns a compio task that runs `main_fetch` then schedules a
 //!      pump turn to materialise the Response wrapper inside V8.
@@ -208,12 +206,11 @@ fn cached_admission_error<'s>(
 }
 
 // ===========================================================================
-// install_fetch_global — wire `fetch` onto globalThis (D-22)
+// Install `fetch` onto globalThis.
 // ===========================================================================
 
 /// Install the native `fetch()` callback onto `globalThis.fetch`,
-/// shadowing whatever the JS polyfill set up. Per D-23 step 2c, the
-/// native fetch is now the default — no env-var gate.
+/// shadowing whatever the JS polyfill set up.
 ///
 /// Run AFTER `install_dom` (which installs Request/Response/AbortSignal
 /// natively) so the native fetch can read native Request internals
@@ -233,8 +230,7 @@ pub fn install_fetch_global(scope: &mut v8::PinScope, global: v8::Local<v8::Obje
 /// Per Fetch §5.1 "fetch":
 ///
 ///   1. Coerce input → Request (via the native Request constructor).
-///   2. If signal.aborted, reject SYNCHRONOUSLY with the abort reason
-///      (CRITICAL #6).
+///   2. If signal.aborted, reject synchronously with the abort reason.
 ///   3. Otherwise, snapshot the request fields, spawn the algorithm
 ///      chain, and return a Promise that resolves to a Response.
 fn fetch_callback(
@@ -501,8 +497,8 @@ fn read_signal_reason<'s>(
 }
 
 /// Snapshot the JS Request into a Rust FetchRequest. Drains rewindable
-/// body sources to bytes; rejects streams (D-6 streaming send is
-/// deferred — see comment).
+/// body sources to bytes; rejects streams because streaming uploads are
+/// not wired yet.
 fn snapshot_request<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     req: v8::Local<'s, v8::Object>,
@@ -548,8 +544,8 @@ fn snapshot_request<'s>(
             Some(BodySource::FormData(rc, b)),
         ),
         Some(BodySource::Stream) => {
-            // Streaming POST upload — D-6. For v1 we synchronously
-            // reject. Streaming send-side requires reader-driven
+            // Streaming POST upload is not wired yet, so reject
+            // synchronously. Streaming send-side requires reader-driven
             // chunked-transfer wiring through cyper; deferred.
             return Err(
                 "fetch: streaming request body is not yet supported (use a buffered body)".to_string(),

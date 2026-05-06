@@ -1,7 +1,8 @@
 /**
- * RPC v2 Phase 2 — client-environment transform output.
+ * Client-environment transform output.
  *
- * Per proposal §5 the client transform replaces server-marked exports
+ * `docs/proposals/rpc-v2.md` §5 says the client transform replaces
+ * server-marked exports
  * with branded ProcedureRef stubs that:
  *
  *   - call the wire (`/_zs/v1/<wireId>`) when invoked,

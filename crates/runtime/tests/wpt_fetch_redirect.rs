@@ -600,7 +600,7 @@ fn wpt_fetch_redirect_mode() {
 // redirect-origin.any.js — cross-origin Authorization stripping
 // ---------------------------------------------------------------------------
 //
-// CRITICAL fix per fetch-native v2 §III.4 / D-12: ONLY the Authorization
+// On cross-origin redirect, only the Authorization
 // header is stripped on cross-origin redirect (not Cookie/Host/
 // Proxy-Authorization). Spec: Fetch §5.6 step 13.
 //
@@ -688,7 +688,7 @@ fn wpt_fetch_redirect_origin() {
     }
 
     // 3. Cross-origin redirect: ONLY Authorization is stripped — verify
-    //    Cookie / Proxy-Authorization etc. are preserved (D-12).
+    //    Cookie / Proxy-Authorization etc. are preserved.
     //    Note: the rust algorithm doesn't have a Cookie jar, but a
     //    user-set Cookie header should pass through cross-origin.
     {

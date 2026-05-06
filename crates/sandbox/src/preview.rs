@@ -6,7 +6,7 @@
 //! ## What this does
 //!
 //! 1. **Authenticate** — bearer creator-token; failure → 401 (uniform,
-//!    does NOT vary by sandbox existence — round-6 H4).
+//!    does NOT vary by sandbox existence — uniform-auth rule).
 //! 2. **Authorize** — the single coalesced gate
 //!    [`authorize`]: principal must be present, the sandbox must
 //!    exist, the principal must own it, the port must be in the
@@ -21,15 +21,15 @@
 //!    `proxy.rs` in the agent crate — so we trust them and emit
 //!    verbatim).
 //!
-//! ## Phase 1 simplifications
+//! ## Current simplifications
 //!
-//! - **Bearer token auth only.** No share tokens (Phase 3).
+//! - **Bearer token auth only.** No share tokens.
 //! - **No public DNS yet.** The preview hostname pattern
 //!   `preview-{slug}-{port}.preview.zeroship.dev` is computed and
 //!   forwarded as `X-Forwarded-Host` so the agent's response
 //!   rewriter knows where to point absolute Locations / Refresh
-//!   URLs, even though no DNS is provisioned yet (Phase 4).
-//! - **No streaming, no WebSocket, no circuit breaker.** Phase 2.
+//!   URLs, even though no DNS is provisioned yet.
+//! - **No streaming, no WebSocket, no circuit breaker.**
 //! - **`X-ZSPreview-Host` from inbound is dropped.** A creator
 //!   couldn't override the rewrite target via a request header.
 //!
@@ -88,7 +88,7 @@ pub enum Principal {
     /// `?user_id=` claim. Authorisation matches against the sandbox
     /// record's `user_id`.
     Creator { user_id: String },
-    /// Phase-3 share-token principal. The HMAC + claims have already
+    /// Share-token principal. The HMAC + claims have already
     /// been validated against the path-bound `(sandbox_id, port,
     /// method)`; the `authorize` re-check is belt-and-suspenders.
     ShareToken { claims: TokenClaims },
@@ -144,7 +144,7 @@ pub async fn preview_proxy(
         // bad; treat the whole route like an unknown resource).
         Err(_) => return uniform_404(),
     };
-    // Round-2 fixer / CRITICAL #1: accept both `sbx_<base62>` (the
+    // : accept both `sbx_<base62>` (the
     // canonical wire shape) and hyphenated UUID (back-compat). The
     // pre-fix `.parse()` only handled hyphenated UUIDs, so every
     // share-token cookie URL or creator-bearer path with a typed-id
@@ -175,7 +175,7 @@ pub async fn preview_proxy(
     // 3. Authenticate. Try the share-token cookie FIRST (cheaper —
     //    no header allocation), fall through to creator bearer.
     //    Both paths fail closed on bad input. Uniform 401 with NO
-    //    sandbox-existence oracle (round-6 H4).
+    //    sandbox-existence oracle (uniform-auth rule).
     let principal_opt = authenticate(&req, &state, sandbox_id_opt, port);
 
     // Coalesced check: principal-Some + uuid parsed + info-Some +
@@ -261,7 +261,7 @@ pub async fn preview_proxy(
         format!("{outbound_path}?{query}")
     };
 
-    // 5. Compose the preview-host string. No public DNS yet (Phase 4),
+    // 5. Compose the preview-host string. No public DNS yet,
     // but we still emit the deterministic pattern as `X-Forwarded-Host`
     // so the agent's response-rewriter knows where to point absolute
     // Locations.
@@ -270,7 +270,7 @@ pub async fn preview_proxy(
 
     // 6. Mint fresh (ts, nonce). `sign_kind` builds the v1.1 canonical
     // (path + query, ED25519-V1.1 tag). Per § II.1 retry-semantics,
-    // each retry would mint a fresh tuple; Phase 1 has no retry.
+    // each retry would mint a fresh tuple; there is no retry path yet.
     let ts = unix_now();
     let nonce = mint_nonce();
     let signature = sig::sign_kind(
@@ -302,7 +302,7 @@ pub async fn preview_proxy(
             continue;
         }
         if kl == "x-zspreview-host" {
-            // Round-6: the rewrite target MUST NOT be client-controlled.
+            // the rewrite target MUST NOT be client-controlled.
             continue;
         }
         if kl == "x-forwarded-host"
@@ -424,7 +424,7 @@ fn mint_nonce() -> String {
 ///
 /// Pattern: `preview-{slug}-{port}.preview.zeroship.dev` where
 /// `{slug}` is the sandbox-id stripped to ASCII-lowercase
-/// alphanumeric + `-`. Phase 4 lands real DNS for this.
+/// alphanumeric + `-`. A later DNS pass can tighten this further.
 fn compute_preview_host(sandbox_id: &str, port: u16) -> String {
     // Sandbox IDs are UUIDs (see registry); we lowercase + drop dashes
     // for a compact slug. Subdomain RFC permits up to 63 chars.
@@ -518,7 +518,7 @@ fn try_share_cookie(
 ///   SameSite=Strict; Path=/` and `Clear-Site-Data: "cache"`.
 /// - On failure: uniform 401.
 ///
-/// Sec-Fetch-* fail-closed (§ II.6 round-6 H6): a request without
+/// Sec-Fetch-* fail-closed (§ II.6 Sec-Fetch fail-closed rule): a request without
 /// Sec-Fetch-Site is rejected with `code: "client_too_old"`.
 fn handle_cookie_conversion(
     req: &HttpRequest,
@@ -593,7 +593,7 @@ fn handle_cookie_conversion(
         .json(&json!({"ok": true, "sandbox_id": sandbox_id_str, "port": port}))
 }
 
-/// Sec-Fetch-* enforcement (§ II.6 + round-6 H6 — fail-closed). The
+/// Sec-Fetch-* enforcement (§ II.6 + Sec-Fetch fail-closed rule — fail-closed). The
 /// `__zsbx_share` cookie-conversion is gated on a top-level
 /// navigation: `Sec-Fetch-Mode: navigate` AND `Sec-Fetch-Dest:
 /// document`. Sec-Fetch-Site may be `none` (typed-in URL),

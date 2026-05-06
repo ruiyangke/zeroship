@@ -1,7 +1,7 @@
 "use server";
 // Shared survey wire — the parts of the survey contract that BOTH the
 // wizard runtime (plain LangGraph) and the Builder runtime (deepagents)
-// need. Per spec §4.8.2b + §8.2.7: the wire format is runtime-agnostic.
+// need. Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b + §8.2.7: the wire format is runtime-agnostic.
 // Anything that ties into deepagents (tool wrapping, middleware) lives
 // elsewhere; anything that ties into LangGraph specifically (interrupt,
 // StateGraph) lives in the runtime that uses it.
@@ -65,7 +65,7 @@ const questionSchema = z.object({
 
 /**
  * The survey shape the LLM produces — same on both runtimes. Cap of
- * 1–3 questions per spec §8.2.7. The renderer is also defensive
+ * 1–3 questions per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7. The renderer is also defensive
  * (truncates >3, collapses >6 single_choice options to a dropdown), so
  * malformed surveys still degrade gracefully.
  */

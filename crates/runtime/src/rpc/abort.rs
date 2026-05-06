@@ -1,5 +1,5 @@
-//! RPC v2 phase 1 — Wave E: per-isolate AbortRegistry + eviction-time
-//! abort fan-out.
+//! RPC v2 abort plumbing: per-isolate `AbortRegistry` plus
+//! eviction-time abort fan-out.
 //!
 //! See `docs/proposals/rpc-v2.md` §3 ("Abort source plumbing"). When the
 //! worker's LRU cache evicts an isolate, every in-flight procedure must
@@ -24,23 +24,23 @@
 //!   clears those entries. Failures are swallowed + logged: eviction
 //!   must not be fallible.
 //!
-//! ## Phase-1 deferrals
+//! ## Current deferrals
 //!
 //! The proposal calls for a 30-second hard-drain timer + a `Disposed`
-//! state on the isolate post-drain (§15 OQ-2). Phase 1 ships only the
-//! abort fan-out — the drain timer + Disposed transition are scaffolded
-//! but not enforced. The runtime currently has no graceful-async-
+//! state on the isolate post-drain. Today this module ships only the
+//! abort fan-out; the drain timer + `Disposed` transition are scaffolded
+//! but not enforced. The runtime currently has no graceful async
 //! cancellation primitive, so the timer would degenerate to "remove the
 //! isolate after 30s no matter what" with no observable difference from
 //! the existing `cache.isolates.remove` call.
 //!
-//! Lifetime detail: phase 1 DOES thread the `AbortGuard` through the
+//! Lifetime detail: the runtime does thread the `AbortGuard` through the
 //! pump's `PendingRequest` entry, so the registry retains in-flight
 //! controllers across `await` boundaries. Eviction during the awaited
 //! continuation correctly fires the controller. What's deferred is the
 //! "wait 30 seconds for in-flight procedures to drain before disposing
-//! the isolate" timer — phase 1 disposes immediately after firing the
-//! abort fan-out.
+//! the isolate" timer; the runtime disposes immediately after firing
+//! the abort fan-out.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -100,7 +100,7 @@ impl Drop for AbortGuard {
 /// Register the per-request `AbortController` for the lifetime of a
 /// procedure. Returns an `AbortGuard` whose Drop unregisters the entry.
 ///
-/// `controller` is the JS `AbortController` minted by Wave D's
+/// `controller` is the JS `AbortController` minted by
 /// `RpcContext::build_js_object`. The registry retains a `Global<Object>`
 /// (cloned from the supplied Local on `scope`) so the controller stays
 /// alive across V8 turns until either the guard drops or
@@ -169,8 +169,8 @@ pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
     for (key, controller_global) in to_abort {
         let controller = v8::Local::new(scope, &controller_global);
 
-        // Look up `controller.abort` on the wrapper. Wave D's frozen
-        // ctx layout puts the controller behind ctx.signal — but we
+        // Look up `controller.abort` on the wrapper. The frozen ctx
+        // layout puts the controller behind ctx.signal — but we
         // stored the controller itself, not the signal, so the
         // method dispatch goes through the `#[v8_method]`-emitted
         // accessor on AbortController.prototype.

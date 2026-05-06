@@ -1,4 +1,4 @@
-// Phase 7 — subscription dispatch over WebSocket.
+// Subscription dispatch over WebSocket.
 //
 // Migration to native WebSocket plumbing (post cutover landing 2):
 // these tests now reach into `state.native_websockets[ws_id].events`

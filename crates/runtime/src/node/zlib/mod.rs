@@ -1,8 +1,8 @@
 //! Native `node:zlib`.
 //!
-//! Wave #192 — adds zlib compression / decompression to the runtime
-//! in the same SyntheticModule shape #175 introduced for
-//! `node:async_hooks` + `node:crypto`.
+//! Adds zlib compression and decompression to the runtime in the same
+//! `SyntheticModule` shape used for `node:async_hooks` and
+//! `node:crypto`.
 //!
 //! ## Surface
 //!
@@ -97,9 +97,9 @@ fn populate<'s>(scope: &mut v8::PinScope<'s, '_>, obj: v8::Local<v8::Object>) {
     set_fn(scope, obj, "brotliDecompressSync", op_brotli_decompress_sync);
 
     // Async (callback) variants. We run the codec inline on the V8
-    // thread and fire `cb(null, buf)` via a microtask — same shape
-    // `crypto.pbkdf2`/`randomBytes` use. A future commit can route
-    // large inputs to a spawn_blocking pool (D-N5 parity).
+    // thread and fire `cb(null, buf)` via a microtask — the same shape
+    // `crypto.pbkdf2` and `randomBytes` use. A future change can route
+    // large inputs to a `spawn_blocking` pool.
     set_fn(scope, obj, "gzip", op_gzip);
     set_fn(scope, obj, "gunzip", op_gunzip);
     set_fn(scope, obj, "deflate", op_deflate);

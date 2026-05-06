@@ -1,7 +1,7 @@
 //! Random ops — `randomBytes`, `randomFillSync`, `randomFill`,
 //! `randomInt`, `randomUUID`, `getRandomValues`.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §VI.5 (D-N17).
+//! See `docs/proposals/node-crypto-native.md` §VI.5.
 //!
 //! All sync: backed by the existing thread-local 4 KB CSPRNG buffer
 //! (`crate::crypto::fast_random`) which amortises one syscall over
@@ -301,7 +301,7 @@ fn schedule_callback<'s>(
 
 // ---------------------------------------------------------------------------
 // randomInt(min?, max, callback?) -> number
-//   Uniform via rejection sampling (no modulo bias). Per D-N17.
+//   Uniform via rejection sampling (no modulo bias).
 // ---------------------------------------------------------------------------
 
 pub(crate) fn random_int_callback(
@@ -414,7 +414,7 @@ pub(crate) fn random_uuid_callback(
 }
 
 // ---------------------------------------------------------------------------
-// getRandomValues — re-export of WebCrypto's getRandomValues (D-N16).
+// getRandomValues — re-export of WebCrypto's getRandomValues.
 // We simply delegate to globalThis.crypto.getRandomValues.
 // ---------------------------------------------------------------------------
 

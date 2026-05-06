@@ -2,14 +2,16 @@
 //
 // Compute the manifest's resource tree:
 //
-//   - resources    flat map of `<key> -> resource` per spec §7
+//   - resources    flat map of `<key> -> resource` per
+//                  `docs/proposals/rpc-v2.md` §7
 //   - transformer  always "superjson" by default
 //
 // Validation is wired into the runtime dispatch — the synthetic SSR
 // entry calls `proc.config.input.parse(args)` before invoking the
 // user handler. The manifest never carries JSONSchemas.
 //
-// Wire identity (per spec §2): a pure function of current source.
+// Wire identity (from `docs/proposals/rpc-v2.md` §2): a pure function
+// of current source.
 //
 //   1. fn.config.id (explicit) wins.
 //   2. Default = <exportName>.
@@ -44,7 +46,7 @@ export interface DiscoveredProcedure {
   /**
    * Slug derived from the file path (e.g. `src/server/todos.ts` →
    * `src-server-todos`). Diagnostic-only; not used in wireId
-   * derivation since the Phase 1 follow-up removed path leakage.
+   * derivation since the default wireId stopped including the file path.
    */
   moduleSlug: string;
   /** Discriminator. */
@@ -277,7 +279,7 @@ type WireIdResolution = {
 
 /**
  * Pick the wireId for a procedure. Resolution order (highest priority
- * first; per spec §2):
+ * first; see `docs/proposals/rpc-v2.md` §2):
  *
  *   1. `proc.config.id` (explicit, set on the procedure or on the
  *      module).
@@ -307,7 +309,8 @@ const KEY_FORMAT_RE = /^(?:\*|rpc:[a-zA-Z0-9._*-]+|\/[\w\-/.\[\]:*]*)$/;
 
 /**
  * Validate the authored, flattened resource map against the rules in
- * spec §7 Validation. Throws (production) or warns (dev) on failure.
+ * `docs/proposals/rpc-v2.md` §7 ("Validation"). Throws (production) or
+ * warns (dev) on failure.
  */
 function validateResources(
   flat: Record<string, WireResource>,
@@ -413,7 +416,8 @@ function validateResources(
  * segment (`/api/admin/users` → `/api/admin`). For RPC ids we drop the
  * last dot segment (`rpc:todos.delete` → `rpc:todos`). The bare `*`
  * is everyone's ultimate parent — but we don't infer it as a parent
- * for this check; spec §7 talks about explicit parent declarations.
+ * for this check; `docs/proposals/rpc-v2.md` §7 talks about explicit
+ * parent declarations.
  */
 function parentResourceKey(key: string): string | null {
   if (key === "*") return null;
@@ -433,7 +437,7 @@ function parentResourceKey(key: string): string | null {
 
 // ── defineApp config extraction ────────────────────────────────────────────
 //
-// Phase 1 limitation: we extract the `defineApp({ resources: { ... } })`
+// Current limitation: we extract the `defineApp({ resources: { ... } })`
 // argument via a coarse JS-evaluation approach. The user file is read,
 // the import lines stripped, and the `defineApp(...)` call evaluated as
 // a literal. Computed expressions (e.g. `auth: env.PROD ? ... : ...`)
@@ -470,7 +474,7 @@ async function loadDefineAppResources(
  * Approach: locate the `defineApp(` call, parse the matched-paren
  * region, then `Function`-eval the slice as a JS expression in a
  * scope where references to non-literal identifiers throw a useful
- * error. This is enough for the Phase 1 happy path (literal trees).
+ * error. This is enough for the current happy path (literal trees).
  */
 export function extractDefineAppLiteral(
   src: string,
@@ -513,7 +517,7 @@ export function extractDefineAppLiteral(
   } catch (e) {
     throw new Error(
       `[zeroship:manifest] cannot evaluate defineApp argument in ${filePath} as a literal. ` +
-        `Phase 1 only supports literal resource trees (no computed expressions). ` +
+        `This build only supports literal resource trees (no computed expressions). ` +
         `Hint: replace dynamic values like \`env.PROD ? "anon" : "user"\` with a constant. ` +
         `Underlying error: ${(e as Error).message}`,
     );

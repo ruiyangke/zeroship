@@ -1,6 +1,7 @@
 // sdks/vite-plugin/src/server-graph.ts
 //
-// Reference-graph walk for RPC v2 server-binding discovery (proposal §1).
+// Reference-graph walk for RPC v2 server-binding discovery. The rules
+// come from `docs/proposals/rpc-v2.md` §1.
 //
 // Walk the module graph from the client entry. For each imported
 // binding, decide whether it is a server reference by checking three
@@ -34,7 +35,8 @@ import {
  *
  * `marker` records WHY the binding is a server reference; the strict-
  * mode gate rejects `"graph"`-only bindings in production builds since
- * the spec requires a directly-declared directive.
+ * `docs/proposals/rpc-v2.md` §1 requires a directly-declared
+ * directive.
  */
 export interface ServerBinding {
   wireId: string;
@@ -327,7 +329,7 @@ async function ensureAnalysis(
 
 /**
  * Walk the module graph from the client entry, identifying server
- * bindings per the rules in proposal §1.
+ * bindings per the rules in `docs/proposals/rpc-v2.md` §1.
  *
  * The output map is keyed by `<sourceFile>::<exportName>` (the final
  * declaring location, not the importer). The synthetic-entry
@@ -477,7 +479,8 @@ export async function walkClientEntry(
 // ── Strict-mode gate ───────────────────────────────────────────────────────
 
 /**
- * Strict-mode gate (proposal §1, "Strict mode (production builds)").
+ * Strict-mode gate from `docs/proposals/rpc-v2.md` §1 ("Strict mode
+ * (production builds)").
  * Every server binding must have a directly-declared `"use server"`
  * marker — file-level or function-level. Graph-only bindings are a
  * build error in strict mode.

@@ -21,9 +21,9 @@
 //! both async; its `[[Prototype]]` is `%AsyncIteratorPrototype%`. Its
 //! `@@toStringTag` is `"ReadableStream Async Iterator"`.
 //!
-//! ## Storage (D-2 + D-8)
+//! ## Storage
 //!
-//! Per design D-8, "finished" is **derived** from `reader.[[stream]] === undefined`
+//! `"finished"` is **derived** from `reader.[[stream]] === undefined`
 //! post-release — there is **no** `is_finished` slot on the iterator. The
 //! iterator stores:
 //!
@@ -79,7 +79,7 @@ const ITER_TAG: &str = "[[asyncIter.tag]]";
 
 /// `Box<AsyncIterState>` lives in the iterator wrapper's internal field 0.
 ///
-/// Per D-8: NO `is_finished` slot — finished is derived from
+/// There is no `is_finished` slot; finished is derived from
 /// `reader.[[stream]] === undefined`.
 #[allow(missing_debug_implementations)]
 pub struct AsyncIterState {

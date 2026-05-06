@@ -514,8 +514,8 @@ mod tests {
         assert_eq!(out.stdout.trim(), "early", "partial output must survive");
     }
 
-    /// **H1 regression: huge output is capped, marked truncated,
-    /// reader keeps draining.** Without draining the pipe the writer
+    /// Huge output is capped, marked truncated, and the reader keeps
+    /// draining. Without draining the pipe the writer
     /// blocks at the kernel buffer (~64 KiB) and never reaches the
     /// cap, so this test would also catch a missing drain.
     #[compio::test]

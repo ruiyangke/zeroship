@@ -17,12 +17,13 @@ import type { UIMessage } from "ai";
 // rather than api/index.ts, so the old api/index.ts is dead code.
 // TopBar / AuthContext / Account / Login / Signup still reference
 // `isDevAutoAuth` via that import path; export the same shim here
-// so the module chain loads. Plan 03 cleans up the orphan tree.
+// so the module chain loads. A later cleanup can delete this once the
+// orphaned surfaces are removed.
 export function isDevAutoAuth(): boolean {
   return import.meta.env.DEV;
 }
 
-// ─── Project lifecycle procedures (Plan 03.1) ────────────────────
+// ─── Project Lifecycle Procedures ─────────────────────────────────
 // Re-export server functions as plain async functions. The vite-plugin
 // transforms each server-module export into an RPC stub on the client
 // side (see sdks/vite-plugin/src/transform.ts:317-329 — single-input
@@ -62,25 +63,25 @@ export {
   type FileEntry,
 } from "../server/sandbox";
 
-// Plan / Health canvas stubs (Plan 01.7). Every export takes ONE
+// Plan / Health canvas stubs. Every export takes one
 // object input — see `server/agents.ts` header for the wire-shape
-// rationale. V1 is in-memory; persistence lands with ISS-14/16/etc.
+// rationale. The current implementation is in-memory only.
 //
-// Data + Media canvas stubs (Plan 01.8) live in the same module —
-// same single-input wire convention. Persistence + real backing
-// lives behind ISS-20 → ISS-26.
+// Data + Media canvas stubs live in the same module with the same
+// single-input wire convention. Real persistence and backing stores
+// are still separate follow-up work.
 export {
   listIssues,
   addIssue,
   getQualityScores,
-  // Data canvas (ISS-20 → ISS-25)
+  // Data canvas
   listTables,
   getTableRows,
   listIndexes,
   listMigrations,
   listBackups,
   triggerBackup,
-  // Media canvas (ISS-26)
+  // Media canvas
   listMedia,
   uploadMedia,
   deleteMedia,
@@ -100,10 +101,10 @@ export {
   type MediaEntry,
 } from "../server/agents";
 
-// PM / SRE scheduled-worker procs (spec §4.8.3.2). Each takes
+// PM / SRE scheduled-worker procs (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.3.2). Each takes
 // `{appId}` and returns a structured digest / findings payload — see
 // `server/pm_worker.ts` and `server/sre_worker.ts` for the wire shape
-// and the ISS-28 caveat about missing cron infrastructure.
+// and the missing cron infrastructure caveat.
 export {
   pmDigest,
   type PMDigest,
@@ -119,7 +120,7 @@ export {
 
 export { appPreviewUrl } from "./lib/preview-url";
 
-// One procedure to start with — Plan 02 may add more (file CRUD, deploy,
+// One procedure to start with — we can add more later (file CRUD, deploy,
 // etc.) and they go here as additional fields on `App`.
 type App = {
   chat: ProcedureType<"stream", { messages: UIMessage[]; appId?: string }, never>;
@@ -176,7 +177,7 @@ export function chatTransport<TIn>(
       const resume = (body as { resume?: { token: string; value: unknown } } | undefined)?.resume;
       // appId carried alongside both fresh and resume payloads so the
       // server's data-part middleware can persist Critic-graded
-      // scorecards back to the right project (per ISS-16 fix path).
+      // scorecards back to the right project.
       // Optional — when missing (rare; tests, default thread), the
       // middleware skips the persistence side-effect.
       const appId = options.appId;

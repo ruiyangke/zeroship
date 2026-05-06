@@ -2,7 +2,7 @@
 //!
 //! Covers the LangGraph-shaped subset (`getStore`, `run`,
 //! `enterWith`, `disable`) plus the scenario that broke the
-//! closure-based polyfill (ISS-01): `getStore()` after an awaited
+//! closure-based polyfill: `getStore()` after an awaited
 //! native operation.
 //!
 //! The native impl uses V8's `ContinuationPreservedEmbedderData`
@@ -10,7 +10,7 @@
 //! hop, so a `run(value, cb)` body that does `await something`
 //! sees the right value when the continuation resumes.
 //!
-//! Pre-D-N26 this drove the class via `globalThis.__zsAsyncHooks`.
+//! Earlier versions drove the class via `globalThis.__zsAsyncHooks`.
 //! Post-migration the class is the export of a V8 SyntheticModule
 //! (`node:async_hooks`); this harness uses the `__zeroshipNodeBuiltin`
 //! bridge that the runtime installs for dev's ModuleRunner — same
@@ -112,7 +112,7 @@ fn nested_run_inner_sees_inner_outer_restores() {
 }
 
 // ---------------------------------------------------------------------------
-// THE critical regression test for ISS-01
+// Regression test: async continuation keeps the active ALS store
 // ---------------------------------------------------------------------------
 //
 // `getStore()` inside an async callback after `await` must return
@@ -365,7 +365,7 @@ fn run_callback_must_be_callable_throws_typeerror() {
 }
 
 // ---------------------------------------------------------------------------
-// LangGraph-shaped integration test (the ISS-01 reproducer)
+// LangGraph-shaped integration test
 // ---------------------------------------------------------------------------
 //
 // Mimics the pattern that triggers the bug in `@langchain/langgraph`:
@@ -404,8 +404,8 @@ fn langgraph_shaped_runwithconfig_after_await_sees_config() {
         function fakeFetch() {
             return Promise.resolve("model-output");
         }
-        // The "node body" — awaits then calls interrupt(). The naive
-        // single-node shape that ISS-01 made impossible.
+        // The "node body" — awaits then calls interrupt(). This is the
+        // single-node shape that previously failed.
         async function nodeBody() {
             const out = await fakeFetch();
             // Pre-fix this would throw because the slot was reverted

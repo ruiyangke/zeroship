@@ -11,7 +11,7 @@
 //!
 //! ## Why we ship our own parser
 //!
-//! Per the design's D-21 v2 fix, we considered adding the `data-url` crate
+//! We considered adding the `data-url` crate
 //! as a workspace dep. Auditing the crate (~270 LOC, no other consumers,
 //! pulls in `mime` + a percent-decoder) showed it was simpler to inline
 //! the parser. The grammar from RFC 2397 is tiny:

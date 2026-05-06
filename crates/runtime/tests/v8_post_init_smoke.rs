@@ -1,7 +1,7 @@
-//! Smoke tests for `#[v8_constructor(post_init = "fn_name")]` (MAC-02).
+//! Smoke tests for `#[v8_constructor(post_init = "fn_name")]`.
 //!
 //! See `docs/proposals/macro-constructor-post-init.md` for the design
-//! and §7.2 for the test surface — this file ships the Phase 1 cases:
+//! and §7.2 for the test surface — this file ships the initial cases:
 //!
 //!   #1   Basic post_init — private symbol set by hook is visible from
 //!        a method on the same class.

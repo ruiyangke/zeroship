@@ -1,4 +1,4 @@
-//! Native `RpcError` tests — RPC v2 phase 1 (Wave B).
+//! Native `RpcError` tests.
 //!
 //! Mirrors the DOMException test harness pattern. The class is installed
 //! by the runtime's `setup_globals` path; we drive it through the
@@ -146,7 +146,7 @@ fn expose_message_default_false_overridable() {
 #[test]
 fn details_round_trip() {
     // serde_json's workspace-level `preserve_order` feature (enabled by
-    // the superjson wire format in Wave A) makes Value preserve insertion
+    // the superjson wire format) makes Value preserve insertion
     // order through every Rust-side re-serialization step — so V8's
     // insertion order survives all the way to the wire byte-identical.
     let r = dispatch(

@@ -3,7 +3,7 @@
 //! Covers:
 //!   - Construction + dictionary parsing
 //!   - code conversion: ConvertToInt default case (modulo, NOT [Clamp])
-//!     — addresses critic MAJOR #28.
+//!     — this is the behavior we pin here.
 //!   - wasClean / reason defaults
 //!   - instanceof CloseEvent && instanceof Event
 
@@ -103,7 +103,7 @@ fn close_event_missing_type_throws() {
 // ---------------------------------------------------------------------------
 // `code` conversion — ConvertToInt default case (NOT [Clamp]).
 // Per WebIDL: NaN/inf → 0; truncate toward zero; modulo 2^16.
-// (addresses critic MAJOR #28)
+// This is the behavior we pin here.
 // ---------------------------------------------------------------------------
 
 #[test]

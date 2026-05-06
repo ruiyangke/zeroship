@@ -1,5 +1,5 @@
 //! Smoke + regression coverage for `gen_recover_box` honoring
-//! `ReceiverKind`/`mut_receiver`. Closes Wave 9 NS1.
+//! `ReceiverKind`/`mut_receiver`.
 //!
 //! Pre-fix, the shared `gen_recover_box` helper unconditionally emitted
 //!
@@ -19,7 +19,7 @@
 //! when neither borrow is observably aliased at the user-visible
 //! dispatch.
 //!
-//! Wave 9's fix gates the materialisation form on `mut_receiver`:
+//! The fix gates the materialisation form on `mut_receiver`:
 //! `&self` callbacks emit
 //!
 //! ```ignore
@@ -187,7 +187,7 @@ mod recover_box_class {
 // codegen materialises `&Self`, so both the outer and inner bindings
 // are shared references to the same allocation (sound).
 //
-// Pre-fix (Wave 8 and earlier) the materialisation was unconditional
+// Earlier versions used an unconditional
 // `&mut *`; the inner re-entry produced a second `&mut Self` while the
 // outer one was still bound. Release-mode optimisers may miscompile
 // under that aliasing, and Miri's stacked-borrows checker rejects it
@@ -266,7 +266,7 @@ fn shared_self_cross_method_reentry_is_sound() {
         },
         // The outer `peek` calls the callback → callback re-enters peek
         // (which is the SAME method) — this is the cross-binding-of-
-        // same-method case. Wave 9 NS1 covers this because the inner
+        // same-method case. The fix covers this because the inner
         // call manifests its OWN `&Self` from `__ext.value()`, distinct
         // from the outer call's binding but pointing at the same
         // allocation. Two `&Self`s on the same allocation is sound.

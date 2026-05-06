@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 01 — onboarding (spec §7.1, §7.3, §7.5).
+// Onboarding smoke test.
 //
 // All UI surfaces — no API key, no control plane needed. The
 // onboarding intent picker, the wizard's first-run hint, and the
@@ -45,7 +45,7 @@ async function deleteTourApp(id: string): Promise<void> {
   }).catch(() => {});
 }
 
-test.describe("Plan 01 — onboarding (spec §7)", () => {
+test.describe("onboarding (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7)", () => {
   test.beforeEach(async ({ context }) => {
     // Each test starts on a clean storage so first-run flags fire.
     await context.clearCookies();
@@ -114,7 +114,7 @@ test.describe("Plan 01 — onboarding (spec §7)", () => {
   });
 });
 
-test.describe("Plan 01 — product tour (spec §7.5)", () => {
+test.describe("product tour (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.5)", () => {
   // The tour is driven from the WorkspaceShell TopBar "?" button, so
   // we need a project workspace mounted. Fall back to creating an app
   // via the control plane; if it's down we skip — the tour requires

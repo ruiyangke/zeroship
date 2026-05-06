@@ -7,7 +7,7 @@
 //!      dispatch.
 //!   2. `main_fetch(fetchParams)` — routes by scheme: `http`/`https` →
 //!      `http_fetch`, `data:` → `data_url_fetch`, others → network error.
-//!   3. `http_fetch(fetchParams)` — sets up CORS bypass per D-3 (we
+//!   3. `http_fetch(fetchParams)` — sets up CORS bypass (we
 //!      ignore mode/credentials policing because the gateway is the
 //!      perimeter), calls `http_redirect_fetch`.
 //!   4. `http_redirect_fetch(fetchParams)` — wraps the redirect loop
@@ -15,12 +15,12 @@
 //!      method/body mutation per status, cross-origin Authorization
 //!      stripping.
 //!   5. `http_network_or_cache_fetch` — applies cache-aware request
-//!      header rewrites (D-14: we don't run a cache, but we still
+//!      header rewrites (we don't run a cache, but we still
 //!      respect `Cache-Control: no-store` etc. for upstream behaviour).
 //!   6. `http_network_fetch` — the actual TCP/TLS round-trip. Wraps
 //!      the cyper backend.
 //!
-//! ## Naming convention (D-20)
+//! ## Naming convention
 //!
 //! Function names are snake_case of the spec abstract operation names:
 //! `main_fetch`, `http_fetch`, `http_redirect_fetch`, etc. So a reader
@@ -28,8 +28,8 @@
 //!
 //! ## Out-of-scope for this dispatch
 //!
-//! - CORS preflight (the gateway is the security boundary; D-3).
-//! - HTTP cache (D-14 — defer until a caching plugin lands).
+//! - CORS preflight (the gateway is the security boundary).
+//! - HTTP cache (defer until a caching plugin lands).
 //! - Service Worker interception (no SWs in zeroship).
 //! - Mixed-content checks (HTTPS-from-HTTPS-only is enforced by the
 //!   bad-port table + scheme allowlist; spec subtleties around upgrade
@@ -136,11 +136,11 @@ pub struct AlgorithmResponse {
 
 /// Per Fetch §5.2 "main fetch". Routes on URL scheme and dispatches.
 ///
-/// Per design D-3 we skip:
+/// We intentionally skip:
 ///   - Step 7 "should request be blocked due to a bad port" runs inside
 ///     scheme-fetch for HTTP — we apply the bad-port check there, not
 ///     here, since data: / about: skip the check in the spec.
-///   - Step 14 CORS preflight (D-3 — gateway-level).
+///   - Step 14 CORS preflight (gateway-level).
 ///   - Step 15 referrer policy (we don't tag requests).
 pub async fn main_fetch(
     request: FetchRequest,
@@ -203,7 +203,7 @@ async fn data_url_fetch(
 // ---------------------------------------------------------------------------
 
 /// Per Fetch §5.5 "HTTP fetch". For our use case (zeroship V8 isolates,
-/// no service workers, no CORS preflight per D-3):
+/// no service workers, no CORS preflight):
 ///
 ///   1. Bad-port check (§5.5 step 2.2).
 ///   2. Hand off to `http_redirect_fetch` for the redirect loop.
@@ -398,8 +398,9 @@ async fn http_network_or_cache_fetch(
     request: &FetchRequest,
 ) -> Result<NetworkResponse, String> {
     let resp = http_network_fetch(request).await?;
-    // D-15: post-decode strip Content-Encoding + Content-Length when CE
-    // was present. Run the decompression hook here so the response the
+    // After decoding, strip Content-Encoding and Content-Length when
+    // Content-Encoding was present. Run the decompression hook here
+    // so the response the
     // caller sees has decoded body + clean headers.
     let decoded = decompress_response_body(resp.body, &resp.headers)
         .map_err(|e| e)?;
@@ -412,11 +413,11 @@ async fn http_network_or_cache_fetch(
 }
 
 // ---------------------------------------------------------------------------
-// Default Accept-Encoding helper (D-15)
+// Default Accept-Encoding helper
 // ---------------------------------------------------------------------------
 
-/// Per design D-15: outbound requests get a default `Accept-Encoding`
-/// when the user didn't set one. HTTPS gets `br, gzip, deflate`; HTTP
+/// Outbound requests get a default `Accept-Encoding` when the user
+/// didn't set one. HTTPS gets `br, gzip, deflate`; HTTP
 /// gets `gzip, deflate` (browsers historically suppress `br` over HTTP
 /// because of legacy proxies that mishandle it).
 pub fn default_accept_encoding(scheme: &str) -> &'static str {
@@ -428,7 +429,7 @@ pub fn default_accept_encoding(scheme: &str) -> &'static str {
 
 /// True if a list of headers already contains `Accept-Encoding`
 /// (case-insensitive). Used to skip the default when the user supplied
-/// one (including the empty string for opt-out per D-15).
+/// one, including the empty string for opt-out.
 pub fn has_accept_encoding(headers: &[(String, String)]) -> bool {
     headers
         .iter()
@@ -436,13 +437,13 @@ pub fn has_accept_encoding(headers: &[(String, String)]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Origin header (D-16)
+// Origin header
 // ---------------------------------------------------------------------------
 
 /// Per Fetch §2.2.5 step 4 — append `Origin` for methods NOT in
 /// {GET, HEAD}. The value is the request's origin tuple's serialization
-/// (`scheme://host[:port]`); per design D-16, "no-referrer" referrer
-/// policy makes it `null`.
+/// (`scheme://host[:port]`); `"no-referrer"` referrer policy makes it
+/// `null`.
 pub fn append_origin_if_needed(headers: &mut Vec<(String, String)>, method: &str, url: &str, referrer_policy: &str) {
     let upper = method.to_ascii_uppercase();
     if upper == "GET" || upper == "HEAD" {

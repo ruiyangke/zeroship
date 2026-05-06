@@ -1,6 +1,6 @@
 import { EmptyState } from "../components/EmptyState";
 
-/** Plan 01 placeholder — real preview canvas in Plan 04. */
+/** Placeholder until the real preview canvas is wired. */
 export function PreviewCanvasStub() {
   return (
     <div data-testid="preview-canvas" className="h-full flex items-center justify-center bg-paper-2">

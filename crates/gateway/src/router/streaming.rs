@@ -12,7 +12,7 @@ use std::rc::Rc;
 use ntex::util::Bytes;
 
 // ---------------------------------------------------------------------------
-// Phase 6 — streaming static-asset serving
+// Streaming static-asset serving
 // ---------------------------------------------------------------------------
 
 // Blobs at or above this size skip the in-memory cache and stream from
@@ -20,8 +20,8 @@ use ntex::util::Bytes;
 // would either evict everything else (single-entry budget bypass) or
 // be silently dropped (single-entry budget exceeded), so streaming is
 // both a correctness and a footprint win for large blobs. 1 MiB
-// matches the value cited in `docs/architecture/blob-store.md`
-// "Phase C" and is a clean cut-off between "small enough to share
+// matches the value cited in `docs/architecture/blob-store.md` and is a
+// clean cut-off between "small enough to share
 // via Bytes refcounting" and "large enough to pay the cost of
 // chunked file I/O".
 pub(super) const STREAM_THRESHOLD_BYTES: u64 = 1024 * 1024;
@@ -131,7 +131,8 @@ pub(super) async fn chunk_stream_from_file_range<R>(
                 chunk.truncate(n);
                 // Bytes::from(Vec<u8>) copies in this version of
                 // ntex_bytes. That's the residual user-space copy
-                // Phase C / sendfile would eliminate. The win at this
+                // A future sendfile-style path would eliminate this. The
+                // win at this
                 // layer is that we never hold the full file in RAM.
                 if tx.send(Ok(Bytes::from(chunk))).is_err() {
                     return;

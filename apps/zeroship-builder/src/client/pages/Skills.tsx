@@ -1,8 +1,8 @@
 // ─── Skills — public skill catalogue (`/skills`) ────────────────
 //
-// Per spec §5.3. Filter pills at the top, grid of skill cards
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.3. Filter pills at the top, grid of skill cards
 // underneath. "Add to project" is greyed out / "Coming soon" — the
-// install action and skill registry aren't wired yet (see ISS-13).
+// install action and skill registry are not wired yet.
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -85,9 +85,7 @@ export function Skills() {
           <p className="font-serif italic text-[15px] text-ink-soft m-0 leading-[1.55]">
             The skill registry is wiring up. For now this page lists what's
             on the roadmap; "Add to project" lights up once the install
-            action ships. (Tracking under{" "}
-            <code className="font-mono text-[12px] not-italic">ISS-13</code>{" "}
-            in <code className="font-mono text-[12px] not-italic">ISSUES.md</code>.)
+            action ships.
           </p>
         </section>
 

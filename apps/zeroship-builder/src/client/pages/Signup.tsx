@@ -22,7 +22,7 @@ export default function Signup() {
     mutationFn: () => apiRegister({ email, password, name }),
     onSuccess: async () => {
       await refresh();
-      // First signup → run the onboarding intent flow per spec §7.1.
+      // First signup → run the onboarding intent flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1.
       // If the caller wanted a deeper destination (`?return=…`), respect
       // that — login flows and OAuth callbacks supply it. Bare /signup
       // submissions land on `/home` by default; we redirect those to
@@ -143,7 +143,7 @@ function Field({
 
 function sanitizeReturn(raw: string | null): string {
   // Post-signup default lands in the authed gallery at /home — `/` is
-  // the public marketing page (per spec §5.1).
+  // the public marketing page (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.1).
   if (!raw) return "/home";
   if (raw.startsWith("//") || raw.includes("://") || !raw.startsWith("/")) return "/home";
   return raw;

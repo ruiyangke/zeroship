@@ -1,17 +1,17 @@
-// ─── HealthCanvas — SRE agent's home (spec §9.9) ────────────────
+// ─── HealthCanvas — SRE agent's home (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.9) ────────────────
 //
 // Four stacked sections inside one scrolling canvas:
 //   1. Status pulse — Live/Draft chip from `app.deploy_hash`, last
 //      deploy relative time, region (placeholder).
-//   2. Quality scorecard — seven dimensions per spec §11.1, sourced
+//   2. Quality scorecard — seven dimensions per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §11.1, sourced
 //      from the Critic stub via `getQualityScores({appId})`.
 //   3. Incidents — empty state for V1 (no incidents table yet, see
-//      ISSUES.md ISS-17).
+//      this part is not wired yet).
 //   4. Performance — defensive log-line parsing for request rate /
 //      error rate / p95 latency. Polls `getAppLogs(appId)` every 5s
 //      and keeps a 24-tick rolling history per metric. Hand-rolled
 //      SVG sparkline (no chart lib). Structured metering still
-//      pending (ISS-18 partial).
+//      still pending.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -267,7 +267,7 @@ function Incidents({ appId }: { appId: string }) {
             All quiet — no incidents on record.
           </div>
           <div className="mt-0.5 font-serif italic text-[11.5px] text-pencil">
-            Backing table tracked as ISS-17.
+            Persistent incident history is not wired yet.
           </div>
         </div>
       )}
@@ -333,7 +333,7 @@ function FindingCard({ finding }: { finding: SREFindingItem }) {
 // The latest values feed three KPI tiles; a 24-tick rolling history
 // per metric powers a hand-rolled SVG sparkline. When no logs (or no
 // matching lines), tiles render the original "connect a deploy"
-// placeholder per spec §26 voice.
+// placeholder per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §26 voice.
 
 const PERF_POLL_MS = 5_000;
 const PERF_HISTORY = 24;
@@ -462,7 +462,8 @@ function Performance({ appId }: { appId: string }) {
         />
       </div>
       <div className="mt-2 font-serif italic text-[11.5px] text-pencil">
-        Best-effort signals from log text. Structured metering tracked as ISS-18.
+        Best-effort signals from log text. Structured metering is not
+        wired yet.
       </div>
     </section>
   );

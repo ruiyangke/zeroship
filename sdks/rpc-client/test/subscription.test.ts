@@ -1,5 +1,5 @@
 /**
- * Phase 7 — `subscribe()` over WebSocket.
+ * `subscribe()` over WebSocket.
  *
  * Surface:
  *

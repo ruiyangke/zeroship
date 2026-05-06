@@ -1,14 +1,16 @@
 /**
- * Phase 5 — `proc.useMutation(...)` happy path + idempotency × retry.
+ * `proc.useMutation(...)` happy path + idempotency × retry.
  *
  * Two scenarios:
  *
  *   1. Happy path: `mutate(input)` invokes `call(input)`; the hook's
  *      `data` becomes the call result.
- *   2. Idempotency × retry (the load-bearing test from §10): when a
+ *   2. Idempotency × retry (the load-bearing test from
+ *      `docs/proposals/rpc-v2.md` §10): when a
  *      mutation declares `idempotent: true`, all retries of a single
  *      `mutate()` reuse the SAME UUIDv7 idempotency key. Server-side
- *      Phase 6 dedupe replays the first response on retries 2-N.
+ *      gateway dedupe can then replay the first response on retries
+ *      2-N.
  */
 
 import { test, describe } from "node:test";

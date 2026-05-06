@@ -86,15 +86,14 @@ export function pickEntryWireId(p: {
  */
 export function buildServerEntrySource(opts: {
   userEntryRel: string;
-  /** Phase 2: explicit server-binding map. When provided, the
-   *  synthetic entry emits per-target imports and a static
-   *  `_procedures` object literal. Falls back to the namespace-walk
-   *  shape when omitted (Phase 1 compatibility). */
+  /** Explicit server-binding map. When provided, the synthetic entry
+   *  emits per-target imports and a static `_procedures` object
+   *  literal. Falls back to namespace-walk registration when omitted. */
   bindings?: Map<string, ServerBinding>;
 }): string {
   const userImport = JSON.stringify(opts.userEntryRel);
 
-  // Phase 2 — static dispatch table fed by walkClientEntry().
+  // Static dispatch table fed by walkClientEntry().
   if (opts.bindings && opts.bindings.size > 0) {
     return buildPhase2Entry(userImport, opts.bindings);
   }
@@ -371,13 +370,13 @@ export default { fetch: _zsFetch, rpc: _zsRpc };
 `;
 }
 
-// ── Phase 2: server-binding-fed synthetic entry ───────────────────────────
+// ── Server-Binding Synthetic Entry ────────────────────────────────────────
 //
 // When the plugin has run the reference-graph walk it can hand the
 // generator a `ServerBinding` map keyed by `<sourceFile>::<exportName>`.
 // We emit one ESM import per target file (deduplicated) and a static
 // `_procedures` literal keyed by wireId. This matches the shape in
-// proposal §5.
+// `docs/proposals/rpc-v2.md` §5.
 
 function buildPhase2Entry(
   userImport: string,
@@ -434,7 +433,7 @@ function buildPhase2Entry(
     }
   }
 
-  return `// virtual:zeroship/_server-entry — auto-generated synthetic entry (Phase 2)
+  return `// virtual:zeroship/_server-entry — auto-generated synthetic entry
 //
 // The dispatch table is statically derived from the reference-graph
 // walk. Each entry maps a wireId to a per-target namespace member.
@@ -446,7 +445,7 @@ ${importLines}
 
 // TODO(rpc-v2): swap to \`__dispatchRpc\` from \`@zeroship/server/runtime\`
 // once the upstream stub ships. Until then, the inline _zsRpc helper
-// below preserves the Phase-1 dispatch shape (input parse, output
+// below preserves the current dispatch behavior (input parse, output
 // dev-validation, stream tagging).
 
 const _procedures = {
@@ -700,10 +699,10 @@ export function rpcRegistryPlugin(opts: {
   root?: string;
   userEntryRel: string;
   state?: TransformState;
-  /** Phase 2: pre-computed server bindings. When provided, the
-   *  generated entry uses static per-target imports + a wireId-keyed
-   *  `_procedures` literal. Recomputed by the caller (e.g.,
-   *  `buildPlugin`) after the reference-graph walk. */
+  /** Pre-computed server bindings. When provided, the generated entry
+   *  uses static per-target imports plus a wireId-keyed `_procedures`
+   *  literal. Recomputed by the caller (for example `buildPlugin`)
+   *  after the reference-graph walk. */
   getBindings?: () => Map<string, ServerBinding> | undefined;
 }): Plugin {
   return {

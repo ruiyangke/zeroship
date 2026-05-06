@@ -5,15 +5,15 @@
 // planning loop checks; if not approved and iteration count < N, Builder
 // revises.
 //
-// Per spec §11.1 + §4.8.9:
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §11.1 + §4.8.9:
 //  - SubAgent (deepagents primitive), not a separate runtime
-//  - responseFormat = Zod schema for structured output (G5) — deepagents
+//  - responseFormat = Zod schema for structured output — deepagents
 //    forwards this to LangChain's `createAgent`, which accepts a Zod
 //    schema directly via `ResponseFormatInput` (see
 //    node_modules/langchain/dist/agents/responses.d.ts).
 //  - Model: openai:gpt-5.4-mini, same family as Builder. Standardised
-//    across all SubAgents per spec §4.8.9 G6 (model parity > cost diff
-//    in V1; revisit if telemetry shows Critic spend dominates).
+//    across all subagents for now (model parity > cost diff in the
+//    initial rollout; revisit if telemetry shows Critic spend dominates).
 //  - Builder calls task("critic", { changes }) after each commit; the
 //    "loop" is a plain JS while inside Builder's planning, not a custom
 //    LangGraph cycle.
@@ -58,8 +58,7 @@ export const critic: SubAgent = {
     "responsive, code_health) and returns structured approval / issues. " +
     "Called by Builder after each commit; iterate until approved or limit hit.",
   systemPrompt: CRITIC_PROMPT,
-  // Same model family as Builder — gpt-5.4-mini is the V1 standard
-  // across all SubAgents per spec §4.8.9 G6. Per-agent model tuning
+  // Same model family as Builder. Per-agent model tuning
   // deferred until cost telemetry justifies divergence.
   model: "openai:gpt-5.4-mini",
   // No tools — Critic reviews what Builder hands over via the task input.

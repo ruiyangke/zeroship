@@ -9,9 +9,8 @@ import MagicString from "magic-string";
  *
  * `@zeroship/server` is the canonical home today (the wrappers ship
  * alongside `defineApp`, `z`, and the SSR adapter). `@zeroship/rpc`
- * is reserved for the Phase 2 split where the server-only authoring
- * API separates from the build-time wrapper helpers; until then it
- * resolves the same names.
+ * is kept as an alias so the wrapper import path can be split later
+ * without changing the transform model.
  */
 const WRAPPER_SOURCES = new Set([
   "@zeroship/server",
@@ -33,8 +32,8 @@ type WrapperKind = "query" | "mutation" | "stream" | "subscription" | "procedure
 
 /**
  * Per-procedure metadata stashed at transform time. Consumed by the
- * Phase 1 manifest emitter (`src/manifest.ts`) at closeBundle to build
- * the `manifest.resources` block.
+ * manifest emitter (`src/manifest.ts`) at closeBundle to build the
+ * `manifest.resources` block.
  *
  * Wire-stable contract: this struct mirrors `DiscoveredProcedure` in
  * `src/manifest.ts`. They evolve together.
@@ -82,8 +81,8 @@ export interface TransformState {
 /**
  * File-level `"use server"` directive detector.
  *
- * ISS-02: the path convention (`src/server.{ts,tsx,js,jsx}` single-file
- * layout, anything under `src/server/**` directory layout) is GONE.
+ * The old path convention (`src/server.{ts,tsx,js,jsx}` single-file
+ * layout, anything under `src/server/**` directory layout) is gone.
  * It silently turned every exported function — including helpers
  * reached via `export * from "./helpers"` — into a public, network-
  * reachable RPC endpoint.
@@ -95,9 +94,9 @@ export interface TransformState {
  * first non-string-expression statement. Comments are stripped by the
  * parser; we just look at body[0].
  *
- * Note this is the FILE-level marker only (Phase 1). The function-level
- * `"use server"` directive (Phase 2) lets a single file mix client and
- * server code; until then a file is wholly server or wholly client.
+ * Note this is the file-level marker only. A later function-level
+ * `"use server"` mode may let one file mix client and server code; for
+ * now a file is wholly server or wholly client.
  */
 export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
   const body = ast.body;
@@ -126,7 +125,8 @@ export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
 /**
  * Function-level `"use server"` directive detector.
  *
- * Per proposal §1, a function whose first statement is the string
+ * `docs/proposals/rpc-v2.md` §1 says that a function whose first
+ * statement is the string
  * literal `"use server"` is a server function regardless of whether
  * the enclosing file carries a file-level directive. The function may
  * be declared via:
@@ -242,8 +242,8 @@ export function detectFunctionLevelUseServer(ast: { body?: unknown[] }): Set<str
 
 /**
  * Path predicate for the legacy `src/server.{ts,tsx,js,jsx}` /
- * `src/server/**` shape. The path convention itself is dead (ISS-02),
- * but the predicate stays around so the transform can emit a friendly
+ * `src/server/**` shape. The path convention itself is gone, but the
+ * predicate stays around so the transform can emit a friendly
  * "you probably want a `"use server"` directive at the top of this
  * file" hint when a developer trips over the breaking change.
  */
@@ -441,8 +441,8 @@ async function* __rpcStream(id, input) {
  *
  *   `src/server/todos.ts` → `src-server-todos`
  *
- * NOTE: As of the Phase 1 follow-up, the slug is NOT used in wireId
- * derivation — the default wireId is just the bare `<exportName>`.
+ * NOTE: the slug is NOT used in wireId derivation — the default wireId
+ * is just the bare `<exportName>`.
  * The slug is retained only for diagnostic messages (the build report
  * and collision-error hints reference it for human readability).
  */
@@ -666,7 +666,7 @@ function collectConfig(astBody: any[]): {
 
 /** Client stub for a non-streaming export.
  *
- * Single-input wire (per spec §RPC): the user's procedure takes one
+ * Single-input wire: the user's procedure takes one
  * value, so the stub forwards `args[0]` (or `undefined` when called
  * with no args). Procedures that conceptually take multiple values
  * pass them as a single object.
@@ -674,9 +674,9 @@ function collectConfig(astBody: any[]): {
  * Emits a `__makeProcedure` call from `@zeroship/rpc-client` — the
  * builder attaches the `__SERVER_REFERENCE` brand, hook getters
  * (lazy-initialized via the `_hookRegistry`), and `{ id, kind, wire }`
- * metadata uniformly. Per proposal §5, RSC `<form action={fn}>` works
- * without JS and runtime callers detect stubs passed as props by
- * checking the brand. */
+ * metadata uniformly. `docs/proposals/rpc-v2.md` §5 requires this so
+ * RSC `<form action={fn}>` works without JS and runtime callers can
+ * detect stubs passed as props by checking the brand. */
 function clientUnaryStub(name: string, methodName: string, kind: string): string {
   const meta = JSON.stringify({ id: methodName, kind, wire: "json" });
   return (
@@ -733,8 +733,8 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    comments. This avoids the AST parse cost on the >99% of
         //    source files that don't open with `"use server"`.
         if (!quickHasUseServerDirective(code)) {
-          // Friendly hint for ISS-02 migration: a file at the legacy
-          // `src/server.{ts,...}` / `src/server/**` shape that's
+          // Friendly hint for code still laid out like the legacy
+          // `src/server.{ts,...}` / `src/server/**` shape: a file that's
           // missing the directive is almost certainly an unmigrated
           // server module. Emit one warning per file path per dev
           // session so HMR doesn't spam.
@@ -747,7 +747,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             const msg =
               `[zeroship:transform] ${rel} sits at the legacy server-module path ` +
               `but is missing the \`"use server"\` directive. ` +
-              `Path-based discovery was dropped (see ISS-02): add ` +
+              `Path-based discovery was dropped: add ` +
               `\`"use server";\` as the first line, then wrap each RPC ` +
               `export with procedure()/query()/mutation()/stream() ` +
               `from \`@zeroship/server\`. Untouched files will not be ` +
@@ -765,9 +765,9 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         const isTsx = id.endsWith(".tsx") || id.endsWith(".jsx");
         const ast = this.parse(code, { lang: isTsx ? "tsx" : "ts" });
 
-        // 3. Server-module gate — file-level `"use server"` directive
-        //    (ISS-02). The path convention is gone; only this directive
-        //    opts a file into RPC discovery.
+        // 3. Server-module gate — file-level `"use server"` directive.
+        //    The path convention is gone; only this directive opts a
+        //    file into RPC discovery.
         if (!detectFileLevelUseServer(ast)) return null;
 
         // 4. Find server-procedure exports inside the server module.
@@ -783,7 +783,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //    Plain `export function helper(...)` and `export const x =
         //    ...` stay private; they survive in the server bundle and
         //    are callable by other server code, but they are NOT
-        //    network-reachable. This closes the ISS-02 footgun: a
+        //    network-reachable. That means a
         //    misplaced `export * from "./helpers"` no longer publishes
         //    helpers as `/_zs/v1/<helperName>` endpoints.
         const wrapperBindings = collectWrapperBindings(ast.body);
@@ -819,7 +819,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           //   export async function name() { ... }
           //   export async function* name() { ... }
           //
-          // These are NOT RPCs anymore (ISS-02). They stay in the
+          // These are NOT RPCs anymore. They stay in the
           // server bundle as private helpers; the synthetic SSR
           // entry's namespace iteration ignores them because they
           // lack the wrapper-attached `__zsKind` / `config.kind` tag
@@ -899,8 +899,8 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         // 6. Track for build report + export signature tracking
         serverFunctionMap.set(relative(root, id), new Set(names));
 
-        // 6b. Phase 1 RPC v2: collect per-procedure metadata for the
-        //     manifest emitter. We do this once per server-env transform
+        // 6b. Collect per-procedure metadata for the manifest emitter.
+        //     We do this once per server-env transform
         //     pass; idempotent on (filePath, exportName). The synthetic
         //     SSR entry's dispatch table is populated at module-init
         //     time from the user namespace's exports — it does NOT read
@@ -979,11 +979,12 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           }
         }
 
-        // Resolve wireId per spec §2: explicit `id` wins (looked up in
-        // both the wrapper's second-arg config AND the legacy `<fn>.
-        // config = { ... }` assignment); default is the bare export
-        // name. Production-mode "missing id" check happens in
-        // manifest.ts; here we just pick the same shape so register
+        // Resolve wireId using the order from
+        // `docs/proposals/rpc-v2.md` §2: explicit `id` wins (looked up
+        // in both the wrapper's second-arg config and the legacy
+        // `<fn>.config = { ... }` assignment); default is the bare
+        // export name. The production-only "missing id" check happens
+        // in manifest.ts; here we just pick the same shape so register
         // and dispatch agree on the key.
         const { perFn: perFnForWireIds } = collectConfig(ast.body);
         const wireIdFor = (fn: ServerFn) => {

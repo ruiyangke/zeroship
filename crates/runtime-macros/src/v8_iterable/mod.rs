@@ -98,11 +98,10 @@
 //!
 //! Other types are rejected with a compile_error in the codegen below.
 //!
-//! # Wave 9 split
+//! # Module split
 //!
-//! Pre-Wave-9 this module was a 1,368-LOC god file. Per design's
-//! Wave 9 architectural decomposition (mirroring `v8_class/`'s
-//! parse/emit/shared layout), the file split into:
+//! This module used to be a single 1,368-LOC file. It is now split
+//! to mirror `v8_class/`'s parse/emit/shared layout:
 //!
 //!   - `parse.rs`         — `IterableAttr`, `ValuePairsSig`,
 //!                          `IterMode`, `extract_iterable`,
@@ -129,8 +128,8 @@ mod value_marshal;
 pub(crate) use parse::{extract_iterable, inspect_value_pairs, IterMode, IterableAttr, ValuePairsSig};
 
 /// Shared codegen context threaded through the per-section helpers in
-/// `emit_factory` and `emit_iterator`. Pre-Wave-9 these locals were
-/// hand-passed inside one giant `generate` function; the context
+/// `emit_factory` and `emit_iterator`. Earlier versions hand-passed
+/// these locals inside one giant `generate` function; the context
 /// struct collects them once at orchestrator entry and lets the
 /// helpers read whichever fields they need.
 ///
@@ -203,11 +202,11 @@ pub(super) struct EmitCtx<'a> {
     /// receiver's prototype chain looking for the cached
     /// `<Class>Iterator.prototype` and throws TypeError on miss with
     /// the shape `"<Class>Iterator.prototype.next called on
-    /// incompatible receiver"`. Closes Wave 10 NS6.
+    /// incompatible receiver"`.
     pub next_brand_check: TokenStream2,
 
     // Pre-rendered must_str token bindings for every literal V8 string
-    // the iterable codegen emits. Centralised in Wave 9 NS5 / H10.
+    // the iterable codegen emits. Centralized here once.
     pub class_name_init: TokenStream2,
     pub to_string_tag_init: TokenStream2,
     pub next_key_init: TokenStream2,
@@ -333,8 +332,8 @@ fn build_ctx<'a>(
 
     let scope_tok = quote! { scope };
 
-    // Per-call re-entrancy guard for `&mut self` value_pairs. Wave 8
-    // closes design §13 / C5/H13 with the multi-slot Cell shape;
+    // Per-call re-entrancy guard for `&mut self` value_pairs. This
+    // uses the multi-slot Cell shape;
     // matches `v8_class/emit/reentry_guard.rs`'s design. No-op for
     // `&self` shapes (helper returns an empty TokenStream).
     let reentry_guard = reentry::gen_iter_reentry_guard(class_ty, is_mut);
@@ -367,15 +366,15 @@ fn build_ctx<'a>(
     let iter_install_slot_ty = format_ident!("__InstallSlot_{}", iter_class_ty);
     let iter_brand_slot_ty = format_ident!("__BrandSlot_{}", iter_class_ty);
     // Iterator-class brand-check helper. Walks `__this`'s prototype
-    // chain looking for the cached `<Class>Iterator.prototype`. Closes
-    // Wave 10 NS6: a caller could previously hand `<Class>Iterator
+    // chain looking for the cached `<Class>Iterator.prototype`. A
+    // caller could previously hand `<Class>Iterator
     // .prototype.next` a *different* `#[v8_class]` wrapper as `this`
     // (any wrapper has `internal_field(0) = External(Box<X>)`), causing
     // the recovery `__ext.value() as *mut <Class>Iterator` to
     // reinterpret a `Box<Other>` as `*mut <Class>Iterator` — UB.
     let iter_brand_check_fn = format_ident!("__brand_check_{}", iter_class_ty);
 
-    // Parent class's brand-check ident (see Wave 9 N1 note in
+    // Parent class's brand-check ident (see the note in
     // class_config.rs — the iterable codegen runs BEFORE ClassConfig
     // is built, so we still recompute here; same emitted token).
     let parent_brand_check_fn = format_ident!("__brand_check_{}", class_ty);
@@ -409,7 +408,7 @@ fn build_ctx<'a>(
         }
     };
 
-    // Pre-render must_str token bindings (Wave 9 NS5 / H10).
+    // Pre-render must_str token bindings.
     let class_name_init = must_str(&scope_tok, &quote! { #iter_class_name_str });
     let to_string_tag_init = must_str(&scope_tok, &quote! { #iter_to_string_tag_str });
     let next_key_init = must_str(&scope_tok, &quote! { "next" });

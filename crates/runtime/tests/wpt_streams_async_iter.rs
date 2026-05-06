@@ -8,7 +8,8 @@
 //!   - async-iterator.any.js
 //!
 //! Deferred:
-//!   - patched-global iteration (deferred to D-19 polyfill cutover phase 3)
+//!   - patched-global iteration (deferred until the native globals
+//!     fully replace the patched-global path)
 //!   - GC-driven tests (`garbageCollect()` is a no-op in our runtime)
 
 #![allow(unsafe_code)]

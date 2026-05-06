@@ -1,5 +1,4 @@
-//! Compile-fail snapshot tests for `#[v8_state_marker(...)]` diagnostics
-//! (MAC-01 Phase 1 design `docs/proposals/macro-v8-state.md` §6.2).
+//! Compile-fail snapshot tests for `#[v8_state_marker(...)]` diagnostics.
 //!
 //! Each fixture under `tests/compile_fail_state_marker/` exercises one
 //! malformed shape and pairs with a `.stderr` snapshot. trybuild

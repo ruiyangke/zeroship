@@ -1,6 +1,6 @@
 //! Insta snapshot tests for `#[derive(WebIdlDict)]` codegen.
 //!
-//! Wave 7 commit 2 (F9) — locks the WebIdlDict derive's emit shape
+//! Locks the WebIdlDict derive's emit shape
 //! against drift, mirroring the pattern in
 //! `v8_class/snapshot_tests.rs`. The snapshots live at the workspace
 //! default `crates/runtime-macros/src/snapshots/` (insta resolves

@@ -17,9 +17,9 @@
 //!   `reset_queue`).
 //! - `algorithms` — cross-class spec abstract operations (e.g.
 //!   `ReadableStreamFulfillReadRequest`, `ReadableStreamCancel`).
-//! - `promise_resolve` — D-3 helpers for routing a resolver through
+//! - `promise_resolve` — helpers for routing a resolver through
 //!   `OpResult::JsValue`.
-//! - `budget` — D-18 concurrent stream cap (65,536 per isolate).
+//! - `budget` — concurrent stream cap (65,536 per isolate).
 //!
 //! Class files (one per public IDL interface) follow:
 //! - `readable` / `readable_default_controller` / `readable_default_reader` /
@@ -33,7 +33,7 @@
 // `runtime::build_fetch_outcome`.
 pub mod response_forwarder;
 
-// Native classes & primitives — installed unconditionally per D-19.
+// Native classes and primitives installed unconditionally.
 pub mod algorithms;
 pub mod async_iter;
 pub mod budget;

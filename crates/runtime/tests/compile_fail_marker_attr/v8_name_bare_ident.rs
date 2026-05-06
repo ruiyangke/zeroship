@@ -1,6 +1,6 @@
 //! Compile-fail: `#[v8_name(foo)]` — list form, missing the `=` sign.
 //!
-//! Pre-Wave-4 the `extract_v8_name` helper silently fell back to `None`
+//! Earlier versions let `extract_v8_name` silently fall back to `None`
 //! on malformed shape (closes H5). Now `V8NameAttr::merge` errors with:
 //!   "#[v8_name = \"...\"]: expected `name = literal` shape"
 //!

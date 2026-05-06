@@ -1,4 +1,4 @@
-// ─── LogsCanvas — the ledger (spec §9.5) ────────────────────────
+// ─── LogsCanvas — the ledger (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.5) ────────────────────────
 //
 // Header: filter pills + search box + auto-scroll toggle.
 // Body: virtualized-ish list of log lines (timestamp · level · msg).

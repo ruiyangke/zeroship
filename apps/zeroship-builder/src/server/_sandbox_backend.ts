@@ -1,6 +1,6 @@
 "use server";
-// Phase B.1: deepagents `SandboxBackendProtocolV2` adapter targeting the
-// zeroship sandbox controller (`crates/sandbox`). Builder's built-in
+// deepagents `SandboxBackendProtocolV2` adapter targeting the zeroship
+// sandbox controller (`crates/sandbox`). Builder's built-in
 // fs/exec tools (`ls`, `read_file`, `write_file`, `edit_file`,
 // `execute`, `grep`, `glob`) flow through this class and end up as
 // HTTP calls to the controller's `/sandboxes/:id/...` endpoints.
@@ -110,9 +110,9 @@ function sanitizeId(raw: string, fallback: string): string {
 
 // We don't yet have a real per-creator user_id flowing into Builder —
 // auth lives one layer up (see `auth.ts`) but the chat handler doesn't
-// currently thread it through. Placeholder until Phase B.3 routes the
-// real uid here. Project_id derives from threadId so a user with one
-// chat per project still gets one sandbox per chat.
+// currently thread it through. For now this adapter uses a placeholder
+// user id. `project_id` derives from `threadId`, so a user with one chat
+// per project still gets one sandbox per chat.
 export const BUILDER_USER_ID = "builder";
 
 async function controllerCreateSandbox(

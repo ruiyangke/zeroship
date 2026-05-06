@@ -8,7 +8,7 @@ export function DiffCard({ diff }: { diff: Diff }) {
         <span className="text-pencil text-[10px]">diff</span>
       </div>
       <div className="p-3 font-mono text-[11px] leading-snug whitespace-pre overflow-x-auto max-h-48">
-        {/* simple line-diff for Plan 01; LSP-grade diff in Plan 04 */}
+        {/* Simple line diff for now; richer diff tooling can land later. */}
         {simpleDiff(diff.before, diff.after).map((line, i) => (
           <div key={i} className={
             line.kind === "add"    ? "bg-ivy/10 text-ivy" :

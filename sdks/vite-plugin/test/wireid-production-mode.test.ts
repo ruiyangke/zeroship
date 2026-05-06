@@ -1,5 +1,5 @@
 /**
- * RPC v2 Phase 1 follow-up — production-mode gate.
+ * Production-mode gate.
  *
  * `vite build --mode production` requires every procedure to have an
  * explicit `fn.config.id`. A procedure that lands at the

@@ -230,7 +230,8 @@ fn decode_strips_meta_returns_shadow() {
     let env = superjson::from_bytes(&fx("composite")).unwrap();
     let shadow = superjson::decode(env).unwrap();
     // Shadow is the raw JSON-side projection — Date is still an ISO string,
-    // BigInt is still a decimal string, etc. Wave C reconstructs in V8.
+    // BigInt is still a decimal string, etc. The V8-side decoder
+    // reconstructs those richer types later.
     assert_eq!(shadow["d"], json!("2026-01-01T00:00:00.000Z"));
     assert_eq!(shadow["n"], json!("9007199254740993"));
 }

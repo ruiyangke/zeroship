@@ -12,7 +12,7 @@
 //!    SHA-1 path for *sign*. The WebCrypto spec still requires SHA-1
 //!    for RSASSA-PKCS1-v1_5 (§22) and RSA-PSS (§24).
 //!
-//! Per `docs/proposals/webcrypto-native.md` D-16.
+//! See `docs/proposals/webcrypto-native.md`.
 //!
 //! Surface kept minimal: a few safe entry points, all convert FFI
 //! failures to `OpError::dom("OperationError", _)`.

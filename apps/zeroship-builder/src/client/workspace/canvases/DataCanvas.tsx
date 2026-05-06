@@ -1,16 +1,16 @@
-// ─── DataCanvas — five-subtab DB view (spec §9.3) ───────────────
+// ─── DataCanvas — five-subtab DB view (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.3) ───────────────
 //
 // Five subtab pills inside one canvas:
 //   1. Tables    — list of relations from listTables; row click opens
 //                  a paginated row browser (getTableRows).
-//   2. Schema    — placeholder (visualizer ships with ISS-22).
+//   2. Schema    — placeholder until the visualizer is wired.
 //   3. Indexes   — flat list from listIndexes.
 //   4. Migrations— timeline list from listMigrations.
 //   5. Backups   — list from listBackups + a "trigger backup" button
 //                  that calls triggerBackup.
 //
 // All data flows through the in-memory stubs in `src/server/agents.ts`
-// (see ISS-20 → ISS-25). Real pg_catalog introspection / per-app
+// Real pg_catalog introspection and per-app
 // schema reads / migration log / backup trigger all need control-plane
 // work — every "Coming soon" copy points at the right ISSUE.
 
@@ -56,8 +56,9 @@ export function DataCanvas({ appId }: DataCanvasProps) {
             Data
           </h1>
           <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
-            Tables, indexes, migrations, backups. Read-only in V1 —
-            tracked under ISSUES.md ISS-20 through ISS-25.
+            Tables, indexes, migrations, backups. Read-only in this
+            build while the live catalog, index, migration, and backup
+            plumbing lands.
           </p>
         </header>
 
@@ -146,7 +147,7 @@ function TablesPane({ appId }: { appId: string }) {
         </div>
       )}
       <div className="mt-3 font-serif italic text-[12px] text-pencil">
-        pg_catalog introspection lands with ISS-20.
+        Live `pg_catalog` introspection is not wired yet.
       </div>
     </section>
   );
@@ -277,7 +278,7 @@ function RowBrowser({
 
       <div className="mt-3 flex items-center justify-between">
         <div className="font-serif italic text-[12px] text-pencil">
-          Pagination over real per-app schemas tracked as ISS-21.
+          Pagination over live per-app schemas is not wired yet.
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -317,7 +318,7 @@ function SchemaPane() {
           Schema visualizer coming soon.
         </div>
         <div className="font-serif italic text-[12.5px] text-pencil">
-          See ISSUES.md ISS-22 for the design path.
+          Relationship and schema visualization are not wired yet.
         </div>
       </div>
     </section>
@@ -365,7 +366,7 @@ function IndexesPane({ appId }: { appId: string }) {
         </div>
       )}
       <div className="mt-3 font-serif italic text-[12px] text-pencil">
-        pg_indexes introspection tracked as ISS-23.
+        Live `pg_indexes` introspection is not wired yet.
       </div>
     </section>
   );
@@ -426,7 +427,7 @@ function MigrationsPane({ appId }: { appId: string }) {
         </div>
       )}
       <div className="mt-3 font-serif italic text-[12px] text-pencil">
-        Migration log persistence tracked as ISS-24.
+        Persistent migration history is not wired yet.
       </div>
     </section>
   );
@@ -496,7 +497,7 @@ function BackupsPane({ appId }: { appId: string }) {
           </h2>
           <p className="font-serif text-[13.5px] text-ink-soft leading-[1.55] m-0">
             Daily auto-snapshots plus on-demand manual ones. Restore is
-            tracked as part of ISS-25.
+            not wired yet.
           </p>
         </div>
         <StampButton
@@ -540,7 +541,7 @@ function BackupsPane({ appId }: { appId: string }) {
       )}
 
       <div className="mt-3 font-serif italic text-[12px] text-pencil">
-        pg_dump trigger + restore wiring tracked as ISS-25.
+        Snapshot export and restore wiring are not connected yet.
       </div>
     </section>
   );

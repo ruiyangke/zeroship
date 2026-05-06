@@ -68,8 +68,8 @@ fn cache_into_registry<'s>(
 /// Walk a fresh module to `Evaluated`. Synthetic modules have no
 /// imports so the empty resolver suffices; bundle modules retrieved
 /// from the registry are already at least `Instantiated` (and usually
-/// `Evaluated`) thanks to `load_modules`'s eager Phase 3+4 — the
-/// status guards below short-circuit duplicate work.
+/// `Evaluated`) thanks to `load_modules`'s eager instantiate/evaluate
+/// path. The status guards below short-circuit duplicate work.
 fn instantiate_and_evaluate<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     module: v8::Local<'s, v8::Module>,

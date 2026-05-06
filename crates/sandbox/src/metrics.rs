@@ -1,20 +1,22 @@
-//! Lightweight Phase-2 HA metrics (sandbox-pg-state design § 14.1 +
-//! § 14.7). Process-global atomic counters / gauges; no Prometheus
-//! framework dependency yet (Phase 3 wires a `/metrics` exporter).
+//! Lightweight HA metrics (`docs/proposals/sandbox-pg-state.md` §14.1
+//! + §14.7).
+//! Process-global atomic counters / gauges; no Prometheus framework
+//! dependency yet. A later follow-up can add a `/metrics` exporter.
 //!
 //! ## Why not a real registry?
 //!
 //! `crates/control/` doesn't ship a Prometheus crate today, and pulling
-//! one into the sandbox crate just for Phase 2 would balloon the
+//! one into the sandbox crate right now would balloon the
 //! dep-graph. The atomic-counter shape is what every Prometheus client
 //! lib uses internally; an exporter binding is a pure-additive change.
-//! Phase 3 swaps the inner type without touching call sites.
+//! A later exporter can swap the inner type without touching call sites.
 //!
 //! ## What we expose
 //!
 //! - `sandbox_ha_takeover_total{reason}` — counter; one bump per
-//!   successful takeover. v1 ships only `lease_expiration`; the
-//!   `operator_rebind` label slot exists for Phase 3's admin API.
+//!   successful takeover. The current code ships only
+//!   `lease_expiration`; the `operator_rebind` label slot is reserved
+//!   for future admin tooling.
 //! - `sandbox_ha_lost_leadership_total{op}` — counter; one bump
 //!   each time a CAS-guarded UPDATE returns 0 rows because the
 //!   `(host_id, generation)` pair was preempted by a peer (§ 11.2
@@ -26,7 +28,8 @@
 //!   hosts the takeover task has observed across all scans. Useful
 //!   for soak tests — a healthy fleet's value stays near zero.
 //! - `sandbox_ha_clock_rewind_total` — counter; one bump per scan
-//!   that observed `now() - last_heartbeat < 0` (§ 12 R-MM).
+//!   that observed `now() - last_heartbeat < 0`, which indicates
+//!   clock skew or a clock rewind.
 //!
 //! Tests can read each value via the `*_value` accessors below.
 
@@ -36,18 +39,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Counters
 // ────────────────────────────────────────────────────────────────────
 
-/// `sandbox_ha_takeover_total{reason="lease_expiration"}`. v1 only
-/// emits this label; v2 (Phase 3 admin API) will add
+/// `sandbox_ha_takeover_total{reason="lease_expiration"}`. The current
+/// code emits only this label; a future admin API can add
 /// `reason="operator_rebind"`.
 static TAKEOVER_LEASE_EXPIRATION: AtomicU64 = AtomicU64::new(0);
 
-/// `sandbox_ha_lost_leadership_total{op="<op_name>"}`. The
-/// per-op label is materialised lazily into a `Mutex<HashMap>` so
-/// Phase-3 alerting can break down the counter by call-site
-/// without re-instrumenting (round-1 fixer / MINOR #15). The
-/// global aggregate remains in a fast atomic so the hot path stays
-/// allocation-free in steady state — the lock is only taken on
-/// the rare miss-path bumps.
+/// `sandbox_ha_lost_leadership_total{op="<op_name>"}`. The per-op
+/// label is materialised lazily into a `Mutex<HashMap>` so later
+/// alerting can break down the counter by call-site without
+/// re-instrumenting. The global aggregate remains in a fast atomic so
+/// the hot path stays allocation-free in steady state; the lock is
+/// only taken on the rare miss-path bumps.
 static LOST_LEADERSHIP: AtomicU64 = AtomicU64::new(0);
 
 /// Per-op breakdown of LOST_LEADERSHIP. `&'static str` keys keep
@@ -70,45 +72,43 @@ fn lost_leadership_by_op() -> &'static std::sync::Mutex<
 static DEAD_HOSTS_OBSERVED: AtomicU64 = AtomicU64::new(0);
 
 /// `sandbox_ha_clock_rewind_total`. Counter — increments when a
-/// heartbeat-lag read returns a negative value. R-MM: a healthy
-/// fleet must never see this fire.
+/// heartbeat-lag read returns a negative value. A healthy fleet
+/// should never see this fire.
 static CLOCK_REWIND: AtomicU64 = AtomicU64::new(0);
 
 /// `sandbox_ha_takeover_orphan_total`. Counter — increments once
-/// per takeover-rehydrate that found NO sealed record on the new
-/// owner's local disk. Round-1 fixer / CRITICAL #4: in Phase 2 v1
-/// we accept "sealed not on this host" as `status='lost'`; a
-/// future cross-host sealed sync (S3? gossip?) is Phase 3+.
+/// per takeover-rehydrate that found no sealed record on the new
+/// owner's local disk. The current behavior marks that case as
+/// `status='lost'`; a future cross-host sealed-sync mechanism could
+/// recover it instead.
 static TAKEOVER_ORPHAN: AtomicU64 = AtomicU64::new(0);
 
 /// `sandbox_ha_takeover_mismatched_total`. Counter — increments
-/// once per takeover-rehydrate where the sealed signing key
-/// disagreed with pg's `key_fp`, OR the agent's `/version` returned
-/// 401, OR the agent answered with a different fingerprint. Round-2
-/// fixer / MINOR #3: pre-fix these outcomes were silently dropped;
-/// today operators can rate(...) them to spot key-rotation issues.
+/// once per takeover-rehydrate where the sealed signing key disagreed
+/// with pg's `key_fp`, or the agent's `/version` returned 401, or the
+/// agent answered with a different fingerprint. These outcomes used to
+/// be silently dropped; now operators can `rate(...)` them to spot
+/// key-rotation issues.
 static TAKEOVER_MISMATCHED: AtomicU64 = AtomicU64::new(0);
 
 /// `sandbox_ha_takeover_unreachable_total`. Counter — increments
 /// once per takeover-rehydrate where the agent's `/version` probe
-/// timed out / returned a non-2xx non-401. Round-2 fixer / MINOR
-/// #3.
+/// timed out or returned a non-2xx non-401.
 static TAKEOVER_UNREACHABLE: AtomicU64 = AtomicU64::new(0);
 
 /// `sandbox_ha_takeover_corrupt_total`. Counter — increments once
 /// per takeover-rehydrate that hit a corrupt sealed record, an
-/// unparseable typed-id, or a backend.restore_from_pg_and_sealed
-/// failure. These are bug-grade events; healthy clusters don't see
-/// them. Round-2 fixer / MINOR #3.
+/// unparseable typed-id, or a `backend.restore_from_pg_and_sealed`
+/// failure. These are bug-grade events; healthy clusters should not
+/// see them.
 static TAKEOVER_CORRUPT: AtomicU64 = AtomicU64::new(0);
 
 /// `sandbox_corrupt_id_total`. Counter — increments when restore
 /// encounters a pg row whose `sandbox_id` doesn't parse as a
-/// typed-id. Round-2 fixer / MINOR #1: pre-fix `sandbox_id_from_str_lossy`
-/// silently swallowed the malformed id and fell back to
-/// `Uuid::nil()` for a no-op UPDATE; today the row is skipped and
-/// this counter fires so an alert can catch the drift between code
-/// and data.
+/// typed-id. The earlier `sandbox_id_from_str_lossy` helper silently
+/// swallowed malformed ids and fell back to `Uuid::nil()` for a no-op
+/// UPDATE; today the row is skipped and this counter fires so an alert
+/// can catch drift between code and data.
 static SANDBOX_CORRUPT_ID: AtomicU64 = AtomicU64::new(0);
 
 // ────────────────────────────────────────────────────────────────────
@@ -140,9 +140,8 @@ pub fn add_takeover_lease_expiration(n: u64) {
 
 /// Bump `sandbox_ha_lost_leadership_total` once. The `op` label is
 /// recorded both on the aggregate counter (cheap atomic) and on a
-/// per-op breakdown map. Round-1 fixer / MINOR #15: pre-fix the
-/// label was discarded entirely; today the breakdown is queryable
-/// via [`lost_leadership_value_for_op`].
+/// per-op breakdown map. The breakdown is queryable via
+/// [`lost_leadership_value_for_op`].
 pub fn inc_lost_leadership(op: &'static str) {
     LOST_LEADERSHIP.fetch_add(1, Ordering::Relaxed);
     let map = lost_leadership_by_op();
@@ -170,32 +169,28 @@ pub fn inc_clock_rewind() {
     CLOCK_REWIND.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bump `sandbox_ha_takeover_orphan_total` once. Round-1 fixer /
-/// CRITICAL #4: emitted once per post-takeover rehydrate that found
-/// no sealed record locally.
+/// Bump `sandbox_ha_takeover_orphan_total` once. This fires when
+/// post-takeover rehydrate finds no sealed record locally.
 pub fn inc_takeover_orphan() {
     TAKEOVER_ORPHAN.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bump `sandbox_ha_takeover_mismatched_total` once. Round-2 fixer
-/// / MINOR #3.
+/// Bump `sandbox_ha_takeover_mismatched_total` once.
 pub fn inc_takeover_mismatched() {
     TAKEOVER_MISMATCHED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bump `sandbox_ha_takeover_unreachable_total` once. Round-2 fixer
-/// / MINOR #3.
+/// Bump `sandbox_ha_takeover_unreachable_total` once.
 pub fn inc_takeover_unreachable() {
     TAKEOVER_UNREACHABLE.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bump `sandbox_ha_takeover_corrupt_total` once. Round-2 fixer /
-/// MINOR #3.
+/// Bump `sandbox_ha_takeover_corrupt_total` once.
 pub fn inc_takeover_corrupt() {
     TAKEOVER_CORRUPT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Bump `sandbox_corrupt_id_total` once. Round-2 fixer / MINOR #1.
+/// Bump `sandbox_corrupt_id_total` once.
 pub fn inc_sandbox_corrupt_id() {
     SANDBOX_CORRUPT_ID.fetch_add(1, Ordering::Relaxed);
 }
@@ -304,7 +299,7 @@ mod tests {
 
     #[test]
     fn lost_leadership_label_does_not_alter_counter_shape() {
-        // Round-2 fixer / IMPORTANT #6: pre-fix this test only
+        // : pre-fix this test only
         // verified the AGGREGATE counter incremented by 2 — a
         // regression that collapsed the per-op breakdown into one
         // bucket would have passed silently. The fix asserts each

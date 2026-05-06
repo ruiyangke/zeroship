@@ -1,7 +1,8 @@
 //! `TransformStream` — spec §5.2.
 //!
-//! Constructor migrated onto `#[v8_class]` + `#[v8_constructor(post_init = ...)]`
-//! per MAC-02. Per-instance getters (`readable` / `writable`) and the
+//! Constructor uses `#[v8_class]` +
+//! `#[v8_constructor(post_init = ...)]`. Per-instance getters
+//! (`readable` / `writable`) and the
 //! cross-module receiver checks still key off the priv-sym brand
 //! (`TS_BRAND`) because callers across `algorithms.rs` /
 //! `transform_controller.rs` hold raw `Local<Object>` and read the brand
@@ -20,13 +21,13 @@
 //! };
 //! ```
 //!
-//! Storage (D-2 audit, design §XV.5):
+//! Storage:
 //! - `[[backpressure]]`               → Rust Cell<bool>            (SLOT)
 //! - `[[backpressureChangePromise]]`  → Rust paired Promise+Resolver (SLOT)
 //! - `[[readable]]`                   → V8 priv sym `[[readable]]` (SLOT)
 //! - `[[writable]]`                   → V8 priv sym `[[writable]]` (SLOT)
 //! - `[[controller]]` (TS controller) → V8 priv sym `[[ts.controller]]` (SLOT)
-//! - `[[Detached]]`                   → not supported in v1 (D-7 transferable scope)
+//! - `[[Detached]]`                   → not supported yet
 //! - `transformerCodec` (compression dep #5) → V8 priv sym holding External
 //!                                              (lands with compression — not in v1)
 
@@ -64,7 +65,7 @@ struct PendingTransformSetup {
 }
 
 /// `Box<TSStreamState>` lives in the wrapper's V8 internal field 0.
-/// Per D-2 / §XV.5: this struct holds ONLY pure-Rust slots (the
+/// This struct holds ONLY pure-Rust slots (the
 /// backpressure pair). The `[[readable]]`, `[[writable]]`, `[[controller]]`
 /// slots live in V8 private symbols.
 #[allow(missing_debug_implementations)]
@@ -73,18 +74,18 @@ pub struct TSStreamState {
     pub backpressure: Cell<bool>,
     /// SLOT: [[backpressureChangePromise]] — paired storage. The Promise
     /// is the JS-visible side; the Resolver lets Rust resolve it when
-    /// backpressure flips. Per critic #11 (single-source D-2): exactly one
-    /// place. We choose Rust state because the spec only needs the Promise
+    /// backpressure flips. We keep it in one place, in Rust state,
+    /// because the spec only needs the Promise
     /// for `await`-ing in the source's pull algorithm and for
     /// SetBackpressure to resolve+replace; no algorithm needs to compare
     /// it for JS identity.
     pub bp_change_promise: RefCell<Option<v8::Global<v8::Promise>>>,
     pub bp_change_resolver: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
-    /// MAC-02 args plumbing — populated by the constructor body, consumed
+    /// Constructor args plumbing — populated by the constructor body, consumed
     /// (`take()`) by `after_install`. None on the `from_native_transformer`
     /// path which wires the controller directly without the post_init hook.
     pending_setup: RefCell<Option<PendingTransformSetup>>,
-    /// D-18 budget guard.
+    /// Budget guard.
     _budget: StreamBudgetGuard,
 }
 
@@ -128,7 +129,7 @@ impl TSStreamState {
         writable_strategy: v8::Local<v8::Value>,
         readable_strategy: v8::Local<v8::Value>,
     ) -> Result<Self, OpError> {
-        // Budget guard first — limits per-isolate stream count (D-18).
+        // Budget guard first — limits per-isolate stream count.
         let budget = try_alloc_stream().map_err(OpError::range_error)?;
 
         // Spec §5.2.4 ordering: strategies converted before transformer
@@ -305,7 +306,7 @@ pub fn ts_controller_slot<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// from_native_transformer — Rust-only constructor (D-9, §I.1, §VIII.3)
+// `from_native_transformer` — Rust-only constructor
 // ---------------------------------------------------------------------------
 
 /// Build a JS TransformStream from a Rust transformer.

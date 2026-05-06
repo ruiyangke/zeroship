@@ -1,7 +1,7 @@
 //! Compile-fail snapshot tests for `#[derive(WebIdlDict)]`.
 //!
-//! Wave 7 (H16) — locks the derive-time rejection of reference-typed
-//! fields. Pre-Wave-7 the derive accepted `&str` (or any
+//! Locks the derive-time rejection of reference-typed fields.
+//! Earlier versions accepted `&str` (or any
 //! `Type::Reference`) silently and the codegen panicked at
 //! extraction time with a confusing "expected &str, found String"
 //! error pointing at synthetic tokens the user did not write.

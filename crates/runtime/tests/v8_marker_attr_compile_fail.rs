@@ -1,9 +1,8 @@
-//! Compile-fail snapshot tests for the strict `MarkerAttr` parsers
-//! introduced in Wave 4a (design `docs/proposals/runtime-macros-
-//! refactor.md` §3.2 + §3.6).
+//! Compile-fail snapshot tests for the strict `MarkerAttr` parsers.
 //!
-//! Pre-Wave-4 the impl-block / per-method `extract_*` helpers silently
-//! fell back to `None` on malformed shape. Closing finding H5 / H6 of
+//! Earlier versions used impl-block / per-method `extract_*` helpers
+//! that silently fell back to `None` on malformed shape. Closing
+//! finding H5 / H6 of
 //! `runtime-macros-architecture-critique-2026-05-05.md` made each
 //! `MarkerAttr::merge` strict — return `Err` (and thus emit a span-
 //! pinned `compile_error!`) on shapes that don't match the documented
@@ -15,7 +14,7 @@
 //!
 //! Cases:
 //!   - `v8_name_bare_ident.rs`             — `#[v8_name(foo)]` (list
-//!     form, missing `=` sign — pre-Wave-4 silently accepted as None)
+//!     form, missing `=` sign — earlier versions silently accepted it as `None`)
 //!   - `v8_name_non_string_lit.rs`         — `#[v8_name = 42]` (non-
 //!     string literal value)
 //!   - `v8_to_string_tag_bare_ident.rs`    — `#[v8_to_string_tag]` /
@@ -24,8 +23,8 @@
 //!     = 42]` (non-string literal value)
 //!   - `v8_inherit_intrinsic_bad_value.rs`  — `#[v8_inherit_intrinsic
 //!     = "ArrayPrototype"]` (recognised SHAPE but unsupported VALUE;
-//!     Wave 9 NS2 moved the diagnostic out of the install fn body
-//!     and into the analyse phase)
+//!     the diagnostic now comes from the analyze phase rather than the
+//!     generated install body)
 //!   - `v8_state_marker_missing_path.rs`   — `#[v8_state_marker]`
 //!     (bare attribute, no parenthesised marker)
 //!   - `v8_state_marker_non_path.rs`       — `#[v8_state_marker = "M"]`

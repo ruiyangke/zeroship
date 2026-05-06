@@ -3,7 +3,7 @@
 //! This module hosts the **shared** machinery that both Request and
 //! Response build on:
 //!
-//! - `body::BodyImpl` — the two-headed body (D-2): a native ReadableStream
+//! - `body::BodyImpl` — the two-headed body: a native ReadableStream
 //!   plus an optional source for redirect rewinding / cheap clone.
 //! - `body::Body` — Rust trait implemented by Request and Response so
 //!   `text` / `json` / `arrayBuffer` / `bytes` / `blob` / `formData`
@@ -14,7 +14,7 @@
 //!   v2 dispatch order fix (C-10) and the proper USVString conversion
 //!   for string bodies (C-11).
 //! - `consumers` — the 6 body consumer methods, including the v2
-//!   error-shape fix (MAJOR-25): `json()` rejects with **SyntaxError**
+//!   error-shape fix: `json()` rejects with **SyntaxError**
 //!   not TypeError, `arrayBuffer()` rejects with **RangeError** at
 //!   2GB, etc.
 //! - `body_stream` — `read_all_bytes` + `read_one_chunk` helpers that
@@ -22,7 +22,7 @@
 //!   design §III.4, consumers MUST flow through the JS-visible reader
 //!   to honour spec lock checks (locked stream → TypeError).
 //!
-//! ## D-2 single-source slot rule
+//! ## Single-source slot rule
 //!
 //! Body state is split between the BodyImpl struct (Rust-side: source,
 //! length) and a private V8 symbol on the wrapper for the stream Global.

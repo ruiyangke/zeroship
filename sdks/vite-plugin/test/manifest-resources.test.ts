@@ -1,13 +1,14 @@
 /**
- * Phase 1 — manifest emitter for the unified `resources` block.
+ * Manifest emitter for the unified `resources` block.
  *
  * The new emitter (in `src/manifest.ts`) takes the transform state
  * (discovered procedures + their metadata) plus the `defineApp({ resources })`
  * tree from `src/server/config.ts`, and produces two companion blocks
  * the vite-plugin merges into the existing manifest:
  *
- *   - `manifest.resources`   — flat key map per spec §7
- *   - `manifest.transformer` — `"superjson"` (Phase 1 default)
+ *   - `manifest.resources`   — flat key map per
+ *     `docs/proposals/rpc-v2.md` §7
+ *   - `manifest.transformer` — `"superjson"` (the current default)
  *
  * These tests feed the emitter a tmpdir fixture and inspect the output.
  */
@@ -97,7 +98,8 @@ describe("computeManifestExtras", () => {
     // `proc.config.output` when the user declared a Zod schema. The
     // manifest emitter must drop these keys — schemas are typed
     // runtime objects the synthetic SSR entry parses against; the
-    // wire never sees a JSONSchema (codegen sidecar is Phase 7).
+    // wire never sees a JSONSchema; a future codegen sidecar can
+    // consume those schemas separately.
     const fix = await makeFixture({});
     try {
       const ZS_MARKER = Object.freeze({ __zsSchema: true });

@@ -10,7 +10,7 @@
 //     batch of *normal* messages terminated by ReadyForQuery.
 //   - Inside a `Normal` batch, callers iterate via `BackendMessages::next`.
 //
-// The length-cap + peek helpers hardened in our Phase-1 BufStream port
+// The length-cap + peek helpers from the earlier BufStream hardening pass
 // still guard against an attacker-controlled length field.
 
 use crate::Error;
@@ -36,8 +36,7 @@ pub enum FrontendMessage {
 /// A backend (server → client) message or batch thereof.
 ///
 /// Matches tokio-postgres's `BackendMessage` shape so the demux logic in
-/// `connection.rs` (Phase 3) can remain a close translation of the
-/// upstream source.
+/// `connection.rs` can remain a close translation of the upstream source.
 pub enum BackendMessage {
     /// A run of synchronous messages, optionally terminated by
     /// `ReadyForQuery`.

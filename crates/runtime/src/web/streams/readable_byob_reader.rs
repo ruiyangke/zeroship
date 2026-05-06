@@ -40,7 +40,7 @@ use crate::streams::slots::{self, CLOSED_PROMISE, READER, STORED_ERROR, STREAM};
 /// internal field 0; reclaimed by the V8 weak finalizer registered via the
 /// `#[v8_class]` macro.
 ///
-/// MAC-02 migration: parallels `ReadableStreamDefaultReader`. The
+/// This parallels `ReadableStreamDefaultReader`. The
 /// constructor (Self::new) validates the stream argument (must be a
 /// byte-typed ReadableStream, must be unlocked) and stashes it in
 /// `pending_stream` so the post_init hook can run ReaderGenericInitialize
@@ -536,7 +536,7 @@ fn read_method_callback<'s>(
         rv.set(p.into());
         return;
     }
-    // D-16: detached check on view.buffer.
+    // Detached check on view.buffer.
     let buffer = match view.buffer(scope) {
         Some(b) => b,
         None => {

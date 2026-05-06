@@ -1,9 +1,10 @@
 /**
- * Phase 1 — override marker validation.
+ * Override marker validation.
  *
- * Per spec §7: when a child resource shadows an inherited field, it
- * MUST list that field in `override: [...]`. Without the marker, the
- * build refuses with a clear error.
+ * `docs/proposals/rpc-v2.md` §7 says that when a child resource
+ * shadows an inherited field, it MUST list that field in
+ * `override: [...]`. Without the marker, the build refuses with a
+ * clear error.
  *
  * This is the safety mechanism that prevents accidental policy
  * weakening (a child silently downgrading from `auth: admin` to

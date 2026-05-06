@@ -1,13 +1,9 @@
 //! `gen_install` — `pub fn install(scope) -> FunctionTemplate` codegen.
 //!
-//! Wave 3 commit 3 — extracted from `mod.rs`'s 195-line megaquote
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1, F3, F4).
-//! Closes the 9-arg parameter list by reading every input from
-//! [`ClassConfig`].
-//!
-//! Wave 9 N3 — split the install body's monolithic `quote!` (121 LOC
-//! pre-fix) into per-fragment helpers per design §3.1 / Appendix B
-//! PoC. The orchestrator [`gen_install`] now composes the fragments:
+//! Extracted from `mod.rs` when install emission was split into
+//! smaller helpers. The orchestrator [`gen_install`] reads every input
+//! from [`ClassConfig`] and composes the install body from these
+//! fragments:
 //!
 //! - `gen_install_function_template_setup` — the inherit-base block,
 //!   the FunctionTemplate ctor, set_class_name, internal_field_count.
@@ -45,7 +41,7 @@ use crate::must_str;
 /// the surrounding `impl <Class>` block emitted by the top-level
 /// `assemble_tokens` orchestrator.
 ///
-/// Wave 9 N3 — body is now a thin orchestrator that delegates to the
+/// The body is a thin orchestrator that delegates to the
 /// six per-fragment helpers below. Each helper takes `&ClassConfig`
 /// (per design §3.1) and returns a self-contained TokenStream that
 /// the orchestrator splices in document order.
@@ -191,7 +187,7 @@ pub(super) fn gen_register(cfg: &ClassConfig) -> TokenStream2 {
 }
 
 // ---------------------------------------------------------------------------
-// Per-fragment helpers (Wave 9 N3 — see top-of-file rationale).
+// Per-fragment helpers.
 // ---------------------------------------------------------------------------
 
 /// FunctionTemplate ctor + class-name binding + `#[v8_inherit]`
@@ -683,7 +679,7 @@ fn gen_install_to_string_tag(cfg: &ClassConfig) -> TokenStream2 {
 /// a named property — wrong shape. Direct prototype-set via JS is the
 /// documented Deno/Cloudflare workaround.
 ///
-/// Wave 9 NS2: the unrecognised-value diagnostic moved to
+/// The unrecognised-value diagnostic moved to
 /// `analyze.rs`'s pre-emit validation step. By the time we get here,
 /// `inherit_intrinsic` is known to be either `None`,
 /// `Some("IteratorPrototype")`, or `Some("Error")`. Any other value
@@ -698,7 +694,7 @@ fn gen_install_inherit_intrinsic(cfg: &ClassConfig) -> TokenStream2 {
         }
         Some("Error") => "Error.prototype",
         // Unreachable per the analyse-phase validation in
-        // `v8_class/analyze.rs` (Wave 9 NS2). Kept as a defensive
+        // `v8_class/analyze.rs`. Kept as a defensive
         // guard; the `unreachable!` here surfaces as a proc-macro
         // panic at expand time, NOT as a `compile_error!` spliced
         // into the user's fn body — so any future drift in the

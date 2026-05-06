@@ -456,7 +456,7 @@ fn gzip_response_decompressed() {
     });
     let resp = run(main_fetch(req("GET", &server.url()))).unwrap();
     assert_eq!(resp.body, b"hello compressed world");
-    // Content-Encoding stripped per D-8.
+    // Content-Encoding is stripped after decoding.
     assert!(!resp
         .headers
         .iter()
@@ -648,7 +648,7 @@ fn identity_only_strips_ce_cl() {
     assert!(!resp.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-encoding")));
 }
 
-// 22. Unknown Content-Encoding → network error (D-9)
+// 22. Unknown Content-Encoding → network error
 #[test]
 fn unknown_content_encoding_errors() {
     let server = start_mock_server(|_req| {

@@ -14,10 +14,10 @@
 //   nice-to-have future optimisation and documented as a hand-off in
 //   PHASE3.md.
 // * `target_session_attrs=ReadWrite`/`ReadOnly` post-handshake probe
-//   (the `SHOW transaction_read_only` query) is deferred to Phase 4:
-//   it requires `Client::simple_query_raw` which lands with the full
-//   query surface. We return an error if a non-default value is set,
-//   to surface the limitation rather than silently ignore it.
+//   (the `SHOW transaction_read_only` query) is still deferred: it
+//   requires `Client::simple_query_raw` from the full query surface.
+//   We return an error if a non-default value is set, rather than
+//   silently ignoring it.
 
 use crate::client::{Addr, Client, SocketConfig};
 use crate::config::{Host, LoadBalanceHosts, TargetSessionAttrs};
@@ -187,12 +187,13 @@ where
     // of the source cannot be expressed directly. Implementing this
     // properly requires either: (a) a `poll_one_step` method on
     // Connection; or (b) spawning the connection and re-joining it
-    // after the probe. Neither fits cleanly into Phase 4's scope, so we
-    // surface the limitation rather than silently ignore a non-default
-    // value. Phase 5 will revisit alongside the Transaction port.
+    // after the probe. For now we surface the limitation rather than
+    // silently ignoring a non-default value. This should be revisited
+    // alongside the transaction port.
     if config.get_target_session_attrs() != TargetSessionAttrs::Any {
         return Err(Error::config(
-            "target_session_attrs is not yet supported; Phase 5 will implement the probe".into(),
+            "target_session_attrs is not yet supported; the post-connect probe is still missing"
+                .into(),
         ));
     }
 

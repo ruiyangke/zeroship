@@ -88,7 +88,7 @@ fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
 
 /// Pick the canonical-string version for a request based on the path.
 ///
-/// **Round-6 § II.1 CRITICAL-4 dispatcher byte-equality invariant.**
+/// Dispatcher byte-equality invariant for preview-proxy paths.
 /// The byte string we test (`req.path()`) is identical to the byte
 /// string ntex's route matcher uses to dispatch the handler, with NO
 /// normalization between them. A request whose URL is

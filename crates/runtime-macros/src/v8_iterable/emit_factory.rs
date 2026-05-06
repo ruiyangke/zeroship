@@ -1,8 +1,7 @@
 //! Iterator companion class + factory callbacks + install bridge.
 //!
-//! Wave 9 split — extracted from `v8_iterable.rs`'s 1,368-LOC god
-//! file (per design + v2 architecture-critic R2). This file owns the
-//! emit shape for everything wired to the FACTORY side of the
+//! Split out from the old monolithic `v8_iterable.rs`. This file owns
+//! the emit shape for everything wired to the factory side of the
 //! iterable surface: the `<Class>Iterator` companion struct, its
 //! install fn, the `__zs_iter_construct_throws` constructor stub, the
 //! per-kind factory callbacks (keys / values / entries), and the
@@ -106,7 +105,7 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
 
         // Per-isolate slot for the cached `<Class>Iterator.prototype`
         // (used by `__brand_check_<Class>Iterator`). Lazily populated
-        // on first brand-check call. Closes Wave 10 NS6.
+        // on first brand-check call.
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
         pub struct #iter_brand_slot_ty(::v8::Global<::v8::Object>);
@@ -116,13 +115,13 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
         /// `<Class>Iterator.prototype`. Returns true on match (the
         /// receiver IS a `<Class>Iterator`), false otherwise.
         ///
-        /// Closes Wave 10 NS6: the previous `next()` codegen relied
-        /// solely on internal-field-0 being an `External`, which any
+        /// The previous `next()` codegen relied solely on
+        /// internal-field-0 being an `External`, which any
         /// `#[v8_class]` wrapper satisfies. A caller could pass a
         /// different wrapper as `this` and the recovery
         /// `__ext.value() as *mut <Class>Iterator` would reinterpret a
         /// `Box<Other>` as `*mut <Class>Iterator` — UB. The brand
-        /// check pins the receiver to instances of THIS iterator class
+        /// check pins the receiver to instances of this iterator class
         /// before the unsafe cast.
         ///
         /// Walks at most 1024 prototype links — matches V8's internal

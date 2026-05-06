@@ -2,10 +2,10 @@
 //! (https://fetch.spec.whatwg.org/#request-class).
 //!
 //! `Box<RequestState>` lives in V8 internal field 0; the unit struct
-//! `Request` is the JS-class identity (drives install slot, brand
-//! check, callback names, Symbol.toStringTag, constructor.name) per
-//! `#[v8_state_marker(Request)] impl RequestState`. MAC-01 Phase 2
-//! migration — see `docs/proposals/macro-v8-state.md` §7.2.
+//! `Request` is the JS-class identity that drives the install slot,
+//! brand check, callback names, `Symbol.toStringTag`, and
+//! `constructor.name` via `#[v8_state_marker(Request)] impl
+//! RequestState`.
 //!
 //! What stays hand-rolled (per design §7.2.1):
 //!   - `state_ptr` (private) — `Body` trait + `mod.rs::snapshot_request`
@@ -283,9 +283,8 @@ impl RequestState {
         // local: cleaner than v1's two suggested options.
         let mut pending_ct: Option<String> = None;
 
-        // Step 6: parse `input` — string or Request. The brand check
-        // is the typed `Request::is_instance` introduced in Wave 5c
-        // (design `docs/proposals/runtime-macros-refactor.md` §3.5).
+        // Step 6: parse `input` — string or Request. Use the typed
+        // `Request::is_instance` brand check.
         let input_is_request =
             input_v.is_object() && Request::is_instance(scope, input_v);
 

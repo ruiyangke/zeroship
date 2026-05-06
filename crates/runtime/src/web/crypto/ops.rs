@@ -396,7 +396,7 @@ fn compute_derived_key_length<'s>(
                     return Ok(n);
                 }
             }
-            // default: block size of hash (D-19).
+            // default: block size of hash.
             let hash = head.hash.ok_or_else(|| {
                 OpError::dom("OperationError", "HMAC derivedKey requires 'hash'")
             })?;

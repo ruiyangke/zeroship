@@ -332,7 +332,7 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
 /// stage everything in locals first and only mutate cache at the
 /// end.
 ///
-/// Phase 4b: bytes come from `BlobStore` keyed by
+/// Bytes come from `BlobStore` keyed by
 /// `manifest.worker.modules[manifest.worker.entry]` rather than from a
 /// dedicated control-plane endpoint. The blob store enforces
 /// `sha256(bytes) == hash` on read, so the previous explicit hash

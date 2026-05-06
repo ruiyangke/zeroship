@@ -1,7 +1,6 @@
 //! Per-class isolate-slot marker types.
 //!
-//! Wave 3 commit 3 — extracted from `mod.rs`'s 195-line megaquote
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1, F3).
+//! Split out from the old monolithic emit assembly.
 //! Emits the two structs that hold the cached install template and
 //! the cached `Foo.prototype` for brand checks.
 

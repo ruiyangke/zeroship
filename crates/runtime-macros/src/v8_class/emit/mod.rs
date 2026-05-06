@@ -1,17 +1,14 @@
 //! Top-level assembly of `#[v8_class]` macro emission.
 //!
-//! Wave 3 commit 3 — extracted from `mod.rs`'s 195-line megaquote
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1, F3).
+//! Split out from the old monolithic emit assembly.
 //! The orchestrator [`assemble_tokens`] composes per-fragment helpers
 //! (slot types, brand check, public_is, install fn, per-method
 //! callbacks, fastcall shims, iterable codegen) into the final token
 //! stream returned to the proc-macro driver.
 //!
 //! Per-fragment helpers each emit ≤80 LOC of tokens and live in their
-//! own files for testability — Wave 6 will further split the install
-//! body into `#[v8_inherit]`, `#[v8_const]`, `#[v8_async_iterable]`,
-//! Symbol.toStringTag fragments. For Wave 3 the install fn stays
-//! monolithic (`emit/install.rs`) but the megaquote that wrapped it
+//! own files for testability. The install fn still lives as a single
+//! generated block in `emit/install.rs`, but the old megaquote wrapper
 //! is gone.
 //!
 //! Byte-identity contract: the output of `assemble_tokens` is
@@ -57,8 +54,7 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
     let public_is = public_is::gen_public_is_fn(cfg);
 
     // The install fn body — `pub fn install(scope) -> FunctionTemplate`.
-    // Wave 6 will further split this into per-fragment helpers; for now
-    // it stays monolithic but parameterised by ClassConfig.
+    // It stays monolithic for now, but is parameterized by ClassConfig.
     let install = install::gen_install(cfg);
 
     // The `register(scope, global)` companion (#198). Bare template +

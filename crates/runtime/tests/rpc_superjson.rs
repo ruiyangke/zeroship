@@ -1,10 +1,10 @@
-//! V8 ↔ superjson Envelope round-trip tests — RPC v2 phase 1 (Wave C).
+//! V8 ↔ superjson Envelope round-trip tests.
 //!
-//! Wave A (`crates/core/src/superjson.rs`) defined the wire envelope and
-//! its byte serialiser; Wave C (`crates/runtime/src/rpc/superjson.rs`) is
-//! the V8 half — encodes V8 values into envelopes and revives envelopes
+//! `crates/core/src/superjson.rs` defines the wire envelope and its
+//! byte serializer; `crates/runtime/src/rpc/superjson.rs` is the V8
+//! half that encodes V8 values into envelopes and revives envelopes
 //! back to V8 values. These tests pin both directions plus the
-//! cross-side bytes-equality with the npm fixtures.
+//! cross-side byte equality with the npm fixtures.
 //!
 //! Test harness mirrors `tests/v8_iterable_brand_check_smoke.rs` — fresh
 //! isolate per test, `install_globals` the URL class so the URL detection
@@ -646,14 +646,14 @@ fn fixture_meta_parses_consistently() {
 }
 
 // ---------------------------------------------------------------------------
-// Encoder rejection — non-Uint8Array typed arrays in phase 1.
+// Encoder rejection — non-Uint8Array typed arrays in the current ABI.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn non_uint8_typed_array_rejected_phase1() {
     with_v8(|scope, _| {
-        // Int32Array is a typed array but not Uint8Array — phase 1 only
-        // supports Uint8Array. Reject explicitly so callers find out.
+        // Int32Array is a typed array but not Uint8Array. The current
+        // ABI only supports Uint8Array, so reject explicitly.
         let v = eval(scope, r#"new Int32Array([1, 2, 3])"#);
         let err = encode_to_envelope(scope, v).expect_err("should reject");
         let msg = err.message.to_lowercase();

@@ -1,8 +1,8 @@
 "use server";
-// Phase B.2 (cont.): server-side custom tools that aren't covered by
-// deepagents' built-in fs/exec set. The ask_survey tool is the first —
+// Server-side custom tools that aren't covered by deepagents' built-in
+// fs/exec set. The ask_survey tool is the first —
 // when the Builder needs structured clarification (single-/multi-choice
-// or short-text answers, max 3 questions per spec §8.2.7), it calls
+// or short-text answers, max 3 questions per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7), it calls
 // `ask_survey` and the run halts via `interrupt()`. The client renders
 // a SurveyCard from the `data-survey` chunk emitted by `_middleware.ts`,
 // the user submits, and the resume protocol (`Command({resume})` server-

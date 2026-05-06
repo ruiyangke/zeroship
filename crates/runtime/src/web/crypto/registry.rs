@@ -1,6 +1,6 @@
 //! Algorithm registry — operation × algorithm-name → ParamShape.
 //!
-//! Per `docs/proposals/webcrypto-native.md` §VII (D-8 + D-24).
+//! See `docs/proposals/webcrypto-native.md` §VII.
 //! Replaces the JS-side hand-rolled `normalizeAlgorithm`.
 
 #![allow(dead_code)]

@@ -1,4 +1,4 @@
-//! Controller restart restore (round-8 / Phase 1: pg-driven).
+//! Controller restart restore (pg-driven).
 //!
 //! On boot, the controller queries pg for every sandbox row owned by
 //! its `host_id` with `status='running'`, then unseals the matching
@@ -8,7 +8,7 @@
 //! `vm_index`, `agent_url`, `key_fp`, `created_at`).
 //!
 //! This module is the boot-time reconciler. There is no periodic
-//! reconciler (round-8: pg is the single writer for non-secret state;
+//! reconciler: pg is the single writer for non-secret state;
 //! sealed is the single writer for secret state — categories don't
 //! overlap, so steady-state has no drift source).
 //!
@@ -24,7 +24,7 @@
 //! Plus the orphan sweep:
 //! - **Sealed without pg row** → unlink (cancelled-create orphan).
 //!
-//! ## Phase-1 scope
+//! ## Current scope
 //!
 //! Backend rehydration is implemented for nomad-ch only; Docker and
 //! K8s bubble up an `Err` from `Backend::restore_from_sealed`. Their
@@ -156,9 +156,9 @@ pub async fn restore_at_startup(
     Ok(sum)
 }
 
-/// Round-1 fixer / CRITICAL #4 — single-row probe-and-register
-/// entry point reused by both the boot-path reconciler
-/// (`restore_at_startup`) and the Phase-2.5 takeover post-step
+/// Single-row probe-and-register entry point reused by both the
+/// boot-path reconciler (`restore_at_startup`) and the takeover
+/// follow-up step
 /// (`spawn_takeover_task`). Wraps `process_pg_row` with an
 /// owned `consumed` set since takeover callers don't run an orphan
 /// sweep and don't care which sealed paths the probe touched.
@@ -175,9 +175,9 @@ pub async fn restore_at_startup(
 ///     operator quarantine review (except the missing case, where
 ///     there's nothing to leave).
 ///
-/// Phase-2 v1 limitation (documented in CRITICAL #4 fix path
-/// step 3): the new owner's local sealed-records dir might not have
-/// the file (cross-host sealed-record sync is Phase 3+). When the
+/// Current limitation: the new owner's local sealed-records dir might
+/// not have the file. Cross-host sealed-record sync is still missing.
+/// When the
 /// seal is missing, we surface `RestoreOutcome::SealMissing` and
 /// the caller bumps `sandbox_ha_takeover_orphan_total`.
 pub(crate) async fn probe_and_register_one(
@@ -221,7 +221,7 @@ async fn process_pg_row(
     let sandbox_id_uuid: Uuid = match zeroship_core::typed_id::parse(&row.sandbox_id) {
         Ok((_, uuid)) => uuid,
         Err(e) => {
-            // Round-2 fixer / MINOR #1: pre-fix this fell back to
+            // : pre-fix this fell back to
             // `sandbox_id_from_str_lossy` → `Uuid::nil()` and fired
             // an UPDATE that no-op'd against a real row but pretended
             // to have marked it Lost. Today we skip the row entirely
@@ -317,7 +317,7 @@ async fn process_pg_row(
                 Ok(auth) => {
                     let info = build_restored_info(row);
                     registry.insert_with_auth(sandbox_id_uuid, info, auth);
-                    // Phase-2 HA: hydrate the in-memory generation
+                    // Hydrate the in-memory generation
                     // from the pg row so any subsequent CAS-guarded
                     // write carries the canonical value (§ 11.2).
                     // Without this, the registry would default to 0
@@ -329,8 +329,8 @@ async fn process_pg_row(
                         let pv = crate::registry::PreviewSecrets::from_sealed(secrets);
                         registry.restore_preview_state(sandbox_id_uuid, Some(pv), Vec::new());
                     }
-                    // Round-2 fixer / IMPORTANT #2: a row that came
-                    // in as 'unreachable' now passes the probe — flip
+                    // A row that came in as 'unreachable' now passes
+                    // the probe — flip
                     // it back to 'running' so subsequent dispatches
                     // see the recovered state. We CAS on the row's
                     // current generation; if a peer has moved past
@@ -439,7 +439,7 @@ async fn process_pg_row(
     }
 }
 
-// Round-2 fixer / MINOR #1: `sandbox_id_from_str_lossy` was removed —
+// : `sandbox_id_from_str_lossy` was removed —
 // see the corresponding `process_pg_row` arm above. It used to swallow
 // malformed ids and fire a no-op UPDATE; now we skip the row + emit
 // `sandbox_corrupt_id_total`.
@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(info.created_at_secs, 1_700_000_000);
     }
 
-    // Round-2 fixer / MINOR #1: removed `sandbox_id_lossy_parses_typed_id_suffix`
+    // : removed `sandbox_id_lossy_parses_typed_id_suffix`
     // because the helper itself is gone. The new behaviour (skip + bump
     // `sandbox_corrupt_id_total`) is exercised end-to-end in the pg-gated
     // integration tests.

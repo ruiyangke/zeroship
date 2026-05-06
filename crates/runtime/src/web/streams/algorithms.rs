@@ -1,7 +1,7 @@
 //! Cross-class abstract operations for ReadableStream (spec §3.9.1, §3.9.2)
 //! and WritableStream (spec §4.5).
 //!
-//! Per D-20: spec abstract operations whose name doesn't sit on a single
+//! Spec abstract operations whose name doesn't sit on a single
 //! class (e.g. `ReadableStreamCancel`, `WritableStreamAbort`) live here.
 //! Class-local operations (`ReadableStreamDefaultControllerEnqueue`) live
 //! in their respective class file.
@@ -944,7 +944,7 @@ fn _unused_ws_state(_s: &WSStreamState) {}
 
 /// `ReadableStreamPipeTo(source, dest, preventClose, preventAbort,
 /// preventCancel, signal)` — spec §3.5.1. Re-exported here for the
-/// "abstract operation lives at top-level" naming convention (D-20).
+/// "abstract operation lives at top-level" naming convention.
 /// The implementation lives in `crate::streams::pipe`.
 pub fn readable_stream_pipe_to<'s>(
     scope: &mut v8::PinScope<'s, '_>,

@@ -1,7 +1,7 @@
 // ─── ForgotPassword — password recovery (UI stub) ────────────────
 //
-// Per spec §6.3. The control plane doesn't yet expose a
-// /auth/forgot-password endpoint (see ISSUES.md ISS-09), so this
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §6.3. The control plane doesn't yet expose a
+// /auth/forgot-password endpoint, so this
 // page renders as a UI stub: it accepts an email, "submits", and
 // always shows the standard no-enumeration confirmation message.
 // When the endpoint lands, replace `submit` with the real call and

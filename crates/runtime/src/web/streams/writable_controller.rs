@@ -1053,8 +1053,7 @@ pub fn set_up_writable_stream_default_controller_native<S: NativeSink + 'static>
 ) {
     let _sink_rc = Rc::new(RefCell::new(sink));
     // For this dispatch the native sink's pull/cancel/write futures aren't
-    // driven by the runtime loop yet (D-3 / §VII.5 wiring lands with the
-    // fetch+upload chunk). The trait surface exists so the next dispatch
+    // driven by the runtime loop yet. The trait surface exists so the next dispatch
     // can attach a runtime-loop driver without churning the API. For now,
     // pull/close/abort are no-ops — same shape as
     // set_up_readable_stream_default_controller_native.

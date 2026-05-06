@@ -1,13 +1,13 @@
-//! Phase-3 admin/operator API for the sandbox controller.
+//! Admin/operator API for the sandbox controller.
 //!
 //! See `docs/proposals/sandbox-pg-state.md` § 13 / § 13.5 / § 13.6 /
-//! § 13.7 / § 15 Phase 3 for the design. This module is the
+//! § 13.7 for the design. This module is the
 //! implementation of the operator-facing query surface + GDPR
 //! data-export and data-delete pipelines.
 //!
-//! ## Auth shape (Phase 3)
+//! ## Auth shape
 //!
-//! Phase 3 ships a deliberately-simple bearer-from-file admin auth
+//! This module uses a deliberately simple bearer-from-file admin auth
 //! that mirrors the existing sandbox auth (`SANDBOX_TOKEN`) but uses
 //! a separate token + env var so a leaked controller token does NOT
 //! grant operator access:
@@ -20,12 +20,11 @@
 //!   - When set, requests must carry `Authorization: Bearer <token>`
 //!     where token equals the file contents (constant-time compare).
 //!
-//! The full design (§ 13.8) calls for short-lived JWT + per-endpoint
+//! The long-term design (§ 13.8) calls for short-lived JWT + per-endpoint
 //! scopes + 2FA step-up + per-admin rate limit + anomaly detection.
-//! Phase 3's bearer-from-file is intentionally narrow — the JWT
-//! shape lands as Phase 5 / production hardening; doing it now
-//! couples the sandbox crate to the platform JWT verifier (which
-//! lives in `crates/control/`) before that contract is finalized.
+//! The current bearer-from-file shape is intentionally narrow. Doing
+//! JWT now would couple the sandbox crate to the platform verifier
+//! before that contract is finalized.
 //!
 //! Migration to JWT will:
 //!   1. Replace `admin_check` with a JWT verifier that pulls
@@ -76,26 +75,20 @@ const MAX_LIMIT: i64 = 1000;
 const EVENT_EXPORT_CAP: i64 = 10_000;
 
 // ────────────────────────────────────────────────────────────────────
-// Auth — boot-time bearer cache (Round-3 / Phase-3 CRITICAL #3).
-// § 13.8 expansion deferred to Phase 5 production hardening.
+// Auth — boot-time bearer cache.
+// JWT/scoped auth stays separate follow-up work.
 // ────────────────────────────────────────────────────────────────────
 
 /// Constant-time bearer compare via SHA-256 digests.
 ///
-/// Round-3 / Phase-3 CRITICAL #1: the original shape returned in O(1) ns
-/// on a length mismatch (early `if presented.len() != expected.len()`),
-/// while the matching path ran `ct_eq` + JSON allocation taking ~µs —
-/// an attacker could bisect the token length from response-time
-/// distributions. Round-3's first patch padded both sides to `max(len)`
-/// and compared via `subtle::ConstantTimeEq`, but `vec![0u8; max_len]`
-/// allocates an attacker-sized buffer on the unauthenticated path:
-/// (a) allocator timing depends on `presented.len()` (capped ~8 KiB by
-/// ntex via the `Authorization` header), so it isn't actually
-/// constant-time at the allocator level; (b) it's a fresh DoS
-/// amplifier on the auth path that the boot-cache fix was meant to
-/// remove.
+/// The raw-byte compare path leaked length information because an
+/// early `if presented.len() != expected.len()` returned much faster
+/// than the matching path. An intermediate approach padded both sides
+/// to `max(len)` before calling `subtle::ConstantTimeEq`, but that
+/// introduced attacker-controlled allocation on the unauthenticated
+/// path.
 ///
-/// Round-4 fix: hash both inputs with SHA-256 and `ct_eq` the 32-byte
+/// Hash both inputs with SHA-256 and `ct_eq` the 32-byte
 /// digests. SHA-256 is constant-time on a fixed-size finalize buffer;
 /// the only length-dependent work is the streaming `update`, whose cost
 /// scales with `presented.len()` (capped ~8 KiB) but does NOT branch on
@@ -120,12 +113,12 @@ fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
 ///   - `Err(503)` when admin API is disabled (no `SANDBOX_ADMIN_TOKEN_PATH`).
 ///   - `Err(401)` when the bearer is missing or wrong.
 ///
-/// Round-3 / Phase-3 CRITICAL #3: reads from the boot-cached
-/// `state.admin_token` instead of stat()+read()'ing the file per
-/// request. Bounded amplification at 10k req/s; no slow-FS DoS;
-/// no fail-open on chmod-error (boot-time read fails loud).
+/// Reads from the boot-cached `state.admin_token` instead of
+/// stat()+read()'ing the file per request. That avoids slow-FS DoS
+/// amplification and ensures chmod/read failures fail at boot rather
+/// than on the auth path.
 ///
-/// Round-4 / IMPORTANT #2: defense-in-depth empty-token guard.
+/// Defense-in-depth empty-token guard.
 /// `AppState.admin_token` is a `pub` field; if anything constructs
 /// `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
 /// the constant-time compare against an empty `Authorization: Bearer `
@@ -398,8 +391,8 @@ pub async fn get_sandbox_detail(
         "row": serialize_sandbox_row(&row, in_memory_info.is_some()),
         "in_memory": in_memory_info,
         // /version probe is best-effort — we'd issue an HTTP call to
-        // row.agent_url. Phase 3 surfaces None here; Phase 5 wires
-        // the probe + signs the request with the persisted key.
+        // row.agent_url. This endpoint currently surfaces `null`
+        // until the signed probe path is wired.
         "agent_version": serde_json::Value::Null,
     }))
 }
@@ -649,7 +642,7 @@ pub async fn list_hosts(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// GET /admin/users/{user_id}/export   GDPR data-export
+// GET /admin/users/{user_id}/export   GDPR data export
 // ────────────────────────────────────────────────────────────────────
 //
 // One JSON document with everything the platform stores about this
@@ -657,7 +650,7 @@ pub async fn list_hosts(
 // shape is consistent (the operator sees a snapshot, not a moving
 // target). Caps `events` at 10k rows; the response includes a
 // `events_truncated: true` flag when the cap kicked in. Streaming
-// NDJSON for huge users is Phase 5.
+// NDJSON for huge users is separate follow-up work.
 
 pub async fn export_user(
     req: HttpRequest,
@@ -717,16 +710,15 @@ pub async fn export_user(
     // Cap events at 10k. Order by ts so the truncation is a tail-cut
     // (operator gets the most recent 10k).
     //
-    // Round-4 / IMPORTANT #3: filter out `kind = 'gdpr.delete_user'`
-    // from the user-facing export. These rows are operator-side
+    // Filter out `kind = 'gdpr.delete_user'` from the user-facing
+    // export. These rows are operator-side
     // records — they live in `sandbox.events` because the gdpr-role
     // INSERT grant runs through that table, but they are NOT user
     // data. They document who/when erased the user (GDPR Art. 30
     // Records of Processing Activities) and surfacing them on a
     // post-erasure export request would let the user re-discover
     // their own erasure record. The carve-out is operator-records
-    // under the RoPA exemption — see runbook:
-    // `docs/runbooks/sandbox-nomad-ch.md` § Phase-3 admin API. The
+    // under the RoPA exemption — see the sandbox admin runbook. The
     // events_total / events_truncated counters mirror the same
     // filter so callers reading those numbers see the user-facing
     // row count, not the operator-record count.
@@ -780,7 +772,7 @@ pub async fn export_user(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // Round-trip the per-table strings through serde_json so the
+    // Parse the per-table strings through serde_json so the
     // outer document is well-formed even if json_agg returns NULL
     // (we COALESCE to '[]'::json so this is defensive).
     let sandboxes_v: serde_json::Value =
@@ -922,10 +914,10 @@ pub async fn delete_user(
     // Audit row inside the same TX. The sandbox_gdpr role has INSERT
     // grant on events for exactly this audit row (§ 13.2).
     //
-    // Round-4 / IMPORTANT #6: `admin_id` is hard-coded `"operator"`
-    // pending the Phase-5 per-operator JWT claim. The trade-off is
+    // `admin_id` is hard-coded `"operator"` until auth exposes a
+    // per-operator identity claim. The trade-off is
     // documented in `docs/decisions/2026-05-05-sandbox-admin-shared-bearer.md`.
-    let admin_id = "operator"; // Phase 5 replaces with JWT claim.
+    let admin_id = "operator"; // Future auth work replaces this with a claim.
     let audit_event_id = zeroship_core::typed_id::generate("evt");
     let audit_data = serde_json::json!({
         "admin_id": admin_id,
@@ -934,8 +926,8 @@ pub async fn delete_user(
         "shares_deleted": shares_deleted,
     })
     .to_string();
-    // Round-4 / IMPORTANT #4: post-migration 0005 the `sandbox_id`
-    // column on `sandbox.events` is NULLable. The GDPR audit row
+    // After migration 0005, `sandbox.events.sandbox_id` is nullable.
+    // The GDPR audit row
     // isn't tied to any specific sandbox; we write `sandbox_id = NULL`
     // rather than synthesizing a never-existed `sbx_…` (which used
     // to pollute `idx_events_sandbox_ts` with unmatchable keys when
@@ -1055,21 +1047,21 @@ mod tests {
         }
     }
 
-    // Phase-3 admin_check coverage lives in two places:
+    // `admin_check` coverage lives in two places:
     //   - tests/sandbox_admin_e2e.rs — real ntex HTTP stack; full
     //     auth path including header parsing + 503/401 responses.
     //   - the constant_time_bearer_eq tests below — pure-helper
-    //     correctness for the SHA-256-digest compare (Round-4 #1).
+    //     correctness for the SHA-256-digest compare.
     // Boot-loader unit tests live inline in lib.rs's
-    // `boot_loader_tests` module (Round-4 / MINOR #4).
+    // `boot_loader_tests` module.
     #[test]
     fn unauthorized_response_shape() {
         let resp = unauthorized();
         assert_eq!(resp.status().as_u16(), 401);
     }
 
-    /// Round-4 fix: the SHA-256-digest compare returns the right
-    /// boolean for matched / mismatched / unequal-length inputs.
+    /// The SHA-256-digest compare returns the right boolean for
+    /// matched, mismatched, and unequal-length inputs.
     /// Timing-side-channel resistance is asserted by inspection of
     /// the function (no length-dependent control flow or allocation
     /// past the fixed-size hasher state); a reliable timing test in
@@ -1090,7 +1082,7 @@ mod tests {
         // Empty presented.
         assert!(!constant_time_bearer_eq(b"", b"right-token-12345"));
         // Empty expected (degenerate at THIS layer; admin_check guards
-        // the empty case with an early 401 — Round-4 / IMPORTANT #2.
+        // the empty case with an early 401.
         // We assert here that the comparator itself doesn't panic on
         // empty inputs.)
         assert!(!constant_time_bearer_eq(b"presented", b""));
@@ -1102,12 +1094,9 @@ mod tests {
     }
 
     /// Smoke test that the comparator handles wildly different
-    /// lengths without allocating attacker-sized buffers (Round-4
-    /// IMPORTANT #1: pre-fix the comparator did
-    /// `vec![0u8; max(presented.len(), expected.len())]` which gave
-    /// an attacker a fresh DoS amplifier — `presented` is bounded
-    /// only by ntex's ~8 KiB header cap). The post-fix shape hashes
-    /// both sides into 32 bytes regardless of input size.
+    /// lengths without allocating attacker-sized buffers. The current
+    /// shape hashes both sides into 32 bytes regardless of input
+    /// size.
     #[test]
     fn constant_time_bearer_eq_handles_wildly_different_lengths() {
         let presented = b"x";
@@ -1121,4 +1110,3 @@ mod tests {
         assert!(!constant_time_bearer_eq(&presented, expected));
     }
 }
-

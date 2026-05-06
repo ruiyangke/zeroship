@@ -1,9 +1,9 @@
 // Public surface of `@zeroship/server`.
 //
-// Phase 1 ships only the build-time pieces: the `defineApp` authoring
-// helper and the type vocabulary for the resource tree. Runtime helpers
-// (`user()`, `requireRole`, `RpcError`) are stubs that throw — they ship
-// in Phase 4 / Phase 5.
+// This package currently ships the build-time pieces: the `defineApp`
+// authoring helper and the type vocabulary for the resource tree.
+// Runtime helpers (`user()`, `requireRole`, `RpcError`) are reserved
+// here but still throw when called.
 
 export { defineApp } from "./define-app.js";
 export {
@@ -29,10 +29,9 @@ export {
 
 // ── Procedure wrapper markers ─────────────────────────────────────────
 //
-// ISS-02: explicit opt-in markers replace the path-based "every export
-// under src/server/** is an RPC" rule. The vite-plugin's transform
-// statically recognizes these wrapper names (any of `procedure`,
-// `query`, `mutation`, `stream`, `subscription`) when imported from
+// RPC discovery is explicit now: the vite-plugin's transform statically
+// recognizes these wrapper names (any of `procedure`, `query`,
+// `mutation`, `stream`, `subscription`) when imported from
 // `@zeroship/server`; only exports whose initializer is one such call
 // become RPCs.
 //
@@ -56,7 +55,7 @@ export {
 //   );
 export { procedure, query, mutation, stream, subscription } from "./wrappers.js";
 
-// Phase 5 — `__makeServerProcedure` SSR adapter.
+// `__makeServerProcedure` SSR adapter.
 //
 // The vite-plugin's SSR-enabled-app variant wraps each user procedure
 // with `__makeServerProcedure(impl, meta)` so the same React component
@@ -126,31 +125,30 @@ export const z: ZodNamespace = _zodModule
       },
     ) as unknown as ZodNamespace);
 
-// ── Phase 4/5 stubs ──────────────────────────────────────────────────
+// ── Runtime Helper Stubs ─────────────────────────────────────────────
 // Exported so user code can import them today; calling them throws.
 //
-// Each export here gets a real implementation in the corresponding
-// phase. The stub form reserves the name and shape so user code that
-// imports them survives a phased rollout.
+// The stub form reserves the name and shape so user code can adopt the
+// API before the runtime wiring exists.
 
-const NOT_IMPLEMENTED = "Not implemented in Phase 1 of @zeroship/server";
+const NOT_IMPLEMENTED = "Not implemented in this build of @zeroship/server";
 
-/** Phase 5: returns the request's authenticated user. */
+/** Returns the request's authenticated user once runtime auth wiring exists. */
 export function user(): never {
   throw new Error(NOT_IMPLEMENTED);
 }
 
-/** Phase 5: returns the request's user or null if anon. */
+/** Returns the request's user or `null` for anonymous callers once wired. */
 export function userOrNull(): never {
   throw new Error(NOT_IMPLEMENTED);
 }
 
-/** Phase 5: throws PERMISSION_DENIED if the user lacks the role. */
+/** Throws `PERMISSION_DENIED` if the user lacks the role once wired. */
 export function requireRole(_role: string): never {
   throw new Error(NOT_IMPLEMENTED);
 }
 
-/** Phase 4: structured RPC error with a fixed code enum. */
+/** Structured RPC error with a fixed code enum. */
 export class RpcError extends Error {
   constructor(
     public readonly code: string,

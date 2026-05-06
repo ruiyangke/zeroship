@@ -1,5 +1,5 @@
 //! Cross-class brand-check regression for `<Class>Iterator.prototype
-//! .next()` — closes Wave 10 NS6.
+//! .next()`.
 //!
 //! Pre-fix, the macro emitted a bare External-recovery prologue at the
 //! top of the iterator's `next()` callback:
@@ -22,10 +22,10 @@
 //! release mode, this corrupts whichever box's state happens to alias
 //! the cast; under Miri, it's an instant abort.
 //!
-//! Wave 10 NS6's fix: emit a per-iterator-class brand check (private
+//! The fix emits a per-iterator-class brand check (private
 //! prototype-walk helper, mirrors the parent-class brand check in
-//! `v8_class/emit/brand.rs`) and call it at the top of `next()` before
-//! the External recovery. Mismatches throw TypeError with the shape
+//! `v8_class/emit/brand.rs`) and calls it at the top of `next()`
+//! before the External recovery. Mismatches throw TypeError with the shape
 //! `"<Class>Iterator.prototype.next called on incompatible receiver"`.
 //!
 //! What this file pins:

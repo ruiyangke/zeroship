@@ -1,32 +1,33 @@
-//! Pg-backed non-secret state for the sandbox controller (Phase 0).
+//! Pg-backed non-secret state for the sandbox controller.
 //!
-//! See `docs/proposals/sandbox-pg-state.md` (Draft v8) for the
-//! design. Phase 0 lands the schema, the migration runner, and the
-//! `Database` handle. Live integration with the backends ships in
-//! Phase 1; this module's surface in Phase 0 is deliberately small:
+//! See `docs/proposals/sandbox-pg-state.md` for the design. This
+//! module owns the schema, migration runner, and [`Database`]
+//! handle. The live controller currently uses only a subset of that
+//! surface:
 //!
 //! - [`Database::from_env`] parses env, opens the pool, validates HA
-//!   env vars (R-NN: `lease_ttl >= 4 * heartbeat`).
+//!   env vars, and rejects unsafe lease settings
+//!   (`lease_ttl >= 4 * heartbeat`).
 //! - [`Database::ensure_schema_at_version`] is the boot gate — the
 //!   designated migrator (`SANDBOX_PG_RUN_MIGRATIONS=1`) applies
 //!   pending migrations forward-only; everyone else polls
 //!   `MAX(version)` until the schema reaches `target`.
 //! - [`Database::run_pending_migrations`] is the migrator-side
 //!   forward-only apply loop, race-tolerant against simultaneous
-//!   migrators via the PRIMARY KEY on `schema_migrations.version`
-//!   (§ 7.1 fallback).
+//!   migrators via the PRIMARY KEY on `schema_migrations.version`.
 //! - [`Database::ping`] / [`Database::current_schema_version`] are
 //!   for tests and `/readyz`.
 //!
-//! ## What this module deliberately does NOT do (Phase 0)
+//! ## What this module deliberately does NOT do
 //!
-//! - No call sites are wired. `insert_sandbox`, `record_event`, etc.
-//!   ship in Phase 1.
+//! - Some controller call sites still are not wired. `insert_sandbox`,
+//!   `record_event`, and related methods exist here, but not every
+//!   runtime path consumes them yet.
 //! - No worker queue. The `flume` dep is declared in `Cargo.toml`
-//!   for Phase 1's § 14.14 worker pool.
+//!   for a future worker-pool follow-up.
 //! - No advisory locks. ANYWHERE. Concurrency is enforced by the
 //!   designated-migrator pattern + UNIQUE-constraint race-tolerance
-//!   on `sandbox.schema_migrations.version` (D-4 / § 7.1).
+//!   on `sandbox.schema_migrations.version`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -41,7 +42,7 @@ use uuid::Uuid;
 // Migration files are read at compile time via `include_str!`. Each
 // file is a single transactional migration (the runner wraps it in
 // BEGIN/COMMIT) plus an idempotent guard around every CREATE so a
-// loser of a two-migrator race can replay safely (D-4 / § 7.1).
+// loser of a two-migrator race can replay safely.
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -61,7 +62,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 4,
-        description: "Phase-3 role-grant tightening (sandbox_app no DELETE on events)",
+        description: "role-grant tightening (sandbox_app cannot DELETE from events)",
         sql: include_str!("../migrations/0004_role_split_phase3.sql"),
     },
     Migration {
@@ -106,25 +107,23 @@ impl Migration {
 /// the design.
 ///
 /// **Hand-rolled `Debug`** redacts the DSN's `password=` query
-/// parameter and the URI userinfo password (round-1 fixer /
-/// MINOR #16). Pre-fix, `tracing::debug!(?config, …)` would echo
-/// the full DSN — including a password injected by
-/// `inject_password_if_configured` — straight into operator logs
-/// where it persisted in journald / log aggregators.
+/// parameter and the URI userinfo password. Without this,
+/// `tracing::debug!(?config, …)` could echo the full DSN —
+/// including a password injected by `inject_password_if_configured`
+/// — into operator logs.
 #[derive(Clone)]
 pub struct DbConfig {
     /// Primary DSN as the `sandbox_app` role. Must start with
-    /// `postgres://` or `postgresql://`. Phase 0 only verifies the
-    /// scheme; production hardening (host allow-list,
-    /// `sslmode=verify-full`) lands with Phase 1's connection
-    /// security review.
+    /// `postgres://` or `postgresql://`. This only verifies the
+    /// scheme; stronger connection hardening such as a host
+    /// allow-list or `sslmode=verify-full` is still separate work.
     pub dsn: String,
-    /// Phase-3 audit-role DSN. Connects as `sandbox_audit` and is used
+    /// Audit-role DSN. Connects as `sandbox_audit` and is used
     /// exclusively for `INSERT INTO sandbox.events`. Falls back to
     /// `dsn` (the app role) when `SANDBOX_DATABASE_URL_AUDIT` is unset
     /// — the dev-convenience shape per § 13.2 last paragraph.
     pub dsn_audit: String,
-    /// Phase-3 GDPR-role DSN. Connects as `sandbox_gdpr` for the
+    /// GDPR-role DSN. Connects as `sandbox_gdpr` for the
     /// admin-handler GDPR cascade DELETE only; opened on demand at
     /// request time, not at boot. Falls back to `dsn` when
     /// `SANDBOX_DATABASE_URL_GDPR` is unset.
@@ -135,15 +134,15 @@ pub struct DbConfig {
     /// identity deletes the file. (§ 10.1)
     pub host_id: Uuid,
     /// `=1` from `SANDBOX_PG_RUN_MIGRATIONS`. Tags this process as
-    /// the deployment's designated migrator (D-4 / § 7.1).
+    /// the deployment's designated migrator.
     pub run_migrations: bool,
     /// Maximum seconds a non-migrator waits for the schema to reach
     /// `target_version`. From `SANDBOX_PG_BOOT_TIMEOUT_SECS`,
-    /// default 60 (per § 5.6 default 300; Phase 0 ships a tighter
-    /// 60s default for fail-fast tests + dev — operators raise it
-    /// in production).
+    /// default 60. The proposal used 300 seconds; this code keeps a
+    /// tighter fail-fast default for tests and local development, and
+    /// operators can raise it in production.
     pub boot_timeout_secs: u64,
-    /// Pool max-size. From `SANDBOX_PG_POOL_MAX`, default 16 (D-17).
+    /// Pool max-size. From `SANDBOX_PG_POOL_MAX`, default 16.
     pub pool_max: usize,
 }
 
@@ -206,7 +205,7 @@ fn redact_dsn_for_debug(dsn: &str) -> String {
 }
 
 /// Errors surfaced by [`Database`] at boot or during migration
-/// apply. Live-path call-site errors land in Phase 1.
+/// apply.
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
     /// Underlying pg driver failure (connect / TLS / auth / query).
@@ -233,18 +232,14 @@ pub enum DatabaseError {
     /// env vars, host_id parse, etc). Refuses to start.
     #[error("validation: {0}")]
     Validation(String),
-    /// Round-1 fixer / IMPORTANT #7: a CAS-guarded UPDATE matched
-    /// zero rows because the row's `generation` had advanced past
-    /// the caller's `expected_generation`. Distinct from `NotFound`
-    /// — the row exists, just at a generation we no longer own.
+    /// A CAS-guarded UPDATE matched zero rows because the row's
+    /// `generation` had advanced past the caller's
+    /// `expected_generation`. Distinct from `NotFound`: the row
+    /// still exists, just at a generation we no longer own.
     ///
-    /// Round-2 fixer / IMPORTANT #5: extended to carry the
-    /// `observed_generation` (what pg currently has) and
-    /// `current_host_id` (who owns the row right now). Pre-fix the
-    /// audit log only said "expected 5" with no hint at "row is at
-    /// 9, owned by host_id Y" — operators triaging a split-brain
-    /// event had to manually open pg and re-read the row. Today the
-    /// error itself is self-contained.
+    /// Carries the current `observed_generation` and
+    /// `current_host_id` so callers can log enough context to
+    /// diagnose ownership races without re-reading the row manually.
     #[error("CAS lost for sandbox {sandbox_id}: expected generation {expected_generation}, observed {observed_generation} (current host {current_host_id:?})")]
     CasLost {
         sandbox_id: String,
@@ -258,18 +253,15 @@ pub enum DatabaseError {
         /// would indicate corruption).
         current_host_id: Option<String>,
     },
-    /// Round-1 fixer / IMPORTANT #7: the targeted row does not exist
-    /// (or has been tombstoned, or the tenant fence excluded it).
+    /// The targeted row does not exist, has been tombstoned, or the
+    /// tenant fence excluded it.
     /// Carries the typed-id so the caller can include it in the
     /// audit log without re-deriving the string.
     #[error("not found: {sandbox_id}")]
     NotFound { sandbox_id: String },
-    /// Round-2 fixer / MINOR #4: dedicated variant for
-    /// `takeover_sandboxes_from_host`'s self-takeover guard. Pre-fix
-    /// this returned `Validation("refusing self-takeover: …")` and
-    /// the (sole) test substring-matched on the message. The typed
-    /// variant lets callers / tests pattern-match without coupling
-    /// to the message format.
+    /// Dedicated variant for `takeover_sandboxes_from_host`'s
+    /// self-takeover guard so callers and tests can pattern-match
+    /// without depending on a formatted validation message.
     #[error("self-takeover refused for host {host_id}")]
     SelfTakeoverRefused { host_id: String },
 }
@@ -287,10 +279,10 @@ pub type Result<T> = std::result::Result<T, DatabaseError>;
 /// the worker factory closure to be `Send + Clone` so we cannot
 /// stash a `Pool` inside the shared `Arc<AppState>`.
 ///
-/// Phase-0 design: `Database` holds the resolved DSN + config and
-/// builds a transient pool inline for migration runs (one boot
-/// pass) and for `ping`. Phase 1 introduces a per-ntex-worker
-/// thread-local pool when call sites actually consume it.
+/// `Database` holds the resolved DSN + config and builds a transient
+/// pool inline for migration runs and for `ping`. A future hot-path
+/// optimization can replace that with a per-worker thread-local pool
+/// once more controller code relies on database access.
 ///
 /// `Database` itself is `Send + Sync` (just String + Copy fields),
 /// so `Arc<Database>` plumbs cleanly through `AppState` without
@@ -309,7 +301,7 @@ impl Database {
     ///
     /// Validation order (any failure aborts boot):
     ///   1. DSN present + scheme is `postgres://` or `postgresql://`.
-    ///   2. HA env-var sanity (R-NN: `lease_ttl >= 4 * heartbeat`).
+    ///   2. HA env-var sanity (`lease_ttl >= 4 * heartbeat`).
     ///   3. Pool numbers parse + are within sane bounds.
     ///   4. Host identity loads (env → file → generate-and-persist).
     ///   5. Pool opens (TCP + auth + warm `min_idle` connections).
@@ -324,7 +316,7 @@ impl Database {
     /// Build with an explicit DSN — used by tests that want a
     /// per-test pg fixture without round-tripping through env.
     ///
-    /// Phase-3: the audit + GDPR DSNs come from
+    /// The audit + GDPR DSNs come from
     /// `SANDBOX_DATABASE_URL_AUDIT` / `SANDBOX_DATABASE_URL_GDPR`
     /// when set; both fall back to the primary DSN for dev
     /// convenience (a single role for everything). In production
@@ -334,8 +326,8 @@ impl Database {
         validate_dsn_scheme(&dsn)?;
         let dsn = inject_password_if_configured(dsn)?;
 
-        // HA env validation (Phase 0 even though the takeover task
-        // ships in Phase 4; § 15 / R-NN).
+        // Validate the lease settings at boot so unsafe values never
+        // make it to runtime.
         validate_ha_env_vars()?;
 
         let run_migrations = matches!(
@@ -355,8 +347,8 @@ impl Database {
 
         // Eagerly verify the DSN connects + auths so a misconfigured
         // controller fails fast at boot rather than at first call.
-        // The transient pool is dropped immediately; Phase-1 call
-        // sites build per-worker pools when they need them.
+        // The transient pool is dropped immediately; hot-path call
+        // sites can move to long-lived per-worker pools later.
         let mut pool_cfg = PoolConfig::default();
         pool_cfg.max_size = pool_max;
         let pool = Pool::connect_with_config(&dsn, pool_cfg)
@@ -368,7 +360,7 @@ impl Database {
         drop(client);
         drop(pool);
 
-        // Phase-3 split-role DSNs. Defaults to `dsn` (the app role)
+        // Split-role DSNs. Defaults to `dsn` (the app role)
         // when unset — single-role-for-dev convenience documented in
         // § 13.2 last paragraph; production sets all three.
         let dsn_audit = resolve_optional_role_dsn("SANDBOX_DATABASE_URL_AUDIT", &dsn)?;
@@ -438,35 +430,26 @@ impl Database {
     }
 
     /// Resolved DSN as the `sandbox_app` role, password injected if
-    /// a `SANDBOX_DATABASE_PASSWORD_PATH` was configured. Phase 1
-    /// uses this to build per-ntex-worker connection pools when
-    /// call sites actually need pooled access.
+    /// a `SANDBOX_DATABASE_PASSWORD_PATH` was configured. Callers can
+    /// use this when they need to build connection pools explicitly.
     pub fn dsn(&self) -> &str {
         &self.config.dsn
     }
 
-    /// Configured pool max-size (D-17 default 16). Phase 1 reads
-    /// this when constructing the per-worker pool.
+    /// Configured pool max-size (default 16). Future per-worker pools
+    /// should use the same bound.
     pub fn pool_max(&self) -> usize {
         self.config.pool_max
     }
 
     /// Open a transient connection pool.
     ///
-    /// **TODO (round-1 fixer / IMPORTANT #10):** every method on
-    /// `Database` calls this and drops the pool inside the same
-    /// future. That round-trips a TCP connect + auth handshake on
-    /// every call. The fix is a per-compio-thread `thread_local!`
-    /// holding a long-lived `Pool`, lazily initialized on first
-    /// use; deferred to a follow-up because `compio_postgres::Pool`
-    /// is `!Send` + `!Sync`, so a naive thread-local works in
-    /// principle but interacts subtly with ntex's worker-factory
-    /// bounds (factory must be `Send + Clone`; thread-locals
-    /// satisfy that as long as we don't try to share a `Pool`
-    /// across worker boundaries — which we don't, since each
-    /// worker thread has its own `thread_local`). Documenting
-    /// here so the next round picks it up; the current pattern is
-    /// correct, just slow on the hot path.
+    /// Every method on `Database` calls this and drops the pool in
+    /// the same future. That means a fresh TCP connect and auth
+    /// handshake on every call. The code is correct, but slow on hot
+    /// paths. A future optimization can move this to a
+    /// per-compio-thread `thread_local!` pool without sharing `Pool`
+    /// across worker boundaries.
     async fn open_pool(&self) -> Result<Pool> {
         let mut cfg = PoolConfig::default();
         cfg.max_size = self.config.pool_max.max(2);
@@ -475,7 +458,7 @@ impl Database {
             .map_err(DatabaseError::Pg)
     }
 
-    /// Phase-3: open a transient pool authenticated as the
+    /// Open a transient pool authenticated as the
     /// `sandbox_app` role. Alias for `open_pool` — the controller's
     /// default DML role. Exposed under a role-named accessor so
     /// call sites read self-documenting.
@@ -483,7 +466,7 @@ impl Database {
         self.open_pool().await
     }
 
-    /// Phase-3: open a transient pool authenticated as the
+    /// Open a transient pool authenticated as the
     /// `sandbox_audit` role. Used by `insert_event` once the audit
     /// pipe is split from the controller; falls back to
     /// `SANDBOX_DATABASE_URL` when `SANDBOX_DATABASE_URL_AUDIT` is
@@ -496,7 +479,7 @@ impl Database {
             .map_err(DatabaseError::Pg)
     }
 
-    /// Phase-3: open a transient pool authenticated as the
+    /// Open a transient pool authenticated as the
     /// `sandbox_gdpr` role. Opened on demand inside the GDPR-delete
     /// admin handler and dropped at end-of-request; never cached
     /// (§ 13.2).
@@ -589,7 +572,7 @@ impl Database {
     /// `INSERT INTO schema_migrations` loses a race against a
     /// concurrent migrator (UNIQUE on `version`), the loser rolls
     /// back its TX, observes the migration is now applied, and
-    /// continues. No advisory locks (§ 7.1, D-4).
+    /// continues. No advisory locks.
     pub async fn run_pending_migrations(&self) -> Result<u64> {
         // Bootstrap: ensure the schema + table exist outside any
         // migration TX so a fresh database can be queried for
@@ -669,10 +652,9 @@ impl Database {
         // The DDL body. `batch_execute` inside a TX runs every
         // statement in the file under one transaction (BEGIN issued
         // by `client.transaction()`). Any statement that is itself
-        // not transactionable would have to land in a Phase-2
-        // migration with `Down-Compatible: …` markup — Phase 0
-        // ships only `0001_initial.sql`, all of which is plain DDL
-        // wrapped in IF NOT EXISTS guards.
+        // not transactionable would have to land in a dedicated
+        // follow-up migration. The current migrations are all plain
+        // DDL wrapped in IF NOT EXISTS guards.
         let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
         if let Err(e) = tx.batch_execute(m.sql).await {
             let _ = tx.rollback().await;
@@ -768,8 +750,8 @@ impl Database {
 // Helpers
 // ────────────────────────────────────────────────────────────────────
 
-/// Round-1 fixer / MINOR #19: enforce mode 0o400 on the
-/// pg-password file on Unix. Mirrors `persist::AeadKey::from_path`.
+/// Enforce mode 0o400 on the pg-password file on Unix. Mirrors
+/// `persist::AeadKey::from_path`.
 /// On non-Unix targets this is a no-op (the modes are POSIX-only).
 fn enforce_password_file_mode(path: &str) -> Result<()> {
     #[cfg(unix)]
@@ -829,8 +811,8 @@ fn validate_dsn_scheme(dsn: &str) -> Result<()> {
         Err(DatabaseError::Validation(format!(
             "SANDBOX_DATABASE_URL must start with postgres:// or postgresql://, got: {}",
             // Don't echo the full string in case it carries a
-            // password (Round-2 § 13.1 forbids it but defense in
-            // depth — log only the scheme prefix).
+            // password. Log only the scheme prefix as defense in
+            // depth.
             dsn.split_once(':').map(|(s, _)| s).unwrap_or("(empty)")
         )))
     }
@@ -840,10 +822,9 @@ fn validate_dsn_scheme(dsn: &str) -> Result<()> {
 /// inject the password into the DSN. Otherwise return the DSN
 /// unchanged.
 ///
-/// Round-1 fixer / MINOR #19: enforces mode 0o400 on Unix (mirrors
-/// `persist::AeadKey::from_path`). A world-readable password file
-/// is a footgun on shared hosts; refusing to boot is the right
-/// answer rather than silently degrading.
+/// Enforces mode 0o400 on Unix (mirrors `persist::AeadKey::from_path`).
+/// A world-readable password file is a footgun on shared hosts, so
+/// boot fails loudly instead of silently degrading.
 fn inject_password_if_configured(dsn: String) -> Result<String> {
     let Ok(path) = std::env::var("SANDBOX_DATABASE_PASSWORD_PATH") else {
         return Ok(dsn);
@@ -920,7 +901,7 @@ fn url_encode_password(s: &str) -> String {
     out
 }
 
-/// Phase-3: resolve an optional role-specific DSN env var. Returns
+/// Resolve an optional role-specific DSN env var. Returns
 /// the env var's value (validated as `postgres://` / `postgresql://`
 /// + password injection) when set, else falls back to `default_dsn`.
 ///
@@ -941,9 +922,7 @@ fn resolve_optional_role_dsn(env_var: &str, default_dsn: &str) -> Result<String>
     }
 }
 
-/// HA env-var validator (Round-7 / R-NN; lands in Phase 0 even
-/// though the takeover task that consumes the values ships in
-/// Phase 4). Refuses boot when:
+/// HA env-var validator. Refuses boot when:
 ///   - heartbeat <= 0
 ///   - lease_ttl <= 0
 ///   - lease_ttl < 4 * heartbeat
@@ -961,7 +940,7 @@ fn validate_ha_env_vars() -> Result<()> {
             "SANDBOX_HA_LEASE_TTL_SECS must be > 0, got {lease_ttl}"
         )));
     }
-    // The 4× heartbeat lower-bound is the R-NN safety margin —
+    // The 4× heartbeat lower-bound is the safety margin —
     // shorter TTLs cause spurious takeovers during routine
     // heartbeat jitter (a brief GC pause flips A's lease to
     // "expired" from B's view; B starts a takeover that A's next
@@ -970,7 +949,7 @@ fn validate_ha_env_vars() -> Result<()> {
     if lease_ttl < heartbeat.saturating_mul(4) {
         return Err(DatabaseError::Validation(format!(
             "SANDBOX_HA_LEASE_TTL_SECS={lease_ttl} must be >= 4 * \
-             SANDBOX_HA_HEARTBEAT_SECS ({}); see R-NN in the design",
+             SANDBOX_HA_HEARTBEAT_SECS ({}); see the HA design",
             heartbeat * 4
         )));
     }
@@ -1017,8 +996,8 @@ fn load_or_generate_host_id() -> Result<Uuid> {
         let s = s.trim();
         if !s.is_empty() {
             // Be permissive: accept either typed-id form or raw
-            // UUID. The proposal's § 10.1 lifecycle picks typed-id;
-            // Phase-0 dev workflows often paste raw UUIDs.
+            // UUID. The design prefers typed IDs, but local testing
+            // often pastes raw UUIDs.
             if let Ok(uuid) =
                 zeroship_core::typed_id::parse_with_prefix(s, "hst")
             {
@@ -1113,10 +1092,10 @@ fn is_concurrent_ddl_race(e: &compio_postgres::Error) -> bool {
 
 
 // ────────────────────────────────────────────────────────────────────
-// Phase-1 row types + write methods (round-8: pg as system of record)
+// Row Types And Write Methods
 // ────────────────────────────────────────────────────────────────────
 
-/// One row's-worth of takeover RETURNING data. Used by the Phase-2
+/// One row's-worth of takeover RETURNING data. Used by the takeover
 /// takeover task to update its in-memory generation map after a
 /// successful CAS-guarded ownership rebind (§ 11.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1130,8 +1109,8 @@ pub struct TakenSandbox {
 }
 
 /// One row from `sandbox.sandboxes`. Mirrors the persistent shape of
-/// the registry's [`crate::backend::SandboxInfo`] plus host/owner +
-/// CAS counter for the Phase-2 lease-based takeover.
+/// the registry's [`crate::backend::SandboxInfo`] plus host/owner and
+/// the CAS counter used during lease-based takeover.
 #[derive(Debug, Clone)]
 pub struct SandboxRow {
     pub sandbox_id: String,
@@ -1150,9 +1129,8 @@ pub struct SandboxRow {
     pub last_used_at_secs: u64,
 }
 
-/// Pg `sandboxes.status` values. Round-8: `Unreachable` is a Phase-1
-/// addition so the boot loop can mark agents that 200-don't-respond
-/// without losing the row.
+/// Pg `sandboxes.status` values. `Unreachable` lets the boot loop mark
+/// agents that stop responding without dropping the row entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxStatus {
     Starting,
@@ -1252,10 +1230,8 @@ impl Database {
 
     /// INSERT the host row (idempotent ON CONFLICT (host_id) DO
     /// UPDATE). Matches the boot-time host upsert from § 10.1 step 2.
-    /// Round-8 Phase 1: hostname/region/backend default to "" /
-    /// "us-local-1" / pg's CHECK-passing default unless the operator
-    /// supplies them via env. Phase-2 wires the heartbeat task that
-    /// updates `last_heartbeat`.
+    /// `hostname`, `region`, and `backend` fall back to simple local
+    /// defaults unless the operator supplies them explicitly.
     pub async fn upsert_host(&self, hostname: &str, backend: &str) -> Result<()> {
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
@@ -1290,14 +1266,12 @@ impl Database {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Phase 2 — periodic heartbeat + lease-based takeover (§ 11)
+    // Heartbeat And Takeover
     // ────────────────────────────────────────────────────────────────
 
-    /// Round-1 fixer / IMPORTANT #8: mark THIS controller's host row
-    /// `status='draining'`. Called from
-    /// [`crate::AppState::trigger_shutdown`] so peers see the
-    /// drain-intent before our heartbeat goes silent (without this
-    /// hint, peers wait the full lease_ttl before taking over).
+    /// Mark this controller's host row `status='draining'`. Called
+    /// from [`crate::AppState::trigger_shutdown`] so peers see the
+    /// drain intent before our heartbeat goes silent.
     /// Idempotent: running twice is a no-op past the first apply.
     pub async fn set_host_draining(&self) -> Result<()> {
         let pool = self.open_pool().await?;
@@ -1318,11 +1292,11 @@ impl Database {
         Ok(())
     }
 
-    /// Bump `last_heartbeat = now()` for THIS controller's host row.
+    /// Bump `last_heartbeat = now()` for this controller's host row.
     /// Called periodically by [`crate::spawn_heartbeat_task`]. The
     /// pg-side `now()` is the canonical wall clock for lease-window
-    /// decisions (§ 12 R-MM); this UPDATE is the one place a
-    /// controller's identity meets pg's clock.
+    /// decisions, so this UPDATE is the one place a controller's
+    /// identity meets pg's clock.
     ///
     /// Returns `Err` if pg is unavailable; the heartbeat task logs
     /// and continues so a transient outage doesn't crash the
@@ -1349,15 +1323,13 @@ impl Database {
         Ok(())
     }
 
-    /// Read the pg-side `now() - last_heartbeat` for THIS controller's
+    /// Read the pg-side `now() - last_heartbeat` for this controller's
     /// host row. Used by:
     ///   - the takeover task to refresh the
     ///     `sandbox_ha_heartbeat_lag_seconds` gauge, and
-    ///   - the clock-rewind detector — § 12 R-MM: a healthy fleet
-    ///     never sees a negative lag here, because pg's `now()` is
-    ///     monotonic from pg's perspective. A negative lag indicates
-    ///     pg's wall clock was rewound or the row's `last_heartbeat`
-    ///     was set to a future timestamp.
+    ///   - the clock-rewind detector. A healthy fleet should never
+    ///     see a negative lag here because pg's `now()` is the
+    ///     canonical clock from the database's perspective.
     ///
     /// Returns `Ok(None)` if the row is absent (a misconfigured
     /// controller never upserted at boot); `Err` only on pg failure.
@@ -1392,17 +1364,9 @@ impl Database {
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
         let lease_ttl_i64 = i64::try_from(lease_ttl_secs)
             .map_err(|e| DatabaseError::Validation(format!("lease_ttl overflow: {e}")))?;
-        // Round-2 fixer / CRITICAL #4: include `status='draining'` in
-        // the dead-hosts filter. A draining host is in the middle of
-        // a graceful shutdown but its lease is still authoritative
-        // until it expires; if the host crashes mid-drain (or the
-        // drain grace is shorter than the lease_ttl), no other path
-        // ever transitions it to dead. Pre-fix, draining hosts whose
-        // heartbeat went silent stayed `'draining'` forever and
-        // their sandboxes were orphaned. Today the same lease-ttl
-        // expiration logic catches both alive and draining hosts;
-        // the takeover TX flips them to `'dead'` once it owns the
-        // sandboxes (see `takeover_sandboxes_from_host`).
+        // Include both `alive` and `draining`. A host that dies
+        // mid-drain must still become eligible for takeover once its
+        // lease expires.
         let rows = client
             .query(
                 "SELECT host_id FROM sandbox.hosts \
@@ -1442,8 +1406,8 @@ impl Database {
             zeroship_core::typed_id::uuid_to_base62(&my_host)
         );
         if dead_host_typed == my_host_typed {
-            // Round-2 fixer / MINOR #4: typed variant; tests
-            // pattern-match instead of substring-matching the message.
+            // Typed variant so callers can match the error
+            // structurally instead of parsing a string.
             return Err(DatabaseError::SelfTakeoverRefused {
                 host_id: my_host_typed,
             });
@@ -1467,15 +1431,10 @@ impl Database {
         //       host heart-beated back to life between (1) and (2),
         //       the WHERE clause misses and we leave status='alive'.
         let tx = client.transaction().await.map_err(DatabaseError::Pg)?;
-        // Round-2 fixer / CRITICAL #4: the EXISTS subquery accepts both
-        // `'alive'` and `'draining'` so a host that died mid-drain (or
-        // crashed shortly after the operator initiated drain) doesn't
-        // permanently orphan its sandboxes.
-        // Round-2 fixer / IMPORTANT #2: include `'unreachable'` in the
-        // status filter so a row whose previous probe failed gets a
-        // chance to be re-probed by the new owner; otherwise an
-        // unreachable row stays unreachable forever even after the host
-        // dies and a peer should reclaim it.
+        // Accept both `'alive'` and `'draining'` so a host that dies
+        // mid-drain still becomes reclaimable. Also include
+        // `'unreachable'` rows so a failed probe can be retried by
+        // the new owner instead of leaving the row degraded forever.
         let rows = tx
             .query(
                 "UPDATE sandbox.sandboxes \
@@ -1512,10 +1471,9 @@ impl Database {
         // takeover above also conditioned on the same predicate, so
         // a takeover-with-zero-rows + still-alive host leaves the
         // host's status untouched as expected.
-        // Round-2 fixer / CRITICAL #4: the host-status flip also
-        // accepts both `'alive'` and `'draining'` as the prior state.
-        // A host that died mid-drain transitions draining → dead in
-        // one step here, exactly the same as alive → dead.
+        // The host-status flip accepts both `'alive'` and
+        // `'draining'` as the prior state so a host that died
+        // mid-drain transitions straight to `'dead'`.
         tx.execute(
             "UPDATE sandbox.hosts \
                 SET status = 'dead' \
@@ -1584,15 +1542,11 @@ impl Database {
     /// CAS-guarded status update. Returns the new generation on
     /// success.
     ///
-    /// Round-1 fixer / IMPORTANT #7: the failure modes are typed —
-    /// `Err(CasLost)` when the row exists at a higher generation
-    /// (a peer took over via § 11.2), `Err(NotFound)` when the row
-    /// is absent (deleted, never existed, or filtered out by the
-    /// tenant fence). Pre-fix, both cases collapsed to
-    /// `Validation("CAS missed …")` and the handler matched on
-    /// substring. Today the handler matches on the variant.
+    /// Failure modes are typed: `Err(CasLost)` when the row exists at
+    /// a higher generation, and `Err(NotFound)` when the row is
+    /// absent or filtered out by the tenant fence.
     ///
-    /// Round-1 fixer / IMPORTANT #9: `expected_user_id` is the
+    /// `expected_user_id` is the
     /// optional tenant fence. When `Some`, the WHERE clause appends
     /// `AND user_id = $expected_user_id` so a misrouted call can't
     /// modify rows owned by a different user.
@@ -1601,10 +1555,9 @@ impl Database {
     /// have a host_id at hand. Forwards to
     /// [`Self::update_sandbox_status_with_host`] with
     /// `host_id = self.host_id()` — this controller's stable
-    /// identity. Round-2 fixer / IMPORTANT #1: every CAS UPDATE
-    /// fences on (host_id, generation) per design D-14, so a
-    /// misrouted call from a peer who lost its lease can never flip
-    /// our row.
+    /// identity. Every CAS UPDATE fences on `(host_id, generation)`,
+    /// so a misrouted call from a peer who lost its lease cannot
+    /// flip our row.
     pub async fn update_sandbox_status(
         &self,
         sandbox_id: Uuid,
@@ -1623,15 +1576,11 @@ impl Database {
         .await
     }
 
-    /// Round-2 fixer / IMPORTANT #1: CAS-guarded status update with
-    /// an explicit `(host_id, generation)` fence. Per design D-14,
-    /// every UPDATE on ownership-relevant fields MUST be guarded by
-    /// the host_id fence in addition to the generation counter — a
-    /// peer who somehow held a stale handle to this `Database` would
-    /// have the right generation only briefly (the takeover write
-    /// also bumps generation), but the host_id fence ensures that
-    /// even if generation collisions happen across hosts, the wrong
-    /// host can't move our row.
+    /// CAS-guarded status update with an explicit
+    /// `(host_id, generation)` fence. Every ownership-relevant
+    /// UPDATE must check the host as well as the generation so a
+    /// stale peer cannot move our row even if it somehow guesses the
+    /// current generation.
     pub async fn update_sandbox_status_with_host(
         &self,
         sandbox_id: Uuid,
@@ -1691,10 +1640,8 @@ impl Database {
         // wrong tenant" (NotFound) so the caller can audit-log
         // precisely.
         //
-        // Round-2 fixer / IMPORTANT #5: the lookup also pulls
-        // `generation` and `host_id` so the `CasLost` variant can
-        // surface "row is at gen N, owned by host_id X" without the
-        // operator re-opening pg.
+        // Also fetch `generation` and `host_id` so the `CasLost`
+        // variant can report who owns the row now.
         let lookup = client
             .query_opt(
                 "SELECT generation, host_id FROM sandbox.sandboxes \
@@ -1721,8 +1668,8 @@ impl Database {
         }
     }
 
-    /// Read a single sandbox row by typed-id. Round-1 fixer /
-    /// CRITICAL #4: the post-takeover rehydrate path needs the row's
+    /// Read a single sandbox row by typed-id. The post-takeover
+    /// rehydrate path needs the row's
     /// fields (user_id, project_id, agent_url, key_fp, generation,
     /// status) so it can call `restore::probe_and_register_one`.
     /// Returns `Ok(None)` for an absent / tombstoned row; the caller
@@ -1785,14 +1732,10 @@ impl Database {
             "hst_{}",
             zeroship_core::typed_id::uuid_to_base62(&host_id)
         );
-        // Round-2 fixer / IMPORTANT #2: include `'unreachable'` rows
-        // in the boot-time restore set. A previous boot's probe might
-        // have stamped `'unreachable'` and there's no other path that
-        // ever flips it back; re-probing on each new boot is cheap
-        // (one signed /version round-trip per sandbox), and on
-        // probe-Ok `restore::probe_and_register_one` flips the row
-        // back to `'running'`. Without this, a single transient probe
-        // failure would degrade a sandbox forever.
+        // Include `'unreachable'` rows in the boot-time restore set.
+        // A previous boot's probe might have stamped `'unreachable'`,
+        // and re-probing on each new boot is the path that can move
+        // the row back to `'running'`.
         let rows = client
             .query(
                 "SELECT sandbox_id, user_id, project_id, backend, vm_index, \
@@ -1837,18 +1780,17 @@ impl Database {
 
     /// Move a sandbox row to the `deleted_sandboxes` tombstone in one
     /// TX. After this call, the row is gone from `sandboxes` but the
-    /// tombstone keeps the operator's audit trail (and prevents the
-    /// boot reconciler from re-INSERTing from a sealed-record orphan
-    /// — though round-8 unlinks orphans rather than re-INSERTing).
+    /// tombstone keeps the operator's audit trail and prevents the
+    /// boot reconciler from recreating the row from stale state.
     ///
-    /// `expected_host_id` is round-1 fixer / CRITICAL #3 ownership
+    /// `expected_host_id` is the ownership
     /// fence: when `Some`, the DELETE is gated on `host_id =
     /// $expected` so a controller that LOST the lease can't yank the
     /// row out from under the legitimate new owner. The handler
-    /// passes its own host_id; admin-tooling (Phase 3) passes
+    /// passes its own host_id; admin tooling passes
     /// `None` for cross-owner cleanup.
     ///
-    /// `expected_user_id` is round-1 fixer / IMPORTANT #9 tenant
+    /// `expected_user_id` is the tenant
     /// fence: when `Some`, both the tombstone and the DELETE are
     /// gated on `user_id = $expected`. Defense in depth — the
     /// in-memory registry already filters by owner, but a SQL-level
@@ -2011,8 +1953,8 @@ impl Database {
         Ok(out)
     }
 
-    /// Rotate the per-sandbox secret-version. Phase-1 model: the
-    /// in-memory `PreviewSecrets.sv_current` is the canonical counter;
+    /// Rotate the per-sandbox secret-version. The current model keeps
+    /// the in-memory `PreviewSecrets.sv_current` as the canonical counter;
     /// pg's per-share `secret_version` rows track which secret a
     /// given share was minted under. Rotate-and-clear (the explicit
     /// DELETE flow) marks every existing share row revoked so the
@@ -2124,7 +2066,7 @@ mod tests {
         unsafe { std::env::set_var(k, v) }
     }
 
-    // ─── HA env-var validator (R-NN) ─────────────────────────────
+    // ─── HA Env-Var Validator ────────────────────────────────────
 
     #[test]
     fn from_env_validates_lease_ttl_minimum() {
@@ -2261,7 +2203,7 @@ mod tests {
 
     // ─── Unique-violation detection ──────────────────────────────
 
-    // ─── Round-1 fixer / MINOR #16: Debug for DbConfig redacts ──
+    // ─── DbConfig Debug Redaction ────────────────────────────────
 
     #[test]
     fn dbconfig_debug_redacts_uri_userinfo_password() {
@@ -2302,7 +2244,7 @@ mod tests {
         assert!(s.contains("sslmode=require"), "non-secret query params must remain: {s}");
     }
 
-    // ─── Round-1 fixer / MINOR #19: pg-password file mode 0o400 ──
+    // ─── Password File Mode Checks ───────────────────────────────
 
     #[cfg(unix)]
     #[test]

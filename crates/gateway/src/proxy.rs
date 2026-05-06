@@ -89,15 +89,15 @@ impl HashRing {
         (least, &self.workers[least])
     }
 
-    /// CHWBL routing with an extra affinity key — used by Phase 7
-    /// subscriptions (spec §16 #4). The hash is `app_id || affinity`
-    /// so reconnects from the same `(app, principal)` always pick the
-    /// same worker, but different principals on the same app spread
-    /// naturally across the fleet. The overload guard (`max_per_worker`)
-    /// is honored: when the affinity-preferred worker is saturated
-    /// we walk the ring forward to the next viable slot. This is a
-    /// "sticky bit" in CHWBL terminology — affinity steers the choice
-    /// but doesn't override capacity.
+    /// CHWBL routing with an extra affinity key, used for subscription
+    /// traffic. The hash is `app_id || affinity` so reconnects from the
+    /// same `(app, principal)` pick the same worker, while different
+    /// principals on the same app still spread naturally across the
+    /// fleet. The overload guard (`max_per_worker`) is honored: when the
+    /// affinity-preferred worker is saturated we walk the ring forward
+    /// to the next viable slot. This is a "sticky bit" in CHWBL
+    /// terminology — affinity steers the choice but does not override
+    /// capacity.
     pub fn select_with_affinity(&self, app_id: &Uuid, affinity: &str) -> (usize, &str) {
         let mut combined = Vec::with_capacity(16 + affinity.len() + 1);
         combined.extend_from_slice(app_id.as_bytes());

@@ -4,7 +4,8 @@
 //! These exercise the Fetch §5.5 constructor + getters + clone() +
 //! body consumers + static methods (Response.error, Response.redirect,
 //! Response.json). WPT conformance lives in `wpt_fetch_response.rs`;
-//! this file covers the design's CRITICAL list and behavioural shape.
+//! this file covers the highest-risk behaviors and the intended
+//! surface shape.
 
 #![allow(unsafe_code)]
 
@@ -430,7 +431,7 @@ fn array_buffer_returns_array_buffer_not_uint8array() {
 
 #[test]
 fn json_rejects_with_syntax_error_not_type_error() {
-    // Per MAJOR-25: response.json() rejects with SyntaxError, not
+    // response.json() rejects with SyntaxError, not
     // TypeError, on parse failure.
     let s = run_async_in_v8(
         r#"

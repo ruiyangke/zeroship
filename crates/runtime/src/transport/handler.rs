@@ -42,12 +42,11 @@ fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8
 /// `Object.create(prototype)` because the resulting instance has a null
 /// internal field, and the first getter call throws "Illegal invocation".
 ///
-/// Per D-22, the JSON header marshalling is retired with the polyfill in
-/// landing 2: native `fetch()` builds Request objects directly inside V8,
-/// no JSON intermediate. This helper remains for the kernel's slow-path
-/// `default.fetch` dispatch where Rust passes raw header bytes; once the
-/// dispatch path itself moves to native (post-D-23), this constant goes
-/// away too.
+/// Native `fetch()` builds Request objects directly inside V8, with no
+/// JSON header intermediate. This helper remains for the kernel's
+/// slow-path `default.fetch` dispatch where Rust passes raw header
+/// bytes; once that dispatch path moves fully native, this constant can
+/// go away too.
 ///
 /// Fast paths still preserved:
 ///   - Skips `JSON.parse` when `headersJson` is empty or `"[]"`.
@@ -134,7 +133,7 @@ pub enum SettledResult {
 
 /// Inspect a V8 Response object and extract status, headers, body / stream info.
 ///
-/// Per D-23 step 3 the polyfill is gone — every Response that reaches this
+/// The JS polyfill is gone, so every Response that reaches this
 /// inspector is either a native `#[v8_class]` Response (Box<ResponseState>
 /// in internal field 0 — see `crate::fetch_response`) or a duck-typed
 /// `{ status, ... }` plain object the user returned from a handler. The
@@ -168,7 +167,7 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
     // gateway path stashes the client WebSocket Global on the Response;
     // we ferry the `ws_id` through to the kernel.
     //
-    // Two layouts in flight during the cutover (D-25):
+    // Two layouts were supported during the WebSocket cutover:
     //   - polyfill: `webSocket` is a plain JS object with an `_id`
     //     expando set by `__wsCreatePair` / `__wsLinkPair`. Read via
     //     `ws_obj.get("_id")`.
@@ -178,8 +177,8 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
     //     `websocket_native::ws_id_of`.
     //
     // We try the native path first, then fall back to the polyfill
-    // expando. (per design §X.1 — addresses the v1 design's "polyfill
-    // `_id` field" gap.)
+    // expando. This preserves the fallback for the old polyfill-backed
+    // `_id` field.
     if status == 101 {
         if let Some(ws_g) = crate::fetch_response::try_native_response_websocket(scope, obj) {
             let ws_obj = v8::Local::new(scope, ws_g);
@@ -200,7 +199,7 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         }
     }
 
-    // Native Response: read body via the public surface (D-23). For
+    // Native Response: read the body via the public surface. For
     // duck-typed `{ status, ... }` plain objects, fall through with an
     // empty body.
     if let Some(view) = crate::fetch_response::try_native_response_body(scope, obj) {

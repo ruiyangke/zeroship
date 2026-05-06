@@ -136,8 +136,7 @@ fn dispatch_one(
             crate::dom::event_target::dispatch_event(scope, wrapper, ce);
         }
         WsEvent::Error { reason: _ } => {
-            // §4 step 3.1: fire a plain `error` Event (NOT ErrorEvent
-            // — D-26).
+            // §4 step 3.1: fire a plain `error` Event, not ErrorEvent.
             let event = build_plain_event(scope, "error");
             crate::dom::event_target::dispatch_event(scope, wrapper, event);
         }

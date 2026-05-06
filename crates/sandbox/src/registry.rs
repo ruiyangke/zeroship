@@ -24,10 +24,10 @@ use crate::AppState;
 /// Grace period (seconds) during which the *previous* preview-secret
 /// version is still honoured after an organic rotation. Explicit
 /// `DELETE` is **zero-grace** — see [`SandboxRegistry::rotate_preview_secret`].
-/// (preview-URL § II.4 "Per-sandbox secret" — "60 s grace period")
+/// (`docs/proposals/sandbox-preview-urls.md` § II.4 "Per-sandbox secret" — "60 s grace period")
 pub const PREVIEW_SECRET_GRACE_SECS: u64 = 60;
 
-/// Per-sandbox HMAC-secret ring used by Phase-3 share tokens.
+/// Per-sandbox HMAC-secret ring used by share tokens.
 /// Mirrors [`crate::persist::SealedPreviewSecrets`] — the registry
 /// holds the live in-memory copy; persistence layer sees the same
 /// shape. Cloning is cheap (32 bytes + Option + u64).
@@ -152,17 +152,17 @@ fn fresh_secret_bytes() -> [u8; 32] {
 /// signing-key + agent-URL bundle the preview proxy and any future
 /// signed-RPC dispatch reach for; populated at `insert_with_auth`
 /// time, `None` for legacy callers that haven't lifted yet (the
-/// preview-URL proposal § II.0 says the registry SHOULD always
-/// hold auth, but we keep the optional shape so the migration is
-/// gradual — the Backend's `session_auth` lookup is still the
-/// authoritative source).
+/// `docs/proposals/sandbox-preview-urls.md` §II.0 says the registry
+/// should eventually always hold auth, but we keep the optional
+/// shape so the migration can stay gradual. The Backend's
+/// `session_auth` lookup is still the authoritative source).
 #[derive(Clone)]
 struct Sandbox {
     info: SandboxInfo,
     created_at: Instant,
     last_used: Arc<RwLock<Instant>>,
     auth: Option<SandboxAuth>,
-    /// Phase-2 CAS counter (sandbox-pg-state design § 11.2).
+    /// CAS counter mirrored from pg (`docs/proposals/sandbox-pg-state.md` §11.2).
     /// Mirrors the pg row's `generation` column. Read-modify-write
     /// over the lifetime of the sandbox: every CAS-guarded write
     /// to pg passes the current value as `expected_generation`. On
@@ -170,16 +170,16 @@ struct Sandbox {
     /// the registry's [`SandboxRegistry::update_generation`] is the
     /// callback that brings this in-memory value back in sync.
     ///
-    /// Phase-1 inserts default to 0 (pg's `INSERT ... DEFAULT 0`);
+    /// Inserts default to 0 (pg's `INSERT ... DEFAULT 0`);
     /// the restore path picks up the row's actual generation.
     generation: Arc<AtomicI64>,
-    /// Phase-3 preview share-token secret ring. `None` until the
+    /// Preview share-token secret ring. `None` until the
     /// first `POST .../share` mint or until a sealed-record restore
     /// re-hydrates one. Lock granularity matches `last_used` — a
     /// per-sandbox `RwLock` so token validate/mint paths don't
     /// contend with each other across sandboxes.
     preview_secrets: Arc<RwLock<Option<PreviewSecrets>>>,
-    /// Phase-3 share-token audit metadata. Keyed by `token_id` so
+    /// Share-token audit metadata. Keyed by `token_id` so
     /// `GET` returns rows in insert order while `record_use` and
     /// `revoke_one` lookups are O(active rows).
     preview_audit: Arc<RwLock<Vec<PreviewAuditEntry>>>,
@@ -260,10 +260,10 @@ impl SandboxRegistry {
     }
 
     /// Insert a sandbox alongside its lifted auth material. Used by
-    /// the controller's restart-restore path (preview-URL § II.0):
+    /// the controller's restart-restore path (`docs/proposals/sandbox-preview-urls.md` § II.0):
     /// once a sealed record's `/version` rebind probe succeeds, the
     /// info + auth go in together so the registry holds a complete
-    /// view. Phase 1's preview proxy reads `auth` here.
+    /// view. The preview proxy reads `auth` here.
     pub fn insert_with_auth(
         &self,
         sandbox_id: Uuid,
@@ -285,7 +285,7 @@ impl SandboxRegistry {
             created_at: now,
             last_used: Arc::new(RwLock::new(now)),
             auth,
-            // Phase-2: generation starts at 0 to match pg's
+            // Generation starts at 0 to match pg's
             // `INSERT … generation DEFAULT 0`. The restore path uses
             // [`Self::set_generation`] to overwrite from pg's row
             // when re-hydrating after a controller restart or a
@@ -300,7 +300,7 @@ impl SandboxRegistry {
         info
     }
 
-    /// Read the in-memory `generation` for a sandbox. Phase-2 CAS
+    /// Read the in-memory `generation` for a sandbox. CAS
     /// callers pass this to `Database::update_sandbox_status` as
     /// `expected_generation`. Returns `None` for unknown id (the
     /// caller should treat as already-gone and skip the pg call).
@@ -334,7 +334,7 @@ impl SandboxRegistry {
         Some(s.generation.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
-    /// Restore Phase-3 share-token state from a sealed record. Used
+    /// Restore share-token state from a sealed record. Used
     /// by [`crate::restore::restore_at_startup`] when re-hydrating a
     /// v2 sealed record. No-op for v1 records (`secrets` and
     /// `audit` both empty/None).
@@ -618,7 +618,7 @@ mod tests {
         }
     }
 
-    /// Round-2 fixer / IMPORTANT #4: after a successful CAS UPDATE,
+    /// : after a successful CAS UPDATE,
     /// callers MUST mirror the new generation into the registry so
     /// the next CAS write carries the right value. This test asserts
     /// the basic round-trip; the handler-level wiring is verified by

@@ -1,5 +1,5 @@
 /**
- * Phase 3 — auth resolver covers async functions.
+ * Auth resolver covers async functions.
  *
  *   auth: () => Promise<string>  — fetched fresh per request before the
  *                                  client kicks off the underlying fetch.

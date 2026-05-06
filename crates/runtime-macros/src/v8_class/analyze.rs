@@ -1,10 +1,8 @@
 //! Analyse phase — turn a parsed `syn::ItemImpl` into a fully-validated
 //! [`ClassConfig`] that the emit phase can consume directly.
 //!
-//! Wave 3 commit 5 — extracted from `mod.rs`'s `expand_tokens` body
-//! (design `docs/proposals/runtime-macros-refactor.md` §4.1). Wave 4
-//! will further split the parse-side validation into per-attribute
-//! `MarkerAttr` impls; this file is the seam.
+//! Extracted from `mod.rs` when the macro was split into dedicated
+//! parse, analyse, and emit stages.
 //!
 //! Returns `Result<(ClassConfig, ItemImpl), TokenStream2>`. The `Err`
 //! variant carries pre-rendered `compile_error!` tokens (so callers
@@ -74,7 +72,7 @@ pub(super) fn analyze<'a>(
         .any(|m| m.fastcall);
 
     // Impl-block-level overrides for class-wide install behaviour.
-    // Wave 4: these used to be 6 separate `&[Attribute]` walks. Now
+    // These used to be six separate `&[Attribute]` walks. Now
     // they're delivered pre-parsed by the single-scan
     // `parse::parse_attrs` (closes F8). The fields below are taken from
     // the already-built `ParsedAttrs`.
@@ -84,7 +82,7 @@ pub(super) fn analyze<'a>(
     let async_iterable_method = parsed_class_attrs.async_iterable;
     let const_decls = parsed_class_attrs.consts;
 
-    // Wave 9 NS2: validate `#[v8_inherit_intrinsic = "..."]` value at
+    // Validate `#[v8_inherit_intrinsic = "..."]` at
     // analyse time, NOT during emit. Previously the install fn body
     // emitted `quote! { compile_error!(#msg); }` for unrecognised
     // values — which DOES surface the right diagnostic but spliced
@@ -181,7 +179,7 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
     for item in &input.items {
         if let ImplItem::Fn(func) = item {
             if let Some(kind) = classify(func) {
-                // Wave 4: per-method extracts now share the strict
+                // Per-method extracts now share the strict
                 // MarkerAttr error path. Surface malformed-shape errors
                 // via the proc-macro's compile-error stream.
                 let js_name = extract_v8_name(&func.attrs)
@@ -321,7 +319,7 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                 validate_variadic_param(func, kind, fastcall_flag)
                     .map_err(|e| e.to_compile_error())?;
 
-                // Wave 4: fold per-method attribute extracts into the
+                // Fold per-method attribute extracts into the
                 // ClassMethod record so emit-side helpers don't walk
                 // attrs again. Each extract uses the strict MarkerAttr
                 // error path — malformed shapes surface as compile-

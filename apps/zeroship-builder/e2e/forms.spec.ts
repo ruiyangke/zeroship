@@ -125,7 +125,7 @@ test.describe("Forms — EnvCanvas Add var", () => {
   // the canvas pill switches and the "+ add" button is present when
   // an appId IS in scope. Catch-all has no appId; skip that path —
   // we test the path that's reachable without env requirements: the
-  // empty-state copy + form open/cancel via the Plan canvas instead.
+  // empty-state copy + form open/cancel via the roadmap canvas instead.
   test("Plan new-issue modal opens, fills, cancels", async ({ page }) => {
     await page.goto("/__catchall_for_test");
     // Without an appId the plan canvas shows "No project selected".

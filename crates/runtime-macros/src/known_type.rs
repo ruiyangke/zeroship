@@ -1,7 +1,7 @@
-//! Table-driven argument-type classifier for `gen_extract` (Wave 4b —
-//! design `docs/proposals/runtime-macros-refactor.md` §3.7).
+//! Table-driven argument-type classifier for `gen_extract`.
 //!
-//! Pre-Wave-4b `gen_extract` was a 277-LOC dispatcher with a stack of
+//! Earlier `gen_extract` implementations used a 277-LOC dispatcher
+//! with a stack of
 //! `if is_X(ty)` predicates plus a 13-arm string-keyed `match` on the
 //! type's last-segment ident. The shape was hostile to extension — every
 //! new newtype added one more `if` block and one more silent fallback to
@@ -52,7 +52,7 @@ use crate::{
 /// A `syn::Type` classified into one of the macro's known argument
 /// shapes (or `User`/`StringDefault` for the catchall path).
 ///
-/// The variants intentionally mirror the conditional cascade pre-Wave-4b
+/// The variants intentionally mirror the older conditional cascade
 /// `gen_extract` performed; the value of the refactor is centralising
 /// that cascade in ONE place ([`KnownType::from_ty`]) instead of
 /// duplicating it across every emit caller.
@@ -100,7 +100,7 @@ pub(crate) enum KnownType {
     // -- Catchall ---------------------------------------------------
     /// Unrecognised type — falls back to `String` via
     /// `to_rust_string_lossy`. This is the legacy "default arm" of the
-    /// pre-Wave-4b dispatcher.
+    /// earlier dispatcher.
     StringDefault,
 }
 

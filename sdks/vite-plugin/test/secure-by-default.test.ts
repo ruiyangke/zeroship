@@ -1,8 +1,9 @@
 /**
- * Phase 1 — secure-by-default validation.
+ * Secure-by-default validation.
  *
- * Per spec §7 Validation: `auth: "anon"` requires `publiclyAccessible: true`
- * on the same resource. Build error in production; warning in dev.
+ * `docs/proposals/rpc-v2.md` §7 ("Validation") requires
+ * `auth: "anon"` to be paired with `publiclyAccessible: true` on the
+ * same resource. Build error in production; warning in dev.
  */
 
 import { test, describe } from "node:test";

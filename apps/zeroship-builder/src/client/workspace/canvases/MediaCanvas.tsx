@@ -1,4 +1,4 @@
-// ─── MediaCanvas — drop zone + grid (spec §9.4) ─────────────────
+// ─── MediaCanvas — drop zone + grid (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.4) ─────────────────
 //
 // One canvas, two regions:
 //   1. Drop zone — drag-drop or click-to-pick. Reads the file as
@@ -9,7 +9,7 @@
 //      Hover reveals copy-URL + delete buttons.
 //
 // All data flows through the in-memory stub in `src/server/agents.ts`
-// (ISS-26). When the real `@zeroship/storage` upload RPC lands, swap
+// When the real `@zeroship/storage` upload RPC lands, swap
 // the procs out — the wire shape (single-input objects) stays.
 
 import { useRef, useState } from "react";
@@ -84,7 +84,7 @@ export function MediaCanvas({ appId }: MediaCanvasProps) {
           </h1>
           <p className="font-serif text-[14px] text-ink-soft leading-[1.55]">
             Images, videos, and other files your project serves.
-            Uploads are in-memory in V1 — see ISSUES.md ISS-26.
+            Uploads stay in memory in this build.
           </p>
         </header>
 
@@ -170,7 +170,7 @@ export function MediaCanvas({ appId }: MediaCanvasProps) {
         )}
 
         <div className="mt-6 font-serif italic text-[12px] text-pencil">
-          Real `@zeroship/storage` backing tracked as ISS-26.
+          Persistent `@zeroship/storage` backing is not wired yet.
         </div>
       </div>
     </div>

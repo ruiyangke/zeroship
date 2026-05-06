@@ -1,7 +1,7 @@
 //! WebSocket-Upgrade proxy handler for the sandbox preview-URL feature.
 //!
 //! See `docs/proposals/sandbox-preview-urls.md` § II.1 (agent endpoint)
-//! and D-8 / D-14 (post-Upgrade frames are NOT signed; the Upgrade
+//! and post-upgrade TCP-splice rule / WebSocket signature-separation rule (post-Upgrade frames are NOT signed; the Upgrade
 //! itself uses the V1_1_Ws canonical with a `-WS` domain-separator).
 //!
 //! ## Implementation choice — separate compio TCP listener
@@ -17,7 +17,7 @@
 //! same VM —
 //!
 //! - **`:7777`** — ntex HTTP server (`/exec`, `/files`, `/proxy/...`
-//!   non-Upgrade). Phase 1, unchanged.
+//!   non-Upgrade).
 //! - **`:7778`** (default) — a compio raw-TCP listener that ONLY
 //!   serves WebSocket Upgrade requests under `/proxy/{port}/{path*}`.
 //!   Implemented in this module.
@@ -49,7 +49,7 @@
 //!   ← agent splices the two TCP sockets bidirectionally until close
 //! ```
 //!
-//! Post-Upgrade frames are TCP-spliced (D-8) — the agent never parses
+//! Post-Upgrade frames are TCP-spliced (post-upgrade TCP-splice rule) — the agent never parses
 //! WS frames. The 5-second drain-grace closes in-flight WS by
 //! shutting down the splice tasks (the upstream sees EOF; the
 //! controller sees an RST/EOF and propagates 1001 to the browser).

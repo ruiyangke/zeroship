@@ -9,10 +9,10 @@
 //! when arg shapes don't match the typed signature (e.g. multibyte
 //! strings for SeqOneByteString).
 //!
-//! Layout (post-Wave-4b):
+//! Layout:
 //! - [`types::FastcallType`] — table-driven Rust ↔ fast-API type
 //!   classifier (closes F6 / §3 stringly-typed-dispatch). Replaces the
-//!   pre-Wave-4b parallel string-keyed mappings.
+//!   earlier parallel string-keyed mappings.
 //! - This file —
 //!   - `validate_fastcall_signature` — parse-time signature checker.
 //!   - `fastcall_arg_mapping` / `fastcall_return_mapping` — thin
@@ -186,7 +186,7 @@ pub(super) fn validate_fastcall_signature(func: &ImplItemFn) -> syn::Result<()> 
 /// array, the extern "C" fn signature, and the per-arg adaption that
 /// converts the fast-API value to the user method's expected param type.
 ///
-/// Wave 4b: classification + emission both delegate to
+/// Classification + emission both delegate to
 /// [`FastcallType`] (design §3.7, closes F6). The two parallel
 /// string-keyed `match` tables that used to inline the per-type
 /// triples are gone — the variant carries the data.
@@ -203,7 +203,7 @@ fn fastcall_arg_mapping(
 /// CallbackScope::new(options) to throw, then returns a sentinel zero-
 /// value (V8 ignores the return when an exception is pending).
 ///
-/// Wave 4b: classification splits Result vs. bare ahead of time, then
+/// Classification splits Result vs. bare ahead of time, then
 /// dispatches to a shared per-variant emitter ([`FastcallType`], design
 /// §3.7).
 fn fastcall_return_mapping(

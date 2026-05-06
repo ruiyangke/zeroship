@@ -1,6 +1,6 @@
 "use server";
 // Wizard RPC procedure — `/_zs/v1/wizard`. The pre-coding clarification
-// flow per spec §4.8.2b + §8.2.7. Plain-LangGraph backend (NOT
+// flow per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b + §8.2.7. Plain-LangGraph backend (NOT
 // deepagents) — see the body below for why.
 //
 // Wire (mirrors chat.ts so the client transport is reusable):
@@ -17,7 +17,7 @@
 //
 // --- Runtime: plain LangGraph (NO deepagents, NO sandbox) ---------------
 //
-// Per spec §4.8.2b: the project-creation wizard runs *before* a
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §4.8.2b: the project-creation wizard runs *before* a
 // project exists. It has no fs/exec/SubAgent/todo/summarisation
 // requirements (cost test: 0/5), so loading deepagents and
 // provisioning a sandbox per visitor would be pure overhead. We use
@@ -25,8 +25,8 @@
 // against the LLM until the brief is complete.
 //
 // Wire compatibility: the wizard emits the SAME `data-survey` chunk
-// shape as Builder (§8.2.7) and uses the SAME resume protocol (G3 in
-// §4.8.9). Client-side <SurveyCard> renders identically; client-side
+// shape as Builder (§8.2.7) and uses the same resume protocol.
+// Client-side <SurveyCard> renders identically; client-side
 // `chatTransport.prepareSendMessagesRequest` already routes resume
 // payloads. The only client-visible difference is the RPC procedure
 // (/_zs/v1/wizard vs /_zs/v1/chat) and the terminal `data-brief` chunk
@@ -44,17 +44,16 @@
 //
 //     "Called interrupt() outside the context of a graph."
 //
-// **Status as of ISS-01 fix (2026-05-04):** the underlying runtime
-// bug is closed. `crates/runtime/src/node/async_hooks/` now ships a
-// native AsyncLocalStorage backed by V8's
+// **Status as of 2026-05-04:** the underlying runtime bug is closed.
+// `crates/runtime/src/node/async_hooks/` now ships a native
+// AsyncLocalStorage backed by V8's
 // `ContinuationPreservedEmbedderData`, which V8 propagates across
 // every async hop including continuations resumed from native
 // `fetch`. The two-node shape below is therefore no longer
 // REQUIRED — `interrupt()` after `await model.invoke()` works in a
 // single node now. Collapsing this back into a single node is left
 // to a follow-up PR (functional behaviour is identical; the split
-// is only a code-shape difference). See ISSUES.md for the full
-// regression context.
+// is only a code-shape difference).
 //
 // Fix (kept in place for now): split into two nodes.
 //   - `decide` — calls model.invoke, stashes decision in state. No
@@ -72,7 +71,7 @@
 // Lifecycle: a wizard "session" lives only until Begin. The brief is
 // stashed by the client (sessionStorage / route state) and seeded
 // into Builder's first turn. If the user navigates away mid-wizard,
-// no DB rows or sandboxes leak (per spec §8.2.4 runtime-handoff
+// no DB rows or sandboxes leak (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.4 runtime-handoff
 // section).
 
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage, type UIMessageStreamWriter } from "ai";
@@ -100,7 +99,7 @@ export interface WizardTurnInput {
   id?: string;
   /**
    * Resume payload — present iff client is answering a SurveyCard.
-   * Same shape as Builder's chat resume (§4.8.9 G3).
+   * Same shape as Builder's chat resume.
    */
   resume?: { token: string; value: unknown };
   /**
@@ -186,8 +185,8 @@ async function buildWizardStream(
     );
   }
 
-  // Same model family as Builder per spec §4.8.9 G6. functionCalling
-  // mode (vs default jsonSchema strict mode) tolerates `.optional()`
+  // Same model family as Builder. `functionCalling` mode (vs default
+  // jsonSchema strict mode) tolerates `.optional()`
   // fields without forcing them all to `.nullable()`. The shared
   // surveyInputSchema (used by Builder too) uses `.optional()` for
   // preamble / skip_label / placeholder etc.; with strict mode the

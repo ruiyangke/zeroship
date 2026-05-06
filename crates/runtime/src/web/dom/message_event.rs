@@ -27,7 +27,7 @@
 //! - `ports` always returns an EMPTY frozen array. Per WebIDL §3.2.34
 //!   FrozenArray, every getter call MUST return the SAME instance —
 //!   we cache the array as a `v8::Global` on the state on first
-//!   access (addresses critic MAJOR #27 — ports identity).
+//!   access to preserve ports identity.
 //! - `lastEventId` is empty for WebSocket-dispatched events; the field
 //!   is meaningful for EventSource (when shipped).
 
@@ -167,9 +167,8 @@ impl MessageEventState {
     /// `messageEvent.ports` — empty FrozenArray. Per WebIDL §3.2.34
     /// (https://webidl.spec.whatwg.org/#es-frozen-array): EVERY getter
     /// invocation MUST return the SAME frozen array instance (object
-    /// identity). v2 caches the FrozenArray as a `v8::Global` on the
+    /// identity). The implementation caches the FrozenArray as a `v8::Global` on the
     /// state; `event.ports === event.ports` is true.
-    /// (addresses critic MAJOR #27)
     #[v8_getter]
     fn ports<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
         if let Some(g) = self.ports_cache.borrow().as_ref() {
@@ -177,9 +176,8 @@ impl MessageEventState {
         }
         let arr = v8::Array::new(scope, 0);
         // Per WebIDL FrozenArray, the array MUST be frozen.
-        // `set_integrity_level` returns Option<bool>; we treat
-        // failure as a hard runtime error. (addresses critic MAJOR #30
-        // — set_integrity_level return-value hygiene.)
+        // `set_integrity_level` returns Option<bool>; treat failure as
+        // a hard runtime error.
         let froze = arr.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
         debug_assert_eq!(
             froze,

@@ -5,8 +5,7 @@ import {
 } from "./types.js";
 
 /**
- * Declare an app's resource tree and RPC defaults (Phase 1:
- * build-time only).
+ * Declare an app's resource tree and RPC defaults.
  *
  * Lives at exactly **one** path: `<projectRoot>/src/server/config.ts`.
  * The vite-plugin reads only this file. There is no
@@ -16,9 +15,9 @@ import {
  *
  * The returned object is opaque — its only public guarantee is that
  * it carries the {@link DEFINE_APP_MARKER} symbol so the vite-plugin's
- * manifest emitter can recognize it during AST extraction. (Phase 1
- * extracts the literal AST without executing user code; the symbol
- * helps when a future phase hot-reloads the module instead.)
+ * manifest emitter can recognize it during AST extraction. The current
+ * build reads the literal AST without executing user code; the symbol
+ * leaves room for future module-driven loading.
  *
  * @example
  * ```ts

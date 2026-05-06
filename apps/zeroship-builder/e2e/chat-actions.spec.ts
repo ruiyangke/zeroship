@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-// Plan 01 §10 — chat surface polish: hover actions, @-mention dropdown,
+// Chat surface interactions: hover actions, @-mention dropdown,
 // markdown rendering on assistant messages, retry on error.
 //
 // Two test groups:
@@ -25,7 +25,7 @@ async function setupClipboard(page: Page) {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
 }
 
-test.describe("Plan 01 §10 — chat actions (shell-only)", () => {
+test.describe("chat actions (shell-only)", () => {
   test.beforeEach(async ({ page }) => {
     await setupClipboard(page);
   });
@@ -76,7 +76,7 @@ test.describe("Plan 01 §10 — chat actions (shell-only)", () => {
   });
 });
 
-test.describe("Plan 01 §10 — chat actions (gated, real LLM)", () => {
+test.describe("chat actions (gated, real LLM)", () => {
   test.beforeEach(async ({ page }) => {
     await setupClipboard(page);
   });

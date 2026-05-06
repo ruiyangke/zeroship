@@ -59,7 +59,7 @@ export const listTodos = query(
   },
 );
 
-// Phase 4 — async-generator stream procedure.
+// Async-generator stream procedure.
 //
 // The `stream()` wrapper tags this as `kind: "stream"`. The synthetic
 // SSR entry pipes the iterator into the AI-SDK Data Stream Protocol

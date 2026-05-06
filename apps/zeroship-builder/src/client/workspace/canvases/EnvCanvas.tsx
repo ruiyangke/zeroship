@@ -1,4 +1,4 @@
-// ─── EnvCanvas — variables + secrets (spec §9.6) ────────────────
+// ─── EnvCanvas — variables + secrets (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.6) ────────────────
 //
 // Two sections in one canvas. Variables render values inline; secrets
 // only render the key (the control plane never exposes the value, so
@@ -9,7 +9,7 @@
 // with positional args. The single-input wire only forwards args[0]
 // — but the existing dashboard already calls these with the same
 // signatures, so behaviour is consistent with the rest of the
-// codebase. Plan 03+ will migrate these to object input. For Plan 01
+// codebase. A later cleanup will migrate these to object input. For now
 // we mirror the legacy EnvTab's call shape to avoid a wire flip in
 // this commit.
 

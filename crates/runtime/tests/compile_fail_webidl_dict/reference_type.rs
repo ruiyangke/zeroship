@@ -1,6 +1,6 @@
 //! Compile-fail: WebIdlDict field is a reference type.
 //!
-//! Pre-Wave-7 the derive accepted `&str` (or any `Type::Reference`)
+//! Earlier versions accepted `&str` (or any `Type::Reference`)
 //! fields silently — the codegen emitted a member extraction that
 //! reads an OWNED `String` and tried to assign it back into the
 //! `&str` field, surfacing as a confusing rustc "expected &str,

@@ -1,4 +1,4 @@
-// ─── SettingsCanvas — identity, plan, danger zone (spec §9.7) ───
+// ─── SettingsCanvas — identity, plan, danger zone (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.7) ───
 //
 // Three sections.
 //   • Identity: app name (read-only V1), app id (copyable),

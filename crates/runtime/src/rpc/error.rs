@@ -1,4 +1,4 @@
-//! Native `RpcError` — RPC v2 phase 1 (Wave B).
+//! Native `RpcError`.
 //!
 //! Mirrors the [`crate::web::dom::exception::DOMException`] pattern but
 //! built on the modern `#[v8_inherit_intrinsic = "Error"]` attribute

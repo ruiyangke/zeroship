@@ -171,7 +171,8 @@ impl CounterRegistry {
         map
     }
 
-    /// Phase 1: Compute deltas since last flush. Does NOT advance watermark.
+    /// Compute deltas since the last flush. Does NOT advance the
+    /// watermark.
     /// Returns (resource_name -> delta, snapshotted_currents).
     /// Call `commit_flush(&snapshot)` after the store write succeeds,
     /// passing the exact snapshot returned here to avoid TOCTOU races
@@ -192,7 +193,8 @@ impl CounterRegistry {
         (deltas, currents)
     }
 
-    /// Phase 2: Advance watermark using the exact snapshot from pending_deltas().
+    /// Advance the watermark using the exact snapshot from
+    /// `pending_deltas()`.
     /// Call this ONLY after store.flush() succeeds.
     pub fn commit_flush(&self, snapshot: &[u64]) {
         for (i, &val) in snapshot.iter().enumerate() {

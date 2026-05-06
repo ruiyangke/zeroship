@@ -1,6 +1,5 @@
 /**
- * ISS-02 — file-level `"use server"` directive + wrapper-marker
- * discovery.
+ * File-level `"use server"` directive + wrapper-marker discovery.
  *
  * A file is a server module iff its first non-comment statement is
  * the string-literal expression `"use server"`. Inside a server

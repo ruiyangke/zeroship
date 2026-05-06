@@ -3,7 +3,7 @@
 // to build next based on existing project state (issues + roadmap +
 // recent activity).
 //
-// Per spec §11 + §4.8.3.2:
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §11 + §4.8.3.2:
 //   - PM has two modes:
 //       · Conversational SubAgent (this file) — invoked when the user
 //         asks "@pm what should I build next?" or when Builder routes

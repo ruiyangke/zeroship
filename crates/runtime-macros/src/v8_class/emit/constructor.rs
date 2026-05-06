@@ -1,8 +1,6 @@
 //! Constructor callback codegen + Box install/finalize helpers.
 //!
-//! Wave 3 commit 4 — relocated from `v8_class/method.rs:649-908` into
-//! the `emit/` cluster (design `docs/proposals/runtime-macros-refactor.md`
-//! §4.1, F3). Hosts:
+//! Split out from the old `v8_class/method.rs` mega-file. Hosts:
 //!
 //! - `gen_constructor_callback` — user-defined `#[v8_constructor]`
 //! - `gen_default_constructor_callback` — `<State as Default>::default()`
@@ -76,7 +74,7 @@ fn gen_must_new_prologue(class_ty: &syn::Ident, opt_out: bool) -> TokenStream2 {
 /// User-defined constructor callback. Parses JS args, invokes the
 /// user's `#[v8_constructor]` fn, materialises a `Box<State>`, and
 /// installs it in internal field 0 with a guaranteed finalizer.
-/// Optional MAC-02 `post_init` hook fires after install.
+/// An optional `post_init` hook fires after install.
 pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> TokenStream2 {
     let class_ty = cfg.class_ty;
     let state_ty = cfg.state_ty;
@@ -87,7 +85,7 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     // Constructors have no `self` receiver; the skipping-self helper
     // works uniformly here since it just collects typed args.
     let params = parse_params_skipping_self(c.func);
-    // Wave 4: per-method extracts pre-parsed by analyse phase.
+    // Per-method extracts are pre-parsed by the analyze phase.
     let extractions = gen_param_extractions(&params, &c.reject_shared_names);
     let call_args: Vec<&syn::Ident> = params.iter().map(|p| &p.name).collect();
 
@@ -123,7 +121,7 @@ pub(crate) fn gen_constructor_callback(cfg: &ClassConfig, c: &ClassMethod) -> To
     let store = gen_box_and_install_finalizer(state_ty, has_any_fastcall);
     let must_new = gen_must_new_prologue(class_ty, c.callable_no_new);
 
-    // MAC-02: post_init dispatch — runs AFTER box install, BEFORE the
+    // post_init dispatch runs after box install and before the
     // callback returns to V8. Hook signature is
     // `fn(&mut PinScope, Local<Object>) -> Result<(), OpError>`.
     //

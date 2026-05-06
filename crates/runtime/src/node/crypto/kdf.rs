@@ -1,13 +1,13 @@
 //! KDF ops — `pbkdf2Sync`, `pbkdf2`, `hkdfSync`, `hkdf`.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §VI.2 (D-N15).
+//! See `docs/proposals/node-crypto-native.md` §VI.2.
 //!
 //! Sync variants run on the V8 thread (user opted in by picking the
 //! `*Sync` API). Async variants (`pbkdf2(...callback)` and the
 //! Promise-shaped form) currently run synchronously on the V8 thread
 //! and resolve a Promise / fire the callback synchronously via the
 //! microtask queue. A future commit can wire the spawn_blocking
-//! threadpool variant per D-N5; npm packages that block the event
+//! threadpool variant; npm packages that block the event
 //! loop with PBKDF2 1M iterations from request handlers are doing
 //! something wrong (XVII.6).
 //!
@@ -66,7 +66,7 @@ pub(crate) fn pbkdf2_sync_callback(
 
 /// `pbkdf2(password, salt, iterations, keylen, digest, callback) -> void`.
 /// Currently runs sync; fires callback async via microtask. A future
-/// commit can spawn_blocking for high iteration counts (D-N5).
+/// commit can spawn_blocking for high iteration counts.
 pub(crate) fn pbkdf2_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,

@@ -14,9 +14,9 @@ use zeroship_runtime::{crypto_native, crypto_node, dom, init_v8};
 /// crypto + node:crypto installed. Returns the script's last
 /// expression value.
 ///
-/// Pre-D-N26 this called `crypto_node::install_globals(scope, global)`
+/// Earlier versions called `crypto_node::install_globals(scope, global)`
 /// which mounted the surface at `globalThis.__zeroship_node_crypto`.
-/// Post-migration the surface is the export object of the
+/// The production surface is now the export object of the
 /// `node:crypto` SyntheticModule. These tests run raw `script.run`,
 /// not the module loader, so we mint the same boundary object
 /// directly via `populate()` and stash it under the legacy name —
@@ -315,7 +315,7 @@ fn hmac_finalize_twice_throws() {
 
 #[test]
 fn hmac_no_copy_method() {
-    // Per D-N10, Node does NOT have Hmac.copy.
+    // Node does not expose `Hmac.copy()`.
     let result = run_js_bool(
         r#"
         const h = __zeroship_node_crypto.createHmac('sha256', 'k');

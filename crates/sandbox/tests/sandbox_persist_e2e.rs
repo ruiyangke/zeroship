@@ -1,6 +1,7 @@
-//! Round-8 superseded — Phase-0's sealed-record FS-walk restore tests
-//! lived here. Round-8 made restart-restore pg-driven; the equivalent
-//! Phase-1 tests live in `sandbox_pg_e2e.rs` (gated on `PG_TEST_URL`).
+//! Superseded: this file used to hold the sealed-record filesystem
+//! restore tests. Restart restore is now pg-driven, and the
+//! replacement tests live in `sandbox_pg_e2e.rs` (gated on
+//! `PG_TEST_URL`).
 //!
 //! Specifically, the tests this file used to host (and where they live
 //! now):

@@ -2,11 +2,10 @@
 //! recognise the macro's well-known type shapes (Vec<u8>, ByteString,
 //! USVString, EnforceRange*, Vec<Vec<u8>>, etc.).
 //!
-//! Wave 4 cleanup commit: split out from `lib.rs` to keep that file
-//! near the ≤500 LOC budget (design `docs/proposals/runtime-macros-
-//! refactor.md` post-Wave-4 target). The helpers are pub(crate)-only
-//! and consumed by [`super::known_type`] (the slow-path arg-extract
-//! classifier) and [`super::codegen`] (the return-side marshalling).
+//! Split out from `lib.rs` so the type-shape predicates live in one
+//! place. The helpers are pub(crate)-only and consumed by
+//! [`super::known_type`] (the slow-path arg-extract classifier) and
+//! [`super::codegen`] (the return-side marshalling).
 //!
 //! Detection is by last-segment ident (e.g. `Vec`, `ByteString`) — we
 //! don't enforce a full path since users typically import the type
@@ -81,7 +80,7 @@ pub(crate) fn is_enforce_range_u64(ty: &Type) -> bool {
 /// `EnforceRangeU64` for WebIDL `[EnforceRange] unsigned long`. Used
 /// by the WebCrypto IDL surface (Pbkdf2Params.iterations,
 /// RsaKeyGenParams.modulusLength, deriveBits.length, etc.). See
-/// `docs/proposals/webcrypto-native.md` D-20.
+/// `docs/proposals/webcrypto-native.md`.
 pub(crate) fn is_enforce_range_u32(ty: &Type) -> bool {
     type_ident(ty).as_deref() == Some("EnforceRangeU32")
 }

@@ -1,11 +1,11 @@
-// Wizard surface — pre-coding clarification chat. Per spec §8.2.7 +
+// Wizard surface — pre-coding clarification chat. Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7 +
 // §4.8.2b: this page talks to the wizard runtime (plain LangGraph,
 // `apps/zeroship-builder/src/server/_wizard.ts`), NOT Builder. The
 // wizard halts on data-survey chunks; the user answers; once the LLM
 // decides the brief is concrete enough it emits a terminal data-brief
 // chunk that we render as a BriefCard with a Begin button.
 //
-// On Begin: per spec §8.2.4, this is where project creation +
+// On Begin: per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.4, this is where project creation +
 // sandbox provisioning happen synchronously and we navigate to
 // /p/<id>/preview where the WORKSPACE Builder takes over. We:
 //   1. derive a project name from the brief idea (first 3 words),
@@ -63,7 +63,7 @@ function deriveProjectName(idea: string): string {
 
 // Inline minimal frame instead of PageFrame because the latter pulls
 // in TopBar → useAuth → AuthProvider, which lives in the orphan tree
-// from the pre-redesign auth pages and has broken imports. Plan 03
+// from the pre-redesign auth pages and has broken imports. A later cleanup
 // restores AuthProvider at the App root and we'll switch to PageFrame
 // then. Keeping the wizard layout decoupled also matches §4.8.2b: the
 // wizard runs *before* a project (and arguably before a real auth

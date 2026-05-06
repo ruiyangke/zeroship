@@ -1,4 +1,4 @@
-//! Ed25519 + X25519 (D-26). Per spec §§25, 26.
+//! Ed25519 + X25519. Per spec §§25, 26.
 
 #![allow(dead_code)]
 

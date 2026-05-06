@@ -1,6 +1,6 @@
 // ─── Privacy — public legal stub (`/legal/privacy`) ─────────────
 //
-// Per spec §5.5. V1 placeholder until counsel-reviewed copy lands.
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.5. V1 placeholder until counsel-reviewed copy lands.
 // The shape is right — sections, plain language, last-updated date.
 
 import { Link } from "react-router-dom";

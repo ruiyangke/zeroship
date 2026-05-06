@@ -1,10 +1,9 @@
 //! Per-call re-entrancy guard for `&mut self` `value_pairs` callbacks.
 //!
-//! Wave 9 split — extracted from `crates/runtime-macros/src/
-//! v8_iterable.rs`'s 1,368-LOC god file. This is the iterable-side
-//! analogue of `v8_class/emit/reentry_guard.rs`. Wave 8 (closes
-//! design §13 / C5/H13) introduced the multi-slot Cell shape; this
-//! helper emits the same pattern for `value_pairs(&mut self)`.
+//! Split out from the old monolithic `v8_iterable.rs`. This is the
+//! iterable-side analogue of `v8_class/emit/reentry_guard.rs` and
+//! emits the same multi-slot `Cell` pattern for
+//! `value_pairs(&mut self)`.
 //!
 //! Caller-site contract: the emitted block expects `__inflight_addr`
 //! and `scope` to be in scope. On entry: insert the address into a

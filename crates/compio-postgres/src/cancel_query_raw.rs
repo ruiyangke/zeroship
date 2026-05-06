@@ -1,9 +1,9 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Phase 4 port: the control flow is identical to tokio-postgres; only the
-// trait names change. compio's `AsyncWriteExt::write_all` takes an owned
-// buffer and returns the buffer; we throw it away with `.0`. Shutdown is a
-// plain `AsyncWrite` method.
+// The control flow is identical to tokio-postgres; only the trait names
+// change. compio's `AsyncWriteExt::write_all` takes an owned buffer and
+// returns the buffer; we throw it away with `.0`. Shutdown is a plain
+// `AsyncWrite` method.
 
 use crate::Error;
 use crate::config::{SslMode, SslNegotiation};

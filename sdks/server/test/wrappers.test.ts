@@ -1,5 +1,6 @@
 // Wrapper helpers — `procedure` / `query` / `mutation` / `stream` /
-// `subscription`. ISS-02 opt-in markers.
+// `subscription`. These are the explicit opt-in markers the transform
+// looks for when deciding which exports become RPC procedures.
 //
 // At runtime the wrappers are identity functions: the value returned IS
 // the handler, with `.config` (when supplied) and a non-enumerable

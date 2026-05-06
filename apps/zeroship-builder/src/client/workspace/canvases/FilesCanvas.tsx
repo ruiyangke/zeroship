@@ -1,4 +1,4 @@
-// ─── FilesCanvas — read-only manuscript view (spec §9.2) ────────
+// ─── FilesCanvas — read-only manuscript view (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.2) ────────
 //
 // 3-column layout:
 //   [ tree (260px) | content (flex-1) | metadata (200px) ]

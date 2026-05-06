@@ -3,7 +3,7 @@
 // issues (errors, slowdowns, broken probes) using app logs + perf data
 // + status surfaced via the question text.
 //
-// Per spec §11 + §4.8.3.2:
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §11 + §4.8.3.2:
 //   - Like PM, SRE has two modes:
 //       · Conversational SubAgent (this file) — invoked when the user
 //         asks "@sre why is the app slow?" or Builder routes a

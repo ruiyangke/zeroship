@@ -1,7 +1,8 @@
-// Public types for `@zeroship/server`. The Phase 1 surface is the
+// Public types for `@zeroship/server`. The current surface is the
 // `defineApp({ resources })` authoring tree plus the type vocabulary
 // for procedure metadata. Most fields here are honored by the build's
-// manifest emitter; runtime/gateway enforcement is Phase 2 work.
+// manifest emitter; some runtime and gateway enforcement is still
+// reserved for future wiring.
 //
 // Validation: procedures opt into runtime input/output validation by
 // setting `fn.config.input` / `fn.config.output` to a Zod schema (or
@@ -64,8 +65,9 @@ export interface ProcedureConfig<TIn = unknown, TOut = unknown> {
    */
   timeout?: Timeout;
   /**
-   * Pre-handler middleware names (Phase 5). Names resolve against the
-   * app's middleware registry; the chain runs before the handler.
+   * Pre-handler middleware names. These are carried through the manifest
+   * now and will resolve against the app's middleware registry once the
+   * runtime middleware chain is wired.
    */
   middleware?: string[];
   /**
@@ -120,9 +122,10 @@ export interface StaticAction {
 }
 
 /**
- * One node in the authoring resource tree. Mirrors the manifest's
- * resource shape from spec §7. Children are an authoring convenience —
- * the build flattens them to fully-qualified keys.
+ * One node in the authoring resource tree. Mirrors the manifest shape
+ * described in `docs/proposals/rpc-v2.md` §7. Children are an
+ * authoring convenience; the build flattens them to fully-qualified
+ * keys.
  *
  * Mutually exclusive routing actions: `redirect`, `rewrite`, `static`.
  */
@@ -165,7 +168,8 @@ export interface Timeout {
 
 /**
  * App-level RPC defaults. Procedures inherit these unless overridden by
- * `fn.config` / module-level `$config`. Per spec §1 resolution order:
+ * `fn.config` / module-level `$config`. `docs/proposals/rpc-v2.md` §1
+ * defines the resolution order:
  * `fn.config` → module `$config` → `defineApp({ rpc: { defaults } })` →
  * built-in defaults.
  */
@@ -184,7 +188,8 @@ export interface RpcConfig {
    * If `true`, error redaction is disabled in production builds —
    * thrown errors keep their full message on the wire. Useful for
    * staging environments where you want production-like routing but
-   * readable errors. See §16 #3 for the redaction rule.
+   * readable errors. See `docs/proposals/rpc-v2.md` §16 for the
+   * production redaction rule.
    */
   dev?: boolean;
 }

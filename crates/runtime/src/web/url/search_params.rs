@@ -158,7 +158,7 @@ impl URLSearchParams {
 // auto-generated `__brand_check_URLSearchParams` walks `obj`'s
 // [[Prototype]] chain for the cached `URLSearchParams.prototype` and
 // is invoked at the top of every method/getter/iterator-factory/
-// forEach callback. The pre-MAC-09 hand-rolled `is_url_search_params`
+// forEach callback. The old hand-rolled `is_url_search_params`
 // helper here became dead once the iterator factory + forEach moved
 // into the macro emit (M4/M5 fixes are now expressed by the same
 // brand-check on every entry point).

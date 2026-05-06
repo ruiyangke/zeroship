@@ -17,7 +17,7 @@
 //! };
 //! ```
 //!
-//! Storage (D-2 audit, design §XV.4):
+//! Storage:
 //! - `[[state]]`                          → Rust Cell<WSState>            (SLOT)
 //! - `[[backpressure]]`                   → Rust Cell<bool>               (SLOT)
 //! - `[[closeRequest]]`                   → Rust paired (Promise+Resolver)(SLOT)
@@ -56,7 +56,7 @@ pub enum WSState {
 }
 
 /// `Box<WSStreamState>` is stored in the wrapper's V8 internal field 0.
-/// Per D-2 / §XV.4: this struct holds ONLY pure-Rust slots. The
+/// This struct holds ONLY pure-Rust slots. The
 /// `[[storedError]]` / `[[writer]]` / `[[controller]]` slots live in
 /// V8 private symbols.
 #[allow(missing_debug_implementations)]
@@ -76,15 +76,15 @@ pub struct WSStreamState {
     pub in_flight_close_request: RefCell<Option<v8::Global<v8::PromiseResolver>>>,
     /// SLOT: [[pendingAbortRequest]]
     pub pending_abort_request: RefCell<Option<PendingAbortRequest>>,
-    /// SLOT: [[writeRequests]] — list of Promises (returned to JS). Per
-    /// CRITICAL #13 / design §II.8: spec says this is a list of Promises,
+    /// SLOT: [[writeRequests]] — list of Promises (returned to JS).
+    /// The spec says this is a list of Promises,
     /// NOT Resolvers. We store both: the promises here (used by
     /// FinishErroring to iterate and reject), and the matching resolvers
     /// in `write_request_resolvers` so we can resolve/reject them on
     /// completion.
     pub write_requests: RefCell<VecDeque<v8::Global<v8::Promise>>>,
     pub write_request_resolvers: RefCell<VecDeque<v8::Global<v8::PromiseResolver>>>,
-    /// D-18 budget guard.
+    /// Budget guard.
     _budget: StreamBudgetGuard,
 }
 
@@ -163,7 +163,7 @@ pub fn with_ws_state<R>(
 }
 
 // ---------------------------------------------------------------------------
-// from_native_sink — Rust-only constructor (D-9, §I.1)
+// from_native_sink — Rust-only constructor (§I.1)
 // ---------------------------------------------------------------------------
 
 /// Build a JS WritableStream from a Rust sink.

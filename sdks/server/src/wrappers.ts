@@ -1,8 +1,7 @@
 // Wrapper-marker helpers — `procedure` / `query` / `mutation` / `stream` /
 // `subscription`.
 //
-// ISS-02: drop the "every export under src/server/** is an RPC" footgun.
-// Discovery moves to a two-step opt-in:
+// Discovery uses a two-step opt-in now:
 //
 //   1. The file declares a top-level `"use server"` directive (file-level
 //      ECMAScript Directive Prologue). The vite-plugin's transform skips

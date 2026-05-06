@@ -1,5 +1,5 @@
 /**
- * Phase 5 — `<ZeroshipProvider>` populates the rpc-client hook registry.
+ * `<ZeroshipProvider>` populates the rpc-client hook registry.
  *
  * Importing `@zeroship/rpc-react` should:
  *

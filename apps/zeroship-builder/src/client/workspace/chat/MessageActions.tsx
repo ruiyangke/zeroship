@@ -3,7 +3,7 @@
 // presentational while we centralise click → callback → state-effect
 // wiring (clipboard write, regenerate, edit-pencil) in one place.
 //
-// Per spec §10.6:
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §10.6:
 //   - Assistant turns: ↻ regenerate · 📋 copy
 //   - User turns:      ✎ edit prior   · 📋 copy
 //

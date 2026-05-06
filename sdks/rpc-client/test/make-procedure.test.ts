@@ -1,7 +1,7 @@
 /**
- * Phase 5 — `__makeProcedure` + `_hookRegistry`.
+ * `__makeProcedure` + `_hookRegistry`.
  *
- * Per spec §10:
+ * `docs/proposals/rpc-v2.md` §10 defines this surface:
  *
  *   - `__makeProcedure(call, meta)` returns a callable that ALSO carries
  *     hook getters. The getters read from a closure-private hook
@@ -203,12 +203,12 @@ describe("__makeProcedure — populated registry plumbing", () => {
     assert.deepEqual(receivedKey, ["todos.list", { limit: 50 }]);
   });
 
-  // ── Spec §10 "Idempotency × retry interaction" ─────────────────────
+  // ── docs/proposals/rpc-v2.md §10 "Idempotency × retry interaction" ──
   //
   // React Query retries call the mutationFn multiple times for one
   // logical `mutate(input)` call. The transport must reuse a SINGLE
-  // Idempotency-Key across all attempts so Phase 6's gateway dedupe
-  // table replays the first attempt's response on retries 2..N.
+  // Idempotency-Key across all attempts so gateway dedupe can replay
+  // the first attempt's response on retries 2..N.
   //
   // We assert this by capturing the `idempotencyKey` option that the
   // wrapped mutationFn passes to `call(...)` on each retry.

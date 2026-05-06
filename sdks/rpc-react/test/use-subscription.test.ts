@@ -1,14 +1,13 @@
 /**
- * Phase 5 — `useSubscription` placeholder stub.
+ * `useSubscription` placeholder stub.
  *
- * Subscriptions land in Phase 7 (parallel work). For Phase 5 the
- * `useSubscription` slot is wired into `_hookRegistry.useSubscription`
- * with a stub that throws UNIMPLEMENTED — that way procedure handles
- * declared as `kind: "subscription"` get a clear error message at the
- * point of misuse instead of silently breaking.
+ * `useSubscription` is wired into `_hookRegistry.useSubscription` with
+ * a stub that throws `UNIMPLEMENTED`. That gives procedures declared as
+ * `kind: "subscription"` a clear error at the point of misuse instead
+ * of silently breaking.
  *
- * The throw message MUST mention follow-up landing so users know it's
- * tracked.
+ * The throw message should still make it clear that WebSocket-backed
+ * subscriptions are planned rather than missing accidentally.
  */
 
 import { test, describe } from "node:test";

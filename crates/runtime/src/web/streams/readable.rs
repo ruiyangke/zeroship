@@ -19,7 +19,7 @@
 //! }
 //! ```
 //!
-//! Storage (D-2 audit, design §XV.1):
+//! Storage:
 //! - `state` (Readable / Closed / Errored)            → Rust field on RSState
 //! - `disturbed`                                       → Rust field on RSState
 //! - `[[reader]]`                                      → V8 priv sym `[[reader]]`
@@ -54,14 +54,14 @@ pub enum StreamState {
 }
 
 /// `Box<RSState>` is stored in the wrapper's V8 internal field 0.
-/// Per D-2: this struct holds ONLY pure-Rust slots. The
+/// This struct holds ONLY pure-Rust slots. The
 /// `[[controller]]` / `[[reader]]` / `[[storedError]]` slots live in
 /// V8 private symbols.
 #[allow(missing_debug_implementations)]
 pub struct RSState {
     pub state: Cell<StreamState>,
     pub disturbed: Cell<bool>,
-    /// D-18 budget guard. Decrements live count on Drop (i.e. when the
+    /// Budget guard. Decrements live count on Drop (i.e. when the
     /// V8 weak finalizer reclaims the Box).
     _budget: StreamBudgetGuard,
 }
@@ -117,7 +117,7 @@ pub fn with_rs_state<R>(
 }
 
 // ---------------------------------------------------------------------------
-// from_native_source — Rust-only constructor (D-9, §I.1)
+// `from_native_source` — Rust-only constructor
 // ---------------------------------------------------------------------------
 
 /// Build a JS ReadableStream from a Rust source.
@@ -1325,7 +1325,7 @@ impl NativeReadableController {
 
 /// Install `globalThis.ReadableStream`, `…DefaultReader`,
 /// `…DefaultController`. Test harnesses call this directly; production
-/// `setup_globals` wires it once the polyfill cutover (D-19) lands.
+/// `setup_globals` wires it into the runtime.
 pub fn install_native_streams(
     scope: &mut v8::PinScope,
     global: v8::Local<v8::Object>,
@@ -1363,16 +1363,13 @@ pub fn install_native_streams(
 //   - the iterator protocol is JS-native (no Rust crossing per chunk);
 //   - errors propagate through the Promise machinery automatically.
 //
-// MAC-01 bail (#170): not migrated to `#[v8_static_method]`. The
-// macro path requires the static body to live as a Rust callback
-// inside an `#[v8_class] impl Block` — but ReadableStream itself is
-// hand-rolled (not `#[v8_class]`-annotated, because every method
-// keys off `args.this()` and several use private symbols the macro
-// doesn't expose). Migrating `from` alone would either need a
-// per-call slot lookup + indirection (worse perf) or a full Rust
-// rewrite of the iterator-driven pull/cancel algorithm (large
-// rewrite, low value). Defer until ReadableStream as a whole moves
-// to the macro.
+// `from` is not on `#[v8_static_method]` yet. The macro path requires
+// the static body to live as a Rust callback inside an `#[v8_class]`
+// impl block, but `ReadableStream` itself is still hand-rolled because
+// every method keys off `args.this()` and several use private symbols
+// the macro does not expose. Migrating `from` alone would either need
+// a per-call slot lookup and indirection, or a full Rust rewrite of
+// the iterator-driven pull/cancel algorithm.
 
 fn install_readable_stream_from(
     scope: &mut v8::PinScope,

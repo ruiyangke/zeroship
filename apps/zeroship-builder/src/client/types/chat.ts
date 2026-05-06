@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 
-// --- Survey (per design §8.2.7) ---
+// --- Survey (per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7) ---
 
 export const optionSchema = z.object({
   value: z.string(),

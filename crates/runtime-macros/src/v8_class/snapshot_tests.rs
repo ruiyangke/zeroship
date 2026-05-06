@@ -1,9 +1,9 @@
-//! Codegen snapshot tests (MAC-01 Phase 1).
+//! Codegen snapshot tests for `#[v8_state_marker]`.
 //!
 //! Lock the macro's emission against unintended drift. Per design §5.1
 //! / §6.4: the no-attribute path is required to be byte-identical to
-//! pre-Phase-1 emission (modulo the qualified Private-symbol name in row
-//! 16). The new `#[v8_state_marker]` path is also snapshotted so a
+//! the old emission shape (modulo the qualified Private-symbol name in
+//! row 16). The new `#[v8_state_marker]` path is also snapshotted so a
 //! future change can detect drift in either direction.
 //!
 //! We snapshot the prettyplease-formatted output of `expand_tokens` so
@@ -11,8 +11,8 @@
 //! require `cargo insta accept` with reviewer audit (design §8 settled-
 //! question 9).
 //!
-//! Wave 6 commit 1 — extracted out of `mod.rs` so the module head is a
-//! thin orchestrator. The snapshot files themselves live in
+//! Extracted out of `mod.rs` so the module head stays a thin
+//! orchestrator. The snapshot files themselves live in
 //! `crates/runtime-macros/src/v8_class/snapshots/` (paths unchanged
 //! across the move).
 

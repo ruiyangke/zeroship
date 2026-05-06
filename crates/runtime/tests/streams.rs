@@ -351,7 +351,7 @@ fn readable_stream_get_reader_locks() {
 
 #[test]
 fn readable_stream_get_reader_twice_throws_typeerror() {
-    // D-13: each ReadableStream has [[reader]]; second getReader throws TypeError.
+    // Each ReadableStream has [[reader]]; second getReader throws TypeError.
     let r = run_with_streams(
         r#"
         const s = new ReadableStream();
@@ -716,7 +716,7 @@ fn writable_stream_get_writer_locks() {
 
 #[test]
 fn writable_stream_get_writer_twice_throws_typeerror() {
-    // D-13: each WritableStream has [[writer]]; second getWriter throws TypeError.
+    // Each WritableStream has [[writer]]; second getWriter throws TypeError.
     let r = run_with_streams(
         r#"
         const s = new WritableStream();
@@ -2147,7 +2147,7 @@ fn byob_byobrequest_respond_advances_descriptor() {
 
 #[test]
 fn byob_d15_respond_zero_on_close_with_nonempty_queue_throws() {
-    // CRITICAL D-15: After controller.close() with non-empty queue,
+    // After controller.close() with a non-empty queue,
     // closeRequested === true but state is still 'readable'. respond(0)
     // MUST throw TypeError in this window.
     //
@@ -2209,7 +2209,7 @@ fn byob_d15_respond_zero_on_close_with_nonempty_queue_throws() {
 
 #[test]
 fn byob_d16_enqueue_with_detached_buffer_throws() {
-    // D-16: enqueue with a view whose buffer was already detached must
+    // Enqueue with a view whose buffer was already detached must
     // throw TypeError.
     let r = run_with_streams(
         r#"
@@ -2244,7 +2244,7 @@ fn byob_d16_enqueue_with_detached_buffer_throws() {
 
 #[test]
 fn byob_d16_respond_with_new_view_detached_throws() {
-    // D-16: respondWithNewView with a view whose buffer is detached
+    // RespondWithNewView with a view whose buffer is detached
     // must throw TypeError.
     let r = run_with_streams(
         r#"

@@ -1,5 +1,5 @@
 //! Compile-fail snapshot tests for `#[v8_constructor(post_init = ...)]`
-//! diagnostics (MAC-02 design §6.2).
+//! diagnostics.
 //!
 //! Each fixture under `tests/compile_fail_post_init/` exercises one
 //! malformed shape and pairs with a `.stderr` snapshot. trybuild

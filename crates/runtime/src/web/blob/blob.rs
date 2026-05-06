@@ -212,8 +212,8 @@ pub fn is_blob_instance_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Obje
 /// Return the size (in bytes) of a Blob. Returns 0 if the object isn't
 /// a Blob (callers should brand-check first via `is_blob_instance_public`).
 ///
-/// Used by `WebSocket.send(blob)` to bump bufferedAmount synchronously
-/// — per WHATWG §3.1 step 4 + critic MAJOR #6.
+/// Used by `WebSocket.send(blob)` to bump `bufferedAmount`
+/// synchronously, per WHATWG §3.1 step 4.
 pub fn blob_size_public(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> u64 {
     if !is_blob_instance(scope, obj) {
         return 0;

@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared port allow/deny constants used by both the controller and the
-# agent (preview-URL § II.1 / I9 — defense-in-depth port deny).
+# agent (`docs/proposals/sandbox-preview-urls.md` § II.1 / I9 — defense-in-depth port deny).
 zeroship-core = { workspace = true }
 
 # Workspace runtime: compio (io_uring) + ntex (HTTP). Same stack as

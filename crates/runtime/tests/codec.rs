@@ -9,25 +9,24 @@
 //! native-streams sibling project (per the design's Dependencies
 //! section).
 //!
-//! Spec corner cases covered (each maps to a design BLOCKER/MAJOR id
-//! cited in the test name):
+//! Spec corner cases covered:
 //!
-//! - BLOCKER-1 trailing-byte detection — flate2's finish() does NOT
+//! - Trailing-byte detection — flate2's finish() does NOT
 //!   flag trailing data; the codec write contract returns
 //!   (produced, consumed) so the call site can detect truncation.
-//! - BLOCKER-2 idempotent finish/cancel/Drop — repeated finish/cancel
+//! - Idempotent finish/cancel/Drop — repeated finish/cancel
 //!   are no-ops; Drop after either is safe.
-//! - BLOCKER-5 SAB rejection — exercised in the macro smoke test
+//! - SAB rejection — exercised in the macro smoke test
 //!   crate (this file is codec-only Rust).
-//! - MAJOR-6 multi-coding chain (gzip → br encode then br → gzip
+//! - Multi-coding chain (gzip → br encode then br → gzip
 //!   decode) round-trips, applied in REVERSE per RFC 9110 §8.4.1.
-//! - MAJOR-7 identity coding is a pass-through; unknown codings yield
+//! - Identity coding is a pass-through; unknown codings yield
 //!   CodecError::UnknownCoding.
-//! - MAJOR-10 empty input through compressor → no header bytes until
+//! - Empty input through compressor → no header bytes until
 //!   finish().
-//! - MAJOR-11 empty input through decompressor → CodecError::Truncated
+//! - Empty input through decompressor → CodecError::Truncated
 //!   on finish() (mapped from flate2's Z_BUF_ERROR).
-//! - MAJOR-14 lenient deflate (try zlib then raw) for the internal
+//! - Lenient deflate (try zlib then raw) for the internal
 //!   fetch path; public API stays strict.
 
 use zeroship_runtime::codec::{
@@ -84,7 +83,7 @@ fn roundtrip_brotli() {
 }
 
 // ---------------------------------------------------------------------------
-// BLOCKER-1 — trailing-byte detection
+// Trailing-byte detection
 // ---------------------------------------------------------------------------
 //
 // Per WHATWG `decompress-and-enqueue` step 6:
@@ -149,7 +148,7 @@ fn brotli_decode_reports_partial_consumed_on_trailing_byte() {
 }
 
 // ---------------------------------------------------------------------------
-// BLOCKER-2 — idempotent finish/cancel/Drop
+// Idempotent finish/cancel/Drop
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -158,8 +157,8 @@ fn double_finish_is_idempotent() {
     let (_, _) = enc.write(SAMPLE).unwrap();
     let _trailer = enc.finish().expect("first finish ok");
     assert!(enc.finished());
-    // Second finish: design D-2 says "second finish after cancel/finish
-    // is a no-op." We accept Ok(empty) — never panic, never error.
+    // Second finish is a no-op. We accept `Ok(empty)` and never
+    // panic or error here.
     let second = enc.finish().expect("second finish must be no-op Ok");
     assert!(second.is_empty(), "second finish produces no further bytes");
 }
@@ -208,7 +207,7 @@ fn write_after_cancel_is_noop() {
 }
 
 // ---------------------------------------------------------------------------
-// MAJOR-10 — empty input through transform produces no header bytes
+// Empty input through transform produces no header bytes
 // ---------------------------------------------------------------------------
 //
 // Per spec compress-and-enqueue step 3: "If buffer is empty, return."
@@ -240,7 +239,7 @@ fn empty_write_produces_no_output() {
 }
 
 // ---------------------------------------------------------------------------
-// MAJOR-11 — empty input through DECOMPRESSOR is a truncation
+// Empty input through the decompressor is a truncation
 // ---------------------------------------------------------------------------
 //
 // The codec was constructed but never fed any bytes; stream-end was
@@ -333,7 +332,7 @@ fn deflate_zlib_decoder_rejects_raw_deflate_input() {
 }
 
 // ---------------------------------------------------------------------------
-// MAJOR-6 — multi-coding decode chain runs in REVERSE
+// Multi-coding decode chain runs in reverse
 // ---------------------------------------------------------------------------
 
 fn encode_chain(codings: &[CompressionFormat], data: &[u8]) -> Vec<u8> {
@@ -394,7 +393,7 @@ fn multi_coding_chain_three_codings() {
 }
 
 // ---------------------------------------------------------------------------
-// MAJOR-7 — identity, x-gzip aliases, unknown codings
+// identity, x-gzip aliases, unknown codings
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -420,5 +419,5 @@ fn x_gzip_alias_works() {
     assert_eq!(decoded, payload);
 }
 
-// MAJOR-14 lenient deflate fallback is `pub(crate)`; tests for it
+// The lenient deflate fallback is `pub(crate)`; tests for it
 // live in `src/codec.rs` `#[cfg(test)] mod internal_tests`.

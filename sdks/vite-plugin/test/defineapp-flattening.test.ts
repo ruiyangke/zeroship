@@ -1,5 +1,5 @@
 /**
- * Phase 1 — defineApp({ resources }) tree flattening.
+ * `defineApp({ resources })` tree flattening.
  *
  * `children: { ... }` is authoring sugar. The build flattens to fully
  * qualified keys, prepending the parent's namespace separator:
@@ -107,7 +107,8 @@ export default defineApp({
   test("camelCase fields snake-case-rename to wire shape", async () => {
     // The manifest wire shape uses snake_case (rate_limit, max_input_bytes,
     // publicly_accessible, csrf_origins). The authoring API uses camelCase.
-    // The flattener does the rename so the manifest matches spec §7.
+    // The flattener does the rename so the manifest matches
+    // `docs/proposals/rpc-v2.md` §7.
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
 export default defineApp({

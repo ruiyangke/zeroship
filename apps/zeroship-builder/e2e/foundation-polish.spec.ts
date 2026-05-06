@@ -141,7 +141,7 @@ test.describe("Dev events badge", () => {
 
 // ─── account sessions stub ────────────────────────────────────
 
-test.describe("Account sessions (ISS-10 stub)", () => {
+test.describe("Account sessions", () => {
   test("sessions section shows current browser + sign-out-everywhere", async ({ page }) => {
     await page.goto("/account");
     await expect(page.getByTestId("account-sessions")).toBeVisible();

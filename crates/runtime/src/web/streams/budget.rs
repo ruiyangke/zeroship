@@ -1,9 +1,9 @@
-//! Per-isolate concurrent stream cap (D-18).
+//! Per-isolate concurrent stream cap.
 //!
 //! Constructions over `MAX_LIVE_STREAMS` throw `RangeError("too many
 //! concurrent streams")`. The cap is per-thread per-isolate.
 //!
-//! Justification (design D-18): target 200K req/s × 32-thread worker =
+//! Justification: target 200K req/s × 32-thread worker =
 //! ~6,250 req/s/thread; mean lifecycle ~50ms = 312 streams in flight per
 //! thread; 65,536 is 200× headroom.
 //!

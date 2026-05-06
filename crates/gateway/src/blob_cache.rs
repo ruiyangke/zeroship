@@ -1,16 +1,16 @@
 //! Edge LRU caches for blob bytes, keyed by content hash.
 //!
-//! - `BlobCache` is the in-memory tier (Phase A of the zero-copy plan;
-//!   see `docs/architecture/blob-store.md`). Bytes are still copied
+//! - `BlobCache` is the in-memory tier (see
+//!   `docs/architecture/blob-store.md`). Bytes are still copied
 //!   once on socket write — `Bytes` is `Arc`-refcounted so concurrent
 //!   requests for the same hash share the buffer.
-//! - `DiskBlobCache` is the on-disk tier (Phase B). Larger blobs that
-//!   don't fit in the memory budget land on disk; on serve, the gateway
-//!   `mmap`s the file and hands the pointer to ntex via
+//! - `DiskBlobCache` is the on-disk tier. Larger blobs that do not fit
+//!   in the memory budget land on disk; on serve, the gateway `mmap`s
+//!   the file and hands the pointer to ntex via
 //!   `Bytes::from_owner`, so the kernel page cache → socket path is
 //!   zero-copy from the userspace side.
-//! - Phase C will swap the page-cache → socket copy for `sendfile(2)`
-//!   or `IORING_OP_SPLICE`.
+//! - A future follow-up can swap the page-cache → socket copy for
+//!   `sendfile(2)` or `IORING_OP_SPLICE`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -113,7 +113,7 @@ impl std::fmt::Debug for BlobCache {
 }
 
 // ---------------------------------------------------------------------------
-// Disk-backed LRU (Phase B)
+// Disk-backed LRU
 // ---------------------------------------------------------------------------
 
 /// Bounded-by-bytes LRU cache that stores blob bytes on the local
@@ -317,7 +317,7 @@ fn unique_tmp_suffix() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// mmap helper — Phase B zero-copy
+// mmap helper for the disk-cache serve path
 // ---------------------------------------------------------------------------
 
 /// Open `path` and return a `Bytes` view backed by an mmap of the

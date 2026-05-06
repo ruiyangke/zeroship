@@ -1,10 +1,10 @@
-//! V8-aware superjson encode/decode — RPC v2 phase 1 (Wave C).
+//! V8-aware superjson encode/decode for RPC v2.
 //!
-//! Wave A built the wire envelope (`zeroship_core::superjson::Envelope`,
-//! `Meta`, `MetaTag`) and a serializer that round-trips against the npm
-//! `superjson@2.x` fixtures. Wave C is the V8 half: walk a
-//! `v8::Local<v8::Value>` extracting rich-typed leaves into the meta
-//! map, and revive a wire envelope back to a V8 value.
+//! `zeroship_core::superjson` provides the wire envelope
+//! (`Envelope`, `Meta`, `MetaTag`) and the serializer that round-trips
+//! against the npm `superjson@2.x` fixtures. This file is the V8 half:
+//! walk a `v8::Local<v8::Value>` extracting rich-typed leaves into the
+//! meta map, and revive a wire envelope back to a V8 value.
 //!
 //! ## Type detection at encode time
 //!
@@ -22,12 +22,12 @@
 //! | plain string/number/boolean/null | passthrough | (none) |
 //! | plain object/array | recurse | (none) |
 //!
-//! ## Phase-1 limitations
+//! ## Current limitations
 //!
-//! - Typed arrays: only `Uint8Array` round-trips. Other TypedArray ctors
-//!   (`Int32Array`, `Float64Array`, etc.) are rejected at encode time
-//!   with `OpError::type_error`. Phase 2 will widen this to the full
-//!   `["typed-array", "<Ctor>"]` family.
+//! - Typed arrays: only `Uint8Array` round-trips. Other TypedArray
+//!   constructors (`Int32Array`, `Float64Array`, etc.) are rejected at
+//!   encode time with `OpError::type_error`. If needed, this can widen
+//!   later to the full `["typed-array", "<Ctor>"]` family.
 //! - Cycles: a self-referential object will exhaust the stack. The npm
 //!   library doesn't handle cycles either — reasonable for an RPC
 //!   wire format. Add an explicit `seen` set if the requirement changes.
@@ -223,7 +223,8 @@ impl EncodeVisitor {
             self.record(MetaTag::TypedArray("Uint8Array".into()));
             return Ok(encode_uint8_array(scope, value)?);
         }
-        // Reject other typed-array ctors — phase 1 is Uint8Array only.
+        // Reject other typed-array constructors. The current
+        // implementation supports only Uint8Array.
         if is_other_typed_array(value) {
             return Err(OpError::type_error(
                 "superjson encode: only Uint8Array typed-arrays are supported in phase 1",
@@ -1074,7 +1075,7 @@ fn apply_child_paths<'s>(
     children: &IndexMap<String, MetaTag>,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     // The root value may itself be reassigned (top-level path "" maps
-    // to root, but Wave A's `WithChildren` never produces `""`-keyed
+    // to root, but `WithChildren` never produces `""`-keyed
     // entries — paths always step into the container). Process longest-
     // first paths first to keep ancestor mutations from clobbering
     // descendant overwrites. In practice the npm wire emits paths in

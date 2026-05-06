@@ -65,9 +65,9 @@ pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
 
 /// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
 ///
-/// Bundle bytes are the raw ES module source (UTF-8). Phase 4b: the
-/// caller (`sync::reconcile_once` or `handler::load_on_demand`) resolves
-/// the worker-entry blob hash from the manifest and reads it via
+/// Bundle bytes are the raw ES module source (UTF-8). The caller
+/// (`sync::reconcile_once` or `handler::load_on_demand`) resolves the
+/// worker-entry blob hash from the manifest and reads it via
 /// `BlobStore::get_blob` before calling here. Single-module bundles
 /// (today's only shape) become a one-element `modules` vector tagged
 /// `index.js`; multi-module deploys will pass a richer slice once the
@@ -105,7 +105,7 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         // Pass `app_id` so the runtime's RPC fast path can register
         // every in-flight `AbortController` with `crate::rpc::abort`,
         // keyed by `(app_id, request_id)`. `evict_lru` walks that
-        // registry on eviction (Wave E).
+        // registry on eviction.
         let runtime = Runtime::builder()
             .modules(modules)
             .env_vars(env_vars)
@@ -210,13 +210,13 @@ fn evict_lru(cache: &mut AppCache) {
         tracing::info!(app_id = %oldest_id, "worker: evicting LRU isolate");
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
 
-        // Wave E — fire every in-flight `AbortController` for this app
-        // BEFORE removing the isolate. User code awaiting a fetch /
-        // setTimeout / addEventListener("abort") gets one V8 turn to
-        // observe the cancellation; the synchronous abort dispatch
-        // runs inside `with_scope`. Phase 1 ships only the abort
-        // fan-out — the 30-second drain timer + Disposed state
-        // (proposal §3 / §15 OQ-2) are deferred to phase 2.
+        // Fire every in-flight `AbortController` for this app BEFORE
+        // removing the isolate. User code awaiting a fetch /
+        // `setTimeout` / `addEventListener("abort")` gets one V8 turn
+        // to observe the cancellation; the synchronous abort dispatch
+        // runs inside `with_scope`. The current implementation stops at
+        // abort fan-out; a drain timer and explicit disposed state can
+        // be added later if eviction needs to become more graceful.
         if let Some(entry) = cache.isolates.get(&oldest_id) {
             entry.runtime.with_scope(|scope| {
                 zeroship_runtime::rpc::abort::entered_for_eviction(scope, oldest_id);

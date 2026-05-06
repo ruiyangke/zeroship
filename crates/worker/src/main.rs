@@ -32,12 +32,12 @@ pub struct WorkerConfig {
     /// fatal for Kubernetes preemption (which will SIGKILL after its own
     /// `terminationGracePeriodSeconds`).
     pub shutdown_timeout_secs: u64,
-    /// Content-addressed blob store. Phase 4b of the artifact rollout —
-    /// the worker fetches worker-bundle bytes here directly instead of
-    /// round-tripping through the control plane. In dev / single-host
-    /// prod the gateway, control, and worker all point at the same path;
-    /// in multi-host prod each crate keeps its own `Arc` over a shared
-    /// remote backend (S3 + on-disk LRU, later phase).
+    /// Content-addressed blob store. The worker fetches bundle bytes
+    /// here directly instead of round-tripping through the control
+    /// plane. In dev and single-host production the gateway, control,
+    /// and worker all point at the same path; in multi-host production
+    /// each crate keeps its own `Arc` over a shared remote backend
+    /// (for example S3 with an on-disk LRU).
     pub blob_store: Arc<dyn BlobStore>,
 }
 

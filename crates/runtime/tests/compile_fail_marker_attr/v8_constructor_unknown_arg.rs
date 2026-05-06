@@ -1,7 +1,7 @@
 //! Compile-fail: `#[v8_constructor(unknown_flag)]` — unrecognised
 //! flag inside the constructor's nested-meta list.
 //!
-//! Pre-Wave-4 the parser silently ignored unknown idents. Now
+//! Earlier versions silently ignored unknown identifiers. Now
 //! `CallableNoNewFlag::merge` validates every nested meta and rejects
 //! anything that isn't `callable_no_new` (Path) or `post_init = "..."`
 //! (NameValue):

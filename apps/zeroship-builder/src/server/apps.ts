@@ -8,13 +8,13 @@ import { CONTROL_URL, CONTROL_KEY } from "./env";
 import { getRequest } from "./request-context";
 import { persistGet, persistSet } from "./_persist.js";
 
-// ─── archive: KV-backed stub (ISS-19) ────────────────────────────
+// ─── archive: KV-backed stub ─────────────────────────────────────
 //
 // The control plane has no `archived` column / endpoint yet. Until
 // then, archive state lives in KV (per-user list of archived appIds).
-// V1 dev: KV is the in-memory plugin in the V8 worker — survives HMR
-// module reloads, vanishes on hard worker restart. Production lands a
-// real `archived_at` column per ISS-19's fix path.
+// In dev, KV is the in-memory plugin in the V8 worker — it survives HMR
+// module reloads and vanishes on hard worker restart. Production should
+// replace this with a real `archived_at` column.
 //
 // Scoping: per current user. The dev synthetic user is a single id
 // (`usr_dev`), so the dashboard always reads the same list during dev.
@@ -41,7 +41,7 @@ export interface AppRecord {
   created_at: string;
   updated_at: string;
   server_js?: string;
-  /** Soft-delete flag (ISS-19 stub — module-level Set, dev only). */
+  /** Soft-delete flag from the temporary archive store. */
   archived?: boolean;
 }
 
@@ -92,7 +92,7 @@ getApp.config = { id: "apps.getApp" };
 
 /**
  * Soft-delete an app. Tracked in KV per-user (see ARCHIVE_KEY above)
- * until the control plane gains a real `archived_at` column (ISS-19).
+ * until the control plane gains a real `archived_at` column.
  * Returns the new state so the client can update its cache without a
  * refetch round-trip.
  */
@@ -118,7 +118,7 @@ unarchiveApp.config = { id: "apps.unarchiveApp" };
  * lose `plan_id` (and the dev-bootstrap actually passes `ctx` as the
  * second arg, which produced an "expected a string" deserialize error
  * upstream when `JSON.stringify({..., plan_id: ctx})` ran). Wrap into
- * one object per spec §RPC.
+ * one object per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §RPC.
  */
 export async function createApp(input: {
   name: string;

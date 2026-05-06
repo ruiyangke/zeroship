@@ -43,7 +43,7 @@ export interface ZeroshipOptions {
    *   prerendered HTML into `dist/` themselves.
    */
   mode?: "full" | "static";
-  /** RPC v2 (proposal §1) — server-function discovery + emission. */
+  /** RPC v2 (`docs/proposals/rpc-v2.md` §1) — server-function discovery + emission. */
   rpc?: {
     /**
      * Strict-mode posture for the reference-graph walk.

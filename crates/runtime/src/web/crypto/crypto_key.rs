@@ -3,7 +3,7 @@
 //! box (so the macro's `&self` cast lines up with the storage we
 //! produce in `build`).
 //!
-//! Per `docs/proposals/webcrypto-native.md` §V (D-2, D-9, D-10).
+//! See `docs/proposals/webcrypto-native.md` §V.
 //!
 //! The class is platform-constructed per spec §13 — the constructor
 //! throws if called from JS; real instances come from
@@ -94,7 +94,7 @@ impl CryptoKey {
 }
 
 // ---------------------------------------------------------------------------
-// Brand check (D-10) + state accessor
+// Brand check + state accessor
 // ---------------------------------------------------------------------------
 
 /// Unspoofable instanceof check — read internal-field 0's tag byte.
@@ -216,7 +216,7 @@ pub fn build<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers — algorithm + usages frozen JS objects (D-9 SameObject backing)
+// Helpers — algorithm + usages frozen JS objects for SameObject getters
 // ---------------------------------------------------------------------------
 
 fn build_algorithm_object<'s>(

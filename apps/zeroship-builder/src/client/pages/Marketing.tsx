@@ -1,6 +1,6 @@
 // ─── Marketing — public landing page (`/`) ──────────────────────
 //
-// Per spec §5.1. Editorial single-column layout, max-width 760px.
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.1. Editorial single-column layout, max-width 760px.
 // Hero with serif Fraunces headline + tomato-italic verb, sub-lede,
 // inline "Begin your project" CTA. "How it works" section. Featured
 // templates grid. Pricing teaser. Footer with public links.

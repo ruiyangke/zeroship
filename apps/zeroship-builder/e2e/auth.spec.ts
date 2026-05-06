@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 01 Phase 6 — auth UI surfaces render and route protection
+// Auth UI smoke test: public auth pages render and protected routes
 // is wired. These tests do NOT exercise the control plane: they only
 // assert that the public auth pages render correctly and that the
 // dev-bypass branch of AuthGuard lets a developer hit /account.
@@ -9,7 +9,7 @@ import { test, expect } from "@playwright/test";
 // controller required. These are pure UI smoke tests that should run
 // against a vanilla `npm run dev` worktree.
 
-test.describe("Plan 01 Phase 6 — auth UI surfaces", () => {
+test.describe("auth UI surfaces", () => {
   test("/login renders the form, Google button, and link to /signup", async ({ page }) => {
     await page.goto("/login");
 

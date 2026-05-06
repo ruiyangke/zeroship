@@ -75,7 +75,7 @@ pub struct K8sBackend {
     /// optionally by a background re-probe. `false` = backend not
     /// usable; consumers can route around or page out.
     healthy: Arc<AtomicBool>,
-    /// Sealed-record persistence (preview-URL § II.0 §4). See
+    /// Sealed-record persistence (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). See
     /// [`crate::persist::Persistence`]. `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset.
     persist: Option<Arc<crate::persist::Persistence>>,
@@ -486,7 +486,7 @@ impl K8sBackend {
 
         let now = unix_now();
 
-        // Seal the per-sandbox auth to disk (preview-URL § II.0 §4).
+        // Seal the per-sandbox auth to disk (`docs/proposals/sandbox-preview-urls.md` § II.0 §4).
         // BEST-EFFORT: a seal failure does NOT fail create(). K8s
         // records seal `agent_url` directly because it's not a
         // deterministic function of any controller-side index — it's
@@ -583,7 +583,7 @@ impl K8sBackend {
             errs.push(format!("wait_for_pod_gone({pod_name}): {e}"));
         }
 
-        // 5. Delete the sealed record (preview-URL § II.0 §4).
+        // 5. Delete the sealed record (`docs/proposals/sandbox-preview-urls.md` § II.0 §4).
         //    BEST-EFFORT: delete failures are logged but never fail
         //    stop().
         if let Some(persist) = &self.persist {
@@ -1471,7 +1471,7 @@ fn sanitize_path(p: &str) -> Result<String, String> {
 /// backend use, integration tests, a mistakenly-added admin
 /// endpoint).
 ///
-/// Phase-1+2 wire migration: previously this enforced the legacy
+/// Typed-id wire migration: previously this enforced the legacy
 /// DNS-1123 charset `[a-z0-9-]{1,50}`, which rejected typed-ids
 /// (they contain `_`) and 500'd every real HTTP create. The handler
 /// validates typed-id form upstream; this helper now validates the
@@ -1524,7 +1524,7 @@ mod tests {
 
     #[test]
     fn validate_typed_id_accepts_typed_user_id() {
-        // Phase-1+2 wire shape: handlers and backends both speak
+        // Handlers and backends both speak
         // `usr_<22-base62>` end-to-end. The typed-id check is the
         // single source of truth; legacy `[a-z0-9-]+` ids are
         // rejected uniformly.

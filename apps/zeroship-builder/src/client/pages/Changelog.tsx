@@ -1,6 +1,6 @@
 // ─── Changelog — public chronology (`/changelog`) ───────────────
 //
-// Per spec §5.5. A static, editorial list of recent changes. Entries
+// Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §5.5. A static, editorial list of recent changes. Entries
 // are dated and described in the same voice as the app. New entries
 // go on top.
 

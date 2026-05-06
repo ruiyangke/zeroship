@@ -1,4 +1,4 @@
-//! Content-Encoding decompression hook per design §V.9 + RFC 9110 §8.4.1.
+//! Content-Encoding decompression hook for RFC 9110 §8.4.1.
 //!
 //! Implements the `with_response_body_hook` contract that the
 //! compression-streams design depends on. The hook runs between
@@ -12,7 +12,7 @@
 //!   4. Pipe the inbound bytes through the chain.
 //!   5. Strip `Content-Encoding` and `Content-Length` from the user-
 //!      visible headers (matches undici's `handleResponseBody` and
-//!      workerd's `removeContentEncoding` — D-8 of compression design).
+//!      workerd's `removeContentEncoding`).
 //!
 //! For the v1 fetch path, we run the chain over the **buffered** body
 //! bytes — not as a streaming TransformStream — for two reasons:
@@ -25,10 +25,10 @@
 //!      shippable).
 //!   2. The vast majority of real-world HTTP responses fit in the
 //!      `MAX_RESPONSE_SIZE` cap (10 MiB) the cyper layer enforces. A
-//!      streaming version is a future enhancement (D-23 noted).
+//!      streaming version is a future enhancement.
 //!
-//! Lenient deflate: per design D-6 / MAJOR-14, we use
-//! `try_zlib_then_raw_decode` for the fetch path — public
+//! Lenient deflate: we use `try_zlib_then_raw_decode` for the fetch
+//! path. Public
 //! `DecompressionStream("deflate")` stays strict zlib-only.
 
 use crate::codec::{
@@ -38,8 +38,8 @@ use crate::codec::{
 /// Outcome of running the Content-Encoding chain over response bytes.
 pub struct DecodedBody {
     pub bytes: Vec<u8>,
-    /// The new headers list with `Content-Encoding` and `Content-Length`
-    /// stripped per D-8.
+    /// The new headers list with `Content-Encoding` and
+    /// `Content-Length` stripped.
     pub headers: Vec<(String, String)>,
 }
 
@@ -47,9 +47,8 @@ pub struct DecodedBody {
 /// by `headers`. Modifies `headers` to strip `Content-Encoding` and
 /// `Content-Length`.
 ///
-/// Returns network error (as `Err(String)`) on:
-///   - Unknown coding name (D-9)
-///   - Decompression failure (corrupt / truncated / trailing-bytes)
+/// Returns a network error (`Err(String)`) on unknown coding names or
+/// decompression failure (corrupt / truncated / trailing-bytes).
 pub fn decompress_response_body(
     body: Vec<u8>,
     headers: &[(String, String)],
@@ -66,7 +65,7 @@ pub fn decompress_response_body(
     };
 
     // Identity / empty list / pure-identity → no decode, but still
-    // strip headers per D-8 if Content-Encoding was present.
+    // strip headers if Content-Encoding was present.
     let any_real_coding = codings
         .iter()
         .any(|c| !c.eq_ignore_ascii_case("identity"));
@@ -80,7 +79,7 @@ pub fn decompress_response_body(
     }
 
     // Special-case `deflate` for the fetch path's lenient zlib-or-raw
-    // policy (D-6). When the chain is single-element `["deflate"]`,
+    // policy. When the chain is single-element `["deflate"]`,
     // route through `try_zlib_then_raw_decode`. For multi-element
     // chains containing `deflate`, fall through to the strict path —
     // the lenient probe-the-bytes strategy doesn't compose, and
@@ -210,7 +209,8 @@ mod tests {
         ];
         let r = decompress_response_body(body.clone(), &headers).unwrap();
         assert_eq!(r.bytes, body);
-        // Per D-8: when CE was present (even identity), strip CE+CL.
+        // When Content-Encoding was present, strip CE+CL even for
+        // `identity`.
         assert!(r.headers.iter().all(|(k, _)| !k.eq_ignore_ascii_case("content-encoding")));
         assert!(r.headers.iter().all(|(k, _)| !k.eq_ignore_ascii_case("content-length")));
     }

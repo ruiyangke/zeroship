@@ -1,20 +1,20 @@
 "use server";
-// Agents server functions — V1 stubs for the Plan / Health canvases.
+// Agents server functions — current stubs for the Plan / Health
+// canvases.
 //
-// The PM agent owns Issues / Roadmap / Deployments (spec §9.8) and the
+// The PM agent owns Issues / Roadmap / Deployments (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.8) and the
 // SRE agent owns Status / Quality / Incidents / Performance (§9.9).
 // None of these have backing tables yet; this file exposes a single-
 // input RPC surface (`{appId, …}`) so the canvas shells render real-
-// looking data while the schema gaps are tracked in ISSUES.md
-// (ISS-14 through ISS-18).
+// looking data while the real backing tables are still being built.
 //
 // Storage shape: KV-backed via `_persist.ts`. The native `@zeroship/kv`
 // primitive lives in the V8 worker process, which the vite-plugin keeps
 // running across HMR module re-evaluations — so writes survive "save
 // the file → dev refreshes the bundle". They DO vanish on a hard worker
 // restart, which is consistent with "dev only, single worker" semantics
-// of the in-memory KV backend. Production lands a real backing table
-// per the `Fix path` notes in each ISSUES entry.
+// of the in-memory KV backend. Production will replace these with real
+// backing tables.
 //
 // Wire convention: every export takes ONE object input (per the
 // builder's single-input RPC wire — see `apps/zeroship-builder/src/
@@ -24,7 +24,7 @@
 
 import { persistGet, persistSet } from "./_persist.js";
 
-// ─── issue store (ISS-14) ───────────────────────────────────────
+// ─── issue store ────────────────────────────────────────────────
 
 export type IssueStatus = "open" | "in_progress" | "done";
 export type IssueSource = "you" | "pm" | "sre" | "builder";
@@ -81,8 +81,8 @@ function seedIssues(appId: string): Issue[] {
       id: nextId(),
       title: "Wire up password reset",
       description:
-        "Spec §6.3 promises a forgot-password flow. The endpoint lives behind " +
-        "ISSUES.md ISS-09 — track that for the backing handler.",
+        "The forgot-password page exists, but the backing reset endpoint " +
+        "is not wired up yet.",
       status: "in_progress",
       source: "builder",
       assignee: "Builder",
@@ -160,7 +160,7 @@ export async function addIssue(input: AddIssueInput): Promise<{ issue: Issue }> 
     updated_at: now,
     comments: [],
   };
-  // Newest first — matches the spec §9.8 mock where the most recent
+  // Newest first — matches the `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.8 mock where the most recent
   // issue sits at the top of the list.
   const next = [issue, ...list];
   await persistSet(issuesKey(input.appId), next);
@@ -168,7 +168,7 @@ export async function addIssue(input: AddIssueInput): Promise<{ issue: Issue }> 
 }
 addIssue.config = { id: "agents.addIssue" };
 
-// ─── quality scorecard (ISS-16) ─────────────────────────────────
+// ─── quality scorecard ──────────────────────────────────────────
 //
 // Spec §11.1 names seven quality dimensions. KV-backed per appId via
 // `_persist.ts`. The Critic loop now writes here on every round (see
@@ -272,18 +272,16 @@ getQualityScores.config = { id: "agents.getQualityScores" };
 
 // Note: the writer side of the quality scorecard (the function the
 // chat middleware calls after every Critic round) lives in
-// `_agent_writes.ts` so it stays out of the public RPC surface. Per
-// ISS-02, every export from this file becomes a network endpoint via
-// `server.ts`'s `export *`; we want `setQualityFromCritic` to be
-// server-internal only.
+// `_agent_writes.ts` so it stays out of the public RPC surface. Every
+// export from this file becomes a network endpoint via `server.ts`'s
+// `export *`; we want `setQualityFromCritic` to stay server-internal.
 
-// ─── data canvas stubs (ISS-20 → ISS-25) ────────────────────────
+// ─── data canvas stubs ───────────────────────────────────────────
 //
-// V1 surface for the Data canvas (spec §9.3). The control plane
-// has no per-app introspection RPC yet — pg_catalog reads, table
-// row pagination, index/migration/backup tracking all need backing
-// schemas that don't exist. Each ISSUES.md entry below names the
-// missing piece.
+// V1 surface for the Data canvas (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.3). The control plane
+// has no per-app introspection RPC yet — pg_catalog reads, table row
+// pagination, index/migration/backup tracking all need backing schemas
+// that do not exist yet.
 //
 // Same wire convention as the rest of this file: every export
 // takes ONE object input. Returns hardcoded sample shapes shared
@@ -625,16 +623,16 @@ export async function triggerBackup(
     size_bytes: 4_400_000_000 + Math.floor(Math.random() * 200_000_000),
     at: nowIso(),
   };
-  // Newest first matches the spec §9.3.5 mock.
+  // Newest first matches the `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.3.5 mock.
   const next = [entry, ...list];
   await persistSet(backupsKey(input.appId), next);
   return { backup: { ...entry } };
 }
 triggerBackup.config = { id: "agents.triggerBackup" };
 
-// ─── media canvas stubs (ISS-26) ────────────────────────────────
+// ─── media canvas stubs ──────────────────────────────────────────
 //
-// V1 surface for the Media canvas (spec §9.4). Object Storage exists
+// V1 surface for the Media canvas (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §9.4). Object Storage exists
 // in the platform (`zeroship.storage.*` + `@zeroship/storage`) but
 // there's no per-app upload RPC exposed to the dashboard yet — we'd
 // need a control-plane endpoint that scopes uploads to the caller's
@@ -662,9 +660,9 @@ export interface MediaEntry {
 const mediaKey = (appId: string) => `media:${appId}`;
 
 // Cap inline base64 uploads at 1 MB so a stray "drag-everything-onto-
-// the-canvas" doesn't blow up the KV store. Real Storage backend (per
-// ISS-26 fix path) lives behind a control-plane endpoint and accepts
-// arbitrary sizes via streaming multipart.
+// the-canvas" doesn't blow up the KV store. A real storage backend
+// should live behind a control-plane endpoint and accept arbitrary
+// sizes via streaming multipart.
 const MAX_UPLOAD_BYTES = 1_048_576;
 
 function seedMedia(): MediaEntry[] {
@@ -744,7 +742,7 @@ export async function uploadMedia(
   if (size > MAX_UPLOAD_BYTES) {
     throw new Error(
       `File too large for the V1 KV-backed media store (${size} bytes; cap is ${MAX_UPLOAD_BYTES}). ` +
-        `Real Storage backend with streaming uploads is tracked as ISS-26.`,
+        `A persistent storage backend with streaming uploads is not wired yet.`,
     );
   }
   const key = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -754,8 +752,8 @@ export async function uploadMedia(
     size,
     contentType: input.contentType || "application/octet-stream",
     // For now we serve uploads back as data URLs so the preview thumb
-    // works without a backing object store. Real Storage backend lives
-    // behind ISS-26.
+    // works without a backing object store. A real storage backend can
+    // replace this later.
     url: `data:${input.contentType || "application/octet-stream"};base64,${input.base64}`,
     uploaded_at: nowIso(),
   };

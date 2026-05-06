@@ -1,6 +1,7 @@
 //
 // Request transports for unary procedures (query / mutation) and
-// streams (Phase 4). Subscriptions are Phase 8.
+// streams. WebSocket subscriptions are not implemented in this package
+// yet.
 //
 // Wire shape:
 //
@@ -78,7 +79,7 @@ export async function sendUnary<TOut = unknown>(
     throw new RpcError({
       code: "UNIMPLEMENTED",
       message:
-        "subscription procedures are not supported in Phase 3 of @zeroship/rpc-client",
+        "subscription procedures are not supported by @zeroship/rpc-client yet",
       retryable: false,
     });
   }
@@ -201,7 +202,7 @@ function isAbortError(err: unknown): boolean {
   return e.name === "AbortError" || e.code === "ABORT_ERR";
 }
 
-// ── Streams (Phase 4) ───────────────────────────────────────────────────
+// ── Streams ─────────────────────────────────────────────────────────────
 
 /** Per-call options for `streamCall`. Same shape as `TransportOptions` minus `kind`. */
 export interface StreamOptions {
@@ -524,7 +525,7 @@ export function streamCall<TOut = unknown>(
   return iter;
 }
 
-// ── Subscriptions (Phase 7) ──────────────────────────────────────────────
+// ── Subscriptions ────────────────────────────────────────────────────────
 //
 // Wire — see `docs/proposals/rpc-v2.md` §6 (Subscription wire) and the
 // runtime's `_zsAcceptSubscription` (`crates/runtime/src/init.rs`).

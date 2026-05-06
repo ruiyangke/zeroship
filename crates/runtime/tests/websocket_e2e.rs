@@ -285,7 +285,7 @@ fn ws_echo_text_roundtrip() {
     );
 }
 
-/// Server returns deflate extension — native MUST reject (CRITICAL #7).
+/// Server returns deflate extension — native MUST reject.
 #[test]
 fn ws_extensions_rejected() {
     let mut cfg = ServerCfg::default();
@@ -317,7 +317,7 @@ fn ws_extensions_rejected() {
 }
 
 /// Server selects a subprotocol that wasn't offered — native MUST reject
-/// (CRITICAL #9).
+///.
 #[test]
 fn ws_unrequested_subprotocol_rejected() {
     let mut cfg = ServerCfg::default();
@@ -343,8 +343,7 @@ fn ws_unrequested_subprotocol_rejected() {
     );
 }
 
-/// Verify that we DON'T send a Sec-WebSocket-Extensions header — design
-/// CRITICAL #7 / MAJOR #18.
+/// Verify that we do not send a `Sec-WebSocket-Extensions` header.
 #[test]
 fn ws_no_extensions_header_sent() {
     let server = start_server(ServerCfg::default());

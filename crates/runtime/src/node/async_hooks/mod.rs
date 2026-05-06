@@ -5,7 +5,7 @@
 //! `@langchain/langgraph` and friends use to thread per-request /
 //! per-graph state across `await` boundaries.
 //!
-//! ## Why native (per ISS-01)
+//! ## Why native
 //!
 //! The closure-based polyfill in `docs/reference/node-compat.md`'s
 //! original §"node:async_hooks" reverted state synchronously in

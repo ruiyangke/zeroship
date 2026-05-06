@@ -1,9 +1,9 @@
-//! Promise plumbing for stream algorithms (D-3, §VII.3, §VII.4).
+//! Promise plumbing for stream algorithms.
 //!
 //! Two responsibilities:
 //!
 //! 1. **`enqueue_microtask`** — schedule a Rust closure on the V8
-//!    microtask queue. Per design D-12, this uses
+//!    microtask queue. This uses
 //!    `Isolate::enqueue_microtask(Local<Function>)` directly. NOT
 //!    `Promise.resolve().then(…)` — that path is observable from
 //!    userland Promise-prototype tampering and adds an extra microtask
@@ -33,7 +33,7 @@ type MicrotaskClosure = Box<dyn FnOnce(&mut v8::PinScope) + 'static>;
 /// reachable from a re-entrant V8 path.
 type MicrotaskHolder = RefCell<Option<MicrotaskClosure>>;
 
-/// Schedule a Rust closure on V8's default microtask queue. Per D-12.
+/// Schedule a Rust closure on V8's default microtask queue.
 ///
 /// Rationale: stream spec algorithms say "queue a microtask to run X".
 /// Implementing this as `Promise.resolve().then(X)` is observable to

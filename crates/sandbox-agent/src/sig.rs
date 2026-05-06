@@ -106,7 +106,7 @@ const EMPTY_BODY_SHA256_HEX: &str =
 const V1_1_DOMAIN_TAG: &str = "ED25519-V1.1";
 
 /// Domain-separator tag for the **WebSocket-Upgrade variant** of
-/// canonical v1.1. Round-2 fix (D-14): prevents a captured non-WS
+/// canonical v1.1. This prevents a captured non-WS
 /// signature whose body matches `b"sec-websocket-key=…"` from being
 /// replayed as a WebSocket Upgrade. The `-WS` suffix on the tag puts
 /// every Upgrade canonical in a disjoint domain from the HTTP
@@ -151,7 +151,7 @@ pub enum CanonicalKind {
     V1_1,
     /// `auth.ed25519-v1.1-ws` — separately-versioned canonical for
     /// **WebSocket Upgrade** requests on the `/proxy/...` path
-    /// (round-2 D-14). Same shape as v1.1 but with a `-WS` suffix on
+    /// (round-2 WebSocket signature-separation rule). Same shape as v1.1 but with a `-WS` suffix on
     /// the domain-separator tag. The Upgrade body MUST be empty; the
     /// body-hash slot uses the empty-body constant
     /// (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`).
@@ -819,7 +819,7 @@ mod tests {
         );
     }
 
-    /// Round-6 § II.1 I2 — the 6-row corner-case table. Every row
+    /// Six-row corner-case table. Every row
     /// pins the byte-exact canonical fragment for v1.1 path-query.
     #[test]
     fn v1_1_path_query_corner_cases() {
@@ -947,7 +947,7 @@ mod tests {
 
     #[test]
     fn v1_1_empty_query_is_distinct_from_absent_query() {
-        // Round-6 I2 invariant: `?` with empty params and no `?` are
+        // `?` with empty params and no `?` are
         // signed differently. A controller that signed `/foo?` and a
         // verifier asked to validate `/foo` (or vice-versa) MUST 401.
         let (sk, pk) = keypair();
@@ -1027,7 +1027,7 @@ mod tests {
 
     // ─── canonical V1_1_Ws (WebSocket Upgrade) ──────────────────
 
-    /// D-14: the V1_1_Ws canonical bytes match the doc's exact format
+    /// WebSocket signature-separation rule: the V1_1_Ws canonical bytes match the doc's exact format
     /// — `"ED25519-V1.1-WS\n" + method + "\n" + path_query + "\n" + ts
     /// + "\n" + nonce + "\n" + sha256_hex(empty)`. Pin it byte-exact
     /// so a future contributor who reorders fields can't silently
@@ -1074,7 +1074,7 @@ mod tests {
             .is_ok());
     }
 
-    /// **CRITICAL forgery defense (round-2 D-14).** A signature minted
+    /// **CRITICAL forgery defense (round-2 WebSocket signature-separation rule).** A signature minted
     /// under V1_1 (HTTP, with body bytes that happen to look like a
     /// captured Sec-WebSocket-Key) MUST NOT validate as V1_1_Ws. The
     /// `-WS` domain-separator puts the two canonicals in disjoint

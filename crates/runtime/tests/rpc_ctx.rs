@@ -1,4 +1,4 @@
-//! ALS-backed RPC ctx tests — RPC v2 phase 1 (Wave D).
+//! ALS-backed RPC ctx tests.
 //!
 //! Covers the per-request `ctx` object exposed via
 //! `globalThis.__zeroshipGetRpcCtx()`: scalar fields, native

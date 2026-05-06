@@ -1,9 +1,9 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Phase 4 port: near-verbatim from tokio-postgres. The Bind/Execute state
-// machine, parameter encoding, and `RowStream` implementation are purely
+// Near-verbatim from tokio-postgres. The Bind/Execute state machine,
+// parameter encoding, and `RowStream` implementation are purely
 // protocol-level, so only the imports change. `pin_project_lite` is used
-// identically; the `InnerClient::send` primitive is Phase 3's real impl.
+// identically, and `InnerClient::send` is the real request path.
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;

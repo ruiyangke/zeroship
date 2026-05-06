@@ -17,9 +17,9 @@
 //! consumes.
 //!
 //! Historical note: this file used to also house the `__rawFetch` V8
-//! callback and the legacy fetch executor. Both were deleted alongside the
-//! D-23 polyfill cutover — `globalThis.fetch` is now the native callback
-//! installed by `fetch_native::install_fetch_global`. See ADR D-23.
+//! callback and the legacy fetch executor. Both were deleted alongside
+//! the native fetch cutover; `globalThis.fetch` is now the native
+//! callback installed by `fetch_native::install_fetch_global`.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -136,8 +136,8 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 /// `validate_url`), so the WebSocket handshake also reaches the Vite
 /// dev server.
 ///
-/// Spec: defends the "DNS rebinding" attack class explicitly — see
-/// docs/proposals/websocket-native.md §VIII.1 (CRITICAL #8).
+/// This is the explicit DNS-rebinding guard described in
+/// `docs/proposals/websocket-native.md` §VIII.1.
 pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
     use std::io::{Error, ErrorKind};
 

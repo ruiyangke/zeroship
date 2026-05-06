@@ -1,6 +1,5 @@
 /**
- * RPC v2 Phase 2 — reference-graph walk + strict-mode gate +
- * collision detection (proposal §1).
+ * Reference-graph walk + strict-mode gate + collision detection.
  *
  * The walker takes the client entry, discovers server bindings via
  * three rules:
@@ -169,7 +168,8 @@ export async function add(input) { return input; }
   });
 
   test("graph-only marker: edge from marked file to undirected target", async () => {
-    // The proposal §1 case: client imports `helper` directly from a
+    // The `docs/proposals/rpc-v2.md` §1 case: client imports `helper`
+    // directly from a
     // file-level "use server" module, and that module re-exports
     // `helper` from a third file with NO directive. The third file's
     // export becomes a graph-only binding (the target itself doesn't

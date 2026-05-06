@@ -1,4 +1,4 @@
-// Phase 4 — Vercel AI-SDK Data Stream Protocol wire tests.
+// Vercel AI-SDK Data Stream Protocol wire tests.
 //
 // Each line of the SSE response is `<typeId>:<json>\n`:
 //

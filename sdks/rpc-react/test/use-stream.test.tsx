@@ -1,7 +1,7 @@
 /**
- * Phase 5 — `proc.useStream(...)` and the `useStream(...)` standalone hook.
+ * `proc.useStream(...)` and the `useStream(...)` standalone hook.
  *
- * Per spec §10 (Streaming + React Query):
+ * `docs/proposals/rpc-v2.md` §10 ("Streaming + React Query") defines:
  *
  *   const { chunks, isStreaming, error, cancel } = search.useStream({ query: "..." });
  *   // chunks: T[] — appended as the server yields

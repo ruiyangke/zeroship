@@ -1,13 +1,13 @@
 import { test, expect } from "@playwright/test";
 
-// Plan 01 — project lifecycle (archive filter pill + Settings archive).
+// Project lifecycle smoke test: archive filter pill and Settings archive.
 //
 // Pure UI smoke against /home and the SettingsCanvas. No control
 // plane / OPENAI required. The Archive UI is module-level state in
-// the zeroship-builder dev server (ISS-19), so we just verify the
+// the zeroship-builder dev server, so we just verify the
 // filter pill is wired and the empty-archived state renders.
 
-test.describe("Plan 01 — project lifecycle (spec §8.3)", () => {
+test.describe("project lifecycle (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.3)", () => {
   test("Home shows the Active / Archived filter pills", async ({ page }) => {
     await page.goto("/home");
     await expect(page.getByTestId("home-filters")).toBeVisible();

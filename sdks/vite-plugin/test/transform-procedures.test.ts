@@ -1,8 +1,8 @@
 /**
- * Phase 1 — transform stashes per-procedure metadata.
+ * Transform stashes per-procedure metadata.
  *
  * Server-module discovery is via the file-level `"use server"`
- * directive (ISS-02 — the path convention is gone). Inside a server
+ * directive. The old path convention is gone. Inside a server
  * module, only exports whose initializer is a call to one of the
  * wrapper markers (`procedure`/`query`/`mutation`/`stream`/
  * `subscription`, imported from `@zeroship/server` or `@zeroship/rpc`)
@@ -203,7 +203,7 @@ export const list = procedure(async () => []);
     assert.equal(state.discoveredProcedures[0].moduleSlug, "src-server-todos");
   });
 
-  // ── Directive-based discovery (ISS-02) ────────────────────────────────
+  // ── Directive-based discovery ─────────────────────────────────────────
 
   test("directive: top-of-file `\"use server\"` opts the file in", () => {
     const state = makeState();
@@ -274,7 +274,7 @@ export async function unmigrated() { return 1; }
     );
     assert.match(
       ctx.warnings[0],
-      /ISS-02/,
+      /Path-based discovery was dropped/,
       "warning references the issue id",
     );
   });

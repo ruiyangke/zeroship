@@ -1,11 +1,12 @@
 //! `Cipher` / `Decipher` classes + `createCipheriv` / `createDecipheriv`
 //! factories.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §V.4 / §III.
+//! See `docs/proposals/node-crypto-native.md` §V.4 / §III.
 //!
-//! Stage C ships AES-{CBC,CTR,GCM} and ChaCha20-Poly1305 — the four
+//! The current implementation ships AES-{CBC,CTR,GCM} and
+//! ChaCha20-Poly1305 — the four
 //! modes that cover ~95% of npm-package usage. CCM is in the design as
-//! Stage C / D-N38 but defers to Stage E (the raw aws-lc-sys FFI is
+//! a later follow-up and still deferred (the raw aws-lc-sys FFI is
 //! ~120 LOC and rarely used in app-server code; covered when a creator
 //! app surfaces the need).
 //!
@@ -609,7 +610,7 @@ pub(crate) fn create_cipher_callback(
     _args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    // Deprecated path — D-N22 + design §V.4.
+    // Deprecated path; see `docs/proposals/node-crypto-native.md` §V.4.
     let exc = crate::node_error::build_node_exception(
         scope,
         "ERR_CRYPTO_UNSUPPORTED_OPERATION",

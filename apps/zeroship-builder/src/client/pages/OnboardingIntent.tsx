@@ -1,4 +1,4 @@
-// ─── OnboardingIntent — first-run intent picker (spec §7.1) ─────
+// ─── OnboardingIntent — first-run intent picker (`docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §7.1) ─────
 //
 // One screen, one question, six chip answers, and a skip link. Runs
 // after Signup before the first /home visit. The chosen intent is

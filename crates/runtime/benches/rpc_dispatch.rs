@@ -1,4 +1,4 @@
-//! RPC v2 phase 1 — Wave F microbench.
+//! RPC dispatch microbench.
 //!
 //! Measures the production `default.rpc(name, input, ctx)` dispatch
 //! path end-to-end: `extract_zs_v1_id` → `parse_envelope_body` →
@@ -17,13 +17,13 @@
 //!   multipart same body as `medium`, multipart Content-Type     ~3.6 KB
 //!
 //! The "multipart" workload exists to exercise the dispatch path with
-//! a multipart-shaped Content-Type — phase 1.7 will add real FormData
-//! parsing; right now the kernel just sees the header and forwards.
+//! a multipart-shaped Content-Type. Real FormData parsing is not part
+//! of this bench yet; right now the kernel just sees the header and forwards.
 //! The point is to confirm dispatch overhead is roughly constant
 //! across header shapes, not to measure FormData decoding.
 //!
 //! Per `docs/proposals/rpc-v2.md` §5, this baseline decides whether
-//! phase 1 stays on the single-call ABI or amends to a two-step
+//! the current implementation stays on the single-call ABI or moves to a two-step
 //! `#[v8_method(fastcall)] enqueue` shape. If single-call dispatch is
 //! a small fraction of typical procedure latency, single-call wins;
 //! the two-step ABI's fastcall savings (proposal estimates 30-100 ns)
@@ -183,8 +183,8 @@ fn bench_dispatch(c: &mut Criterion) {
         ("large", large_body(), &json_headers),
         // multipart: same body shape as `medium`, multipart-shaped
         // Content-Type. Dispatch overhead should be ~constant — the
-        // header is just stored, not parsed. Phase 1.7 adds real
-        // FormData decoding.
+        // header is just stored, not parsed. Real FormData decoding
+        // is intentionally out of scope for this bench.
         ("multipart", medium_body(), &multipart_headers),
     ];
 

@@ -11,13 +11,13 @@
 //!     and the `signal: AbortSignal` removal pattern.
 //!   - `AbortSignal.timeout(ms)` had no GC-retention strategy — a
 //!     pending timeout's signal could be reclaimed before the
-//!     timer fired (CRITICAL-9).
+//!     timer fired.
 //!   - `AbortSignal.any([s1, s2])` registered abort listeners on
 //!     each input but didn't flatten through transitive
-//!     `AbortSignal.any` returns per DOM §3.3.4 (CRITICAL-8).
+//!     `AbortSignal.any` returns per DOM §3.3.4.
 //!   - The "signal abort" algorithm fired listeners BEFORE running
 //!     abort algorithms, which the spec specifically calls out as
-//!     wrong (MAJOR-40).
+//!     wrong.
 //!
 //! This implementation honours all of the above. See design fetch-
 //! native §IX.4 (signal abort algorithm), §IX.5 (timeout GC),
@@ -78,7 +78,7 @@ pub struct AbortSignal {
     /// "Source signals" set (DOM §3.3.4 step 4) — the signals that,
     /// when aborted, abort this signal. Bidirectional with
     /// `dependent_signals`. Used by AbortSignal.any to flatten
-    /// transitive dependents (CRITICAL-8).
+    /// transitive dependents.
     pub source_signals: RefCell<Vec<v8::Global<v8::Object>>>,
     /// "Dependent signals" set — the signals that this signal aborts
     /// when it itself aborts. Bidirectional with `source_signals`.
@@ -95,7 +95,7 @@ pub struct AbortSignal {
     /// reading `onabort` returns the stored function (or null).
     pub onabort: RefCell<Option<v8::Global<v8::Function>>>,
     /// AbortSignal.timeout: the timer ID we can cancel on GC, plus
-    /// the strong-self-ref for GC retention (CRITICAL-9). The Rc is
+    /// the strong-self-ref for GC retention. The Rc is
     /// held by SharedState's `timeout_pinned` map; the ID lets us
     /// remove ourselves on abort.
     pub timer_id: Cell<Option<u32>>,
@@ -191,7 +191,7 @@ impl AbortSignal {
     ///
     /// The timer setup runs synchronously inside `timeout_static`,
     /// BEFORE the wrapper is returned — preserving the strong pin in
-    /// SharedState::timeout_pinned_signals (CRITICAL-9). Order
+    /// SharedState::timeout_pinned_signals. Order
     /// matters: pin first, then return, so any GC between the
     /// callback's first "alloc the signal" step and "return to JS"
     /// finds the wrapper anchored.
@@ -308,7 +308,7 @@ pub fn is_aborted(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool 
 /// EventTarget's `signal`-removal hook. The callback runs SYNCHRONOUSLY
 /// during the `signal abort` algorithm (DOM §3.3.1 step 5.1) BEFORE
 /// the "abort" event is fired — this is the spec-mandated ordering
-/// (MAJOR-40).
+///.
 ///
 /// If `obj` isn't an AbortSignal, this is a silent no-op.
 pub fn add_abort_algorithm(
@@ -356,7 +356,7 @@ pub(crate) fn build_timeout_error<'s>(
 
 /// "To signal abort an AbortSignal signal with reason" — DOM §3.3.1.
 ///
-/// Per spec ordering (CRITICAL-7):
+/// Per spec ordering:
 ///   1. If signal is aborted, return.
 ///   2. Set signal's reason.
 ///   3. Collect non-aborted dependent signals AND set their reason.
@@ -417,8 +417,8 @@ pub fn signal_abort(
 }
 
 /// "Abort steps" sub-algorithm: run abort algorithms, clear them,
-/// then fire the "abort" event via the EventTarget surface (MAJOR-40
-/// — algorithms FIRST, event SECOND).
+/// then fire the "abort" event via the EventTarget surface.
+/// Algorithms run first; the event fires second.
 fn run_abort_steps(scope: &mut v8::PinScope, signal_obj: v8::Local<v8::Object>) {
     // Take and run abort algorithms (FnOnce — consumed).
     let algorithms = {
@@ -446,7 +446,7 @@ fn run_abort_steps(scope: &mut v8::PinScope, signal_obj: v8::Local<v8::Object>) 
         }
     }
 
-    // Fire "abort" event AFTER algorithms (MAJOR-40).
+    // Fire "abort" event AFTER algorithms.
     let event = build_abort_event(scope);
     dispatch_event(scope, signal_obj, event);
 }
@@ -487,7 +487,7 @@ pub fn abort_static<'s>(
 /// aborts after `ms` milliseconds with a "TimeoutError" DOMException
 /// reason.
 ///
-/// GC retention (CRITICAL-9): per DOM step 3, "for the duration of
+/// GC retention: per DOM step 3, "for the duration of
 /// this timeout, if signal has any event listeners registered for
 /// its abort event, there must be a strong reference from global to
 /// signal." We pin the wrapper in `SharedState::timeout_pinned_signals`
@@ -638,7 +638,7 @@ fn timeout_fired_callback(
 /// signal". Returns a fresh signal that aborts when any of the input
 /// signals abort, with `reason` set to the first input's reason.
 ///
-/// CRITICAL-8: transitive flattening. If an input is itself a
+/// Transitive flattening: if an input is itself a
 /// dependent signal (returned by an earlier `AbortSignal.any` call),
 /// we copy its `source_signals` into the result's `source_signals`
 /// rather than referencing the dependent. This way, aborting an
@@ -920,4 +920,3 @@ fn onabort_setter_callback(
 
     *signal.onabort.borrow_mut() = Some(cb_global);
 }
-

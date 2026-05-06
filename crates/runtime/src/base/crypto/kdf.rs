@@ -1,8 +1,8 @@
 //! Key derivation: PBKDF2 + HKDF + scrypt.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §VI.2 (D-N15) + §III.2a.
+//! See `docs/proposals/node-crypto-native.md` §VI.2 + §III.2a.
 //! scrypt drops to aws-lc-sys raw FFI (`EVP_PBE_scrypt`) because the
-//! high-level aws-lc-rs surface doesn't expose it.
+//! high-level aws-lc-rs surface does not expose it.
 
 #![allow(dead_code, unsafe_code)]
 
@@ -98,7 +98,7 @@ impl aws_lc_rs::hkdf::KeyType for OkmLen {
 }
 
 // ---------------------------------------------------------------------------
-// scrypt (RFC 7914) — aws-lc-sys raw FFI per D-N15 / §III.2a.
+// scrypt (RFC 7914) — aws-lc-sys raw FFI; see §III.2a.
 // ---------------------------------------------------------------------------
 
 /// scrypt parameter validation per RFC 7914 §6 + Node parity.

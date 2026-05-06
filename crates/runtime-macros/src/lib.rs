@@ -45,8 +45,8 @@ mod v8_iterable;
 mod webidl_dict;
 mod webidl_enum;
 
-// Wave 7 (F9) — insta snapshot tests for the WebIdl derives + v8_iterable.
-// Live as siblings of the production module so insta's default snapshot
+// Insta snapshot tests for the WebIdl derives and `v8_iterable`.
+// They live as siblings of the production module so insta's default snapshot
 // resolution lands the .snap files in src/snapshots/. Mirrors
 // v8_class/snapshot_tests.rs which covers the v8_class derive.
 #[cfg(test)]
@@ -251,7 +251,7 @@ pub fn v8_inherit(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Impl-block-level marker attribute: project the JS-facing class
-/// identity from a separate state struct. MAC-01 Phase 1.
+/// identity from a separate state struct.
 ///
 /// Usage:
 /// ```ignore
@@ -507,15 +507,15 @@ pub fn reject_shared(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // Type helpers
 // ---------------------------------------------------------------------------
 
-// Wave 4 cleanup: type-classification helpers (is_unit_type, type_ident,
+// Type-classification helpers (is_unit_type, type_ident,
 // is_vec_u8, is_vec_vec_u8, is_byte_string, is_enforce_range_u32 / _u64,
 // is_usv_string, is_option_usv_string, first_generic_arg) moved to
-// `types.rs`. The clamp_kind / wrap_kind standalone helpers from
-// pre-Wave-4b folded into KnownType::Clamp(ClampInt) /
+// `types.rs`. The old clamp_kind / wrap_kind standalone helpers folded
+// into `KnownType::Clamp(ClampInt)` /
 // KnownType::Wrap(WrapInt) (§3.7, closes F10/H8 + the stringly-typed
 // dispatch anti-pattern).
 
-// Wave 4 cleanup: argument-extraction + return-value codegen +
+// Argument-extraction + return-value codegen +
 // V8-string + OpError-throw helpers all live in `codegen.rs` now.
 // `gen_call_return`, `gen_extract`, `gen_extract_throw`, `must_str`,
 // `must_str_abs`, `gen_throw_op_error_arms` are re-exported above for

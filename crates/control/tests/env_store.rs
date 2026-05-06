@@ -230,12 +230,12 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     let registry = Registry::new(&url).await.expect("registry");
     let app = create_test_app(&registry).await;
 
-    // Phase 1: write secret with key v1.
+    // Initial write with key v1.
     let store_v1 = EnvStore::new(registry.clone(), "key-v1", false).expect("store");
     store_v1.set_secret(app, "STRIPE_KEY", "sk_live_old").await.unwrap();
 
-    // Phase 2: rotate to key v2; declare key-v1 as legacy. Existing
-    // ciphertexts decrypt via fallback; new writes use v2.
+    // Rotate to key v2 and keep key-v1 as a legacy decrypt-only key.
+    // Existing ciphertexts still decrypt; new writes use v2.
     let store_v2 = EnvStore::new_with_previous(
         registry.clone(),
         "key-v2",
@@ -257,8 +257,8 @@ async fn rotation_decrypts_old_secrets_and_rewrites_to_new_key() {
     // on v2 — skipped.
     assert_eq!(count, 1);
 
-    // Phase 3: drop legacy key. Previously-rotated secret still
-    // decrypts via the new primary alone.
+    // Drop the legacy key. Previously-rotated secrets still decrypt
+    // via the new primary alone.
     let store_v3 = EnvStore::new(registry.clone(), "key-v2", false).expect("store");
     let merged = store_v3.merged_env(app).await.unwrap();
     assert_eq!(merged.get("STRIPE_KEY").and_then(|v| v.as_str()), Some("sk_live_old"));

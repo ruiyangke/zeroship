@@ -36,9 +36,9 @@ pub(super) async fn serve_resource_tree_static(
     try_chain: &[String],
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    // Phase 2: support the literal templates the build emits, plus the
-    // bare `$path` token (used by `/_assets/*` SPA fallback). Captures
-    // are deferred — the build emits literal paths for now.
+    // Support the literal templates the build emits, plus the bare
+    // `$path` token (used by `/_assets/*` SPA fallback). Captures are
+    // still deferred; the build emits literal paths for now.
     for tpl in try_chain {
         let resolved = if tpl == "$path" {
             request_path.to_string()
@@ -106,7 +106,7 @@ pub(super) enum BlobFetch {
 /// 1. Memory LRU — `BlobCache::get` returns refcounted `Bytes`.
 /// 2. Disk LRU — `DiskBlobCache::local_path` returns a path; we
 ///    `mmap` it and wrap as `Bytes::from_owner(mmap)` for zero-copy
-///    serving (Phase B).
+///    serving.
 /// 3. Backend — fetch from `BlobStore`, fill both tiers.
 ///
 /// On a disk miss + backend hit we ALWAYS write to the disk cache so
@@ -480,8 +480,9 @@ fn build_buffered_response(
     // bytes is either an `Arc<Vec<u8>>` (memory tier) or backed by an
     // mmap (disk tier via `Bytes::from_owner`). Either way ntex needs
     // its own `ntex_bytes::Bytes`; the conversion is one userspace
-    // copy today, replaced by `sendfile(2)` in Phase C for streamable
-    // sizes (large blobs already take the streaming path).
+    // copy today. Large blobs already take the streaming path, and a
+    // future sendfile-style path can remove this copy for the buffered
+    // serve path too.
     resp.body(Bytes::copy_from_slice(bytes))
 }
 
@@ -754,7 +755,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 6 — streaming-body tests
+    // Streaming-body tests
     // -----------------------------------------------------------------------
 
     use ntex::http::body::{Body, BodySize, MessageBody, ResponseBody};

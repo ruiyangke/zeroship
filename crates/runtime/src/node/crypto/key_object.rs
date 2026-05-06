@@ -1,7 +1,7 @@
-//! `KeyObject` + `PublicKeyObject` / `PrivateKeyObject` / `SecretKeyObject`.
+//! `KeyObject` + `PublicKeyObject` / `PrivateKeyObject` /
+//! `SecretKeyObject`.
 //!
-//! Per `docs/proposals/node-crypto-native.md` §IV (D-N3, D-N4, D-N13,
-//! D-N14, D-N19).
+//! See `docs/proposals/node-crypto-native.md` §IV.
 //!
 //! Architecture: the WebCrypto surface already shipped a complete
 //! `KeyMaterial` enum + DER/JWK parsers via `web::crypto::{rsa, ec, okp,
@@ -16,10 +16,10 @@
 //! - Factories `createSecretKey`, `createPublicKey`, `createPrivateKey`
 //!   accept Buffer/string/PEM/JWK input shapes.
 //! - `KeyObject.from(cryptoKey)` clones a CryptoKey's `KeyMaterial`
-//!   into a fresh KeyObject (forward bridge per D-N4).
+//!   into a fresh KeyObject.
 //!
-//! Encrypted PKCS#8 (`{ cipher, passphrase }`) is gated to Stage E in
-//! this implementation — see §IV.4a / D-N37; the high-level surface
+//! Encrypted PKCS#8 (`{ cipher, passphrase }`) is still deferred in
+//! this implementation — see §IV.4a. The high-level surface
 //! returns `ERR_CRYPTO_UNSUPPORTED_OPERATION`. PEM encrypted-input
 //! paths similarly throw `ERR_MISSING_PASSPHRASE` when a passphrase is
 //! seen on an encrypted-PEM block. The full PBES2 raw-FFI path lands
@@ -1191,7 +1191,8 @@ fn decode_der_by_label(
             }
             let _ = passphrase;
             // Stage E — encrypted PKCS#8 via PBES2 raw FFI is in the
-            // design as D-N37; for Stage C we surface the spec-correct
+            // Defer encrypted PKCS#8 export for now; surface the
+            // spec-correct
             // ERR_CRYPTO_UNSUPPORTED_OPERATION until that path lands.
             // (See `pkcs8_enc.rs` for the placeholder + design ref.)
             Err(OpError::node(
