@@ -358,21 +358,22 @@ function matchWrapperCall(
   return { kind: wrapper, handler, configNode };
 }
 
-/** Shared runtime: emitted once per client bundle. Speaks the spec wire
- *  (`/_zs/v1/<id>` with superjson `{ json, meta? }` envelope, AI-SDK Data
- *  Stream Protocol for streams). No npm deps; superjson revival is left
- *  to the consumer (rare on the bare-stub path — most apps use
- *  `@zeroship/rpc-client` directly).
- *
- *  Per proposal §5, every emitted stub carries the `__SERVER_REFERENCE`
- *  symbol so RSC-style `<form action={fn}>` and prop-passed server
- *  actions can be detected at runtime. The symbol is namespaced
- *  (`Symbol.for("zeroship/server-reference")`) so it survives realm
- *  boundaries and bundle deduplication. TODO: when
- *  `@zeroship/rpc/client` ships `__makeProcedure` / `__SERVER_REFERENCE`
- *  upstream, swap the inline stubs for an import. */
+/** Import prelude emitted once per transformed client module. Pulls
+ *  `__makeProcedure` (the callable + hooks-on-function builder) and
+ *  `__SERVER_REFERENCE` (the brand symbol) from the canonical home
+ *  `@zeroship/rpc-client`. `__makeProcedure` brands every stub
+ *  internally — the symbol import is exposed for downstream consumers
+ *  (RSC `<form action={fn}>` detectors, dev-tools) that re-derive the
+ *  brand without re-importing `Symbol.for`. */
+const CLIENT_IMPORT_PRELUDE = `import { __makeProcedure, __SERVER_REFERENCE } from "@zeroship/rpc-client";\n`;
+
+/** Shared wire helpers: emitted once per client bundle. Speaks the spec
+ *  wire (`/_zs/v1/<id>` with superjson `{ json, meta? }` envelope,
+ *  AI-SDK Data Stream Protocol for streams). No npm deps beyond
+ *  `@zeroship/rpc-client`; superjson revival is left to the consumer
+ *  (rare on the bare-stub path — most apps use `@zeroship/rpc-client`
+ *  directly). */
 const CLIENT_HELPERS = `
-const __SERVER_REFERENCE = Symbol.for("zeroship/server-reference");
 async function __rpcUnary(id, input) {
   const r = await fetch("/_zs/v1/" + id, {
     method: "POST",
@@ -619,36 +620,30 @@ function collectConfig(astBody: any[]): {
  * with no args). Procedures that conceptually take multiple values
  * pass them as a single object.
  *
- * Per proposal §5, the emitted stub is a callable that ALSO carries
- * the `__SERVER_REFERENCE` symbol + `{ id, kind, wire }` metadata, so
- * RSC `<form action={fn}>` works without JS and the runtime can detect
- * stubs passed as props.
- */
+ * Emits a `__makeProcedure` call from `@zeroship/rpc-client` — the
+ * builder attaches the `__SERVER_REFERENCE` brand, hook getters
+ * (lazy-initialized via the `_hookRegistry`), and `{ id, kind, wire }`
+ * metadata uniformly. Per proposal §5, RSC `<form action={fn}>` works
+ * without JS and runtime callers detect stubs passed as props by
+ * checking the brand. */
 function clientUnaryStub(name: string, methodName: string, kind: string): string {
+  const meta = JSON.stringify({ id: methodName, kind, wire: "json" });
   return (
-    `export const ${name} = /* @__PURE__ */ (() => {\n` +
-    `  const _f = (input) => __rpcUnary(${JSON.stringify(methodName)}, input);\n` +
-    `  _f[__SERVER_REFERENCE] = true;\n` +
-    `  _f.id = ${JSON.stringify(methodName)};\n` +
-    `  _f.kind = ${JSON.stringify(kind)};\n` +
-    `  _f.wire = "json";\n` +
-    `  return _f;\n` +
-    `})();`
+    `export const ${name} = __makeProcedure(` +
+    `(input) => __rpcUnary(${JSON.stringify(methodName)}, input), ` +
+    `${meta});`
   );
 }
 
 /** Client stub for a streaming (async generator) export. Same single-
- *  input wire as unary. */
+ *  input wire as unary; differs only in the underlying transport
+ *  helper (`__rpcStream` instead of `__rpcUnary`). */
 function clientStreamStub(name: string, methodName: string, kind: string): string {
+  const meta = JSON.stringify({ id: methodName, kind, wire: "json" });
   return (
-    `export const ${name} = /* @__PURE__ */ (() => {\n` +
-    `  const _f = (input) => __rpcStream(${JSON.stringify(methodName)}, input);\n` +
-    `  _f[__SERVER_REFERENCE] = true;\n` +
-    `  _f.id = ${JSON.stringify(methodName)};\n` +
-    `  _f.kind = ${JSON.stringify(kind)};\n` +
-    `  _f.wire = "json";\n` +
-    `  return _f;\n` +
-    `})();`
+    `export const ${name} = __makeProcedure(` +
+    `(input) => __rpcStream(${JSON.stringify(methodName)}, input), ` +
+    `${meta});`
   );
 }
 
@@ -1023,7 +1018,11 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             : clientUnaryStub(fn.name, wid, k);
         });
 
-        s.overwrite(0, code.length, CLIENT_HELPERS + "\n\n" + stubs.join("\n") + "\n");
+        s.overwrite(
+          0,
+          code.length,
+          CLIENT_IMPORT_PRELUDE + CLIENT_HELPERS + "\n\n" + stubs.join("\n") + "\n",
+        );
         return {
           code: s.toString(),
           map: s.generateMap({ source: id, includeContent: true, hires: true }),

@@ -292,6 +292,114 @@ fn unknown_code_throws_type_error() {
 }
 
 // ---------------------------------------------------------------------------
+// `cause` passthrough — matches the standard `Error` shape (ECMAScript
+// §20.5.6.1.1): when `cause` is given in opts, the instance gets a
+// non-enumerable own data property `cause`; when absent, no property is
+// emitted (`'cause' in err === false`, mirroring `new Error("x")`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cause_round_trip_error_instance() {
+    let r = dispatch(
+        m(r#"export function test() {
+            const e = new RpcError("INTERNAL", "boom", { cause: new TypeError("inner") });
+            return {
+                isType: e.cause instanceof TypeError,
+                isError: e.cause instanceof Error,
+                msg: e.cause.message,
+            };
+        }"#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains("\"isType\":true"), "got: {}", r.json);
+    assert!(r.json.contains("\"isError\":true"), "got: {}", r.json);
+    assert!(r.json.contains("\"msg\":\"inner\""), "got: {}", r.json);
+}
+
+#[test]
+fn cause_round_trip_string() {
+    let r = dispatch(
+        m(r#"export function test() {
+            const e = new RpcError("INTERNAL", "x", { cause: "string-cause" });
+            return { eq: e.cause === "string-cause", typ: typeof e.cause };
+        }"#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains("\"eq\":true"), "got: {}", r.json);
+    assert!(r.json.contains("\"typ\":\"string\""), "got: {}", r.json);
+}
+
+#[test]
+fn cause_round_trip_object() {
+    let r = dispatch(
+        m(r#"export function test() {
+            const e = new RpcError("INTERNAL", "x", { cause: { code: 42 } });
+            return { code: e.cause.code };
+        }"#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains("\"code\":42"), "got: {}", r.json);
+}
+
+#[test]
+fn cause_default_undefined() {
+    // Match `new Error("x")`: when `cause` is absent, no own property.
+    let r = dispatch(
+        m(r#"export function test() {
+            const a = new RpcError("INTERNAL", "x");
+            const b = new RpcError("INTERNAL", "x", {});
+            const c = new RpcError("INTERNAL", "x", { cause: undefined });
+            return {
+                aHas: "cause" in a,
+                bHas: "cause" in b,
+                cHas: "cause" in c,
+                aVal: a.cause,
+            };
+        }"#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains("\"aHas\":false"), "got: {}", r.json);
+    assert!(r.json.contains("\"bHas\":false"), "got: {}", r.json);
+    assert!(r.json.contains("\"cHas\":false"), "got: {}", r.json);
+    // Missing prop reads as undefined, which JSON.stringify omits — verify
+    // by absence rather than by literal.
+    assert!(!r.json.contains("\"aVal\":"), "got: {}", r.json);
+}
+
+#[test]
+fn cause_non_enumerable() {
+    // Per ECMA §20.5.6.1.1, the auto-attached `cause` property is
+    // [[Enumerable]] = false — Object.keys must not list it.
+    let r = dispatch(
+        m(r#"export function test() {
+            const e = new RpcError("INTERNAL", "x", { cause: "z" });
+            const desc = Object.getOwnPropertyDescriptor(e, "cause");
+            return {
+                keys: Object.keys(e),
+                enumerable: desc.enumerable,
+                writable: desc.writable,
+                configurable: desc.configurable,
+            };
+        }"#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains("\"keys\":[]"), "got: {}", r.json);
+    assert!(r.json.contains("\"enumerable\":false"), "got: {}", r.json);
+    assert!(r.json.contains("\"writable\":true"), "got: {}", r.json);
+    assert!(r.json.contains("\"configurable\":true"), "got: {}", r.json);
+}
+
+// ---------------------------------------------------------------------------
 // Rust-side brand-check: RpcError::is_instance returns true for native
 // instances and false for plain Error / non-class objects.
 // ---------------------------------------------------------------------------

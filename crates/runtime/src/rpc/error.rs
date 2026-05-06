@@ -36,6 +36,8 @@
 //! [`ZsErrorCode::http_status`] maps each variant to its canonical HTTP
 //! status (matches the gRPC → HTTP mapping table).
 
+use std::cell::RefCell;
+
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
     v8_class, v8_constructor, v8_getter, v8_inherit_intrinsic, v8_name, v8_to_string_tag,
@@ -157,18 +159,17 @@ impl ZsErrorCode {
 
 /// Options passed to `new RpcError(code, message, opts?)`.
 ///
-/// `details` is a `v8::Local` passthrough — we JSON.stringify it in
-/// the constructor body and store the resulting raw JSON text on the
-/// instance, so the V8-side round-trip preserves the original key
-/// insertion order (`serde_json::Value` would re-sort under the
-/// default `BTreeMap` backing, breaking
-/// `{path: [...], n: ...}.details` order checks).
-///
-/// TODO(Wave D): wire `cause` v8::Value passthrough — needs raw
-/// v8::Local in WebIdlDict, currently unsupported.
+/// `details` and `cause` ride as `v8::Local` passthroughs: `details` is
+/// `JSON.stringify`d at construction so the round-trip preserves
+/// insertion order (`serde_json::Value`'s default `BTreeMap` backing
+/// would re-sort keys); `cause` is stashed verbatim and re-attached as
+/// an own property on the instance by the post-init hook (matches
+/// ECMAScript §20.5.6.1.1 — `{ [[Writable]]: true, [[Enumerable]]:
+/// false, [[Configurable]]: true }`).
 #[derive(Default, Debug, WebIdlDict)]
 pub struct RpcErrorInit<'s> {
     pub details: Option<v8::Local<'s, v8::Value>>,
+    pub cause: Option<v8::Local<'s, v8::Value>>,
     pub retryable: Option<bool>,
     #[webidl_name = "exposeMessage"]
     pub expose_message: Option<bool>,
@@ -179,8 +180,8 @@ pub struct RpcErrorInit<'s> {
 // ---------------------------------------------------------------------------
 
 /// Backing state for a JS-constructed RpcError. Stored in the V8
-/// wrapper's internal field 0 as `Box<RpcError>`. All slots are
-/// immutable post-construction.
+/// wrapper's internal field 0 as `Box<RpcError>`. All non-pending
+/// slots are immutable post-construction.
 ///
 /// `details_json` carries the raw `JSON.stringify`-output of the
 /// original JS value, preserving the source object's key insertion
@@ -189,6 +190,13 @@ pub struct RpcErrorInit<'s> {
 /// `BTreeMap`). [`details_as_value`] hydrates the stored text into a
 /// `serde_json::Value` on demand for Rust callers that prefer the
 /// typed shape; the wire format is the JSON text either way.
+///
+/// `pending_cause` stashes the constructor's `opts.cause` value until
+/// the post-init hook (`attach_cause`) attaches it as an own property
+/// on `args.this()`. Constructor body can't see `__this` (the macro
+/// only passes user args) so the hand-off goes through this slot.
+/// Always cleared (`take`) by the post-init hook — observable as
+/// `None` thereafter.
 #[derive(Default, Debug)]
 pub struct RpcError {
     pub code: ZsErrorCode,
@@ -196,6 +204,7 @@ pub struct RpcError {
     pub details_json: Option<String>,
     pub retryable: bool,
     pub expose_message: bool,
+    pub pending_cause: RefCell<Option<v8::Global<v8::Value>>>,
 }
 
 impl RpcError {
@@ -233,7 +242,7 @@ impl RpcError {
     /// which would produce a type-mismatched extraction. Manual
     /// `from_v8` calls in the body bypass the classifier; pattern is
     /// the same as `CustomEvent::new`.
-    #[v8_constructor]
+    #[v8_constructor(post_init = "attach_cause")]
     fn new(
         scope: &mut v8::PinScope,
         code: v8::Local<v8::Value>,
@@ -269,6 +278,16 @@ impl RpcError {
                 }
             }
         };
+        // Stash `cause` for the post-init hook. `undefined` ⇒ no own
+        // property emitted (matches `new Error("x")` shape: `'cause' in
+        // err === false`); any other value (incl. `null`) is preserved
+        // verbatim. The hand-off is necessary because the macro doesn't
+        // expose `args.this()` to the constructor body — the hook
+        // re-reads via `with_state` after field-0 install.
+        let pending_cause = match opts.cause {
+            Some(v) if !v.is_undefined() => RefCell::new(Some(v8::Global::new(scope, v))),
+            _ => RefCell::new(None),
+        };
         let retryable = opts
             .retryable
             .unwrap_or_else(|| code.default_retryable());
@@ -278,6 +297,7 @@ impl RpcError {
             details_json,
             retryable,
             expose_message: opts.expose_message.unwrap_or(false),
+            pending_cause,
         })
     }
 
@@ -339,6 +359,49 @@ impl RpcError {
     fn status(&self) -> u32 {
         self.code.http_status() as u32
     }
+
+    /// Post-init hook: re-attach the stashed `cause` as a non-enumerable
+    /// own data property on the instance, matching the ECMAScript
+    /// `Error` shape (§20.5.6.1.1 step 3:
+    /// `CreateNonEnumerableDataPropertyOrThrow(O, "cause", cause)` —
+    /// writable + configurable + non-enumerable). Skipped (no property
+    /// emitted) when `cause` was absent or explicitly `undefined` — so
+    /// `'cause' in new RpcError(...)` is false in those cases, exactly
+    /// like a plain `new Error("x")`.
+    pub(crate) fn attach_cause(
+        scope: &mut v8::PinScope,
+        this: v8::Local<v8::Object>,
+    ) -> Result<(), OpError> {
+        let cause_g = with_state(scope, this, |s| s.pending_cause.borrow_mut().take())
+            .ok_or_else(|| OpError::error("attach_cause: with_state returned None"))?;
+        let Some(cause_g) = cause_g else { return Ok(()); };
+        let cause = v8::Local::new(scope, &cause_g);
+        let key = v8::String::new(scope, "cause")
+            .ok_or_else(|| OpError::error("attach_cause: String alloc failed"))?;
+        // DONT_ENUM only — keeps writable + configurable, matching the
+        // ECMA-spec descriptor for the implicit cause own property.
+        this.define_own_property(scope, key.into(), cause, v8::PropertyAttribute::DONT_ENUM);
+        Ok(())
+    }
+}
+
+/// Recover the boxed `RpcError` from a JS wrapper's internal field 0.
+/// Returns `None` for non-RpcError objects or torn-down state. SAFETY:
+/// the External points at a `Box<RpcError>` whose lifetime is owned by
+/// V8's weak finalizer; aliasing is fine because the hook only borrows
+/// non-mutably or through the inner `RefCell`s.
+pub fn with_state<R>(
+    scope: &mut v8::PinScope,
+    this: v8::Local<v8::Object>,
+    f: impl FnOnce(&RpcError) -> R,
+) -> Option<R> {
+    let raw = this.get_internal_field(scope, 0)?;
+    let ext = v8::Local::<v8::External>::try_from(raw).ok()?;
+    let ptr = ext.value() as *const RpcError;
+    if ptr.is_null() {
+        return None;
+    }
+    Some(f(unsafe { &*ptr }))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,12 +445,16 @@ pub fn build<'s>(
         .details
         .as_ref()
         .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
+    // Rust-side builds bypass V8's [[Construct]], so the post-init
+    // hook never fires — leave `pending_cause` empty. Callers that
+    // need a JS-visible cause can attach it on the returned object.
     let state = RpcError {
         code,
         message: message.to_string(),
         details_json,
         retryable,
         expose_message: options.expose_message.unwrap_or(false),
+        pending_cause: RefCell::new(None),
     };
     let boxed: Box<RpcError> = Box::new(state);
     let raw = Box::into_raw(boxed);

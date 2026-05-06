@@ -38,6 +38,14 @@ export interface ProcedureBuildMeta {
   /** Discriminator: drives which hooks attach. */
   kind: ProcedureKind;
   /**
+   * Wire format the stub speaks. `"json"` is the only shipped format
+   * today (superjson-on-top covered by the per-call transformer); the
+   * field is reserved so future wire variants (CBOR, msgpack) can be
+   * tagged at build time without a meta shape change. Defaults to
+   * `"json"`.
+   */
+  wire?: string;
+  /**
    * Mutations only: when true, the React adapter generates a fresh
    * Idempotency-Key per `mutate()` call and reuses it across retries
    * (the React Query observer's lifetime). The server's Phase 6
@@ -45,6 +53,21 @@ export interface ProcedureBuildMeta {
    */
   idempotent?: boolean;
 }
+
+/**
+ * Brand symbol applied to every `__makeProcedure` return value. RSC-style
+ * `<form action={fn}>` and prop-passed server actions detect server
+ * references at runtime by reading this property; the
+ * `Symbol.for("zeroship/server-reference")` registration makes the
+ * symbol survive realm boundaries (multiple bundle copies, dynamic
+ * imports). Public so consumers can check the brand without re-deriving
+ * the symbol name. (Not `unique symbol` — `Symbol.for` returns a
+ * registry-shared symbol; the consumer-facing brand is the registry
+ * key, not the symbol identity.)
+ */
+export const __SERVER_REFERENCE: symbol = Symbol.for(
+  "zeroship/server-reference",
+);
 
 /**
  * Caller signature. Always async; returns the procedure's output.
@@ -180,10 +203,23 @@ export function __makeProcedure<TIn = unknown, TOut = unknown>(
   // ── Common bag ──
   Object.defineProperty(fn, "id", { value: meta.id, enumerable: true });
   Object.defineProperty(fn, "kind", { value: meta.kind, enumerable: true });
+  Object.defineProperty(fn, "wire", {
+    value: meta.wire ?? "json",
+    enumerable: true,
+  });
   Object.defineProperty(fn, "queryKey", {
     value: (input?: TIn): [string, ...unknown[]] =>
       input === undefined ? [meta.id] : [meta.id, input],
     enumerable: true,
+  });
+  // Server-reference brand — non-enumerable so JSON.stringify and dev-
+  // tools enumeration stay clean; Symbol.for lets cross-realm consumers
+  // re-derive the same key.
+  Object.defineProperty(fn, __SERVER_REFERENCE, {
+    value: true,
+    enumerable: false,
+    configurable: true,
+    writable: false,
   });
 
   // ── Per-kind hooks ──
