@@ -2583,6 +2583,218 @@ async fn restore_handler_vm_index_unavailable_when_cluster_exhausted() {
     let _ = std::fs::remove_dir_all(&backend_root);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// PR 3g — sweep tasks (transient-state takeover + idle eviction).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 6.1 + § 7.
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::backend::Backend;
+use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+use zeroship_sandbox::registry::SandboxRegistry;
+use zeroship_sandbox::sweep::{
+    run_idle_eviction_once, run_transient_takeover_once, RecordingIdleSnapshotter,
+};
+
+fn sweep_test_cfg(snapshot_enabled: bool) -> SandboxConfig {
+    SandboxConfig {
+        port: 9091,
+        token: ApiToken::new("ignored"),
+        backend: "nomad-ch".into(),
+        image: "img".into(),
+        workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+        network: "n".into(),
+        memory_mb: 1024,
+        cpus: 2.0,
+        idle_timeout_secs: 1800,
+        max_lifetime_secs: 28800,
+        auto_pull: false,
+        k8s: K8sConfig {
+            namespace: "default".into(),
+            image: "i".into(),
+            runtime_class: "kvm-sandbox".into(),
+            ready_timeout_secs: 120,
+            use_port_forward: false,
+            port_forward_start: 18000,
+            user_home_size: "5Gi".into(),
+            user_home_storage_class: None,
+            startup_orphan_cleanup: false,
+        },
+        nomad_ch: NomadCHConfig {
+            nomad_addr: "http://127.0.0.1:4646".into(),
+            datacenter: "dc1".into(),
+            wrapper_path: std::path::PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
+            runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+            host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+            user_home_dir_root: std::path::PathBuf::from("/var/zeroship/ch/users"),
+            vm_index_floor: 1,
+            vm_index_ceil: 200,
+            alloc_running_timeout_secs: 60,
+            agent_livez_timeout_secs: 30,
+            host_fence_timeout_secs: 30,
+            startup_orphan_cleanup: false,
+            subnet_second_octet: 99,
+        },
+        create_retry_max: 2,
+        create_retry_total_timeout_secs: 90,
+        snapshot_enabled,
+    }
+}
+
+fn build_sweep_state(
+    db: Database,
+    snapshot_enabled: bool,
+) -> std::sync::Arc<zeroship_sandbox::AppState> {
+    let cfg = sweep_test_cfg(snapshot_enabled);
+    let backend = Backend::from_config(&cfg).expect("backend");
+    let registry = SandboxRegistry::new();
+    std::sync::Arc::new(zeroship_sandbox::AppState {
+        config: cfg,
+        sandboxes: registry,
+        backend,
+        mint_rate_limiter: Some(
+            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
+        ),
+        database: Some(std::sync::Arc::new(db)),
+        persist: None,
+        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admin_token: None,
+    })
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3g transient takeover sweep"]
+async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    // Drive into snapshotting and stamp a stale lessee_updated_at by
+    // direct UPDATE (bypassing update_lessee which stamps now()).
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let _ = g1;
+    // Backdate `lessee_updated_at` 600 seconds — well past the 120s
+    // threshold the sweep uses by default.
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let n = client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/true);
+    let (seen, recovered) = run_transient_takeover_once(&state, 120).await;
+    assert!(seen >= 1, "sweep should have seen at least our stale row; seen={seen}");
+    assert!(recovered >= 1, "sweep should have recovered at least our row; recovered={recovered}");
+
+    // Row must be in `snapshotting_aborted` per § 9.2.
+    let row = state
+        .database
+        .as_ref()
+        .unwrap()
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.status, SandboxStatus::SnapshottingAborted);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3g idle-eviction sweep selects opted-in stale rows"]
+async fn sweep_idle_eviction_selects_opted_in_stale_rows() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Mark opted-in + stale.
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET idle_snapshot_opted_in = TRUE, \
+                    last_used_at = now() - interval '30 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/true);
+    let snapshotter = RecordingIdleSnapshotter::default();
+    let attempted = run_idle_eviction_once(&state, &snapshotter, 60, 2).await;
+    assert!(
+        attempted.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "sweep must select our opted-in stale row; got {attempted:?}"
+    );
+    let seen = snapshotter.seen.lock().unwrap();
+    assert!(
+        seen.contains(&sid),
+        "snapshotter must have been called for our row; seen={seen:?}"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3g idle-eviction sweep no-op when feature disabled"]
+async fn sweep_idle_eviction_skips_when_feature_disabled() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET idle_snapshot_opted_in = TRUE, \
+                    last_used_at = now() - interval '30 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/false);
+    let snapshotter = RecordingIdleSnapshotter::default();
+    let attempted = run_idle_eviction_once(&state, &snapshotter, 60, 2).await;
+    assert!(
+        attempted.is_empty(),
+        "sweep must self-disable when snapshot_enabled=false; attempted={}",
+        attempted.len()
+    );
+    let seen = snapshotter.seen.lock().unwrap();
+    assert!(seen.is_empty(), "snapshotter must not have been called; seen={seen:?}");
+}
+
 #[compio::test]
 #[ignore = "needs Postgres; PR 3e feature flag off"]
 async fn restore_handler_returns_feature_disabled_when_flag_off() {

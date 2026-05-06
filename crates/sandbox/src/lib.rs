@@ -28,6 +28,7 @@ pub mod snapshot_aead;
 pub mod snapshot_handler;
 pub mod snapshot_store;
 pub mod snapshot_store_gcs;
+pub mod sweep;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -316,6 +317,28 @@ impl AppState {
         {
             spawn_takeover_task(state.clone());
         }
+
+        // PR 3g: snapshot/restore sweep tasks (transient-state
+        // takeover + idle eviction). Both observe
+        // `state.shutdown_requested()` between iterations. The
+        // transient sweep runs unconditionally so a feature-flipped-
+        // on-then-off deploy still recovers in-flight transients;
+        // the idle-eviction sweep self-disables when
+        // `snapshot_enabled = false` or the threshold env is 0.
+        if state.database.is_some() {
+            sweep::spawn_transient_state_takeover(state.clone());
+        }
+        // Idle eviction needs a real `IdleSnapshotter` to actually
+        // perform snapshots. Wiring the production handler chain
+        // (snapshot_handler::snapshot_sandbox + the worker's
+        // SnapshotStore + RealChRemoteClient + SourceVmOps) is
+        // deferred to the same v2 PR that lands `RealChRemoteClient`.
+        // For v1, leave the sweep dormant — the loop is in tree but
+        // not auto-spawned to avoid silently triggering a not-yet-
+        // implemented snapshot_one. Operators who want to exercise
+        // it call `sweep::spawn_idle_eviction_sweep` from a custom
+        // controller binary with a wrapper around their snapshot
+        // pipeline.
         Ok(state)
     }
 }
