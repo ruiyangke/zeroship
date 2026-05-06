@@ -15,11 +15,15 @@
 //!   - `build_kernel_request` — kernel fast-path Request builder.
 //!   - Helpers for headers / signal / body / method validation.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use crate::fetch_body::body::{Body, BodyImpl};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
+use super::enums::{
+    ReferrerPolicy, RequestCache, RequestCredentials, RequestDestination, RequestMode,
+    RequestRedirect,
+};
 // The macro attributes are consumed by `#[v8_class]` expansion (which
 // strips them before rustc sees them), so the imports show as unused.
 // The `#[v8_state_marker]` is also consumed by the impl-block-level
@@ -28,7 +32,7 @@ use crate::fetch_body::extract::extract_body;
 // usage tracker.
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker,
+    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker, WebIdlDict,
 };
 
 /// Synthetic base URL used when `new Request(input)` receives a
@@ -45,6 +49,13 @@ const DEFAULT_BASE_URL: &str = "http://localhost/";
 /// The boxed Rust state for a Request wrapper. Mutable fields live in
 /// `RefCell` so getter callbacks can hand out read-only views without
 /// cloning, while constructor / future setter paths can mutate.
+///
+/// Typed enum fields (`mode`, `credentials`, `cache`, `redirect`,
+/// `referrer_policy`, `destination`) live in `Cell` since the enums are
+/// `Copy`. Per Fetch §5.4 these are validated at construction time —
+/// the `WebIdlConvertible::from_v8` paths reject unknown values with a
+/// TypeError, so by the time a value lands in the cell it's a valid
+/// spec variant.
 #[allow(missing_debug_implementations)]
 pub struct RequestState {
     pub body: RefCell<BodyImpl>,
@@ -60,20 +71,19 @@ pub struct RequestState {
     /// returns a fresh signal even when the user didn't pass one. We
     /// lazily mint on first access if none was provided.
     pub signal: RefCell<Option<v8::Global<v8::Object>>>,
-    /// Other Request attributes — strings rather than enums to keep
-    /// the v1 surface small (no enum validation for v1; matches the
-    /// polyfill's permissive behaviour).
-    pub destination: RefCell<String>,
+    /// Typed enum slots — see `enums.rs`. Validated at construction
+    /// time (TypeError on unknown JS values per WebIDL §3.13.7).
+    pub destination: Cell<RequestDestination>,
     pub referrer: RefCell<String>,
-    pub referrer_policy: RefCell<String>,
-    pub mode: RefCell<String>,
-    pub credentials: RefCell<String>,
-    pub cache: RefCell<String>,
-    pub redirect: RefCell<String>,
+    pub referrer_policy: Cell<ReferrerPolicy>,
+    pub mode: Cell<RequestMode>,
+    pub credentials: Cell<RequestCredentials>,
+    pub cache: Cell<RequestCache>,
+    pub redirect: Cell<RequestRedirect>,
     pub integrity: RefCell<String>,
-    pub keepalive: RefCell<bool>,
-    pub is_reload_navigation: RefCell<bool>,
-    pub is_history_navigation: RefCell<bool>,
+    pub keepalive: Cell<bool>,
+    pub is_reload_navigation: Cell<bool>,
+    pub is_history_navigation: Cell<bool>,
     pub duplex: RefCell<String>,
     pub priority: RefCell<String>,
 }
@@ -86,21 +96,69 @@ impl Default for RequestState {
             url: RefCell::new(String::new()),
             headers: RefCell::new(None),
             signal: RefCell::new(None),
-            destination: RefCell::new(String::new()),
+            destination: Cell::new(RequestDestination::Empty),
             referrer: RefCell::new("about:client".to_string()),
-            referrer_policy: RefCell::new(String::new()),
-            mode: RefCell::new("cors".to_string()),
-            credentials: RefCell::new("same-origin".to_string()),
-            cache: RefCell::new("default".to_string()),
-            redirect: RefCell::new("follow".to_string()),
+            referrer_policy: Cell::new(ReferrerPolicy::Empty),
+            // Constructor default per Fetch §5.4 step 14: requests
+            // built from JS land on "cors". The enum's own
+            // `Default::default()` is `NoCors` (the storage default
+            // for new requests created without a JS constructor — only
+            // reachable via the kernel-side `build_kernel_request`,
+            // which doesn't observe `req.mode` via JS). The
+            // constructor body sets this explicitly via the dict's
+            // missing-path default; we initialise to `Cors` here so
+            // the kernel-side path matches the JS-observable shape.
+            mode: Cell::new(RequestMode::Cors),
+            credentials: Cell::new(RequestCredentials::SameOrigin),
+            cache: Cell::new(RequestCache::Default),
+            redirect: Cell::new(RequestRedirect::Follow),
             integrity: RefCell::new(String::new()),
-            keepalive: RefCell::new(false),
-            is_reload_navigation: RefCell::new(false),
-            is_history_navigation: RefCell::new(false),
+            keepalive: Cell::new(false),
+            is_reload_navigation: Cell::new(false),
+            is_history_navigation: Cell::new(false),
             duplex: RefCell::new("half".to_string()),
             priority: RefCell::new("auto".to_string()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// RequestInit — `[Dictionary]` per Fetch §5.4
+// ---------------------------------------------------------------------------
+
+/// `RequestInit` per Fetch §5.4. The typed-enum members migrate from
+/// the v1 `RefCell<String>` storage; the v8::Value passthroughs
+/// (`headers`, `body`, `signal`) stay OUTSIDE the dict because they're
+/// union types the constructor body dispatches on by V8 shape (the
+/// HeadersInit union for `headers`, the BodyInit union for `body`,
+/// AbortSignal-or-null for `signal`).
+///
+/// Critically, the dict's blanket `Option<T: WebIdlConvertible>` impl
+/// collapses missing / undefined / null into `None` — but Fetch §5.4
+/// distinguishes "missing init.body" (inherit from input Request) from
+/// "explicit null" (use null body, do not inherit). The constructor
+/// body reads `body` / `headers` / `signal` raw from the init object
+/// to preserve that distinction.
+///
+/// # Behaviour change vs v1
+///
+/// Unknown enum values (`mode: "bogus"`) now throw TypeError instead
+/// of being silently stored as a string. Spec-correct per WebIDL
+/// §3.13.7 step 4.
+#[derive(Default, Debug, WebIdlDict)]
+pub(crate) struct RequestInit {
+    pub method: Option<String>,
+    pub mode: Option<RequestMode>,
+    pub credentials: Option<RequestCredentials>,
+    pub cache: Option<RequestCache>,
+    pub redirect: Option<RequestRedirect>,
+    pub referrer: Option<String>,
+    #[webidl_name = "referrerPolicy"]
+    pub referrer_policy: Option<ReferrerPolicy>,
+    pub integrity: Option<String>,
+    pub keepalive: Option<bool>,
+    pub duplex: Option<String>,
+    pub priority: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -251,16 +309,17 @@ impl RequestState {
             // SAFETY: `Request::is_instance` confirmed the prototype-chain
             // brand; internal-field-0 holds a `Box<RequestState>`.
             let other: &RequestState = unsafe { &*raw };
-            // Copy over scalar fields from the input Request.
+            // Copy over scalar fields from the input Request. Typed-enum
+            // slots are `Cell::set` since the enums are `Copy`.
             *state.method.borrow_mut() = other.method.borrow().clone();
             *state.referrer.borrow_mut() = other.referrer.borrow().clone();
-            *state.referrer_policy.borrow_mut() = other.referrer_policy.borrow().clone();
-            *state.mode.borrow_mut() = other.mode.borrow().clone();
-            *state.credentials.borrow_mut() = other.credentials.borrow().clone();
-            *state.cache.borrow_mut() = other.cache.borrow().clone();
-            *state.redirect.borrow_mut() = other.redirect.borrow().clone();
+            state.referrer_policy.set(other.referrer_policy.get());
+            state.mode.set(other.mode.get());
+            state.credentials.set(other.credentials.get());
+            state.cache.set(other.cache.get());
+            state.redirect.set(other.redirect.get());
             *state.integrity.borrow_mut() = other.integrity.borrow().clone();
-            *state.keepalive.borrow_mut() = *other.keepalive.borrow();
+            state.keepalive.set(other.keepalive.get());
             *state.priority.borrow_mut() = other.priority.borrow().clone();
             // Body / Headers will be (potentially) overridden by init.
             // The disturbed-input-Request check (Fetch §5.4 step 36 "If
@@ -298,62 +357,84 @@ impl RequestState {
 
         *state.url.borrow_mut() = initial_url;
 
-        // Step 12+: apply `init` overrides.
-        let init_obj: Option<v8::Local<v8::Object>> = if init_v.is_undefined() {
+        // Step 12+: parse `init` via the WebIdlDict reader. This is the
+        // single point where unknown enum values throw TypeError per
+        // WebIDL §3.13.7 (e.g. `mode: "bogus"`). The dict carries only
+        // the typed members; the v8::Value passthroughs `headers` /
+        // `body` / `signal` are read separately below to preserve the
+        // explicit-null vs missing distinction (the dict's
+        // `Option<v8::Local<...>>` blanket collapses both to `None`).
+        let init_dict = RequestInit::from_v8(scope, init_v)?;
+        // Whether init is an actual JS Object (vs null/undefined). The
+        // duplex-on-stream-body check (Fetch §5.4 step 36) cares about
+        // "init['duplex'] does not exist" — when init itself is missing
+        // there's no dict to consult, so we suppress the check.
+        let init_obj: Option<v8::Local<v8::Object>> = if init_v.is_null_or_undefined() {
             None
         } else {
-            match v8::Local::<v8::Object>::try_from(init_v) {
-                Ok(o) => Some(o),
-                Err(_) => None,
-            }
+            v8::Local::<v8::Object>::try_from(init_v).ok()
         };
 
-        // Method.
-        if let Some(init) = init_obj {
-            if let Some(m_v) = get_init(scope, init, "method") {
-                let raw_method = m_v.to_rust_string_lossy(scope);
-                let normalized = match normalize_method(&raw_method) {
-                    Ok(m) => m,
-                    Err(e) => return Err(crate::state::OpError::type_error(e)),
-                };
-                *state.method.borrow_mut() = normalized;
-            }
+        // Method — normalize per §4.3 (uppercase standard methods,
+        // forbidden CONNECT/TRACE/TRACK, RFC 9110 token validation).
+        if let Some(raw_method) = init_dict.method.as_deref() {
+            let normalized = match normalize_method(raw_method) {
+                Ok(m) => m,
+                Err(e) => return Err(crate::state::OpError::type_error(e)),
+            };
+            *state.method.borrow_mut() = normalized;
         }
 
-        // Referrer / referrerPolicy / mode / credentials / cache /
-        // redirect / integrity / keepalive / duplex / priority — string
-        // copies, no validation in v1.
-        if let Some(init) = init_obj {
-            copy_string_init(scope, init, "referrer", &state.referrer);
-            copy_string_init(scope, init, "referrerPolicy", &state.referrer_policy);
-            copy_string_init(scope, init, "mode", &state.mode);
-            copy_string_init(scope, init, "credentials", &state.credentials);
-            copy_string_init(scope, init, "cache", &state.cache);
-            copy_string_init(scope, init, "redirect", &state.redirect);
-            copy_string_init(scope, init, "integrity", &state.integrity);
-            copy_string_init(scope, init, "duplex", &state.duplex);
-            copy_string_init(scope, init, "priority", &state.priority);
-            if let Some(k) = get_init(scope, init, "keepalive") {
-                *state.keepalive.borrow_mut() = k.boolean_value(scope);
-            }
-            // Per Fetch (Chrome/Deno/etc.): `duplex: "full"` is not yet
-            // supported — implementations throw TypeError. We match that
-            // behaviour. WPT request-init-stream.any.js explicitly
-            // requires this for any body shape (null, string, Uint8Array,
-            // ReadableStream) when duplex is "full".
-            if state.duplex.borrow().as_str() == "full" {
-                return Err(crate::state::OpError::type_error(
-                    "Request init.duplex = 'full' is not supported",
-                ));
-            }
+        // Apply scalar / typed-enum init overrides. Each `Some` value
+        // wins over the inherited / default; `None` (missing key) leaves
+        // the slot at whatever was set above (input-Request copy or
+        // `RequestState::default()`).
+        if let Some(referrer) = init_dict.referrer.clone() {
+            *state.referrer.borrow_mut() = referrer;
+        }
+        if let Some(rp) = init_dict.referrer_policy {
+            state.referrer_policy.set(rp);
+        }
+        if let Some(mode) = init_dict.mode {
+            state.mode.set(mode);
+        }
+        if let Some(creds) = init_dict.credentials {
+            state.credentials.set(creds);
+        }
+        if let Some(cache) = init_dict.cache {
+            state.cache.set(cache);
+        }
+        if let Some(redirect) = init_dict.redirect {
+            state.redirect.set(redirect);
+        }
+        if let Some(integrity) = init_dict.integrity.clone() {
+            *state.integrity.borrow_mut() = integrity;
+        }
+        if let Some(duplex) = init_dict.duplex.clone() {
+            *state.duplex.borrow_mut() = duplex;
+        }
+        if let Some(priority) = init_dict.priority.clone() {
+            *state.priority.borrow_mut() = priority;
+        }
+        if let Some(keepalive) = init_dict.keepalive {
+            state.keepalive.set(keepalive);
+        }
+        // Per Fetch (Chrome/Deno/etc.): `duplex: "full"` is not yet
+        // supported — implementations throw TypeError. We match that
+        // behaviour. WPT request-init-stream.any.js explicitly
+        // requires this for any body shape (null, string, Uint8Array,
+        // ReadableStream) when duplex is "full".
+        if state.duplex.borrow().as_str() == "full" {
+            return Err(crate::state::OpError::type_error(
+                "Request init.duplex = 'full' is not supported",
+            ));
         }
 
-        // Body extraction. Step 35–36.
-        let body_v: Option<v8::Local<v8::Value>> = if let Some(init) = init_obj {
-            get_init(scope, init, "body")
-        } else {
-            None
-        };
+        // Body extraction. Step 35–36. Read raw from init_obj so that
+        // explicit `body: null` is distinguished from missing (the
+        // former skips input-Request inheritance per spec).
+        let body_v: Option<v8::Local<v8::Value>> =
+            init_obj.and_then(|o| get_raw_init(scope, o, "body"));
 
         // If init.body is missing AND input was a Request, inherit the
         // input's body. Per Fetch §5.4 step 36 + step 42 ("clone a body"):
@@ -440,22 +521,19 @@ impl RequestState {
                 // We match Chrome / Deno here: only validate when body is
                 // a ReadableStream. URLSearchParams / Blob / etc. don't
                 // need duplex.
-                if let Some(init) = init_obj {
+                if init_obj.is_some() {
                     let body_is_stream = if let Ok(obj) = v8::Local::<v8::Object>::try_from(b) {
                         is_readable_stream_global_instance(scope, obj)
                     } else {
                         false
                     };
-                    if body_is_stream {
-                        let duplex_v = get_init(scope, init, "duplex");
-                        if duplex_v.is_none() {
-                            return Err(crate::state::OpError::type_error(
-                                "Request with ReadableStream body requires init.duplex = 'half'",
-                            ));
-                        }
+                    if body_is_stream && init_dict.duplex.is_none() {
+                        return Err(crate::state::OpError::type_error(
+                            "Request with ReadableStream body requires init.duplex = 'half'",
+                        ));
                     }
                 }
-                let keepalive = *state.keepalive.borrow();
+                let keepalive = state.keepalive.get();
                 match extract_body(scope, b, keepalive) {
                     Ok(extracted) => {
                         *state.body.borrow_mut() = extracted.body;
@@ -542,10 +620,13 @@ impl RequestState {
         // Headers — build / inherit. Per Fetch §5.4 step 32:
         //   1. Let headers be a copy of this's headers.
         //   2. If init["headers"] exists, then [...] fill from init.
-        let headers_obj = match build_request_headers(scope, init_obj, input_is_request, input_v) {
-            Ok(h) => h,
-            Err(msg) => return Err(crate::state::OpError::type_error(msg)),
-        };
+        let init_headers_v: Option<v8::Local<v8::Value>> =
+            init_obj.and_then(|o| get_raw_init(scope, o, "headers"));
+        let headers_obj =
+            match build_request_headers(scope, init_headers_v, input_is_request, input_v) {
+                Ok(h) => h,
+                Err(msg) => return Err(crate::state::OpError::type_error(msg)),
+            };
 
         // Apply pending Content-Type (set on the body but only if the user
         // didn't already provide one on init.headers). PENDING_CT now lives
@@ -558,7 +639,9 @@ impl RequestState {
 
         // Signal: chain `init.signal` if provided. Always mint a fresh
         // signal so `request.signal` is non-null per Fetch §5.4.
-        let signal_obj = build_request_signal(scope, init_obj);
+        let init_signal_v: Option<v8::Local<v8::Value>> =
+            init_obj.and_then(|o| get_raw_init(scope, o, "signal"));
+        let signal_obj = build_request_signal(scope, init_signal_v);
         *state.signal.borrow_mut() = Some(v8::Global::new(scope, signal_obj));
 
         // The macro's emitted callback boxes `state`, installs the box
@@ -583,7 +666,7 @@ impl RequestState {
 
     #[v8_getter]
     fn destination(&self) -> String {
-        self.destination.borrow().clone()
+        self.destination.get().as_str().to_string()
     }
 
     #[v8_getter]
@@ -594,27 +677,27 @@ impl RequestState {
     #[v8_getter]
     #[v8_name = "referrerPolicy"]
     fn referrer_policy(&self) -> String {
-        self.referrer_policy.borrow().clone()
+        self.referrer_policy.get().as_str().to_string()
     }
 
     #[v8_getter]
     fn mode(&self) -> String {
-        self.mode.borrow().clone()
+        self.mode.get().as_str().to_string()
     }
 
     #[v8_getter]
     fn credentials(&self) -> String {
-        self.credentials.borrow().clone()
+        self.credentials.get().as_str().to_string()
     }
 
     #[v8_getter]
     fn cache(&self) -> String {
-        self.cache.borrow().clone()
+        self.cache.get().as_str().to_string()
     }
 
     #[v8_getter]
     fn redirect(&self) -> String {
-        self.redirect.borrow().clone()
+        self.redirect.get().as_str().to_string()
     }
 
     #[v8_getter]
@@ -624,19 +707,19 @@ impl RequestState {
 
     #[v8_getter]
     fn keepalive(&self) -> bool {
-        *self.keepalive.borrow()
+        self.keepalive.get()
     }
 
     #[v8_getter]
     #[v8_name = "isReloadNavigation"]
     fn is_reload_navigation(&self) -> bool {
-        *self.is_reload_navigation.borrow()
+        self.is_reload_navigation.get()
     }
 
     #[v8_getter]
     #[v8_name = "isHistoryNavigation"]
     fn is_history_navigation(&self) -> bool {
-        *self.is_history_navigation.borrow()
+        self.is_history_navigation.get()
     }
 
     #[v8_getter]
@@ -1023,7 +1106,13 @@ fn is_readable_stream_global_instance(
     obj.instance_of(scope, class_obj).unwrap_or(false)
 }
 
-fn get_init<'s>(
+/// Read a single property from the init object. Returns `None` for
+/// missing keys AND undefined values (matching the WebIDL §3.10
+/// "missing dictionary member" path), but `Some(v)` for explicit null.
+/// The constructor body uses this distinction for the `body` /
+/// `headers` / `signal` raw passthroughs — explicit null suppresses
+/// the input-Request inheritance per Fetch §5.4 step 36.
+fn get_raw_init<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     init: v8::Local<v8::Object>,
     name: &str,
@@ -1034,23 +1123,6 @@ fn get_init<'s>(
         return None;
     }
     Some(v)
-}
-
-fn copy_string_init(
-    scope: &mut v8::PinScope,
-    init: v8::Local<v8::Object>,
-    name: &str,
-    target: &RefCell<String>,
-) {
-    let key = match v8::String::new(scope, name) {
-        Some(k) => k,
-        None => return,
-    };
-    let Some(v) = init.get(scope, key.into()) else { return };
-    if v.is_undefined() {
-        return;
-    }
-    *target.borrow_mut() = v.to_rust_string_lossy(scope);
 }
 
 /// Per Fetch §4.3 "method" + §5.4 step 25:
@@ -1142,7 +1214,7 @@ fn apply_content_type_if_absent(
 
 fn build_request_headers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    init_obj: Option<v8::Local<v8::Object>>,
+    init_headers: Option<v8::Local<v8::Value>>,
     input_is_request: bool,
     input_v: v8::Local<v8::Value>,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
@@ -1159,24 +1231,8 @@ fn build_request_headers<'s>(
     //   - If init.headers is present, use that.
     //   - Else if input is a Request, copy headers from there.
     //   - Else empty.
-    let headers_init: v8::Local<v8::Value> = if let Some(init) = init_obj {
-        if let Some(v) = get_init(scope, init, "headers") {
-            v
-        } else if input_is_request {
-            // Copy from input Request's headers. We invoke the Headers
-            // constructor with the existing Headers object — it walks
-            // its iterator.
-            let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
-            let raw = state_ptr(scope, req_obj).ok_or_else(|| "Request input invalid".to_string())?;
-            // SAFETY: caller already brand-checked input_v.
-            let other: &RequestState = unsafe { &*raw };
-            match other.headers.borrow().as_ref() {
-                Some(g) => v8::Local::new(scope, g.clone()).into(),
-                None => v8::undefined(scope).into(),
-            }
-        } else {
-            v8::undefined(scope).into()
-        }
+    let headers_init: v8::Local<v8::Value> = if let Some(v) = init_headers {
+        v
     } else if input_is_request {
         let req_obj: v8::Local<v8::Object> = input_v.try_into().unwrap();
         let raw = state_ptr(scope, req_obj).ok_or_else(|| "Request input invalid".to_string())?;
@@ -1209,7 +1265,7 @@ fn empty_headers<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Obje
 
 fn build_request_signal<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    init_obj: Option<v8::Local<v8::Object>>,
+    init_signal: Option<v8::Local<v8::Value>>,
 ) -> v8::Local<'s, v8::Object> {
     let global = scope.get_current_context().global(scope);
     let key = v8::String::new(scope, "AbortSignal").unwrap();
@@ -1219,20 +1275,18 @@ fn build_request_signal<'s>(
     // If init.signal is provided, run AbortSignal.any([init.signal])
     // so the request's signal aborts when init.signal does. If no
     // init.signal, just `new AbortController().signal`.
-    if let Some(init) = init_obj {
-        if let Some(sig_v) = get_init(scope, init, "signal") {
-            if !sig_v.is_null_or_undefined() {
-                // AbortSignal.any([sig_v]) — returns a fresh signal.
-                let any_key = v8::String::new(scope, "any").unwrap();
-                if let Some(any_fn_v) = class_obj.get(scope, any_key.into()) {
-                    if let Ok(any_fn) = v8::Local::<v8::Function>::try_from(any_fn_v) {
-                        let arr = v8::Array::new(scope, 1);
-                        arr.set_index(scope, 0, sig_v);
-                        let args = [arr.into()];
-                        if let Some(result) = any_fn.call(scope, class_obj.into(), &args) {
-                            if let Ok(o) = v8::Local::<v8::Object>::try_from(result) {
-                                return o;
-                            }
+    if let Some(sig_v) = init_signal {
+        if !sig_v.is_null_or_undefined() {
+            // AbortSignal.any([sig_v]) — returns a fresh signal.
+            let any_key = v8::String::new(scope, "any").unwrap();
+            if let Some(any_fn_v) = class_obj.get(scope, any_key.into()) {
+                if let Ok(any_fn) = v8::Local::<v8::Function>::try_from(any_fn_v) {
+                    let arr = v8::Array::new(scope, 1);
+                    arr.set_index(scope, 0, sig_v);
+                    let args = [arr.into()];
+                    if let Some(result) = any_fn.call(scope, class_obj.into(), &args) {
+                        if let Ok(o) = v8::Local::<v8::Object>::try_from(result) {
+                            return o;
                         }
                     }
                 }
