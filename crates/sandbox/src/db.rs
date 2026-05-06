@@ -74,13 +74,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "sandboxes.status CHECK accepts snapshot lifecycle values",
         sql: include_str!("../migrations/0006_sandbox_status_snapshot.sql"),
     },
+    Migration {
+        version: 7,
+        description: "sandboxes columns for snapshot artifact + lease + idle-sweep",
+        sql: include_str!("../migrations/0007_sandbox_snapshot_columns.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 6;
+pub const LATEST_MIGRATION_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
