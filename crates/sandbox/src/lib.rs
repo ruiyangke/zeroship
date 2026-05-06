@@ -23,6 +23,7 @@ pub mod preview_share_handlers;
 pub mod preview_ws;
 pub mod registry;
 pub mod restore;
+pub mod snapshot_aead;
 pub mod snapshot_handler;
 pub mod snapshot_store;
 
