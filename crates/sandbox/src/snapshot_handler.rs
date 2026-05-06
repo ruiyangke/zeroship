@@ -373,39 +373,214 @@ async fn do_snapshot_inner(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// TODO (v2): RealChRemoteClient subprocess wrapper.
+// Real `ch-remote` subprocess wrapper. Synchronous `std::process::
+// Command`; callers in the async path hop through
+// `compio::runtime::spawn_blocking` (existing pattern in
+// `crates/sandbox/src/persist.rs`).
 //
-// Shape (sketch):
-//
-//   pub struct RealChRemoteClient {
-//       /// Absolute path to `ch-remote` on $PATH; resolved at
-//       /// controller boot. Cached so the snapshot critical path
-//       /// doesn't `which`.
-//       binary: PathBuf,
-//       version: String, // populated by spawning `ch-remote --version`
-//   }
-//
-//   impl ChRemoteClient for RealChRemoteClient {
-//       fn pause(&self, api_socket: &Path) -> Result<(), String> {
-//           run_blocking(&self.binary, &["--api-socket", api_socket, "pause"])
-//       }
-//       fn snapshot(&self, api_socket: &Path, dest_dir: &Path) -> Result<(), String> {
-//           let url = format!("file://{}", dest_dir.display());
-//           run_blocking(&self.binary, &["--api-socket", api_socket, "snapshot", &url])
-//       }
-//       fn version(&self) -> &str { &self.version }
-//   }
-//
-// `run_blocking` invokes std::process::Command and surfaces stderr
-// on non-zero exit. The handler wraps these calls in
-// `compio::runtime::spawn_blocking` to keep the ntex worker
-// responsive during the ~2.1 s pause/snapshot wall (§ 2 measurement).
-//
-// The boundary stays here: a v2 PR adds `RealChRemoteClient`
-// alongside `MockChRemoteClient`; the handler picks one at construct
-// time. The trait + signature are stable (this is the v1 commit
-// point).
+// Hard wall-time budget per call: 30 s. CH v51.1 measured
+// pause+snapshot ≈ 2.1 s on n2-standard-32 (§ 2 measurement); 30 s is
+// a generous safety net so a wedged `ch-remote` doesn't park a
+// blocking worker forever. On budget overrun we kill(SIGKILL) the
+// child + return an error.
 // ────────────────────────────────────────────────────────────────────
+
+/// Wall-time budget for any single `ch-remote` invocation. CH v51.1
+/// snapshot wall is ≈ 2.1 s; 30 s leaves ~14× headroom for a slow
+/// host without parking the controller forever.
+const CH_REMOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Production `ChRemoteClient` — wraps the `ch-remote` binary on
+/// `$PATH`. The binary path + version string are resolved once at
+/// construct time so the snapshot critical path doesn't `which`.
+#[derive(Debug, Clone)]
+pub struct RealChRemoteClient {
+    binary: PathBuf,
+    version: String,
+}
+
+impl RealChRemoteClient {
+    /// Default constructor: resolves `ch-remote` on `$PATH`.
+    /// Falls back to `/usr/local/bin/ch-remote` if `which`-style
+    /// resolution fails (production hosts have it there). Caches
+    /// `ch-remote --version` on success; on failure caches the
+    /// sentinel "unknown" so the handler can still run (the
+    /// version string is recorded into pg for forensics, not
+    /// gating).
+    pub fn new() -> Self {
+        let binary = resolve_ch_remote_binary();
+        let version = read_ch_remote_version(&binary)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    binary = %binary.display(),
+                    error = %e,
+                    "ch-remote: --version probe failed; recording 'unknown' for snapshot_ch_version"
+                );
+                "unknown".to_string()
+            });
+        Self { binary, version }
+    }
+
+    /// Test-friendly constructor — accepts an explicit binary path
+    /// + version. Used by unit tests with a fake `ch-remote` shell
+    /// script.
+    pub fn with_binary(binary: PathBuf, version: String) -> Self {
+        Self { binary, version }
+    }
+}
+
+impl Default for RealChRemoteClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChRemoteClient for RealChRemoteClient {
+    fn pause(&self, api_socket: &Path) -> Result<(), String> {
+        run_with_timeout(
+            &self.binary,
+            &[
+                std::ffi::OsStr::new("--api-socket"),
+                api_socket.as_os_str(),
+                std::ffi::OsStr::new("pause"),
+            ],
+            CH_REMOTE_TIMEOUT,
+        )
+    }
+
+    fn snapshot(
+        &self,
+        api_socket: &Path,
+        dest_dir: &Path,
+    ) -> Result<(), String> {
+        let url = format!("file://{}", dest_dir.display());
+        run_with_timeout(
+            &self.binary,
+            &[
+                std::ffi::OsStr::new("--api-socket"),
+                api_socket.as_os_str(),
+                std::ffi::OsStr::new("snapshot"),
+                std::ffi::OsStr::new(&url),
+            ],
+            CH_REMOTE_TIMEOUT,
+        )
+    }
+
+    fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// Best-effort `which ch-remote`. We don't take a dep on the `which`
+/// crate just for this — splitting `$PATH` ourselves is ~10 lines.
+fn resolve_ch_remote_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = std::path::Path::new(dir).join("ch-remote");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    // Fall back to the production install path. If it's not there
+    // either, the first invocation will fail loudly.
+    PathBuf::from("/usr/local/bin/ch-remote")
+}
+
+/// `ch-remote --version` → "v51.1\n" (or similar). Trims trailing
+/// whitespace. Errors on non-zero exit / process spawn failure.
+fn read_ch_remote_version(binary: &Path) -> Result<String, String> {
+    let out = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("spawn {} --version: {e}", binary.display()))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{} --version: exit={:?}, stderr={}",
+            binary.display(),
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout.is_empty() {
+        // Some `ch-remote` builds emit the version on stderr.
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            return Ok(stderr);
+        }
+    }
+    Ok(stdout)
+}
+
+/// Spawn a child, wait up to `timeout`, surface stderr on non-zero
+/// exit, kill on timeout. Uses a short polling loop on `try_wait`
+/// rather than threads — the controller is single-host, ch-remote
+/// finishes in ~2 s, busy-poll at 50 ms is fine.
+fn run_with_timeout(
+    binary: &Path,
+    args: &[&std::ffi::OsStr],
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(args);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn {} {:?}: {e}", binary.display(), args))?;
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                let mut stderr = Vec::new();
+                if let Some(mut s) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = s.read_to_end(&mut stderr);
+                }
+                return Err(format!(
+                    "{} {:?}: exit={:?}, stderr={}",
+                    binary.display(),
+                    args,
+                    status.code(),
+                    String::from_utf8_lossy(&stderr).trim()
+                ));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    // Timeout — kill the child. Best-effort; ignore
+                    // kill errors (the process may have just exited).
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{} {:?}: timed out after {:?}",
+                        binary.display(),
+                        args,
+                        timeout
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{} {:?}: try_wait: {e}",
+                    binary.display(),
+                    args
+                ));
+            }
+        }
+    }
+}
 
 /// Stub `SourceVmOps` for unit tests. Stores fabricated values for
 /// `api_socket` and `vm_index`; teardown is a no-op (or fail
@@ -464,6 +639,146 @@ pub fn snap_stage_dir(host_state_dir: &Path, sandbox_id: Uuid) -> PathBuf {
         zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
     );
     host_state_dir.join("snap-stage").join(typed)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// `RealChRemoteClient` unit tests — drive the subprocess wrapper with
+// a fake `ch-remote` shell script. The script is written into a
+// temp dir + chmod 0o755'd so the child shells it out exactly like
+// a real install.
+// ────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[cfg(test)]
+mod real_ch_remote_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        {
+            // Scope the file handle so it's closed (drop) BEFORE exec.
+            // ETXTBSY can otherwise fire if the kernel still has the
+            // file open for writing when we try to execve it.
+            let mut f = std::fs::File::create(&p).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn fresh_dir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "zsbx-real-chrem-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// pause + snapshot succeed when the fake script exits 0 and
+    /// writes the three artifact files. Snapshot path is
+    /// `file://<dest_dir>` per CH's CLI.
+    #[test]
+    fn pause_and_snapshot_succeed_with_zero_exit() {
+        let dir = fresh_dir();
+        // Fake ch-remote: parses `pause` (exit 0) and `snapshot
+        // file://<dest>` (extracts the dir, writes the three files).
+        let body = r#"#!/usr/bin/env bash
+set -eu
+sub=""
+dest=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --api-socket) shift; shift ;;
+    pause) sub="pause"; shift ;;
+    snapshot) sub="snapshot"; shift; dest="${1#file://}"; shift ;;
+    --version) echo "v51.1"; exit 0 ;;
+    *) shift ;;
+  esac
+done
+case "$sub" in
+  pause) exit 0 ;;
+  snapshot)
+    mkdir -p "$dest"
+    echo "fake-config" > "$dest/config.json"
+    echo "fake-mem"    > "$dest/memory-ranges"
+    echo "fake-state"  > "$dest/state.json"
+    exit 0 ;;
+  *) echo "unknown sub" >&2; exit 2 ;;
+esac
+"#;
+        let bin = write_script(&dir, "ch-remote", body);
+        let client = RealChRemoteClient::with_binary(bin, "v51.1".to_string());
+        let api_sock = dir.join("ch.sock");
+        // pause
+        client.pause(&api_sock).expect("pause must succeed");
+        // snapshot — dir is created by the fake script
+        let dest = dir.join("snap-out");
+        client.snapshot(&api_sock, &dest).expect("snapshot must succeed");
+        for &name in crate::snapshot_store::ARTIFACT_FILES {
+            assert!(dest.join(name).is_file(), "{name} must exist after snapshot");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Non-zero exit surfaces stderr in the error string. Operators
+    /// trying to triage a failed snapshot need to see what
+    /// `ch-remote` wrote to stderr.
+    #[test]
+    fn nonzero_exit_surfaces_stderr() {
+        let dir = fresh_dir();
+        let body = r#"#!/usr/bin/env bash
+echo "ch-remote: api-socket connect refused" >&2
+exit 1
+"#;
+        let bin = write_script(&dir, "ch-remote-fail", body);
+        let client = RealChRemoteClient::with_binary(bin, "v51.1".to_string());
+        let err = client
+            .pause(&dir.join("ch.sock"))
+            .expect_err("non-zero exit must error");
+        assert!(
+            err.contains("connect refused"),
+            "stderr must surface in error; got {err}"
+        );
+        assert!(err.contains("exit"), "error must mention exit code; got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hung child gets killed past the timeout; error mentions
+    /// "timed out". We use a 1-second budget here (production budget
+    /// is 30 s) so the test runs quickly.
+    #[test]
+    fn timeout_kills_hung_child() {
+        let dir = fresh_dir();
+        // Sleeps forever; the timeout path must SIGKILL it.
+        let body = r#"#!/usr/bin/env bash
+sleep 60
+"#;
+        let bin = write_script(&dir, "ch-remote-hang", body);
+        let api_sock = dir.join("ch.sock");
+        let started = std::time::Instant::now();
+        let err = run_with_timeout(
+            &bin,
+            &[
+                std::ffi::OsStr::new("--api-socket"),
+                api_sock.as_os_str(),
+                std::ffi::OsStr::new("pause"),
+            ],
+            std::time::Duration::from_secs(1),
+        )
+        .expect_err("hung child must time out");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "timeout must fire near the budget, took {elapsed:?}"
+        );
+        assert!(err.contains("timed out"), "error must mention timeout; got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // Silence the unused-import warning when no test-only Arc usage lands.
