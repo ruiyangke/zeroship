@@ -69,18 +69,12 @@ fn evaluate<'s>(
     // throw-on-call stubs so npm packages that probe the surface (e.g.
     // tracing libraries asking for `executionAsyncId`) get a clear
     // error rather than `undefined is not a function`.
+    //
+    // Task #169: `run(store, fn, ...args)` is now wired via the macro
+    // (variadic param support shipped in the same task). No manual
+    // proto.set step here — `AsyncLocalStorage::install` does it all.
     let als_tmpl = als::AsyncLocalStorage::install(scope);
     let als_fn = als_tmpl.get_function(scope).unwrap();
-    {
-        // Same prototype patching as the old `install_on` — `run` is
-        // hand-rolled because the macro can't express variadic args.
-        let proto_key = v8::String::new(scope, "prototype").unwrap();
-        let proto_v = als_fn.get(scope, proto_key.into()).unwrap();
-        let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
-        let run_fn = v8::Function::new(scope, als::run_callback).unwrap();
-        let run_key = v8::String::new(scope, "run").unwrap();
-        proto.set(scope, run_key.into(), run_fn.into());
-    }
 
     set_export(scope, module, "AsyncLocalStorage", als_fn.into());
 
