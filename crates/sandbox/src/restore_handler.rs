@@ -33,10 +33,12 @@
 //! tests can drive the flow with a mock backend.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
+use crate::config::NomadCHConfig;
 use crate::db::{Database, DatabaseError, SandboxStatus};
 use crate::snapshot_store::SnapshotStore;
 
@@ -631,6 +633,586 @@ mod unit_tests {
             format!("/opt/nomad/data/alloc/{new_alloc}/serial.log")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// `RealRestoreBackend` — production impl mirroring nomad_ch's
+// create-side path (submit job, poll alloc-running, poll livez)
+// with two key differences:
+//
+//   1. ZSBX_RESTORE_FROM=<alloc_dir> set in the spawned task's env
+//      so the wrapper's PR 3f branch invokes
+//      `cloud-hypervisor --restore source_url=file://<alloc_dir>`.
+//   2. The vm_index is forced to the source slot (from the snapshot
+//      row); cluster-fallback is documented but not implemented in
+//      v1. A reserve() collision surfaces as 503
+//      `vm_index_unavailable`.
+//
+// The trait's methods are sync. Each method uses the blocking ureq
+// client directly; the handler invokes them from an async task and
+// will block its compio worker for the duration. This is acceptable
+// because (a) restore is a one-shot, infrequent op (not on the hot
+// path) and (b) the wall time is dominated by CH boot + agent
+// readiness — same shape as the existing nomad_ch create flow that
+// already runs blocking-ish in spawn_blocking.
+// ────────────────────────────────────────────────────────────────────
+
+use std::collections::BTreeSet;
+
+/// Minimal vm_index tracker used by the restore backend. Independent
+/// of `NomadCHBackend::vm_index_allocator` because the restore path
+/// runs ahead of any controller-managed registry — the in-memory
+/// state for the restored alloc lives only in the restore-flow
+/// scratch (alloc dir + Nomad job).  Production wiring shares the
+/// allocator with `NomadCHBackend` via `Arc<Mutex<_>>` so a v2
+/// cross-backend create cannot collide with an in-flight restore.
+#[derive(Debug, Default)]
+pub struct VmIndexReservations {
+    reserved: BTreeSet<i16>,
+}
+
+impl VmIndexReservations {
+    pub fn new() -> Self {
+        Self {
+            reserved: BTreeSet::new(),
+        }
+    }
+
+    /// Returns Err if `vm_index` is already reserved.
+    pub fn reserve(&mut self, vm_index: i16) -> Result<(), String> {
+        if !self.reserved.insert(vm_index) {
+            return Err(format!("vm_index {vm_index} already reserved"));
+        }
+        Ok(())
+    }
+
+    pub fn release(&mut self, vm_index: i16) {
+        self.reserved.remove(&vm_index);
+    }
+}
+
+/// Production restore backend. Submits a Nomad job that mirrors the
+/// shape of `NomadCHBackend::create`'s, with `ZSBX_RESTORE_FROM` set.
+pub struct RealRestoreBackend {
+    cfg: NomadCHConfig,
+    /// Wall-time budget for the spawned alloc to reach
+    /// `ClientStatus="running"` (mirrors `cfg.alloc_running_timeout_secs`).
+    alloc_running_timeout: Duration,
+    /// Wall-time budget for `/livez` to return 200 once the alloc is
+    /// running. Mirrors `cfg.agent_livez_timeout_secs`. v1 polls
+    /// unsigned /livez only — the signed /version fingerprint check
+    /// requires plumbing the per-sandbox signing key out of the
+    /// sealed record, which is a follow-up PR.
+    agent_livez_timeout: Duration,
+    /// Process-local reservation map for the source vm_index. The v1
+    /// reserve path is "this worker, this slot, right now"; v2's
+    /// cross-cluster fallback would consult pg.
+    reservations: Arc<Mutex<VmIndexReservations>>,
+}
+
+impl std::fmt::Debug for RealRestoreBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealRestoreBackend")
+            .field("nomad_addr", &self.cfg.nomad_addr)
+            .field("datacenter", &self.cfg.datacenter)
+            .field("alloc_running_timeout", &self.alloc_running_timeout)
+            .field("agent_livez_timeout", &self.agent_livez_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RealRestoreBackend {
+    pub fn new(cfg: NomadCHConfig) -> Self {
+        let alloc_running_timeout =
+            Duration::from_secs(cfg.alloc_running_timeout_secs);
+        let agent_livez_timeout =
+            Duration::from_secs(cfg.agent_livez_timeout_secs);
+        Self {
+            cfg,
+            alloc_running_timeout,
+            agent_livez_timeout,
+            reservations: Arc::new(Mutex::new(VmIndexReservations::new())),
+        }
+    }
+}
+
+impl RestoreBackend for RealRestoreBackend {
+    fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String> {
+        self.reservations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .reserve(vm_index)
+    }
+
+    fn release_vm_index(&self, vm_index: i16) {
+        self.reservations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .release(vm_index);
+    }
+
+    fn restore_alloc_dir(&self, sandbox_id: Uuid) -> PathBuf {
+        // Stable across attempts so ZSBX_RESTORE_FROM is deterministic.
+        // <host_state_dir>/<sandbox-id>/restore/
+        self.cfg
+            .host_state_dir
+            .join(sandbox_id.simple().to_string())
+            .join("restore")
+    }
+
+    fn submit_restore_job(
+        &self,
+        sandbox_id: Uuid,
+        vm_index: i16,
+        alloc_dir: &Path,
+    ) -> Result<(), String> {
+        let job_id = format!("zsbx-restore-{}", sandbox_id.simple());
+        let job_json = build_restore_nomad_job_json(
+            &job_id,
+            &self.cfg,
+            vm_index as u16,
+            alloc_dir,
+            sandbox_id,
+        );
+        let body = serde_json::to_vec(&job_json)
+            .map_err(|e| format!("serialize Nomad job JSON: {e}"))?;
+        let url = format!("{}/v1/jobs", self.cfg.nomad_addr);
+        let resp = nomad_post_blocking(&url, &body, Duration::from_secs(15))?;
+        if resp.status != 200 {
+            return Err(format!(
+                "POST {url} → status {}: {}",
+                resp.status,
+                resp.body.trim()
+            ));
+        }
+        // Now poll until the alloc reaches running (or terminal).
+        wait_for_alloc_running_blocking(
+            &self.cfg.nomad_addr,
+            &job_id,
+            self.alloc_running_timeout,
+        )
+    }
+
+    fn wait_for_livez(
+        &self,
+        _sandbox_id: Uuid,
+        vm_index: i16,
+    ) -> Result<(), String> {
+        let agent_url = format!(
+            "http://10.{}.{}.2:7777",
+            self.cfg.subnet_second_octet,
+            100u16 + (vm_index as u16)
+        );
+        wait_for_livez_blocking(&agent_url, self.agent_livez_timeout)
+    }
+
+    fn teardown_restore(&self, sandbox_id: Uuid, vm_index: i16) {
+        let job_id = format!("zsbx-restore-{}", sandbox_id.simple());
+        // Best-effort DELETE; ignore errors. The orphan-prune sweep
+        // will mop up if Nomad is unreachable right now.
+        let url = format!("{}/v1/job/{}?purge=true", self.cfg.nomad_addr, job_id);
+        if let Err(e) = nomad_delete_blocking(&url, Duration::from_secs(10)) {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                vm_index,
+                error = %e,
+                "restore teardown: nomad DELETE failed (non-fatal)"
+            );
+        }
+        // Always release the vm_index regardless of teardown outcome.
+        self.release_vm_index(vm_index);
+    }
+}
+
+/// Build the Nomad job JSON for a restore alloc. Same shape as
+/// `build_nomad_job_json` in nomad_ch but with `ZSBX_RESTORE_FROM`
+/// set. We don't share the helper because the restore path doesn't
+/// have a `user_id`/`project_id` to plumb through Meta — those are
+/// already recorded on the source sandbox row in pg, the wrapper
+/// doesn't need them.
+fn build_restore_nomad_job_json(
+    job_id: &str,
+    cfg: &NomadCHConfig,
+    vm_index: u16,
+    alloc_dir: &Path,
+    sandbox_id: Uuid,
+) -> serde_json::Value {
+    serde_json::json!({
+        "Job": {
+            "ID": job_id,
+            "Name": job_id,
+            "Type": "service",
+            "Datacenters": [cfg.datacenter],
+            "Meta": {
+                "zeroship.sandbox": sandbox_id.to_string(),
+                "zeroship.vm_index": vm_index.to_string(),
+                "zeroship.kind": "restore",
+            },
+            "TaskGroups": [{
+                "Name": "vm",
+                "Count": 1,
+                "RestartPolicy": {
+                    "Attempts": 0,
+                    "Mode": "fail",
+                    "Interval": 30_000_000_000u64,
+                    "Delay":     5_000_000_000u64,
+                },
+                "ReschedulePolicy": {
+                    "Attempts": 0,
+                    "Unlimited": false,
+                },
+                "Tasks": [{
+                    "Name": "ch",
+                    "Driver": "raw_exec",
+                    "Config": {
+                        "command": cfg.wrapper_path.display().to_string(),
+                    },
+                    "Env": {
+                        "ZSBX_VM_INDEX": vm_index.to_string(),
+                        "ZSBX_ARTIFACT_DIR": cfg.runtime_dir.display().to_string(),
+                        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
+                        // The wrapper's PR 3f restore branch reads
+                        // this and switches to `cloud-hypervisor
+                        // --restore source_url=file://<dir>`.
+                        "ZSBX_RESTORE_FROM": alloc_dir.display().to_string(),
+                        "ZSBX_SUBNET_BASE_OCTET":
+                            cfg.subnet_second_octet.to_string(),
+                    },
+                    "Resources": {
+                        // Match nomad_ch.rs: CPU MHz advisory under
+                        // raw_exec + CH; memory comes from the
+                        // snapshot's saved config.
+                        "CPU": 500,
+                        "MemoryMB": 1024u32,
+                    },
+                    "KillTimeout": 10_000_000_000u64,
+                }],
+            }],
+        }
+    })
+}
+
+/// Sync HTTP response shape — mirrors `AgentResponse` in nomad_ch.
+struct BlockingResponse {
+    status: u16,
+    body: String,
+}
+
+fn nomad_post_blocking(
+    url: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<BlockingResponse, String> {
+    let req = ureq::post(url)
+        .timeout(timeout)
+        .set("content-type", "application/json");
+    send_ureq_blocking(req, body)
+}
+
+fn nomad_get_blocking(
+    url: &str,
+    timeout: Duration,
+) -> Result<BlockingResponse, String> {
+    let req = ureq::get(url).timeout(timeout);
+    send_ureq_blocking(req, &[])
+}
+
+fn nomad_delete_blocking(
+    url: &str,
+    timeout: Duration,
+) -> Result<BlockingResponse, String> {
+    let req = ureq::delete(url).timeout(timeout);
+    send_ureq_blocking(req, &[])
+}
+
+fn send_ureq_blocking(
+    req: ureq::Request,
+    body: &[u8],
+) -> Result<BlockingResponse, String> {
+    use std::io::Read;
+    let send = if body.is_empty() {
+        req.call()
+    } else {
+        req.send_bytes(body)
+    };
+    match send {
+        Ok(resp) => {
+            let status = resp.status();
+            let mut bytes = Vec::new();
+            let _ = resp.into_reader().take(8 * 1024 * 1024).read_to_end(&mut bytes);
+            Ok(BlockingResponse {
+                status,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let mut bytes = Vec::new();
+            let _ = resp.into_reader().take(8 * 1024).read_to_end(&mut bytes);
+            Ok(BlockingResponse {
+                status: code,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            })
+        }
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// Sync version of `wait_for_alloc_running` (nomad_ch.rs) — polls
+/// the job's allocations every 250 ms until at least one reaches
+/// `ClientStatus="running"`, or terminal (failed/lost) → Err, or the
+/// deadline expires.
+fn wait_for_alloc_running_blocking(
+    nomad_addr: &str,
+    job_id: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let url = format!("{nomad_addr}/v1/job/{job_id}/allocations");
+    let mut last_status: Option<String> = None;
+    let mut last_err: Option<String> = None;
+    while Instant::now() < deadline {
+        match nomad_get_blocking(&url, Duration::from_secs(5)) {
+            Ok(r) if r.status == 200 => {
+                let allocs: Result<serde_json::Value, _> =
+                    serde_json::from_str(&r.body);
+                match allocs {
+                    Ok(allocs) => {
+                        for a in allocs.as_array().into_iter().flatten() {
+                            let cs = a["ClientStatus"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string();
+                            if cs == "running" {
+                                return Ok(());
+                            }
+                            if cs == "failed" || cs == "lost" {
+                                let desc = a["ClientDescription"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string();
+                                return Err(format!(
+                                    "nomad alloc terminal status={cs}: {desc}"
+                                ));
+                            }
+                            last_status = Some(cs);
+                        }
+                    }
+                    Err(e) => {
+                        last_err = Some(format!("parse allocs: {e}"));
+                    }
+                }
+            }
+            Ok(r) => {
+                last_err = Some(format!("status {} body={}", r.status, r.body.trim()));
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let mut msg = format!(
+        "restore: nomad alloc never reached running for {job_id} (last status={:?})",
+        last_status.unwrap_or_else(|| "<no allocs>".to_string())
+    );
+    if let Some(e) = last_err {
+        msg.push_str(&format!(" last_err={e}"));
+    }
+    Err(msg)
+}
+
+/// Sync version of `wait_for_agent_livez` — polls just the unsigned
+/// `/livez` until 200, or the deadline. v1 skips the signed /version
+/// fingerprint check; that requires plumbing the per-sandbox signing
+/// key out of the sealed record (follow-up PR). For v1 the absence
+/// of the fp check is acceptable because the restore path forces the
+/// source vm_index — there's no "stale tenant" because the prior
+/// alloc already terminated as part of the snapshot's destructive
+/// teardown.
+fn wait_for_livez_blocking(
+    base_url: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let url = format!("{base_url}/livez");
+    let mut last: Option<String> = None;
+    while Instant::now() < deadline {
+        match nomad_get_blocking(&url, Duration::from_millis(500)) {
+            Ok(r) if r.status == 200 => return Ok(()),
+            Ok(r) => last = Some(format!("status {}", r.status)),
+            Err(e) => last = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    Err(format!(
+        "restore: agent at {base_url} never returned 200 on /livez (last={})",
+        last.unwrap_or_else(|| "<no responses>".into())
+    ))
+}
+
+#[cfg(test)]
+mod real_backend_tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicU32, Ordering as AOrdering};
+    use std::thread;
+
+    fn fresh_dir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "zsbx-restore-real-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn base_cfg(nomad_addr: String, host_state: PathBuf) -> NomadCHConfig {
+        NomadCHConfig {
+            nomad_addr,
+            datacenter: "dc1".into(),
+            wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
+            runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
+            host_state_dir: host_state,
+            user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+            vm_index_floor: 1,
+            vm_index_ceil: 155,
+            alloc_running_timeout_secs: 1,
+            agent_livez_timeout_secs: 1,
+            host_fence_timeout_secs: 30,
+            startup_orphan_cleanup: false,
+            subnet_second_octet: 99,
+        }
+    }
+
+    /// Tiny synchronous HTTP server thread for tests. Accepts one
+    /// connection at a time; serves a fixed `(status, body)` pair.
+    /// The handler is a closure that returns `(status, body, kind)`
+    /// per request so we can vary responses across calls.
+    fn spawn_fake_nomad<F>(handler: F) -> (String, Arc<AtomicU32>)
+    where
+        F: Fn(u32) -> (u16, String) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicU32::new(0));
+        let c2 = counter.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut s = match stream {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let n = c2.fetch_add(1, AOrdering::SeqCst);
+                let (status, body) = handler(n);
+                use std::io::{Read, Write};
+                // Drain request — at least one chunk; ureq sends
+                // headers + maybe body. We don't actually parse.
+                let mut buf = [0u8; 8192];
+                let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                let _ = s.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(response.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        (format!("http://{addr}"), counter)
+    }
+
+    /// Submit + alloc-running succeeds when Nomad returns 200 then a
+    /// running alloc.
+    #[test]
+    fn submit_restore_job_succeeds_when_nomad_returns_running() {
+        let host_state = fresh_dir();
+        let (nomad_addr, calls) = spawn_fake_nomad(move |n| match n {
+            0 => (200, "{}".to_string()),
+            _ => (
+                200,
+                r#"[{"ClientStatus":"running","ClientDescription":"ok"}]"#.to_string(),
+            ),
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+
+        backend
+            .submit_restore_job(sid, 7, &alloc_dir)
+            .expect("submit_restore_job must succeed");
+        assert!(
+            calls.load(AOrdering::SeqCst) >= 2,
+            "expected at least submit + 1 poll; got {}",
+            calls.load(AOrdering::SeqCst)
+        );
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// 500 on POST surfaces as a recoverable error (the handler will
+    /// CAS restoring → snapshotted).
+    #[test]
+    fn submit_restore_job_errors_when_nomad_500s() {
+        let host_state = fresh_dir();
+        let (nomad_addr, _) = spawn_fake_nomad(|_| {
+            (500, r#"{"error":"nomad: backend down"}"#.to_string())
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+
+        let err = backend
+            .submit_restore_job(sid, 8, &alloc_dir)
+            .expect_err("500 must error");
+        assert!(err.contains("status 500"), "{err}");
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// reserve_vm_index returns Err on collision (simulates v1's
+    /// "no cluster fallback" surface).
+    #[test]
+    fn reserve_vm_index_collides() {
+        let cfg = base_cfg("http://127.0.0.1:1".into(), fresh_dir());
+        let backend = RealRestoreBackend::new(cfg);
+        backend.reserve_vm_index(42).expect("first must succeed");
+        let err = backend.reserve_vm_index(42).expect_err("collision");
+        assert!(err.contains("already reserved"), "{err}");
+        backend.release_vm_index(42);
+        backend.reserve_vm_index(42).expect("post-release must succeed");
+    }
+
+    /// Alloc-never-running times out and the error mentions the job
+    /// id + last status. Uses a 1-second cfg budget (set in
+    /// `base_cfg`).
+    #[test]
+    fn submit_restore_job_times_out_when_alloc_never_running() {
+        let host_state = fresh_dir();
+        let (nomad_addr, _) = spawn_fake_nomad(|n| match n {
+            0 => (200, "{}".to_string()), // POST OK
+            _ => (
+                200,
+                r#"[{"ClientStatus":"pending","ClientDescription":"queued"}]"#.to_string(),
+            ),
+        });
+        let cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(cfg);
+        let sid = Uuid::now_v7();
+        let alloc_dir = backend.restore_alloc_dir(sid);
+        std::fs::create_dir_all(&alloc_dir).unwrap();
+
+        let err = backend
+            .submit_restore_job(sid, 9, &alloc_dir)
+            .expect_err("never-running must time out");
+        assert!(
+            err.contains("never reached running"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&host_state);
     }
 }
 
