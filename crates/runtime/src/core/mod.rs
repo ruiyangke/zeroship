@@ -8,6 +8,7 @@ pub mod channel;
 pub mod dispatch;
 pub mod init;
 pub mod modules;
+pub mod native_modules;
 pub mod node_error;
 pub(crate) mod panic_util;
 pub mod plugin;

@@ -6,7 +6,7 @@
 import * as vite from "vite";
 import type { WebSocket } from "ws";
 import type { FetchFunctionOptions } from "vite/module-runner";
-import { getNodeCompatId, getCustomPolyfillCode } from "./node-compat.js";
+import { getNodeCompatId, getCustomPolyfillCode, isRuntimeNative } from "./node-compat.js";
 
 const MAX_WS_BUFFER = 1000;
 
@@ -197,6 +197,20 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
     const isNodeish = id.startsWith("node:") || /^(crypto|buffer|path|util|events|stream|os|url|http|https|fs|assert|process|async_hooks|timers|string_decoder|querystring|punycode|net|tls|dns|zlib|worker_threads|diagnostics_channel|perf_hooks|module)(\/.+)?$/.test(id);
 
     if (isNodeish) {
+      // Runtime-native specifiers (`node:async_hooks`, `node:crypto`)
+      // are owned by the V8 runtime's SyntheticModule loader. In dev,
+      // ModuleRunner can't issue native imports — bridge through the
+      // runtime-installed `__zeroshipNodeBuiltin` helper that returns
+      // the same namespace object the synthetic module exposes.
+      if (isRuntimeNative(id)) {
+        const code = `
+const m = globalThis.__zeroshipNodeBuiltin && globalThis.__zeroshipNodeBuiltin(${JSON.stringify(id)});
+if (!m) throw new Error(${JSON.stringify(`${id}: runtime native module helper missing`)});
+Object.assign(__vite_ssr_exports__, m, { default: m.default ?? m });
+`;
+        return { id, url: id, code, file: id } as vite.FetchResult;
+      }
+
       const compatId = getNodeCompatId(id);
       if (compatId) {
         // Custom polyfill (e.g. crypto) → return code directly

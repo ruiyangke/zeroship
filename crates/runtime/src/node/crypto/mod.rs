@@ -18,12 +18,16 @@
 //!   follow-up using the macro's `#[v8_async_method]` shape).
 //! - `misc` — `timingSafeEqual`, `getHashes`, `getCiphers` (stub),
 //!   `getCurves` (stub), `getFips`, `setFips`.
-//! - `module` — synthetic `node:crypto` ESM module installer; binds
-//!   `globalThis.__zeroship_node_crypto.{...}`.
+//! - `module` — synthetic `node:crypto` ESM module: V8
+//!   `SyntheticModule` whose exports are populated lazily on import.
 //!
-//! The single Rust↔JS boundary object is `globalThis.__zeroship_node_crypto`
-//! — the Vite-side synthetic module re-exports each named slot from
-//! it. Per D-N26.
+//! User code imports the module directly:
+//!
+//! ```js
+//! import { createHash, randomUUID } from "node:crypto";
+//! ```
+//!
+//! Resolved by `core::native_modules::resolve_native`. Per D-N26.
 
 pub mod buffer;
 pub mod encoding;
@@ -40,4 +44,4 @@ pub mod cipher;
 pub mod keygen;
 pub mod pkcs8_enc;
 
-pub use module::install_globals;
+pub use module::{populate, synthetic_module};

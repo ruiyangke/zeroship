@@ -355,30 +355,6 @@ pub(crate) fn run_callback(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Install the run() method on the AsyncLocalStorage prototype
-// ---------------------------------------------------------------------------
-
-/// Install `AsyncLocalStorage` as a constructor function on `target`
-/// under the name `name`. Also installs the hand-rolled `run` method
-/// on the prototype (the macro doesn't support varargs, so `run` lives
-/// outside the `#[v8_class]` impl block).
-pub fn install_on<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    target: v8::Local<v8::Object>,
-    name: &str,
-) {
-    let tmpl = AsyncLocalStorage::install(scope);
-    let class_fn = tmpl.get_function(scope).unwrap();
-
-    // Install run() on the prototype.
-    let proto_key = v8::String::new(scope, "prototype").unwrap();
-    let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    let proto: v8::Local<v8::Object> = proto_v.try_into().unwrap();
-    let run_fn = v8::Function::new(scope, run_callback).unwrap();
-    let run_key = v8::String::new(scope, "run").unwrap();
-    proto.set(scope, run_key.into(), run_fn.into());
-
-    let key = v8::String::new(scope, name).unwrap();
-    target.set(scope, key.into(), class_fn.into());
-}
+// `run()` is exported via the synthetic `node:async_hooks` module; the
+// proto wiring lives in `mod.rs::evaluate`. The hand-rolled callback
+// stays here because it owns the slot snapshot/restore contract.

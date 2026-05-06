@@ -63,160 +63,29 @@ const unenvInject: Record<string, string | readonly string[] | false> = {
 
 const CUSTOM_PREFIX = "\0zeroship-node:";
 
+/**
+ * Specifiers the V8 runtime resolves itself (native synthetic modules
+ * registered in `crates/runtime/src/core/native_modules.rs`). The
+ * vite-plugin must NOT polyfill or rewrite these — the bundler keeps
+ * the bare `import { X } from "node:foo"` and the runtime's module
+ * loader produces a SyntheticModule with the real exports.
+ */
+const RUNTIME_NATIVE_MODULES = new Set([
+  "node:async_hooks",
+  "node:crypto",
+]);
+
 /** Custom polyfill code for modules unenv doesn't implement well for V8. */
 const customPolyfills: Record<string, string> = {
-  // node:crypto — Stage B native implementation. Per
-  // docs/proposals/node-crypto-native.md §XI (D-N26). The Rust runtime
-  // installs globalThis.__zeroship_node_crypto with createHash, createHmac,
-  // random helpers, KDFs, timingSafeEqual, getHashes, the WebCrypto bridge,
-  // etc. This shim re-exports each property as a named ESM export and wraps
-  // Hash.update / Hmac.update with a thin closure that supplies `return this`
-  // so npm packages can chain `.update(x).update(y).digest()`.
-  //
-  // Stage C will land KeyObject + Sign / Verify + Cipher / Decipher + the
-  // create*Key factories (currently absent — packages that need them will
-  // fall back to npm-package alternatives or fail with a clear error).
-  "node:crypto": `
-const N = globalThis.__zeroship_node_crypto;
-if (!N) throw new Error("node:crypto: native install missing — runtime not initialised");
-
-// Wrap Hash / Hmac so update() returns this (the native method returns
-// undefined; chainability is supplied here per design §V.2 wrapper note).
-function _wrapStreamingHash(h) {
-  const origUpdate = h.update.bind(h);
-  h.update = function(data, enc) { origUpdate(data, enc); return h; };
-  return h;
-}
-
-function createHash(algorithm, options) {
-  return _wrapStreamingHash(N.createHash(algorithm, options));
-}
-function createHmac(algorithm, key, options) {
-  return _wrapStreamingHash(N.createHmac(algorithm, key, options));
-}
-
-// Stage B exports — direct re-exports.
-const randomBytes = N.randomBytes;
-const randomFillSync = N.randomFillSync;
-const randomFill = N.randomFill;
-const randomInt = N.randomInt;
-const randomUUID = N.randomUUID;
-const getRandomValues = N.getRandomValues;
-const pbkdf2 = N.pbkdf2;
-const pbkdf2Sync = N.pbkdf2Sync;
-const hkdf = N.hkdf;
-const hkdfSync = N.hkdfSync;
-const scrypt = N.scrypt;
-const scryptSync = N.scryptSync;
-const timingSafeEqual = N.timingSafeEqual;
-const getHashes = N.getHashes;
-const getCiphers = N.getCiphers;
-const getCurves = N.getCurves;
-const getFips = N.getFips;
-const setFips = N.setFips;
-const secureHeapUsed = N.secureHeapUsed;
-const webcrypto = N.webcrypto;
-const subtle = N.subtle;
-const fips = N.fips;
-const constants = N.constants;
-
-// Stage C placeholders — throw a clear error directing creators to file
-// an issue if they need cipher / sign / KeyObject (rare in Stage B's
-// target package set).
-function _stageC(name) {
-  return function() {
-    const err = new Error(name + " is not yet implemented (Stage C of node:crypto)");
-    err.code = "ERR_CRYPTO_UNSUPPORTED_OPERATION";
-    throw err;
-  };
-}
-const createCipher = _stageC("crypto.createCipher");
-const createCipheriv = _stageC("crypto.createCipheriv");
-const createDecipheriv = _stageC("crypto.createDecipheriv");
-const createSign = _stageC("crypto.createSign");
-const createVerify = _stageC("crypto.createVerify");
-const createSecretKey = _stageC("crypto.createSecretKey");
-const createPublicKey = _stageC("crypto.createPublicKey");
-const createPrivateKey = _stageC("crypto.createPrivateKey");
-const createDiffieHellman = _stageC("crypto.createDiffieHellman");
-const createECDH = _stageC("crypto.createECDH");
-const generateKeyPair = _stageC("crypto.generateKeyPair");
-const generateKeyPairSync = _stageC("crypto.generateKeyPairSync");
-const generateKey = _stageC("crypto.generateKey");
-const generateKeySync = _stageC("crypto.generateKeySync");
-const sign = _stageC("crypto.sign");
-const verify = _stageC("crypto.verify");
-const publicEncrypt = _stageC("crypto.publicEncrypt");
-const privateDecrypt = _stageC("crypto.privateDecrypt");
-const diffieHellman = _stageC("crypto.diffieHellman");
-
-const _default = {
-  createHash, createHmac,
-  randomBytes, randomFillSync, randomFill, randomInt, randomUUID, getRandomValues,
-  pbkdf2, pbkdf2Sync, hkdf, hkdfSync, scrypt, scryptSync,
-  timingSafeEqual, getHashes, getCiphers, getCurves, getFips, setFips, secureHeapUsed,
-  webcrypto, subtle, fips, constants,
-  // Stage C placeholders
-  createCipher, createCipheriv, createDecipheriv,
-  createSign, createVerify,
-  createSecretKey, createPublicKey, createPrivateKey,
-  createDiffieHellman, createECDH,
-  generateKeyPair, generateKeyPairSync, generateKey, generateKeySync,
-  sign, verify, publicEncrypt, privateDecrypt, diffieHellman,
-};
-
-Object.assign(__vite_ssr_exports__, _default, { default: _default });
-`,
-
-  // node:async_hooks — native AsyncLocalStorage (ISS-01). The Rust
-  // runtime installs `globalThis.__zsAsyncHooks` with a real
-  // AsyncLocalStorage class backed by V8's
-  // `ContinuationPreservedEmbedderData` slot — the only way to
-  // preserve a store across awaits, including continuations resumed
-  // from native Rust async work like `fetch`. unenv's polyfill is
-  // closure-based and reverts the store synchronously, so anything
-  // that awaits inside `als.run(value, fn)` (e.g. LangGraph nodes
-  // calling `interrupt()` after `await model.invoke()`) loses the
-  // store. We replace the unenv shim outright.
-  //
-  // Surface: `AsyncLocalStorage` is the only class real apps use.
-  // `AsyncResource`, `createHook`, `executionAsyncId`,
-  // `triggerAsyncId` — all stubs that throw "Not implemented" so
-  // silent breakage doesn't slip through (Node ships them all).
-  "node:async_hooks": `
-const N = globalThis.__zsAsyncHooks;
-if (!N || !N.AsyncLocalStorage) {
-  throw new Error("node:async_hooks: native install missing — runtime not initialised");
-}
-const AsyncLocalStorage = N.AsyncLocalStorage;
-
-function _notImplemented(name) {
-  return function() {
-    const err = new Error(name + " is not implemented in zeroship's V8 runtime");
-    err.code = "ERR_METHOD_NOT_IMPLEMENTED";
-    throw err;
-  };
-}
-class AsyncResource {
-  constructor() { _notImplemented("AsyncResource")(); }
-}
-const executionAsyncId = _notImplemented("executionAsyncId");
-const triggerAsyncId = _notImplemented("triggerAsyncId");
-const executionAsyncResource = _notImplemented("executionAsyncResource");
-const createHook = _notImplemented("createHook");
-const asyncWrapProviders = {};
-
-const _default = {
-  AsyncLocalStorage,
-  AsyncResource,
-  createHook,
-  executionAsyncId,
-  triggerAsyncId,
-  executionAsyncResource,
-  asyncWrapProviders,
-};
-Object.assign(__vite_ssr_exports__, _default, { default: _default });
-`,
+  // node:crypto and node:async_hooks are now resolved as native V8
+  // SyntheticModules by the runtime itself (see
+  // crates/runtime/src/core/native_modules.rs). The vite plugin used
+  // to ship a virtual module that re-exported `globalThis.__zsAsyncHooks`
+  // / `globalThis.__zeroship_node_crypto`; the runtime owns those
+  // specifiers directly now, so the shim entries are gone — the
+  // resolver below falls through `getNodeCompatId` returning null,
+  // and Vite forwards the bare `node:*` import to the runtime
+  // unmodified.
 
   // node:timers/promises — unenv's setInterval is a Promise, not an async
   // generator. The latter is what `for await` consumers (tRPC, langchain
@@ -321,12 +190,20 @@ Object.assign(__vite_ssr_exports__, _exports);
  * Given a `node:*` specifier, return the rewritten module ID for Vite to
  * resolve. Custom overrides win; unenv@2 aliases handle the rest.
  *
+ * - Runtime-native (e.g. `node:async_hooks`) → null + caller marks
+ *   external so the bare specifier survives into the bundle and the V8
+ *   runtime resolves it itself.
  * - Custom modules → virtual ID (CUSTOM_PREFIX + specifier)
  * - unenv modules  → unenv specifier (e.g. `unenv/node/buffer`)
  * - Unknown        → null (let Vite handle it)
  */
 export function getNodeCompatId(specifier: string): string | null {
   const normalized = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
+
+  // Runtime-native: don't rewrite. Caller (resolveId / fetchModule)
+  // checks `isRuntimeNative` separately to decide whether to mark
+  // external or pass through.
+  if (RUNTIME_NATIVE_MODULES.has(normalized)) return null;
 
   // Custom overrides first.
   if (normalized in customPolyfills) return CUSTOM_PREFIX + normalized;
@@ -336,6 +213,12 @@ export function getNodeCompatId(specifier: string): string | null {
   if (unenvId) return unenvId;
 
   return null;
+}
+
+/** True if the V8 runtime owns this specifier (synthetic module). */
+export function isRuntimeNative(specifier: string): boolean {
+  const normalized = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
+  return RUNTIME_NATIVE_MODULES.has(normalized);
 }
 
 /** Source code for a custom polyfill virtual module, or null. */
@@ -381,6 +264,11 @@ export function nodeCompatPlugin(): Plugin {
       // doesn't get polyfilled into the browser asset.
       const envName = (this as any).environment?.name;
       if (envName === "client") return null;
+
+      // Runtime-native specifier: keep the bare import in the bundle
+      // so the V8 runtime's module loader sees it and resolves it via
+      // SyntheticModule.
+      if (isRuntimeNative(id)) return { id, external: true };
 
       // Bare `unenv/*` specifiers — emitted by @rollup/plugin-inject
       // for inject targets like `process` → `unenv/node/process`. The

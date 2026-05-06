@@ -13,6 +13,15 @@ use zeroship_runtime::{crypto_native, crypto_node, dom, init_v8};
 /// Run a JS snippet in a fresh V8 context with DOMException + native
 /// crypto + node:crypto installed. Returns the script's last
 /// expression value.
+///
+/// Pre-D-N26 this called `crypto_node::install_globals(scope, global)`
+/// which mounted the surface at `globalThis.__zeroship_node_crypto`.
+/// Post-migration the surface is the export object of the
+/// `node:crypto` SyntheticModule. These tests run raw `script.run`,
+/// not the module loader, so we mint the same boundary object
+/// directly via `populate()` and stash it under the legacy name —
+/// keeps the 97 existing assertions readable; the production path
+/// goes through the synthetic module instead.
 fn run_js<F, R>(src: &str, f: F) -> R
 where
     F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
@@ -26,9 +35,12 @@ where
     let global = scope.get_current_context().global(scope);
     dom::exception::install_global(scope, global);
     crypto_native::install_globals(scope, global);
-    // node:crypto must install AFTER WebCrypto so the bridge to
+    // node:crypto must populate AFTER WebCrypto so the bridge to
     // globalThis.crypto is wired.
-    crypto_node::install_globals(scope, global);
+    let ns = v8::Object::new(scope);
+    crypto_node::populate(scope, ns);
+    let key = v8::String::new(scope, "__zeroship_node_crypto").unwrap();
+    global.set(scope, key.into(), ns.into());
 
     let src_v8 = v8::String::new(scope, src).unwrap();
     let script = v8::Script::compile(scope, src_v8, None).unwrap();

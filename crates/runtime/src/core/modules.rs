@@ -134,6 +134,22 @@ pub fn load_modules(
                 ).unwrap();
                 let import_specifier = request.get_specifier().to_rust_string_lossy(scope);
 
+                // Native synthetic module (e.g. `node:async_hooks`) — minted
+                // here so the resolve callback finds it pre-instantiation.
+                // Synthetic modules have no imports, so we don't queue
+                // them for further discovery.
+                if super::native_modules::is_native(&import_specifier) {
+                    if !registry.borrow().compiled.contains_key(&import_specifier) {
+                        let m = super::native_modules::resolve_native(scope, &import_specifier)
+                            .expect("is_native true but resolve_native returned None");
+                        registry
+                            .borrow_mut()
+                            .compiled
+                            .insert(import_specifier.clone(), v8::Global::new(scope, m));
+                    }
+                    continue;
+                }
+
                 // Resolve to actual source specifier
                 let resolved = match resolve_specifier(&import_specifier, &sources) {
                     Some(s) => s,
@@ -268,20 +284,32 @@ fn resolve_callback<'a>(
         .expect("ModuleRegistry not in slot")
         .clone();
 
-    let reg = registry.borrow();
+    {
+        let reg = registry.borrow();
 
-    // Try exact, then variants
-    let candidates = [
-        spec.clone(),
-        spec.strip_prefix("./").unwrap_or(&spec).to_string(),
-        format!("{spec}.js"),
-        format!("{}.js", spec.strip_prefix("./").unwrap_or(&spec)),
-    ];
+        // Try exact, then variants
+        let candidates = [
+            spec.clone(),
+            spec.strip_prefix("./").unwrap_or(&spec).to_string(),
+            format!("{spec}.js"),
+            format!("{}.js", spec.strip_prefix("./").unwrap_or(&spec)),
+        ];
 
-    for candidate in &candidates {
-        if let Some(module_global) = reg.compiled.get(candidate) {
-            return Some(v8::Local::new(scope, module_global));
+        for candidate in &candidates {
+            if let Some(module_global) = reg.compiled.get(candidate) {
+                return Some(v8::Local::new(scope, module_global));
+            }
         }
+    }
+
+    // Fallback for native modules — Phase 2 should have pre-registered
+    // these, but this guards against unusual entry shapes.
+    if let Some(m) = super::native_modules::resolve_native(scope, &spec) {
+        registry
+            .borrow_mut()
+            .compiled
+            .insert(spec.clone(), v8::Global::new(scope, m));
+        return Some(m);
     }
 
     tracing::error!(specifier = %spec, "module resolution failed");

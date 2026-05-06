@@ -9,11 +9,17 @@
 //! slot — V8 propagates the slot automatically across every async
 //! hop, so a `run(value, cb)` body that does `await something`
 //! sees the right value when the continuation resumes.
+//!
+//! Pre-D-N26 this drove the class via `globalThis.__zsAsyncHooks`.
+//! Post-migration the class is the export of a V8 SyntheticModule
+//! (`node:async_hooks`); this harness uses the `__zeroshipNodeBuiltin`
+//! bridge that the runtime installs for dev's ModuleRunner — same
+//! class object, same semantics, no V8 module-graph plumbing
+//! required for these unit tests.
 
 #![allow(unsafe_code)]
 
-use zeroship_runtime::init_v8;
-use zeroship_runtime::node::async_hooks;
+use zeroship_runtime::{init_v8, native_modules};
 
 fn run_in_v8<F, R>(src: &str, f: F) -> R
 where
@@ -26,14 +32,13 @@ where
     let scope = &mut v8::ContextScope::new(handle_scope, context);
 
     let global = scope.get_current_context().global(scope);
-    async_hooks::install_globals(scope, global);
+    native_modules::install_global_bridge(scope, global);
 
-    // Hoist `AsyncLocalStorage` from `__zsAsyncHooks` for ergonomic
-    // use in JS test snippets — same shape the Vite-side synthetic
-    // `node:async_hooks` re-export gives user code at runtime.
+    // Hoist `AsyncLocalStorage` for ergonomic JS test snippets — same
+    // class the synthetic `node:async_hooks` module exports.
     let bind = v8::String::new(
         scope,
-        "globalThis.AsyncLocalStorage = globalThis.__zsAsyncHooks.AsyncLocalStorage;",
+        r#"globalThis.AsyncLocalStorage = globalThis.__zeroshipNodeBuiltin("node:async_hooks").AsyncLocalStorage;"#,
     )
     .unwrap();
     let s = v8::Script::compile(scope, bind, None).unwrap();
