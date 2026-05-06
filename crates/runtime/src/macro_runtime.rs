@@ -212,3 +212,34 @@ pub trait V8ClassInstance: __private::Sealed {
     /// the class hasn't been installed.
     fn is_instance(scope: &mut ::v8::PinScope, value: ::v8::Local<::v8::Value>) -> bool;
 }
+
+// ----- register_native_classes! (#198) -----
+//
+// Declarative loop over `<Class>::register(scope, global)` for the
+// simple bind-only classes — collapses ~30 individual call sites in
+// `core::init::setup_globals` into a single class-list. Classes with
+// extras (DOMException's legacy code constants, RpcError's wire-string
+// codes, AbortSignal's `onabort` accessor pair, …) keep their hand-
+// written `install_global` and stay outside the list.
+//
+// The expansion is the obvious unrolled sequence — chosen over a
+// runtime-vec dispatch so the per-class register call inlines exactly
+// the same way the manual call did pre-#198 (no Vec, no fn-ptr).
+
+/// Register a list of `#[v8_class]`-annotated classes on `globalThis`
+/// in source order. Each class must expose a `register(scope, global)`
+/// associated fn — emitted automatically by the `#[v8_class]` macro.
+///
+/// ```ignore
+/// register_native_classes!(scope, global, [
+///     crate::web::dom::abort_controller::AbortController,
+///     crate::web::dom::event_target::EventTarget,
+///     // ...
+/// ]);
+/// ```
+#[macro_export]
+macro_rules! register_native_classes {
+    ($scope:expr, $global:expr, [ $($class:path),* $(,)? ]) => {{
+        $( <$class>::register($scope, $global); )*
+    }};
+}

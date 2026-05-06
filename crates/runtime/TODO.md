@@ -52,9 +52,14 @@ for diff stats.
 
 ## Smaller items
 
-- Per-class isolate-slot caching is per `__InstallSlot_X` types, but registration
+- ~~Per-class isolate-slot caching is per `__InstallSlot_X` types, but registration
   in `init.rs` happens via individual function calls. Could be unified via a
-  `register_native_class!` macro — minor.
+  `register_native_class!` macro — minor.~~ Done (#198): `#[v8_class]` now emits
+  `Class::register(scope, global)` alongside `Class::install`; simple bind-only
+  classes collapse onto `register_native_classes!` in `setup_globals` and the
+  per-module install helpers. Classes with extras (DOMException's legacy code
+  constants, RpcError's wire-string codes, AbortSignal's `onabort`, …) keep
+  their hand-written `install_global`.
 - `legacy_bridge.rs` (in `streams/`) is named misleadingly — still alive via
   `__zsBeginStreamForward`. Rename to `stream_bridge.rs` OR delete entirely if
   the Rust-only forwarder lands via fetch-js-delete.

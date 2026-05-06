@@ -178,6 +178,19 @@ impl EventTarget {
         scope.set_slot(__InstallSlot_EventTarget(global));
         local
     }
+
+    /// Macro-shape `register` (#198). Hand-rolled to match
+    /// `Self::install` above, so `register_native_classes!` can drive
+    /// EventTarget alongside its `#[v8_class]` siblings.
+    pub fn register<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        global: v8::Local<v8::Object>,
+    ) {
+        let tmpl = Self::install(scope);
+        let class_fn = tmpl.get_function(scope).unwrap();
+        let key = v8::String::new(scope, "EventTarget").unwrap();
+        global.set(scope, key.into(), class_fn.into());
+    }
 }
 
 // Hand-rolled constructor for `new EventTarget()`. Allocates the
@@ -609,23 +622,9 @@ pub fn remove_internal_listener(
     }
 }
 
-// ---------------------------------------------------------------------------
-// install_global — wire up EventTarget on globalThis
-// ---------------------------------------------------------------------------
-
-/// Install `globalThis.EventTarget`. The methods live on the
-/// FunctionTemplate's prototype_template (registered by `install`)
-/// so derived classes (AbortSignal via `#[v8_inherit(EventTarget)]`)
-/// inherit them.
-pub fn install_global<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<v8::Object>,
-) {
-    let tmpl = EventTarget::install(scope);
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, "EventTarget").unwrap();
-    global.set(scope, key.into(), class_fn.into());
-}
+// #198 — `install_global` removed; bind happens via the macro-emitted
+// `EventTarget::register` invoked from `dom::install_globals`'s
+// `register_native_classes!` list.
 
 // ---------------------------------------------------------------------------
 // Hand-rolled callbacks

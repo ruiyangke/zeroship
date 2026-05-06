@@ -60,15 +60,28 @@ pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
+    // #198 — simple classes (template + globalThis bind only) collapse
+    // onto the macro-emitted `register` fn. Classes that need extras
+    // stay on their `install_global` / `install_class` callsites:
+    //   - DOMException — Error-proto chain + legacy code constants;
+    //   - Event        — Event interface constants (NONE, AT_TARGET, …);
+    //   - MessageEvent /
+    //     CloseEvent   — state-marker name mismatch (global bound under
+    //                    the IDL name, `class_ty` is e.g. `MessageEventState`);
+    //   - AbortSignal  — `onabort` IDL accessor pair (defineProperty);
+    //   - FormData     — 4 hand-rolled scope-aware methods.
+    //
+    // Install order: EventTarget before AbortSignal (which inherits via
+    // `#[v8_inherit(EventTarget)]`); Event before CustomEvent /
+    // MessageEvent / CloseEvent (same reason).
     exception::install_global(scope, global);
-    event_target::install_global(scope, global);
+    crate::register_native_classes!(scope, global, [
+        event_target::EventTarget,
+    ]);
     install_class(scope, global, "Event", event::Event::install);
-    install_class(
-        scope,
-        global,
-        "CustomEvent",
-        custom_event::CustomEvent::install,
-    );
+    crate::register_native_classes!(scope, global, [
+        custom_event::CustomEvent,
+    ]);
     // MessageEvent / CloseEvent inherit Event via #[v8_inherit(Event)] —
     // installed AFTER Event for the same `__InstallSlot_Event`-cache
     // reason as CustomEvent.
@@ -85,7 +98,9 @@ pub fn install_globals<'s>(
         close_event::CloseEventState::install,
     );
     abort_signal::install_global(scope, global);
-    abort_controller::install_global(scope, global);
+    crate::register_native_classes!(scope, global, [
+        abort_controller::AbortController,
+    ]);
     form_data::install_global(scope, global);
 }
 

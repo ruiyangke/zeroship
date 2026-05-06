@@ -407,16 +407,9 @@ pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
 ) {
-    {
-        let tmpl = CompressionStream::install(scope);
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "CompressionStream").unwrap();
-        global.set(scope, key.into(), class_fn.into());
-    }
-    {
-        let tmpl = DecompressionStream::install(scope);
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "DecompressionStream").unwrap();
-        global.set(scope, key.into(), class_fn.into());
-    }
+    // #198 — bare template + globalThis bind for both classes.
+    crate::register_native_classes!(scope, global, [
+        CompressionStream,
+        DecompressionStream,
+    ]);
 }
