@@ -40,6 +40,7 @@
 
 import type { Plugin } from "vite";
 import type { TransformState } from "./transform.js";
+import type { ServerBinding } from "./server-graph.js";
 
 // ── Public IDs ─────────────────────────────────────────────────────────────
 
@@ -85,8 +86,18 @@ export function pickEntryWireId(p: {
  */
 export function buildServerEntrySource(opts: {
   userEntryRel: string;
+  /** Phase 2: explicit server-binding map. When provided, the
+   *  synthetic entry emits per-target imports and a static
+   *  `_procedures` object literal. Falls back to the namespace-walk
+   *  shape when omitted (Phase 1 compatibility). */
+  bindings?: Map<string, ServerBinding>;
 }): string {
   const userImport = JSON.stringify(opts.userEntryRel);
+
+  // Phase 2 — static dispatch table fed by walkClientEntry().
+  if (opts.bindings && opts.bindings.size > 0) {
+    return buildPhase2Entry(userImport, opts.bindings);
+  }
 
   return `// virtual:zeroship/_server-entry — auto-generated synthetic entry
 // Procedures are discovered at module-init time from the user module's
@@ -360,6 +371,286 @@ export default { fetch: _zsFetch, rpc: _zsRpc };
 `;
 }
 
+// ── Phase 2: server-binding-fed synthetic entry ───────────────────────────
+//
+// When the plugin has run the reference-graph walk it can hand the
+// generator a `ServerBinding` map keyed by `<sourceFile>::<exportName>`.
+// We emit one ESM import per target file (deduplicated) and a static
+// `_procedures` literal keyed by wireId. This matches the shape in
+// proposal §5.
+
+function buildPhase2Entry(
+  userImport: string,
+  bindings: Map<string, ServerBinding>,
+): string {
+  // Group bindings by source file so we emit ONE namespace import per
+  // target. The synthetic entry then references `<ns>.<exportName>`.
+  const byFile = new Map<string, ServerBinding[]>();
+  for (const b of bindings.values()) {
+    const arr = byFile.get(b.sourceFile);
+    if (arr) arr.push(b);
+    else byFile.set(b.sourceFile, [b]);
+  }
+
+  // Stable per-file alias — `_user_TARGET_<n>_`. Order keys for a
+  // deterministic emission order across builds.
+  const sortedFiles = [...byFile.keys()].sort();
+  const aliasOf = new Map<string, string>();
+  sortedFiles.forEach((file, idx) => aliasOf.set(file, `_user_TARGET_${idx}_`));
+
+  const importLines = sortedFiles
+    .map((file) => `import * as ${aliasOf.get(file)} from ${JSON.stringify(file)};`)
+    .join("\n");
+
+  const tableEntries: string[] = [];
+  for (const file of sortedFiles) {
+    for (const b of byFile.get(file)!) {
+      tableEntries.push(
+        `  ${JSON.stringify(b.wireId)}: ${aliasOf.get(file)}.${b.exportName},`,
+      );
+    }
+  }
+
+  return `// virtual:zeroship/_server-entry — auto-generated synthetic entry (Phase 2)
+//
+// The dispatch table is statically derived from the reference-graph
+// walk. Each entry maps a wireId to a per-target namespace member.
+// User code never reaches this module; the resolveId hook keeps it
+// behind a \\0-prefix.
+
+import * as _zsUser from ${userImport};
+${importLines}
+
+// TODO(rpc-v2): swap to \`__dispatchRpc\` from \`@zeroship/server/runtime\`
+// once the upstream stub ships. Until then, the inline _zsRpc helper
+// below preserves the Phase-1 dispatch shape (input parse, output
+// dev-validation, stream tagging).
+
+const _procedures = {
+${tableEntries.join("\n")}
+};
+
+const _userDefault = (_zsUser && _zsUser.default && typeof _zsUser.default === "object")
+  ? _zsUser.default : null;
+const _userFetch = _userDefault && typeof _userDefault.fetch === "function"
+  ? _userDefault.fetch : null;
+
+function _zsErrResponse(status, code, message, details) {
+  const body = { message, name: "Error", code };
+  if (details !== undefined) body.details = details;
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function _isAsyncIterator(x) {
+  return (
+    x != null &&
+    typeof x === "object" &&
+    typeof x[Symbol.asyncIterator] === "function" &&
+    typeof x.next === "function"
+  );
+}
+
+function _isParseable(s) {
+  return s != null && typeof s === "object" && typeof s.parse === "function";
+}
+
+function _zodIssues(err) {
+  if (err && Array.isArray(err.issues)) return err.issues;
+  if (err && Array.isArray(err.errors)) return err.errors;
+  return [];
+}
+
+function _isZodStringSchema(s) {
+  if (!s || typeof s !== "object") return false;
+  const def = s._def || s.def;
+  if (!def) return false;
+  if (def.typeName === "ZodString") return true;
+  if (def.type === "string") return true;
+  return false;
+}
+
+function _zsRpc(name, input, ctx) {
+  const fn = _procedures[name];
+  if (typeof fn !== "function") {
+    throw Object.assign(new Error("Method not found: " + name), {
+      status: 404,
+      code: "NOT_FOUND",
+    });
+  }
+
+  let validated = input;
+  const cfg = fn.config;
+  if (cfg && _isParseable(cfg.input)) {
+    try {
+      validated = cfg.input.parse(input);
+    } catch (e) {
+      throw Object.assign(new Error("Invalid input"), {
+        status: 400,
+        code: "INVALID_ARGUMENT",
+        details: { issues: _zodIssues(e) },
+      });
+    }
+  }
+
+  const out = fn(validated, ctx);
+  if (out && typeof out.then === "function") {
+    return out.then((v) => _zsRpcPost(v, cfg));
+  }
+  return _zsRpcPost(out, cfg);
+}
+
+function _zsRpcPost(result, cfg) {
+  if (_isAsyncIterator(result)) {
+    if (cfg && _isZodStringSchema(cfg.output)) {
+      try { result.__zsOutputIsString = true; } catch (_e) {}
+    }
+    return result;
+  }
+  const isDev =
+    typeof process !== "undefined" &&
+    process &&
+    process.env &&
+    process.env.NODE_ENV === "development";
+  if (isDev && cfg && _isParseable(cfg.output)) {
+    try {
+      cfg.output.parse(result);
+    } catch (e) {
+      throw Object.assign(new Error("Invalid handler output"), {
+        status: 500,
+        code: "INTERNAL",
+        details: { issues: _zodIssues(e) },
+      });
+    }
+  }
+  return result;
+}
+
+async function _zsFetch(request, env, ctx) {
+  const url = new URL(request.url);
+
+  if (url.pathname.startsWith("/_zs/v1/")) {
+    const id = url.pathname.slice("/_zs/v1/".length);
+    if (!id) return _zsErrResponse(400, "INVALID_ARGUMENT", "missing wireId");
+
+    let input = undefined;
+    if (request.method === "GET") {
+      const param = url.searchParams.get("input");
+      if (param) {
+        try {
+          const b64 = param.replace(/-/g, "+").replace(/_/g, "/");
+          const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+          const e = JSON.parse(atob(padded));
+          input = e && typeof e === "object" && "json" in e ? e.json : e;
+        } catch (e) {
+          return _zsErrResponse(400, "INVALID_ARGUMENT", \`invalid base64url input: \${e?.message ?? e}\`);
+        }
+      }
+    } else if (request.method === "POST") {
+      const text = await request.text();
+      if (text) {
+        try {
+          const e = JSON.parse(text);
+          input = e && typeof e === "object" && "json" in e ? e.json : e;
+        } catch (e) {
+          return _zsErrResponse(400, "INVALID_ARGUMENT", \`invalid JSON body: \${e?.message ?? e}\`);
+        }
+      }
+    } else {
+      return _zsErrResponse(405, "FAILED_PRECONDITION", \`method \${request.method} not allowed on /_zs/v1/\`);
+    }
+
+    return await _zsRpcAndRespond(id, input, ctx);
+  }
+
+  if (_userFetch) return _userFetch.call(_userDefault, request, env, ctx);
+  return new Response("Not Found", { status: 404 });
+}
+
+async function _zsRpcAndRespond(name, input, ctx) {
+  try {
+    const result = await _zsRpc(name, input, ctx);
+
+    if (_isAsyncIterator(result)) {
+      const outputIsString = !!result.__zsOutputIsString;
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          try {
+            while (true) {
+              const step = await result.next();
+              if (step.done) {
+                controller.enqueue(encoder.encode("d:{}\\n"));
+                break;
+              }
+              const v = step.value;
+              if (outputIsString || typeof v === "string") {
+                controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\\n"));
+              } else {
+                controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\\n"));
+              }
+            }
+          } catch (e) {
+            const env = {
+              message: (e && e.message) || String(e),
+              name:    (e && e.name)    || "Error",
+            };
+            if (e && typeof e.code === "string") env.code = e.code;
+            if (e && e.details !== undefined)    env.details = e.details;
+            if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
+            controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\\n"));
+            controller.enqueue(encoder.encode("d:{}\\n"));
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache, no-transform",
+          "x-accel-buffering": "no",
+        },
+      });
+    }
+
+    if (result instanceof Response) return result;
+
+    return new Response(
+      JSON.stringify({ json: result === undefined ? null : result }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  } catch (err) {
+    const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600)
+      ? err.status : 500;
+    const body = {
+      message: err?.message ?? String(err),
+      name: err?.name ?? "Error",
+    };
+    if (err && typeof err.code === "string") body.code = err.code;
+    if (err && err.details !== undefined) body.details = err.details;
+    if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
+    return new Response(
+      JSON.stringify(body),
+      { status, headers: { "content-type": "application/json" } },
+    );
+  }
+}
+
+export default {
+  rpc:   (name, input, ctx) => _zsRpc(name, input, ctx),
+  fetch: (request, env, ctx) => _userFetch
+    ? (new URL(request.url).pathname.startsWith("/_zs/v1/")
+        ? _zsFetch(request, env, ctx)
+        : _userFetch.call(_userDefault, request, env, ctx))
+    : _zsFetch(request, env, ctx),
+};
+`;
+}
+
 // ── Vite plugin ────────────────────────────────────────────────────────────
 
 /**
@@ -386,6 +677,11 @@ export function rpcRegistryPlugin(opts: {
   root?: string;
   userEntryRel: string;
   state?: TransformState;
+  /** Phase 2: pre-computed server bindings. When provided, the
+   *  generated entry uses static per-target imports + a wireId-keyed
+   *  `_procedures` literal. Recomputed by the caller (e.g.,
+   *  `buildPlugin`) after the reference-graph walk. */
+  getBindings?: () => Map<string, ServerBinding> | undefined;
 }): Plugin {
   return {
     name: "zeroship:server-entry",
@@ -396,7 +692,11 @@ export function rpcRegistryPlugin(opts: {
     },
     load(id: string) {
       if (id !== SERVER_ENTRY_RESOLVED_ID) return null;
-      return buildServerEntrySource({ userEntryRel: opts.userEntryRel });
+      const bindings = opts.getBindings?.();
+      return buildServerEntrySource({
+        userEntryRel: opts.userEntryRel,
+        bindings,
+      });
     },
   };
 }
