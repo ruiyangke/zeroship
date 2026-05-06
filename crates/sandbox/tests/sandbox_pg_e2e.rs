@@ -2423,3 +2423,187 @@ async fn snapshot_handler_returns_feature_disabled_when_flag_off() {
 
     let _ = std::fs::remove_dir_all(&store_root);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3e — RestoreHandler integration tests (LocalDiskSnapshotStore +
+// StubRestoreBackend; real Database).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 5 (identity rewrite), § 8 (failure modes).
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::restore_handler::{
+    restore_sandbox, RestoreBackend, RestoreHandlerError, StubRestoreBackend,
+};
+
+/// Drive a row to `Snapshotted` with a real artifact on disk so the
+/// restore handler can find + verify it. Returns
+/// (artifact-store, sha256, vm_index, generation-after-snapshot).
+async fn seed_snapshotted_row(
+    db: &Database,
+    sid: Uuid,
+    info: &SandboxInfo,
+    store_root: &std::path::Path,
+) -> ([u8; 32], i16, i64) {
+    use zeroship_sandbox::snapshot_store::SnapshotStore;
+    let store = LocalDiskSnapshotStore::new(store_root);
+    let host_id = db.host_id();
+    db.insert_sandbox(info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Drive to running → snapshotting → snapshotted.
+    let g0 = 0i64;
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, g0, None)
+        .await
+        .unwrap();
+
+    // Stage a fake artifact.
+    let stage = std::env::temp_dir().join(format!(
+        "zsbx-restore-test-stage-{}-{}",
+        std::process::id(),
+        Uuid::now_v7().simple(),
+    ));
+    std::fs::create_dir_all(&stage).unwrap();
+    // Minimal config.json carrying the v1 rewrite shape.
+    std::fs::write(
+        stage.join("config.json"),
+        r#"{
+            "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
+            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(stage.join("state.json"), b"{\"st\":1}").unwrap();
+    std::fs::write(stage.join("memory-ranges"), b"fake-mem").unwrap();
+    let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
+    let meta = store.put(&typed, &stage, "v51.1").unwrap();
+    let _ = std::fs::remove_dir_all(&stage);
+
+    let backing = r#"{"keys":"u","userhome":"u","rootfs_overlay":"u"}"#;
+    let g2 = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, Some("v1"))
+        .await
+        .unwrap();
+    (meta.sha256, 7, g2)
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e restore happy path"]
+async fn restore_handler_happy_path_drives_snapshotted_to_running() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore");
+    let (_sha, _vm_index, _g2) = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let backend_root = fresh_temp("rback");
+    let backend = StubRestoreBackend::new(backend_root.clone());
+
+    let outcome = restore_sandbox(&db, &store, &backend, sid, true)
+        .await
+        .expect("happy path restore");
+    assert_eq!(outcome.vm_index, 7);
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Running);
+
+    // The stub backend should have seen the full sequence.
+    assert!(backend.submit_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(backend.livez_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!backend.teardown_called.load(std::sync::atomic::Ordering::SeqCst));
+
+    // config.json got rewritten in-place inside backend's restore_alloc_dir.
+    let cfg_path = backend.restore_alloc_dir(sid).join("config.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e checksum mismatch → snapshotted_suspect"]
+async fn restore_handler_checksum_mismatch_marks_suspect() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore_corrupt");
+    let (_sha, _vm_index, g2) = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    // Corrupt the on-disk artifact so the SHA-256 verify fails.
+    let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
+    let mr = store_root.join(&typed).join("memory-ranges");
+    std::fs::write(&mr, b"tampered").unwrap();
+    let _ = g2;
+
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let backend_root = fresh_temp("rback_corrupt");
+    let backend = StubRestoreBackend::new(backend_root.clone());
+
+    let err = restore_sandbox(&db, &store, &backend, sid, true)
+        .await
+        .expect_err("must fail with corrupt artifact");
+    assert!(matches!(err, RestoreHandlerError::SnapshotCorrupt), "{err:?}");
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::SnapshottedSuspect);
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e cluster-exhausted vm_index → 503"]
+async fn restore_handler_vm_index_unavailable_when_cluster_exhausted() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore_busy");
+    let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let backend_root = fresh_temp("rback_busy");
+    let mut backend = StubRestoreBackend::new(backend_root.clone());
+    backend.fail_reserve = true;
+
+    let err = restore_sandbox(&db, &store, &backend, sid, true)
+        .await
+        .expect_err("must fail with cluster-exhausted");
+    assert!(
+        matches!(err, RestoreHandlerError::VmIndexUnavailable { .. }),
+        "{err:?}"
+    );
+
+    // Row should have rolled back to `snapshotted` (artifact preserved).
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e feature flag off"]
+async fn restore_handler_returns_feature_disabled_when_flag_off() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore_flag");
+    let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    let store = LocalDiskSnapshotStore::new(&store_root);
+    let backend_root = fresh_temp("rback_flag");
+    let backend = StubRestoreBackend::new(backend_root.clone());
+
+    let err = restore_sandbox(&db, &store, &backend, sid, false)
+        .await
+        .expect_err("must refuse with flag off");
+    assert!(matches!(err, RestoreHandlerError::FeatureDisabled), "{err:?}");
+
+    // Row stays at snapshotted (no CAS attempted).
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
