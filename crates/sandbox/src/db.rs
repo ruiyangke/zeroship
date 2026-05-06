@@ -79,13 +79,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "sandboxes columns for snapshot artifact + lease + idle-sweep",
         sql: include_str!("../migrations/0007_sandbox_snapshot_columns.sql"),
     },
+    Migration {
+        version: 8,
+        description: "hosts.region CHECK accepts GCP-zone-suffixed shapes",
+        sql: include_str!("../migrations/0008_relax_hosts_region_regex.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 7;
+pub const LATEST_MIGRATION_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {

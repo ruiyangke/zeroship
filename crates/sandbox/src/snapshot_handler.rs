@@ -454,7 +454,7 @@ impl ChRemoteClient for RealChRemoteClient {
         dest_dir: &Path,
     ) -> Result<(), String> {
         let url = format!("file://{}", dest_dir.display());
-        run_with_timeout(
+        let outcome = run_with_timeout(
             &self.binary,
             &[
                 std::ffi::OsStr::new("--api-socket"),
@@ -463,7 +463,46 @@ impl ChRemoteClient for RealChRemoteClient {
                 std::ffi::OsStr::new(&url),
             ],
             CH_REMOTE_TIMEOUT,
-        )
+        );
+
+        // CH v51.1 quirk: `ch-remote snapshot` writes the three
+        // artifact files, then CH itself crashes / closes the API
+        // socket as part of the snapshot teardown. ch-remote's NEXT
+        // request on the same connection (some versions issue a
+        // post-snapshot status query) hits the dead socket and
+        // returns `Fatal error: HttpApiClient(MissingProtocol)` /
+        // `ConnectionReset` with non-zero exit. The snapshot itself
+        // SUCCEEDED — the files are on disk. We discovered this in
+        // the May-5 manual stress run (round-2 report calls it out
+        // verbatim under "Failure modes #5: CH v50.2 snapshot crashes
+        // the VMM after writing").
+        //
+        // Treat the snapshot as authoritative on artifact-on-disk:
+        // if `memory-ranges` exists (largest file, written last by
+        // CH), the snapshot succeeded regardless of ch-remote's exit
+        // code. If we still get a non-zero exit AND no artifact, the
+        // original error is real — propagate.
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Last-written artifact: present + non-empty → snapshot
+                // is on disk; ch-remote's complaint is the post-write
+                // VMM-down quirk and not an error we should bubble.
+                let memory_ranges = dest_dir.join("memory-ranges");
+                match std::fs::metadata(&memory_ranges) {
+                    Ok(m) if m.len() > 0 => {
+                        tracing::info!(
+                            error = %e,
+                            memory_ranges_bytes = m.len(),
+                            "ch-remote snapshot exited non-zero but artifact is on disk; \
+                             treating as success (CH v51.1 post-snapshot VMM-down quirk)"
+                        );
+                        Ok(())
+                    }
+                    _ => Err(e),
+                }
+            }
+        }
     }
 
     fn version(&self) -> &str {
@@ -745,6 +784,74 @@ exit 1
             "stderr must surface in error; got {err}"
         );
         assert!(err.contains("exit"), "error must mention exit code; got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CH v51.1 quirk: `ch-remote snapshot` writes the artifact then
+    /// CH crashes / closes the API socket, which makes ch-remote's
+    /// post-write status query fail with `MissingProtocol` and
+    /// non-zero exit. The artifact files ARE on disk; the snapshot
+    /// IS authoritative. Verify the on-disk fallback path treats
+    /// this as success rather than propagating ch-remote's exit
+    /// code as an error. (Discovered May 6 cluster stress;
+    /// regression-pinned.)
+    #[test]
+    fn snapshot_succeeds_when_ch_remote_exits_nonzero_but_artifact_on_disk() {
+        let dir = fresh_dir();
+        let body = r#"#!/usr/bin/env bash
+set -eu
+sub=""
+dest=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --api-socket) shift; shift ;;
+    snapshot) sub="snapshot"; shift; dest="${1#file://}"; shift ;;
+    *) shift ;;
+  esac
+done
+if [[ "$sub" == "snapshot" ]]; then
+  mkdir -p "$dest"
+  echo "fake-config" > "$dest/config.json"
+  printf 'fake-memory-ranges-non-empty' > "$dest/memory-ranges"
+  echo "fake-state"  > "$dest/state.json"
+  # Now mimic v51.1: VMM crashed, post-write ping fails.
+  echo "Fatal error: HttpApiClient(MissingProtocol)" >&2
+  exit 1
+fi
+exit 2
+"#;
+        let bin = write_script(&dir, "ch-remote-quirk", body);
+        let client = RealChRemoteClient::with_binary(bin, "v51.1".to_string());
+        let dest = dir.join("snap-out");
+        client
+            .snapshot(&dir.join("ch.sock"), &dest)
+            .expect("artifact-on-disk path must treat non-zero exit as success");
+        for &name in crate::snapshot_store::ARTIFACT_FILES {
+            assert!(dest.join(name).is_file(), "{name} must exist post-fallback");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sister to the above: non-zero exit AND no artifact on disk
+    /// must still propagate the error. The on-disk check is the
+    /// trust signal; we don't mask genuine failures.
+    #[test]
+    fn snapshot_propagates_error_when_no_artifact_on_disk() {
+        let dir = fresh_dir();
+        let body = r#"#!/usr/bin/env bash
+echo "Fatal error: HttpApiClient(MissingProtocol)" >&2
+exit 1
+"#;
+        let bin = write_script(&dir, "ch-remote-real-fail", body);
+        let client = RealChRemoteClient::with_binary(bin, "v51.1".to_string());
+        let dest = dir.join("snap-out");
+        let err = client
+            .snapshot(&dir.join("ch.sock"), &dest)
+            .expect_err("genuine snapshot failure must error");
+        assert!(
+            err.contains("MissingProtocol") || err.contains("exit"),
+            "error must surface ch-remote stderr / exit; got {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
