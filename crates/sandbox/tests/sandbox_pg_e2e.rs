@@ -1391,6 +1391,12 @@ async fn every_sandbox_status_value_passes_pg_check() {
         SandboxStatus::Recreating,
         SandboxStatus::Orphan,
         SandboxStatus::Unreachable,
+        SandboxStatus::Snapshotting,
+        SandboxStatus::Snapshotted,
+        SandboxStatus::SnapshottingAborted,
+        SandboxStatus::SnapshottedSuspect,
+        SandboxStatus::Restoring,
+        SandboxStatus::RestoringCold,
     ];
     // Compile-time guard: this match must be exhaustive. If a new
     // variant lands, the test author must extend `all`.
@@ -1404,6 +1410,12 @@ async fn every_sandbox_status_value_passes_pg_check() {
             SandboxStatus::Recreating => {}
             SandboxStatus::Orphan => {}
             SandboxStatus::Unreachable => {}
+            SandboxStatus::Snapshotting => {}
+            SandboxStatus::Snapshotted => {}
+            SandboxStatus::SnapshottingAborted => {}
+            SandboxStatus::SnapshottedSuspect => {}
+            SandboxStatus::Restoring => {}
+            SandboxStatus::RestoringCold => {}
         }
     }
 
@@ -1416,6 +1428,35 @@ async fn every_sandbox_status_value_passes_pg_check() {
         db.insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), None)
             .await
             .unwrap();
+
+        // The 0007 CHECK `sandboxes_snapshot_artifact_consistency`
+        // requires Snapshotted/SnapshottedSuspect rows to carry a
+        // populated artifact descriptor (path + sha + ch_version).
+        // For these two states we pre-populate via direct SQL — PR 3
+        // will add the proper Rust API for snapshot writes.
+        if status.is_snapshotted() {
+            let pool = db.pool_app().await.unwrap();
+            let client = pool.get().await.unwrap();
+            let sid_typed = format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&sid)
+            );
+            let path: &str = "gs://test/snap";
+            let sha: Vec<u8> = vec![0u8; 32];
+            let ver: &str = "v51.1";
+            client
+                .execute(
+                    "UPDATE sandbox.sandboxes \
+                        SET snapshot_artifact_path = $1::TEXT, \
+                            snapshot_sha256 = $2::BYTEA, \
+                            snapshot_ch_version = $3::TEXT \
+                      WHERE sandbox_id = $4::TEXT",
+                    &[&path, &sha, &ver, &sid_typed],
+                )
+                .await
+                .unwrap();
+        }
+
         // First UPDATE (generation 0 → 1).
         let _ = db
             .update_sandbox_status(sid, status, 0, None)

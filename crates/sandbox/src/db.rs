@@ -1173,6 +1173,14 @@ pub enum SandboxStatus {
     Recreating,
     Orphan,
     Unreachable,
+    // Snapshot/restore lifecycle (PR 2 / migration 0006). Reads only;
+    // no code WRITES these states yet — see proposal § 13 step 2-3.
+    Snapshotting,
+    Snapshotted,
+    SnapshottingAborted,
+    SnapshottedSuspect,
+    Restoring,
+    RestoringCold,
 }
 
 impl SandboxStatus {
@@ -1186,6 +1194,12 @@ impl SandboxStatus {
             Self::Recreating => "recreating",
             Self::Orphan => "orphan",
             Self::Unreachable => "unreachable",
+            Self::Snapshotting => "snapshotting",
+            Self::Snapshotted => "snapshotted",
+            Self::SnapshottingAborted => "snapshotting_aborted",
+            Self::SnapshottedSuspect => "snapshotted_suspect",
+            Self::Restoring => "restoring",
+            Self::RestoringCold => "restoring_cold",
         }
     }
 
@@ -1199,8 +1213,31 @@ impl SandboxStatus {
             "recreating" => Self::Recreating,
             "orphan" => Self::Orphan,
             "unreachable" => Self::Unreachable,
+            "snapshotting" => Self::Snapshotting,
+            "snapshotted" => Self::Snapshotted,
+            "snapshotting_aborted" => Self::SnapshottingAborted,
+            "snapshotted_suspect" => Self::SnapshottedSuspect,
+            "restoring" => Self::Restoring,
+            "restoring_cold" => Self::RestoringCold,
             _ => return None,
         })
+    }
+
+    /// True if the status represents an in-flight snapshot/restore op.
+    /// Used by the lease-takeover scan to find sandboxes whose source
+    /// controller may have crashed mid-flight (§ 6.1).
+    pub fn is_transient_snapshot_state(self) -> bool {
+        matches!(
+            self,
+            Self::Snapshotting | Self::Restoring | Self::RestoringCold
+        )
+    }
+
+    /// True if the status represents a sandbox that has an artifact
+    /// (or should have) and is not currently running. Used by the
+    /// idle-eviction sweep filter and admin-API state matchers.
+    pub fn is_snapshotted(self) -> bool {
+        matches!(self, Self::Snapshotted | Self::SnapshottedSuspect)
     }
 }
 
