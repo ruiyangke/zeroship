@@ -69,13 +69,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "events.sandbox_id NULLable (GDPR audit row writes NULL)",
         sql: include_str!("../migrations/0005_events_sandbox_id_nullable.sql"),
     },
+    Migration {
+        version: 6,
+        description: "sandboxes.status CHECK accepts snapshot lifecycle values",
+        sql: include_str!("../migrations/0006_sandbox_status_snapshot.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 5;
+pub const LATEST_MIGRATION_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
