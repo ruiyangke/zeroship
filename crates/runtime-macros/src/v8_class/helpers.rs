@@ -2,10 +2,11 @@
 //!
 //! - `method_callback_ident` — mangle `__<Class>_<method>_callback`.
 //! - `gen_param_extractions` — emit per-arg extraction code, treating
-//!   `&mut PinScope` and `Local<Object>` as synthetic params.
+//!   `&mut PinScope` and `Local<Object>` as synthetic params, and a
+//!   trailing `Vec<v8::Local<v8::Value>>` as a variadic capture.
 //! - `parse_params_skipping_self` — collect typed args, dropping the
 //!   receiver.
-//! - `is_pin_scope_ref`, `is_wrapper_local`, `type_path_contains_segment`,
+//! - `is_pin_scope_ref`, `is_wrapper_local`, `is_varargs_vec`,
 //!   `outer_ident` — type classification helpers.
 
 use proc_macro2::TokenStream as TokenStream2;
@@ -54,6 +55,31 @@ pub(super) fn gen_param_extractions(
     // produce Locals whose lifetime unifies with the param `scope`.
     for p in params.iter() {
         if is_pin_scope_ref(&p.ty) || is_wrapper_local(&p.ty) {
+            continue;
+        }
+        // Variadic capture: bind a `Vec<v8::Local<v8::Value>>` to all
+        // JS args from `js_idx` onward. The analyse phase has already
+        // validated that this param is last, appears at most once, and
+        // is not on a fastcall / getter / setter. We emit the slice
+        // unconditionally — it's `Vec::new()` when the caller passed
+        // fewer args than positional params consumed.
+        if is_varargs_vec(&p.ty) {
+            let start = js_idx as i32;
+            let name = &p.name;
+            out.push(quote! {
+                let #name: Vec<v8::Local<v8::Value>> = {
+                    let __zs_va_len = args.length();
+                    let __zs_va_start: i32 = #start;
+                    if __zs_va_start < __zs_va_len {
+                        (__zs_va_start..__zs_va_len).map(|__zs_i| args.get(__zs_i)).collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+            });
+            // Varargs swallows the remaining JS arg index range — no
+            // further positional extractions after this point. The
+            // analyse phase guarantees the param list ends here.
             continue;
         }
         // Optional SAB-rejection guard, emitted *before* the regular
@@ -181,6 +207,76 @@ fn is_wrapper_local(ty: &Type) -> bool {
     args.args.iter().any(|arg| {
         if let syn::GenericArgument::Type(inner) = arg {
             return last_path_segment_is(inner, "Object");
+        }
+        false
+    })
+}
+
+/// True for `Vec<v8::Local<v8::Value>>` typed params — the variadic
+/// JS-args capture. Recognised as the last positional parameter and
+/// filled with `args.get(N..args.length())` at the JS-arg index where
+/// the varargs began. Used by spec-shaped methods that take an
+/// arbitrary trailing arg list (e.g. `AsyncLocalStorage.run(store, fn,
+/// ...args)` or `Function.prototype.call`-style passthroughs).
+///
+/// We accept `Vec<v8::Local<v8::Value>>` only — not `&[...]` — because
+/// owning a `Vec` materialises a copy of the leaked-arg locals and
+/// avoids a lifetime entanglement with `FunctionCallbackArguments`.
+/// The cost is one Vec allocation per call (`O(n)` Local pointers
+/// where `n` is the trailing count); the slice form would need a
+/// caller-side scratch buffer that lives across the user-method
+/// dispatch, which costs more in macro complexity than it saves.
+///
+/// Detection mirrors `is_wrapper_local`: walk the outer `Vec`'s first
+/// generic, then check the inner `Local<Value>` shape. Path-segment
+/// matching is by terminal ident (so `Vec<v8::Local<v8::Value>>`,
+/// `Vec<::v8::Local<::v8::Value>>`, and a user `use v8::Local;`-shaped
+/// `Vec<Local<Value>>` all qualify).
+///
+/// Visible to the analyse phase — see `analyze::validate_variadic_param`
+/// for the per-method shape guard.
+pub(super) fn is_varargs_vec(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let last = match tp.path.segments.last() {
+        Some(s) => s,
+        None => return false,
+    };
+    if last.ident != "Vec" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    args.args.iter().any(|arg| {
+        if let syn::GenericArgument::Type(inner) = arg {
+            return is_local_value(inner);
+        }
+        false
+    })
+}
+
+/// True for `v8::Local<v8::Value>` (any prefix / lifetime). Helper for
+/// `is_varargs_vec` — matches the inner shape that the varargs Vec
+/// carries.
+fn is_local_value(ty: &Type) -> bool {
+    let Type::Path(tp) = ty else {
+        return false;
+    };
+    let last = match tp.path.segments.last() {
+        Some(s) => s,
+        None => return false,
+    };
+    if last.ident != "Local" {
+        return false;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    args.args.iter().any(|arg| {
+        if let syn::GenericArgument::Type(inner) = arg {
+            return last_path_segment_is(inner, "Value");
         }
         false
     })

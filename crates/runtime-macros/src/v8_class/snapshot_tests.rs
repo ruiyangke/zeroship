@@ -95,6 +95,46 @@ fn snapshot_class_with_state_marker() {
     insta::assert_snapshot!("class_with_state_marker", format_expansion(out));
 }
 
+/// Insta snapshot for the variadic-param shape. A
+/// `Vec<v8::Local<v8::Value>>` trailing parameter captures all JS
+/// args from its position onward — used by spec-shaped methods like
+/// `AsyncLocalStorage.run(store, fn, ...args)` whose JS surface
+/// takes an arbitrary trailing arg list. The codegen must:
+///   - count preceding positional args (here: 1) for the start index;
+///   - emit a single `(start..args.length()).map(args.get).collect()`
+///     instead of one `args.get(idx)` per positional arg;
+///   - bind the result as the user's parameter ident so the call site
+///     dispatches naturally as `<State>::method(&self, target, rest)`.
+///
+/// Locks the variadic codegen against future drift — any change to
+/// the slice shape, the index computation, or the bind site shows
+/// up as a snapshot delta.
+#[test]
+fn snapshot_class_with_variadic_method() {
+    let item = quote! {
+        impl Spreader {
+            #[v8_constructor]
+            fn new() -> Spreader {
+                Spreader
+            }
+
+            #[v8_method]
+            fn invoke<'s>(
+                &self,
+                scope: &mut v8::PinScope<'s, '_>,
+                target: v8::Local<v8::Value>,
+                rest: Vec<v8::Local<v8::Value>>,
+            ) -> v8::Local<'s, v8::Value> {
+                let func: v8::Local<v8::Function> = target.try_into().unwrap();
+                let undef = v8::undefined(scope).into();
+                func.call(scope, undef, &rest).unwrap_or_else(|| v8::undefined(scope).into())
+            }
+        }
+    };
+    let out = expand_tokens(quote! {}, item);
+    insta::assert_snapshot!("class_with_variadic_method", format_expansion(out));
+}
+
 /// Hard-error snapshot: marker == receiver. Per design §4.7 the
 /// macro emits a clear compile_error rather than silently treating
 /// it as a no-op (which would mask a typo'd marker name).
