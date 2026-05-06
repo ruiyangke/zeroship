@@ -26,6 +26,8 @@ pub fn resolve_native<'s>(
     match specifier {
         "node:async_hooks" => Some(crate::node::async_hooks::synthetic_module(scope)),
         "node:crypto" => Some(crate::node::crypto::synthetic_module(scope)),
+        "node:zlib" => Some(crate::node::zlib::synthetic_module(scope)),
+        "node:os" => Some(crate::node::os::synthetic_module(scope)),
         _ => None,
     }
 }
@@ -33,7 +35,10 @@ pub fn resolve_native<'s>(
 /// True if `specifier` is a runtime-owned native module — used to
 /// short-circuit "Cannot resolve" errors before we surface them.
 pub fn is_native(specifier: &str) -> bool {
-    matches!(specifier, "node:async_hooks" | "node:crypto")
+    matches!(
+        specifier,
+        "node:async_hooks" | "node:crypto" | "node:zlib" | "node:os"
+    )
 }
 
 /// Install `globalThis.__zeroshipNodeBuiltin(specifier)` — the dev-only
