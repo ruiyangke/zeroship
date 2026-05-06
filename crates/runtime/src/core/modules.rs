@@ -36,6 +36,25 @@ impl ModuleRegistry {
             compiled: HashMap::new(),
         }
     }
+
+    /// Lookup a pre-compiled module by exact specifier. The dynamic-import
+    /// callback uses this; the static `resolve_callback` reads `compiled`
+    /// directly because it also needs to mutate on the native fallback
+    /// path. Read-only accessors keep `compiled` private.
+    pub(crate) fn get(&self, specifier: &str) -> Option<&v8::Global<v8::Module>> {
+        self.compiled.get(specifier)
+    }
+
+    /// Insert (or replace) a compiled module under `specifier`. Used by
+    /// the dynamic-import callback when caching a freshly-minted native
+    /// synthetic so subsequent imports return the same module record.
+    pub(crate) fn insert(
+        &mut self,
+        specifier: String,
+        module: v8::Global<v8::Module>,
+    ) -> Option<v8::Global<v8::Module>> {
+        self.compiled.insert(specifier, module)
+    }
 }
 
 /// Resolve a specifier against the source map, trying common variants.
