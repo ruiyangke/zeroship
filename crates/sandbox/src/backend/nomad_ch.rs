@@ -2585,8 +2585,8 @@ fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
 ///
 /// The fingerprint is the kernel of "is this OUR agent?" — the
 /// controller mints a fresh Ed25519 keypair per sandbox; the agent
-/// publishes the pubkey-SHA256[..8] under `pubkey_fingerprint` on
-/// `/version`. A stale-tenant agent has a *different* fingerprint
+/// publishes the pubkey-SHA256[..16] (32 hex chars) under
+/// `pubkey_fingerprint` on `/version`. A stale-tenant agent has a *different* fingerprint
 /// (different keypair → different pubkey → different hash), so we
 /// keep polling until either:
 ///   1. `/version.pubkey_fingerprint` matches `expected_fp` → ready, OR

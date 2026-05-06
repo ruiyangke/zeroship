@@ -454,12 +454,21 @@ impl std::fmt::Debug for Verifier {
     }
 }
 
-/// Short hex fingerprint of a public key — first 8 bytes of
-/// SHA-256(pubkey). Useful in logs / `/version` for operators to
-/// confirm "the agent is verifying with the expected controller key".
+/// Short hex fingerprint of a public key — first 16 bytes of
+/// SHA-256(pubkey), hex-encoded → 32 ASCII chars. Useful in logs /
+/// `/version` for operators to confirm "the agent is verifying with
+/// the expected controller key".
+///
+/// **Schema invariant:** the `sandbox.sandboxes.key_fp` column has
+/// `CHECK (key_fp ~ '^[0-9a-f]{32}$')` (see
+/// `crates/sandbox/migrations/0001_initial.sql`). The 16-byte (32-hex)
+/// width is load-bearing — controllers INSERT this string verbatim,
+/// and an 8-byte (16-hex) value silently fails the CHECK on the
+/// snapshot/restore path (cold-boot swallows the error as
+/// "(non-fatal)", but the CAS-fenced lifecycle cannot tolerate it).
 pub fn pubkey_fingerprint(pk: &VerifyingKey) -> String {
     let digest = Sha256::digest(pk.as_bytes());
-    hex::encode(&digest[..8])
+    hex::encode(&digest[..16])
 }
 
 /// Sign a v1-canonical request, producing the `X-Sbx-Signature`
@@ -800,7 +809,14 @@ mod tests {
     fn pubkey_fingerprint_is_stable_and_short() {
         let (_, pk) = keypair();
         let fp = pubkey_fingerprint(&pk);
-        assert_eq!(fp.len(), 16, "fingerprint should be 8 bytes hex");
+        // Schema invariant: sandbox.sandboxes.key_fp CHECK requires
+        // exactly 32 hex chars (16 bytes). See pubkey_fingerprint
+        // doc-comment for the full chain of reasoning.
+        assert_eq!(fp.len(), 32, "fingerprint should be 16 bytes hex");
+        assert!(
+            fp.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "fingerprint must be lowercase hex to match pg CHECK"
+        );
         // Stable for the deterministic test key.
         assert_eq!(fp, pubkey_fingerprint(&keypair().1));
     }

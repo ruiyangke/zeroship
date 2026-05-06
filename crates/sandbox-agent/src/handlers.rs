@@ -694,9 +694,10 @@ mod tests {
         assert!(cap_strs.contains(&"auth.ed25519-v1"));
         assert_eq!(body["started_at_unix"], 1234);
         // pubkey_fingerprint is included for ops verification —
-        // 16 hex chars (8 bytes of SHA-256(pubkey)).
+        // 32 hex chars (16 bytes of SHA-256(pubkey)). Width is
+        // load-bearing: pg `key_fp` CHECK requires `^[0-9a-f]{32}$`.
         let fp = body["pubkey_fingerprint"].as_str().unwrap();
-        assert_eq!(fp.len(), 16);
+        assert_eq!(fp.len(), 32);
         assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -707,11 +708,13 @@ mod tests {
     /// `controller_pubkey_fingerprint`) would silently break that
     /// check — wait_for_agent_livez would unwrap to None and fall
     /// into the legacy-agent path, undoing FM-A. The stable contract
-    /// is: the EXACT key name `pubkey_fingerprint`, a string, 16
-    /// hex chars (first 8 bytes of SHA-256(pubkey) hex-encoded).
-    /// If any field has to change, treat it as a wire-protocol
-    /// breakage: bump PROTOCOL_VERSION + add a new capability +
-    /// keep the old field for one release.
+    /// is: the EXACT key name `pubkey_fingerprint`, a string, 32
+    /// hex chars (first 16 bytes of SHA-256(pubkey) hex-encoded).
+    /// Width is also a contract: `sandbox.sandboxes.key_fp` has a
+    /// pg-side `CHECK (key_fp ~ '^[0-9a-f]{32}$')`. If any field has
+    /// to change, treat it as a wire-protocol breakage: bump
+    /// PROTOCOL_VERSION + add a new capability + keep the old field
+    /// for one release.
     #[ntex::test]
     async fn version_pubkey_fingerprint_field_name_is_stable_contract() {
         let (state, _d) = make_state("ver_stable");
@@ -735,9 +738,11 @@ mod tests {
             .expect("WIRE-CONTRACT: pubkey_fingerprint must be a string");
         assert_eq!(
             fp.len(),
-            16,
-            "WIRE-CONTRACT: pubkey_fingerprint must be exactly 16 hex \
-             chars (8 bytes of SHA-256(pubkey) hex-encoded)"
+            32,
+            "WIRE-CONTRACT: pubkey_fingerprint must be exactly 32 hex \
+             chars (16 bytes of SHA-256(pubkey) hex-encoded). Pg \
+             `key_fp` CHECK requires `^[0-9a-f]{{32}}$`; a shorter \
+             value silently fails the snapshot/restore INSERT."
         );
         assert!(
             fp.chars().all(|c| c.is_ascii_hexdigit()),
