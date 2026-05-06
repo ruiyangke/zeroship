@@ -43,6 +43,7 @@ use crate::registry::SandboxRegistry;
 use crate::restore_handler::{RealRestoreBackend, RestoreBackend};
 use crate::snapshot_handler::{ChRemoteClient, RealChRemoteClient};
 use crate::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
+use crate::snapshot_store_gcs::{GcsSnapshotStore, TieredSnapshotStore};
 
 /// Shared application state passed to every handler.
 #[allow(missing_debug_implementations)]
@@ -299,22 +300,21 @@ impl AppState {
             .map(zeroize::Zeroizing::new);
 
         // Phase-A snapshot/restore wiring. When `snapshot_enabled =
-        // true`, construct the production trio: LocalDiskSnapshotStore
-        // at the canonical L1 root, RealChRemoteClient (resolves
-        // `ch-remote` on PATH at construct time), RealRestoreBackend
-        // (Nomad submit + poll). When false we leave them `None`;
+        // true`, construct the production trio:
+        //   - LocalDiskSnapshotStore at config.snapshot_l1_root
+        //     (optionally tier-wrapped with GcsSnapshotStore when
+        //     config.snapshot_use_gcs = true)
+        //   - RealChRemoteClient (resolves `ch-remote` on PATH at
+        //     construct time)
+        //   - RealRestoreBackend (Nomad submit + poll)
+        // When `snapshot_enabled = false` we leave them `None`;
         // admin handlers see `None` and return 501 feature_disabled.
-        //
-        // A4 will tier-wrap the snapshot_store with GCS when
-        // `SANDBOX_SNAPSHOT_USE_GCS=true`. A5 reads the L1 root from
-        // config; for now (A3) it's hardcoded to the canonical path
-        // — operators can set SANDBOX_SNAPSHOT_L1_ROOT in A5+.
         let (snapshot_store, ch_remote, restore_backend): (
             Option<Arc<dyn SnapshotStore>>,
             Option<Arc<dyn ChRemoteClient>>,
             Option<Arc<dyn RestoreBackend>>,
         ) = if config.snapshot_enabled {
-            let l1_root = std::path::PathBuf::from("/var/zeroship/ch/snapshots");
+            let l1_root = config.snapshot_l1_root.clone();
             // Idempotent — directory may already exist.
             if let Err(e) = std::fs::create_dir_all(&l1_root) {
                 tracing::warn!(
@@ -323,15 +323,34 @@ impl AppState {
                     "snapshot wiring: L1 root mkdir failed (will surface on first put)"
                 );
             }
-            let store: Arc<dyn SnapshotStore> =
-                Arc::new(LocalDiskSnapshotStore::new(l1_root));
+            let l1 = LocalDiskSnapshotStore::new(l1_root.clone());
+            let store: Arc<dyn SnapshotStore> = if config.snapshot_use_gcs {
+                let bucket = config
+                    .snapshot_gcs_bucket
+                    .clone()
+                    .expect("SANDBOX_SNAPSHOT_GCS_BUCKET must be set when use_gcs=true (validated at config parse)");
+                let l2 = GcsSnapshotStore::new(bucket.clone(), "default");
+                tracing::info!(
+                    l1_root = %l1_root.display(),
+                    gcs_bucket = %bucket,
+                    "snapshot wiring: tiered L1+GCS"
+                );
+                Arc::new(TieredSnapshotStore::new(l1, l2))
+            } else {
+                tracing::info!(
+                    l1_root = %l1_root.display(),
+                    "snapshot wiring: L1 disk-only"
+                );
+                Arc::new(l1)
+            };
             let ch: Arc<dyn ChRemoteClient> =
                 Arc::new(RealChRemoteClient::new());
             let rb: Arc<dyn RestoreBackend> =
                 Arc::new(RealRestoreBackend::new(config.nomad_ch.clone()));
             tracing::info!(
                 ch_version = ch.version(),
-                "snapshot/restore wiring: enabled (L1 disk-only; GCS gated by A4 follow-up)"
+                kek_path = ?config.snapshot_root_kek_path,
+                "snapshot/restore wiring: enabled"
             );
             (Some(store), Some(ch), Some(rb))
         } else {

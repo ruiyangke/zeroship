@@ -136,6 +136,31 @@ pub struct SandboxConfig {
     /// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
     /// § 10.3, § 13.1.
     pub snapshot_enabled: bool,
+
+    /// L1 root directory for snapshot artifacts. Each sandbox's
+    /// artifact lives at `<root>/<sandbox-id>/{config,state,memory}.<ext>`.
+    /// `SANDBOX_SNAPSHOT_L1_ROOT` (default `/var/zeroship/ch/snapshots`).
+    pub snapshot_l1_root: PathBuf,
+
+    /// When `true`, the controller wraps `LocalDiskSnapshotStore`
+    /// in `TieredSnapshotStore<L1=disk, L2=GCS>` so put writes
+    /// fire-and-forget to GCS in addition to L1, and L1-miss reads
+    /// fall back to GCS. Requires `snapshot_gcs_bucket` to be set.
+    /// `SANDBOX_SNAPSHOT_USE_GCS` (default `false`).
+    pub snapshot_use_gcs: bool,
+
+    /// GCS bucket name (no `gs://` prefix). Required when
+    /// `snapshot_use_gcs = true`; ignored otherwise.
+    /// `SANDBOX_SNAPSHOT_GCS_BUCKET` (default `None`).
+    pub snapshot_gcs_bucket: Option<String>,
+
+    /// Path to the root KEK (key-encryption key) file used by the
+    /// AEAD wrap layer (snapshot_aead.rs). When `None`, the wrap
+    /// layer runs in passthrough mode — snapshots are not
+    /// encrypted at rest. Production deployments set this to a
+    /// 0o400 file containing the 32-byte key.
+    /// `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` (default `None`).
+    pub snapshot_root_kek_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -627,6 +652,30 @@ impl SandboxConfig {
         let create_retry_total_timeout_secs =
             parse_env("SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS", 90u64)?;
         let snapshot_enabled = parse_env("SANDBOX_SNAPSHOT_ENABLED", false)?;
+        let snapshot_l1_root = PathBuf::from(
+            std::env::var("SANDBOX_SNAPSHOT_L1_ROOT")
+                .unwrap_or_else(|_| "/var/zeroship/ch/snapshots".to_string()),
+        );
+        let snapshot_use_gcs = parse_env("SANDBOX_SNAPSHOT_USE_GCS", false)?;
+        let snapshot_gcs_bucket = std::env::var("SANDBOX_SNAPSHOT_GCS_BUCKET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let snapshot_root_kek_path = std::env::var("SANDBOX_SNAPSHOT_ROOT_KEK_PATH")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+
+        // Validate: GCS path requires the bucket. Refuse to boot
+        // with use_gcs=true and no bucket — the operator's intent
+        // is clear and silently falling back to L1-only would
+        // surprise them on the first put.
+        if snapshot_enabled && snapshot_use_gcs && snapshot_gcs_bucket.is_none() {
+            return Err(
+                "SANDBOX_SNAPSHOT_USE_GCS=true requires SANDBOX_SNAPSHOT_GCS_BUCKET to be set"
+                    .to_string(),
+            );
+        }
 
         Ok(Self {
             port, token, backend, image, workspace_root, network,
@@ -635,6 +684,10 @@ impl SandboxConfig {
             create_retry_max,
             create_retry_total_timeout_secs,
             snapshot_enabled,
+            snapshot_l1_root,
+            snapshot_use_gcs,
+            snapshot_gcs_bucket,
+            snapshot_root_kek_path,
         })
     }
 }

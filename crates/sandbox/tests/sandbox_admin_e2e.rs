@@ -76,7 +76,11 @@ fn make_cfg(token: &str) -> SandboxConfig {
         },
         create_retry_max: 2,
         create_retry_total_timeout_secs: 90,
-            snapshot_enabled: false,
+        snapshot_enabled: false,
+        snapshot_l1_root: std::path::PathBuf::from("/var/zeroship/ch/snapshots"),
+        snapshot_use_gcs: false,
+        snapshot_gcs_bucket: None,
+        snapshot_root_kek_path: None,
     }
 }
 
