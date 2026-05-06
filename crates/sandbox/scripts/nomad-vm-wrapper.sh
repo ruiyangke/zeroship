@@ -32,6 +32,20 @@
 #                        host has a corp collision.  See M6 in the round-3
 #                        review notes.
 #
+# Optional inputs (snapshot/restore — § 11 of the snapshot proposal):
+#   ZSBX_RESTORE_FROM    when set, switches the wrapper from cold-boot to
+#                        the restore path. Value is an absolute directory
+#                        containing a CH snapshot dir (config.json,
+#                        memory-ranges, state.json) prepared by the
+#                        controller's `RestoreHandler`. The controller is
+#                        responsible for staging the alloc dir to match
+#                        the rewritten `config.json`'s socket / disk /
+#                        serial-log paths; the wrapper just spawns
+#                        virtiofsd × 3 at the standard sock paths and
+#                        execs `cloud-hypervisor --restore source_url=
+#                        file://$ZSBX_RESTORE_FROM`. See § 11.1 division
+#                        of labor.
+#
 # The host operator is responsible for pre-provisioning:
 #   - tap device `zsbx-nm-$IDX` in the /30 subnet
 #     10.${ZSBX_SUBNET_BASE_OCTET}.$((100+IDX)).0/30
@@ -134,6 +148,15 @@ mkdir -p "$ZSBX_KEYS_DIR" "$ZSBX_WORKSPACE_DIR" "$ZSBX_USER_HOME_DIR"
 # AND the explicit error message below, the Nomad task log carries
 # "rootfs copy failed" within ~250 ms; the controller's
 # `wait_for_alloc_running` surfaces it immediately.
+#
+# Restore path note: when `ZSBX_RESTORE_FROM` is set, the snapshot's
+# memory image carries the entire VM state (including the rootfs's
+# in-RAM page cache view), so we still need a writable rootfs file
+# at the same path the restored config.json expects. The controller
+# stages `$ZSBX_RESTORE_FROM` such that this path is consistent with
+# the snapshot's `disks[]` entry (today: shared read-only template
+# from $ZSBX_ARTIFACT_DIR — see § 5.2). The cp below remains a
+# defensive belt-and-braces (idempotent due to the [ ! -f ] guard).
 if [ ! -f "$DISK" ]; then
   if ! cp --reflink=auto "$ZSBX_ARTIFACT_DIR/rootfs-slim.img" "$DISK"; then
     echo "[wrapper] FATAL: rootfs copy failed: $ZSBX_ARTIFACT_DIR/rootfs-slim.img → $DISK" >&2
@@ -236,19 +259,47 @@ done
 # Important CH quirk: `--fs` takes ALL fs arguments as ONE space-
 # separated token, NOT one per flag. Listing them as separate `--fs`
 # args makes CH only register the last one. Same for `--disk` etc.
-cloud-hypervisor \
-  --api-socket "$API_SOCK" \
-  --kernel    vmlinuz \
-  --cmdline   "console=ttyS0 root=/dev/vda rw init=/sbin/init reboot=t panic=1 ip=${VM_IP}::${HOST_IP}:255.255.255.252::eth0:none" \
-  --disk      path="$DISK",readonly=off,direct=off,image_type=raw \
-  --net       tap="$TAP",mac="$MAC" \
-  --fs        tag=keys,socket="$VFS_KEYS_SOCK" tag=workspace,socket="$VFS_WS_SOCK" tag=userhome,socket="$VFS_HOME_SOCK" \
-  --memory    size=${ZSBX_VM_MEMORY_MB}M,shared=on \
-  --cpus      boot=${ZSBX_VM_CPUS_BOOT} \
-  --console   off \
-  --serial    file="$ZSBX_RUNTIME/serial.log" \
-  > "$ZSBX_RUNTIME/ch.log" 2>&1 &
-CH_PID=$!
+#
+# Branch: restore vs. cold boot. When ZSBX_RESTORE_FROM is set, the
+# memory/state/config triple at that path carries the entire VM
+# config (cmdline, disks, net, fs, memory, cpus, serial), so CH
+# `--restore source_url=file://$DIR` is invoked WITHOUT the
+# kernel / cmdline / disk / net / fs / memory / cpus / serial
+# flags — those would conflict with the snapshot's embedded config.
+# `--api-socket` is fresh (unrelated to the snapshot's recorded
+# api-socket path; CH treats it as a new control channel).
+if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
+  # Defensive: confirm the staged dir exists + is non-empty. The
+  # controller stages prior to job submission so the typical failure
+  # mode is "controller rolled back mid-stage" — surface it loudly.
+  if [ ! -d "$ZSBX_RESTORE_FROM" ] \
+     || [ ! -f "$ZSBX_RESTORE_FROM/memory-ranges" ] \
+     || [ ! -f "$ZSBX_RESTORE_FROM/config.json" ] \
+     || [ ! -f "$ZSBX_RESTORE_FROM/state.json" ]; then
+    echo "[wrapper] FATAL: ZSBX_RESTORE_FROM=$ZSBX_RESTORE_FROM missing one of {memory-ranges,config.json,state.json}" >&2
+    exit 1
+  fi
+  echo "[wrapper] restore path: source=$ZSBX_RESTORE_FROM"
+  cloud-hypervisor \
+    --api-socket "$API_SOCK" \
+    --restore    "source_url=file://$ZSBX_RESTORE_FROM" \
+    > "$ZSBX_RUNTIME/ch.log" 2>&1 &
+  CH_PID=$!
+else
+  cloud-hypervisor \
+    --api-socket "$API_SOCK" \
+    --kernel    vmlinuz \
+    --cmdline   "console=ttyS0 root=/dev/vda rw init=/sbin/init reboot=t panic=1 ip=${VM_IP}::${HOST_IP}:255.255.255.252::eth0:none" \
+    --disk      path="$DISK",readonly=off,direct=off,image_type=raw \
+    --net       tap="$TAP",mac="$MAC" \
+    --fs        tag=keys,socket="$VFS_KEYS_SOCK" tag=workspace,socket="$VFS_WS_SOCK" tag=userhome,socket="$VFS_HOME_SOCK" \
+    --memory    size=${ZSBX_VM_MEMORY_MB}M,shared=on \
+    --cpus      boot=${ZSBX_VM_CPUS_BOOT} \
+    --console   off \
+    --serial    file="$ZSBX_RUNTIME/serial.log" \
+    > "$ZSBX_RUNTIME/ch.log" 2>&1 &
+  CH_PID=$!
+fi
 
 echo "[wrapper] cloud-hypervisor pid=$CH_PID, vfs keys=$VFS_KEYS_PID ws=$VFS_WS_PID home=$VFS_HOME_PID"
 # Port 7777 mirrors `zeroship_sandbox_agent::AGENT_PORT` — keep them
