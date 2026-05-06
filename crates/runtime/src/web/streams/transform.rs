@@ -311,13 +311,19 @@ fn constructor_callback(
     let (writable_hwm, writable_size) =
         match crate::streams::readable::parse_strategy_local(scope, writable_strategy, 1.0) {
             Ok(v) => v,
-            Err(()) => return,
+            Err(e) => {
+                crate::streams::readable::throw_op_error(scope, &e);
+                return;
+            }
         };
     // Per spec: readableStrategy default HWM = 0.
     let (readable_hwm, readable_size) =
         match crate::streams::readable::parse_strategy_local(scope, readable_strategy, 0.0) {
             Ok(v) => v,
-            Err(()) => return,
+            Err(e) => {
+                crate::streams::readable::throw_op_error(scope, &e);
+                return;
+            }
         };
 
     // Reject readableType / writableType per spec §5.2.4 step 3 + 4.
@@ -368,25 +374,24 @@ fn constructor_callback(
     );
     std::mem::forget(weak);
 
-    if let Err(msg) =
+    // The constructor owns the start_resolver so the start-throw path can
+    // surface the user's exception verbatim through OpError::JsValue —
+    // unblocking #200 (TransformStream macro migration). The helper rejects
+    // it on a synchronous throw before returning the captured exception.
+    let start_resolver = v8::PromiseResolver::new(scope).unwrap();
+    if let Err(e) =
         crate::streams::transform_controller::set_up_transform_stream_default_controller_from_transformer(
             scope,
             stream_obj,
             transformer,
+            start_resolver,
             writable_hwm,
             writable_size,
             readable_hwm,
             readable_size,
         )
     {
-        // The "start threw synchronously" path already pushed the user's
-        // own exception via scope.throw_exception. We must NOT push a
-        // second TypeError on top of it (V8 would discard the first).
-        if msg != "TransformStream: start threw synchronously" {
-            let v8_msg = v8::String::new(scope, &msg).unwrap();
-            let exc = v8::Exception::type_error(scope, v8_msg);
-            scope.throw_exception(exc);
-        }
+        crate::streams::readable::throw_op_error(scope, &e);
     }
 }
 

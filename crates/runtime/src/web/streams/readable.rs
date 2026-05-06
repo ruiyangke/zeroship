@@ -332,12 +332,11 @@ fn constructor_callback(
     // and size), then underlyingSource. If either throws, the exception
     // propagates via tc_scope set on call.
 
-    // Parse strategy first (per spec). On error, propagate.
-    let (hwm, size_algo) = match crate::streams::readable::parse_strategy_local(scope, strategy, 1.0) {
+    // Parse strategy first (per spec). On error, throw and return.
+    let (hwm, size_algo) = match parse_strategy_local(scope, strategy, 1.0) {
         Ok(v) => v,
-        Err(()) => {
-            // parse_strategy already pushed an exception via the V8 try-catch
-            // mechanism (the getter throw propagates through `obj.get`).
+        Err(e) => {
+            throw_op_error(scope, &e);
             return;
         }
     };
@@ -387,9 +386,12 @@ fn constructor_callback(
         // default 1.0; if strategy was undefined OR strategy.highWaterMark
         // was undefined, override. We can't tell easily here, so re-parse
         // with default 0 instead.
-        let (hwm0, _) = match crate::streams::readable::parse_strategy_local(scope, strategy, 0.0) {
+        let (hwm0, _) = match parse_strategy_local(scope, strategy, 0.0) {
             Ok(v) => v,
-            Err(()) => return,
+            Err(e) => {
+                throw_op_error(scope, &e);
+                return;
+            }
         };
         // Use hwm0 below.
         let _ = hwm; // suppress unused warning
@@ -1131,60 +1133,105 @@ pub fn parse_strategy(
     Ok((hwm, size))
 }
 
-/// Same as `parse_strategy` but on error pushes an exception via
-/// `scope.throw_exception` and returns `Err(())` so the V8 callback can
-/// `return` immediately. Used by the constructor where a throwing
-/// strategy getter must propagate as the construction failure (per WPT
+/// Re-throw an `OpError` as the matching V8 exception. JsValue passes
+/// through verbatim so user-thrown exceptions reach `catch` blocks with
+/// their original Error subclass / `e.code` / custom properties intact;
+/// the rest dress as TypeError / RangeError / Error per the variant.
+///
+/// Mirrors `gen_throw_op_error_arms` (`runtime-macros::codegen`) in
+/// hand-rolled callbacks. The macro uses the proc-macro arm; bodies that
+/// haven't migrated yet (the streams trio) call this helper.
+pub(crate) fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
+    if let crate::state::OpErrorKind::JsValue(global) = &err.kind {
+        let local = v8::Local::new(scope, global);
+        scope.throw_exception(local);
+        return;
+    }
+    let msg = v8::String::new(scope, &err.message).unwrap();
+    let exc: v8::Local<v8::Value> = match &err.kind {
+        crate::state::OpErrorKind::TypeError => v8::Exception::type_error(scope, msg),
+        crate::state::OpErrorKind::RangeError => v8::Exception::range_error(scope, msg),
+        crate::state::OpErrorKind::DomException(name) => {
+            crate::dom::exception::build(scope, &err.message, name).into()
+        }
+        crate::state::OpErrorKind::NodeError(code) => {
+            crate::node_error::build_node_exception(scope, code, &err.message)
+        }
+        crate::state::OpErrorKind::Error => v8::Exception::error(scope, msg),
+        crate::state::OpErrorKind::JsValue(_) => unreachable!(),
+    };
+    scope.throw_exception(exc);
+}
+
+/// Same as `parse_strategy` but reads `size` BEFORE `highWaterMark` to
+/// match the reference implementation's getter ordering (per WPT
 /// `constructor.any.js` "underlyingSource argument should be converted
-/// after queuingStrategy argument"). Reads `size` BEFORE `highWaterMark`
-/// to match the reference implementation's getter ordering.
+/// after queuingStrategy argument" — a throwing size-getter wins over a
+/// throwing hwm-getter and over a throwing underlyingSource start-getter).
+///
+/// On error returns `OpError`; a user-thrown exception caught from a
+/// getter is preserved verbatim via `OpError::js_value` so `catch` blocks
+/// observe the original Error subclass / `e.code` / custom properties.
+/// Constructors propagate the error through their `Result<Self, OpError>`
+/// boundary; the macro's throw machinery (`gen_throw_op_error_arms`)
+/// re-throws JsValue passthroughs without dressing them as TypeError.
 pub(crate) fn parse_strategy_local(
     scope: &mut v8::PinScope,
     strategy: v8::Local<v8::Value>,
     default_hwm: f64,
-) -> Result<(f64, ctlr::SizeAlgorithm), ()> {
+) -> Result<(f64, ctlr::SizeAlgorithm), OpError> {
     if strategy.is_undefined() {
         return Ok((default_hwm, ctlr::SizeAlgorithm::DefaultCount));
     }
     let Ok(obj) = v8::Local::<v8::Object>::try_from(strategy) else {
-        let msg = v8::String::new(scope, "ReadableStream: strategy must be an object").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return Err(());
+        return Err(OpError::type_error("ReadableStream: strategy must be an object"));
     };
-    // Per WPT constructor.any.js: queuingStrategy is converted at the
-    // IDL layer before underlyingSource. Within the strategy dict, the
-    // ref impl reads `size` BEFORE `highWaterMark`, so a throwing
-    // size-getter wins over a throwing hwm-getter (and over a throwing
-    // underlyingSource start-getter).
-    let size_key = v8::String::new(scope, "size").unwrap();
-    let size_v = match obj.get(scope, size_key.into()) {
-        Some(v) => v,
-        None => return Err(()),
+    // Capture user-thrown exceptions from accessor getters via tc_scope —
+    // the brand-new OpError::JsValue variant carries the raw v8::Value so
+    // re-throw preserves the user's Error subclass and custom properties.
+    let (size_v, hwm_v) = {
+        v8::tc_scope!(let tc, scope);
+        let size_key = v8::String::new(tc, "size").unwrap();
+        let size_v = obj.get(tc, size_key.into());
+        if tc.has_caught() {
+            let exc = tc.exception().unwrap();
+            return Err(OpError::js_value(tc, exc, "strategy.size getter threw"));
+        }
+        let Some(size_v) = size_v else {
+            return Err(OpError::error("strategy: size getter returned no value"));
+        };
+        let hwm_key = v8::String::new(tc, "highWaterMark").unwrap();
+        let hwm_v = obj.get(tc, hwm_key.into());
+        if tc.has_caught() {
+            let exc = tc.exception().unwrap();
+            return Err(OpError::js_value(tc, exc, "strategy.highWaterMark getter threw"));
+        }
+        let Some(hwm_v) = hwm_v else {
+            return Err(OpError::error("strategy: highWaterMark getter returned no value"));
+        };
+        (v8::Global::new(tc, size_v), v8::Global::new(tc, hwm_v))
     };
-    let hwm_key = v8::String::new(scope, "highWaterMark").unwrap();
-    let hwm_v = match obj.get(scope, hwm_key.into()) {
-        Some(v) => v,
-        None => return Err(()),
-    };
+    let size_v = v8::Local::new(scope, &size_v);
+    let hwm_v = v8::Local::new(scope, &hwm_v);
 
     let hwm = if hwm_v.is_undefined() {
         default_hwm
     } else {
-        let Some(n) = hwm_v.number_value(scope) else {
-            return Err(());
+        // ToNumber may invoke a user `valueOf` / `Symbol.toPrimitive`
+        // — wrap in a tc_scope to capture user-thrown exceptions verbatim.
+        v8::tc_scope!(let tc, scope);
+        let Some(n) = hwm_v.number_value(tc) else {
+            if tc.has_caught() {
+                let exc = tc.exception().unwrap();
+                return Err(OpError::js_value(tc, exc, "highWaterMark coercion threw"));
+            }
+            return Err(OpError::type_error("highWaterMark must be a number"));
         };
         if n.is_nan() {
-            let msg = v8::String::new(scope, "highWaterMark must not be NaN").unwrap();
-            let exc = v8::Exception::range_error(scope, msg);
-            scope.throw_exception(exc);
-            return Err(());
+            return Err(OpError::range_error("highWaterMark must not be NaN"));
         }
         if n < 0.0 {
-            let msg = v8::String::new(scope, "highWaterMark must be non-negative").unwrap();
-            let exc = v8::Exception::range_error(scope, msg);
-            scope.throw_exception(exc);
-            return Err(());
+            return Err(OpError::range_error("highWaterMark must be non-negative"));
         }
         n
     };
@@ -1193,10 +1240,7 @@ pub(crate) fn parse_strategy_local(
         ctlr::SizeAlgorithm::DefaultCount
     } else {
         let Ok(fn_l) = v8::Local::<v8::Function>::try_from(size_v) else {
-            let msg = v8::String::new(scope, "strategy.size must be a function").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return Err(());
+            return Err(OpError::type_error("strategy.size must be a function"));
         };
         ctlr::SizeAlgorithm::Js(v8::Global::new(scope, fn_l))
     };

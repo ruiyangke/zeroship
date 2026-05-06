@@ -329,8 +329,8 @@ fn constructor_callback(
     // ReadableStream constructor's ordering for WPT consistency.
     let (hwm, size_algo) = match crate::streams::readable::parse_strategy_local(scope, strategy, 1.0) {
         Ok(v) => v,
-        Err(()) => {
-            // parse_strategy_local already pushed an exception.
+        Err(e) => {
+            crate::streams::readable::throw_op_error(scope, &e);
             return;
         }
     };
