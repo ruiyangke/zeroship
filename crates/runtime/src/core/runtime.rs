@@ -392,6 +392,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Cap the V8 isolate's heap (megabytes). Default off — V8 grows
+    /// past multi-GB before GC pressure kicks in. When set, V8 forces
+    /// earlier GC and surfaces OOM rather than growing past the cap.
+    ///
+    /// Recommended floor is 32 MB; lower caps thrash on burst load.
+    /// The control plane / worker config surface this as a per-app
+    /// setting (see `docs/reference/runtime-limits.md`).
+    pub fn heap_limit_mb(mut self, mb: u32) -> Self {
+        self.limits.heap_limit_bytes = Some((mb as usize) * 1024 * 1024);
+        self
+    }
+
     /// Register one plugin. Two plugins sharing a namespace will panic at
     /// Runtime construction — see [`register_plugins`](crate::plugin).
     pub fn plugin<P: NativePlugin>(mut self, p: P) -> Self {
@@ -653,17 +665,38 @@ impl RuntimeInner {
         let params = v8::CreateParams::default().heap_limits(0, heap_max);
         let mut isolate = v8::Isolate::new(params);
 
-        // Register near-heap-limit callback. After MAX_HEAP_LIMIT_HITS
-        // consecutive invocations, terminate execution so the app doesn't
-        // pin RSS at the cap forever — each hit means V8 tried to grow,
-        // failed, GC'd, tried again, and still needs more memory.
+        // Register near-heap-limit callback. V8 invokes this when the
+        // configured heap cap is approached. The callback's return
+        // value is the *new* limit V8 should use:
+        //   - Equal to `current_heap_limit` → V8 GCs and may fatal-
+        //     abort the process if it still can't satisfy.
+        //   - Greater than `current_heap_limit` → V8 grows and lets
+        //     allocation succeed; useful as a one-off escape valve.
         //
-        // Counter is heap-allocated and leaked (static lifetime for the
-        // extern callback). One allocation per Runtime, freed when the
-        // process exits. Worth the 8 bytes to avoid an atomic-global or
-        // unsafe thread-local dance.
+        // Strategy: on every hit grow the cap modestly (avoids a hard
+        // fatal-abort and lets the in-flight allocation surface as a
+        // catchable JS RangeError on the very next allocation that
+        // doesn't fit). After MAX_HEAP_LIMIT_HITS consecutive hits we
+        // also call `Isolate::terminate_execution`, which fires on the
+        // next interrupt check — guaranteeing the runaway handler
+        // can't pin RSS at the cap forever.
+        //
+        // Data block is heap-allocated and intentionally leaked: one
+        // allocation per Runtime, lifetime is the isolate's. The block
+        // also carries the IsolateHandle so the callback can fire
+        // termination from any thread (V8 contract: `terminate_execution`
+        // is thread-safe).
+        struct HeapLimitData {
+            hits: u32,
+            handle: v8::IsolateHandle,
+            initial_limit: usize,
+        }
         const MAX_HEAP_LIMIT_HITS: u32 = 5;
-        let heap_hit_counter = Box::into_raw(Box::new(0u32));
+        let heap_data = Box::into_raw(Box::new(HeapLimitData {
+            hits: 0,
+            handle: isolate.thread_safe_handle(),
+            initial_limit: heap_max,
+        }));
 
         unsafe extern "C" fn near_heap_limit_callback(
             data: *mut std::ffi::c_void,
@@ -673,36 +706,43 @@ impl RuntimeInner {
             if data.is_null() {
                 return current_heap_limit;
             }
-            // SAFETY: `data` was set via `Box::into_raw(Box::new(0u32))` below
-            // and is never freed during the isolate's lifetime. V8 invokes
-            // this callback only from the isolate's owning thread per
-            // `Isolate::add_near_heap_limit_callback` contract, so we have
-            // exclusive access to the counter here.
-            let counter = unsafe { &mut *(data as *mut u32) };
-            *counter += 1;
-            if *counter >= MAX_HEAP_LIMIT_HITS {
+            // SAFETY: `data` was set via `Box::into_raw(Box::new(...))`
+            // below and is never freed during the isolate's lifetime.
+            // V8 invokes this callback only from the isolate's owning
+            // thread per `Isolate::add_near_heap_limit_callback` contract,
+            // so we have exclusive access here.
+            let d = unsafe { &mut *(data as *mut HeapLimitData) };
+            d.hits += 1;
+            if d.hits >= MAX_HEAP_LIMIT_HITS {
                 tracing::error!(
                     heap_limit_mb = current_heap_limit / 1024 / 1024,
-                    hits = *counter,
+                    hits = d.hits,
                     "v8 heap limit hit threshold; terminating isolate"
                 );
-                // V8 checks the termination flag after the callback returns,
-                // so the allocation that triggered this callback will throw
-                // a catchable exception first — the terminate fires on the
-                // next microtask boundary.
+                // Fire termination — V8 checks the flag on the next
+                // interrupt boundary, surfacing as a catchable
+                // `RangeError` to JS or a terminated-state to the
+                // dispatch loop.
+                d.handle.terminate_execution();
             } else {
                 tracing::warn!(
                     heap_limit_mb = current_heap_limit / 1024 / 1024,
-                    hits = *counter,
+                    hits = d.hits,
                     max_hits = MAX_HEAP_LIMIT_HITS,
                     "v8 near heap limit"
                 );
             }
-            current_heap_limit
+            // Grow modestly so V8 doesn't fatal-abort the process while
+            // the JS exception / termination flag propagates. Cap the
+            // expansion at 4× the original limit so a wedged isolate
+            // can't claim unbounded RSS before the eviction sweep kills
+            // it.
+            let max_grow = d.initial_limit.saturating_mul(4);
+            current_heap_limit.saturating_add(d.initial_limit / 4).min(max_grow)
         }
         isolate.add_near_heap_limit_callback(
             near_heap_limit_callback,
-            heap_hit_counter as *mut std::ffi::c_void,
+            heap_data as *mut std::ffi::c_void,
         );
 
         // `await import(spec)` — resolves through the per-isolate module
