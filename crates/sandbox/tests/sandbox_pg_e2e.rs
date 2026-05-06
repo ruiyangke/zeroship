@@ -1978,3 +1978,273 @@ async fn role_sandbox_app_can_update_sandboxes() {
         .expect("sandbox_app must be able to UPDATE sandboxes");
     assert_eq!(n, 1, "UPDATE should affect 1 row");
 }
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3h — snapshot writers (update_snapshot_metadata,
+// clear_snapshot_metadata, update_lessee, transient_state_lease_expired,
+// idle_eligible_sandboxes).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 9.1 (schema), § 6.1 (transient lease), § 7 (idle sweep).
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::snapshot_store::SnapshotMetadata;
+
+fn dummy_meta(path: &str) -> SnapshotMetadata {
+    let mut sha = [0u8; 32];
+    sha[0] = 0xab;
+    sha[31] = 0xcd;
+    SnapshotMetadata {
+        artifact_path: path.to_string(),
+        sha256: sha,
+        ch_version: "v51.1".into(),
+        bytes: 1024,
+    }
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h snapshot metadata writer"]
+async fn update_snapshot_metadata_records_artifact_and_cas_to_snapshotted() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    // Move to snapshotting first (gen 0 → 1).
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .expect("CAS to snapshotting");
+    assert_eq!(g1, 1);
+
+    let meta = dummy_meta("/var/zeroship/ch/snapshots/sbx_test/");
+    let backing = r#"{"keys":"unknown","userhome":"unknown","rootfs_overlay":"unknown"}"#;
+    let g2 = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, Some("v1"))
+        .await
+        .expect("update_snapshot_metadata");
+    assert_eq!(g2, g1 + 1);
+
+    // Verify the row reached `snapshotted` with the artifact descriptor
+    // populated.
+    let row = db
+        .get_sandbox_row(sid)
+        .await
+        .expect("read row")
+        .expect("row exists");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+    assert_eq!(row.generation, g2);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h CAS-loss path"]
+async fn update_snapshot_metadata_returns_cas_lost_on_stale_generation() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let meta = dummy_meta("/p");
+    let backing = r#"{"keys":"x","userhome":"x","rootfs_overlay":"x"}"#;
+    // First call uses correct generation; second call uses stale one.
+    db.update_snapshot_metadata(sid, g1, &meta, 7, backing, None)
+        .await
+        .expect("first metadata write");
+    let err = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, None)
+        .await
+        .expect_err("second write must miss CAS");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::CasLost { .. }),
+        "expected CasLost, got {err:?}",
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h clear_snapshot_metadata wipes snapshot_*"]
+async fn clear_snapshot_metadata_nulls_all_snapshot_columns() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Drive into snapshotted, then back to running.
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let meta = dummy_meta("/p");
+    let backing = r#"{"keys":"x","userhome":"x","rootfs_overlay":"x"}"#;
+    let g2 = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, None)
+        .await
+        .unwrap();
+
+    // Move from snapshotted → restoring → running so the CHECK
+    // constraint doesn't reject the column-clear (status='running'
+    // permits NULL snapshot_*).
+    let g3 = db
+        .update_sandbox_status(sid, SandboxStatus::Restoring, g2, None)
+        .await
+        .unwrap();
+    let g4 = db
+        .update_sandbox_status(sid, SandboxStatus::Running, g3, None)
+        .await
+        .unwrap();
+    let g5 = db
+        .clear_snapshot_metadata(sid, g4)
+        .await
+        .expect("clear");
+    assert_eq!(g5, g4 + 1);
+
+    // Verify columns are NULL via direct query.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT snapshot_artifact_path, snapshot_sha256, snapshot_ch_version \
+               FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    let path: Option<String> = row.try_get(0).ok();
+    let sha: Option<Vec<u8>> = row.try_get(1).ok();
+    let ver: Option<String> = row.try_get(2).ok();
+    assert!(path.is_none(), "artifact_path must be NULL after clear");
+    assert!(sha.is_none(), "sha256 must be NULL after clear");
+    assert!(ver.is_none(), "ch_version must be NULL after clear");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h lease bump"]
+async fn update_lessee_bumps_only_in_transient_states() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // running → bump must affect 0 rows (status guard).
+    let n0 = db.update_lessee(sid).await.expect("running noop");
+    assert_eq!(n0, 0, "update_lessee must skip non-transient rows");
+
+    // snapshotting → bump must affect 1 row.
+    let _g = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let n1 = db.update_lessee(sid).await.expect("transient bump");
+    assert_eq!(n1, 1, "update_lessee must bump transient rows");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h transient sweep query"]
+async fn transient_state_lease_expired_filters_by_threshold() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+    // Move to snapshotting + bump lessee (now()).
+    let _g = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    db.update_lessee(sid).await.unwrap();
+
+    // Threshold high → 0 rows (we just bumped).
+    let none = db
+        .transient_state_lease_expired_sandboxes(60)
+        .await
+        .expect("query");
+    assert!(
+        !none.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "fresh-bumped row must not appear in expired set"
+    );
+
+    // Backdate lessee_updated_at to ~5 min ago + re-query at 120s
+    // threshold; must find our row.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes SET lessee_updated_at = now() - interval '5 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let stale = db
+        .transient_state_lease_expired_sandboxes(120)
+        .await
+        .expect("query");
+    assert!(
+        stale.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "stale-lease row must surface"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h idle sweep query"]
+async fn idle_eligible_sandboxes_respects_opt_in_and_threshold() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Default `idle_snapshot_opted_in = FALSE` → never returned.
+    let none = db
+        .idle_eligible_sandboxes(0, 100)
+        .await
+        .expect("query opted-out");
+    assert!(
+        !none.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "opted-out rows must not appear",
+    );
+
+    // Opt the row in + backdate last_used_at; query at threshold > 0
+    // expects a hit.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET idle_snapshot_opted_in = TRUE, \
+                    last_used_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    let some = db
+        .idle_eligible_sandboxes(60, 100)
+        .await
+        .expect("query opted-in");
+    assert!(
+        some.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "opted-in stale row must surface"
+    );
+}

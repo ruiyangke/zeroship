@@ -2088,6 +2088,366 @@ impl Database {
         Ok(n)
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // Snapshot/restore writer methods (PR 3h).
+    //
+    // Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+    // § 9.1 (schema) + § 6.1 (lease semantics) + § 9.2 (CAS table).
+    //
+    // All writes are CAS-guarded on `(sandbox_id, generation, host_id)`
+    // to match `update_sandbox_status_with_host`'s fence model — a
+    // controller that lost its lease cannot mutate snapshot metadata
+    // on someone else's row even if it has a stale handle.
+    //
+    // The `crate::snapshot_store::SnapshotMetadata` type is the
+    // shape produced by `SnapshotStore::put`; this module imports it
+    // through a fully-qualified path to avoid polluting the db
+    // module's namespace with a cross-module re-export.
+    // ────────────────────────────────────────────────────────────────
+
+    /// Write the snapshot artifact descriptor onto the row + CAS the
+    /// status to `snapshotted` in a single UPDATE.
+    ///
+    /// Used by the `SnapshotHandler` (PR 3b) at the end of a
+    /// successful snapshot flow: after the CH artifact lands in L1
+    /// (and optionally L2), this records `(snapshot_artifact_path,
+    /// snapshot_taken_at, snapshot_ch_version, snapshot_sha256,
+    /// snapshot_aead_dek_id, snapshot_backing_versions,
+    /// snapshot_vm_index)` and CASes `snapshotting → snapshotted`.
+    ///
+    /// `expected_generation` is the row's generation BEFORE this
+    /// write (i.e., the generation post-CAS-to-`snapshotting`).
+    /// Returns the new generation on success.
+    ///
+    /// The CHECK constraint added by migration 0007
+    /// (`sandboxes_snapshot_artifact_consistency`) enforces that any
+    /// row in `snapshotted` carries `snapshot_artifact_path`,
+    /// `snapshot_sha256`, and `snapshot_ch_version` — this method's
+    /// payload satisfies all three so a mismatch surfaces here, not
+    /// later on read.
+    pub async fn update_snapshot_metadata(
+        &self,
+        sandbox_id: Uuid,
+        expected_generation: i64,
+        meta: &crate::snapshot_store::SnapshotMetadata,
+        vm_index: i16,
+        backing_versions_json: &str,
+        aead_dek_id: Option<&str>,
+    ) -> Result<i64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let sha_bytes: Vec<u8> = meta.sha256.to_vec();
+        let aead_dek_id_owned: Option<String> =
+            aead_dek_id.map(|s| s.to_string());
+        // Payload satisfies the artifact-consistency CHECK introduced
+        // in 0007 (status='snapshotted' → artifact_path/sha/ch_version
+        // all NOT NULL).
+        let opt = client
+            .query_opt(
+                "UPDATE sandbox.sandboxes \
+                    SET status = 'snapshotted', \
+                        generation = generation + 1, \
+                        last_used_at = now(), \
+                        lessee_updated_at = NULL, \
+                        snapshot_artifact_path    = $1::TEXT, \
+                        snapshot_taken_at         = now(), \
+                        snapshot_ch_version       = $2::TEXT, \
+                        snapshot_sha256           = $3::BYTEA, \
+                        snapshot_aead_dek_id      = $4::TEXT, \
+                        snapshot_backing_versions = CAST($5::TEXT AS JSONB), \
+                        snapshot_vm_index         = $6::SMALLINT \
+                  WHERE sandbox_id = $7::TEXT \
+                    AND generation = $8::BIGINT \
+                    AND host_id = $9::TEXT \
+                    AND deleted_at IS NULL \
+                  RETURNING generation",
+                &[
+                    &meta.artifact_path,
+                    &meta.ch_version,
+                    &sha_bytes,
+                    &aead_dek_id_owned,
+                    &backing_versions_json.to_string(),
+                    &vm_index,
+                    &sandbox_id_typed,
+                    &expected_generation,
+                    &host_id_typed,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if let Some(row) = opt {
+            return Ok(row.get::<_, i64>(0));
+        }
+        // CAS missed — read back to distinguish CasLost from NotFound.
+        let lookup = client
+            .query_opt(
+                "SELECT generation, host_id FROM sandbox.sandboxes \
+                  WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
+                &[&sandbox_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if let Some(row) = lookup {
+            Err(DatabaseError::CasLost {
+                sandbox_id: sandbox_id_typed,
+                expected_generation,
+                observed_generation: row.get::<_, i64>(0),
+                current_host_id: row.try_get::<_, String>(1).ok(),
+            })
+        } else {
+            Err(DatabaseError::NotFound {
+                sandbox_id: sandbox_id_typed,
+            })
+        }
+    }
+
+    /// Clear all snapshot_* columns on the row. Used after a
+    /// successful `restoring → running` transition (the on-disk
+    /// artifact is no longer the canonical state — the in-memory
+    /// restored VM is) and after operator-deletion of a snapshotted
+    /// row in the same TX as the row delete.
+    ///
+    /// CAS-guarded on `(generation, host_id)` for the same reason as
+    /// `update_snapshot_metadata`: a stale-handle peer must not be
+    /// able to wipe metadata on a row it no longer owns.
+    pub async fn clear_snapshot_metadata(
+        &self,
+        sandbox_id: Uuid,
+        expected_generation: i64,
+    ) -> Result<i64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        let opt = client
+            .query_opt(
+                "UPDATE sandbox.sandboxes \
+                    SET generation = generation + 1, \
+                        last_used_at = now(), \
+                        snapshot_artifact_path    = NULL, \
+                        snapshot_taken_at         = NULL, \
+                        snapshot_ch_version       = NULL, \
+                        snapshot_sha256           = NULL, \
+                        snapshot_aead_dek_id      = NULL, \
+                        snapshot_backing_versions = NULL, \
+                        snapshot_vm_index         = NULL \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND generation = $2::BIGINT \
+                    AND host_id = $3::TEXT \
+                    AND deleted_at IS NULL \
+                  RETURNING generation",
+                &[
+                    &sandbox_id_typed,
+                    &expected_generation,
+                    &host_id_typed,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if let Some(row) = opt {
+            return Ok(row.get::<_, i64>(0));
+        }
+        let lookup = client
+            .query_opt(
+                "SELECT generation, host_id FROM sandbox.sandboxes \
+                  WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
+                &[&sandbox_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if let Some(row) = lookup {
+            Err(DatabaseError::CasLost {
+                sandbox_id: sandbox_id_typed,
+                expected_generation,
+                observed_generation: row.get::<_, i64>(0),
+                current_host_id: row.try_get::<_, String>(1).ok(),
+            })
+        } else {
+            Err(DatabaseError::NotFound {
+                sandbox_id: sandbox_id_typed,
+            })
+        }
+    }
+
+    /// Bump `lessee_updated_at = now()` on a transient-state row.
+    /// Called every 10s by the in-flight snapshot/restore handlers
+    /// so the lease-takeover sweep doesn't reap them while they're
+    /// still alive (§ 6.1).
+    ///
+    /// Unlike the `update_snapshot_metadata` / `clear_snapshot_metadata`
+    /// writers, this is **not** CAS-guarded on generation: bumping a
+    /// timestamp does not need to invalidate concurrent state work.
+    /// It IS still fenced on host_id so a peer that lost the lease
+    /// cannot keep the row alive.
+    ///
+    /// Returns the row count updated (0 = not found / wrong host /
+    /// not in a transient state). Caller logs the 0 case but does
+    /// not error — the next iteration will retry.
+    pub async fn update_lessee(&self, sandbox_id: Uuid) -> Result<u64> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let host_id_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        // Restrict the bump to transient states — matches § 6.1's
+        // invariant that lessee_updated_at is non-NULL only when
+        // status ∈ {snapshotting, restoring, restoring_cold}.
+        let n = client
+            .execute(
+                "UPDATE sandbox.sandboxes \
+                    SET lessee_updated_at = now() \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND host_id = $2::TEXT \
+                    AND status IN ('snapshotting','restoring','restoring_cold') \
+                    AND deleted_at IS NULL",
+                &[&sandbox_id_typed, &host_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        Ok(n)
+    }
+
+    /// Lease-takeover sweep query (§ 6.1). Returns rows in transient
+    /// snapshot states whose owning controller hasn't bumped
+    /// `lessee_updated_at` within `threshold_secs`. The sweep's CAS
+    /// step (in `crate::sweep`) decides the recovery state per row.
+    ///
+    /// `threshold_secs` is `SANDBOX_TRANSIENT_STATE_TIMEOUT_SECS`
+    /// (default 120s). Rows with `lessee_updated_at IS NULL` are
+    /// excluded — that's a `running`-row invariant violation
+    /// (caught by the application-level invariant tests, not this
+    /// query) or an in-flight new transient that hasn't bumped yet.
+    pub async fn transient_state_lease_expired_sandboxes(
+        &self,
+        threshold_secs: i64,
+    ) -> Result<Vec<SandboxRow>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        // Uses partial index `sandboxes_status_lessee_idx` (0007).
+        let rows = client
+            .query(
+                "SELECT sandbox_id, user_id, project_id, backend, vm_index, \
+                        agent_url, host_id, generation, status, key_fp, \
+                        EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_secs, \
+                        EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
+                        EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
+                        EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
+                   FROM sandbox.sandboxes \
+                  WHERE status IN ('snapshotting','restoring','restoring_cold') \
+                    AND lessee_updated_at IS NOT NULL \
+                    AND lessee_updated_at < now() - make_interval(secs => $1::BIGINT) \
+                    AND deleted_at IS NULL",
+                &[&threshold_secs],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let status_str: &str = r.get("status");
+            let started_at_opt: Option<i64> = r.try_get("started_at_secs").ok();
+            let stopped_at_opt: Option<i64> = r.try_get("stopped_at_secs").ok();
+            out.push(SandboxRow {
+                sandbox_id: r.get("sandbox_id"),
+                user_id: r.get("user_id"),
+                project_id: r.get("project_id"),
+                backend: r.get("backend"),
+                vm_index: r.try_get("vm_index").ok(),
+                agent_url: r.try_get("agent_url").ok(),
+                host_id: r.get("host_id"),
+                generation: r.get::<_, i64>("generation"),
+                status: SandboxStatus::from_str_opt(status_str)
+                    .unwrap_or(SandboxStatus::Lost),
+                key_fp: r.get("key_fp"),
+                created_at_secs: r.get::<_, i64>("created_at_secs").max(0) as u64,
+                started_at_secs: started_at_opt.map(|v| v.max(0) as u64),
+                stopped_at_secs: stopped_at_opt.map(|v| v.max(0) as u64),
+                last_used_at_secs: r.get::<_, i64>("last_used_at_secs").max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Idle-eviction sweep query (§ 7). Returns running, opt-in
+    /// sandboxes whose `last_used_at` is older than `threshold_secs`,
+    /// limited to `limit` rows per call.
+    ///
+    /// Backed by the partial index `sandboxes_idle_snapshot_idx`
+    /// (migration 0007), so the cost is index-scan over the small
+    /// opted-in cohort regardless of fleet size.
+    ///
+    /// Caller handles per-controller throttling via a counting
+    /// semaphore (§ 7.1, `SANDBOX_SNAPSHOT_PER_WORKER_CONCURRENCY`).
+    pub async fn idle_eligible_sandboxes(
+        &self,
+        threshold_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<SandboxRow>> {
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let rows = client
+            .query(
+                "SELECT sandbox_id, user_id, project_id, backend, vm_index, \
+                        agent_url, host_id, generation, status, key_fp, \
+                        EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_secs, \
+                        EXTRACT(EPOCH FROM started_at)::BIGINT AS started_at_secs, \
+                        EXTRACT(EPOCH FROM stopped_at)::BIGINT AS stopped_at_secs, \
+                        EXTRACT(EPOCH FROM last_used_at)::BIGINT AS last_used_at_secs \
+                   FROM sandbox.sandboxes \
+                  WHERE status = 'running' \
+                    AND idle_snapshot_opted_in = TRUE \
+                    AND last_used_at < now() - make_interval(secs => $1::BIGINT) \
+                    AND deleted_at IS NULL \
+                  ORDER BY last_used_at ASC, sandbox_id ASC \
+                  LIMIT $2::BIGINT",
+                &[&threshold_secs, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let status_str: &str = r.get("status");
+            let started_at_opt: Option<i64> = r.try_get("started_at_secs").ok();
+            let stopped_at_opt: Option<i64> = r.try_get("stopped_at_secs").ok();
+            out.push(SandboxRow {
+                sandbox_id: r.get("sandbox_id"),
+                user_id: r.get("user_id"),
+                project_id: r.get("project_id"),
+                backend: r.get("backend"),
+                vm_index: r.try_get("vm_index").ok(),
+                agent_url: r.try_get("agent_url").ok(),
+                host_id: r.get("host_id"),
+                generation: r.get::<_, i64>("generation"),
+                status: SandboxStatus::from_str_opt(status_str)
+                    .unwrap_or(SandboxStatus::Lost),
+                key_fp: r.get("key_fp"),
+                created_at_secs: r.get::<_, i64>("created_at_secs").max(0) as u64,
+                started_at_secs: started_at_opt.map(|v| v.max(0) as u64),
+                stopped_at_secs: stopped_at_opt.map(|v| v.max(0) as u64),
+                last_used_at_secs: r.get::<_, i64>("last_used_at_secs").max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
     /// INSERT an audit-pipe row.
     pub async fn insert_event(&self, event: &EventRow) -> Result<()> {
         let _ = zeroship_core::typed_id::parse_with_prefix(&event.event_id, "evt")

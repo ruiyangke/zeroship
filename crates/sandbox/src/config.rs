@@ -126,6 +126,16 @@ pub struct SandboxConfig {
     /// retries remain. `SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS`
     /// (default 90).
     pub create_retry_total_timeout_secs: u64,
+
+    /// Snapshot/restore master feature flag. When `false`, the
+    /// snapshot/wake/cold-boot admin handlers return 501
+    /// `feature_disabled` and the idle-eviction sweep is a no-op.
+    /// Lease-takeover for transient states (§ 6.1) stays on
+    /// regardless — we always need to unwedge stuck rows.
+    /// `SANDBOX_SNAPSHOT_ENABLED` (default `false`).
+    /// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+    /// § 10.3, § 13.1.
+    pub snapshot_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -616,6 +626,7 @@ impl SandboxConfig {
         let create_retry_max = parse_env("SANDBOX_CREATE_RETRY_MAX", 2u32)?;
         let create_retry_total_timeout_secs =
             parse_env("SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS", 90u64)?;
+        let snapshot_enabled = parse_env("SANDBOX_SNAPSHOT_ENABLED", false)?;
 
         Ok(Self {
             port, token, backend, image, workspace_root, network,
@@ -623,6 +634,7 @@ impl SandboxConfig {
             k8s, nomad_ch,
             create_retry_max,
             create_retry_total_timeout_secs,
+            snapshot_enabled,
         })
     }
 }
