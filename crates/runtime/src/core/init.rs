@@ -141,7 +141,15 @@ function getRequest() {
     return req;
 }
 
-export { env, waitUntil, getRequest };
+// RPC v2 phase 1 (Wave D) — ALS-backed per-request context. Returns
+// the frozen `ctx` object during a `default.rpc(...)` call and
+// `undefined` outside one. The npm `@zeroship/server` package layers
+// `user()` / `request()` / `idempotencyKey()` etc. on top of this.
+function getRequestContext() {
+    return globalThis.__zeroshipGetRpcCtx();
+}
+
+export { env, waitUntil, getRequest, getRequestContext };
 "#;
 
 /// Internal bootstrap-only module. NOT part of the stable user-facing API —
@@ -685,27 +693,24 @@ pub fn load_polyfills_and_modules(
         crate::crypto_native::install_globals(scope, global);
     }
 
-    // Native node:crypto — `globalThis.__zeroship_node_crypto` (D-N26).
-    // Per docs/proposals/node-crypto-native.md §XI; the Vite-side
-    // synthetic module re-exports each property of this object as a
-    // named ESM export.
+    // node:crypto and node:async_hooks are resolved as native V8
+    // SyntheticModules by `core::native_modules`. User code imports
+    // them directly:
+    //
+    //     import { createHash } from "node:crypto";
+    //     import { AsyncLocalStorage } from "node:async_hooks";
+    //
+    // Per D-N26 (crypto) and ISS-01 (async_hooks). Exports are
+    // populated lazily by the modules' `evaluate` callbacks on first
+    // import.
+    //
+    // `__zeroshipNodeBuiltin(spec)` — single-function bridge consumed
+    // by vite-plugin's dev `fetchModule` (ModuleRunner can't issue
+    // native ESM imports in dev). Cheap, dispatches to the same
+    // SyntheticModule path.
     {
         let global = scope.get_current_context().global(scope);
-        crate::node::crypto::install_globals(scope, global);
-    }
-
-    // Native node:async_hooks — `globalThis.__zsAsyncHooks` (ISS-01).
-    // Closes the gap that broke LangGraph's `interrupt()` after any
-    // `await fetch(...)` inside a node body. Backed by V8's
-    // `ContinuationPreservedEmbedderData` slot, which V8 propagates
-    // automatically across every async hop (await, microtask, .then).
-    // Must be installed BEFORE user/module code evaluates so
-    // `@langchain/core`'s singleton-init path picks up the real
-    // `AsyncLocalStorage` instead of falling back to its bundled
-    // `MockAsyncLocalStorage` shadow.
-    {
-        let global = scope.get_current_context().global(scope);
-        crate::node::async_hooks::install_globals(scope, global);
+        crate::native_modules::install_global_bridge(scope, global);
     }
 
     // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).
@@ -1473,11 +1478,11 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
 
     // (`__cryptoHashSync` / `__cryptoHmacSync` were the v1 sync hash/HMAC
     // ad-hoc V8 callbacks consumed by the JS shim at
-    // `sdks/vite-plugin/src/node-compat.ts`. After Stage B of
-    // `docs/proposals/node-crypto-native.md` the node:crypto shim
-    // delegates to `globalThis.__zeroship_node_crypto.createHash` /
-    // `createHmac` — the per-call thunks are dead code and have been
-    // removed alongside the JS shim's inline implementation.)
+    // `sdks/vite-plugin/src/node-compat.ts`. Stage B of
+    // `docs/proposals/node-crypto-native.md` replaced them with a
+    // boundary object; the post-Stage-B migration moved the surface
+    // into a V8 SyntheticModule registered as `node:crypto` (see
+    // `crate::core::native_modules`). The thunks are long gone.)
 
     // (`__streams.{create,read,enqueue,close,error}` was the native
     // backing for the JS pump in `__zsBeginStreamForward` from the
@@ -1744,6 +1749,16 @@ pub fn install_headers(scope: &mut v8::PinScope) {
 pub fn install_dom(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
     crate::dom::install_globals(scope, global);
+    // Native RpcError (RPC v2 phase 1, Wave B). Installed AFTER `dom`
+    // so the platform's DOMException-style error envelopes share
+    // ordering: any path that depends on RpcError running after Error
+    // already exists on the global is fine because V8 wires the Error
+    // intrinsic before user-visible install hooks fire.
+    crate::rpc::install_global(scope, global);
+    // RPC v2 phase 1 (Wave D) — install `__zeroshipGetRpcCtx` so the
+    // `getRequestContext` export in the `zeroship` JS module can read
+    // the per-request platform ctx out of V8's embedder-data slot.
+    crate::rpc::install_dispatch_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).

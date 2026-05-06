@@ -40,7 +40,8 @@ url = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
 
 # Crypto
 sha2 = "0.10"
@@ -96,6 +97,11 @@ ada-url = "3.4.4"
 # V8
 v8 = "147"
 deno_core_icudata = "0.77"
+
+# Microbenchmarks. Pinned at 0.5 (matches platform crate's dev-dep).
+# Wave F (RPC v2 phase 1) added the first proper microbench in this
+# workspace (`crates/runtime/benches/rpc_dispatch.rs`).
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # WHATWG Encoding spec — Henri Sivonen's reference impl, also the
 # encoding library used by Firefox. Replaces hand-rolled UTF-8 decode

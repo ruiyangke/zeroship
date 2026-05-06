@@ -172,9 +172,9 @@ pub fn build<'s>(
     inst
 }
 
-/// `crypto.createHash(name, options?)` — top-level free function entry
-/// point bound to `globalThis.__zeroship_node_crypto.createHash` by
-/// `module::install_globals`.
+/// `crypto.createHash(name, options?)` — top-level free function
+/// exported as `createHash` by the `node:crypto` synthetic module
+/// (`module::evaluate`).
 pub(crate) fn create_hash_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,

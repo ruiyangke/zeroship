@@ -102,11 +102,16 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
 
         let limits = runtime_limits_from_app(&app_limits);
+        // Pass `app_id` so the runtime's RPC fast path can register
+        // every in-flight `AbortController` with `crate::rpc::abort`,
+        // keyed by `(app_id, request_id)`. `evict_lru` walks that
+        // registry on eviction (Wave E).
         let runtime = Runtime::builder()
             .modules(modules)
             .env_vars(env_vars)
             .limits(limits)
             .plugins(plugins)
+            .app_id(app_id)
             .build();
 
         // Exit isolate so other isolates can be created/entered on this thread.
@@ -204,6 +209,20 @@ fn evict_lru(cache: &mut AppCache) {
     if let Some((&oldest_id, _)) = cache.isolates.iter().min_by_key(|(_, e)| e.last_used) {
         tracing::info!(app_id = %oldest_id, "worker: evicting LRU isolate");
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
+
+        // Wave E — fire every in-flight `AbortController` for this app
+        // BEFORE removing the isolate. User code awaiting a fetch /
+        // setTimeout / addEventListener("abort") gets one V8 turn to
+        // observe the cancellation; the synchronous abort dispatch
+        // runs inside `with_scope`. Phase 1 ships only the abort
+        // fan-out — the 30-second drain timer + Disposed state
+        // (proposal §3 / §15 OQ-2) are deferred to phase 2.
+        if let Some(entry) = cache.isolates.get(&oldest_id) {
+            entry.runtime.with_scope(|scope| {
+                zeroship_runtime::rpc::abort::entered_for_eviction(scope, oldest_id);
+            });
+        }
+
         cache.isolates.remove(&oldest_id);
         HASHES.with(|h| { h.borrow_mut().remove(&oldest_id); });
         // Env in `SharedEnvs` is process-wide and may still be needed
