@@ -1714,19 +1714,11 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // `{ stream: true }` option and corrupted multi-byte UTF-8 split
     // across chunk boundaries (the AI SDK / SSE bug). Native
     // implementations live in `text_encoding.rs` and are wired here
-    // via the `#[v8_class]` macro's `install` fn.
-    {
-        let tmpl = crate::text_encoding::TextEncoder::install(scope);
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "TextEncoder").unwrap();
-        global.set(scope, key.into(), class_fn.into());
-    }
-    {
-        let tmpl = crate::text_encoding::TextDecoder::install(scope);
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "TextDecoder").unwrap();
-        global.set(scope, key.into(), class_fn.into());
-    }
+    // via the macro-emitted `register` fn (#198).
+    crate::register_native_classes!(scope, global, [
+        crate::text_encoding::TextEncoder,
+        crate::text_encoding::TextDecoder,
+    ]);
 
     // Native Headers per WHATWG Fetch §2.2 — wired in
     // `load_polyfills_and_modules` immediately after fetch.js runs.
@@ -1807,18 +1799,11 @@ pub fn install_native_streams(scope: &mut v8::PinScope) {
 ///     delegate to).
 pub fn install_text_encoding_streams(scope: &mut v8::PinScope) {
     let global = scope.get_current_context().global(scope);
-    {
-        let tmpl = crate::text_encoding::streams::TextEncoderStream::install(scope);
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "TextEncoderStream").unwrap();
-        global.set(scope, key.into(), class_fn.into());
-    }
-    {
-        let tmpl = crate::text_encoding::streams::TextDecoderStream::install(scope);
-        let class_fn = tmpl.get_function(scope).unwrap();
-        let key = v8::String::new(scope, "TextDecoderStream").unwrap();
-        global.set(scope, key.into(), class_fn.into());
-    }
+    // #198 — bare template + globalThis bind for both classes.
+    crate::register_native_classes!(scope, global, [
+        crate::text_encoding::streams::TextEncoderStream,
+        crate::text_encoding::streams::TextDecoderStream,
+    ]);
 }
 
 /// Install native `CompressionStream` / `DecompressionStream` per the

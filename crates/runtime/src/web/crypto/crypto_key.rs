@@ -316,18 +316,7 @@ fn vec_to_uint8array<'s>(
     arr.into()
 }
 
-// ---------------------------------------------------------------------------
-// install_global — wire CryptoKey on globalThis
-// ---------------------------------------------------------------------------
-
-pub fn install_global<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<v8::Object>,
-) -> v8::Local<'s, v8::Function> {
-    let tmpl = CryptoKey::install(scope);
-    let class_fn = tmpl.get_function(scope).unwrap();
-
-    let key = v8::String::new(scope, "CryptoKey").unwrap();
-    global.set(scope, key.into(), class_fn.into());
-    class_fn
-}
+// #198 — `install_global` removed; bind happens via the macro-emitted
+// `CryptoKey::register` invoked from `crypto::install_globals`'s
+// `register_native_classes!` list. No caller used the previously-
+// returned `Function`.

@@ -89,7 +89,13 @@ pub fn install_globals<'s>(
 ) {
     // Install the classes first so SubtleCrypto::install / CryptoKey::install
     // are cached per-isolate by the time `crypto.subtle` getter runs.
-    crypto_key::install_global(scope, global);
+    // #198 — CryptoKey is bare bind; SubtleCrypto's `install_global`
+    // returns its Function for callers that wanted it (no current users
+    // — the let _ binding swallows it) so it stays on the wrapper for
+    // now; Crypto needs the global `crypto` instance build, also stays.
+    crate::register_native_classes!(scope, global, [
+        crypto_key::CryptoKey,
+    ]);
     let _ = subtle::install_global(scope, global);
     crypto_class::install_global(scope, global);
 }

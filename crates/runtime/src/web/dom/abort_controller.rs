@@ -71,16 +71,6 @@ impl AbortController {
     }
 }
 
-// ---------------------------------------------------------------------------
-// install_global
-// ---------------------------------------------------------------------------
-
-pub fn install_global<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<v8::Object>,
-) {
-    let tmpl = AbortController::install(scope);
-    let class_fn = tmpl.get_function(scope).unwrap();
-    let key = v8::String::new(scope, "AbortController").unwrap();
-    global.set(scope, key.into(), class_fn.into());
-}
+// #198 — `install_global` removed; bind happens via the macro-emitted
+// `AbortController::register` invoked from `dom::install_globals`'s
+// `register_native_classes!` list.

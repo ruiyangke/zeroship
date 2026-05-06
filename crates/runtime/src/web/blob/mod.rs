@@ -18,6 +18,12 @@ pub use file::File;
 /// flow already orders streams before Blob.
 pub fn install_globals(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     // ----- Install Blob -----
+    //
+    // #198 — left as direct install/bind because File below needs the
+    // resolved `blob_class_fn` (for `file_class_fn.set_prototype(blob)`),
+    // and `register_native_classes!` doesn't return the bound Function.
+    // Re-fetching via `global.get(...)` after registration would just be
+    // strictly more code, so keep the manual sequence here.
     let blob_tmpl = Blob::install(scope);
     let blob_class_fn = blob_tmpl.get_function(scope).unwrap();
     let blob_key = v8::String::new(scope, "Blob").unwrap();
