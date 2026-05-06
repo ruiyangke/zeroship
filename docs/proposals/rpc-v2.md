@@ -164,6 +164,25 @@ Per round-01 Medium-9 / Low-N feedback: rules are explicit, not implicit.
 - A function-level directive applies only to the function it heads. Other exports of the same file are normal client-bundle exports.
 - Re-exports of a server function (`export { add } from "./todos"`) are tagged transitively.
 
+### Opt-in lazy procedures (Wave #188)
+
+A procedure marked `lazy: true` defers its module evaluation to the first call. The vite-plugin emits a dynamic-import wrapper instead of a static `import * as` line for that target file:
+
+```ts
+"use server";
+import { mutation } from "@zeroship/server";
+import { runWizard } from "./_wizard.js";   // heavy
+
+export const wizard = mutation(async (input) => runWizard(input), {
+  id:    "wizard",
+  lazy:  true,
+});
+```
+
+The synthetic SSR entry replaces the eager `import * as _user_TARGET_n_` plus `_procedures[wid] = ns.wizard` with `_procedures[wid] = async (input, ctx) => (await import("./wizard.js")).wizard(input, ctx)`. Cold-start parses only non-lazy modules. The dynamic import rides V8's host callback (Wave #187), which caches the module on first evaluation — second call is a Map lookup, not a re-import.
+
+Detection accepts `fn.config.lazy = true` (literal boolean) or the wrapper second-arg form `mutation(handler, { lazy: true })`. Non-literal `lazy` expressions warn at build time and stay eager. Mixed files (some lazy, some eager exports) emit BOTH a static import and per-procedure dynamic-import wrappers — V8 de-dupes the module so both refer to the same namespace.
+
 ---
 
 ## 2. Wire identity

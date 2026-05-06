@@ -385,6 +385,12 @@ function buildPhase2Entry(
 ): string {
   // Group bindings by source file so we emit ONE namespace import per
   // target. The synthetic entry then references `<ns>.<exportName>`.
+  // A file with both eager AND lazy exports lands in BOTH columns: the
+  // namespace import for the eager ones, the dynamic-import wrapper for
+  // the lazy ones. V8 de-dupes the module — the dynamic import resolves
+  // to the same namespace the static import already evaluated (Wave
+  // #187 host callback cache). The lazy wrapper is then a Map lookup
+  // on the second call.
   const byFile = new Map<string, ServerBinding[]>();
   for (const b of bindings.values()) {
     const arr = byFile.get(b.sourceFile);
@@ -392,22 +398,39 @@ function buildPhase2Entry(
     else byFile.set(b.sourceFile, [b]);
   }
 
-  // Stable per-file alias — `_user_TARGET_<n>_`. Order keys for a
-  // deterministic emission order across builds.
-  const sortedFiles = [...byFile.keys()].sort();
+  // Files needing a static namespace import — those with at least one
+  // EAGER binding. Lazy-only files get no static import (their dynamic
+  // import is the only entry point).
+  const eagerFiles = [...byFile.keys()]
+    .filter((f) => byFile.get(f)!.some((b) => !b.lazy))
+    .sort();
   const aliasOf = new Map<string, string>();
-  sortedFiles.forEach((file, idx) => aliasOf.set(file, `_user_TARGET_${idx}_`));
+  eagerFiles.forEach((file, idx) => aliasOf.set(file, `_user_TARGET_${idx}_`));
 
-  const importLines = sortedFiles
+  const importLines = eagerFiles
     .map((file) => `import * as ${aliasOf.get(file)} from ${JSON.stringify(file)};`)
     .join("\n");
 
+  // Procedure entries — eager ones reference the static namespace
+  // alias, lazy ones emit an arrow that does the dynamic import.
+  // Ordering: iterate files lex, then bindings in their original order.
   const tableEntries: string[] = [];
-  for (const file of sortedFiles) {
+  const allFiles = [...byFile.keys()].sort();
+  for (const file of allFiles) {
     for (const b of byFile.get(file)!) {
-      tableEntries.push(
-        `  ${JSON.stringify(b.wireId)}: ${aliasOf.get(file)}.${b.exportName},`,
-      );
+      if (b.lazy) {
+        // Wave #188 — defers module evaluation to first call. The
+        // V8 dynamic-import host callback (Wave #187) caches the
+        // namespace, so the second call is a Map lookup.
+        tableEntries.push(
+          `  ${JSON.stringify(b.wireId)}: async (input, ctx) => ` +
+            `(await import(${JSON.stringify(file)})).${b.exportName}(input, ctx),`,
+        );
+      } else {
+        tableEntries.push(
+          `  ${JSON.stringify(b.wireId)}: ${aliasOf.get(file)}.${b.exportName},`,
+        );
+      }
     }
   }
 
