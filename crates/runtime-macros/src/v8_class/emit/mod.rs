@@ -61,6 +61,12 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
     // it stays monolithic but parameterised by ClassConfig.
     let install = install::gen_install(cfg);
 
+    // The `register(scope, global)` companion (#198). Bare template +
+    // globalThis-bind under `class_ty.to_string()`. Lives in the same
+    // impl block as `install` so a single macro list in `setup_globals`
+    // can enumerate `<Class>::register` for every simple class.
+    let register = install::gen_register(cfg);
+
     // Per-method callback fns. Async methods take a different codegen
     // path (spawn a future via `state.spawned_ops` and return a Promise
     // immediately) but install on the prototype identically — async vs
@@ -110,6 +116,8 @@ pub(super) fn assemble_tokens(cfg: &ClassConfig, stripped_impl: &ItemImpl) -> To
         #[allow(non_snake_case, dead_code)]
         impl #class_ty {
             #install
+
+            #register
         }
 
         #constructor_callback

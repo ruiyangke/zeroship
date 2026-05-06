@@ -1,5 +1,6 @@
 ---
 source: crates/runtime-macros/src/v8_class/snapshot_tests.rs
+assertion_line: 95
 expression: format_expansion(out)
 ---
 impl State {
@@ -236,6 +237,21 @@ impl Marker {
         let __local = ::v8::Local::new(scope, __global.clone());
         scope.set_slot(__InstallSlot_Marker(__global));
         __local
+    }
+    /// Register this class on `globalThis` for the current isolate
+    /// — the bare template+bind path consumed by
+    /// `register_native_classes!` in `setup_globals`. Classes that
+    /// need extras (legacy code constants, prototype-chain links,
+    /// hand-rolled methods, …) keep a custom `install_global`
+    /// alongside this and bypass the registration list.
+    pub fn register<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        global: v8::Local<v8::Object>,
+    ) {
+        let __tmpl = Self::install(scope);
+        let __key = v8::String::new(scope, "Marker").unwrap();
+        let __class_fn = __tmpl.get_function(scope).unwrap();
+        global.set(scope, __key.into(), __class_fn.into());
     }
 }
 #[allow(non_snake_case, unused_variables, unused_mut, clippy::needless_borrow)]

@@ -41,13 +41,20 @@ use super::super::{ClassMethod, ConstKind, MethodKind};
 use crate::must_str;
 
 /// Emit the per-class `pub fn install(scope) -> v8::Local<v8::FunctionTemplate>`
-/// body. Splices into the surrounding `impl <Class>` block emitted by
-/// the top-level `assemble_tokens` orchestrator.
+/// AND companion `pub fn register(scope, global)` bodies. Splices into
+/// the surrounding `impl <Class>` block emitted by the top-level
+/// `assemble_tokens` orchestrator.
 ///
 /// Wave 9 N3 — body is now a thin orchestrator that delegates to the
 /// six per-fragment helpers below. Each helper takes `&ClassConfig`
 /// (per design §3.1) and returns a self-contained TokenStream that
 /// the orchestrator splices in document order.
+///
+/// #198 — `register` is the bare template+global-bind path used by
+/// `register_native_classes!` from `setup_globals`. Classes with extra
+/// setup (DOMException's legacy code constants, RpcError's wire-string
+/// codes, EventTarget-pre-AbortSignal ordering, …) keep their hand-
+/// written `install_global` and stay outside the macro list.
 pub(super) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
     let class_ty = cfg.class_ty;
 
@@ -144,6 +151,41 @@ pub(super) fn gen_install(cfg: &ClassConfig) -> TokenStream2 {
             let __local = ::v8::Local::new(scope, __global.clone());
             scope.set_slot(#install_slot_ty(__global));
             __local
+        }
+    }
+}
+
+/// Emit the per-class `pub fn register(scope, global)` — the bare
+/// template-build + globalThis-bind path consumed by
+/// `register_native_classes!` from `setup_globals` (#198).
+///
+/// The global key is the `set_class_name` literal — i.e. `class_ty`'s
+/// Rust name, which for the no-marker path matches the WebIDL interface
+/// identifier (e.g. `AbortController`). For state-marker classes
+/// (`MessageEventState`, `EventSourceState`, …) the bound key would be
+/// the marker-state name — those classes therefore keep their hand-
+/// written `install_global` and stay outside the macro registration list.
+pub(super) fn gen_register(cfg: &ClassConfig) -> TokenStream2 {
+    let class_ty = cfg.class_ty;
+    let class_name_str = class_ty.to_string();
+    let scope_tok = quote! { scope };
+    let key_init = must_str(&scope_tok, &quote! { #class_name_str });
+
+    quote! {
+        /// Register this class on `globalThis` for the current isolate
+        /// — the bare template+bind path consumed by
+        /// `register_native_classes!` in `setup_globals`. Classes that
+        /// need extras (legacy code constants, prototype-chain links,
+        /// hand-rolled methods, …) keep a custom `install_global`
+        /// alongside this and bypass the registration list.
+        pub fn register<'s>(
+            scope: &mut v8::PinScope<'s, '_>,
+            global: v8::Local<v8::Object>,
+        ) {
+            let __tmpl = Self::install(scope);
+            let __key = #key_init;
+            let __class_fn = __tmpl.get_function(scope).unwrap();
+            global.set(scope, __key.into(), __class_fn.into());
         }
     }
 }
