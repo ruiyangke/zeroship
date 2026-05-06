@@ -92,6 +92,36 @@ Modules come from a `Vec<ModuleEntry>` (specifier + source). Today every deploy 
 
 Stream chunks moving onto an HTTP wire go through the Rust-side response forwarder in `crates/runtime/src/web/streams/response_forwarder.rs`: when `inspect_response` sees a Response with a stream body, `begin_forward` locks it via `getReader()` and drives `read()` in a Rust promise-reaction loop, pushing each chunk into a per-stream forwarder. The kernel attaches a `direct_writer` (StreamWriter to the TCP-bound channel) in `build_fetch_outcome`; from then on chunks pump straight to the wire. This used to be a JS shim (`__zsBeginStreamForward` + `__streams.{create,enqueue,close,error}` namespace) — both deleted.
 
+## Cold-start budget (and why we don't snapshot)
+
+Measured cold-start (Criterion microbench, `crates/runtime/benches/cold_start.rs`):
+
+- `isolate_only` p50 ≈ **1.24 ms** (V8 isolate construction + native class installs).
+- `boot_to_first` p50 ≈ **2.4 ms** (above + polyfill JS evaluation + first user-fetch dispatch).
+
+This is fast enough that a V8 boot snapshot (`SnapshotCreator` /
+`Isolate::CreateParams::snapshot_blob`) doesn't help — investigated
+through three implementation phases on `feature/boot-snapshot` (deleted
+2026-05-06), all perf-neutral or slightly regressed. See
+`crates/runtime/TODO.md` §"Memory footprint" lever 2 for the writeup.
+
+The platform's discipline of small native primitives + lazy lib imports
++ minimal polyfill JS already wins most of the cold-start battle. The
+snapshot lever only pays off when init exceeds ~10 ms, which would
+require a much heavier native surface or richer polyfill prelude. If
+that day comes, the lazy-in-process pattern (build snapshot at first
+`Runtime::builder().build()`, cache in `OnceLock<Vec<u8>>`) is the
+right shape — V8 won't accept flag changes post-`init_v8`, so the
+build.rs blob route has ergonomic problems.
+
+What's wired today:
+
+- **Heap cap** (`RuntimeBuilder::heap_limit_mb`) — bounds per-isolate
+  RSS; default 128 MB. See `docs/reference/runtime-limits.md`.
+- **Idle GC** (`RuntimeBuilder::idle_gc_after_ms`) — fires
+  `low_memory_notification` after a configurable idle window;
+  default 30 s. Frees ~50–100 MB per isolate during quiet windows.
+
 ## Bench infrastructure
 
 `crates/runtime/benches/`:
@@ -108,7 +138,7 @@ See `docs/reference/zerobench.md` for the tool.
 | --- | --- |
 | A new native primitive | `docs/reference/plugin-system.md`, then `crates/plugin-kv/src/lib.rs` (smallest existing example) |
 | Streams correctness | `crates/runtime/src/core/init.rs` (look for `streams.js` and the polyfill) |
-| Cold-start latency | `crates/runtime/src/core/runtime.rs::ensure_initialized`; consider V8 code-cache wiring (Tier 4 future) |
+| Cold-start latency | `crates/runtime/src/core/runtime.rs::ensure_initialized`. Boot snapshot investigated 2026-05-06 — not worth it at our 2.4 ms baseline (see "Cold-start budget" above). V8 code-cache wiring is the next lever if needed. |
 | HTTP request shaping | `crates/runtime/src/transport/handler.rs` |
 | Multi-tenant isolation | `crates/worker/src/cache.rs` (LRU, eviction); `runtime.rs` (`enter_depth`, `Drop`) |
 | Adding a Node compat shim | `crates/runtime/src/core/init.rs` (the polyfill prelude); `docs/reference/node-compat.md` |

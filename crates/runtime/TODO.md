@@ -278,59 +278,75 @@ The runtime's per-isolate working set sits around 125 MB after warmup
 ~20 MB + transient request state ~30 MB). At 16 workers per process,
 that's ~2 GB resident. Three levers, listed by effort × impact:
 
-### 1. Per-isolate `--max-old-space-size` cap
+### 1. Per-isolate `--max-old-space-size` cap — SHIPPED 2026-05-06
 
-V8 has no heap cap today; it grows to multi-GB before GC pressure
-kicks in. Capping old-gen forces earlier GC and bounds the worst
-case.
+Wired via `RuntimeBuilder::heap_limit_mb(mb)` →
+`Isolate::CreateParams::heap_limits(0, max)`. Default 128 MB; control
+plane surfaces `AppRuntimeLimits.heap_limit_mb` per app. The
+near-heap-limit callback grows the cap by `initial / 4` per hit
+(escape valve, capped at 4 × initial) and calls
+`IsolateHandle::terminate_execution` once hits ≥ 5 — surfaces as a
+catchable JS RangeError, then the worker LRU reaps the isolate.
 
-- API: `v8::Isolate::CreateParams::heap_limits(initial, max)` —
-  pass `max = 64 * 1024 * 1024` (or whatever the cap is).
-- Wire via `RuntimeBuilder` so deployers can set it per-app.
-- Risk: too low causes thrashing or OOM. Default off; opt-in via
-  `RuntimeLimits::heap_limit_mb`. Document the trade-off in
-  `docs/reference/runtime-limits.md` (file doesn't exist yet —
-  create as part of this).
-- Cuts total RSS from ~2 GB → ~1 GB at 16 workers.
+Reference docs: `docs/reference/runtime-limits.md`.
+Tests: `crates/runtime/tests/heap_limits.rs` (3 tests).
 
-### 2. Boot snapshot — `StartupData`
+### 2. Boot snapshot — INVESTIGATED 2026-05-06, NOT WORTH IT
 
-V8 supports startup snapshots: freeze the post-init heap (after
-all native classes installed, after `scenarios.js`-equivalent
-boot-time JS evaluated) into a binary blob. Each isolate boots
-from the snapshot instead of re-running init.
+We tried this through three implementation phases (`#190` Phase 1 +
+Phase 2 + Phase 2b on the now-deleted `feature/boot-snapshot`
+branch). All three were perf-neutral or regressed `isolate_only` p50
+by 3-5%. Root cause: the TODO's "50–200 ms → 5–10 ms" target was
+based on Cloudflare Workers' baseline (heavy polyfills, dozens of
+native classes, larger Workers runtime). Our actual cold-start is
+**~2.4 ms** for `boot_to_first` — there's no 45 ms to save.
 
-- API: `v8::SnapshotCreator` build-time, `v8::Isolate::CreateParams::snapshot_blob`
-  per-isolate boot.
-- Two snapshots: (a) base — native classes + Web API surface;
-  (b) per-app — base + the user's `default.fetch` + module
-  graph evaluated. (b) is the bigger win for cold-start.
-- Risk: snapshot must be re-built on every native API change.
-  Add a build-time step in `crates/runtime/build.rs` that produces
-  `target/zeroship-runtime-snapshot.bin`, included via `include_bytes!`.
-- Cuts per-isolate boot from ~50–200 ms → ~5–10 ms. Saves
-  ~20–30 MB per isolate (no init artifacts retained — already
-  compiled into the snapshot).
-- Cloudflare Workers technique. The biggest perf lever for
-  multi-tenant cold starts.
+Where our cold-start time goes (rough decomposition):
 
-### 4. Idle GC trigger
+  - V8 isolate creation: ~1 ms (V8 intrinsic, can't snapshot away)
+  - JS evaluation (polyfills + bootstrap): ~0.5–1 ms
+  - Native class installs: ~50–100 µs total
+  - Module loading + instantiation: rest
 
-V8 only GCs under heap pressure or when the allocator hits a
-threshold. During low-traffic windows the heap retains its
-high-water-mark working set indefinitely — unfree-able from the
-OS's point of view.
+The snapshot would only capture native class installs (smallest
+slice). To move the needle we'd have to capture the JS-evaluation
+heap — a different architectural lever (run polyfill JS at build
+time, freeze the post-eval heap). That's a separate proposal, not
+the simple "freeze native classes" snapshot the TODO described.
 
-- API: `v8::Isolate::idle_notification_deadline(deadline_in_seconds)`
-  hints V8 to spend up to N ms running incremental GC. Returns
-  `true` when GC has caught up.
-- Wire into the compio event loop as a "no requests for K seconds
-  → fire idle GC" trigger. Per-isolate timer.
-- Effort: ~30 LOC in `runtime.rs` — track `last_request_ts` per
-  isolate, schedule idle ticks via `compio::time::interval`.
-- Saves: depends on traffic profile. For per-app isolates that
-  see bursty traffic, can free ~50–100 MB per isolate during
-  idle windows.
+V8 SnapshotCreator also has tight constraints (every callback in
+`external_references`, every cached `v8::Global` dropped before
+`create_blob`, no `Weak::with_guaranteed_finalizer`). Headers'
+fastcall and Crypto's per-realm finalizer hit panic walls during
+the experiment — fixing them would require runtime-macros patches
+and per-class debug, with no proportional win.
+
+**Verdict:** the platform's discipline of small native primitives +
+lazy lib imports + minimal polyfill JS already won most of the
+cold-start battle. Revisit only if cold-start exceeds ~10 ms (e.g.,
+a heavier polyfill / native surface ships).
+
+If revisited, prefer the lazy-in-process snapshot pattern over a
+build.rs blob: V8 won't accept flag changes after `init_v8`, so
+`SnapshotCreator` at build time has ergonomic issues. Build the
+snapshot at first `Runtime::builder().build()`, cache in a
+process-wide `OnceLock<Vec<u8>>`, share across all subsequent
+isolates. The discarded `feature/boot-snapshot` branch in git
+history (last commit `2bcaef2`, dropped 2026-05-06) carries the
+working scaffolding for this pattern.
+
+### 4. Idle GC trigger — SHIPPED 2026-05-06
+
+Wired via `RuntimeBuilder::idle_gc_after_ms(ms)` (default 30 s; pass
+0 to disable). Per-isolate compio ticker holds `Weak<RuntimeInner>`,
+fires `Isolate::low_memory_notification` on quiet windows. The
+v8 = "147" Rust binding doesn't expose `idle_notification_deadline`;
+`low_memory_notification` is the closest substitute (synchronous
+full GC instead of incremental budget — invisible since it only
+fires on idle).
+
+Reference docs: `docs/reference/runtime-limits.md` § Idle GC.
+Tests: `crates/runtime/tests/idle_gc.rs` (3 tests).
 
 (Note: original "drop --workers=16 to --workers=4" alternative
 isn't a runtime concern — it's a deploy-time config.)
