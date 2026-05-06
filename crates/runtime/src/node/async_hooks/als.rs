@@ -159,6 +159,111 @@ impl AsyncLocalStorage {
         let key_local = v8::Local::new(scope, key_global);
         map.delete(scope, key_local.into());
     }
+
+    /// `run(store, fn, ...args)` — invoke `fn(...args)` with the
+    /// store bound to this ALS for the duration of the call AND for
+    /// every continuation that branches off from inside `fn`. The
+    /// previous slot value is restored on every exit path (return,
+    /// throw, rejection).
+    ///
+    /// Per-call clone of the context Map is intentional — see the
+    /// module docs at the top of this file (§"`run(store, fn,
+    /// ...args)` semantics" step 2): mutating the slot value in place
+    /// would leak the new entry into sibling-async branches that
+    /// captured the slot by reference before we entered.
+    ///
+    /// The macro emits the brand check, the External recovery, and
+    /// the `&self` materialisation; the body owns just the slot
+    /// snapshot/restore + tc_scope dance. Pre-task-#169 this was a
+    /// hand-rolled `v8::Function` callback (~130 LOC duplicating the
+    /// macro's prologue) — the variadic `Vec<v8::Local<v8::Value>>`
+    /// arg now lets the macro express the shape directly.
+    #[v8_method]
+    fn run<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        store: v8::Local<v8::Value>,
+        fn_val: v8::Local<v8::Value>,
+        rest: Vec<v8::Local<v8::Value>>,
+    ) -> v8::Local<'s, v8::Value> {
+        // Type-check the callback. JS-visible TypeError — matches the
+        // pre-task-#169 hand-rolled callback's contract; the message
+        // text is unobservable to the test suite (it only asserts on
+        // `e instanceof TypeError`).
+        let fn_local: v8::Local<v8::Function> = match fn_val.try_into() {
+            Ok(f) => f,
+            Err(_) => {
+                let msg = v8::String::new(
+                    scope,
+                    "AsyncLocalStorage.run: callback must be callable",
+                )
+                .unwrap();
+                let exc = v8::Exception::type_error(scope, msg);
+                scope.throw_exception(exc);
+                return v8::undefined(scope).into();
+            }
+        };
+
+        // Snapshot the previous slot value so we can restore it on
+        // every exit path. The slot starts as `undefined` in fresh
+        // isolates; stashing as a Global keeps it alive across the
+        // call regardless of GC.
+        let prev_slot = scope.get_continuation_preserved_embedder_data();
+        let prev_slot_global = v8::Global::new(scope, prev_slot);
+
+        // Build the new context Map = clone(current) + (key -> store).
+        // Per-call clone is the documented invariant — see module docs.
+        let next_map = match read_context_map(scope) {
+            Some(m) => clone_map(scope, m),
+            None => v8::Map::new(scope),
+        };
+        let key_global = match self.key.borrow().clone() {
+            Some(g) => g,
+            None => {
+                // No key minted — constructor mints one, so reaching
+                // here would mean the box was poisoned. Treat as
+                // "no-op run" (fn still runs, no slot mutation).
+                let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+                return fn_local
+                    .call(scope, undefined, &rest)
+                    .unwrap_or_else(|| v8::undefined(scope).into());
+            }
+        };
+        let key_local = v8::Local::new(scope, key_global);
+        next_map.set(scope, key_local.into(), store);
+        scope.set_continuation_preserved_embedder_data(next_map.into());
+
+        // Invoke fn(...rest) inside a TryCatch so we can restore the
+        // slot before re-throwing. The inner scope captures the
+        // outcome as Globals so we can drop tc_scope before touching
+        // the outer scope again.
+        let (result_global, exc_global) = {
+            v8::tc_scope!(let tc, scope);
+            let undefined: v8::Local<v8::Value> = v8::undefined(tc).into();
+            let r = fn_local.call(tc, undefined, &rest);
+            if tc.has_caught() {
+                let exc = tc.exception().map(|e| v8::Global::new(tc, e));
+                (None, exc)
+            } else {
+                (r.map(|v| v8::Global::new(tc, v)), None)
+            }
+        };
+
+        // Restore the slot — UNCONDITIONAL. The whole point of
+        // the function's documented critical contract.
+        let prev_slot_local = v8::Local::new(scope, &prev_slot_global);
+        scope.set_continuation_preserved_embedder_data(prev_slot_local);
+
+        if let Some(exc_g) = exc_global {
+            let exc_local = v8::Local::new(scope, &exc_g);
+            scope.throw_exception(exc_local);
+            return v8::undefined(scope).into();
+        }
+        match result_global {
+            Some(r_g) => v8::Local::new(scope, &r_g),
+            None => v8::undefined(scope).into(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,144 +322,8 @@ pub(crate) fn clone_map<'s>(
     dst
 }
 
-// ---------------------------------------------------------------------------
-// Hand-rolled `run(store, fn, ...args)` callback
-// ---------------------------------------------------------------------------
-//
-// Variadic JS args don't fit the `#[v8_method]` macro's positional
-// extraction, so the `run` callback is hand-rolled. It's installed on
-// the prototype after `AsyncLocalStorage::install()` returns
-// (see `install_global` below).
-
-#[inline]
-fn als_state_from_obj<'a>(
-    scope: &mut v8::PinScope,
-    obj: v8::Local<v8::Object>,
-) -> Option<&'a AsyncLocalStorage> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *mut AsyncLocalStorage;
-    if ptr.is_null() {
-        return None;
-    }
-    // SAFETY: brand check has already verified `obj` is an
-    // AsyncLocalStorage wrapper; the boxed state's lifetime is tied
-    // to the wrapper via the macro-installed weak finalizer.
-    Some(unsafe { &*ptr })
-}
-
-/// `run(store, fn, ...args)` — invoke `fn(...args)` with the store
-/// bound to this ALS for the duration of the call AND for every
-/// continuation that branches off from inside `fn`. The previous
-/// slot value is restored on every exit path (return, throw,
-/// rejection).
-pub(crate) fn run_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    // Brand check — typed entry point introduced in Wave 5c (design
-    // `docs/proposals/runtime-macros-refactor.md` §3.5).
-    let this_v: v8::Local<v8::Value> = args.this().into();
-    if !AsyncLocalStorage::is_instance(scope, this_v) {
-        let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return;
-    }
-    let this = args.this();
-    let als = match als_state_from_obj(scope, this) {
-        Some(s) => s,
-        None => {
-            let msg = v8::String::new(scope, "Illegal invocation").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-
-    let store = args.get(0);
-    let fn_arg = args.get(1);
-    let fn_val: v8::Local<v8::Function> = match fn_arg.try_into() {
-        Ok(f) => f,
-        Err(_) => {
-            let msg = v8::String::new(scope, "AsyncLocalStorage.run: callback must be callable").unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-
-    // Collect varargs (positions 2..N).
-    let arg_len = args.length();
-    let extra_count = if arg_len > 2 { (arg_len - 2) as usize } else { 0 };
-    let mut call_args: Vec<v8::Local<v8::Value>> = Vec::with_capacity(extra_count);
-    for i in 0..extra_count {
-        call_args.push(args.get((i + 2) as i32));
-    }
-
-    // Snapshot the previous slot value so we can restore it on every
-    // exit path. The slot starts as `undefined` in fresh isolates;
-    // stashing as a Global keeps it alive across the call regardless
-    // of GC.
-    let prev_slot = scope.get_continuation_preserved_embedder_data();
-    let prev_slot_global = v8::Global::new(scope, prev_slot);
-
-    // Build the new context Map = clone(current) + (this.key -> store).
-    let next_map = match read_context_map(scope) {
-        Some(m) => clone_map(scope, m),
-        None => v8::Map::new(scope),
-    };
-    let key_global = match als.key.borrow().clone() {
-        Some(g) => g,
-        None => {
-            // No key minted — should be impossible (constructor sets
-            // it). Treat as "no-op run" so the user's fn still runs.
-            let undefined = v8::undefined(scope).into();
-            match fn_val.call(scope, undefined, &call_args) {
-                Some(v) => rv.set(v),
-                None => {} // exception is already pending
-            }
-            return;
-        }
-    };
-    let key_local = v8::Local::new(scope, key_global);
-    next_map.set(scope, key_local.into(), store);
-    scope.set_continuation_preserved_embedder_data(next_map.into());
-
-    // Invoke fn(...args) inside a TryCatch so we can restore the
-    // slot before re-throwing. Using `tc_scope!` borrows an inner
-    // scope; we capture the outcome and let the inner scope drop
-    // before touching the outer scope again.
-    let (result_global, exc_global) = {
-        v8::tc_scope!(let tc, scope);
-        let undefined = v8::undefined(tc).into();
-        let r = fn_val.call(tc, undefined, &call_args);
-        if tc.has_caught() {
-            let exc = tc.exception().map(|e| v8::Global::new(tc, e));
-            (None, exc)
-        } else {
-            (r.map(|v| v8::Global::new(tc, v)), None)
-        }
-    };
-
-    // Restore the slot — UNCONDITIONAL. This is the whole point of
-    // the function's documented critical contract.
-    let prev_slot_local = v8::Local::new(scope, &prev_slot_global);
-    scope.set_continuation_preserved_embedder_data(prev_slot_local);
-
-    if let Some(exc_g) = exc_global {
-        let exc_local = v8::Local::new(scope, &exc_g);
-        scope.throw_exception(exc_local);
-        return;
-    }
-    if let Some(r_g) = result_global {
-        let r_local = v8::Local::new(scope, &r_g);
-        rv.set(r_local);
-    }
-}
-
-// `run()` is exported via the synthetic `node:async_hooks` module; the
-// proto wiring lives in `mod.rs::evaluate`. The hand-rolled callback
-// stays here because it owns the slot snapshot/restore contract.
+// `run()` is now a `#[v8_method]` on the impl block above — see task
+// #169. The macro emits the brand check, the External recovery, the
+// arg extraction (including the trailing `Vec<v8::Local<v8::Value>>`
+// variadic), and the prototype install; this file owns only the
+// slot snapshot/restore + tc_scope dance inside the method body.

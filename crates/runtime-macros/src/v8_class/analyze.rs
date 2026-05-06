@@ -19,6 +19,7 @@ use quote::quote;
 use syn::{ImplItem, ItemImpl};
 
 use super::fastcall::validate_fastcall_signature;
+use super::helpers::{is_varargs_vec, parse_params_skipping_self};
 use super::parse::{
     classify, extract_callable_no_new, extract_fastcall, extract_post_init, extract_reject_shared,
     extract_same_object, extract_v8_name, has_any_receiver, has_mut_self, is_result_unit_return,
@@ -310,6 +311,16 @@ fn collect_methods(input: &ItemImpl) -> Result<Vec<ClassMethod<'_>>, TokenStream
                     }
                 }
 
+                // Variadic param validation. The macro recognises a
+                // `Vec<v8::Local<v8::Value>>` trailing parameter as
+                // "give me args[N..] as a Vec" — see
+                // `helpers::is_varargs_param` for the shape contract.
+                // Reject the disallowed combinations here so the user
+                // sees a span'd compile-error rather than a confused
+                // codegen failure downstream.
+                validate_variadic_param(func, kind, fastcall_flag)
+                    .map_err(|e| e.to_compile_error())?;
+
                 // Wave 4: fold per-method attribute extracts into the
                 // ClassMethod record so emit-side helpers don't walk
                 // attrs again. Each extract uses the strict MarkerAttr
@@ -372,6 +383,89 @@ fn detect_duplicate_js_names(methods: &[ClassMethod<'_>]) -> Result<(), TokenStr
         }
     }
     Ok(())
+}
+
+/// Validate a method's variadic-param shape. The macro recognises a
+/// trailing `Vec<v8::Local<v8::Value>>` parameter as "give me args
+/// from index N onward as a Vec." Enforce:
+///   - at most ONE varargs param (the codegen would only fill the
+///     last one anyway, but two would silently confuse the user);
+///   - varargs MUST be the LAST positional param (everything after
+///     it would always extract `undefined` because the variadic
+///     swallows the remaining JS arg range);
+///   - varargs is REJECTED on fastcall (fixed-arity by V8 ABI),
+///     getters / setters (single-value spec ABI), and constructors
+///     (constructor codegen has no place to bind a Vec — and the
+///     usefulness is marginal; use a regular `Vec<...>` arg instead).
+///   - varargs IS allowed on `#[v8_method]` and `#[v8_async_method]`.
+///
+/// Errors are returned as `syn::Error` so the proc-macro driver can
+/// span the diagnostic on the offending parameter (or method ident
+/// when no specific parameter exists).
+fn validate_variadic_param(
+    func: &syn::ImplItemFn,
+    kind: MethodKind,
+    fastcall_flag: bool,
+) -> syn::Result<()> {
+    let params = parse_params_skipping_self(func);
+    let varargs_idxs: Vec<usize> = params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| if is_varargs_vec(&p.ty) { Some(i) } else { None })
+        .collect();
+
+    if varargs_idxs.is_empty() {
+        return Ok(());
+    }
+
+    if varargs_idxs.len() > 1 {
+        // Span on the second occurrence — the first one is fine
+        // structurally; it's the duplicate that's wrong.
+        let dup_param = &params[varargs_idxs[1]];
+        return Err(syn::Error::new_spanned(
+            &dup_param.ty,
+            "#[v8_method]: at most one variadic `Vec<v8::Local<v8::Value>>` parameter is allowed",
+        ));
+    }
+
+    let varargs_idx = varargs_idxs[0];
+    if varargs_idx != params.len() - 1 {
+        let p = &params[varargs_idx];
+        return Err(syn::Error::new_spanned(
+            &p.ty,
+            "#[v8_method]: variadic `Vec<v8::Local<v8::Value>>` parameter must be the \
+             LAST parameter (it captures all JS args from this position to args.length())",
+        ));
+    }
+
+    if fastcall_flag {
+        return Err(syn::Error::new_spanned(
+            &func.sig.ident,
+            "#[v8_method(fastcall)] does not support variadic args; remove `fastcall` \
+             or drop the trailing `Vec<v8::Local<v8::Value>>` parameter \
+             (V8 fast API is fixed-arity by design)",
+        ));
+    }
+
+    match kind {
+        MethodKind::Getter | MethodKind::Setter => Err(syn::Error::new_spanned(
+            &func.sig.ident,
+            "getters and setters take fixed arity per WebIDL §3.7.6 — \
+             variadic `Vec<v8::Local<v8::Value>>` is not allowed",
+        )),
+        MethodKind::StaticGetter => Err(syn::Error::new_spanned(
+            &func.sig.ident,
+            "static getters take fixed arity — variadic \
+             `Vec<v8::Local<v8::Value>>` is not allowed",
+        )),
+        MethodKind::Constructor => Err(syn::Error::new_spanned(
+            &func.sig.ident,
+            "#[v8_constructor] does not support variadic \
+             `Vec<v8::Local<v8::Value>>` parameters; use a regular \
+             `Vec<...>` arg if you need a sequence",
+        )),
+        MethodKind::Method | MethodKind::AsyncMethod | MethodKind::StaticMethod => Ok(()),
+    }
 }
 
 fn strip_marker_attrs(mut input: ItemImpl) -> ItemImpl {
