@@ -55,12 +55,14 @@
 //! under `#[v8_state_marker]` (the call expression now resolves
 //! against `ResponseState`, where the bodies live).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use zeroship_runtime_macros::{
     v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker, v8_static_method,
+    WebIdlDict,
 };
 
+use super::enums::ResponseType;
 use crate::fetch_body::body::{Body, BodyImpl, BodySource};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
 use crate::fetch_body::extract::extract_body;
@@ -81,17 +83,44 @@ fn is_redirect_status(status: u16) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// ResponseInit — `[Dictionary]` per Fetch §5.5
+// ---------------------------------------------------------------------------
+
+/// `ResponseInit` per Fetch §5.5. Members:
+///   - `status`: u16 (default 200; spec range 200..=599; we extend to
+///     allow 101 for the workerd WebSocket-upgrade carve-out).
+///   - `statusText`: ByteString-like (default "").
+///
+/// `headers` (HeadersInit) and `webSocket` (workerd extension) are
+/// read raw from the init object outside the dict — same v8::Value
+/// passthrough convention as `RequestInit`.
+///
+/// Status is read as `f64` so we can preserve the spec range check
+/// (`isNaN` / out-of-range → RangeError) — converting via `u16` directly
+/// would silently truncate. statusText keeps `Option<String>` so the
+/// missing-key path skips the per-byte reason-phrase validation.
+#[derive(Default, Debug, WebIdlDict)]
+pub(crate) struct ResponseInit {
+    pub status: Option<f64>,
+    #[webidl_name = "statusText"]
+    pub status_text: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // ResponseState
 // ---------------------------------------------------------------------------
 
 #[allow(missing_debug_implementations)]
 pub struct ResponseState {
     pub body: RefCell<BodyImpl>,
-    pub status: RefCell<u16>,
+    pub status: Cell<u16>,
     pub status_text: RefCell<String>,
-    pub response_type: RefCell<String>,
+    /// Typed `ResponseType` — see `enums.rs`. Default is `Default`
+    /// (matches the spec for constructor-built responses); the
+    /// `Response.error()` static patches to `Error` after construction.
+    pub response_type: Cell<ResponseType>,
     pub url: RefCell<String>,
-    pub redirected: RefCell<bool>,
+    pub redirected: Cell<bool>,
     pub headers: RefCell<Option<v8::Global<v8::Object>>>,
     pub web_socket: RefCell<Option<v8::Global<v8::Object>>>,
 }
@@ -100,11 +129,11 @@ impl Default for ResponseState {
     fn default() -> Self {
         ResponseState {
             body: RefCell::new(BodyImpl::null()),
-            status: RefCell::new(200),
+            status: Cell::new(200),
             status_text: RefCell::new(String::new()),
-            response_type: RefCell::new("default".to_string()),
+            response_type: Cell::new(ResponseType::Default),
             url: RefCell::new(String::new()),
-            redirected: RefCell::new(false),
+            redirected: Cell::new(false),
             headers: RefCell::new(None),
             web_socket: RefCell::new(None),
         }
@@ -373,10 +402,10 @@ pub fn build_kernel_response<'s>(
     // 4. Build the ResponseState directly.
     let state = ResponseState {
         body: RefCell::new(body_impl),
-        status: RefCell::new(status),
+        status: Cell::new(status),
         status_text: RefCell::new(status_text),
         url: RefCell::new(url),
-        redirected: RefCell::new(redirected),
+        redirected: Cell::new(redirected),
         headers: RefCell::new(Some(headers_g)),
         ..ResponseState::default()
     };
@@ -424,7 +453,17 @@ impl ResponseState {
     ) -> Result<ResponseState, OpError> {
         let state = ResponseState::default();
 
-        let init_obj: Option<v8::Local<v8::Object>> = if init.is_undefined() {
+        // Parse the typed dict once. The dict is the single point where
+        // any future WebIDL-enum members (or the f64 status) reject
+        // bogus values; today `ResponseInit` carries only scalar
+        // status / statusText so the dict is mostly an organisational
+        // helper.
+        let init_dict = ResponseInit::from_v8(scope, init)?;
+        // Whether init is an actual JS Object (vs null/undefined). We
+        // need this for the raw `headers` / `webSocket` passthroughs
+        // below (the dict can't distinguish missing from null for raw
+        // v8::Value members — see `RequestInit` rationale).
+        let init_obj: Option<v8::Local<v8::Object>> = if init.is_null_or_undefined() {
             None
         } else {
             v8::Local::<v8::Object>::try_from(init).ok()
@@ -435,43 +474,32 @@ impl ResponseState {
         // path — the gateway returns `new Response(null, { status: 101,
         // webSocket: client })` from the user's `fetch` handler. The polyfill
         // had the same carve-out (`embed/fetch.js:246-249`).
-        if let Some(init) = init_obj {
-            let key = v8::String::new(scope, "status").unwrap();
-            if let Some(s_v) = init.get(scope, key.into()) {
-                if !s_v.is_undefined() {
-                    let n = s_v.number_value(scope).unwrap_or(0.0);
-                    let in_range = n == 101.0 || (n >= 200.0 && n <= 599.0);
-                    if n.is_nan() || !in_range {
-                        return Err(OpError::range_error("Invalid status code"));
-                    }
-                    *state.status.borrow_mut() = n as u16;
-                }
+        if let Some(n) = init_dict.status {
+            let in_range = n == 101.0 || (200.0..=599.0).contains(&n);
+            if n.is_nan() || !in_range {
+                return Err(OpError::range_error("Invalid status code"));
             }
+            state.status.set(n as u16);
         }
 
         // Step 2: statusText. Validate per HTTP/1.1 reason-phrase ABNF
         // (HTAB / SP / VCHAR / obs-text). Reject CR/LF/non-ASCII control.
-        if let Some(init) = init_obj {
-            let key = v8::String::new(scope, "statusText").unwrap();
-            if let Some(s_v) = init.get(scope, key.into()) {
-                if !s_v.is_undefined() {
-                    let s = s_v.to_rust_string_lossy(scope);
-                    if !is_valid_reason_phrase(&s) {
-                        return Err(OpError::type_error("Invalid statusText"));
-                    }
-                    *state.status_text.borrow_mut() = s;
-                }
+        if let Some(s) = init_dict.status_text.clone() {
+            if !is_valid_reason_phrase(&s) {
+                return Err(OpError::type_error("Invalid statusText"));
             }
+            *state.status_text.borrow_mut() = s;
         }
 
         // Build headers: from init.headers if present, else empty.
-        let headers_obj = build_response_headers(scope, init_obj)
-            .map_err(OpError::type_error)?;
+        let init_headers_v: Option<v8::Local<v8::Value>> =
+            init_obj.and_then(|o| read_init_member(scope, o, "headers"));
+        let headers_obj =
+            build_response_headers(scope, init_headers_v).map_err(OpError::type_error)?;
 
         // webSocket extension — preserve as-is for the gateway path.
-        if let Some(init) = init_obj {
-            let key = v8::String::new(scope, "webSocket").unwrap();
-            if let Some(ws_v) = init.get(scope, key.into()) {
+        if let Some(o) = init_obj {
+            if let Some(ws_v) = read_init_member(scope, o, "webSocket") {
                 if !ws_v.is_null_or_undefined() {
                     if let Ok(o) = v8::Local::<v8::Object>::try_from(ws_v) {
                         *state.web_socket.borrow_mut() = Some(v8::Global::new(scope, o));
@@ -481,7 +509,7 @@ impl ResponseState {
         }
 
         // Step 7: null-body status check.
-        let status_now = *state.status.borrow();
+        let status_now = state.status.get();
         let body_is_null = body.is_null_or_undefined();
         if !body_is_null && is_null_body_status(status_now) {
             return Err(OpError::type_error(
@@ -509,7 +537,7 @@ impl ResponseState {
     #[v8_getter]
     #[v8_name = "type"]
     fn type_(&self) -> String {
-        self.response_type.borrow().clone()
+        self.response_type.get().as_str().to_string()
     }
 
     #[v8_getter]
@@ -519,17 +547,17 @@ impl ResponseState {
 
     #[v8_getter]
     fn redirected(&self) -> bool {
-        *self.redirected.borrow()
+        self.redirected.get()
     }
 
     #[v8_getter]
     fn status(&self) -> u32 {
-        *self.status.borrow() as u32
+        self.status.get() as u32
     }
 
     #[v8_getter]
     fn ok(&self) -> bool {
-        let s = *self.status.borrow();
+        let s = self.status.get();
         (200..300).contains(&s)
     }
 
@@ -630,7 +658,7 @@ impl ResponseState {
         let init = v8::Object::new(scope);
         {
             let key = v8::String::new(scope, "status").unwrap();
-            let v = v8::Integer::new_from_unsigned(scope, *self.status.borrow() as u32);
+            let v = v8::Integer::new_from_unsigned(scope, self.status.get() as u32);
             init.set(scope, key.into(), v.into());
         }
         {
@@ -652,9 +680,9 @@ impl ResponseState {
         // Copy over `type`, `url`, `redirected`.
         if let Some(clone_raw) = state_ptr(scope, clone_obj) {
             let clone_state: &mut ResponseState = unsafe { &mut *clone_raw };
-            *clone_state.response_type.borrow_mut() = self.response_type.borrow().clone();
+            clone_state.response_type.set(self.response_type.get());
             *clone_state.url.borrow_mut() = self.url.borrow().clone();
-            *clone_state.redirected.borrow_mut() = *self.redirected.borrow();
+            clone_state.redirected.set(self.redirected.get());
         }
 
         Ok(clone_obj)
@@ -697,8 +725,8 @@ impl ResponseState {
             return Ok(obj);
         };
         let state: &mut ResponseState = unsafe { &mut *raw };
-        *state.response_type.borrow_mut() = "error".to_string();
-        *state.status.borrow_mut() = 0;
+        state.response_type.set(ResponseType::Error);
+        state.status.set(0);
         *state.status_text.borrow_mut() = String::new();
         *state.body.borrow_mut() = BodyImpl::null();
 
@@ -907,6 +935,23 @@ impl ResponseState {
 // Hand-rolled helpers used by the constructor + static methods
 // ---------------------------------------------------------------------------
 
+/// Read a single property from the init object. Returns `None` for
+/// missing keys / undefined values; `Some(v)` for explicit null. Used
+/// by raw v8::Value passthroughs (`headers` / `webSocket`) where
+/// distinguishing missing-vs-null matters for the spec algorithm.
+fn read_init_member<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    init: v8::Local<v8::Object>,
+    name: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let key = v8::String::new(scope, name)?;
+    let v = init.get(scope, key.into())?;
+    if v.is_undefined() {
+        return None;
+    }
+    Some(v)
+}
+
 fn is_valid_reason_phrase(s: &str) -> bool {
     // RFC 7230: reason-phrase = *( HTAB / SP / VCHAR / obs-text ).
     //   HTAB     = 0x09
@@ -926,7 +971,7 @@ fn is_valid_reason_phrase(s: &str) -> bool {
 
 fn build_response_headers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    init_obj: Option<v8::Local<v8::Object>>,
+    init_headers: Option<v8::Local<v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
     let global = scope.get_current_context().global(scope);
     let headers_class_key = v8::String::new(scope, "Headers").unwrap();
@@ -936,14 +981,9 @@ fn build_response_headers<'s>(
     let class_fn: v8::Local<v8::Function> = class_v
         .try_into()
         .map_err(|_| "Headers is not a function".to_string())?;
-    let init: v8::Local<v8::Value> = if let Some(init_o) = init_obj {
-        let key = v8::String::new(scope, "headers").unwrap();
-        match init_o.get(scope, key.into()) {
-            Some(v) if !v.is_undefined() => v,
-            _ => v8::undefined(scope).into(),
-        }
-    } else {
-        v8::undefined(scope).into()
+    let init: v8::Local<v8::Value> = match init_headers {
+        Some(v) if !v.is_undefined() => v,
+        _ => v8::undefined(scope).into(),
     };
     let args = [init];
     class_fn

@@ -110,30 +110,26 @@ The Tier 3 derives (`WebIdlDict`, `WebIdlEnum`, `v8_iterable`,
 
 **Deferred** (with reasons):
 
-  - `RequestInit` — Request migrated to `#[v8_class]` but the init
-    dict still parses through manual `get_init` / `copy_string_init`
-    helpers. The mode/credentials/cache/redirect/etc. fields are
-    `RefCell<String>` (not enums), and adding `WebIdlEnum` shapes
-    requires the parallel storage-shape change called out below.
-    Track via macros `Tier-4`.
-  - `ResponseInit` — Response is migrated in parallel (MAC-01
-    Phase 3); the init-dict migration is gated on the same
-    enum-or-string storage decision as `RequestInit` above.
-    Track via `runtime-macros/TODO.md` Tier-4 work.
-  - `RequestMode` / `RequestCache` / `RequestRedirect` /
-    `RequestCredentials` / `RequestDestination` / `ReferrerPolicy`
-    / `ResponseType` — don't exist as Rust enums today (stored
-    as `RefCell<String>` on RequestState/ResponseState). The
-    constructor accepts arbitrary strings without spec validation;
-    migrating requires both adding the enum types AND swapping
-    the storage shape — out of scope for a pure macro migration.
-  - `RedirectMode` / `CredentialsMode` — exist as Rust enums but
-    `from_str(s) -> Self` falls through to Default on unknown
-    values (preserved by request validation contract). The
-    macro's `from_str` returns `Option<Self>` and
-    `WebIdlConvertible` throws TypeError on unknown — semantic
-    mismatch. Would need `.unwrap_or(Default)` glue at every call
-    site to preserve existing behaviour.
+  - ~~`RequestInit` / `ResponseInit` / `RequestMode` /
+    `RequestCache` / `RequestRedirect` / `RequestCredentials` /
+    `RequestDestination` / `ReferrerPolicy` / `ResponseType`~~ —
+    LANDED as #197. New module `web/fetch/enums.rs` defines the
+    seven WebIDL enums; `RequestInit` / `ResponseInit` derive
+    `WebIdlDict`; `RequestState` / `ResponseState` storage moved
+    from `RefCell<String>` to `Cell<E>` for the typed-enum slots.
+    Headers / body / signal stay as raw v8::Value passthroughs to
+    preserve the explicit-null vs missing distinction the dict
+    blanket can't express. Behaviour change: unknown enum values
+    (`mode: "bogus"`) now throw TypeError per WebIDL §3.13.7
+    instead of silently storing the string.
+  - `RedirectMode` / `CredentialsMode` (`web/fetch/algorithms.rs`)
+    — still hand-rolled because they live on the algorithm-side
+    `FetchRequest` (not on the JS-facing `RequestState`). The JS
+    boundary uses `RequestRedirect` / `RequestCredentials` (typed,
+    spec-validating); a `From` bridge in `enums.rs` converts to
+    the algorithm shape after `snapshot_request` reads the typed
+    state. Migrating these to `WebIdlEnum` is unnecessary because
+    they never face JS — they're purely an internal kernel form.
   - `ReadableStreamGetReaderOptions` / `ReadableStreamReaderMode`
     — hand-rolled `getReader(options)` parser uses `v8::tc_scope!`
     to capture + rethrow user-thrown errors from a custom

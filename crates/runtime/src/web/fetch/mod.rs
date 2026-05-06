@@ -31,6 +31,7 @@ pub mod bad_ports;
 pub mod body;
 pub mod content_encoding;
 pub mod data_url;
+pub mod enums;
 pub mod http_network;
 pub mod redirect;
 pub mod request;
@@ -522,8 +523,11 @@ fn snapshot_request<'s>(
 
     let method = state.method.borrow().clone();
     let url = state.url.borrow().clone();
-    let redirect_mode = RedirectMode::from_str(&state.redirect.borrow());
-    let credentials_mode = CredentialsMode::from_str(&state.credentials.borrow());
+    // The state's `redirect` / `credentials` are typed enums (validated
+    // at constructor time). Bridge through the `From` impls in
+    // `enums.rs` to the algorithm-side enum shapes.
+    let redirect_mode = RedirectMode::from(state.redirect.get());
+    let credentials_mode = CredentialsMode::from(state.credentials.get());
 
     let headers = read_headers(scope, req)?;
 
@@ -807,7 +811,7 @@ fn build_response_object<'s>(
     if let Some(raw) = response_state_ptr_mut(scope, result) {
         let state: &crate::fetch_response::ResponseState = unsafe { &*raw };
         *state.url.borrow_mut() = alg.url;
-        *state.redirected.borrow_mut() = alg.redirected;
+        state.redirected.set(alg.redirected);
 
         if !matches!(alg.status, 101 | 103 | 204 | 205 | 304) {
             let len = alg.body.len() as u64;
