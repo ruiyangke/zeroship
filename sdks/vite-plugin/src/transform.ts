@@ -53,6 +53,13 @@ export interface DiscoveredProcedureRecord {
   isStream: boolean;
   config?: Record<string, unknown>;
   moduleConfig?: Record<string, unknown>;
+  /** Wave #188 — opt-in lazy procedure flag, set when the procedure's
+   *  config carries `lazy: true` as a literal boolean (either via
+   *  `<fn>.config.lazy = true` or the `query({ lazy: true, ... })`
+   *  wrapper option). Drives the synthetic-entry generator's
+   *  dynamic-import wrapper emission. Non-literal `lazy` expressions
+   *  warn at build time and fall back to `false`. */
+  lazy?: boolean;
 }
 
 export interface TransformState {
@@ -562,6 +569,40 @@ function literalize(node: any, opts?: { allowSchemaProps?: boolean }): unknown {
 }
 
 /**
+ * Inspect an ObjectExpression-typed AST node for a `lazy` key and
+ * classify its value. Used by Wave #188 to decide whether a procedure
+ * opts into the dynamic-import wrapper emission.
+ *
+ *   { lazy: true }   → "true"
+ *   { lazy: false }  → "false"
+ *   { lazy: someVar} → "non-literal"   (warns; treated as false)
+ *   { ... }          → "absent"
+ *
+ * Kept separate from `literalize()` so a non-literal `lazy` expression
+ * doesn't void the rest of the config — the user keeps their `id`,
+ * `kind`, schemas, etc. and just loses the lazy opt-in.
+ */
+function inspectLazy(node: any): "true" | "false" | "non-literal" | "absent" {
+  if (!node || node.type !== "ObjectExpression") return "absent";
+  for (const p of node.properties ?? []) {
+    if (p.type !== "Property" || p.computed) continue;
+    const k =
+      p.key?.type === "Identifier"
+        ? p.key.name
+        : p.key?.type === "Literal"
+          ? String(p.key.value)
+          : undefined;
+    if (k !== "lazy") continue;
+    const v = p.value;
+    if (v?.type === "Literal" && typeof v.value === "boolean") {
+      return v.value ? "true" : "false";
+    }
+    return "non-literal";
+  }
+  return "absent";
+}
+
+/**
  * Walk module body, collecting `<fnName>.config = { ... }` and
  * `export const $config = { ... }` assignments. Returns:
  *
@@ -571,8 +612,13 @@ function literalize(node: any, opts?: { allowSchemaProps?: boolean }): unknown {
 function collectConfig(astBody: any[]): {
   perFn: Map<string, Record<string, unknown>>;
   moduleConfig: Record<string, unknown> | undefined;
+  /** Per-fn AST node for the legacy `<fn>.config = { ... }` RHS. Kept
+   *  alongside the literalized `perFn` so Wave #188's lazy detector can
+   *  classify non-literal `lazy` expressions without re-walking the body. */
+  perFnNode: Map<string, any>;
 } {
   const perFn = new Map<string, Record<string, unknown>>();
+  const perFnNode = new Map<string, any>();
   let moduleConfig: Record<string, unknown> | undefined;
 
   for (const node of astBody) {
@@ -604,13 +650,18 @@ function collectConfig(astBody: any[]): {
         node.expression.left.property?.type === "Identifier" &&
         node.expression.left.property.name === "config") {
       const fnName = node.expression.left.object.name;
-      const lit = literalize(node.expression.right, { allowSchemaProps: true });
+      const rhs = node.expression.right;
+      const lit = literalize(rhs, { allowSchemaProps: true });
       if (lit && typeof lit === "object" && !Array.isArray(lit)) {
         perFn.set(fnName, lit as Record<string, unknown>);
       }
+      // Even when literalize() bails (non-literal value somewhere) we
+      // record the AST node so the lazy inspector can still classify
+      // its `lazy` key independently.
+      perFnNode.set(fnName, rhs);
     }
   }
-  return { perFn, moduleConfig };
+  return { perFn, moduleConfig, perFnNode };
 }
 
 /** Client stub for a non-streaming export.
@@ -747,6 +798,12 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
            *  with `allowSchemaProps: true` so Zod `input` / `output`
            *  call expressions survive as schema markers. */
           wrapperConfig: Record<string, unknown> | undefined;
+          /** Wrapper's second-arg AST (raw) — kept for Wave #188's
+           *  lazy detection. The literalized `wrapperConfig` already
+           *  carries `lazy: true` for the literal-boolean case; the AST
+           *  form lets the lazy inspector classify non-literal `lazy`
+           *  expressions independently and warn. */
+          wrapperConfigNode: any;
           node: any;
           isStream: boolean;
         }
@@ -827,6 +884,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
               name,
               markerKind: wrapper.kind,
               wrapperConfig,
+              wrapperConfigNode: wrapper.configNode,
               node,
               isStream,
             });
@@ -849,7 +907,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         //     this state — so we only record in the server env (where
         //     the manifest emitter runs).
         if (isServerEnv) {
-          const { perFn, moduleConfig } = collectConfig(ast.body);
+          const { perFn, moduleConfig, perFnNode } = collectConfig(ast.body);
           const slug = moduleSlug(root, id);
           for (const fn of serverFns) {
             // Config merge — legacy `<fn>.config = { ... }` assignment
@@ -862,6 +920,27 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
               fn.wrapperConfig || legacyCfg
                 ? { ...(fn.wrapperConfig ?? {}), ...(legacyCfg ?? {}) }
                 : undefined;
+
+            // Wave #188 — resolve `lazy` from BOTH legacy assignment and
+            // wrapper config. Legacy wins on conflict (matches the
+            // overall config-merge precedence above). Non-literal
+            // expressions warn and fall back to false.
+            const legacyLazy = inspectLazy(perFnNode.get(fn.name));
+            const wrapperLazy = inspectLazy(fn.wrapperConfigNode);
+            if (legacyLazy === "non-literal" || wrapperLazy === "non-literal") {
+              const rel = relative(root, id).replace(/\\/g, "/");
+              const msg =
+                `[zeroship:transform] ${rel} — \`${fn.name}\` has a non-literal ` +
+                `\`lazy\` expression. Only \`lazy: true\` / \`lazy: false\` ` +
+                `(literal booleans) are recognized; the procedure stays eager.`;
+              if (typeof this.warn === "function") this.warn(msg);
+              else console.warn(msg);
+            }
+            const lazy =
+              legacyLazy === "true" ||
+              legacyLazy === "false"
+                ? legacyLazy === "true"
+                : wrapperLazy === "true";
             const explicitKind = cfg?.kind as
               | "query"
               | "mutation"
@@ -885,7 +964,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             const existingIdx = state.discoveredProcedures.findIndex(
               (p) => p.filePath === id && p.exportName === fn.name,
             );
-            const record = {
+            const record: DiscoveredProcedureRecord = {
               filePath: id,
               exportName: fn.name,
               moduleSlug: slug,
@@ -893,6 +972,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
               isStream: fn.isStream,
               config: cfg,
               moduleConfig,
+              ...(lazy ? { lazy: true } : {}),
             };
             if (existingIdx >= 0) state.discoveredProcedures[existingIdx] = record;
             else state.discoveredProcedures.push(record);

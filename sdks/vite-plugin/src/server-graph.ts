@@ -44,6 +44,13 @@ export interface ServerBinding {
   marker: "file" | "function" | "graph";
   /** Re-export chain from client to target. Empty for direct imports. */
   chain: string[];
+  /** When true, the synthetic entry emits a dynamic-import wrapper so
+   *  the procedure's source module loads only on first call. Defaults
+   *  to false (eager). Detected from `fn.config.lazy = true` or the
+   *  wrapper's `lazy: true` option (Wave #188). The dynamic import
+   *  rides V8's host callback (Wave #187) — second call to the same
+   *  lazy procedure resolves to the cached namespace. */
+  lazy?: boolean;
 }
 
 export interface WalkClientEntryOptions {
@@ -59,6 +66,10 @@ export interface WalkClientEntryOptions {
   pinnedWireIds?: Map<string, string>;
   /** Optional: known kind per (file, name). Default: "mutation". */
   knownKinds?: Map<string, "query" | "mutation" | "stream" | "subscription">;
+  /** Optional: per-(file, name) lazy flag. The graph walk records it
+   *  on each binding so the synthetic-entry generator can branch.
+   *  Default: false (eager). */
+  lazyFlags?: Map<string, boolean>;
 }
 
 // ── AST helpers (oxc/estree shape) ────────────────────────────────────────
@@ -403,6 +414,7 @@ export async function walkClientEntry(
       const wireId =
         opts.pinnedWireIds?.get(key) ?? r.exportName;
       const kind = opts.knownKinds?.get(key) ?? "mutation";
+      const lazy = opts.lazyFlags?.get(key) === true;
 
       out.set(key, {
         wireId,
@@ -411,6 +423,7 @@ export async function walkClientEntry(
         kind,
         marker,
         chain: r.chain,
+        ...(lazy ? { lazy: true } : {}),
       });
     }
 
@@ -425,6 +438,7 @@ export async function walkClientEntry(
         if (out.has(key)) continue;
         const wireId = opts.pinnedWireIds?.get(key) ?? name;
         const kind = opts.knownKinds?.get(key) ?? "mutation";
+        const lazy = opts.lazyFlags?.get(key) === true;
         out.set(key, {
           wireId,
           sourceFile: file,
@@ -432,6 +446,7 @@ export async function walkClientEntry(
           kind,
           marker: "file",
           chain: [file],
+          ...(lazy ? { lazy: true } : {}),
         });
       }
     }
@@ -441,6 +456,7 @@ export async function walkClientEntry(
         if (out.has(key)) continue;
         const wireId = opts.pinnedWireIds?.get(key) ?? name;
         const kind = opts.knownKinds?.get(key) ?? "mutation";
+        const lazy = opts.lazyFlags?.get(key) === true;
         out.set(key, {
           wireId,
           sourceFile: file,
@@ -448,6 +464,7 @@ export async function walkClientEntry(
           kind,
           marker: "function",
           chain: [file],
+          ...(lazy ? { lazy: true } : {}),
         });
       }
     }
