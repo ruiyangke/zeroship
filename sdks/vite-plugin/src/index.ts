@@ -43,6 +43,31 @@ export interface ZeroshipOptions {
    *   prerendered HTML into `dist/` themselves.
    */
   mode?: "full" | "static";
+  /** RPC v2 (proposal §1) — server-function discovery + emission. */
+  rpc?: {
+    /**
+     * Strict-mode posture for the reference-graph walk.
+     *
+     * - `"auto"` (default): strict in `mode === "production"`, lenient
+     *   in dev. Matches the proposal's "Strict mode (production builds)"
+     *   gate.
+     * - `"always"`: strict regardless of mode.
+     * - `"never"`: lenient regardless of mode (graph-only bindings
+     *   warn, do not error).
+     */
+    strict?: "auto" | "always" | "never";
+  };
+}
+
+/** Resolve the strict-mode posture against the current Vite mode. */
+export function resolveRpcStrict(
+  setting: "auto" | "always" | "never" | undefined,
+  mode: string | undefined,
+): "always" | "never" {
+  if (setting === "always") return "always";
+  if (setting === "never") return "never";
+  // "auto" (default) — production gates strict; dev does not.
+  return mode === "production" ? "always" : "never";
 }
 
 export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
