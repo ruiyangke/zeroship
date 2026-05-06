@@ -39,6 +39,7 @@ pub mod async_iter;
 pub mod budget;
 pub mod byob_request;
 pub mod byte_tee;
+pub mod compression;
 pub mod pipe;
 pub mod promise_resolve;
 pub mod pull_into;

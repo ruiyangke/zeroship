@@ -765,6 +765,16 @@ pub fn load_polyfills_and_modules(
     // picks up the native EventTarget prototype.
     install_dom(scope);
 
+    // Native CompressionStream / DecompressionStream per the WHATWG
+    // Compression Standard. Loaded AFTER `install_native_streams`
+    // (constructor calls `new globalThis.TransformStream(...)`).
+    install_compression_streams(scope);
+
+    // Native EventSource per HTML §9.2 (server-sent events). Loaded
+    // AFTER `install_dom` (inherits EventTarget) and after the native
+    // fetch global (constructor calls `globalThis.fetch(...)`).
+    install_eventsource(scope);
+
     // Native WebSocket — D-25 cutover landing 1: gated behind
     // `runtime_native_websocket` feature flag. When ON, install BEFORE
     // the polyfill so `globalThis.WebSocket` is the native class; the
@@ -1809,6 +1819,29 @@ pub fn install_text_encoding_streams(scope: &mut v8::PinScope) {
         let key = v8::String::new(scope, "TextDecoderStream").unwrap();
         global.set(scope, key.into(), class_fn.into());
     }
+}
+
+/// Install native `CompressionStream` / `DecompressionStream` per the
+/// WHATWG Compression Standard. Both classes wrap a user-visible
+/// `globalThis.TransformStream` constructed with a synthetic codec-
+/// backed underlyingTransformer (see `streams/compression.rs`).
+///
+/// Must run AFTER `install_native_streams` (needs `globalThis.TransformStream`).
+pub fn install_compression_streams(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+    crate::streams::compression::install_globals(scope, global);
+}
+
+/// Install native `EventSource` per HTML §9.2 (server-sent events).
+/// Inherits `EventTarget`; consumes a streaming `fetch()` response body
+/// and parses SSE per the spec.
+///
+/// Must run AFTER `install_dom` (which installs `EventTarget` —
+/// EventSource inherits it) AND after the native fetch global so the
+/// constructor can call `globalThis.fetch(...)`.
+pub fn install_eventsource(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+    crate::web::eventsource::install_global(scope, global);
 }
 
 /// Install native `Blob` and `File` (per WHATWG File API) onto

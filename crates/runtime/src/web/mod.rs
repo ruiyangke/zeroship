@@ -11,6 +11,7 @@ pub mod codec;
 pub mod crypto;
 pub mod dom;
 pub mod encoding;
+pub mod eventsource;
 pub mod fetch;
 pub mod headers;
 pub mod streams;

@@ -495,31 +495,36 @@ impl Codec for InflateDecoder {
         }
         let state = self.state.as_mut().expect("state present");
 
-        // Pre-size output: typical compression ratios for text are 2-5x;
-        // grow the Vec as needed via `reserve` inside the loop. Doubling
-        // the input size is a reasonable starting point.
+        // Pre-size output: typical compression ratios for text are 2-5x.
+        // We expand below as the codec writes into the Vec's spare
+        // capacity (decompress_vec only writes into spare; it does NOT
+        // reallocate). The loop continues feeding the decoder — even
+        // after input is fully consumed — until the decoder emits no
+        // more output (its internal buffer drains into our Vec).
         let mut produced = Vec::with_capacity(chunk.len() * 2);
 
         let start_in = state.total_in();
         loop {
             let consumed = (state.total_in() - start_in) as usize;
-            if consumed >= chunk.len() {
-                break;
-            }
-            let remaining = &chunk[consumed..];
-            // Make room for at least one byte of output (decompress_vec
-            // writes into spare capacity). Doubling preserves amortised
-            // O(n) growth for large outputs.
+            // `consumed >= chunk.len()` is NOT a termination condition
+            // on its own — the decoder may still hold buffered output.
+            // Feed it empty input until output also stops growing, or
+            // we observe StreamEnd.
+            let remaining: &[u8] = if consumed >= chunk.len() {
+                &[]
+            } else {
+                &chunk[consumed..]
+            };
             if produced.capacity() == produced.len() {
-                let want = (produced.capacity() * 2).max(chunk.len() * 2).max(1024);
-                produced.reserve(want - produced.len());
+                let want = (produced.capacity() * 2).max(chunk.len() * 4).max(4096);
+                produced.reserve(want.saturating_sub(produced.len()));
             }
             let before_out = state.total_out();
+            let before_in = state.total_in();
             let status = state
                 .decompress_vec(remaining, &mut produced, FlushDecompress::None)
                 .map_err(|_e| CodecError::DecodeData("corrupt deflate stream"))?;
-            let made_progress = state.total_out() > before_out
-                || (state.total_in() - start_in) as usize > consumed;
+            let made_progress = state.total_out() > before_out || state.total_in() > before_in;
             match status {
                 Status::StreamEnd => {
                     self.reached_end = true;
@@ -527,18 +532,22 @@ impl Codec for InflateDecoder {
                 }
                 Status::Ok => {
                     if !made_progress {
-                        // Avoid a busy-loop if neither in nor out
-                        // advanced (would only happen if we're out of
-                        // both input and output — but we just reserved,
-                        // so this shouldn't happen). Exit defensively.
+                        // No-op iteration on empty input — done draining.
                         break;
                     }
+                    // else: keep going (more output may still be buffered).
                 }
                 Status::BufError => {
-                    // No progress possible — out of input or output.
-                    // Since we just reserved more output capacity, the
-                    // limiting factor must be input.
-                    break;
+                    // Output buffer was full mid-block — grow + retry.
+                    if !made_progress {
+                        let want = (produced.capacity() * 2).max(chunk.len() * 4).max(4096);
+                        produced.reserve(want.saturating_sub(produced.len()));
+                        if produced.capacity() == produced.len() {
+                            break; // allocator refused — defensive bail.
+                        }
+                        continue;
+                    }
+                    // Made progress; the next iteration will reassess.
                 }
             }
         }
