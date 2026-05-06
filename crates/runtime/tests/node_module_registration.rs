@@ -1,13 +1,14 @@
-//! `node:async_hooks` / `node:crypto` / `node:zlib` registered as
-//! native V8 SyntheticModules — the runtime resolves them itself
-//! rather than handing the bare specifier to a vite-plugin shim that
-//! re-exports `globalThis.__zsAsyncHooks` /
+//! `node:async_hooks` / `node:crypto` / `node:zlib` / `node:os`
+//! registered as native V8 SyntheticModules — the runtime resolves
+//! them itself rather than handing the bare specifier to a
+//! vite-plugin shim that re-exports `globalThis.__zsAsyncHooks` /
 //! `globalThis.__zeroship_node_crypto`.
 //!
 //! Covers:
 //!   - `import { AsyncLocalStorage }` returns a usable class.
 //!   - `import { createHash }` produces working digests.
 //!   - `import { gzipSync } from "node:zlib"` resolves.
+//!   - `import { platform } from "node:os"` resolves.
 //!   - The legacy globals are gone.
 //!   - Unknown `node:*` specifiers surface a clear error.
 
@@ -174,4 +175,20 @@ fn import_gzip_sync_works() {
     .unwrap();
     assert!(r.json.contains(r#""kind":"function""#), "got: {}", r.json);
     assert!(r.json.contains(r#""len":true"#), "got: {}", r.json);
+}
+
+#[test]
+fn import_os_platform_works() {
+    let r = dispatch(
+        m(r#"
+        import { platform } from "node:os";
+        export function test() {
+            return { p: platform() };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""p":"linux""#), "got: {}", r.json);
 }

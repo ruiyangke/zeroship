@@ -27,6 +27,7 @@ pub fn resolve_native<'s>(
         "node:async_hooks" => Some(crate::node::async_hooks::synthetic_module(scope)),
         "node:crypto" => Some(crate::node::crypto::synthetic_module(scope)),
         "node:zlib" => Some(crate::node::zlib::synthetic_module(scope)),
+        "node:os" => Some(crate::node::os::synthetic_module(scope)),
         _ => None,
     }
 }
@@ -36,7 +37,7 @@ pub fn resolve_native<'s>(
 pub fn is_native(specifier: &str) -> bool {
     matches!(
         specifier,
-        "node:async_hooks" | "node:crypto" | "node:zlib"
+        "node:async_hooks" | "node:crypto" | "node:zlib" | "node:os"
     )
 }
 
