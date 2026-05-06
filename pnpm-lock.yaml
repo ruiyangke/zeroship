@@ -730,6 +730,9 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+      '@zeroship/rpc-client':
+        specifier: workspace:*
+        version: link:../rpc-client
       acorn:
         specifier: ^8.16.0
         version: 8.16.0

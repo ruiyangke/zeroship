@@ -48,7 +48,7 @@ export { newUuidV7 } from "./idempotency.js";
 // The registry is also exposed on the public subpath
 // `@zeroship/rpc-client/_hooks` so the React adapter can populate it
 // without static-importing into core internals.
-export { __makeProcedure } from "./make-procedure.js";
+export { __makeProcedure, __SERVER_REFERENCE } from "./make-procedure.js";
 export type {
   ProcedureKind,
   ProcedureBuildMeta,
