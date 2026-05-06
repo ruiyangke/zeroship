@@ -78,11 +78,11 @@
 
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -166,6 +166,17 @@ pub struct RuntimeLimits {
     /// V8 heap limit in bytes. `None` → 128 MB default.
     pub heap_limit_bytes: Option<usize>,
 }
+
+/// Idle GC threshold: after this much wall time without a request, the
+/// per-isolate idle ticker fires `Isolate::low_memory_notification` so V8
+/// reclaims the high-water-mark working set during quiet windows.
+/// See `docs/reference/runtime-limits.md` § "Idle GC".
+pub const DEFAULT_IDLE_GC_AFTER: Duration = Duration::from_millis(30_000);
+
+/// Wake interval for the idle-GC ticker. Each tick checks elapsed time
+/// since the last request — if `>= idle_gc_after`, fires the GC hint.
+/// Conservative cadence (10s) so the ticker itself costs ~nothing.
+const IDLE_GC_TICK: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Runtime — the public handle
@@ -339,6 +350,14 @@ impl Runtime {
     pub fn start_pump(&self) {
         RuntimeInner::start_pump(self.inner.clone());
     }
+
+    /// Number of times the per-isolate idle-GC ticker has fired
+    /// `low_memory_notification`. Increments on every GC hint; useful as
+    /// a test-visible signal (the alternative — sampling V8 heap stats
+    /// before/after — is flaky on a small heap).
+    pub fn idle_gc_fire_count(&self) -> u64 {
+        self.inner.borrow().idle_gc_fire_count.get()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +372,10 @@ pub struct RuntimeBuilder {
     limits: RuntimeLimits,
     plugins: Vec<Arc<dyn NativePlugin>>,
     app_id: Option<uuid::Uuid>,
+    /// Idle-GC threshold override (ms). `None` → `DEFAULT_IDLE_GC_AFTER`.
+    /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
+    /// scheduling knob, not a per-request cap.
+    idle_gc_after_ms: Option<u64>,
 }
 
 impl RuntimeBuilder {
@@ -414,12 +437,25 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Idle-GC threshold in milliseconds. After this much quiet time the
+    /// per-isolate ticker fires a low-memory hint so V8 reclaims the
+    /// high-water-mark working set. Default `30000` (30s); see
+    /// `docs/reference/runtime-limits.md` § "Idle GC".
+    pub fn idle_gc_after_ms(mut self, ms: u64) -> Self {
+        self.idle_gc_after_ms = Some(ms);
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
         let limits = self.limits;
         let modules_rc = Rc::new(self.modules);
         let app_id = self.app_id;
+        let idle_gc_after = self
+            .idle_gc_after_ms
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_IDLE_GC_AFTER);
         let inner = RuntimeInner::new_with_plugins(
             self.env_vars,
             limits.cpu_limit,
@@ -427,6 +463,7 @@ impl RuntimeBuilder {
             limits.heap_limit_bytes,
             self.plugins,
             app_id,
+            idle_gc_after,
         );
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
@@ -592,6 +629,21 @@ pub(crate) struct RuntimeInner {
     /// counter to re-enter the isolate just-in-time if it was sitting
     /// in the cache's exited state.
     enter_depth: u32,
+
+    /// Wall-clock timestamp of the most recent request activity — both
+    /// `call_fetch_handler` entry AND every settled async event. The
+    /// idle-GC ticker compares `now() - last_request_ts` against
+    /// `idle_gc_after` to decide whether to fire a GC hint. `Cell`
+    /// because the field is mutated through `&self` accessors and
+    /// `Instant: Copy`.
+    last_request_ts: Cell<Instant>,
+    /// Threshold (configurable via `RuntimeBuilder::idle_gc_after_ms`).
+    /// `0` disables the ticker entirely.
+    idle_gc_after: Duration,
+    /// Counter incremented each time the idle-GC ticker fires the GC
+    /// hint. Test-visible signal so the test suite can assert the
+    /// ticker actually ran without sampling V8 heap statistics.
+    idle_gc_fire_count: Cell<u64>,
 }
 
 // `RuntimeInner` is intentionally *not* `Send`.
@@ -642,6 +694,7 @@ impl RuntimeInner {
         heap_limit_bytes: Option<usize>,
         plugins: Vec<Arc<dyn NativePlugin>>,
         app_id: Option<uuid::Uuid>,
+        idle_gc_after: Duration,
     ) -> Self {
         init_v8();
 
@@ -750,6 +803,9 @@ impl RuntimeInner {
             app_id,
             // `Isolate::new()` enters the isolate, so we boot with depth 1.
             enter_depth: 1,
+            last_request_ts: Cell::new(Instant::now()),
+            idle_gc_after,
+            idle_gc_fire_count: Cell::new(0),
         }
     }
 
@@ -798,10 +854,11 @@ impl RuntimeInner {
     /// on the public handle — it hides the `Rc<RefCell<_>>` plumbing.
     pub(crate) fn start_pump(self_ref: Rc<RefCell<Self>>) {
         let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
-        {
+        let idle_gc_after = {
             let mut rt = self_ref.borrow_mut();
             rt.set_pump_notify(notify_tx);
-        }
+            rt.idle_gc_after
+        };
 
         let rt = self_ref.clone();
         compio::runtime::spawn(async move {
@@ -810,6 +867,72 @@ impl RuntimeInner {
             }).await;
         })
         .detach();
+
+        // Idle-GC ticker — sibling task with a Weak handle so isolate
+        // teardown drops it without a join. `idle_gc_after == 0` opts
+        // out (used by tests that don't want the timer at all).
+        if !idle_gc_after.is_zero() {
+            let weak = Rc::downgrade(&self_ref);
+            compio::runtime::spawn(async move {
+                crate::panic_util::guard("idle_gc_ticker", async move {
+                    Self::idle_gc_ticker(weak, idle_gc_after).await;
+                }).await;
+            })
+            .detach();
+        }
+    }
+
+    /// Per-isolate idle-GC ticker. Wakes on `IDLE_GC_TICK` cadence; when
+    /// `now() - last_request_ts >= idle_gc_after`, enters V8 and fires
+    /// `low_memory_notification` (a full-GC hint — the v8-147 binding
+    /// doesn't expose `idle_notification_deadline`, so this is the
+    /// closest equivalent. See `docs/reference/runtime-limits.md`).
+    ///
+    /// Holds a `Weak`; once the runtime drops, `upgrade()` returns None
+    /// and the loop exits naturally.
+    async fn idle_gc_ticker(weak: Weak<RefCell<Self>>, idle_gc_after: Duration) {
+        // Tick at min(IDLE_GC_TICK, idle_gc_after) so very short test
+        // thresholds (e.g. 100 ms) still get a tick within the window.
+        let period = IDLE_GC_TICK.min(idle_gc_after);
+        let mut interval = compio::time::interval(period);
+        loop {
+            interval.tick().await;
+            let Some(rt_rc) = weak.upgrade() else { return; };
+
+            // Brief borrow to read last-activity. Released before
+            // entering V8 — the pump may be holding the cell.
+            let elapsed = {
+                let rt = rt_rc.borrow();
+                rt.last_request_ts.get().elapsed()
+            };
+            if elapsed < idle_gc_after {
+                drop(rt_rc);
+                continue;
+            }
+
+            // Borrow mut to drive V8 (enter / GC hint / exit). If the
+            // pump has the lock right now, skip this tick — the next
+            // tick (period later) will retry and the runtime is by
+            // definition not idle anyway.
+            let Ok(mut rt) = rt_rc.try_borrow_mut() else {
+                drop(rt_rc);
+                continue;
+            };
+            rt.enter_isolate();
+            // `low_memory_notification` triggers a full GC synchronously
+            // — V8's only exposed "free memory now" hook in this binding.
+            rt.isolate.low_memory_notification();
+            rt.exit_isolate();
+            rt.idle_gc_fire_count.set(rt.idle_gc_fire_count.get() + 1);
+            tracing::trace!(
+                fires = rt.idle_gc_fire_count.get(),
+                idle_ms = elapsed.as_millis() as u64,
+                "idle GC fired",
+            );
+            // Re-arm the clock so we don't refire on the next tick if
+            // no requests came in (idle_gc_after may be < period).
+            rt.last_request_ts.set(Instant::now());
+        }
     }
 
     /// The pump loop — drives `AsyncWork` (fetch, timers, streams) on the
@@ -1233,6 +1356,9 @@ impl RuntimeInner {
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
+        // Reset the idle-GC clock — every request entry is "activity".
+        self.last_request_ts.set(Instant::now());
+
         // Stash the env JSON on state so the very first `ensure_initialized`
         // builds the composite env object (plugin namespaces + scalar JSON)
         // with the real scalars instead of the default `{}`. Must run BEFORE
@@ -1681,6 +1807,10 @@ impl RuntimeInner {
     /// Enters V8 briefly to resolve the op/timer, checks settled promises,
     /// and sends results via oneshot channels.
     pub fn handle_async_event(&mut self, event: AsyncEvent, work: &mut AsyncWork) {
+        // Pump-driven activity counts — a long-running async procedure
+        // resetting the idle clock keeps the GC ticker from firing while
+        // user JS is making forward progress.
+        self.last_request_ts.set(Instant::now());
         match event {
             AsyncEvent::Op(result) => self.handle_op_result_pump(result, work),
             AsyncEvent::Timer(timer) => self.handle_timer_pump(timer, work),
