@@ -1137,6 +1137,13 @@ fn set_up_transform_stream_default_controller<'s>(
 /// the user's dict, build the controller, then run InitializeTransformStream
 /// + start.
 ///
+/// The `start_resolver` is owned by the caller — pulling that allocation
+/// out of this helper lets a macro-emitted `Result<Self, OpError>`-returning
+/// constructor cleanly settle (or reject) the start promise, and lets us
+/// surface a synchronously-thrown user `start()` exception via
+/// `OpError::js_value` (passthrough) instead of via a side-effect pending
+/// V8 exception + sentinel string.
+///
 /// Spec defaults (§5.4.2):
 /// - transform missing → identity transform: `controller.enqueue(chunk)`.
 /// - flush missing → no-op (returns resolved Promise).
@@ -1146,11 +1153,13 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     stream: v8::Local<v8::Object>,
     transformer: v8::Local<v8::Value>,
+    start_resolver: v8::Local<v8::PromiseResolver>,
     writable_hwm: f64,
     writable_size: SizeAlgorithm,
     readable_hwm: f64,
     readable_size: SizeAlgorithm,
-) -> Result<(), String> {
+) -> Result<(), crate::state::OpError> {
+    use crate::state::OpError;
     // Identity-transform sentinel: when the user did not supply
     // `transformer.transform`, the spec's transformAlgorithm is "enqueue
     // chunk into controller". We mark this as `Noop` initially and special-
@@ -1172,11 +1181,17 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
             let key = v8::String::new(scope, key_name).unwrap();
             let v = match t_obj.get(scope, key.into()) {
                 Some(v) => v,
-                None => return Err(format!("error reading transformer.{key_name}")),
+                None => {
+                    return Err(OpError::error(format!(
+                        "error reading transformer.{key_name}"
+                    )))
+                }
             };
             if !v.is_undefined() {
                 let Ok(fn_l) = v8::Local::<v8::Function>::try_from(v) else {
-                    return Err(format!("transformer.{key_name} must be a function"));
+                    return Err(OpError::type_error(format!(
+                        "transformer.{key_name} must be a function"
+                    )));
                 };
                 unsafe {
                     *slot = AlgorithmFn::Js {
@@ -1193,11 +1208,11 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
         let key = v8::String::new(scope, "transform").unwrap();
         let v = match t_obj.get(scope, key.into()) {
             Some(v) => v,
-            None => return Err("error reading transformer.transform".to_string()),
+            None => return Err(OpError::error("error reading transformer.transform")),
         };
         if !v.is_undefined() {
             let Ok(fn_l) = v8::Local::<v8::Function>::try_from(v) else {
-                return Err("transformer.transform must be a function".to_string());
+                return Err(OpError::type_error("transformer.transform must be a function"));
             };
             transform_alg = Some(AlgorithmFn::Js {
                 function: v8::Global::new(scope, fn_l),
@@ -1213,22 +1228,14 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
     let transform_alg = transform_alg.unwrap_or_else(|| build_identity_transform_alg(scope));
 
     // Per spec §5.4.2 ordering:
-    //  1. Allocate a startPromise resolver pair (the halves will gate on
-    //     it BEFORE start runs).
+    //  1. Caller already allocated startPromise + start_resolver — the
+    //     halves gate on the promise BEFORE start runs.
     //  2. InitializeTransformStream(stream, startPromise, …) — builds the
     //     readable + writable halves wired with sink/source forwarders.
-    //     The halves' controllers' [[started]] flips when startPromise
-    //     resolves, but they are SET UP and reachable from start().
-    //  3. Build the TS controller with transform/flush/cancel. Now that
-    //     halves exist, the controller's desiredSize delegate works.
-    //  4. Run startAlgorithm(controller). On synchronous throw, propagate
-    //     to the constructor. Resolve startPromise when start settles.
-    //
-    // (This matches the spec's own ordering: it allocates a startPromise
-    // resolver, calls InitializeTransformStream + SetUpTransformStream
-    // DefaultController, THEN invokes startAlgorithm and chains its result
-    // onto the resolver.)
-    let start_resolver = v8::PromiseResolver::new(scope).unwrap();
+    //  3. Build the TS controller with transform/flush/cancel.
+    //  4. Run startAlgorithm(controller). On synchronous throw, capture
+    //     the exception verbatim into OpError::JsValue (caller re-throws);
+    //     also reject startPromise so the halves error.
     let start_promise = start_resolver.get_promise(scope);
     let start_resolver_g = v8::Global::new(scope, start_resolver);
 
@@ -1251,8 +1258,9 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
         cancel_alg,
     );
 
-    // start(controller). Run via tc_scope so a synchronous throw can be
-    // re-thrown to the caller (TransformStream constructor).
+    // start(controller). Run via tc_scope so a synchronous throw is
+    // captured cleanly (no double pending exception in V8 — caller's
+    // throw machinery owns the rethrow).
     let resolver_l = v8::Local::new(scope, &start_resolver_g);
     match start_alg {
         AlgorithmFn::Noop => {
@@ -1277,11 +1285,17 @@ pub fn set_up_transform_stream_default_controller_from_transformer<'s>(
             match outcome {
                 StartOutcome::Threw(exc_g) => {
                     // Spec: synchronous start throw → constructor throws.
-                    // Also reject the startPromise so the halves error.
+                    // Reject the startPromise so the halves error; surface
+                    // the user's exception verbatim via OpError::JsValue
+                    // so the caller's rethrow preserves Error subclass /
+                    // e.code / custom properties.
                     let exc = v8::Local::new(scope, &exc_g);
                     resolver_l.reject(scope, exc);
-                    scope.throw_exception(exc);
-                    return Err("TransformStream: start threw synchronously".to_string());
+                    return Err(OpError::js_value(
+                        scope,
+                        exc,
+                        "TransformStream: start threw",
+                    ));
                 }
                 StartOutcome::Undefined => {
                     let und = v8::undefined(scope);
