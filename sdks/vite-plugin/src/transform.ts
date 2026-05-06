@@ -117,6 +117,123 @@ export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
 }
 
 /**
+ * Function-level `"use server"` directive detector.
+ *
+ * Per proposal §1, a function whose first statement is the string
+ * literal `"use server"` is a server function regardless of whether
+ * the enclosing file carries a file-level directive. The function may
+ * be declared via:
+ *
+ *   - `function name() { "use server"; ... }` (FunctionDeclaration)
+ *   - `const name = async () => { "use server"; ... }` (Arrow + VarDecl)
+ *   - `const name = function() { "use server"; ... }` (FnExpr + VarDecl)
+ *   - `name = async function() { "use server"; ... }` (assignment)
+ *   - `export function name() { "use server"; ... }`
+ *
+ * The walk covers nested + top-level declarations. Returns the set of
+ * names that resolve to a marked function.
+ *
+ * A function-level directive makes ONLY that function a server
+ * reference; other code in the file stays client-side. The returned
+ * names feed both the per-file metadata pass and the reference-graph
+ * walk in `server-graph.ts`.
+ */
+export function detectFunctionLevelUseServer(ast: { body?: unknown[] }): Set<string> {
+  const out = new Set<string>();
+  const body = ast.body;
+  if (!Array.isArray(body)) return out;
+
+  // Recursive AST walker. We only care about (a) function-like nodes
+  // that carry a `"use server"` directive, and (b) the binding-name
+  // lookup that ties the function back to a public identifier.
+  function walk(node: unknown, parentBindingName: string | undefined): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as Record<string, unknown> & { type?: string };
+    const t = n.type;
+
+    // Function-like nodes — check for the directive at body[0].
+    if (
+      t === "FunctionDeclaration" ||
+      t === "FunctionExpression" ||
+      t === "ArrowFunctionExpression"
+    ) {
+      const fnBody = n.body as { type?: string; body?: unknown[] } | undefined;
+      // Arrow with expression body (`() => x`) cannot carry a directive.
+      if (fnBody && fnBody.type === "BlockStatement" && Array.isArray(fnBody.body)) {
+        const first = fnBody.body[0] as
+          | {
+              type?: string;
+              directive?: string;
+              expression?: { type?: string; value?: unknown };
+            }
+          | undefined;
+        const isDirective =
+          first?.type === "ExpressionStatement" &&
+          (first.directive === "use server" ||
+            (first.expression &&
+              (first.expression.type === "Literal" ||
+                first.expression.type === "StringLiteral") &&
+              first.expression.value === "use server"));
+        if (isDirective) {
+          // Resolve the function's binding name. FunctionDeclarations
+          // carry `id.name` directly; FunctionExpressions / Arrows are
+          // anonymous unless captured by a parent VariableDeclarator
+          // / AssignmentExpression / Property (object literal value).
+          if (t === "FunctionDeclaration") {
+            const id = n.id as { name?: string } | undefined;
+            if (id?.name) out.add(id.name);
+          } else if (parentBindingName) {
+            out.add(parentBindingName);
+          }
+        }
+      }
+      // Recurse into the body so nested marked functions are found too.
+      if (fnBody && Array.isArray((fnBody as { body?: unknown[] }).body)) {
+        for (const child of (fnBody as { body?: unknown[] }).body!) walk(child, undefined);
+      }
+      return;
+    }
+
+    // Bind-resolving wrappers: VariableDeclarator and AssignmentExpression
+    // pass their LHS name down so an anonymous function-expression /
+    // arrow on the RHS can claim it.
+    if (t === "VariableDeclaration") {
+      for (const d of (n.declarations ?? []) as Array<{
+        id?: { type?: string; name?: string };
+        init?: unknown;
+      }>) {
+        const name = d.id?.type === "Identifier" ? d.id.name : undefined;
+        walk(d.init, name);
+      }
+      return;
+    }
+    if (t === "AssignmentExpression") {
+      const left = n.left as { type?: string; name?: string } | undefined;
+      const name = left?.type === "Identifier" ? left.name : undefined;
+      walk(n.right, name);
+      return;
+    }
+
+    // Generic recursion — visit every child key. Ignore parent /
+    // location metadata.
+    for (const key of Object.keys(n)) {
+      if (key === "type" || key === "loc" || key === "range" || key === "start" || key === "end") {
+        continue;
+      }
+      const v = (n as Record<string, unknown>)[key];
+      if (Array.isArray(v)) {
+        for (const item of v) walk(item, undefined);
+      } else if (v && typeof v === "object") {
+        walk(v, undefined);
+      }
+    }
+  }
+
+  for (const stmt of body) walk(stmt, undefined);
+  return out;
+}
+
+/**
  * Path predicate for the legacy `src/server.{ts,tsx,js,jsx}` /
  * `src/server/**` shape. The path convention itself is dead (ISS-02),
  * but the predicate stays around so the transform can emit a friendly
@@ -245,8 +362,17 @@ function matchWrapperCall(
  *  (`/_zs/v1/<id>` with superjson `{ json, meta? }` envelope, AI-SDK Data
  *  Stream Protocol for streams). No npm deps; superjson revival is left
  *  to the consumer (rare on the bare-stub path — most apps use
- *  `@zeroship/rpc-client` directly). */
+ *  `@zeroship/rpc-client` directly).
+ *
+ *  Per proposal §5, every emitted stub carries the `__SERVER_REFERENCE`
+ *  symbol so RSC-style `<form action={fn}>` and prop-passed server
+ *  actions can be detected at runtime. The symbol is namespaced
+ *  (`Symbol.for("zeroship/server-reference")`) so it survives realm
+ *  boundaries and bundle deduplication. TODO: when
+ *  `@zeroship/rpc/client` ships `__makeProcedure` / `__SERVER_REFERENCE`
+ *  upstream, swap the inline stubs for an import. */
 const CLIENT_HELPERS = `
+const __SERVER_REFERENCE = Symbol.for("zeroship/server-reference");
 async function __rpcUnary(id, input) {
   const r = await fetch("/_zs/v1/" + id, {
     method: "POST",
@@ -492,15 +618,38 @@ function collectConfig(astBody: any[]): {
  * value, so the stub forwards `args[0]` (or `undefined` when called
  * with no args). Procedures that conceptually take multiple values
  * pass them as a single object.
+ *
+ * Per proposal §5, the emitted stub is a callable that ALSO carries
+ * the `__SERVER_REFERENCE` symbol + `{ id, kind, wire }` metadata, so
+ * RSC `<form action={fn}>` works without JS and the runtime can detect
+ * stubs passed as props.
  */
-function clientUnaryStub(name: string, methodName: string): string {
-  return `export const ${name} = (input) => __rpcUnary(${JSON.stringify(methodName)}, input);`;
+function clientUnaryStub(name: string, methodName: string, kind: string): string {
+  return (
+    `export const ${name} = /* @__PURE__ */ (() => {\n` +
+    `  const _f = (input) => __rpcUnary(${JSON.stringify(methodName)}, input);\n` +
+    `  _f[__SERVER_REFERENCE] = true;\n` +
+    `  _f.id = ${JSON.stringify(methodName)};\n` +
+    `  _f.kind = ${JSON.stringify(kind)};\n` +
+    `  _f.wire = "json";\n` +
+    `  return _f;\n` +
+    `})();`
+  );
 }
 
 /** Client stub for a streaming (async generator) export. Same single-
  *  input wire as unary. */
-function clientStreamStub(name: string, methodName: string): string {
-  return `export const ${name} = (input) => __rpcStream(${JSON.stringify(methodName)}, input);`;
+function clientStreamStub(name: string, methodName: string, kind: string): string {
+  return (
+    `export const ${name} = /* @__PURE__ */ (() => {\n` +
+    `  const _f = (input) => __rpcStream(${JSON.stringify(methodName)}, input);\n` +
+    `  _f[__SERVER_REFERENCE] = true;\n` +
+    `  _f.id = ${JSON.stringify(methodName)};\n` +
+    `  _f.kind = ${JSON.stringify(kind)};\n` +
+    `  _f.wire = "json";\n` +
+    `  return _f;\n` +
+    `})();`
+  );
 }
 
 export function transformPlugin(_rpcEndpoint: string, state: TransformState): Plugin {
@@ -776,6 +925,21 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
           return explicit ?? fn.name;
         };
 
+        // Resolve kind via the same priority chain used in the
+        // discovery pass (explicit .kind → wrapper marker name → name-
+        // based inference). Hoisted so both server and client branches
+        // can read it.
+        const kindFor = (fn: ServerFn) => {
+          const legacyKind = perFnForWireIds.get(fn.name)?.kind as
+            | "query" | "mutation" | "stream" | "subscription" | undefined;
+          const wrapperArgKind = fn.wrapperConfig?.kind as
+            | "query" | "mutation" | "stream" | "subscription" | undefined;
+          const explicit = legacyKind ?? wrapperArgKind;
+          const wrapperKind: "query" | "mutation" | "stream" | "subscription" | undefined =
+            fn.markerKind === "procedure" ? undefined : fn.markerKind;
+          return explicit ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
+        };
+
         // --- SERVER ENVIRONMENT ---------------------------------------------
         //
         // No more `__zsRegister(wireId, fn)` calls — the synthetic SSR
@@ -791,22 +955,6 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         // entry's `import { fn as _pN }` resolves the import binding —
         // the patches are visible there.
         if (isServerEnv) {
-          // Resolve kind for SSR-side hook attachment. Same priority
-          // chain as the discovery pass: explicit `.kind` (legacy
-          // assignment OR wrapper arg) → wrapper marker name →
-          // name-based inference.
-          const { perFn: perFnForKind } = collectConfig(ast.body);
-          const kindFor = (fn: ServerFn) => {
-            const legacyKind = perFnForKind.get(fn.name)?.kind as
-              | "query" | "mutation" | "stream" | "subscription" | undefined;
-            const wrapperArgKind = fn.wrapperConfig?.kind as
-              | "query" | "mutation" | "stream" | "subscription" | undefined;
-            const explicit = legacyKind ?? wrapperArgKind;
-            const wrapperKind: "query" | "mutation" | "stream" | "subscription" | undefined =
-              fn.markerKind === "procedure" ? undefined : fn.markerKind;
-            return explicit ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
-          };
-
           const s = new MagicString(code);
 
           // Monkey-patch SSR hooks onto each procedure export. Append-only;
@@ -869,9 +1017,10 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
 
         const stubs = serverFns.map((fn) => {
           const wid = wireIdFor(fn);
+          const k = kindFor(fn);
           return fn.isStream
-            ? clientStreamStub(fn.name, wid)
-            : clientUnaryStub(fn.name, wid);
+            ? clientStreamStub(fn.name, wid, k)
+            : clientUnaryStub(fn.name, wid, k);
         });
 
         s.overwrite(0, code.length, CLIENT_HELPERS + "\n\n" + stubs.join("\n") + "\n");
