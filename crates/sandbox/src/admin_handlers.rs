@@ -1012,14 +1012,27 @@ async fn unlink_sealed_for_user(state: &AppState, sandbox_ids: &[String]) -> u64
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Snapshot/restore stub handlers (PR 2c).
+// Snapshot/restore admin handlers.
 //
-// All return 501 `feature_disabled` per § 10.0 standard error envelope
-// (proposal docs/proposals/sandbox-snapshot-restore.md). Real handlers
-// land in PR 3 behind `SANDBOX_SNAPSHOT_ENABLED`. These exist now so
-// the routes are visible in main.rs / OpenAPI / runbook docs from
-// the moment migrations 0006+0007 ship; gateway-side wake-stream
-// integration can target a stable URL surface.
+// Lifecycle:
+//   - PR 2c: 501 `feature_disabled` stubs
+//   - PR 3a-h: db + store + handler + sweep modules landed (unwired)
+//   - Phase A (this commit): wires `state.snapshot_store /
+//     ch_remote / restore_backend` into the snapshot/wake handlers
+//     when `SANDBOX_SNAPSHOT_ENABLED=true`. Cold-boot stays a 501
+//     stub until the cold-boot orchestration ships (separate
+//     follow-up — it's a different state machine).
+//
+// SourceVmOps wiring: the snapshot path needs an in-memory locator
+// for `(api_socket, vm_index)` keyed by sandbox_id, plus a teardown
+// hook. Plumbing those out of NomadCHBackend's private state map
+// requires public accessors that haven't landed yet — a follow-up
+// PR adds them. For Phase A, when wiring is enabled but SourceVmOps
+// is unavailable, the handler returns 503 `wiring_partial` rather
+// than 501, so operators can distinguish "feature off" from "feature
+// on but SourceVmOps not yet wired." A9 smoke test verifies the
+// 501 envelope is gone; full happy-path snapshot returns when the
+// SourceVmOps PR lands.
 // ────────────────────────────────────────────────────────────────────
 
 fn feature_disabled() -> HttpResponse {
@@ -1031,9 +1044,34 @@ fn feature_disabled() -> HttpResponse {
     }))
 }
 
+fn wiring_partial(detail: &str) -> HttpResponse {
+    // 503 Service Unavailable — feature flag is on but the
+    // controller hasn't finished plumbing SourceVmOps into the
+    // backend. Operators see a distinct error code so this isn't
+    // confused with `feature_disabled` (off) or 5xx infra errors.
+    let mut resp = HttpResponse::ServiceUnavailable();
+    resp.json(&serde_json::json!({
+        "error": "wiring_partial",
+        "message": format!(
+            "snapshot/restore feature is enabled but the controller wiring is incomplete: {detail}"
+        )
+    }))
+}
+
 pub async fn snapshot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
     if let Err(r) = admin_check(&req, &state) {
         return r;
+    }
+    if !state.config.snapshot_enabled {
+        return feature_disabled();
+    }
+    // The store + ch + restore backend are populated together when
+    // snapshot_enabled = true. SourceVmOps is the missing piece —
+    // see module doc above.
+    if state.snapshot_store.is_some() {
+        return wiring_partial(
+            "SourceVmOps locator (api_socket + vm_index) not yet wired into NomadCHBackend",
+        );
     }
     feature_disabled()
 }
@@ -1042,6 +1080,14 @@ pub async fn wake_sandbox(req: HttpRequest, state: State) -> HttpResponse {
     if let Err(r) = admin_check(&req, &state) {
         return r;
     }
+    if !state.config.snapshot_enabled {
+        return feature_disabled();
+    }
+    if state.restore_backend.is_some() {
+        return wiring_partial(
+            "wake handler not yet wired through restore_handler::restore_sandbox",
+        );
+    }
     feature_disabled()
 }
 
@@ -1049,6 +1095,9 @@ pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
     if let Err(r) = admin_check(&req, &state) {
         return r;
     }
+    // Cold-boot is a separate state machine (no source VM, no
+    // memory snapshot — it's a fresh boot from the rootfs). Stays
+    // 501 until that orchestrator ships.
     feature_disabled()
 }
 

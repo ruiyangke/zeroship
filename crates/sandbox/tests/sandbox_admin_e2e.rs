@@ -104,6 +104,11 @@ fn make_state_with_admin_token(
         // Round-4 / MINOR #5: admin_token is now Zeroizing-wrapped so
         // the heap allocation is scrubbed on drop.
         admin_token: admin_token.map(zeroize::Zeroizing::new),
+        // Phase A snapshot/restore wiring fields — None for tests
+        // (snapshot_enabled stays false in fixtures).
+        snapshot_store: None,
+        ch_remote: None,
+        restore_backend: None,
     })
 }
 
@@ -147,6 +152,14 @@ macro_rules! make_app {
                 .service(
                     web::resource("/admin/hosts")
                         .route(web::get().to(admin_handlers::list_hosts)),
+                )
+                .service(
+                    web::resource("/admin/sandboxes/{id}/snapshot")
+                        .route(web::post().to(admin_handlers::snapshot_sandbox)),
+                )
+                .service(
+                    web::resource("/admin/sandboxes/{id}/wake")
+                        .route(web::post().to(admin_handlers::wake_sandbox)),
                 ),
         )
         .await
@@ -751,4 +764,100 @@ async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
         0,
         "no synthetic sandbox_id may have been written"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Phase A snapshot wiring smoke. Verifies the admin endpoint moves
+// past the 501 `feature_disabled` envelope when wiring is on.
+// ────────────────────────────────────────────────────────────────────
+
+fn make_state_with_snapshot_wiring(
+    admin_token: Option<String>,
+) -> Arc<zeroship_sandbox::AppState> {
+    let mut cfg = make_cfg("ignored-creator-token");
+    cfg.snapshot_enabled = true;
+    let backend = Backend::from_config(&cfg).expect("backend");
+    let registry = SandboxRegistry::new();
+    // Build the snapshot trio identically to AppState::from_config's
+    // production path, but with an in-memory L1 root so the test
+    // doesn't litter `/var/zeroship`.
+    let l1_root = std::env::temp_dir().join(format!(
+        "zsbx-admin-wiring-{}-{}",
+        std::process::id(),
+        Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&l1_root).unwrap();
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(
+            zeroship_sandbox::snapshot_store::LocalDiskSnapshotStore::new(l1_root),
+        );
+    let ch: std::sync::Arc<dyn zeroship_sandbox::snapshot_handler::ChRemoteClient> =
+        std::sync::Arc::new(zeroship_sandbox::snapshot_handler::MockChRemoteClient::default());
+    let rb: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
+        std::sync::Arc::new(zeroship_sandbox::restore_handler::RealRestoreBackend::new(
+            cfg.nomad_ch.clone(),
+        ));
+    Arc::new(zeroship_sandbox::AppState {
+        config: cfg,
+        sandboxes: registry,
+        backend,
+        mint_rate_limiter: Some(
+            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
+        ),
+        database: None,
+        persist: None,
+        shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        admin_token: admin_token.map(zeroize::Zeroizing::new),
+        snapshot_store: Some(store),
+        ch_remote: Some(ch),
+        restore_backend: Some(rb),
+    })
+}
+
+#[ntex::test]
+async fn snapshot_endpoint_returns_503_wiring_partial_when_enabled() {
+    // Phase A smoke: with snapshot_enabled = true and the trio
+    // populated, the admin endpoint must not return 501
+    // feature_disabled (it should be 503 wiring_partial until the
+    // SourceVmOps follow-up lands).
+    let token = "admin-bearer-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let state = make_state_with_snapshot_wiring(Some(token.to_string()));
+    let svc = make_app!(state);
+
+    let sid = format!("sbx_{}", uuid::Uuid::now_v7().simple());
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "Phase A wiring must move past 501 feature_disabled"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "expected 503 wiring_partial; got {}",
+        resp.status()
+    );
+}
+
+#[ntex::test]
+async fn snapshot_endpoint_returns_501_when_disabled() {
+    // Confirms the off path is unchanged: snapshot_enabled = false
+    // → 501 feature_disabled, regardless of admin auth.
+    let token = "admin-bearer-bbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let state = make_state_with_admin_token(None, Some(token.to_string()));
+    let svc = make_app!(state);
+
+    let sid = format!("sbx_{}", uuid::Uuid::now_v7().simple());
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }

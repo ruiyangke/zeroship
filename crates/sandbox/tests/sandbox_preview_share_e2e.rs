@@ -239,6 +239,9 @@ fn make_state_inner(
         persist: None,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         admin_token: None,
+        snapshot_store: None,
+        ch_remote: None,
+        restore_backend: None,
     });
     (state, sandbox_id)
 }

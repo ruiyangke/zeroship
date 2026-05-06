@@ -40,6 +40,9 @@ use crate::db::{Database, LATEST_MIGRATION_VERSION};
 use crate::persist::Persistence;
 use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
+use crate::restore_handler::{RealRestoreBackend, RestoreBackend};
+use crate::snapshot_handler::{ChRemoteClient, RealChRemoteClient};
+use crate::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
 
 /// Shared application state passed to every handler.
 #[allow(missing_debug_implementations)]
@@ -92,6 +95,16 @@ pub struct AppState {
     /// but the post-mortem surface is closed.) Mirrors the
     /// `config::ApiToken` treatment of `SANDBOX_TOKEN`.
     pub admin_token: Option<zeroize::Zeroizing<String>>,
+
+    /// Phase-A snapshot/restore wiring: present (`Some`) only when
+    /// `config.snapshot_enabled = true`. The trio of stores +
+    /// clients construct together; either all three are populated
+    /// or none. Tests building `AppState` directly leave them
+    /// `None` — admin handlers fall back to 501 `feature_disabled`
+    /// in that case.
+    pub snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub ch_remote: Option<Arc<dyn ChRemoteClient>>,
+    pub restore_backend: Option<Arc<dyn RestoreBackend>>,
 }
 
 impl AppState {
@@ -285,6 +298,46 @@ impl AppState {
         let admin_token = load_admin_token(admin_token_path.as_deref())?
             .map(zeroize::Zeroizing::new);
 
+        // Phase-A snapshot/restore wiring. When `snapshot_enabled =
+        // true`, construct the production trio: LocalDiskSnapshotStore
+        // at the canonical L1 root, RealChRemoteClient (resolves
+        // `ch-remote` on PATH at construct time), RealRestoreBackend
+        // (Nomad submit + poll). When false we leave them `None`;
+        // admin handlers see `None` and return 501 feature_disabled.
+        //
+        // A4 will tier-wrap the snapshot_store with GCS when
+        // `SANDBOX_SNAPSHOT_USE_GCS=true`. A5 reads the L1 root from
+        // config; for now (A3) it's hardcoded to the canonical path
+        // — operators can set SANDBOX_SNAPSHOT_L1_ROOT in A5+.
+        let (snapshot_store, ch_remote, restore_backend): (
+            Option<Arc<dyn SnapshotStore>>,
+            Option<Arc<dyn ChRemoteClient>>,
+            Option<Arc<dyn RestoreBackend>>,
+        ) = if config.snapshot_enabled {
+            let l1_root = std::path::PathBuf::from("/var/zeroship/ch/snapshots");
+            // Idempotent — directory may already exist.
+            if let Err(e) = std::fs::create_dir_all(&l1_root) {
+                tracing::warn!(
+                    path = %l1_root.display(),
+                    error = %e,
+                    "snapshot wiring: L1 root mkdir failed (will surface on first put)"
+                );
+            }
+            let store: Arc<dyn SnapshotStore> =
+                Arc::new(LocalDiskSnapshotStore::new(l1_root));
+            let ch: Arc<dyn ChRemoteClient> =
+                Arc::new(RealChRemoteClient::new());
+            let rb: Arc<dyn RestoreBackend> =
+                Arc::new(RealRestoreBackend::new(config.nomad_ch.clone()));
+            tracing::info!(
+                ch_version = ch.version(),
+                "snapshot/restore wiring: enabled (L1 disk-only; GCS gated by A4 follow-up)"
+            );
+            (Some(store), Some(ch), Some(rb))
+        } else {
+            (None, None, None)
+        };
+
         let state = Arc::new(Self {
             config,
             sandboxes: registry,
@@ -294,6 +347,9 @@ impl AppState {
             persist,
             shutdown: Arc::new(AtomicBool::new(false)),
             admin_token,
+            snapshot_store,
+            ch_remote,
+            restore_backend,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
