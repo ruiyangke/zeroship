@@ -23,6 +23,7 @@ pub mod preview_share_handlers;
 pub mod preview_ws;
 pub mod registry;
 pub mod restore;
+pub mod snapshot_store;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
