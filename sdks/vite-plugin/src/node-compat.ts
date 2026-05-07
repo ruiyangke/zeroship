@@ -72,6 +72,7 @@ const CUSTOM_PREFIX = "\0zeroship-node:";
  */
 const RUNTIME_NATIVE_MODULES = new Set([
   "node:async_hooks",
+  "node:buffer",
   "node:crypto",
   "node:path",
   "node:util",

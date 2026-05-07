@@ -11,6 +11,7 @@
 //!   native async work (`fetch`) resumed.
 
 pub mod async_hooks;
+pub mod buffer;
 pub mod crypto;
 pub mod os;
 pub mod path;

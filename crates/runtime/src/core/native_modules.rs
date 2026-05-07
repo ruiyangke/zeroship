@@ -25,6 +25,7 @@ pub fn resolve_native<'s>(
 ) -> Option<v8::Local<'s, v8::Module>> {
     match specifier {
         "node:async_hooks" => Some(crate::node::async_hooks::synthetic_module(scope)),
+        "node:buffer" => Some(crate::node::buffer::synthetic_module(scope)),
         "node:crypto" => Some(crate::node::crypto::synthetic_module(scope)),
         "node:zlib" => Some(crate::node::zlib::synthetic_module(scope)),
         "node:os" => Some(crate::node::os::synthetic_module(scope)),
@@ -40,11 +41,12 @@ pub fn is_native(specifier: &str) -> bool {
     matches!(
         specifier,
         "node:async_hooks"
+            | "node:buffer"
             | "node:crypto"
-            | "node:zlib"
             | "node:os"
             | "node:path"
             | "node:util"
+            | "node:zlib"
     )
 }
 

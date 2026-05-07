@@ -694,6 +694,17 @@ pub fn load_polyfills_and_modules(
         crate::native_modules::install_global_bridge(scope, global);
     }
 
+    // node:buffer is resolved as a native SyntheticModule. Install
+    // `globalThis.Buffer` so bare `Buffer.from(...)` works without
+    // an explicit import (Node convention) — the user-visible global
+    // is the same constructor as the module export. Must run AFTER
+    // `setup_globals` (TextEncoder / TextDecoder / atob / btoa
+    // become available there — `BUFFER_JS` uses all four).
+    {
+        let global = scope.get_current_context().global(scope);
+        crate::node::buffer::install_global(scope, global);
+    }
+
     // setImmediate(fn, ...args) → setTimeout(() => fn(...args), 0).
     // Last surviving JS shim — too small to be worth the dedicated
     // V8 callback boilerplate (a native impl would need to capture
