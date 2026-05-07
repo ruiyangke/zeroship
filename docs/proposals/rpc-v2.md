@@ -2,6 +2,8 @@
 
 **Status:** Proposal · **Wire version:** `/_zs/v1/`
 
+> Amendment 2026-05-07: `ctx.headers` and `ctx.url` are now request-scoped *mutable* native instances (no `Object.freeze`). The kernel never reads them after handing dispatch to the user procedure, so any mutation vanishes when the request ends — and dropping the freeze + per-setter shadow installs recovers ~4 µs of fixed cost per request (see `docs/perf/rpc-ctx-regression-2026-05-07.md`). The freeze approach was a defense-in-depth shim, not load-bearing on any kernel invariant; this amendment realigns the proposal with WHATWG defaults (`new Headers(...)` and `new URL(...)` are mutable).
+
 ---
 
 ## Motivation
@@ -253,9 +255,9 @@ The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 | `ctx.traceId` | `string` (32-char hex) | W3C `traceparent` header (gateway creates if absent) | Used for OTel correlation. |
 | `ctx.signal` | `AbortSignal` | `AbortSignal.any([clientDisconnect, gatewayDeadline, isolateEviction])` (native, `crates/runtime/src/web/dom/abort_signal.rs`) | Aborts on any of the three (see "Abort source plumbing" below). Auto-passed to `fetch`, `db.*`, `kv.*`, `storage.*`. |
 | `ctx.idempotencyKey` | `string \| undefined` | Client's `Idempotency-Key` header, validated by gateway | `undefined` for queries and mutations without `idempotent: true`. |
-| `ctx.headers` | `Headers` (native, frozen) | The procedure's request | The kernel constructs the `Headers` instance and calls `Object.freeze()` on the JS wrapper; setters (`headers.set(...)`, `headers.append(...)`, `headers.delete(...)`) throw `TypeError("Cannot mutate frozen Headers")`. Read APIs (`headers.get(...)`, `headers.has(...)`, iteration) work. |
+| `ctx.headers` | `Headers` (native, mutable per-request) | The procedure's request | The kernel constructs the `Headers` instance lazily on first `ctx.headers` read and caches the same wrapper for the request's lifetime. Mutations (`headers.set(...)`, `headers.append(...)`, `headers.delete(...)`) succeed but vanish at request end — the kernel never re-reads `ctx.headers` after dispatching to the user procedure. Aligns with the WHATWG default for `new Headers(...)`. To pin an immutable copy, the procedure constructs `new Headers(ctx.headers)` and freezes it itself. |
 | `ctx.method` | `"GET" \| "HEAD" \| "POST" \| "PUT" \| "DELETE" \| "PATCH" \| "OPTIONS"` | The wire request | For non-raw procedures, the gateway pre-rejects bad methods (§7); for `kind: "raw"`, the procedure handles whatever the gateway forwards. |
-| `ctx.url` | `URL` (native, frozen) | The wire request | Same `Object.freeze` pattern as `ctx.headers`; `url.searchParams.set(...)` throws. To build a modified URL, the procedure constructs a fresh `URL(ctx.url)` and mutates that. |
+| `ctx.url` | `URL` (native, mutable per-request) | The wire request | The kernel constructs the `URL` instance lazily on first `ctx.url` read and caches the same wrapper for the request's lifetime. Setters (`url.pathname = ...`, `url.searchParams.set(...)`, etc.) succeed but vanish at request end — the kernel never re-reads `ctx.url` after dispatching. Aligns with the WHATWG default for `new URL(...)`. To build a modified URL without affecting the cached `ctx.url`, the procedure constructs a fresh `new URL(ctx.url)` and mutates that. |
 | `ctx.waitUntil` | `(p: Promise<unknown>) => void` | Kernel — extends the procedure's lifetime past the response without blocking it | For analytics, logging flushes, etc. |
 | `ctx.log` | `{ info, warn, error, debug }` | Kernel structured-log emitter | Each log is a JSON line tagged with `{requestId, traceId, app, procedure}`. |
 | `ctx.env` | merged `vars + secrets` | Per-app config | Read-only; immutable per request. **Merge order** (higher wins): runtime-process env vars < `defineApp.env` declarations < per-deploy secret manager values. The deploy-time `defineApp.env` is the source of truth; runtime-process env exists as a dev-mode fallback. |

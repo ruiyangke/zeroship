@@ -1,0 +1,160 @@
+=== Building ===
+warning: `zeroship-runtime` (lib) generated 40 warnings (run `cargo fix --lib -p zeroship-runtime` to apply 22 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.21s
+=== Fetching nginx via nix ===
+[ok] /nix/store/03xpwd4p37wbj9w7gbz8mgb0zvkqsna2-nginx-1.28.3/bin/nginx
+=== Starting servers ===
+[ok] v8-compio (1w @ 5100, 16w @ 5101)
+[ok] node v22.22.2 (single @ 4002, cluster 16w @ 4003)
+[ok] 1.28.3 echo @ 8888
+
+=================================================================
+  zeroship vs Node.js Runtime Benchmark (zerobench)
+  2026-05-07 | 32 logical cores | x86_64
+  NUMA split: servers on node 0, zerobench on node 1
+  10s per scenario · saturate (300 conns) · serial per-scenario
+=================================================================
+
+=== Benchmarking targets ===
+  [2/4] v8-compio (16w)                done (130s)
+
+=================================================================
+  Per-scenario comparison (req/s · p50 · p99)
+=================================================================
+
+--- ping ---
+
+─── scenario 1/13: ping (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 8,845,412 requests
+throughput     884,541 req/s · ↑ 114.1 MB/s  ↓ 76.1 MB/s
+transfer       ↑ 1.1 GB sent  ↓ 760.7 MB received
+latency      p50=322µs  p90=451µs  p99=591µs  p99.9=5.2ms  max=18ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=8,845,412  4xx=0  5xx=0
+assertions     status==200: 8,845,412/8,845,412 ok
+
+─── scenario 2/13: fib10 (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 8,380,170 requests
+throughput     838,017 req/s · ↑ 115.6 MB/s  ↓ 68.7 MB/s
+transfer       ↑ 1.2 GB sent  ↓ 687.2 MB received
+latency      p50=333µs  p90=413µs  p99=560µs  p99.9=4.5ms  max=9.7ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=8,380,170  4xx=0  5xx=0
+assertions     status==200: 8,380,170/8,380,170 ok
+
+─── scenario 3/13: setTimeout0 (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 7,488,875 requests
+throughput     748,888 req/s · ↑ 99.6 MB/s  ↓ 64.4 MB/s
+transfer       ↑ 996.0 MB sent  ↓ 644.0 MB received
+latency      p50=379µs  p90=496µs  p99=2.1ms  p99.9=2.7ms  max=16ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=7,488,875  4xx=0  5xx=0
+assertions     status==200: 7,488,875/7,488,875 ok
+
+─── scenario 4/13: promiseChain (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 8,411,919 requests
+throughput     841,192 req/s · ↑ 115.2 MB/s  ↓ 69.0 MB/s
+transfer       ↑ 1.2 GB sent  ↓ 689.8 MB received
+latency      p50=334µs  p90=409µs  p99=673µs  p99.9=4.0ms  max=9.3ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=8,411,919  4xx=0  5xx=0
+assertions     status==200: 8,411,919/8,411,919 ok
+
+─── scenario 5/13: fetchEcho (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 1,503,964 requests
+throughput     150,396 req/s · ↑ 25.4 MB/s  ↓ 18.8 MB/s
+transfer       ↑ 254.2 MB sent  ↓ 188.0 MB received
+latency      p50=1.8ms  p90=2.7ms  p99=5.5ms  p99.9=16ms  max=28ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=1,503,964  4xx=0  5xx=0
+assertions     status==200: 1,503,964/1,503,964 ok
+
+─── scenario 6/13: sha256 (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 5,472,226 requests
+throughput     547,223 req/s · ↑ 71.7 MB/s  ↓ 44.9 MB/s
+transfer       ↑ 716.9 MB sent  ↓ 448.7 MB received
+latency      p50=518µs  p90=633µs  p99=1.2ms  p99.9=6.6ms  max=40ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=5,472,226  4xx=0  5xx=0
+assertions     status==200: 5,472,226/5,472,226 ok
+
+─── scenario 7/13: hmacSign (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 4,809,007 requests
+throughput     480,901 req/s · ↑ 64.0 MB/s  ↓ 39.4 MB/s
+transfer       ↑ 639.6 MB sent  ↓ 394.3 MB received
+latency      p50=589µs  p90=727µs  p99=1.1ms  p99.9=6.0ms  max=12ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=4,809,007  4xx=0  5xx=0
+assertions     status==200: 4,809,007/4,809,007 ok
+
+─── scenario 8/13: randomUUID (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 8,008,240 requests
+throughput     800,824 req/s · ↑ 103.3 MB/s  ↓ 94.5 MB/s
+transfer       ↑ 1.0 GB sent  ↓ 945.0 MB received
+latency      p50=345µs  p90=484µs  p99=647µs  p99.9=13ms  max=40ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=8,008,240  4xx=0  5xx=0
+assertions     status==200: 8,008,240/8,008,240 ok
+
+─── scenario 9/13: aesEncrypt (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 4,839,760 requests
+throughput     483,976 req/s · ↑ 65.3 MB/s  ↓ 39.7 MB/s
+transfer       ↑ 653.4 MB sent  ↓ 396.9 MB received
+latency      p50=569µs  p90=826µs  p99=1.3ms  p99.9=6.3ms  max=32ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=4,839,760  4xx=0  5xx=0
+assertions     status==200: 4,839,760/4,839,760 ok
+
+─── scenario 10/13: ecdsaSign (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 1,849,065 requests
+throughput     184,907 req/s · ↑ 24.8 MB/s  ↓ 15.2 MB/s
+transfer       ↑ 247.8 MB sent  ↓ 151.6 MB received
+latency      p50=1.6ms  p90=2.0ms  p99=2.3ms  p99.9=7.5ms  max=10.0ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=1,849,065  4xx=0  5xx=0
+assertions     status==200: 1,849,065/1,849,065 ok
+
+─── scenario 11/13: httpGet (Http) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 2,959,473 requests
+throughput     295,947 req/s · ↑ 20.4 MB/s  ↓ 36.4 MB/s
+transfer       ↑ 204.2 MB sent  ↓ 364.0 MB received
+latency      p50=921µs  p90=1.2ms  p99=1.5ms  p99.9=17ms  max=25ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=2,959,473  4xx=0  5xx=0
+assertions     status==200: 2,959,473/2,959,473 ok
+
+─── scenario 12/13: sseHold (Sse) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 49,453 operations
+throughput     4,945 ops/s · ↑ 0 B/s  ↓ 484.6 kB/s
+transfer       ↑ 0 B sent  ↓ 4.8 MB received
+chunk-gap      p50=10ms  p90=10ms  p99=10ms  p99.9=17ms  max=20ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=49,453  4xx=0  5xx=0
+
+─── scenario 13/13: wsEchoRtt (Ws) ───
+target         saturate (300 tasks) (16 threads)
+duration       10.00s  |  total 50,000 operations
+throughput     5,000 ops/s · ↑ 195.0 kB/s  ↓ 195.0 kB/s
+transfer       ↑ 1.9 MB sent  ↓ 1.9 MB received
+rtt      p50=135µs  p90=173µs  p99=224µs  p99.9=2.0ms  max=10ms
+errors         connect 0  read 0  write 0  timeout 0  keepup 0
+               status 2xx=50,000  4xx=0  5xx=0
+=== END SWEEP RAW ===
+
+=== Per-target ping triple-run (10s each, --target=v8-16w --scenario=ping) ===
+Run 1: 874,934 req/s  p50=297µs  p99=699µs
+Run 2: 884,947 req/s  p50=313µs  p99=593µs
+Run 3: 882,664 req/s  p50=324µs  p99=595µs
+Mean:  880,848 req/s

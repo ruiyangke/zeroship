@@ -100,11 +100,11 @@ impl Drop for AbortGuard {
 /// Register the per-request `AbortController` for the lifetime of a
 /// procedure. Returns an `AbortGuard` whose Drop unregisters the entry.
 ///
-/// `controller` is the JS `AbortController` minted by
-/// `RpcContext::build_js_object`. The registry retains a `Global<Object>`
-/// (cloned from the supplied Local on `scope`) so the controller stays
-/// alive across V8 turns until either the guard drops or
-/// [`entered_for_eviction`] clears the entry.
+/// `controller` is the JS `AbortController` minted eagerly inside
+/// `mint_rpc_ctx`. The registry retains a `Global<Object>` (cloned from
+/// the supplied Local on `scope`) so the controller stays alive across
+/// V8 turns until either the guard drops or [`entered_for_eviction`]
+/// clears the entry.
 pub fn register_in_flight(
     scope: &mut v8::PinScope,
     app_id: Uuid,

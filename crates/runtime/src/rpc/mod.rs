@@ -9,23 +9,26 @@
 //!   - `superjson.rs`: V8 ↔ envelope encoder/decoder. Encodes
 //!     `v8::Value` into the wire envelope and revives it on the
 //!     receiving side.
-//!   - `dispatch.rs`: per-request `RpcContext`, frozen native
-//!     Headers/URL wrapping, and the ALS slot install/restore that lets
-//!     `__zeroshipGetRpcCtx()` survive `await` boundaries.
+//!   - `ctx_holder.rs`: per-request `RpcCtx` `#[v8_class]` with lazy
+//!     accessors for `requestId` / `traceId` / `method` / `url` /
+//!     `headers` / `signal` / `user` / `idempotencyKey`.
+//!   - `dispatch.rs`: ALS slot install/restore + `__zeroshipGetRpcCtx()`
+//!     that lets the holder survive `await` boundaries.
 //!   - `abort.rs`: per-isolate `AbortRegistry` +
 //!     `entered_for_eviction(app_id)` — fires every in-flight
 //!     procedure's `ctx.signal` when the worker's LRU cache evicts the
 //!     isolate.
 
 pub mod abort;
+pub mod ctx_holder;
 pub mod dispatch;
 pub mod error;
 pub mod superjson;
 
 pub use abort::{entered_for_eviction, register_in_flight, AbortGuard};
+pub use ctx_holder::{mint_rpc_ctx, RpcCtx};
 pub use dispatch::{
-    install_globals as install_dispatch_globals, rpc_ctx_als_key, with_rpc_context_in_als,
-    RpcContext, RpcContextHandle,
+    install_globals as install_dispatch_globals, rpc_ctx_als_key, with_rpc_context_lazy,
 };
 pub use error::{
     build, install_global, throw, RpcError, RpcErrorBuildOptions, RpcErrorInit, ZsErrorCode,
