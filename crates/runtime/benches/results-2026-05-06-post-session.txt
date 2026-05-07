@@ -1,0 +1,88 @@
+RPC v2 dispatch microbench — 2026-05-06, d1225c2 (main),
+Intel(R) Xeon(R) CPU @ 2.80GHz · 32 logical cores · Linux 6.12.80 x86_64
+
+Path under test
+---------------
+Identical to the 2026-05-05 baseline. Production single-call dispatch
+of `default.rpc(name, input, ctx)` end-to-end:
+
+  call_fetch_handler
+    → extract_zs_v1_id
+    → parse_envelope_body
+    → RpcContext::build_js_object (frozen Headers / URL / AbortController)
+    → with_rpc_context_in_als (ALS slot install/restore)
+    → rpc_fn.call(undefined, [id, input, ctx])
+    → microtask checkpoint
+    → classify_rpc_return + JSON.stringify envelope
+
+
+Results — comparison vs 2026-05-05 baseline
+-------------------------------------------
+
+  Workload          bytes   p50 (now)    p50 (baseline)   delta
+  ──────────────  ───────  ───────────  ───────────────  ─────
+  tiny                 16  30,496 ns    30,357 ns        +0.5% (noise)
+  small               231  32,306 ns    32,093 ns        +0.7% (noise)
+  medium            3,641  53,106 ns    52,992 ns        +0.2% (noise)
+  large            50,630  350,690 ns   356,373 ns       −1.6%  ↓
+  multipart         3,641  53,568 ns    54,442 ns        −1.6%  ↓
+
+All deltas well within run-to-run jitter on a multi-tenant laptop.
+
+
+What changed since the 2026-05-05 baseline
+------------------------------------------
+
+The dispatch path was re-touched (or transitively crossed) by:
+
+  - RPC v2 phase 2 (vite-plugin transform pipeline): touches the JS-side
+    synthetic entry that exposes `default.rpc`. The kernel call into it
+    is unchanged.
+  - Native node:async_hooks / node:crypto synthetic modules (#175):
+    replaces JS-shim path; kernel ALS install untouched.
+  - V8 dynamic import host callback (#187): adds host hook. No effect
+    on the static dispatch path.
+  - Lazy procedures (#188): synthetic-entry shape change for marked
+    procedures only. Eager procedures (used by this bench) unchanged.
+  - Macro varargs (#169): ALS.run migrated; not on dispatch path.
+  - Native node:zlib / node:os / node:util / node:path / node:buffer
+    (#192 / #202 / #203 / #204): synthetic modules; no dispatch
+    interaction.
+  - EventSource + CompressionStream (#191): new install_global
+    callsites; no dispatch interaction.
+  - Heap cap (#194): isolate creation parameter; no dispatch effect
+    once the isolate is live.
+  - Idle GC (#195): per-isolate compio ticker; doesn't fire during
+    busy bench loops.
+  - TransformStream MAC-02 + slot-shared finishPromise refactor
+    (#199 + #200): streams cluster; not on the unary RPC path.
+  - RequestInit/ResponseInit typed enums (#197): fetch-side migration;
+    Request/Response constructors aren't on the dispatch hot path.
+  - Per-class isolate-slot caching unification (#198): macro emits
+    Class::register; install path identical at runtime.
+  - All comment cleanup commits + zeroship/internal removal: no
+    runtime-observable effect.
+
+Boot snapshot work (#190 / Phase 2 / Phase 2b) was investigated and
+reverted — see crates/runtime/TODO.md §Memory footprint lever 2.
+
+
+Reproduction
+------------
+
+  cargo bench -p zeroship-runtime --bench rpc_dispatch \
+    -- --warm-up-time 1 --measurement-time 3
+
+  Per-iter ns from target/criterion/rpc_dispatch/<w>/new/sample.json
+  (sort, take ceil(0.99 * n) for p99). Same recipe as the
+  2026-05-05 results file.
+
+
+Conclusion
+----------
+
+Dispatch path is statistically unchanged. The platform absorbed
+~30 commits of substantive runtime work (RPC v2 + 7 native node:*
+modules + macro/refactor sweep + Web platform additions + memory
+levers) without measurable regression on the hot path. Single-call
+ABI per Wave F's recommendation remains correct.
