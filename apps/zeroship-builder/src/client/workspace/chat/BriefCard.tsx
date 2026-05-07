@@ -1,5 +1,5 @@
 // Wizard-only terminal card. The wizard's `decide` node (plain
-// LangGraph, see apps/zeroship-builder/src/server/_wizard.ts) emits
+// LangGraph, see apps/zeroship-builder/src/server/wizard.ts) emits
 // a `data-brief` chunk after surveys are exhausted. This card renders
 // it: the LLM's refined summary, the answer trail, and a Begin button
 // that hands off to project creation + Builder.

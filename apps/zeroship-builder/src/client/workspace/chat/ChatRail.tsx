@@ -36,7 +36,7 @@ export interface ChatRailProps {
 
 /**
  * Render an answer value for human-readable transport in the seeded
- * first turn. Mirrors `_wizard.ts:wstringifyAnswer` and
+ * first turn. Mirrors `wizard.ts:wstringifyAnswer` and
  * `BriefCard.tsx:stringifyAnswer` — kept inline here rather than DRYed
  * into types/chat.ts because the helper is rendering policy (Builder-
  * facing), not part of the wire shape.
