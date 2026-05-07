@@ -1,6 +1,6 @@
-//! `node:async_hooks` / `node:crypto` / `node:zlib` / `node:os`
-//! registered as native V8 SyntheticModules — the runtime resolves
-//! them itself rather than handing the bare specifier to a
+//! `node:async_hooks` / `node:buffer` / `node:crypto` / `node:zlib` /
+//! `node:os` registered as native V8 SyntheticModules — the runtime
+//! resolves them itself rather than handing the bare specifier to a
 //! vite-plugin shim that re-exports `globalThis.__zsAsyncHooks` /
 //! `globalThis.__zeroship_node_crypto`.
 //!
@@ -9,6 +9,7 @@
 //!   - `import { createHash }` produces working digests.
 //!   - `import { gzipSync } from "node:zlib"` resolves.
 //!   - `import { platform } from "node:os"` resolves.
+//!   - `import { Buffer } from "node:buffer"` resolves and matches the global.
 //!   - The legacy globals are gone.
 //!   - Unknown `node:*` specifiers surface a clear error.
 
@@ -191,4 +192,43 @@ fn import_os_platform_works() {
     )
     .unwrap();
     assert!(r.json.contains(r#""p":"linux""#), "got: {}", r.json);
+}
+
+#[test]
+fn import_buffer_works() {
+    let r = dispatch(
+        m(r#"
+        import { Buffer } from "node:buffer";
+        export function test() {
+            const b = Buffer.from("hi");
+            return {
+                kind: typeof Buffer,
+                isU8: b instanceof Uint8Array,
+                len: b.length,
+            };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""kind":"function""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""isU8":true"#), "got: {}", r.json);
+    assert!(r.json.contains(r#""len":2"#), "got: {}", r.json);
+}
+
+#[test]
+fn buffer_module_export_matches_global() {
+    let r = dispatch(
+        m(r#"
+        import { Buffer } from "node:buffer";
+        export function test() {
+            return { same: Buffer === globalThis.Buffer };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""same":true"#), "got: {}", r.json);
 }
