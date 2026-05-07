@@ -39,7 +39,8 @@ imports get rewritten by the plugin into chunked RPCs over the wire.
 | `src/server/auth.ts` | Proxies to control plane's `/auth/*` with cookie passthrough. Handles register / login / logout / userinfo. |
 | `src/server/apps.ts` | Proxies to control plane's `/api/apps/*` for app CRUD, deploys, env vars, secrets, logs, plan switching. |
 | `src/server/sandbox.ts` | Proxies to `zeroship-sandbox` for file ops + shell exec inside the per-project Docker container. Holds the sandbox token (browser never sees it). |
-| `src/server/chat.ts` | OpenAI tool-use loop in vanilla JS — no LangGraph, no deepagents. ~250 lines. Uses `fetch()` to call OpenAI's `/v1/chat/completions`, runs each tool against the sandbox/control proxies, loops until the model returns a final answer. Async generator → streams events to the browser. |
+| `src/server/chat.ts` | Builder agent — deepagents + LangGraph in V8 (~691 LOC). Translates the LangChain event stream into AI SDK v6 UI Message Stream Protocol on the wire. Marked `lazy: true` so the heavy graph only loads on first call. |
+| `src/server/wizard.ts` | Pre-coding clarification flow — plain LangGraph (no deepagents, no sandbox) in V8 (~495 LOC). Loops surveys against the LLM until it emits a terminal `data-brief` chunk. Also `lazy: true`. |
 
 ## Project layout
 
@@ -54,10 +55,25 @@ apps/zeroship-builder/
     ├── server/
     │   ├── auth.ts
     │   ├── apps.ts
+    │   ├── agents.ts        (issues + quality + data/media canvas stubs)
     │   ├── sandbox.ts
-    │   ├── chat.ts
+    │   ├── chat.ts          (Builder — deepagents + LangGraph, lazy)
+    │   ├── wizard.ts        (clarification — plain LangGraph, lazy)
+    │   ├── pm_worker.ts     (PM digest RPC)
+    │   ├── sre_worker.ts    (SRE monitor RPC)
     │   ├── env.ts
-    │   └── request-context.ts
+    │   ├── request-context.ts
+    │   ├── _critic.ts       (sibling helper — Critic SubAgent)
+    │   ├── _reviewer.ts     (sibling helper — Reviewer SubAgent)
+    │   ├── _pm.ts           (sibling helper — PM SubAgent)
+    │   ├── _sre.ts          (sibling helper — SRE SubAgent)
+    │   ├── _tools.ts        (sibling helper — tool defs)
+    │   ├── _middleware.ts   (sibling helper — deepagents middleware)
+    │   ├── _persist.ts      (sibling helper — checkpointer)
+    │   ├── _prompts.ts      (sibling helper — system prompts)
+    │   ├── _survey_wire.ts  (sibling helper — data-survey wire)
+    │   ├── _agent_writes.ts (sibling helper — agent-write fan-out)
+    │   └── _sandbox_backend.ts (sibling helper — sandbox HTTP client)
     └── client/
         ├── main.tsx
         ├── App.tsx
@@ -70,6 +86,13 @@ apps/zeroship-builder/
         ├── workspace/      (ProjectWorkspace + tabs)
         └── builder/        (Chat + tool-call rendering)
 ```
+
+The `_*.ts` files in `src/server/` are sibling helpers (SubAgents,
+prompts, middleware, wire shapes) — NOT RPC procedures. They're
+imported by `chat.ts` / `wizard.ts` and never reach the browser.
+`chat.ts` and `wizard.ts` carry `lazy: true` in their config so the
+heavy LangGraph / deepagents code only loads on the first call to
+`/_zs/v1/chat` or `/_zs/v1/wizard` — boot stays cheap.
 
 ## Configuration (env / secrets)
 
