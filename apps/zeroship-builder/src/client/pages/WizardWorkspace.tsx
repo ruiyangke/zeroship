@@ -1,6 +1,6 @@
 // Wizard surface — pre-coding clarification chat. Per `docs/superpowers/specs/2026-04-30-zeroship-builder-design.md` §8.2.7 +
 // §4.8.2b: this page talks to the wizard runtime (plain LangGraph,
-// `apps/zeroship-builder/src/server/_wizard.ts`), NOT Builder. The
+// `apps/zeroship-builder/src/server/wizard.ts`), NOT Builder. The
 // wizard halts on data-survey chunks; the user answers; once the LLM
 // decides the brief is concrete enough it emits a terminal data-brief
 // chunk that we render as a BriefCard with a Begin button.

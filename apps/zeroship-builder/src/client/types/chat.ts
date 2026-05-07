@@ -150,7 +150,7 @@ export type SREFinding = z.infer<typeof sreFindingSchema>;
 // --- Wizard brief (terminal chunk from the wizard runtime) ---
 
 // Mirrors the server-side `WizardBrief` in
-// apps/zeroship-builder/src/server/_wizard.ts. Wizard-only — Builder
+// apps/zeroship-builder/src/server/wizard.ts. Wizard-only — Builder
 // doesn't emit data-brief; it consumes one as starting context for
 // its first turn.
 export const briefSchema = z.object({
