@@ -1,14 +1,15 @@
 //! `node:async_hooks` / `node:crypto` / `node:zlib` / `node:os` /
-//! `node:util` registered as native V8 SyntheticModules — the runtime
-//! resolves them itself rather than handing the bare specifier to a
-//! vite-plugin shim that re-exports `globalThis.__zsAsyncHooks` /
-//! `globalThis.__zeroship_node_crypto`.
+//! `node:path` / `node:util` registered as native V8 SyntheticModules —
+//! the runtime resolves them itself rather than handing the bare
+//! specifier to a vite-plugin shim that re-exports
+//! `globalThis.__zsAsyncHooks` / `globalThis.__zeroship_node_crypto`.
 //!
 //! Covers:
 //!   - `import { AsyncLocalStorage }` returns a usable class.
 //!   - `import { createHash }` produces working digests.
 //!   - `import { gzipSync } from "node:zlib"` resolves.
 //!   - `import { platform } from "node:os"` resolves.
+//!   - `import { join } from "node:path"` resolves.
 //!   - `import { format } from "node:util"` resolves.
 //!   - The legacy globals are gone.
 //!   - Unknown `node:*` specifiers surface a clear error.
@@ -212,4 +213,22 @@ fn import_util_format_works() {
     .unwrap();
     assert!(r.json.contains(r#""fmt":"hi x 7""#), "got: {}", r.json);
     assert!(r.json.contains(r#""isMap":true"#), "got: {}", r.json);
+}
+
+#[test]
+fn import_path_join_works() {
+    let r = dispatch(
+        m(r#"
+        import { join, sep } from "node:path";
+        export function test() {
+            return { kind: typeof join, joined: join("a", "b", "c"), sep };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""kind":"function""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""joined":"a/b/c""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""sep":"/""#), "got: {}", r.json);
 }
