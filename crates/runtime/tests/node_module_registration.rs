@@ -1,6 +1,6 @@
-//! `node:async_hooks` / `node:crypto` / `node:zlib` / `node:os`
-//! registered as native V8 SyntheticModules — the runtime resolves
-//! them itself rather than handing the bare specifier to a
+//! `node:async_hooks` / `node:crypto` / `node:zlib` / `node:os` /
+//! `node:util` registered as native V8 SyntheticModules — the runtime
+//! resolves them itself rather than handing the bare specifier to a
 //! vite-plugin shim that re-exports `globalThis.__zsAsyncHooks` /
 //! `globalThis.__zeroship_node_crypto`.
 //!
@@ -9,6 +9,7 @@
 //!   - `import { createHash }` produces working digests.
 //!   - `import { gzipSync } from "node:zlib"` resolves.
 //!   - `import { platform } from "node:os"` resolves.
+//!   - `import { format } from "node:util"` resolves.
 //!   - The legacy globals are gone.
 //!   - Unknown `node:*` specifiers surface a clear error.
 
@@ -191,4 +192,24 @@ fn import_os_platform_works() {
     )
     .unwrap();
     assert!(r.json.contains(r#""p":"linux""#), "got: {}", r.json);
+}
+
+#[test]
+fn import_util_format_works() {
+    let r = dispatch(
+        m(r#"
+        import { format, types } from "node:util";
+        export function test() {
+            return {
+                fmt: format("hi %s %d", "x", 7),
+                isMap: types.isMap(new Map()),
+            };
+        }
+        "#),
+        "test",
+        "[]",
+    )
+    .unwrap();
+    assert!(r.json.contains(r#""fmt":"hi x 7""#), "got: {}", r.json);
+    assert!(r.json.contains(r#""isMap":true"#), "got: {}", r.json);
 }

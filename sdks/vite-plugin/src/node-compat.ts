@@ -73,6 +73,7 @@ const CUSTOM_PREFIX = "\0zeroship-node:";
 const RUNTIME_NATIVE_MODULES = new Set([
   "node:async_hooks",
   "node:crypto",
+  "node:util",
 ]);
 
 /** Custom polyfill code for modules unenv doesn't implement well for V8. */
