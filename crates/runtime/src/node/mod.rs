@@ -13,4 +13,5 @@
 pub mod async_hooks;
 pub mod crypto;
 pub mod os;
+pub mod util;
 pub mod zlib;
