@@ -36,8 +36,8 @@ pub(super) fn gen_install_slot_types(cfg: &ClassConfig) -> TokenStream2 {
         pub struct #install_slot_ty(::v8::Global<::v8::FunctionTemplate>);
 
         /// Per-class isolate-slot marker holding `Foo.prototype` for
-        /// WebIDL §3.7 brand checks. Captured eagerly during `install`
-        /// (after `get_function`) and consulted by every method,
+        /// WebIDL §3.7 brand checks. Captured lazily on first brand
+        /// check (after `get_function`) and consulted by every method,
         /// getter, and setter callback before the unsafe internal-field
         /// deref.
         ///
@@ -47,8 +47,22 @@ pub(super) fn gen_install_slot_types(cfg: &ClassConfig) -> TokenStream2 {
         /// `Headers.prototype.append.call(blob)` to reinterpret the
         /// Blob's box as a Headers and write Vec<u8> internals into
         /// arbitrary memory (UB).
+        ///
+        /// Storage: `v8::Eternal<v8::Object>` rather than
+        /// `v8::Global<v8::Object>`. Eternals are isolate-lifetime
+        /// handles whose `get()` returns a `Local` directly without
+        /// allocating a fresh `GlobalHandles` slot. This eliminates the
+        /// per-call `Global::clone()` (= `v8__Global__New`) on the
+        /// brand-check hot path; profile work attributed ~9 % of CPU
+        /// to this allocation across the four `#[v8_class]` brand-
+        /// checked types on the httpGet bench. The cached prototype is
+        /// constant for the lifetime of the isolate (the prototype's
+        /// hidden class is captured at install time and shared by
+        /// every `new Foo()` instance), so isolate-lifetime ownership
+        /// matches the access pattern exactly — there is no point in
+        /// time at which the slot needs to be cleared or replaced.
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        pub struct #brand_slot_ty(::v8::Global<::v8::Object>);
+        pub struct #brand_slot_ty(::v8::Eternal<::v8::Object>);
     }
 }

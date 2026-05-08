@@ -71,8 +71,11 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
         /// must not break those.
         ///
         /// First-call cost (one-time per isolate): one `get_function`
-        /// + one `.get(prototype)`. Steady state: an isolate-slot read
-        /// (Rc-clone-shaped) plus the chain walk.
+        /// + one `.get(prototype)` + one `Eternal::set`. Steady state:
+        /// an isolate-slot read followed by `Eternal::get` (which
+        /// materialises the `Local` straight from the isolate's
+        /// eternal handles cell — NO `GlobalHandles::Create`/`Release`
+        /// per call), plus the chain walk.
         ///
         /// Lifetimes are elided here on purpose. An explicit `<'s>`
         /// would tie the `Local<Object>` argument's lifetime to the
@@ -90,13 +93,39 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
             obj: v8::Local<v8::Object>,
         ) -> bool {
             // Resolve the cached prototype, lazily populating the
-            // brand slot on first call. We can't hold the slot's
-            // borrow across `set_slot` (mutable borrow) so we drop
-            // it (via `.cloned()` of the Global) before any `set_slot`
-            // call.
-            let cached_global: v8::Global<v8::Object> =
+            // brand slot on first call.
+            //
+            // Steady-state: the slot holds an `Eternal<Object>` whose
+            // `get(scope)` materialises a `Local` directly from the
+            // isolate-lifetime cell — NO `GlobalHandles::Create` and
+            // NO matching `Release` on drop. Replaces the previous
+            // `slot.0.clone()` of a `Global<Object>`, which allocated
+            // a fresh GlobalHandles slot per call (~22 % of CPU on
+            // the httpGet bench across all callers).
+            //
+            // Cache-miss path: walk the install slot to materialise
+            // the prototype, then write a populated `Eternal` into a
+            // fresh brand slot. `Eternal::set` only needs `&scope`,
+            // but `scope.set_slot` needs `&mut scope` — we therefore
+            // can't hold any prior `&__BrandSlot_…` / `&__InstallSlot_…`
+            // borrow across the `set_slot` call. The else arm clones
+            // the install template `Global` (one-time cost on first
+            // call per isolate) to release the install-slot borrow
+            // before `set_slot` is invoked.
+            let expected_proto: v8::Local<v8::Object> =
                 if let Some(slot) = scope.get_slot::<#brand_slot_ty>() {
-                    slot.0.clone()
+                    match slot.0.get(scope) {
+                        Some(p) => p,
+                        // Defensive: an empty Eternal in the slot would
+                        // mean someone constructed `__BrandSlot_…(Eternal::empty())`
+                        // and stored it without populating. The macro's
+                        // own lazy-init path always populates before
+                        // `set_slot`, so this branch is unreachable in
+                        // practice — but returning false is the safe
+                        // answer if it ever happens (matches the
+                        // pre-Eternal "install slot missing" fallback).
+                        None => return false,
+                    }
                 } else {
                     // Lazy fetch from the install slot. If that slot
                     // is missing too, the class wasn't installed in
@@ -122,12 +151,11 @@ pub(super) fn gen_brand_check_helpers(cfg: &ClassConfig) -> TokenStream2 {
                         Ok(o) => o,
                         Err(_) => return false,
                     };
-                    let g = v8::Global::new(scope, proto);
-                    let g_clone = g.clone();
-                    scope.set_slot(#brand_slot_ty(g));
-                    g_clone
+                    let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
+                    eternal.set(scope, proto);
+                    scope.set_slot(#brand_slot_ty(eternal));
+                    proto
                 };
-            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
             // Walk the [[Prototype]] chain. Each `get_prototype` call
             // can return null (chain root) or a Value (potentially an
             // Object). The 1024 cap matches V8's internal sanity

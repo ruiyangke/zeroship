@@ -28,19 +28,19 @@ pub struct ReadOnlyMapIterator {
 pub struct __InstallSlot_ReadOnlyMapIterator(::v8::Global<::v8::FunctionTemplate>);
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct __BrandSlot_ReadOnlyMapIterator(::v8::Global<::v8::Object>);
+pub struct __BrandSlot_ReadOnlyMapIterator(::v8::Eternal<::v8::Object>);
 /// Brand-check helper for the iterator class: walks the
 /// prototype chain of `obj` looking for the cached
 /// `<Class>Iterator.prototype`. Returns true on match (the
 /// receiver IS a `<Class>Iterator`), false otherwise.
 ///
-/// Closes Wave 10 NS6: the previous `next()` codegen relied
-/// solely on internal-field-0 being an `External`, which any
+/// The previous `next()` codegen relied solely on
+/// internal-field-0 being an `External`, which any
 /// `#[v8_class]` wrapper satisfies. A caller could pass a
 /// different wrapper as `this` and the recovery
 /// `__ext.value() as *mut <Class>Iterator` would reinterpret a
 /// `Box<Other>` as `*mut <Class>Iterator` — UB. The brand
-/// check pins the receiver to instances of THIS iterator class
+/// check pins the receiver to instances of this iterator class
 /// before the unsafe cast.
 ///
 /// Walks at most 1024 prototype links — matches V8's internal
@@ -59,10 +59,13 @@ fn __brand_check_ReadOnlyMapIterator(
     scope: &mut v8::PinScope,
     obj: v8::Local<v8::Object>,
 ) -> bool {
-    let cached_global: v8::Global<v8::Object> = if let Some(slot) = scope
+    let expected_proto: v8::Local<v8::Object> = if let Some(slot) = scope
         .get_slot::<__BrandSlot_ReadOnlyMapIterator>()
     {
-        slot.0.clone()
+        match slot.0.get(scope) {
+            Some(p) => p,
+            None => return false,
+        }
     } else {
         let tmpl_global = match scope.get_slot::<__InstallSlot_ReadOnlyMapIterator>() {
             Some(s) => s.0.clone(),
@@ -85,12 +88,11 @@ fn __brand_check_ReadOnlyMapIterator(
             Ok(o) => o,
             Err(_) => return false,
         };
-        let g = v8::Global::new(scope, proto);
-        let g_clone = g.clone();
-        scope.set_slot(__BrandSlot_ReadOnlyMapIterator(g));
-        g_clone
+        let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
+        eternal.set(scope, proto);
+        scope.set_slot(__BrandSlot_ReadOnlyMapIterator(eternal));
+        proto
     };
-    let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
     let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
         Some(v) => v,
         None => return false,

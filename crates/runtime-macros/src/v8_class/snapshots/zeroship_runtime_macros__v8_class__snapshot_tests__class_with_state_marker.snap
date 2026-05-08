@@ -1,6 +1,5 @@
 ---
 source: crates/runtime-macros/src/v8_class/snapshot_tests.rs
-assertion_line: 95
 expression: format_expansion(out)
 ---
 impl State {
@@ -25,8 +24,8 @@ impl State {
 #[allow(non_camel_case_types)]
 pub struct __InstallSlot_Marker(::v8::Global<::v8::FunctionTemplate>);
 /// Per-class isolate-slot marker holding `Foo.prototype` for
-/// WebIDL §3.7 brand checks. Captured eagerly during `install`
-/// (after `get_function`) and consulted by every method,
+/// WebIDL §3.7 brand checks. Captured lazily on first brand
+/// check (after `get_function`) and consulted by every method,
 /// getter, and setter callback before the unsafe internal-field
 /// deref.
 ///
@@ -36,9 +35,23 @@ pub struct __InstallSlot_Marker(::v8::Global<::v8::FunctionTemplate>);
 /// `Headers.prototype.append.call(blob)` to reinterpret the
 /// Blob's box as a Headers and write Vec<u8> internals into
 /// arbitrary memory (UB).
+///
+/// Storage: `v8::Eternal<v8::Object>` rather than
+/// `v8::Global<v8::Object>`. Eternals are isolate-lifetime
+/// handles whose `get()` returns a `Local` directly without
+/// allocating a fresh `GlobalHandles` slot. This eliminates the
+/// per-call `Global::clone()` (= `v8__Global__New`) on the
+/// brand-check hot path; profile work attributed ~9 % of CPU
+/// to this allocation across the four `#[v8_class]` brand-
+/// checked types on the httpGet bench. The cached prototype is
+/// constant for the lifetime of the isolate (the prototype's
+/// hidden class is captured at install time and shared by
+/// every `new Foo()` instance), so isolate-lifetime ownership
+/// matches the access pattern exactly — there is no point in
+/// time at which the slot needs to be cleared or replaced.
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
-pub struct __BrandSlot_Marker(::v8::Global<::v8::Object>);
+pub struct __BrandSlot_Marker(::v8::Eternal<::v8::Object>);
 /// Brand-check helper: walks the prototype chain of `this`
 /// looking for the cached `Foo.prototype`. Returns true on
 /// match (the receiver IS a Foo, or a subclass via
@@ -71,8 +84,11 @@ pub struct __BrandSlot_Marker(::v8::Global<::v8::Object>);
 /// must not break those.
 ///
 /// First-call cost (one-time per isolate): one `get_function`
-/// + one `.get(prototype)`. Steady state: an isolate-slot read
-/// (Rc-clone-shaped) plus the chain walk.
+/// + one `.get(prototype)` + one `Eternal::set`. Steady state:
+/// an isolate-slot read followed by `Eternal::get` (which
+/// materialises the `Local` straight from the isolate's
+/// eternal handles cell — NO `GlobalHandles::Create`/`Release`
+/// per call), plus the chain walk.
 ///
 /// Lifetimes are elided here on purpose. An explicit `<'s>`
 /// would tie the `Local<Object>` argument's lifetime to the
@@ -86,10 +102,13 @@ pub struct __BrandSlot_Marker(::v8::Global<::v8::Object>);
 #[doc(hidden)]
 #[allow(non_snake_case, dead_code)]
 fn __brand_check_Marker(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> bool {
-    let cached_global: v8::Global<v8::Object> = if let Some(slot) = scope
+    let expected_proto: v8::Local<v8::Object> = if let Some(slot) = scope
         .get_slot::<__BrandSlot_Marker>()
     {
-        slot.0.clone()
+        match slot.0.get(scope) {
+            Some(p) => p,
+            None => return false,
+        }
     } else {
         let tmpl_global = match scope.get_slot::<__InstallSlot_Marker>() {
             Some(s) => s.0.clone(),
@@ -112,12 +131,11 @@ fn __brand_check_Marker(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) ->
             Ok(o) => o,
             Err(_) => return false,
         };
-        let g = v8::Global::new(scope, proto);
-        let g_clone = g.clone();
-        scope.set_slot(__BrandSlot_Marker(g));
-        g_clone
+        let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
+        eternal.set(scope, proto);
+        scope.set_slot(__BrandSlot_Marker(eternal));
+        proto
     };
-    let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
     let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
         Some(v) => v,
         None => return false,
@@ -150,11 +168,9 @@ impl Marker {
     /// `false`, as does an isolate where the class hasn't been
     /// installed. Spec alignment: WebIDL §3.7 brand identity.
     ///
-    /// This is the stable entry point introduced in Wave 5c
-    /// (design `docs/proposals/runtime-macros-refactor.md` §3.5).
-    /// The Wave 5c-era `__zs_is_<Class>` shim was removed in
-    /// Wave 8 — this method now owns the `Local<Value>::try_into`
-    /// gate that the shim used to wrap.
+    /// This is the stable public entry point. The old
+    /// `__zs_is_<Class>` shim has been removed, so this method
+    /// now owns the `Local<Value>::try_into` gate directly.
     pub fn is_instance(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> bool {
         let obj: v8::Local<v8::Object> = match value.try_into() {
             Ok(o) => o,

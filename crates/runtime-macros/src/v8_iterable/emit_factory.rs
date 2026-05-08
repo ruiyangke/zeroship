@@ -106,9 +106,14 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
         // Per-isolate slot for the cached `<Class>Iterator.prototype`
         // (used by `__brand_check_<Class>Iterator`). Lazily populated
         // on first brand-check call.
+        //
+        // Storage: `v8::Eternal<v8::Object>`. Mirrors the parent-class
+        // brand slot — see `v8_class/emit/slot_types.rs` for the
+        // rationale (set-once isolate-lifetime data; `Eternal::get`
+        // materialises a Local without `GlobalHandles::Create`).
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        pub struct #iter_brand_slot_ty(::v8::Global<::v8::Object>);
+        pub struct #iter_brand_slot_ty(::v8::Eternal<::v8::Object>);
 
         /// Brand-check helper for the iterator class: walks the
         /// prototype chain of `obj` looking for the cached
@@ -140,9 +145,12 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
             scope: &mut v8::PinScope,
             obj: v8::Local<v8::Object>,
         ) -> bool {
-            let cached_global: v8::Global<v8::Object> =
+            let expected_proto: v8::Local<v8::Object> =
                 if let Some(slot) = scope.get_slot::<#iter_brand_slot_ty>() {
-                    slot.0.clone()
+                    match slot.0.get(scope) {
+                        Some(p) => p,
+                        None => return false,
+                    }
                 } else {
                     // Lazy fetch from the install slot. If that slot is
                     // missing too, the iterator class wasn't installed
@@ -168,12 +176,11 @@ pub(super) fn gen_iterator_companion(ctx: &EmitCtx<'_>) -> TokenStream2 {
                         Ok(o) => o,
                         Err(_) => return false,
                     };
-                    let g = v8::Global::new(scope, proto);
-                    let g_clone = g.clone();
-                    scope.set_slot(#iter_brand_slot_ty(g));
-                    g_clone
+                    let eternal: v8::Eternal<v8::Object> = v8::Eternal::empty();
+                    eternal.set(scope, proto);
+                    scope.set_slot(#iter_brand_slot_ty(eternal));
+                    proto
                 };
-            let expected_proto: v8::Local<v8::Object> = v8::Local::new(scope, &cached_global);
             let mut current: v8::Local<v8::Value> = match obj.get_prototype(scope) {
                 Some(v) => v,
                 None => return false,
