@@ -16,6 +16,7 @@
 //!   - Helpers for headers / signal / body / method validation.
 
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 
 use crate::fetch_body::body::{Body, BodyImpl};
 use crate::fetch_body::consumers::{install_body_methods, BodyMarker};
@@ -66,7 +67,23 @@ pub struct RequestState {
     /// materialises a `Local<Object>` from this Global on every call —
     /// V8 Globals are persistent handles to the same Object, so identity
     /// is preserved without any extra Private-symbol caching layer.
+    ///
+    /// JS-constructed Requests populate this field eagerly inside the
+    /// constructor; the kernel-side fast-path builder defers V8 work and
+    /// stashes the raw header list in `raw_headers` instead — the
+    /// `headers` getter materialises and caches into THIS field on
+    /// first access. Same-object semantics still hold because every
+    /// subsequent read sees the cached Global.
     pub headers: RefCell<Option<v8::Global<v8::Object>>>,
+    /// Pending raw header list set by `build_kernel_request` when the
+    /// caller wants to avoid the V8 Headers wrapper allocation on
+    /// procedures that never read `request.headers`. Consumed (cleared)
+    /// by the first `headers` getter call (or `Body::content_type`),
+    /// which materialises the wrapper and stores the Global in
+    /// `headers`. Held as `Arc` so the kernel can share the same backing
+    /// `Vec` it already allocated for RPC dispatch without an extra
+    /// O(N) clone.
+    pub raw_headers: RefCell<Option<Arc<Vec<(String, String)>>>>,
     /// AbortSignal Global. Always present per spec — `request.signal`
     /// returns a fresh signal even when the user didn't pass one. We
     /// lazily mint on first access if none was provided.
@@ -95,6 +112,7 @@ impl Default for RequestState {
             method: RefCell::new("GET".to_string()),
             url: RefCell::new(String::new()),
             headers: RefCell::new(None),
+            raw_headers: RefCell::new(None),
             signal: RefCell::new(None),
             destination: Cell::new(RequestDestination::Empty),
             referrer: RefCell::new("about:client".to_string()),
@@ -202,9 +220,32 @@ impl Body for Request {
     ) -> Option<String> {
         let raw = state_ptr(scope, this)?;
         let state: &RequestState = unsafe { &*raw };
-        let h_global = state.headers.borrow().as_ref()?.clone();
-        read_content_type(scope, h_global)
+        // Prefer the V8 Headers wrapper when already materialised — it
+        // honours per-spec Set-Cookie joining and any user mutations.
+        if let Some(h_global) = state.headers.borrow().as_ref().cloned() {
+            return read_content_type(scope, h_global);
+        }
+        // Fall back to the kernel-supplied raw header list (kernel fast-
+        // path Request that never had `request.headers` read by user JS).
+        // Avoids materialising the Headers wrapper just to read CT.
+        if let Some(raw_headers) = state.raw_headers.borrow().as_ref() {
+            return read_content_type_from_raw(raw_headers.as_slice());
+        }
+        None
     }
+}
+
+/// Find Content-Type by case-insensitive name match in a raw header
+/// list. Mirrors `read_content_type` for the lazy path where the V8
+/// Headers wrapper has not been built yet — saves a V8 round trip and
+/// a string allocation in the common no-CT case.
+fn read_content_type_from_raw(pairs: &[(String, String)]) -> Option<String> {
+    for (n, v) in pairs {
+        if n.eq_ignore_ascii_case("content-type") {
+            return Some(v.clone());
+        }
+    }
+    None
 }
 
 fn read_content_type(
@@ -737,8 +778,10 @@ impl RequestState {
     //
     // WebIDL §3.7.5 `[SameObject]` requires `req.headers === req.headers`.
     // We satisfy it without the macro's `#[v8_getter(same_object)]` cache:
-    // `state.headers` already holds a `Global<Object>` (eagerly populated
-    // by the constructor or `build_kernel_request`), and V8 Globals are
+    // `state.headers` is a `Global<Object>` cache — populated eagerly
+    // by the JS constructor and lazily by this getter on the first
+    // `request.headers` read of a kernel-fast-path Request (where
+    // `raw_headers` carries the unmaterialised list). V8 Globals are
     // persistent handles, so `Local::new(scope, g)` returns the same
     // Object identity on every call. The macro's Private-symbol cache
     // would be a redundant indirection on a stable identity — measured
@@ -752,11 +795,20 @@ impl RequestState {
         if let Some(g) = self.headers.borrow().as_ref() {
             return v8::Local::new(scope, g);
         }
-        // Defensive lazy mint — reachable only by future code paths
-        // that construct a RequestState directly. Both the macro
-        // constructor and `build_kernel_request` populate the field
-        // eagerly so JS-side reads always hit the fast path above.
-        let headers_obj = empty_headers(scope);
+        // Lazy mint from the kernel-supplied raw header list. The
+        // kernel fast-path Request builder defers `build_kernel_headers`
+        // here — procedures that never read `request.headers` skip the
+        // V8 Headers wrapper allocation entirely. Per `[SameObject]` in
+        // Fetch §5.4 we cache the resulting Global so subsequent reads
+        // return the identical wrapper.
+        let raw = self.raw_headers.borrow_mut().take();
+        let headers_obj = match raw {
+            Some(arc) => crate::headers::build_kernel_headers(scope, arc.as_slice())
+                .unwrap_or_else(|| empty_headers(scope)),
+            // Defensive: no raw list and no cache (e.g. RequestState
+            // built via Default::default() for testing). Mint empty.
+            None => empty_headers(scope),
+        };
         let g = v8::Global::new(scope, headers_obj);
         *self.headers.borrow_mut() = Some(g);
         // Re-borrow to materialise the Local — borrow_mut already dropped.
@@ -862,6 +914,19 @@ impl RequestState {
             let key = v8::String::new(scope, "duplex").unwrap();
             let v = v8::String::new(scope, "half").unwrap();
             init.set(scope, key.into(), v.into());
+        }
+        // If the V8 Headers wrapper hasn't been materialised yet (lazy
+        // kernel path), build one from raw_headers so the clone gets a
+        // copy of the kernel-supplied list.
+        if self.headers.borrow().is_none() {
+            if let Some(arc) = self.raw_headers.borrow_mut().take() {
+                if let Some(h_obj) =
+                    crate::headers::build_kernel_headers(scope, arc.as_slice())
+                {
+                    *self.headers.borrow_mut() =
+                        Some(v8::Global::new(scope, h_obj));
+                }
+            }
         }
         if let Some(h_g) = self.headers.borrow().clone() {
             let h_local = v8::Local::new(scope, h_g);
@@ -1027,9 +1092,14 @@ pub fn build_kernel_request<'s>(
     let req_proto = v8::Local::new(scope, req_proto_g);
     this_obj.set_prototype(scope, req_proto.into());
 
-    // 3. Build the Headers wrapper directly from the (name,value) list.
-    let headers_obj = crate::headers::build_kernel_headers(scope, headers)?;
-    let headers_g = v8::Global::new(scope, headers_obj);
+    // 3. Defer Headers wrapper construction. We stash the raw header
+    //    list in `raw_headers` and let the `headers` getter materialise
+    //    a native Headers wrapper on first access. Procedures that
+    //    never read `request.headers` skip the V8 allocation + Vec
+    //    clone entirely. Per Fetch §5.4 `[SameObject]` the getter
+    //    caches the materialised Global so identity is preserved across
+    //    reads.
+    let raw_headers = Arc::new(headers.to_vec());
 
     // 4. Build the body. For wire HTTP: GET/HEAD have no body; for
     // other methods, treat the body string as bytes. We use the
@@ -1053,7 +1123,8 @@ pub fn build_kernel_request<'s>(
         body: RefCell::new(body_impl),
         method: RefCell::new(method.to_string()),
         url: RefCell::new(url.to_string()),
-        headers: RefCell::new(Some(headers_g)),
+        headers: RefCell::new(None),
+        raw_headers: RefCell::new(Some(raw_headers)),
         signal: RefCell::new(None),
         ..RequestState::default()
     };
@@ -1237,6 +1308,20 @@ fn build_request_headers<'s>(
         let raw = state_ptr(scope, req_obj).ok_or_else(|| "Request input invalid".to_string())?;
         // SAFETY: caller already brand-checked input_v.
         let other: &RequestState = unsafe { &*raw };
+        // If the input's V8 Headers wrapper is already materialised, copy
+        // it directly. Otherwise mint one from the kernel-supplied raw
+        // header list and cache it on the input so future reads stay
+        // identity-stable per [SameObject].
+        if other.headers.borrow().is_none() {
+            if let Some(arc) = other.raw_headers.borrow_mut().take() {
+                if let Some(h_obj) =
+                    crate::headers::build_kernel_headers(scope, arc.as_slice())
+                {
+                    *other.headers.borrow_mut() =
+                        Some(v8::Global::new(scope, h_obj));
+                }
+            }
+        }
         match other.headers.borrow().as_ref() {
             Some(g) => v8::Local::new(scope, g.clone()).into(),
             None => v8::undefined(scope).into(),

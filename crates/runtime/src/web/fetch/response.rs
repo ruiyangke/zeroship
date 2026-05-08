@@ -426,6 +426,102 @@ pub fn build_kernel_response<'s>(
     Some(this_obj)
 }
 
+/// Fast path for `Response.json(data, init?)` when init has no
+/// `headers` member. Builds the Response wrapper directly via the
+/// per-isolate `ResponseTemplateSlot` — same shape as
+/// `build_kernel_response` but optimised for the static-method path:
+///
+///   - the body is a v8::String we already have (just convert to
+///     UTF-8 bytes once),
+///   - the headers are a fixed 1-entry list `[("Content-Type",
+///     "application/json")]`, minted via `build_kernel_headers_owned`
+///     (no per-pair `is_header_name` / value validation),
+///   - status / statusText were already validated by the caller.
+///
+/// Saves vs the JS Response constructor:
+///   - the `extract_body` walk (BufferSource / Blob / FormData /
+///     URLSearchParams / stream branches all skipped — we know the
+///     body is a string),
+///   - the `new Headers(init_v)` invocation (HeadersInit WebIDL union
+///     dispatch + per-pair validate),
+///   - the `set_default_content_type` has-then-set call pair,
+///   - the ResponseInit dict parse (we already parsed status /
+///     statusText inline above).
+fn build_response_json_fast<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    json_str: v8::Local<v8::String>,
+    status: u16,
+    status_text: String,
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    // 1. Allocate the Response wrapper via the cached instance template.
+    let (resp_tmpl_g, resp_proto_g) = {
+        let slot = scope
+            .get_slot::<ResponseTemplateSlot>()
+            .ok_or_else(|| OpError::error("Response template slot missing"))?;
+        (slot.class_tmpl.clone(), slot.prototype.clone())
+    };
+    let resp_tmpl = v8::Local::new(scope, resp_tmpl_g);
+    let inst_tmpl = resp_tmpl.instance_template(scope);
+    let this_obj = inst_tmpl
+        .new_instance(scope)
+        .ok_or_else(|| OpError::error("Response instance allocation failed"))?;
+    let resp_proto = v8::Local::new(scope, resp_proto_g);
+    this_obj.set_prototype(scope, resp_proto.into());
+
+    // 2. Build a 1-entry Headers wrapper containing Content-Type:
+    // application/json. The bytes are owned (no clone), and the upstream
+    // is "we just minted this string literal" so per-pair validation is
+    // skipped — same skip as build_kernel_response uses for response
+    // headers from the wire.
+    let header_pairs = vec![("Content-Type".to_string(), "application/json".to_string())];
+    let headers_obj = crate::headers::build_kernel_headers_owned(scope, header_pairs)
+        .ok_or_else(|| OpError::error("Headers allocation failed"))?;
+    let headers_g = v8::Global::new(scope, headers_obj);
+
+    // 3. Convert the JSON v8::String to UTF-8 bytes for BodySource::Bytes.
+    // We need an owned Vec<u8> so the Body can outlive any V8 GC of the
+    // input string. `to_rust_string_lossy` does an isolate-side UTF-8
+    // copy.
+    let body_bytes = json_str.to_rust_string_lossy(scope).into_bytes();
+    let body_len = body_bytes.len() as u64;
+    let body_rc = std::rc::Rc::new(body_bytes);
+    let body_impl = BodyImpl {
+        stream: RefCell::new(None),
+        source: Some(BodySource::Bytes(body_rc)),
+        length: Some(body_len),
+    };
+
+    // 4. Build the ResponseState directly. Type / url / redirected /
+    // web_socket all stay at their spec defaults.
+    let state = ResponseState {
+        body: RefCell::new(body_impl),
+        status: Cell::new(status),
+        status_text: RefCell::new(status_text),
+        headers: RefCell::new(Some(headers_g)),
+        ..ResponseState::default()
+    };
+
+    // 5. Box, install in internal field 0, register finalizer. Same
+    // shape as build_kernel_response and the macro-emitted constructor's
+    // gen_box_and_install_finalizer.
+    let boxed = Box::new(state);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    this_obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        this_obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut ResponseState));
+        }),
+    );
+    std::mem::forget(weak);
+
+    Ok(this_obj)
+}
+
 // ---------------------------------------------------------------------------
 // Macro-emitted class
 // ---------------------------------------------------------------------------
@@ -807,62 +903,52 @@ impl ResponseState {
     /// via JSON.stringify, builds a Response with the JSON body, and
     /// sets Content-Type to "application/json" unless init.headers
     /// already supplied one.
+    ///
+    /// Native fast path:
+    ///   - `v8::json::stringify(scope, data)` directly (no globalThis.JSON
+    ///     property walk + 2 V8 .get + JSON.stringify.call).
+    ///   - When `init` has no `headers` member (the common case for AI
+    ///     agents emitting `Response.json(obj)` / `Response.json(obj, {
+    ///     status })`), we build the Response wrapper directly via the
+    ///     kernel-side template slot — skipping the spec constructor's
+    ///     ResponseInit dict walk, `extract_body` (we know the body is a
+    ///     JSON string), `new Headers(init_v)` (we mint a 1-entry header
+    ///     list with `build_kernel_headers_owned`), and `set_default_
+    ///     content_type`'s has/set call pair.
+    ///   - When `init.headers` is supplied we fall back to the JS Response
+    ///     constructor path (`new Response(json_str, init)`) followed by
+    ///     the existing default-Content-Type set, since the user's
+    ///     headers can be a Headers instance, a record, or a sequence —
+    ///     all of which the JS Headers constructor already handles.
     #[v8_static_method]
     fn json<'s>(
         scope: &mut v8::PinScope<'s, '_>,
         data: v8::Local<v8::Value>,
         init: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-        // Per Fetch §5.5 Response.json step 1: "serialize a JavaScript
-        // value to JSON bytes". Per the WHATWG Infra spec, this:
-        //   1. Sets `string` to JSON.stringify(value).
-        //   2. If `string` is undefined (i.e., `value` is a Symbol or
-        //      undefined or contains non-encodables), throw TypeError.
-        //   3. Otherwise, UTF-8 encode `string`.
+        // Step 1: serialize data to a JSON string. Per Fetch §5.5
+        // Response.json + WHATWG Infra "serialize a JavaScript value to
+        // JSON bytes":
+        //   - JSON.stringify(value) — if it throws (circular ref, BigInt,
+        //     throwing toJSON / getter), propagate verbatim.
+        //   - If the result is undefined (Symbol / undefined / function
+        //     value), throw a TypeError.
+        //   - Otherwise, UTF-8 encode the resulting string.
         //
-        // V8's JSON.stringify behaviour:
-        //   - Symbol value, undefined value, function value → returns
-        //     undefined (a JS undefined, NOT a throw).
-        //   - Circular reference, BigInt → throws TypeError.
-        //   - Object with throwing `toJSON` / getter → throws that
-        //     error.
-        //
-        // We test by running `JSON.stringify(value)` and checking the
-        // result.
-        // Use a TryCatch so that if JSON.stringify throws (e.g.
-        // circular reference, BigInt, throwing toJSON), we capture the
-        // actual exception value and re-throw it verbatim via
-        // OpError::js_value — preserving Error subclass identity,
-        // .code, .stack. Without this, the macro's gen_throw_error path
-        // would clobber the pending exception when synthesising its
-        // own.
-        let global = scope.get_current_context().global(scope);
-        let json_key = v8::String::new(scope, "JSON").unwrap();
-        let json_obj_v = global
-            .get(scope, json_key.into())
-            .ok_or_else(|| OpError::error("JSON missing"))?;
-        let json_obj: v8::Local<v8::Object> = json_obj_v
-            .try_into()
-            .map_err(|_| OpError::error("JSON is not an object"))?;
-        let stringify_key = v8::String::new(scope, "stringify").unwrap();
-        let stringify_v = json_obj
-            .get(scope, stringify_key.into())
-            .ok_or_else(|| OpError::error("JSON.stringify missing"))?;
-        let stringify_fn: v8::Local<v8::Function> = stringify_v
-            .try_into()
-            .map_err(|_| OpError::error("JSON.stringify is not a function"))?;
-
-        // Bridge tc_scope!'s borrow lifetime: capture the result + any
-        // exception as Globals inside the inner scope, then re-Localise
-        // back in the outer scope.
+        // We use rusty_v8's `v8::json::stringify` which is a direct C++
+        // shim into V8's JSON::Stringify — no globalThis.JSON property
+        // walk, no JSON.stringify.call. The TryCatch captures any pending
+        // exception and re-throws via OpError::js_value so callers see
+        // the original Error subclass / `e.code` / stack verbatim
+        // (matching WPT response-static-json's CustomError test).
         enum StringifyOutcome {
-            Ok(v8::Global<v8::Value>),
+            Ok(v8::Global<v8::String>),
             Threw(v8::Global<v8::Value>),
         }
         let outcome: StringifyOutcome = {
             v8::tc_scope!(let tc, scope);
-            match stringify_fn.call(tc, json_obj.into(), &[data]) {
-                Some(v) => StringifyOutcome::Ok(v8::Global::new(tc, v)),
+            match v8::json::stringify(tc, data) {
+                Some(s) => StringifyOutcome::Ok(v8::Global::new(tc, s)),
                 None => {
                     let exc = tc.exception().unwrap_or_else(|| {
                         let m = v8::String::new(tc, "JSON.stringify threw").unwrap();
@@ -872,22 +958,89 @@ impl ResponseState {
                 }
             }
         };
-        let json_result_v: v8::Local<v8::Value> = match outcome {
+        let json_str: v8::Local<v8::String> = match outcome {
             StringifyOutcome::Ok(g) => v8::Local::new(scope, &g),
             StringifyOutcome::Threw(g) => {
                 let exc = v8::Local::new(scope, &g);
                 return Err(OpError::js_value(scope, exc, "JSON.stringify threw"));
             }
         };
-        if json_result_v.is_undefined() {
+        // V8's JSON::Stringify returns an empty (null) Local for inputs
+        // that JSON.stringify(value) maps to JS `undefined` — i.e.
+        // top-level Symbol / undefined / function values. The Some-case
+        // check below covers the C++ shim's "returned non-null" path;
+        // the .is_undefined() check is defensive in case V8 ever returns
+        // an actual JS `undefined` string-typed Value.
+        if json_str.is_undefined() {
             return Err(OpError::type_error(
                 "Response.json: data is not JSON-serializable",
             ));
         }
-        let json_str: v8::Local<v8::String> = json_result_v
-            .try_into()
-            .map_err(|_| OpError::error("JSON.stringify did not return a string"))?;
 
+        // Step 2: parse status / statusText / detect headers presence on
+        // init. We walk `init` once to read all three; default status is
+        // 200 / statusText is "".
+        let init_obj: Option<v8::Local<v8::Object>> = if init.is_null_or_undefined() {
+            None
+        } else {
+            v8::Local::<v8::Object>::try_from(init).ok()
+        };
+
+        let mut status: u16 = 200;
+        let mut status_text = String::new();
+        let mut init_has_headers = false;
+
+        if let Some(o) = init_obj {
+            // status
+            if let Some(v) = read_init_member(scope, o, "status") {
+                let n = v.number_value(scope).unwrap_or(f64::NAN);
+                let in_range = n == 101.0 || (200.0..=599.0).contains(&n);
+                if n.is_nan() || !in_range {
+                    return Err(OpError::range_error("Invalid status code"));
+                }
+                status = n as u16;
+            }
+            // statusText
+            if let Some(v) = read_init_member(scope, o, "statusText") {
+                let s = v.to_rust_string_lossy(scope);
+                if !is_valid_reason_phrase(&s) {
+                    return Err(OpError::type_error("Invalid statusText"));
+                }
+                status_text = s;
+            }
+            // detect headers presence (don't extract — handled below).
+            // We use the same read_init_member that treats undefined as
+            // missing, so `{ headers: undefined }` correctly flows through
+            // the no-headers fast path.
+            init_has_headers = read_init_member(scope, o, "headers").is_some();
+        }
+
+        // Step 3: null-body status check. WPT response-static-json
+        // explicitly tests `Response.json("hello world", { status: 204 })`
+        // and expects TypeError (the JSON-encoded body is non-empty, so
+        // any null-body status is invalid).
+        if is_null_body_status(status) {
+            return Err(OpError::type_error(
+                "Response with null body status cannot have a body",
+            ));
+        }
+
+        // Step 4: build the Response. Two paths:
+        //   - No init.headers → kernel fast path (build_kernel_response-
+        //     style direct wrapper alloc with a 1-entry Content-Type
+        //     header list).
+        //   - init.headers → fall back to the JS Response constructor so
+        //     the existing Headers WebIDL-union dispatch handles
+        //     instance/record/sequence inputs. We then apply the default
+        //     Content-Type via the existing set_default_content_type
+        //     helper.
+        if !init_has_headers {
+            return build_response_json_fast(scope, json_str, status, status_text);
+        }
+
+        // Slow path: user supplied init.headers. Reuse the JS Response
+        // constructor so the spec WebIDL-union dispatch on HeadersInit
+        // covers Headers / record / sequence-of-pairs verbatim.
         let global = scope.get_current_context().global(scope);
         let class_key = v8::String::new(scope, "Response").unwrap();
         let class_v = global
@@ -901,29 +1054,16 @@ impl ResponseState {
             .new_instance(scope, &[json_str.into(), init])
             .ok_or_else(|| OpError::error("Response constructor failed"))?;
 
-        // Per Fetch §5.5 Response.json: invoke "initialize a response"
-        // with the body content-type set to "application/json". The
-        // "initialize a response" algorithm sets Content-Type ONLY IF
-        // the user's init.headers didn't supply one.
+        // Set Content-Type to "application/json" unless the user already
+        // supplied one in init.headers. set_default_content_type is a
+        // has-then-set-if-absent helper.
         if let Some(raw) = state_ptr(scope, obj) {
             let state: &ResponseState = unsafe { &*raw };
             if let Some(h_g) = state.headers.borrow().clone() {
                 let h = v8::Local::new(scope, h_g);
-                let user_supplied_ct =
-                    init_supplied_content_type(scope, init).unwrap_or(false);
-                if !user_supplied_ct {
-                    let set_key = v8::String::new(scope, "set").unwrap();
-                    if let Some(set_v) = h.get(scope, set_key.into()) {
-                        if let Ok(set_fn) = v8::Local::<v8::Function>::try_from(set_v) {
-                            let n = v8::String::new(scope, "Content-Type").unwrap();
-                            let v = v8::String::new(scope, "application/json").unwrap();
-                            let _ = set_fn.call(scope, h.into(), &[n.into(), v.into()]);
-                        }
-                    }
-                }
+                set_default_content_type(scope, h, "application/json");
             }
         }
-
         Ok(obj)
     }
 }
@@ -1034,47 +1174,3 @@ fn tee_stream<'s>(
     Some((a.try_into().ok()?, b.try_into().ok()?))
 }
 
-/// Inspect init?.headers to see whether the user supplied a
-/// Content-Type. Used by Response.json so we don't clobber a
-/// user-provided MIME with the default "application/json".
-fn init_supplied_content_type(
-    scope: &mut v8::PinScope,
-    init_v: v8::Local<v8::Value>,
-) -> Option<bool> {
-    if init_v.is_null_or_undefined() {
-        return Some(false);
-    }
-    let init_obj: v8::Local<v8::Object> = init_v.try_into().ok()?;
-    let headers_key = v8::String::new(scope, "headers")?;
-    let h_v = init_obj.get(scope, headers_key.into())?;
-    if h_v.is_null_or_undefined() {
-        return Some(false);
-    }
-    // h_v can be a Headers instance OR a record OR a sequence-of-pairs.
-    // We need to check each shape for "Content-Type" (case-insensitively).
-    if let Ok(h_obj) = v8::Local::<v8::Object>::try_from(h_v) {
-        // Try `headers.has("Content-Type")` first (Headers instance).
-        let has_key = v8::String::new(scope, "has")?;
-        if let Some(has_v) = h_obj.get(scope, has_key.into()) {
-            if let Ok(has_fn) = v8::Local::<v8::Function>::try_from(has_v) {
-                let arg = v8::String::new(scope, "Content-Type")?;
-                if let Some(r) = has_fn.call(scope, h_obj.into(), &[arg.into()]) {
-                    if r.boolean_value(scope) {
-                        return Some(true);
-                    }
-                }
-            }
-        }
-        // Plain object record: walk own properties case-insensitively.
-        if let Some(names) = h_obj.get_own_property_names(scope, Default::default()) {
-            for i in 0..names.length() {
-                let Some(k) = names.get_index(scope, i) else { continue };
-                let key_str = k.to_rust_string_lossy(scope);
-                if key_str.eq_ignore_ascii_case("content-type") {
-                    return Some(true);
-                }
-            }
-        }
-    }
-    Some(false)
-}
