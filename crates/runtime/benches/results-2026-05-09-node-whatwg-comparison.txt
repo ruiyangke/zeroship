@@ -1,0 +1,141 @@
+=== Building ===
+warning: `zeroship-runtime` (lib) generated 40 warnings (run `cargo fix --lib -p zeroship-runtime` to apply 22 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.21s
+=== Fetching nginx via nix ===
+[ok] /nix/store/bzs5wsdx5z55n49rkizhfdnm8lgg1ff9-nginx-1.28.3/bin/nginx
+=== Starting servers ===
+[ok] v8-compio (1w @ 5100, 16w @ 5101)
+[ok] node v22.22.2 (single @ 4002, cluster 16w @ 4003)
+[ok] node v22.22.2 whatwg (single @ 4004, cluster 16w @ 4005)
+[ok] 1.28.3 echo @ 8888
+
+=================================================================
+  zeroship vs Node.js Runtime Benchmark (zerobench)
+  2026-05-09 | 32 logical cores | x86_64
+  NUMA split: servers on node 0, zerobench on node 1
+  10s per scenario · saturate (300 conns) · serial per-scenario
+=================================================================
+
+=== Benchmarking targets ===
+  [1/6] v8-compio (1w)                 done (130s)
+  [2/6] v8-compio (16w)                done (130s)
+  [3/6] node single                     (zerobench exit 1 — transport errors in /tmp/tmp.FSeKm58n48/3.raw)
+ done (120s)
+  [4/6] node cluster (16w)              (zerobench exit 1 — transport errors in /tmp/tmp.FSeKm58n48/4.raw)
+ done (120s)
+  [5/6] node-whatwg single              (zerobench exit 1 — transport errors in /tmp/tmp.FSeKm58n48/5.raw)
+ done (120s)
+  [6/6] node-whatwg cluster (16w)       (zerobench exit 1 — transport errors in /tmp/tmp.FSeKm58n48/6.raw)
+ done (120s)
+
+=================================================================
+  Per-scenario comparison (req/s · p50 · p99)
+=================================================================
+
+--- ping ---
+  v8-compio (1w)                           80,533 req/s  p50=3.5ms  p99=7.1ms
+  v8-compio (16w)                         880,413 req/s  p50=315µs  p99=609µs
+  node single                              26,756 req/s  p50=11ms  p99=12ms
+  node cluster (16w)                      258,283 req/s  p50=1.0ms  p99=3.3ms
+  node-whatwg single                       27,357 req/s  p50=11ms  p99=12ms
+  node-whatwg cluster (16w)               251,703 req/s  p50=1.1ms  p99=3.4ms
+
+--- fib10 ---
+  v8-compio (1w)                           76,900 req/s  p50=3.7ms  p99=6.5ms
+  v8-compio (16w)                         830,984 req/s  p50=362µs  p99=573µs
+  node single                              25,517 req/s  p50=12ms  p99=12ms
+  node cluster (16w)                      245,416 req/s  p50=1.1ms  p99=2.5ms
+  node-whatwg single                       25,986 req/s  p50=11ms  p99=12ms
+  node-whatwg cluster (16w)               240,042 req/s  p50=1.1ms  p99=2.5ms
+
+--- setTimeout0 ---
+  v8-compio (1w)                           66,871 req/s  p50=4.2ms  p99=7.6ms
+  v8-compio (16w)                         745,816 req/s  p50=372µs  p99=2.1ms
+  node single                              30,864 req/s  p50=8.9ms  p99=18ms
+  node cluster (16w)                      166,406 req/s  p50=1.9ms  p99=2.4ms
+  node-whatwg single                       30,491 req/s  p50=9.0ms  p99=18ms
+  node-whatwg cluster (16w)               164,687 req/s  p50=1.9ms  p99=3.0ms
+
+--- promiseChain ---
+  v8-compio (1w)                           74,940 req/s  p50=3.8ms  p99=9.0ms
+  v8-compio (16w)                         840,802 req/s  p50=302µs  p99=1.4ms
+  node single                              25,620 req/s  p50=12ms  p99=13ms
+  node cluster (16w)                      252,441 req/s  p50=1.2ms  p99=2.5ms
+  node-whatwg single                       26,034 req/s  p50=11ms  p99=13ms
+  node-whatwg cluster (16w)               245,158 req/s  p50=1.2ms  p99=2.4ms
+
+--- fetchEcho ---
+  v8-compio (1w)                           41,986 req/s  p50=4.9ms  p99=19ms
+  v8-compio (16w)                         153,975 req/s  p50=1.8ms  p99=5.5ms
+  node single                               4,084 req/s  p50=67ms  p99=87ms
+  node cluster (16w)                       28,764 req/s  p50=8.0ms  p99=36ms
+  node-whatwg single                        4,027 req/s  p50=68ms  p99=90ms
+  node-whatwg cluster (16w)                27,584 req/s  p50=8.5ms  p99=37ms
+
+--- sha256 ---
+  v8-compio (1w)                           58,347 req/s  p50=4.8ms  p99=8.4ms
+  v8-compio (16w)                         576,321 req/s  p50=476µs  p99=1.3ms
+  node single                              20,366 req/s  p50=14ms  p99=18ms
+  node cluster (16w)                      151,307 req/s  p50=1.9ms  p99=4.4ms
+  node-whatwg single                       21,072 req/s  p50=14ms  p99=17ms
+  node-whatwg cluster (16w)               148,143 req/s  p50=2.0ms  p99=4.1ms
+
+--- hmacSign ---
+  v8-compio (1w)                           52,113 req/s  p50=5.5ms  p99=8.6ms
+  v8-compio (16w)                         500,136 req/s  p50=543µs  p99=1.8ms
+  node single                              19,905 req/s  p50=14ms  p99=19ms
+  node cluster (16w)                      139,583 req/s  p50=2.0ms  p99=4.2ms
+  node-whatwg single                       20,865 req/s  p50=14ms  p99=17ms
+  node-whatwg cluster (16w)               135,762 req/s  p50=2.1ms  p99=4.4ms
+
+--- randomUUID ---
+  v8-compio (1w)                           72,855 req/s  p50=3.9ms  p99=14ms
+  v8-compio (16w)                         825,669 req/s  p50=347µs  p99=530µs
+  node single                              23,839 req/s  p50=12ms  p99=17ms
+  node cluster (16w)                      238,423 req/s  p50=1.2ms  p99=2.6ms
+  node-whatwg single                       25,363 req/s  p50=12ms  p99=13ms
+  node-whatwg cluster (16w)               231,282 req/s  p50=1.2ms  p99=2.6ms
+
+--- aesEncrypt ---
+  v8-compio (1w)                           51,701 req/s  p50=5.5ms  p99=8.8ms
+  v8-compio (16w)                         499,740 req/s  p50=563µs  p99=1.8ms
+  node single                              18,382 req/s  p50=15ms  p99=21ms
+  node cluster (16w)                      129,527 req/s  p50=2.2ms  p99=4.6ms
+  node-whatwg single                       19,471 req/s  p50=15ms  p99=16ms
+  node-whatwg cluster (16w)               126,535 req/s  p50=2.3ms  p99=4.6ms
+
+--- ecdsaSign ---
+  v8-compio (1w)                           18,998 req/s  p50=16ms  p99=20ms
+  v8-compio (16w)                         185,672 req/s  p50=1.5ms  p99=3.5ms
+  node single                              18,008 req/s  p50=16ms  p99=20ms
+  node cluster (16w)                       96,199 req/s  p50=2.9ms  p99=7.3ms
+  node-whatwg single                       16,150 req/s  p50=19ms  p99=21ms
+  node-whatwg cluster (16w)                93,817 req/s  p50=3.1ms  p99=6.9ms
+
+--- httpGet ---
+  v8-compio (1w)                           45,186 req/s  p50=5.9ms  p99=18ms
+  v8-compio (16w)                         398,365 req/s  p50=649µs  p99=1.3ms
+  node single                              29,122 req/s  p50=9.7ms  p99=14ms
+  node cluster (16w)                      355,687 req/s  p50=821µs  p99=1.7ms
+  node-whatwg single                       13,206 req/s  p50=21ms  p99=30ms
+  node-whatwg cluster (16w)               102,146 req/s  p50=2.6ms  p99=9.7ms
+
+--- sseHold ---
+  v8-compio (1w)                            4,637 req/s  p50=11ms  p99=16ms
+  v8-compio (16w)                           4,942 req/s  p50=10ms  p99=10ms
+  node single                               4,910 req/s  p50=10ms  p99=11ms
+  node cluster (16w)                        4,947 req/s  p50=10ms  p99=10ms
+  node-whatwg single                        4,883 req/s  p50=10ms  p99=11ms
+  node-whatwg cluster (16w)                 4,941 req/s  p50=10ms  p99=11ms
+
+--- wsEchoRtt ---
+  v8-compio (1w)                            5,000 req/s  p50=113µs  p99=1.7ms
+  v8-compio (16w)                           5,000 req/s  p50=131µs  p99=203µs
+  node single                                   0 req/s  p50=0ns  p99=0ns
+  node cluster (16w)                            0 req/s  p50=0ns  p99=0ns
+  node-whatwg single                            0 req/s  p50=0ns  p99=0ns
+  node-whatwg cluster (16w)                     0 req/s  p50=0ns  p99=0ns
+
+=================================================================
+  Raw per-target reports in: /tmp/tmp.FSeKm58n48
+=================================================================

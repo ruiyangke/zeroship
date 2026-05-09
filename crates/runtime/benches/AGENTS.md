@@ -36,8 +36,10 @@ Bench fixtures + runners for measuring the runtime against itself
 | --- | --- | ---: | --- |
 | `v8-1w` | `zeroship-bench-server` (1 worker) | 5100 | Single-thread runtime ceiling |
 | `v8-16w` | `zeroship-bench-server` (N workers) | 5101 | The headline number — N-core scaling |
-| `node-single` | `node node_server.js` | 4002 | Node single-thread baseline |
-| `node-cluster` | `node node_server_cluster.js` | 4003 | Node N-worker cluster baseline |
+| `node-single` | `node node_server.js` | 4002 | Node `node:http` legacy baseline (plain `req`/`res`) |
+| `node-cluster` | `node node_server_cluster.js` | 4003 | Node `node:http` cluster baseline (plain `req`/`res`) |
+| `node-whatwg` | `node node_whatwg_server.js` | 4004 | Node `node:http` wrapped into WHATWG `(Request) => Response` — apples-to-apples vs zeroship `default.fetch` |
+| `node-whatwg-cluster` | `node node_whatwg_server_cluster.js` | 4005 | Cluster variant of the WHATWG wrap |
 
 `zeroship-bench-server` is the bench fixture binary built from
 `crates/runtime/src/server.rs` — it embeds `scenarios.js` via

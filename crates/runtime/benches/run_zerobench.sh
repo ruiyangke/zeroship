@@ -35,6 +35,8 @@ PORT_V8_1=5100
 PORT_V8_N=5101
 PORT_NODE=4002
 PORT_NODE_CLUSTER=4003
+PORT_NODE_WHATWG=4004
+PORT_NODE_WHATWG_CLUSTER=4005
 PORT_ECHO=8888
 
 for arg in "$@"; do
@@ -50,8 +52,9 @@ for arg in "$@"; do
 done
 
 # --target=v8-1w  (or comma-separated: "v8-1w,v8-16w") restricts which
-# of the four runtime slots get benched. Empty default benches all
-# four. Names: v8-1w, v8-16w, node-single, node-cluster.
+# of the six runtime slots get benched. Empty default benches all
+# six. Names: v8-1w, v8-16w, node-single, node-cluster,
+# node-whatwg, node-whatwg-cluster.
 TARGETS="${TARGETS:-}"
 target_selected() {
     [ -z "$TARGETS" ] && return 0
@@ -128,7 +131,7 @@ http {
 EOF
 
 echo "=== Starting servers ==="
-for port in $PORT_V8_1 $PORT_V8_N $PORT_NODE $PORT_NODE_CLUSTER $PORT_ECHO; do
+for port in $PORT_V8_1 $PORT_V8_N $PORT_NODE $PORT_NODE_CLUSTER $PORT_NODE_WHATWG $PORT_NODE_WHATWG_CLUSTER $PORT_ECHO; do
     lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
 done
 sleep 1
@@ -157,6 +160,14 @@ if target_selected node-cluster; then
     $NUMA_SERVER node "$SCRIPT_DIR/node_server_cluster.js" $PORT_NODE_CLUSTER "$WORKERS" > /dev/null 2>&1 &
     PIDS+=($!); PROBE_PORTS+=($PORT_NODE_CLUSTER)
 fi
+if target_selected node-whatwg; then
+    $NUMA_SERVER node "$SCRIPT_DIR/node_whatwg_server.js" $PORT_NODE_WHATWG > /dev/null 2>&1 &
+    PIDS+=($!); PROBE_PORTS+=($PORT_NODE_WHATWG)
+fi
+if target_selected node-whatwg-cluster; then
+    $NUMA_SERVER node "$SCRIPT_DIR/node_whatwg_server_cluster.js" $PORT_NODE_WHATWG_CLUSTER "$WORKERS" > /dev/null 2>&1 &
+    PIDS+=($!); PROBE_PORTS+=($PORT_NODE_WHATWG_CLUSTER)
+fi
 sleep 4
 
 for port in "${PROBE_PORTS[@]}"; do
@@ -174,6 +185,7 @@ NODE_VERSION=$(node --version 2>/dev/null || echo "unknown")
 NGINX_VERSION=$("$NGINX_BIN" -v 2>&1 | sed 's|.*/||')
 echo "[ok] v8-compio (1w @ $PORT_V8_1, ${WORKERS}w @ $PORT_V8_N)"
 echo "[ok] node $NODE_VERSION (single @ $PORT_NODE, cluster ${WORKERS}w @ $PORT_NODE_CLUSTER)"
+echo "[ok] node $NODE_VERSION whatwg (single @ $PORT_NODE_WHATWG, cluster ${WORKERS}w @ $PORT_NODE_WHATWG_CLUSTER)"
 echo "[ok] $NGINX_VERSION echo @ $PORT_ECHO"
 
 # ---------------------------------------------------------------------------
@@ -206,7 +218,7 @@ RESULTS_DIR="$(mktemp -d)"
 bench_target() {
     local label=$1 port=$2 slot=$3
     local out_file="$RESULTS_DIR/$slot.raw"
-    printf "  [%d/4] %-30s" "$slot" "$label"
+    printf "  [%d/6] %-30s" "$slot" "$label"
     local env_vars=(BENCH_HOST=127.0.0.1 BENCH_PORT="$port" BENCH_ECHO_PORT="$PORT_ECHO")
     if [ -n "${SCENARIO:-}" ]; then
         env_vars+=(BENCH_SCENARIO="$SCENARIO")
@@ -230,10 +242,12 @@ bench_target() {
 
 echo
 echo "=== Benchmarking targets ==="
-target_selected v8-1w        && bench_target "v8-compio (1w)"           $PORT_V8_1         1
-target_selected v8-16w       && bench_target "v8-compio (${WORKERS}w)"  $PORT_V8_N         2
-target_selected node-single  && bench_target "node single"              $PORT_NODE         3
-target_selected node-cluster && bench_target "node cluster (${WORKERS}w)" $PORT_NODE_CLUSTER 4
+target_selected v8-1w               && bench_target "v8-compio (1w)"                  $PORT_V8_1                 1
+target_selected v8-16w              && bench_target "v8-compio (${WORKERS}w)"         $PORT_V8_N                 2
+target_selected node-single         && bench_target "node single"                     $PORT_NODE                 3
+target_selected node-cluster        && bench_target "node cluster (${WORKERS}w)"      $PORT_NODE_CLUSTER         4
+target_selected node-whatwg         && bench_target "node-whatwg single"              $PORT_NODE_WHATWG          5
+target_selected node-whatwg-cluster && bench_target "node-whatwg cluster (${WORKERS}w)" $PORT_NODE_WHATWG_CLUSTER 6
 
 # ---------------------------------------------------------------------------
 # Pass 2: parse each result file into per-(target,scenario) pairs.
@@ -269,7 +283,7 @@ parse_results() {
 
 ALL="$RESULTS_DIR/all.tsv"
 > "$ALL"
-for slot in 1 2 3 4; do
+for slot in 1 2 3 4 5 6; do
     [ -f "$RESULTS_DIR/$slot.raw" ] || continue
     parse_results "$slot" "$RESULTS_DIR/$slot.raw" >> "$ALL"
 done
@@ -281,7 +295,7 @@ done
 # Scenarios in declaration order (prefer slot 2's ordering, fall back
 # to whichever slot was actually run).
 SCENARIOS=""
-for slot in 2 1 3 4; do
+for slot in 2 1 3 4 5 6; do
     SCENARIOS=$(awk -F'\t' -v s="$slot" '$1==s {print $2}' "$ALL")
     [ -n "$SCENARIOS" ] && break
 done
@@ -294,17 +308,18 @@ echo "================================================================="
 for sc in $SCENARIOS; do
     echo
     echo "--- $sc ---"
-    for slot in 1 2 3 4; do
+    for slot in 1 2 3 4 5 6; do
+        [ -f "$RESULTS_DIR/$slot.label" ] || continue
         label=$(cat "$RESULTS_DIR/$slot.label" 2>/dev/null)
         row=$(awk -F'\t' -v s="$slot" -v sc="$sc" '$1==s && $2==sc {print; exit}' "$ALL")
         if [ -z "$row" ]; then
-            printf "  %-30s %14s\n" "$label" "n/a"
+            printf "  %-32s %14s\n" "$label" "n/a"
             continue
         fi
         rps=$(echo "$row" | awk -F'\t' '{print $3}')
         p50=$(echo "$row" | awk -F'\t' '{print $4}')
         p99=$(echo "$row" | awk -F'\t' '{print $5}')
-        printf "  %-30s %'14d req/s  p50=%s  p99=%s\n" \
+        printf "  %-32s %'14d req/s  p50=%s  p99=%s\n" \
             "$label" "$rps" "$p50" "$p99"
     done
 done
