@@ -299,13 +299,23 @@ pub fn try_native_response_websocket(
 
 /// Per-isolate cache of the Response FunctionTemplate + prototype.
 ///
-/// Set from `install_global`; consumed by `build_kernel_response` so the
-/// fetch-success path can allocate a Response wrapper without resolving
-/// `globalThis.Response` and without invoking the spec constructor (which
-/// rebuilds Headers from an init array, runs `extract_body`, etc).
+/// Set from `install_global`; consumed by `build_kernel_response` and
+/// `build_response_json_fast` so the fetch-success / Response.json path
+/// can allocate a Response wrapper without resolving `globalThis.Response`
+/// and without invoking the spec constructor (which rebuilds Headers from
+/// an init array, runs `extract_body`, etc).
+///
+/// Storage: `v8::Eternal<T>` rather than `v8::Global<T>`. Both fields
+/// are set-once at install time and read on every Response build. The
+/// previous `Global` fields required `slot.field.clone()` (=
+/// `v8__Global__New` — a fresh `GlobalHandles` slot) on every call to
+/// drop the slot borrow before `v8::Local::new`. Eternals are isolate-
+/// lifetime handles whose `get(scope)` returns the `Local` directly
+/// without allocating. Mirrors the `__BrandSlot_*` Eternal conversion
+/// in commit b08786a.
 pub struct ResponseTemplateSlot {
-    pub class_tmpl: v8::Global<v8::FunctionTemplate>,
-    pub prototype: v8::Global<v8::Object>,
+    pub class_tmpl: v8::Eternal<v8::FunctionTemplate>,
+    pub prototype: v8::Eternal<v8::Object>,
 }
 
 pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
@@ -329,12 +339,16 @@ pub fn install_global(scope: &mut v8::PinScope, global: v8::Local<v8::Object>) {
     global.set(scope, key.into(), class_fn.into());
 
     // Stash the template + prototype for the kernel-side fast-path
-    // Response builder. See `ResponseTemplateSlot`.
-    let class_tmpl_g = v8::Global::new(scope, class_tmpl);
-    let proto_g = v8::Global::new(scope, our_proto);
+    // Response builder. See `ResponseTemplateSlot`. Eternal slots are
+    // populated here (set-once); steady-state reads avoid the per-call
+    // GlobalHandles alloc that `v8::Global::clone()` incurred.
+    let class_tmpl_e: v8::Eternal<v8::FunctionTemplate> = v8::Eternal::empty();
+    class_tmpl_e.set(scope, class_tmpl);
+    let proto_e: v8::Eternal<v8::Object> = v8::Eternal::empty();
+    proto_e.set(scope, our_proto);
     scope.set_slot(ResponseTemplateSlot {
-        class_tmpl: class_tmpl_g,
-        prototype: proto_g,
+        class_tmpl: class_tmpl_e,
+        prototype: proto_e,
     });
 }
 
@@ -363,14 +377,15 @@ pub fn build_kernel_response<'s>(
     body: Vec<u8>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     // 1. Allocate the Response wrapper via the cached instance template.
-    let (resp_tmpl_g, resp_proto_g) = {
+    // Eternal::get materialises the Local without allocating a fresh
+    // GlobalHandles slot — same access pattern as the macro brand
+    // slots (b08786a).
+    let (resp_tmpl, resp_proto) = {
         let slot = scope.get_slot::<ResponseTemplateSlot>()?;
-        (slot.class_tmpl.clone(), slot.prototype.clone())
+        (slot.class_tmpl.get(scope)?, slot.prototype.get(scope)?)
     };
-    let resp_tmpl = v8::Local::new(scope, resp_tmpl_g);
     let inst_tmpl = resp_tmpl.instance_template(scope);
     let this_obj = inst_tmpl.new_instance(scope)?;
-    let resp_proto = v8::Local::new(scope, resp_proto_g);
     this_obj.set_prototype(scope, resp_proto.into());
 
     // 2. Build the Headers wrapper directly, consuming the (name, value)
@@ -454,18 +469,27 @@ fn build_response_json_fast<'s>(
     status_text: String,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     // 1. Allocate the Response wrapper via the cached instance template.
-    let (resp_tmpl_g, resp_proto_g) = {
+    // Eternal::get materialises the Local without allocating a fresh
+    // GlobalHandles slot — same access pattern as the macro brand
+    // slots (b08786a).
+    let (resp_tmpl, resp_proto) = {
         let slot = scope
             .get_slot::<ResponseTemplateSlot>()
             .ok_or_else(|| OpError::error("Response template slot missing"))?;
-        (slot.class_tmpl.clone(), slot.prototype.clone())
+        let class_tmpl = slot
+            .class_tmpl
+            .get(scope)
+            .ok_or_else(|| OpError::error("Response template slot empty"))?;
+        let proto = slot
+            .prototype
+            .get(scope)
+            .ok_or_else(|| OpError::error("Response prototype slot empty"))?;
+        (class_tmpl, proto)
     };
-    let resp_tmpl = v8::Local::new(scope, resp_tmpl_g);
     let inst_tmpl = resp_tmpl.instance_template(scope);
     let this_obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| OpError::error("Response instance allocation failed"))?;
-    let resp_proto = v8::Local::new(scope, resp_proto_g);
     this_obj.set_prototype(scope, resp_proto.into());
 
     // 2. Build a 1-entry Headers wrapper containing Content-Type:
