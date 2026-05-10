@@ -1,0 +1,108 @@
+=== Building ===
+warning: `zeroship-runtime` (lib) generated 8 warnings (run `cargo fix --lib -p zeroship-runtime` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.20s
+=== Fetching nginx via nix ===
+[ok] /nix/store/03xpwd4p37wbj9w7gbz8mgb0zvkqsna2-nginx-1.28.3/bin/nginx
+=== Starting servers ===
+[ok] v8-compio (1w @ 5100, 16w @ 5101)
+[ok] node v22.22.2 (single @ 4002, cluster 16w @ 4003)
+[ok] 1.28.3 echo @ 8888
+
+=================================================================
+  zeroship vs Node.js Runtime Benchmark (zerobench)
+  2026-05-02 | 32 logical cores | x86_64
+  NUMA split: servers on node 0, zerobench on node 1
+  10s per scenario · saturate (300 conns) · serial per-scenario
+=================================================================
+
+=== Benchmarking targets ===
+  [1/4] v8-compio (1w)                 done (100s)
+  [2/4] v8-compio (16w)                done (130s)
+  [3/4] node single                    done (100s)
+  [4/4] node cluster (16w)             done (100s)
+
+=================================================================
+  Per-scenario comparison (req/s · p50 · p99)
+=================================================================
+
+--- ping ---
+  v8-compio (1w)                         98,547 req/s  p50=3.0ms  p99=3.4ms
+  v8-compio (16w)                     1,124,771 req/s  p50=237µs  p99=942µs
+  node single                            27,158 req/s  p50=11ms  p99=12ms
+  node cluster (16w)                    260,735 req/s  p50=1.1ms  p99=3.1ms
+
+--- fib10 ---
+  v8-compio (1w)                         94,051 req/s  p50=3.2ms  p99=3.5ms
+  v8-compio (16w)                     1,076,571 req/s  p50=245µs  p99=878µs
+  node single                            25,373 req/s  p50=12ms  p99=13ms
+  node cluster (16w)                    247,697 req/s  p50=1.1ms  p99=2.4ms
+
+--- setTimeout0 ---
+  v8-compio (1w)                         79,629 req/s  p50=3.7ms  p99=4.7ms
+  v8-compio (16w)                       975,113 req/s  p50=287µs  p99=652µs
+  node single                            30,593 req/s  p50=9.0ms  p99=18ms
+  node cluster (16w)                    169,854 req/s  p50=1.9ms  p99=2.4ms
+
+--- promiseChain ---
+  v8-compio (1w)                         93,008 req/s  p50=3.2ms  p99=3.6ms
+  v8-compio (16w)                     1,118,377 req/s  p50=248µs  p99=708µs
+  node single                            25,585 req/s  p50=12ms  p99=13ms
+  node cluster (16w)                    252,586 req/s  p50=1.1ms  p99=2.3ms
+
+--- fetchEcho ---
+  v8-compio (1w)                         28,905 req/s  p50=7.0ms  p99=36ms
+  v8-compio (16w)                       132,248 req/s  p50=2.2ms  p99=5.0ms
+  node single                             3,876 req/s  p50=68ms  p99=93ms
+  node cluster (16w)                     28,898 req/s  p50=7.8ms  p99=36ms
+
+--- sha256 ---
+  v8-compio (1w)                         60,167 req/s  p50=4.6ms  p99=8.8ms
+  v8-compio (16w)                       699,494 req/s  p50=387µs  p99=1.4ms
+  node single                            19,921 req/s  p50=14ms  p99=19ms
+  node cluster (16w)                    151,724 req/s  p50=1.9ms  p99=3.9ms
+
+--- hmacSign ---
+  v8-compio (1w)                         60,101 req/s  p50=4.8ms  p99=6.5ms
+  v8-compio (16w)                       626,863 req/s  p50=467µs  p99=1.4ms
+  node single                            19,514 req/s  p50=15ms  p99=19ms
+  node cluster (16w)                    140,789 req/s  p50=2.1ms  p99=3.9ms
+
+--- randomUUID ---
+  v8-compio (1w)                         89,561 req/s  p50=3.3ms  p99=5.4ms
+  v8-compio (16w)                     1,110,639 req/s  p50=253µs  p99=681µs
+  node single                            23,114 req/s  p50=12ms  p99=18ms
+  node cluster (16w)                    237,672 req/s  p50=1.2ms  p99=2.5ms
+
+--- aesEncrypt ---
+  v8-compio (1w)                         55,963 req/s  p50=5.2ms  p99=7.1ms
+  v8-compio (16w)                       558,524 req/s  p50=493µs  p99=1.3ms
+  node single                            18,179 req/s  p50=16ms  p99=21ms
+  node cluster (16w)                    131,403 req/s  p50=2.2ms  p99=4.2ms
+
+--- ecdsaSign ---
+  v8-compio (1w)                         19,569 req/s  p50=15ms  p99=21ms
+  v8-compio (16w)                       201,315 req/s  p50=1.5ms  p99=2.6ms
+  node single                            17,488 req/s  p50=16ms  p99=21ms
+  node cluster (16w)                     96,440 req/s  p50=3.1ms  p99=6.1ms
+
+--- httpGet ---
+  v8-compio (1w)                            n/a
+  v8-compio (16w)                       229,232 req/s  p50=1.2ms  p99=10ms
+  node single                               n/a
+  node cluster (16w)                        n/a
+
+--- sseHold ---
+  v8-compio (1w)                            n/a
+  v8-compio (16w)                         4,957 req/s  p50=10ms  p99=10ms
+  node single                               n/a
+  node cluster (16w)                        n/a
+
+--- wsEchoRtt ---
+  v8-compio (1w)                            n/a
+  v8-compio (16w)                         5,000 req/s  p50=130µs  p99=204µs
+  node single                               n/a
+  node cluster (16w)                        n/a
+
+=================================================================
+  Raw per-target reports in: /tmp/tmp.6DickMjlGT
+=================================================================

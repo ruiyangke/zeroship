@@ -78,6 +78,13 @@ freeze the data point.
 When adding a new snapshot, name it after what changed: `git log
 --oneline -1` on the commit that prompted the run is a good start.
 
+Snapshots that turn out to be pure iteration noise (multiple runs
+of the same workload across a single design-review loop, or v1/v2
+predecessors of a final reading) go in `archive/` rather than the
+top level — they're still tracked, but don't crowd the milestone
+listing. Move via `git mv` so the history survives. Don't archive a
+snapshot referenced from a perf doc or commit message body.
+
 ## Common pitfalls
 
 - **Bench reports impossible numbers (every scenario at ~1.2M req/s, every slot identical)**: the connection pool got reused across scenarios; one slot's idle nginx connections got drawn for the next slot's RPC calls. Hard symptom is `errors connect 0` on a port with no listener. See `~/Projects/zerobench/ISSUES.md`. Workaround: don't put a `nginxRaw`-style anchor scenario before scenarios that hit different ports.

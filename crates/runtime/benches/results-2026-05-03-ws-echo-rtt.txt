@@ -1,0 +1,28 @@
+=== Building ===
+warning: `zeroship-runtime` (lib) generated 27 warnings (run `cargo fix --lib -p zeroship-runtime` to apply 14 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.20s
+=== Fetching nginx via nix ===
+[ok] /nix/store/03xpwd4p37wbj9w7gbz8mgb0zvkqsna2-nginx-1.28.3/bin/nginx
+=== Starting servers ===
+[ok] v8-compio (1w @ 5100, 16w @ 5101)
+[ok] node v22.22.2 (single @ 4002, cluster 16w @ 4003)
+[ok] 1.28.3 echo @ 8888
+
+=================================================================
+  zeroship vs Node.js Runtime Benchmark (zerobench)
+  2026-05-03 | 32 logical cores | x86_64
+  NUMA split: servers on node 0, zerobench on node 1
+  10s per scenario · saturate (300 conns) · serial per-scenario
+=================================================================
+
+=== Benchmarking targets ===
+  [2/4] v8-compio (16w)                 (zerobench exit 1 — transport errors in /tmp/tmp.qU0SWeXCf0/2.raw)
+ done (10s)
+
+=================================================================
+  Per-scenario comparison (req/s · p50 · p99)
+=================================================================
+
+=================================================================
+  Raw per-target reports in: /tmp/tmp.qU0SWeXCf0
+=================================================================
