@@ -228,32 +228,55 @@ impl RpcCtx {
 /// instance template. Both lookups dominate the per-request mint cost
 /// when not cached (instance_template + get_function + prototype get
 /// each trip through V8 for every dispatch).
+///
+/// Storage: `v8::Eternal<T>` rather than `v8::Global<T>`. Both fields
+/// are set-once on first dispatch and read on every RPC dispatch
+/// thereafter. The previous `Global` fields required
+/// `slot.field.clone()` (= `v8__Global__New` — a fresh `GlobalHandles`
+/// slot) on every call to drop the slot borrow before
+/// `v8::Local::new`. Eternals are isolate-lifetime handles whose
+/// `get(scope)` returns the `Local` directly without allocating.
+/// Mirrors the `__BrandSlot_*` Eternal conversion in commit b08786a
+/// and the `ResponseTemplateSlot` Eternal conversion in commit 6fa5422.
 struct RpcCtxTemplateSlot {
-    instance_tmpl: v8::Global<v8::ObjectTemplate>,
-    prototype: v8::Global<v8::Value>,
+    instance_tmpl: v8::Eternal<v8::ObjectTemplate>,
+    prototype: v8::Eternal<v8::Value>,
 }
 
 fn get_or_init_template_slot<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> (v8::Local<'s, v8::ObjectTemplate>, v8::Local<'s, v8::Value>) {
     if let Some(slot) = scope.get_slot::<RpcCtxTemplateSlot>() {
-        return (
-            v8::Local::new(scope, slot.instance_tmpl.clone()),
-            v8::Local::new(scope, slot.prototype.clone()),
-        );
+        // Eternal::get materialises the Local without allocating a
+        // fresh GlobalHandles slot — same access pattern as the macro
+        // brand slots (b08786a) and ResponseTemplateSlot (6fa5422).
+        // The slot is always populated below before `set_slot`, so
+        // `get` returning None would be a runtime invariant violation;
+        // fall through to the install path defensively.
+        if let (Some(inst), Some(proto)) =
+            (slot.instance_tmpl.get(scope), slot.prototype.get(scope))
+        {
+            return (inst, proto);
+        }
     }
     let tmpl = RpcCtx::install(scope);
     let inst_tmpl = tmpl.instance_template(scope);
     let class_fn = tmpl.get_function(scope).unwrap();
     let proto_key = v8::String::new(scope, "prototype").unwrap();
     let proto_v = class_fn.get(scope, proto_key.into()).unwrap();
-    let inst_g = v8::Global::new(scope, inst_tmpl);
-    let proto_g = v8::Global::new(scope, proto_v);
+    // Populate the Eternal handles before stashing the slot. `Eternal::set`
+    // only needs `&scope`, but `scope.set_slot` needs `&mut scope` — the
+    // Eternal storage is already populated by the time we hand it to
+    // `set_slot`, so no prior borrow is held across the mutable call.
+    let inst_e: v8::Eternal<v8::ObjectTemplate> = v8::Eternal::empty();
+    inst_e.set(scope, inst_tmpl);
+    let proto_e: v8::Eternal<v8::Value> = v8::Eternal::empty();
+    proto_e.set(scope, proto_v);
     scope.set_slot(RpcCtxTemplateSlot {
-        instance_tmpl: inst_g.clone(),
-        prototype: proto_g.clone(),
+        instance_tmpl: inst_e,
+        prototype: proto_e,
     });
-    (v8::Local::new(scope, inst_g), v8::Local::new(scope, proto_g))
+    (inst_tmpl, proto_v)
 }
 
 /// Mint a fresh `RpcCtx` JS wrapper on `scope` from the supplied Rust

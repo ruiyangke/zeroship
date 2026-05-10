@@ -740,9 +740,20 @@ impl Headers {
 /// without invoking the spec constructor (which walks the WebIDL
 /// sequence/record dispatch + per-pair validation — overkill when the
 /// kernel already has a clean header list).
+///
+/// Storage: `v8::Eternal<T>` rather than `v8::Global<T>`. Both fields
+/// are set-once at install time and read on every native Headers build
+/// (every Request slow path via `build_kernel_request`, every Response
+/// build via `build_kernel_headers_owned`). The previous `Global`
+/// fields required `slot.field.clone()` (= `v8__Global__New` — a fresh
+/// `GlobalHandles` slot) on every call to drop the slot borrow before
+/// `v8::Local::new`. Eternals are isolate-lifetime handles whose
+/// `get(scope)` returns the `Local` directly without allocating.
+/// Mirrors the `__BrandSlot_*` Eternal conversion in commit b08786a
+/// and the `ResponseTemplateSlot` Eternal conversion in commit 6fa5422.
 pub struct HeadersTemplateSlot {
-    pub class_tmpl: v8::Global<v8::FunctionTemplate>,
-    pub prototype: v8::Global<v8::Object>,
+    pub class_tmpl: v8::Eternal<v8::FunctionTemplate>,
+    pub prototype: v8::Eternal<v8::Object>,
 }
 
 /// Install `Headers` on the given global. The macro's
@@ -767,12 +778,16 @@ pub fn install_global<'s>(
     global.set(scope, key.into(), class_fn.into());
 
     // Stash the template + prototype for the kernel-side fast-path
-    // Request builder. See `HeadersTemplateSlot`.
-    let class_tmpl_g = v8::Global::new(scope, tmpl);
-    let proto_g = v8::Global::new(scope, proto);
+    // Request builder. See `HeadersTemplateSlot`. Eternal slots are
+    // populated here (set-once); steady-state reads avoid the per-call
+    // GlobalHandles alloc that `v8::Global::clone()` incurred.
+    let class_tmpl_e: v8::Eternal<v8::FunctionTemplate> = v8::Eternal::empty();
+    class_tmpl_e.set(scope, tmpl);
+    let proto_e: v8::Eternal<v8::Object> = v8::Eternal::empty();
+    proto_e.set(scope, proto);
     scope.set_slot(HeadersTemplateSlot {
-        class_tmpl: class_tmpl_g,
-        prototype: proto_g,
+        class_tmpl: class_tmpl_e,
+        prototype: proto_e,
     });
 }
 
@@ -799,14 +814,15 @@ pub fn build_kernel_headers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     pairs: &[(String, String)],
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let (class_tmpl_g, proto_g) = {
+    // Eternal::get materialises the Local without allocating a fresh
+    // GlobalHandles slot — same access pattern as the macro brand
+    // slots (b08786a) and ResponseTemplateSlot (6fa5422).
+    let (class_tmpl, proto) = {
         let slot = scope.get_slot::<HeadersTemplateSlot>()?;
-        (slot.class_tmpl.clone(), slot.prototype.clone())
+        (slot.class_tmpl.get(scope)?, slot.prototype.get(scope)?)
     };
-    let class_tmpl = v8::Local::new(scope, class_tmpl_g);
     let inst_tmpl = class_tmpl.instance_template(scope);
     let obj = inst_tmpl.new_instance(scope)?;
-    let proto = v8::Local::new(scope, proto_g);
     obj.set_prototype(scope, proto.into());
 
     // Build the Box<Headers> directly. The list field stores
@@ -839,14 +855,15 @@ pub fn build_kernel_headers_owned<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     pairs: Vec<(String, String)>,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let (class_tmpl_g, proto_g) = {
+    // Eternal::get materialises the Local without allocating a fresh
+    // GlobalHandles slot — same access pattern as the macro brand
+    // slots (b08786a) and ResponseTemplateSlot (6fa5422).
+    let (class_tmpl, proto) = {
         let slot = scope.get_slot::<HeadersTemplateSlot>()?;
-        (slot.class_tmpl.clone(), slot.prototype.clone())
+        (slot.class_tmpl.get(scope)?, slot.prototype.get(scope)?)
     };
-    let class_tmpl = v8::Local::new(scope, class_tmpl_g);
     let inst_tmpl = class_tmpl.instance_template(scope);
     let obj = inst_tmpl.new_instance(scope)?;
-    let proto = v8::Local::new(scope, proto_g);
     obj.set_prototype(scope, proto.into());
 
     let mut headers = Headers::default();

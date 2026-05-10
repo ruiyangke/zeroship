@@ -57,7 +57,17 @@ pub struct UrlNativeSlot {
     pub search_params_class_fn: v8::Global<v8::Function>,
     /// `URLSearchParams.prototype` for the per-class brand check
     /// (M4/M5).
-    pub search_params_prototype: v8::Global<v8::Object>,
+    ///
+    /// Storage: `v8::Eternal<v8::Object>` rather than
+    /// `v8::Global<v8::Object>`. Set-once at install time; the
+    /// brand-check reader was migrated to the `#[v8_iterable]`
+    /// macro-generated `__BrandSlot_*` (commit 0a61b34, MAC-09) so
+    /// this field is currently unused, but it is still populated for
+    /// any future native brand-check call sites. Eternals are
+    /// isolate-lifetime handles whose `get(scope)` returns a `Local`
+    /// without allocating. Mirrors the conversions in commits
+    /// b08786a and 6fa5422.
+    pub search_params_prototype: v8::Eternal<v8::Object>,
 }
 
 /// Install `URL` and `URLSearchParams` on `globalThis`. Called from
@@ -79,10 +89,14 @@ pub fn install_globals<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v
         .try_into()
         .expect("URLSearchParams.prototype is an Object");
 
+    // search_params_prototype is an Eternal — populated set-once,
+    // read by any future native brand-check site. See the field doc.
+    let sp_proto_e: v8::Eternal<v8::Object> = v8::Eternal::empty();
+    sp_proto_e.set(scope, sp_proto);
     let slot = UrlNativeSlot {
         url_class_fn: v8::Global::new(scope, url_class_fn),
         search_params_class_fn: v8::Global::new(scope, sp_class_fn),
-        search_params_prototype: v8::Global::new(scope, sp_proto),
+        search_params_prototype: sp_proto_e,
     };
     scope.set_slot::<UrlNativeSlot>(slot);
 }
