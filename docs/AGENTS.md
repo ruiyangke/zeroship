@@ -9,9 +9,9 @@ what each top-level subdirectory holds.
 | `architecture/` | Long-form architecture write-ups (one file per major subsystem). Stable. Update when the shape of the system changes. |
 | `archive/` | Frozen documents kept for history: superseded perf snapshots, completed review-loop artifacts, design critiques whose findings have shipped. Mirrors the original subdirectory layout (`archive/perf/`, `archive/reviews/`, `archive/proposals/`). |
 | `benchmarks/` | Cross-runtime benchmark output dumps (txt). One file per session. |
-| `decisions/` | ADRs — date-prefixed, immutable once landed (`YYYY-MM-DD-topic.md`). |
+| `decisions/` | ADRs — date-prefixed, immutable once landed (`YYYY-MM-DD-topic.md`). The entry surface for "what shipped, when, and why" — each ADR is a short pointer plus link to its long-form proposal in `proposals/`. |
 | `perf/` | Active performance investigations: regression notes, time-distribution decompositions, microbenches, flamegraphs (`perf/flamegraphs/*.svg`). Snapshots are dated and superseded files move to `archive/perf/`. |
-| `proposals/` | Pre-ship design docs and shipped specs that have no equivalent reference doc. Each carries an explicit **Status** line at the top (Draft / In progress / Shipped / Partially shipped). |
+| `proposals/` | Long-form design docs (pre-ship or shipped specs with no equivalent reference doc). Each carries an explicit **Status** line at the top (Draft / In progress / Shipped / Partially shipped). For a navigability layer over shipped designs, start at `decisions/`. |
 | `reference/` | Stable user-facing contracts (db, auth, billing, websocket, plugin-system, …). The "API surface" of the platform. |
 | `research/` | Competitive landscape and ecosystem research. |
 | `reviews/` | Active critique reports for in-flight design work. Completed review loops move to `archive/reviews/<topic>/`. |
