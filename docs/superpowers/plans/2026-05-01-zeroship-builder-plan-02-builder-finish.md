@@ -238,7 +238,7 @@ aadaf753   docs: accessibility audit for zeroship-builder
 - **@-mention dropdown.** `MentionDropdown.tsx` is keyboard-navigable; types resolved against `lib/skills.ts`, the project's issue list, and a "recent errors" feed.
 - **Scheduled workers as RPC procs.** `pmDigest({appId})` and `sreMonitor({appId})` ship as procs callable from any external cron or curl. ISS-28 documents the missing platform scheduler. The dual shape from spec §4.8.3.2 is now complete in surface area; only the trigger is missing.
 - **Responsive layouts.** Phone (< 768 px) collapses chat into a drawer; topbar gains a chat-toggle button (`topbar-chat-toggle`). Marketing pages get airy padding at desktop, divided by 2 on phone. `useMediaQuery` is wrapped in `lib/useMediaQuery.ts` to avoid SSR hydration mismatch.
-- **A11y pass.** Every interactive element has a focus-visible ring keyed to `--color-tomato`. Modals trap focus and restore on close. Aria-labels on icon buttons. Audit notes captured at `docs/accessibility-audit.md`.
+- **A11y pass.** Every interactive element has a focus-visible ring keyed to `--color-tomato`. Modals trap focus and restore on close. Aria-labels on icon buttons. Audit notes captured at `docs/superpowers/accessibility-audit.md`.
 - **Empty states.** Per spec §26, every canvas + gallery + filter page has an editorial empty-state copy with a next-action CTA. Errors have a retry affordance.
 - **ErrorBoundary.** Root boundary wraps the entire `<App>`. Per-canvas boundaries wrap each canvas under `WorkspaceShell.tsx`. Crash in one canvas doesn't blank the workspace.
 

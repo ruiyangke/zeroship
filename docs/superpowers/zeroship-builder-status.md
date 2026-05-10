@@ -2,7 +2,7 @@
 
 **Branch:** `redesign/plan-01-foundation`
 **HEAD:** `ee40cece` (2026-05-01, post wrap-up pass)
-**Companion docs:** `docs/zeroship-builder-spec-compliance.md` · `ISSUES.md` · `docs/superpowers/plans/2026-05-01-zeroship-builder-plan-02-builder-finish.md` · `.github/PULL_REQUEST.md`
+**Companion docs:** `docs/superpowers/zeroship-builder-spec-compliance.md` · `ISSUES.md` · `docs/superpowers/plans/2026-05-01-zeroship-builder-plan-02-builder-finish.md` · `.github/PULL_REQUEST.md`
 
 ---
 

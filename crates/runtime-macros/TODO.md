@@ -3,8 +3,8 @@
 Closed items keep their commit hash so the rationale stays grep-able.
 Open items track macro extensions consumers can't currently express.
 
-Audit doc: `docs/reviews/v8-class-audit-2026-05-04.md` (Part B = macro
-gaps; cross-referenced as `[B.N]` below).
+Audit doc: `docs/archive/reviews/v8-class-audit-2026-05-04.md` (Part B = macro
+gaps; cross-referenced as `[B.N]` below). Archived 2026-05-07; consumers since migrated to `#[v8_class]`.
 Consumer-side migrations: `crates/runtime/TODO.md`.
 
 ---

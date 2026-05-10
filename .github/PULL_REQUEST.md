@@ -14,7 +14,7 @@ This branch replaces the stub builder app under `apps/zeroship-builder/` with th
 
 The workspace ships the entire pill-driven canvas layer — preview · files · data · media · logs · env · plan · health · settings — with each canvas wrapped in its own `ErrorBoundary`. The public marketing tree (8 surfaces), the auth shell (login · signup · forgot · account), and the §7 onboarding chain (intent picker → first-run hint → first-deploy celebration → product tour) all land. A responsive sweep, an a11y pass, and an editorial empty-state pass complete the polish layer.
 
-What didn't land: real backing for ~13 control-plane-side features (skill registry, deploy history, telemetry pipeline, real `pg_dump`, scheduled-worker cron, …). Each gap is tracked as a self-contained `ISS-XX` entry in `ISSUES.md` with severity, symptom, workaround, and `Fix path:` block. The branch is shippable as an alpha — see `docs/zeroship-builder-status.md` for the full maturity assessment.
+What didn't land: real backing for ~13 control-plane-side features (skill registry, deploy history, telemetry pipeline, real `pg_dump`, scheduled-worker cron, …). Each gap is tracked as a self-contained `ISS-XX` entry in `ISSUES.md` with severity, symptom, workaround, and `Fix path:` block. The branch is shippable as an alpha — see `docs/superpowers/zeroship-builder-status.md` for the full maturity assessment.
 
 ---
 
@@ -182,8 +182,8 @@ npm run test:e2e     # all 54
 
 For reviewers picking a starting point:
 
-- `docs/zeroship-builder-spec-compliance.md` — section-by-section spec walkthrough table
-- `docs/zeroship-builder-status.md` — branch maturity assessment
+- `docs/superpowers/zeroship-builder-spec-compliance.md` — section-by-section spec walkthrough table
+- `docs/superpowers/zeroship-builder-status.md` — branch maturity assessment
 - `docs/superpowers/plans/2026-05-01-zeroship-builder-plan-02-builder-finish.md` — retroactive plan covering the ~120 commits
 - `ISSUES.md` — 28 tracked deferrals with `Fix path:` blocks
 - `apps/zeroship-builder/src/server/_translator.ts` — the deepagents → AI SDK v6 seam
@@ -223,7 +223,7 @@ For reviewers picking a starting point:
 
 ## Reviewer suggestions
 
-1. **Read the spec compliance table first** (`docs/zeroship-builder-spec-compliance.md`) — it gives you the section-by-section verdict in 5 minutes.
+1. **Read the spec compliance table first** (`docs/superpowers/zeroship-builder-spec-compliance.md`) — it gives you the section-by-section verdict in 5 minutes.
 2. **Walk `ISSUES.md` next** — every deferral has a workaround note + `Fix path:` block.
 3. **Spot-check the translator** (`_translator.ts`) and one SubAgent (e.g. `_critic.ts`) to convince yourself the deepagents wire is honest.
 4. **Run the no-env tests** to confirm nothing is broken at the surface level: `cd apps/zeroship-builder && npm run test:e2e`.
