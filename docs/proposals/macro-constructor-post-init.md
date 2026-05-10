@@ -1,7 +1,7 @@
 # MAC-02 — `#[v8_constructor(post_init = "fn")]` with `(scope, this)` signature
 
 **Date:** 2026-05-04
-**Status:** Draft v2 — review pending (do **not** commit until the implementing PR lands)
+**Status:** **Shipped** — `post_init` codegen lands in `crates/runtime-macros/src/v8_class/parse/marker_attr.rs` and is consumed by `runtime-macros-refactor.md` Wave 1. Document retained as design spec.
 **Tracking:** Macro audit MAC-02
 **Spec:** WebIDL §3.7.1 (Interface constructors); Streams §3.4 / §3.5 / §4.4 / §5.2 (constructor algorithms); ECMA-262 `[[Construct]]` (§9.4.3 / §10.3.2)
 **Affected crate:** `crates/runtime-macros/`

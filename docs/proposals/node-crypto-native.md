@@ -1,7 +1,7 @@
 # Native Node.js `node:crypto` design
 
 **Date:** 2026-05-02 (v1) · 2026-05-02 (v2 post-review) · 2026-05-02 (v3 round-3 audit) · 2026-05-02 (v4 round-4 narrow audit)
-**Status:** Draft v4 (impl-ready) — narrow round-4 residuals closed; ready for impl agent
+**Status:** **Shipped (synthetic module + base/crypto layer)** — registered via `crates/runtime/src/core/native_modules.rs` ("node:crypto" → `node::crypto::synthetic_module`) and the base/crypto layer (commits `6f37da0`, `abec749`, `2376b9d`, `2f69ac6`). Document retained as canonical design spec; ~23 active code-comment back-references anchor D-N decisions here.
 **Spec:** Node.js `node:crypto` API reference — https://nodejs.org/api/crypto.html
 **Companion specs:**
 - Node.js `crypto.webcrypto` — https://nodejs.org/api/webcrypto.html (Node's bridge between node:crypto and WHATWG WebCrypto; instructive for our bridging design)

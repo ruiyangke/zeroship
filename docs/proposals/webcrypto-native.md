@@ -1,7 +1,7 @@
 # Native W3C Web Cryptography API design
 
 **Date:** 2026-05-02
-**Status:** Draft v1 — implementation pending
+**Status:** **Shipped** — `crates/runtime/src/web/crypto/` (~8,200 LOC: aes, ec, rsa, okp, hmac, digest, derive, jwk, subtle, …). Document retained as the canonical design spec; ~19 active code-comment back-references anchor design rationale to D-N decisions in this file.
 **Spec:** W3C Web Cryptography API Level 2 (Living Standard) — https://w3c.github.io/webcrypto/
 **Spec source:** https://github.com/w3c/webcrypto/blob/main/spec/Overview.html
 **Algorithm registry:** https://w3c.github.io/webcrypto/#algorithm-registry

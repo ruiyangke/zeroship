@@ -1,7 +1,7 @@
 # Native `Headers` design
 
 **Date:** 2026-05-01
-**Status:** Draft v2 — implementation pending
+**Status:** **Shipped** — `crates/runtime/src/web/headers.rs` (930 LOC). HeadersIterator migrated to `#[v8_iterable]` and `Headers.has` is fastcall (commits `d2fea29`, `5677051`). Document retained as the canonical design spec.
 **Spec:** WHATWG Fetch §2.2 — https://fetch.spec.whatwg.org/#headers-class
 **WebIDL:** https://webidl.spec.whatwg.org/
 

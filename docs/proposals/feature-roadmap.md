@@ -1,5 +1,7 @@
 # zeroship feature roadmap — April 2026
 
+**Last reviewed:** 2026-05-07. Strategic doc; revisit when phase ordering changes.
+
 > Built from the competitive research in `docs/competitors/` + the current
 > state of the runtime, SDKs, and dev experience.
 >

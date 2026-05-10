@@ -1,7 +1,7 @@
 # Native WHATWG WebSocket design
 
 **Date:** 2026-05-02 (v1) · 2026-05-02 (v2 — post-review revision)
-**Status:** Draft v2 (post-review) — implementation pending
+**Status:** **Shipped** — `crates/runtime/src/web/websocket/` (handshake, frame_reader, frame_writer, dispatch, pair). The companion reference doc is `docs/reference/websocket-design.md`. This proposal retained as the design history.
 **Spec:** WHATWG WebSockets Standard — https://websockets.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/websockets/blob/main/index.bs
 **Wire protocol:** RFC 6455 — https://datatracker.ietf.org/doc/html/rfc6455

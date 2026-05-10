@@ -1,5 +1,7 @@
 # Plugins + Workers in a distributed runtime
 
+**Status:** **In progress** — design active; correctness fixes for kv/storage backends and stateless-worker migration not yet shipped. Companion `docs/architecture/distributed.md` describes the current shipped state.
+
 > Companion to `2026-04-23-distributed-architecture.md`. That doc covers
 > the full stack; this one zooms in on the two layers that run user code:
 > the worker fleet and the plugins that give user code its capabilities

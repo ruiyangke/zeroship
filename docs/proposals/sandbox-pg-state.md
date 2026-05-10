@@ -1,7 +1,7 @@
 # pg-backed sandbox state
 
 **Date:** 2026-05-04
-**Status:** Draft v9 (round-8: cut dual-write — pg is system of record from day 1)
+**Status:** **Partially shipped** — `crates/sandbox/src/db.rs` carries the pg writers and snapshot lifecycle queries (commits `046256e`, `984ed79`, `70ba24d`). Active design; remaining phases tracked in this doc.
 **Audience:** sandbox/controller, control-plane, platform-ops, billing, security-review
 **Depends on:**
 - `crates/sandbox/src/persist.rs` — sealed-record codec (XChaCha20-Poly1305, AEAD key file-mounted, sealed filename derived from the sandbox UUID). The pg work LIVES ALONGSIDE this; it does **not** replace it for secrets.

@@ -1,7 +1,7 @@
 # Sandbox preview URLs / port forwarding design
 
 **Date:** 2026-05-02
-**Status:** Draft v7 — round-6 revisions (security re-audit: invariants 1+2)
+**Status:** **Partially shipped** — `crates/sandbox/src/{preview,preview_share,preview_share_handlers,preview_ws}.rs` ship the share-token mint/list/rotate flow + WS proxy. ~17 active code-comment back-references anchor design rationale here.
 **Audience:** sandbox/controller, sandbox-agent, gateway, builder-frontend
 **Depends on:**
 - `crates/sandbox/src/backend/mod.rs:117-255` — Backend enum (Docker / K8s / NomadCh) and its unified API.

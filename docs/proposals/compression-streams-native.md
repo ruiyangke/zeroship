@@ -1,7 +1,7 @@
 # Native `CompressionStream` / `DecompressionStream` design
 
 **Date:** 2026-05-01
-**Status:** Draft — round 2 (architectural pivot to pure native)
+**Status:** **Shipped** — `crates/runtime/src/web/streams/compression.rs` (commit `ed3125e` "EventSource + CompressionStream/DecompressionStream"). Document retained as design spec.
 **Spec:** WHATWG Compression Standard — https://compression.spec.whatwg.org/
 **Depends on:** native-streams proposal (TransformStream / ReadableStream / WritableStream as Rust classes); native-fetch proposal (response-body construction in Rust)
 

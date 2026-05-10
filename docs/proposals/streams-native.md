@@ -1,7 +1,7 @@
 # Native WHATWG Streams design
 
 **Date:** 2026-05-01
-**Status:** Draft v2 — implementation pending
+**Status:** **Shipped** — `crates/runtime/src/web/streams/` (~25 files: readable, writable, transform, controllers, readers, byte/BYOB, queues, strategies, tee, pipe, compression, async-iter). Document retained as canonical design spec; no equivalent reference doc exists.
 **Spec:** WHATWG Streams Standard — https://streams.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/streams/blob/main/index.bs
 **Reference impl:** https://github.com/whatwg/streams/tree/main/reference-implementation

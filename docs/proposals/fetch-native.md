@@ -1,7 +1,7 @@
 # Native WHATWG Fetch design
 
 **Date:** 2026-05-01
-**Status:** Draft v2 — implementation pending (round-2 critic-driven revision)
+**Status:** **Shipped** — `crates/runtime/src/web/fetch/` (~5,400 LOC, request.rs/response.rs/body/algorithms.rs). Document retained as the canonical design spec; no equivalent reference doc exists.
 **Spec:** WHATWG Fetch Standard — https://fetch.spec.whatwg.org/
 **Spec source:** https://github.com/whatwg/fetch/blob/main/fetch.bs
 **Reference impls:**

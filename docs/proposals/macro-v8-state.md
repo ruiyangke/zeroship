@@ -1,7 +1,7 @@
 # MAC-01 — `#[v8_state_marker(MarkerTy)]`: project V8 internal-field-0 from a separate state struct
 
 - **Date:** 2026-05-04
-- **Status:** Proposal (pre-implementation; do not commit until landing PR)
+- **Status:** **Shipped** — `#[v8_state_marker]` macro lives in `crates/runtime-macros/src/lib.rs` (`pub fn v8_state_marker`) and is preserved unchanged through the runtime-macros refactor (see `runtime-macros-refactor.md`). Document retained as design spec.
 - **Tracking:** `crates/runtime-macros/TODO.md` Open section — once
   this proposal lands, the entry "Migrate hand-rolled
   `[SameObject]` getters to `#[v8_getter(same_object)]`"
