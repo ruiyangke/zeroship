@@ -1,6 +1,6 @@
 # Response / Request / Headers per-component microbench — 2026-05-08
 
-Decomposes the JS-microbench numbers from `httpget-time-distribution-2026-05-08.md`
+Decomposes the JS-microbench numbers from `httpget-time-distribution-2026-05-08-v2.md` (v1 archived at `docs/archive/perf/httpget-time-distribution-2026-05-08.md`)
 (`Response.json` 4,800 ns, `new Response(string, init)` 3,967 ns,
 `request.headers` first-access 5,408 ns) into their underlying components.
 Every number here is measured: in-isolate `performance.now()` hot-loops on a
