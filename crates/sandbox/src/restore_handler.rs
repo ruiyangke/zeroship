@@ -454,6 +454,23 @@ pub(crate) fn rewrite_config_json(
         }
     }
 
+    // 5.1 disks[].path: same shape as fs[].socket. The snapshot
+    // config embeds the source alloc dir in disk paths (e.g.,
+    // `/opt/nomad/data/alloc/<old-uuid>/ch/local/rootfs.img`).
+    // Without this rewrite, CH --restore opens the (Nomad-GC'd)
+    // source path and the VM never boots — bug #7 surfaced on the
+    // 2026-05-10 cluster smoke. Test pinning at
+    // `rewrite_config_json_rewrites_disks_path`.
+    if let Some(disks) = v.get_mut("disks").and_then(|n| n.as_array_mut()) {
+        for disk in disks.iter_mut() {
+            if let Some(obj) = disk.as_object_mut() {
+                if let Some(serde_json::Value::String(s)) = obj.get_mut("path") {
+                    *s = rewrite_alloc_path(s, &alloc_uuid_str);
+                }
+            }
+        }
+    }
+
     // 5.1 payload.cmdline IP rewrite — no-op in v1 (the in-VM kernel
     // doesn't re-DHCP), but include the substitution so a v2
     // refactor lands cleanly. Comment-only for now.
@@ -638,6 +655,41 @@ mod unit_tests {
         assert_eq!(
             v["serial"]["file"],
             format!("/opt/nomad/data/alloc/{new_alloc}/serial.log")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bug #7 (2026-05-10 cluster smoke): the rootfs disk path embeds
+    /// the SOURCE alloc UUID. Without rewrite, CH `--restore` opens
+    /// the (Nomad-GC'd) source path and the VM never boots; wake
+    /// fails with `agent never returned 200 on /livez`.
+    #[test]
+    fn rewrite_config_json_rewrites_disks_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-restore-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.json");
+        std::fs::write(
+            &cfg,
+            r#"{
+                "net":[{"tap":"zsbx-nm-2","mac":"12:34:56:78:9b:02"}],
+                "fs":[],
+                "disks":[{"path":"/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img"}],
+                "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+            }"#,
+        )
+        .unwrap();
+        let alloc_uuid = Uuid::now_v7();
+        rewrite_config_json(&cfg, 2, alloc_uuid).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let new_alloc = alloc_uuid.simple().to_string();
+        assert_eq!(
+            v["disks"][0]["path"],
+            format!("/opt/nomad/data/alloc/{new_alloc}/ch/local/rootfs.img")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

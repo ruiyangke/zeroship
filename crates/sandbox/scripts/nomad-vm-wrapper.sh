@@ -130,6 +130,25 @@ VFS_WS_SOCK="$ZSBX_RUNTIME/vfs-ws.sock"
 VFS_HOME_SOCK="$ZSBX_RUNTIME/vfs-home.sock"
 DISK="$ZSBX_RUNTIME/rootfs.img"
 
+# Tap re-up. CH brings the tap UP when it attaches and leaves it DOWN
+# when it exits (KVM_TUN device close path on Linux 6.x). Between the
+# source VM's exit and a restore alloc's spawn, the tap is DOWN; CH
+# `--restore` then fails to attach and the agent is unreachable
+# (`No route to host`). `ip link set up` is idempotent and cheap;
+# keep it here (not the host startup script) so cold-boot, restart,
+# and restore all go through the same setup path. Requires
+# CAP_NET_ADMIN — Nomad raw_exec on the worker runs as root, which
+# the host operator has already accepted as the trust boundary.
+if [ -e "/sys/class/net/$TAP" ]; then
+  ip link set "$TAP" up || {
+    echo "[wrapper] FATAL: failed to bring $TAP up (need root + CAP_NET_ADMIN)" >&2
+    exit 1
+  }
+else
+  echo "[wrapper] FATAL: tap $TAP missing — host setup script did not pre-create it" >&2
+  exit 1
+fi
+
 # The workspace + user-home dirs are owned by the controller; the
 # wrapper only ensures they exist as a defensive measure (the
 # controller mkdir -p's them before submitting the job, so this is a
