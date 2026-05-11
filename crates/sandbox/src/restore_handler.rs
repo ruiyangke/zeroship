@@ -122,6 +122,7 @@ pub trait RestoreBackend: Send + Sync {
         sandbox_id: Uuid,
         vm_index: i16,
         alloc_dir: &Path,
+        user_id: &str,
     ) -> Result<(), String>;
 
     /// Block until the restored VM's agent serves `/livez 200`. Best
@@ -227,6 +228,10 @@ struct SnapshotRowMeta {
     artifact_path: String,
     sha256: [u8; 32],
     vm_index: i16,
+    /// Source sandbox's `user_id` (typed-id form `usr_<base62>`).
+    /// Needed by `submit_restore_job` to derive `ZSBX_USER_HOME_DIR`
+    /// per the cold-boot env contract (Phase B fix #6).
+    user_id: String,
 }
 
 /// Focused pg read for the snapshot_* columns. Returns
@@ -250,7 +255,7 @@ async fn read_snapshot_row(
     );
     let row = client
         .query_opt(
-            "SELECT snapshot_artifact_path, snapshot_sha256, snapshot_vm_index \
+            "SELECT snapshot_artifact_path, snapshot_sha256, snapshot_vm_index, user_id \
                FROM sandbox.sandboxes \
               WHERE sandbox_id = $1::TEXT AND deleted_at IS NULL",
             &[&sandbox_id_typed],
@@ -261,10 +266,11 @@ async fn read_snapshot_row(
     let artifact_path: Option<String> = row.try_get(0).ok();
     let sha_bytes: Option<Vec<u8>> = row.try_get(1).ok();
     let vm_index: Option<i16> = row.try_get(2).ok();
-    let (Some(p), Some(s), Some(v)) = (artifact_path, sha_bytes, vm_index) else {
+    let user_id: Option<String> = row.try_get(3).ok();
+    let (Some(p), Some(s), Some(v), Some(u)) = (artifact_path, sha_bytes, vm_index, user_id) else {
         return Err(RestoreHandlerError::Internal(format!(
             "snapshot row missing required columns for {sandbox_id_typed} \
-             (artifact / sha / vm_index)"
+             (artifact / sha / vm_index / user_id)"
         )));
     };
     if s.len() != 32 {
@@ -274,7 +280,7 @@ async fn read_snapshot_row(
     }
     let mut sha = [0u8; 32];
     sha.copy_from_slice(&s);
-    Ok(SnapshotRowMeta { artifact_path: p, sha256: sha, vm_index: v })
+    Ok(SnapshotRowMeta { artifact_path: p, sha256: sha, vm_index: v, user_id: u })
 }
 
 async fn do_restore_inner(
@@ -347,7 +353,7 @@ async fn do_restore_inner(
 
     // 6. Submit the restore job.
     backend
-        .submit_restore_job(sandbox_id, snap.vm_index, &alloc_dir)
+        .submit_restore_job(sandbox_id, snap.vm_index, &alloc_dir, &snap.user_id)
         .map_err(RestoreHandlerError::Backend)?;
 
     // 7. Wait for /livez.
@@ -544,6 +550,7 @@ impl RestoreBackend for StubRestoreBackend {
         _sandbox_id: Uuid,
         _vm_index: i16,
         _alloc_dir: &Path,
+        _user_id: &str,
     ) -> Result<(), String> {
         self.submit_called
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -696,6 +703,15 @@ impl VmIndexReservations {
 /// shape of `NomadCHBackend::create`'s, with `ZSBX_RESTORE_FROM` set.
 pub struct RealRestoreBackend {
     cfg: NomadCHConfig,
+    /// Controller-wide memory_mb default — written into the restore
+    /// alloc's `ZSBX_VM_MEMORY_MB` env (Phase B fix #6). The wrapper
+    /// passes this through to CH's `--memory size=${N}M,shared=on`
+    /// flag; for restore it must match the snapshot's memory size
+    /// (CH refuses to restore against a size mismatch).
+    memory_mb: u32,
+    /// Controller-wide cpu count — for `ZSBX_VM_CPUS_BOOT`. Same
+    /// match-the-snapshot constraint applies.
+    cpus: f32,
     /// Wall-time budget for the spawned alloc to reach
     /// `ClientStatus="running"` (mirrors `cfg.alloc_running_timeout_secs`).
     alloc_running_timeout: Duration,
@@ -723,13 +739,15 @@ impl std::fmt::Debug for RealRestoreBackend {
 }
 
 impl RealRestoreBackend {
-    pub fn new(cfg: NomadCHConfig) -> Self {
+    pub fn new(cfg: NomadCHConfig, memory_mb: u32, cpus: f32) -> Self {
         let alloc_running_timeout =
             Duration::from_secs(cfg.alloc_running_timeout_secs);
         let agent_livez_timeout =
             Duration::from_secs(cfg.agent_livez_timeout_secs);
         Self {
             cfg,
+            memory_mb,
+            cpus,
             alloc_running_timeout,
             agent_livez_timeout,
             reservations: Arc::new(Mutex::new(VmIndexReservations::new())),
@@ -766,6 +784,7 @@ impl RestoreBackend for RealRestoreBackend {
         sandbox_id: Uuid,
         vm_index: i16,
         alloc_dir: &Path,
+        user_id: &str,
     ) -> Result<(), String> {
         let job_id = format!("zsbx-restore-{}", sandbox_id.simple());
         let job_json = build_restore_nomad_job_json(
@@ -774,6 +793,9 @@ impl RestoreBackend for RealRestoreBackend {
             vm_index as u16,
             alloc_dir,
             sandbox_id,
+            user_id,
+            self.memory_mb,
+            self.cpus,
         );
         let body = serde_json::to_vec(&job_json)
             .map_err(|e| format!("serialize Nomad job JSON: {e}"))?;
@@ -831,13 +853,39 @@ impl RestoreBackend for RealRestoreBackend {
 /// have a `user_id`/`project_id` to plumb through Meta — those are
 /// already recorded on the source sandbox row in pg, the wrapper
 /// doesn't need them.
+#[allow(clippy::too_many_arguments)]
 fn build_restore_nomad_job_json(
     job_id: &str,
     cfg: &NomadCHConfig,
     vm_index: u16,
     alloc_dir: &Path,
     sandbox_id: Uuid,
+    user_id: &str,
+    memory_mb: u32,
+    cpus: f32,
 ) -> serde_json::Value {
+    // Phase B fix #6: the wrapper unconditionally validates 8 envs
+    // before branching to the restore path. Derive the same per-
+    // sandbox host dirs the cold-boot path uses (see
+    // backend/nomad_ch.rs::NomadCHBackend::create, around the
+    // `host_dir`/`keys_dir`/`workspace_dir`/`user_home_dir` block).
+    let host_dir = cfg
+        .host_state_dir
+        .join(sandbox_id.simple().to_string());
+    let keys_dir = host_dir.join("keys");
+    let workspace_dir = host_dir.join("workspace");
+    let user_home_dir = cfg
+        .user_home_dir_root
+        .join(user_id)
+        .join("home");
+    // cpus_boot: ceil(cpus) with a min of 1; mirrors nomad_ch::cpus_boot.
+    let cpus_boot = if !cpus.is_finite() {
+        1u32
+    } else {
+        let n = cpus.ceil() as i64;
+        if n < 1 { 1 } else { n as u32 }
+    };
+
     serde_json::json!({
         "Job": {
             "ID": job_id,
@@ -846,6 +894,7 @@ fn build_restore_nomad_job_json(
             "Datacenters": [cfg.datacenter],
             "Meta": {
                 "zeroship.sandbox": sandbox_id.to_string(),
+                "zeroship.user": user_id,
                 "zeroship.vm_index": vm_index.to_string(),
                 "zeroship.kind": "restore",
             },
@@ -872,6 +921,15 @@ fn build_restore_nomad_job_json(
                         "ZSBX_VM_INDEX": vm_index.to_string(),
                         "ZSBX_ARTIFACT_DIR": cfg.runtime_dir.display().to_string(),
                         "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
+                        "ZSBX_KEYS_DIR": keys_dir.display().to_string(),
+                        "ZSBX_WORKSPACE_DIR": workspace_dir.display().to_string(),
+                        "ZSBX_USER_HOME_DIR": user_home_dir.display().to_string(),
+                        // Must match the snapshot's saved config —
+                        // CH refuses to restore against a memory
+                        // size mismatch. Pulled from the controller's
+                        // SandboxConfig at backend construction.
+                        "ZSBX_VM_MEMORY_MB": memory_mb.to_string(),
+                        "ZSBX_VM_CPUS_BOOT": cpus_boot.to_string(),
                         // The wrapper's PR 3f restore branch reads
                         // this and switches to `cloud-hypervisor
                         // --restore source_url=file://<dir>`.
@@ -884,7 +942,7 @@ fn build_restore_nomad_job_json(
                         // raw_exec + CH; memory comes from the
                         // snapshot's saved config.
                         "CPU": 500,
-                        "MemoryMB": 1024u32,
+                        "MemoryMB": memory_mb,
                     },
                     "KillTimeout": 10_000_000_000u64,
                 }],
@@ -1136,13 +1194,13 @@ mod real_backend_tests {
             ),
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg);
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
 
         backend
-            .submit_restore_job(sid, 7, &alloc_dir)
+            .submit_restore_job(sid, 7, &alloc_dir, "usr_test")
             .expect("submit_restore_job must succeed");
         assert!(
             calls.load(AOrdering::SeqCst) >= 2,
@@ -1161,13 +1219,13 @@ mod real_backend_tests {
             (500, r#"{"error":"nomad: backend down"}"#.to_string())
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg);
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
 
         let err = backend
-            .submit_restore_job(sid, 8, &alloc_dir)
+            .submit_restore_job(sid, 8, &alloc_dir, "usr_test")
             .expect_err("500 must error");
         assert!(err.contains("status 500"), "{err}");
         let _ = std::fs::remove_dir_all(&host_state);
@@ -1178,7 +1236,7 @@ mod real_backend_tests {
     #[test]
     fn reserve_vm_index_collides() {
         let cfg = base_cfg("http://127.0.0.1:1".into(), fresh_dir());
-        let backend = RealRestoreBackend::new(cfg);
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
         backend.reserve_vm_index(42).expect("first must succeed");
         let err = backend.reserve_vm_index(42).expect_err("collision");
         assert!(err.contains("already reserved"), "{err}");
@@ -1200,13 +1258,13 @@ mod real_backend_tests {
             ),
         });
         let cfg = base_cfg(nomad_addr, host_state.clone());
-        let backend = RealRestoreBackend::new(cfg);
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0);
         let sid = Uuid::now_v7();
         let alloc_dir = backend.restore_alloc_dir(sid);
         std::fs::create_dir_all(&alloc_dir).unwrap();
 
         let err = backend
-            .submit_restore_job(sid, 9, &alloc_dir)
+            .submit_restore_job(sid, 9, &alloc_dir, "usr_test")
             .expect_err("never-running must time out");
         assert!(
             err.contains("never reached running"),

@@ -800,6 +800,8 @@ fn make_state_with_snapshot_wiring(
     let rb: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
         std::sync::Arc::new(zeroship_sandbox::restore_handler::RealRestoreBackend::new(
             cfg.nomad_ch.clone(),
+            cfg.memory_mb,
+            cfg.cpus,
         ));
     Arc::new(zeroship_sandbox::AppState {
         config: cfg,

@@ -346,7 +346,11 @@ impl AppState {
             let ch: Arc<dyn ChRemoteClient> =
                 Arc::new(RealChRemoteClient::new());
             let rb: Arc<dyn RestoreBackend> =
-                Arc::new(RealRestoreBackend::new(config.nomad_ch.clone()));
+                Arc::new(RealRestoreBackend::new(
+                    config.nomad_ch.clone(),
+                    config.memory_mb,
+                    config.cpus,
+                ));
             tracing::info!(
                 ch_version = ch.version(),
                 kek_path = ?config.snapshot_root_kek_path,
