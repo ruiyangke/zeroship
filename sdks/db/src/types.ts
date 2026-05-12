@@ -329,9 +329,24 @@ export const t = {
 // Schema builder — per-collection options via fluent API
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-collection strictness for deploy-time data validation
+ * (proposal @zeroship/db v2, section A2). The default is `strict` to
+ * match Convex's `schemaValidation: true` default.
+ *
+ * - `strict`  — refuse the deploy on any validation violation. The
+ *   worker returns a `validation_refused` envelope and the SDK throws
+ *   at module-init time so the app fails fast.
+ * - `lenient` — log violations but allow the push (warning only).
+ * - `off`     — skip validation entirely (equivalent of Convex's
+ *   `schemaValidation: false`); intended for legacy/imported data.
+ */
+export type Strictness = "strict" | "lenient" | "off";
+
 /** Options that can be set per-collection via the schema() builder. */
 export interface SchemaOptions {
   softDelete: boolean;
+  strictness: Strictness;
 }
 
 /**
@@ -344,7 +359,7 @@ export class SchemaBuilder<S> {
 
   constructor(fields: S) {
     this.fields = fields;
-    this._options = { softDelete: false };
+    this._options = { softDelete: false, strictness: "strict" };
   }
 
   /** Returns the collection options. */
@@ -353,6 +368,19 @@ export class SchemaBuilder<S> {
   /** Enable soft delete — deleteOne/deleteMany set `deletedAt` instead of removing rows. */
   softDelete(): this {
     this._options.softDelete = true;
+    return this;
+  }
+
+  /**
+   * Set the deploy-time data-validation strictness for this collection
+   * (A2 of the @zeroship/db v2 proposal). Default is `strict`.
+   *
+   * - `strict`  — refuse the push on any violation.
+   * - `lenient` — warn but allow.
+   * - `off`     — skip validation entirely.
+   */
+  strictness(level: Strictness): this {
+    this._options.strictness = level;
     return this;
   }
 }

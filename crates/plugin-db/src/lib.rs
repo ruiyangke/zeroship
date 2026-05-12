@@ -17,7 +17,9 @@ use std::rc::Rc;
 use compio_postgres::{Client, Pool};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
+pub mod audit;
 pub mod callbacks;
+pub mod diff;
 pub mod query;
 
 // ---------------------------------------------------------------------------

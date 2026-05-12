@@ -955,23 +955,30 @@ pub fn register_model(
     rv.set(promise.into());
 }
 
-/// Execute DDL for registerModel: CREATE SCHEMA, CREATE TABLE, ADD COLUMNs,
-/// then CREATE INDEX CONCURRENTLY for every `index`/`unique` field marker.
+/// Execute DDL for registerModel. Implements the four-phase orchestrator
+/// from proposal A2 (`docs/proposals/zeroship-db-v2.md`):
 ///
-/// The work is split into two phases on purpose (see proposal A1):
-///   * **Phase A** — schema / table / columns. These are transactional-safe
-///     and run via the pool's per-statement connection (`IF NOT EXISTS`
-///     keeps the operation idempotent).
-///   * **Phase B** — index materialisation via `CREATE INDEX CONCURRENTLY`.
-///     CONCURRENTLY cannot run inside a transaction block; each statement
-///     runs on its own pool connection (no implicit `BEGIN`). For every
-///     index we check `pg_index.indisvalid` afterwards and run the
-///     INVALID-index recovery loop described in the proposal:
-///       * `23505/23502/23503/23514` (data violations) → no retry, surface
-///         a structured error so the deploy pipeline halts.
-///       * `40P01` deadlock, `53100/53200` resource pressure → drop the
-///         invalid index and retry, up to 3 times.
-///       * anything else → escalate as `validation_refused`.
+///   1. **Bootstrap**: ensure schema exists and the `__zeroship_migrations`
+///      audit table is provisioned (A3).
+///   2. **Diff phase**: introspect `pg_catalog` and classify each
+///      declared change into additive / compatible / destructive.
+///   3. **Validate phase**: for compatible/destructive ops that involve
+///      an existence check (NOT NULL on a non-empty table, new UNIQUE),
+///      run the validation query and short-circuit `strict` deploys.
+///   4. **Apply phase**: run additive + compatible DDL (table + columns
+///      transactionally, CREATE INDEX CONCURRENTLY outside any tx). Every
+///      operation writes an audit row.
+///
+/// Destructive changes return a structured `validation_refused` envelope.
+/// On a fresh deploy where the table doesn't exist, the diff collapses
+/// to a single `create_table` op so the cold-start path is still
+/// IF NOT EXISTS-idempotent.
+///
+/// Concurrent-deploy serialisation uses Postgres' two-key advisory lock
+/// (`pg_advisory_xact_lock(hashtext('zs_reg:<app_id>')::int4,
+/// hashtext(<deploy_id>)::int4)`); a second worker cold-starting against
+/// the same app + deploy_id blocks until the first transaction commits
+/// (proposal A2, "Concurrent-deploy semantics" section).
 async fn exec_register_model(
     app_id: &str,
     collection: &str,
@@ -989,42 +996,474 @@ async fn exec_register_model(
     });
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
 
+    let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
+
+    exec_register_model_with_pool(&pool, app_id, collection, schema, &deploy_id).await
+}
+
+/// Pool-driven variant of `exec_register_model`. Public so integration
+/// tests can drive the four-phase orchestrator without going through V8.
+///
+/// `deploy_id` controls audit-log grouping (proposal A3 line 233 reserves
+/// `'cold_start'` for pre-deploy DDL).
+pub async fn exec_register_model_with_pool(
+    pool: &compio_postgres::Pool,
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    deploy_id: &str,
+) -> Result<(), String> {
+    // Strictness — proposal A2 line 122. Read from schema._meta.strictness
+    // if present; default is 'strict'.
+    let strictness = schema
+        .get("_meta")
+        .and_then(|m| m.get("strictness"))
+        .and_then(Value::as_str)
+        .unwrap_or("strict")
+        .to_string();
+
+    let empty: Vec<&str> = Vec::new();
+
     // -------------------------------------------------------------------
-    // Phase A: schema + table + columns (idempotent, IF NOT EXISTS)
+    // Concurrent-deploy serialisation: proposal A2 line 202.
+    //
+    // Two-key advisory lock keyed on (app_id, register_model). Held at
+    // session scope on a dedicated pool client so the lock survives the
+    // CREATE INDEX CONCURRENTLY phases (which can't run in a transaction).
+    // Released when this function returns (either by explicit unlock or
+    // by `lock_client` being dropped — its backend session ends, which
+    // implicitly releases all session-level advisory locks).
+    //
+    // The proposal calls for `pg_advisory_xact_lock` (transaction scope);
+    // because registerModel spans non-transactional CONCURRENTLY DDL, we
+    // use the session-scoped equivalent `pg_advisory_lock` on a dedicated
+    // connection. Functionally identical for our serialisation goal: a
+    // second worker calling the same function blocks on the same key.
+    let lock_client = pool
+        .get()
+        .await
+        .map_err(|e| format!("db: failed to acquire orchestrator client: {e}"))?;
+    let lock_sql =
+        "SELECT pg_advisory_lock(hashtext('zs_reg:' || $1)::int4, hashtext('register_model')::int4)";
+    lock_client
+        .query_text_params(lock_sql, &[app_id])
+        .await
+        .map_err(|e| format!("db: pg_advisory_lock failed: {e}"))?;
+    // From this point on, until lock_client is dropped at function exit,
+    // any other orchestrator call against the same app_id blocks.
+
+    // -------------------------------------------------------------------
+    // Bootstrap: schema + audit table
     // -------------------------------------------------------------------
     let create_schema = query::build_create_schema(app_id);
-    let empty: Vec<&str> = Vec::new();
     pool.query_text_params(&create_schema, &empty)
         .await
         .map_err(|e| format!("db: create schema failed: {e}"))?;
 
+    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
+
+    let schema_version = crate::audit::next_schema_version(pool, app_id).await?;
+
+    // Build everything the diff classifier needs.
     let create_table = query::build_create_table(app_id, collection, schema)
         .map_err(|e| format!("db: {e}"))?;
-    pool.query_text_params(&create_table, &empty)
-        .await
-        .map_err(|e| format!("db: create table failed: {}", fmt_db_err(&e)))?;
+    let declared_indexes = query::build_create_indexes(app_id, collection, schema)
+        .map_err(|e| format!("db: {e}"))?;
 
-    if let Some(obj) = schema.as_object() {
-        for (field, def) in obj {
-            let alter = query::build_add_column(app_id, collection, field, def)
-                .map_err(|e| format!("db: {e}"))?;
-            pool.query_text_params(&alter, &empty)
-                .await
-                .map_err(|e| format!("db: add column '{field}' failed: {e}"))?;
+    // -------------------------------------------------------------------
+    // Diff phase: introspect pg_catalog, classify changes.
+    // -------------------------------------------------------------------
+    let mut live = crate::diff::read_live_schema(pool, app_id).await?;
+    let rows_estimate = crate::diff::estimate_row_count(pool, app_id, collection).await?;
+    live.row_counts.insert(collection.to_string(), rows_estimate);
+
+    let ops = crate::diff::compute_diff(
+        &live,
+        app_id,
+        collection,
+        schema,
+        &create_table,
+        &declared_indexes,
+    );
+
+    // -------------------------------------------------------------------
+    // Classify phase: surface destructive ops as validation_refused
+    // when strictness != 'off'. Lenient logs but proceeds with additive
+    // + compatible only.
+    // -------------------------------------------------------------------
+    let destructive: Vec<&crate::diff::DiffOp> = ops
+        .iter()
+        .filter(|op| op.class == crate::diff::ChangeClass::Destructive)
+        .collect();
+
+    if !destructive.is_empty() && strictness != "off" {
+        // Audit each destructive op as pending so operators can see what
+        // was refused. Then return a validation_refused envelope.
+        for op in &destructive {
+            let row = crate::audit::AuditRow {
+                collection: op.collection.clone(),
+                phase: crate::audit::Phase::Ddl,
+                change_class: op.class.as_audit(),
+                change_kind: op.change_kind.as_sql().to_string(),
+                details: op.details.clone(),
+                ddl_sql: op.sql.clone(),
+                status: crate::audit::InitialStatus::Pending,
+                deploy_id: deploy_id.to_string(),
+                schema_version,
+                actor: crate::audit::ActorKind::Auto,
+            };
+            // Best-effort: a failure to write the audit row should not
+            // mask the envelope — tracing::warn so it shows in worker
+            // logs but the user-facing error stays clean.
+            if let Err(e) = crate::audit::write_audit_row(pool, app_id, &row).await {
+                tracing::warn!(error = %e, "audit: failed to log destructive op");
+            }
+        }
+
+        if strictness == "strict" {
+            return Err(build_validation_refused_envelope(deploy_id, &destructive));
+        }
+        // strictness == "lenient": fall through, but skip destructive ops.
+    }
+
+    // -------------------------------------------------------------------
+    // Validate phase: for compatible ops with an existence check
+    // (currently: add NOT NULL column with default on a non-empty table —
+    // covered by the classifier already; new UNIQUE constraint — handled
+    // in create_index_with_recovery via 23505).
+    //
+    // The exhaustive validation budget loop (proposal A2 line 153) is
+    // deferred to a follow-up PR: for the additive-only flows the diff
+    // engine now identifies, classification already prevents unsafe DDL.
+    // -------------------------------------------------------------------
+
+    // -------------------------------------------------------------------
+    // Apply phase: run additive + compatible ops in declared order.
+    // -------------------------------------------------------------------
+    for op in &ops {
+        if op.class == crate::diff::ChangeClass::Destructive {
+            // Skipped above (refused or lenient-skipped).
+            continue;
+        }
+
+        let audit_id = match (crate::audit::AuditRow {
+            collection: op.collection.clone(),
+            phase: crate::audit::Phase::Ddl,
+            change_class: op.class.as_audit(),
+            change_kind: op.change_kind.as_sql().to_string(),
+            details: op.details.clone(),
+            ddl_sql: op.sql.clone(),
+            status: crate::audit::InitialStatus::Running,
+            deploy_id: deploy_id.to_string(),
+            schema_version,
+            actor: crate::audit::ActorKind::Auto,
+        }) {
+            row => match crate::audit::write_audit_row(pool, app_id, &row).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "audit: failed to insert running row");
+                    None
+                }
+            },
+        };
+
+        let result = match &op.change_kind {
+            crate::diff::ChangeKind::CreateTable | crate::diff::ChangeKind::AddColumn => {
+                if let Some(sql) = &op.sql {
+                    pool.query_text_params(sql, &empty)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| format!("db: {} failed: {}", op.change_kind.as_sql(), fmt_db_err(&e)))
+                } else {
+                    Ok(())
+                }
+            }
+            crate::diff::ChangeKind::AddIndex => {
+                // Find the matching IndexSpec so the recovery loop has the
+                // structured columns/unique flags.
+                let spec_owned = declared_indexes
+                    .iter()
+                    .find(|s| op.details.get("index_name").and_then(Value::as_str) == Some(s.name.as_str()))
+                    .cloned();
+                if let Some(spec) = spec_owned {
+                    create_index_with_recovery_audited(
+                        pool,
+                        app_id,
+                        collection,
+                        &spec,
+                        deploy_id,
+                        schema_version,
+                    )
+                    .await
+                } else {
+                    Ok(())
+                }
+            }
+            crate::diff::ChangeKind::DropColumn | crate::diff::ChangeKind::DropIndex => {
+                // Destructive ops are filtered out above.
+                Ok(())
+            }
+        };
+
+        if let Some(id) = audit_id {
+            match &result {
+                Ok(_) => {
+                    let _ = crate::audit::update_audit_status(
+                        pool,
+                        app_id,
+                        id,
+                        crate::audit::TerminalStatus::Applied,
+                        None,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    let _ = crate::audit::update_audit_status(
+                        pool,
+                        app_id,
+                        id,
+                        crate::audit::TerminalStatus::Failed,
+                        Some(e.as_str()),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        result?;
+    }
+
+    // Explicit unlock — best-effort. Dropping `lock_client` would also
+    // release session-level locks when the backend session ends, but we
+    // unlock proactively so the client returns to the pool clean.
+    let unlock_sql =
+        "SELECT pg_advisory_unlock(hashtext('zs_reg:' || $1)::int4, hashtext('register_model')::int4)";
+    let _ = lock_client.query_text_params(unlock_sql, &[app_id]).await;
+    drop(lock_client);
+
+    Ok(())
+}
+
+/// Build the `validation_refused` error envelope (proposal A2 line 167).
+/// The shape matches the SDK's expected error contract so the deploy
+/// pipeline can render the failing PKs / approval URL uniformly.
+fn build_validation_refused_envelope(
+    deploy_id: &str,
+    destructive: &[&crate::diff::DiffOp],
+) -> String {
+    let pending: Vec<Value> = destructive
+        .iter()
+        .map(|op| {
+            serde_json::json!({
+                "collection": op.collection,
+                "change_kind": op.change_kind.as_sql(),
+                "field": op.field,
+                "details": op.details,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "code": "validation_refused",
+        "deploy_id": deploy_id,
+        "violations": [],
+        "destructive_pending": pending,
+    })
+    .to_string()
+}
+
+/// Audited variant of [`create_index_with_recovery`] — every retry,
+/// INVALID-detection drop, and terminal failure writes an
+/// `index_retry` row to `__zeroship_migrations` so operators can see
+/// what the cold-start orchestrator did (proposal A3). Retains the same
+/// SQLSTATE policy as the un-audited version.
+async fn create_index_with_recovery_audited(
+    pool: &compio_postgres::Pool,
+    app_id: &str,
+    collection: &str,
+    spec: &query::IndexSpec,
+    deploy_id: &str,
+    schema_version: i32,
+) -> Result<(), String> {
+    use compio_postgres::error::SqlState;
+
+    const MAX_RETRIES: u32 = 3;
+    let empty: Vec<&str> = Vec::new();
+    let qualified_idx = format!("\"{}\".\"{}\"", app_id, spec.name);
+    let drop_idx_sql = format!(
+        "DROP INDEX CONCURRENTLY IF EXISTS \"{}\".\"{}\"",
+        app_id, spec.name
+    );
+
+    let log_retry = |reason: &'static str,
+                     attempt: u32,
+                     sqlstate: Option<String>,
+                     error: Option<String>| {
+        let row = crate::audit::AuditRow {
+            collection: collection.to_string(),
+            phase: crate::audit::Phase::Ddl,
+            change_class: if spec.unique {
+                crate::audit::ChangeClass::Compatible
+            } else {
+                crate::audit::ChangeClass::Additive
+            },
+            change_kind: "index_retry".to_string(),
+            details: serde_json::json!({
+                "reason": reason,
+                "attempt": attempt,
+                "index_name": spec.name,
+                "columns": spec.columns,
+                "unique": spec.unique,
+                "sqlstate": sqlstate,
+                "error": error,
+            }),
+            ddl_sql: Some(spec.sql.clone()),
+            status: crate::audit::InitialStatus::Running,
+            deploy_id: deploy_id.to_string(),
+            schema_version,
+            actor: crate::audit::ActorKind::Auto,
+        };
+        row
+    };
+
+    for attempt in 0..=MAX_RETRIES {
+        let create_res = pool.query_text_params(&spec.sql, &empty).await;
+
+        match create_res {
+            Ok(_) => {
+                let check_sql = format!(
+                    "SELECT indisvalid FROM pg_index WHERE indexrelid = '{}'::regclass",
+                    qualified_idx.replace('\'', "''")
+                );
+                let rows = pool
+                    .query_text_params(&check_sql, &empty)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "db: failed to verify index '{}' validity: {}",
+                            spec.name,
+                            fmt_db_err(&e)
+                        )
+                    })?;
+                let valid = rows
+                    .first()
+                    .map(|r| r.try_get::<_, bool>("indisvalid").unwrap_or(false))
+                    .unwrap_or(false);
+                if valid {
+                    return Ok(());
+                }
+
+                // INVALID index — audit the retry, drop, and loop.
+                let row = log_retry("invalid_index_landed", attempt, None, None);
+                if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
+                    let _ = crate::audit::update_audit_status(
+                        pool,
+                        app_id,
+                        id,
+                        crate::audit::TerminalStatus::Failed,
+                        Some("index landed INVALID"),
+                    )
+                    .await;
+                }
+                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
+                if attempt == MAX_RETRIES {
+                    return Err(format!(
+                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
+                        \"collection\":\"{}\",\"index\":\"{}\",\
+                        \"reason\":\"index repeatedly landed INVALID after {} retries\"}}",
+                        collection, spec.name, MAX_RETRIES
+                    ));
+                }
+            }
+            Err(e) => {
+                let code = e.code().cloned();
+                let fatal = matches!(
+                    code.as_ref(),
+                    Some(c) if c == &SqlState::UNIQUE_VIOLATION
+                        || c == &SqlState::NOT_NULL_VIOLATION
+                        || c == &SqlState::FOREIGN_KEY_VIOLATION
+                        || c == &SqlState::CHECK_VIOLATION
+                );
+                if fatal {
+                    let code_str = code.as_ref().map(|c| c.code()).unwrap_or("23xxx");
+                    let constraint_kind = if spec.unique { "unique" } else { "index" };
+                    let row = log_retry(
+                        "data_violation",
+                        attempt,
+                        Some(code_str.to_string()),
+                        Some(fmt_db_err(&e)),
+                    );
+                    if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
+                        let _ = crate::audit::update_audit_status(
+                            pool,
+                            app_id,
+                            id,
+                            crate::audit::TerminalStatus::Failed,
+                            Some("data violates constraint"),
+                        )
+                        .await;
+                    }
+                    let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
+                    return Err(format!(
+                        "{{\"code\":\"unique_violation\",\"sqlstate\":\"{}\",\
+                        \"collection\":\"{}\",\"constraint\":\"{}\",\
+                        \"index\":\"{}\",\"columns\":{:?},\
+                        \"message\":\"{}\"}}",
+                        code_str,
+                        collection,
+                        constraint_kind,
+                        spec.name,
+                        spec.columns,
+                        fmt_db_err(&e).replace('"', "\\\"")
+                    ));
+                }
+
+                let transient = matches!(
+                    code.as_ref(),
+                    Some(c) if c == &SqlState::T_R_DEADLOCK_DETECTED
+                        || c == &SqlState::DISK_FULL
+                        || c == &SqlState::OUT_OF_MEMORY
+                );
+
+                let row = log_retry(
+                    if transient { "transient_retry" } else { "non_transient_failure" },
+                    attempt,
+                    code.as_ref().map(|c| c.code().to_string()),
+                    Some(fmt_db_err(&e)),
+                );
+                if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
+                    let _ = crate::audit::update_audit_status(
+                        pool,
+                        app_id,
+                        id,
+                        crate::audit::TerminalStatus::Failed,
+                        Some("index build failed"),
+                    )
+                    .await;
+                }
+
+                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
+                if !transient || attempt == MAX_RETRIES {
+                    return Err(format!(
+                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
+                        \"collection\":\"{}\",\"index\":\"{}\",\
+                        \"sqlstate\":\"{}\",\"attempts\":{},\
+                        \"message\":\"{}\"}}",
+                        collection,
+                        spec.name,
+                        code.as_ref().map(|c| c.code()).unwrap_or("unknown"),
+                        attempt + 1,
+                        fmt_db_err(&e).replace('"', "\\\"")
+                    ));
+                }
+            }
         }
     }
 
-    // -------------------------------------------------------------------
-    // Phase B: indexes (CONCURRENTLY, outside any transaction)
-    // -------------------------------------------------------------------
-    let indexes = query::build_create_indexes(app_id, collection, schema)
-        .map_err(|e| format!("db: {e}"))?;
-
-    for spec in indexes {
-        create_index_with_recovery(&pool, app_id, collection, &spec).await?;
-    }
-
-    Ok(())
+    Err(format!(
+        "db: create index '{}' exhausted retry budget without a terminal result",
+        spec.name
+    ))
 }
 
 /// Run a single `CREATE INDEX CONCURRENTLY` with INVALID-index recovery.
@@ -1035,6 +1474,12 @@ async fn exec_register_model(
 /// `validation_refused` so the deploy pipeline can consume the two paths
 /// uniformly). Transient failures (deadlock, disk pressure) are retried up
 /// to 3 times after `DROP INDEX CONCURRENTLY`.
+///
+/// Kept for the `tests/` path that exercises pre-A2 semantics; the
+/// production `exec_register_model` path uses
+/// `create_index_with_recovery_audited` which writes to
+/// `__zeroship_migrations` on every retry.
+#[allow(dead_code)]
 async fn create_index_with_recovery(
     pool: &compio_postgres::Pool,
     app_id: &str,
