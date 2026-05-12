@@ -154,6 +154,179 @@ pub fn build_add_column(
     ).trim().to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Index builders for registerModel — A1 of the @zeroship/db v2 proposal
+// (docs/proposals/zeroship-db-v2.md). Materialises `t.string().index()` /
+// `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
+// the markers actually do something at the database layer.
+// ---------------------------------------------------------------------------
+
+/// A single index to materialise during `registerModel`.
+///
+/// `name` is the deterministic Postgres identifier (≤ 63 bytes). `sql` is a
+/// `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS …` statement ready to be
+/// executed outside a transaction (CONCURRENTLY cannot run inside `BEGIN`).
+/// `unique` is exposed so callers can apply different recovery policies for
+/// unique-index failures (which surface `23505 unique_violation` errors that
+/// must not be retried — see proposal A1 INVALID-index recovery).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSpec {
+    /// Deterministic index identifier (unquoted).
+    pub name: String,
+    /// Columns the index covers (unquoted, in declared order).
+    pub columns: Vec<String>,
+    /// Whether this is a UNIQUE index.
+    pub unique: bool,
+    /// `CREATE …` DDL ready for execution.
+    pub sql: String,
+}
+
+/// Build the set of `CREATE INDEX CONCURRENTLY` statements for a schema.
+///
+/// Walks the field definitions and emits:
+///   * a non-unique index per field with `index: true`,
+///   * a unique index per field with `unique: true`.
+///
+/// Composite indexes (the proposal's
+/// `defineCollection(fields).index(name, columns[])` builder) are not yet
+/// surfaced by the SDK; when they land, append them to the returned `Vec`.
+/// TODO: A1 composite indexes — wire through `schema_meta.indexes` once the
+/// SDK builder exists.
+///
+/// Statements are emitted in deterministic order: declared field order in the
+/// schema, with `index` markers before `unique` markers for the same field
+/// (effectively impossible since a field is either indexed or unique, but the
+/// rule keeps the contract obvious).
+pub fn build_create_indexes(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+) -> Result<Vec<IndexSpec>, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let mut out = Vec::new();
+
+    let Some(obj) = schema.as_object() else {
+        return Ok(out);
+    };
+
+    let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+
+    for (field, def) in obj {
+        let wants_index = def.get("index").and_then(|v| v.as_bool()) == Some(true);
+        let wants_unique = def.get("unique").and_then(|v| v.as_bool()) == Some(true);
+
+        if !wants_index && !wants_unique {
+            continue;
+        }
+
+        // Unique implies an index — if both flags are set, prefer the unique
+        // form (a unique index also serves as a lookup index, so emitting
+        // both would be redundant and waste storage).
+        if wants_unique {
+            let name = index_name(collection, &[field.as_str()], /* unique = */ true);
+            let col_list = quote_ident(field);
+            let sql = format!(
+                "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
+                quote_ident(&name),
+                table_qualified,
+                col_list,
+            );
+            out.push(IndexSpec {
+                name,
+                columns: vec![field.clone()],
+                unique: true,
+                sql,
+            });
+        } else if wants_index {
+            let name = index_name(collection, &[field.as_str()], /* unique = */ false);
+            let col_list = quote_ident(field);
+            let sql = format!(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
+                quote_ident(&name),
+                table_qualified,
+                col_list,
+            );
+            out.push(IndexSpec {
+                name,
+                columns: vec![field.clone()],
+                unique: false,
+                sql,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Build a deterministic Postgres index name from a table name and columns.
+///
+/// Strategy:
+///   1. Construct `<table>_<col1>_<col2>…_<suffix>` where suffix is
+///      `key` for unique indexes and `idx` otherwise.
+///   2. Postgres `NAMEDATALEN` defaults to 64 bytes (limit 63 chars). If the
+///      generated name exceeds 60 bytes, replace the tail with an 8-char
+///      base32 hash of the full name. This is Atlas's strategy
+///      (`migrate/sqltool/index_name.go`). The 60-byte threshold leaves
+///      headroom for the suffix without ever crossing NAMEDATALEN.
+///   3. The hash is sha256(full_name) → first 5 bytes → base32 (8 chars).
+///      sha256 is in `crates/runtime` and `crates/core` already; pulling
+///      blake3 would add a new transitive dep for an 8-char fingerprint
+///      where collision resistance is not actually load-bearing (we only
+///      need stable + roughly-uniform). sha256 is the cheaper choice.
+///
+/// Naming is content-addressed (same input → same name), so re-running
+/// `registerModel` with `IF NOT EXISTS` is idempotent.
+pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
+    let suffix = if unique { "key" } else { "idx" };
+    let joined_cols = columns.join("_");
+    let full = format!("{table}_{joined_cols}_{suffix}");
+    if full.len() <= 60 {
+        return full;
+    }
+    // Truncated form: keep the table prefix readable, then append the hash.
+    let hash = short_hash_base32(&full);
+    // Reserve `_<hash>` (1 + 8 = 9 bytes) on the tail. Allocate the rest
+    // to a prefix of the original name (which already starts with the
+    // table). Cap the prefix at 54 bytes so the total is ≤ 63 bytes.
+    let prefix_budget = 60usize.saturating_sub(9);
+    let mut prefix: String = full.chars().take(prefix_budget).collect();
+    // Drop a trailing underscore (cosmetic — keep `<a>_<hash>` rather than
+    // `<a>__<hash>`).
+    if prefix.ends_with('_') {
+        prefix.pop();
+    }
+    format!("{prefix}_{hash}")
+}
+
+/// 8-char base32 fingerprint over sha256 of the input.
+///
+/// Crockford-style alphabet without padding — Postgres identifiers are
+/// case-folded but our names already go through `quote_ident`, so we can
+/// keep lowercase letters for readability.
+fn short_hash_base32(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+    let digest = Sha256::digest(input.as_bytes());
+    let bytes = &digest[..5]; // 5 bytes = 40 bits → 8 base32 chars
+
+    let mut out = [0u8; 8];
+    // 5 bytes packed into 8 × 5-bit groups, MSB-first.
+    let mut acc: u64 = 0;
+    for b in bytes {
+        acc = (acc << 8) | u64::from(*b);
+    }
+    for i in 0..8 {
+        let shift = (7 - i) * 5;
+        let idx = ((acc >> shift) & 0x1f) as usize;
+        out[i] = ALPHABET[idx];
+    }
+    // Safety: ALPHABET is ASCII so out is valid UTF-8.
+    String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
+}
+
 /// Convert a field definition to a full column definition for CREATE TABLE.
 fn field_to_column(field: &str, def: &serde_json::Value) -> String {
     let pg_type = def_to_pg_type(def);
@@ -182,9 +355,13 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
         parts.push("NOT NULL".to_string());
     }
 
-    if def.get("unique").and_then(|v| v.as_bool()) == Some(true) {
-        parts.push("UNIQUE".to_string());
-    }
+    // NOTE: `unique` is intentionally NOT emitted as a column-level constraint
+    // here. The proposal (zeroship-db-v2.md A1) mandates that every uniqueness
+    // marker becomes a `CREATE UNIQUE INDEX CONCURRENTLY` so the build never
+    // blocks writes. The inline `UNIQUE` keyword would build the index under
+    // ACCESS EXCLUSIVE lock and would also produce a Postgres-auto-named index
+    // that defeats our deterministic-name idempotency contract. The uniqueness
+    // marker is materialised through `build_create_indexes` instead.
 
     // Default value
     if let Some(default) = def.get("default") {
@@ -2544,5 +2721,272 @@ mod tests {
         let update = json!({"user": "alice"}); // "user" is a reserved word
         let q = build_update_one("app1", "accounts", &filter, &update).unwrap();
         assert!(q.sql.contains(r#""user" = $"#), "sql: {}", q.sql);
+    }
+
+    // -----------------------------------------------------------------------
+    // A1 — Materialised indexes (zeroship-db-v2 proposal §A1).
+    //
+    // Before A1, `t.string().index()` and `t.string().unique()` set
+    // `FieldDef.index/unique` in the SDK but the Rust DDL emitter produced
+    // no index. These tests lock the materialisation contract: every
+    // marker yields a `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS …`
+    // statement with a deterministic name.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_indexes_empty_schema() {
+        let schema = json!({});
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert!(out.is_empty(), "expected no indexes, got: {out:?}");
+    }
+
+    #[test]
+    fn test_build_indexes_no_markers_produces_no_indexes() {
+        let schema = json!({
+            "email": {"type": "string", "required": true},
+            "age": {"type": "number"},
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert!(out.is_empty(), "expected no indexes when no markers set");
+    }
+
+    #[test]
+    fn test_build_indexes_single_field_unique() {
+        let schema = json!({
+            "email": {"type": "string", "required": true, "unique": true},
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert_eq!(out.len(), 1, "expected one unique index");
+        let spec = &out[0];
+        assert!(spec.unique, "should be a unique index");
+        assert_eq!(spec.name, "users_email_key");
+        assert_eq!(spec.columns, vec!["email"]);
+        assert!(
+            spec.sql.starts_with("CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS"),
+            "sql: {}",
+            spec.sql
+        );
+        // Both schema and table identifiers must be quoted.
+        assert!(spec.sql.contains(r#""app1"."users""#), "sql: {}", spec.sql);
+        assert!(spec.sql.contains(r#"("email")"#), "sql: {}", spec.sql);
+        assert!(
+            spec.sql.contains(r#""users_email_key""#),
+            "sql: {}",
+            spec.sql
+        );
+    }
+
+    #[test]
+    fn test_build_indexes_single_field_non_unique() {
+        let schema = json!({
+            "handle": {"type": "string", "index": true},
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert_eq!(out.len(), 1);
+        let spec = &out[0];
+        assert!(!spec.unique);
+        assert_eq!(spec.name, "users_handle_idx");
+        assert!(
+            spec.sql.starts_with("CREATE INDEX CONCURRENTLY IF NOT EXISTS"),
+            "sql: {}",
+            spec.sql
+        );
+        assert!(
+            !spec.sql.contains("UNIQUE"),
+            "non-unique index must not contain UNIQUE keyword: {}",
+            spec.sql
+        );
+    }
+
+    #[test]
+    fn test_build_indexes_unique_wins_over_index() {
+        // If a user sets both `.unique()` and `.index()` on the same field,
+        // the unique index already serves as a lookup index — emitting a
+        // second non-unique index would be wasted storage.
+        let schema = json!({
+            "email": {"type": "string", "unique": true, "index": true},
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].unique);
+        assert_eq!(out[0].name, "users_email_key");
+    }
+
+    #[test]
+    fn test_build_indexes_multiple_fields() {
+        let schema = json!({
+            "email": {"type": "string", "unique": true},
+            "name": {"type": "string"},
+            "tenant_id": {"type": "string", "index": true},
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert_eq!(out.len(), 2, "expected 2 indexes, got: {out:?}");
+        let names: Vec<_> = out.iter().map(|s| s.name.clone()).collect();
+        assert!(names.contains(&"users_email_key".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"users_tenant_id_idx".to_string()),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_indexes_special_column_name_is_quoted() {
+        // A column named `"user"` (reserved word) — must be quoted in
+        // the CREATE INDEX column list. The index *name* still embeds
+        // the bare token, which is fine because we double-quote it
+        // separately.
+        let schema = json!({
+            "user": {"type": "string", "index": true},
+        });
+        let out = build_create_indexes("app1", "accounts", &schema).unwrap();
+        assert_eq!(out.len(), 1);
+        let spec = &out[0];
+        assert!(spec.sql.contains(r#"("user")"#), "sql: {}", spec.sql);
+    }
+
+    #[test]
+    fn test_build_indexes_rejects_bad_collection() {
+        let schema = json!({"x": {"type": "string", "index": true}});
+        let err = build_create_indexes("app1", "users; DROP TABLE", &schema).unwrap_err();
+        assert!(matches!(err, QueryError::InvalidCollection(_)));
+    }
+
+    #[test]
+    fn test_build_indexes_rejects_bad_schema() {
+        let schema = json!({"x": {"type": "string", "index": true}});
+        let err = build_create_indexes("app; --", "users", &schema).unwrap_err();
+        assert!(matches!(err, QueryError::InvalidCollection(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Naming truncation (Postgres NAMEDATALEN = 64).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_index_name_short_form() {
+        assert_eq!(index_name("users", &["email"], true), "users_email_key");
+        assert_eq!(index_name("posts", &["author_id"], false), "posts_author_id_idx");
+    }
+
+    #[test]
+    fn test_index_name_truncates_with_deterministic_hash() {
+        // A pathological column name that exceeds 60 bytes when combined
+        // with table + suffix. The result must still be ≤ 63 bytes and
+        // deterministic across calls.
+        let long_col = "a".repeat(70);
+        let n1 = index_name("users", &[long_col.as_str()], true);
+        let n2 = index_name("users", &[long_col.as_str()], true);
+        assert_eq!(n1, n2, "name must be deterministic for idempotent re-runs");
+        assert!(
+            n1.len() <= 63,
+            "name {} exceeds Postgres NAMEDATALEN limit of 63",
+            n1
+        );
+        // Hash is 8 base32 chars at the tail.
+        let tail = &n1[n1.len() - 8..];
+        assert!(
+            tail.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "tail '{}' should be base32",
+            tail
+        );
+    }
+
+    #[test]
+    fn test_index_name_different_inputs_yield_different_hashes() {
+        let long = "x".repeat(80);
+        let n1 = index_name("users", &[long.as_str()], true);
+        let n2 = index_name("users", &[long.as_str()], false);
+        // unique vs non-unique produces a different "full" pre-hash name,
+        // hence a different hash suffix.
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn test_index_name_just_under_threshold_not_hashed() {
+        // 60-byte threshold (inclusive). Build a name whose unhashed length
+        // is exactly 60.
+        //   "t_" (2) + col (53) + "_idx" (4) = 59  → unhashed
+        //   "t_" (2) + col (54) + "_idx" (4) = 60  → unhashed
+        //   "t_" (2) + col (55) + "_idx" (4) = 61  → hashed
+        let col = "c".repeat(54);
+        let name = index_name("t", &[col.as_str()], false);
+        assert_eq!(name.len(), 60, "name: {}", name);
+        assert!(name.ends_with("_idx"), "should keep readable suffix: {}", name);
+    }
+
+    #[test]
+    fn test_index_name_just_over_threshold_is_hashed() {
+        let col = "c".repeat(55);
+        let name = index_name("t", &[col.as_str()], false);
+        assert!(name.len() <= 63);
+        assert!(
+            !name.ends_with("_idx"),
+            "over-threshold name should end with the hash, not _idx: {}",
+            name
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Silent-bug repro (the original reason A1 exists).
+    //
+    // Before this change, `t.string().unique()` set FieldDef.unique = true
+    // in the SDK but the Rust layer never emitted a unique index. This
+    // test asserts that the emitted SQL after registerModel actually
+    // contains a CREATE UNIQUE INDEX CONCURRENTLY statement targeting
+    // the `email` column.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_silent_unique_bug_is_closed() {
+        // Exactly what the SDK produces for `t.string().required().unique()`.
+        let schema = json!({
+            "email": {"type": "string", "required": true, "unique": true},
+        });
+        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        assert_eq!(out.len(), 1, "should emit a unique index for `unique: true`");
+        let spec = &out[0];
+        assert!(spec.unique, "must be marked as unique");
+        // Statement shape — the four invariants the proposal calls out:
+        //   * CREATE UNIQUE INDEX (so duplicates are actually rejected)
+        //   * CONCURRENTLY        (so writes are never blocked on build)
+        //   * IF NOT EXISTS       (so re-runs are idempotent)
+        //   * targets ("email")   (the column the marker is on)
+        assert!(spec.sql.contains("CREATE UNIQUE INDEX"), "sql: {}", spec.sql);
+        assert!(spec.sql.contains("CONCURRENTLY"), "sql: {}", spec.sql);
+        assert!(spec.sql.contains("IF NOT EXISTS"), "sql: {}", spec.sql);
+        assert!(spec.sql.contains(r#"("email")"#), "sql: {}", spec.sql);
+    }
+
+    #[test]
+    fn test_create_table_does_not_emit_inline_unique() {
+        // Regression guard: A1 moved uniqueness out of the inline
+        // column definition (which would build the underlying index
+        // under ACCESS EXCLUSIVE lock) into a separate CONCURRENT
+        // index build. CREATE TABLE / ADD COLUMN must therefore NOT
+        // contain the bare `UNIQUE` keyword for fields tagged
+        // `unique: true`.
+        let schema = json!({
+            "email": {"type": "string", "required": true, "unique": true},
+        });
+        let create = build_create_table("app1", "users", &schema).unwrap();
+        assert!(create.contains("NOT NULL"), "still emits NOT NULL: {}", create);
+        assert!(
+            !create.contains(" UNIQUE"),
+            "CREATE TABLE must not emit inline UNIQUE (would force non-concurrent index): {}",
+            create
+        );
+
+        let alter = build_add_column(
+            "app1",
+            "users",
+            "email",
+            &json!({"type": "string", "required": true, "unique": true}),
+        )
+        .unwrap();
+        assert!(
+            !alter.contains(" UNIQUE"),
+            "ADD COLUMN must not emit inline UNIQUE: {}",
+            alter
+        );
     }
 }

@@ -955,7 +955,23 @@ pub fn register_model(
     rv.set(promise.into());
 }
 
-/// Execute DDL for registerModel: CREATE SCHEMA, CREATE TABLE, ADD COLUMNs.
+/// Execute DDL for registerModel: CREATE SCHEMA, CREATE TABLE, ADD COLUMNs,
+/// then CREATE INDEX CONCURRENTLY for every `index`/`unique` field marker.
+///
+/// The work is split into two phases on purpose (see proposal A1):
+///   * **Phase A** — schema / table / columns. These are transactional-safe
+///     and run via the pool's per-statement connection (`IF NOT EXISTS`
+///     keeps the operation idempotent).
+///   * **Phase B** — index materialisation via `CREATE INDEX CONCURRENTLY`.
+///     CONCURRENTLY cannot run inside a transaction block; each statement
+///     runs on its own pool connection (no implicit `BEGIN`). For every
+///     index we check `pg_index.indisvalid` afterwards and run the
+///     INVALID-index recovery loop described in the proposal:
+///       * `23505/23502/23503/23514` (data violations) → no retry, surface
+///         a structured error so the deploy pipeline halts.
+///       * `40P01` deadlock, `53100/53200` resource pressure → drop the
+///         invalid index and retry, up to 3 times.
+///       * anything else → escalate as `validation_refused`.
 async fn exec_register_model(
     app_id: &str,
     collection: &str,
@@ -973,21 +989,21 @@ async fn exec_register_model(
     });
     let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
 
-    // 1. CREATE SCHEMA IF NOT EXISTS
+    // -------------------------------------------------------------------
+    // Phase A: schema + table + columns (idempotent, IF NOT EXISTS)
+    // -------------------------------------------------------------------
     let create_schema = query::build_create_schema(app_id);
     let empty: Vec<&str> = Vec::new();
     pool.query_text_params(&create_schema, &empty)
         .await
         .map_err(|e| format!("db: create schema failed: {e}"))?;
 
-    // 2. CREATE TABLE IF NOT EXISTS
     let create_table = query::build_create_table(app_id, collection, schema)
         .map_err(|e| format!("db: {e}"))?;
     pool.query_text_params(&create_table, &empty)
         .await
         .map_err(|e| format!("db: create table failed: {}", fmt_db_err(&e)))?;
 
-    // 3. ALTER TABLE ADD COLUMN IF NOT EXISTS for each field
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
             let alter = query::build_add_column(app_id, collection, field, def)
@@ -998,7 +1014,170 @@ async fn exec_register_model(
         }
     }
 
+    // -------------------------------------------------------------------
+    // Phase B: indexes (CONCURRENTLY, outside any transaction)
+    // -------------------------------------------------------------------
+    let indexes = query::build_create_indexes(app_id, collection, schema)
+        .map_err(|e| format!("db: {e}"))?;
+
+    for spec in indexes {
+        create_index_with_recovery(&pool, app_id, collection, &spec).await?;
+    }
+
     Ok(())
+}
+
+/// Run a single `CREATE INDEX CONCURRENTLY` with INVALID-index recovery.
+///
+/// On success, returns `Ok(())`. On a fatal data violation
+/// (`23505/23502/23503/23514`), returns a structured `validation_refused`
+/// JSON envelope (see proposal A1/A2 — the envelope shape matches A2's
+/// `validation_refused` so the deploy pipeline can consume the two paths
+/// uniformly). Transient failures (deadlock, disk pressure) are retried up
+/// to 3 times after `DROP INDEX CONCURRENTLY`.
+async fn create_index_with_recovery(
+    pool: &compio_postgres::Pool,
+    app_id: &str,
+    collection: &str,
+    spec: &query::IndexSpec,
+) -> Result<(), String> {
+    use compio_postgres::error::SqlState;
+
+    const MAX_RETRIES: u32 = 3;
+    let empty: Vec<&str> = Vec::new();
+    let qualified_idx = format!("\"{}\".\"{}\"", app_id, spec.name);
+    let drop_idx_sql = format!(
+        "DROP INDEX CONCURRENTLY IF EXISTS \"{}\".\"{}\"",
+        app_id, spec.name
+    );
+
+    for attempt in 0..=MAX_RETRIES {
+        // Issue the CREATE. Note: `IF NOT EXISTS` means an already-VALID
+        // index is a no-op; an existing INVALID one would still be a no-op
+        // here, which is why we always follow up with the indisvalid check.
+        let create_res = pool.query_text_params(&spec.sql, &empty).await;
+
+        match create_res {
+            Ok(_) => {
+                // Verify the index landed VALID.
+                let check_sql = format!(
+                    "SELECT indisvalid FROM pg_index WHERE indexrelid = '{}'::regclass",
+                    qualified_idx.replace('\'', "''")
+                );
+                let rows = pool
+                    .query_text_params(&check_sql, &empty)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "db: failed to verify index '{}' validity: {}",
+                            spec.name,
+                            fmt_db_err(&e)
+                        )
+                    })?;
+
+                let valid = rows
+                    .first()
+                    .map(|r| r.try_get::<_, bool>("indisvalid").unwrap_or(false))
+                    .unwrap_or(false);
+
+                if valid {
+                    return Ok(());
+                }
+
+                // Index exists but is INVALID. Drop and retry as a
+                // transient failure (we have no SQLSTATE to inspect — the
+                // CREATE itself succeeded so a concurrent failure left
+                // the entry behind). TODO: A3 — log to
+                // `__zeroship_migrations` with change_kind='index_retry'.
+                tracing::warn!(
+                    app_id = %app_id,
+                    collection = %collection,
+                    index = %spec.name,
+                    attempt = attempt,
+                    "index landed INVALID — dropping and retrying (TODO: A3 audit log)"
+                );
+
+                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
+                if attempt == MAX_RETRIES {
+                    return Err(format!(
+                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
+                        \"collection\":\"{}\",\"index\":\"{}\",\
+                        \"reason\":\"index repeatedly landed INVALID after {} retries\"}}",
+                        collection, spec.name, MAX_RETRIES
+                    ));
+                }
+            }
+            Err(e) => {
+                let code = e.code().cloned();
+                let fatal = matches!(
+                    code.as_ref(),
+                    Some(c) if c == &SqlState::UNIQUE_VIOLATION
+                        || c == &SqlState::NOT_NULL_VIOLATION
+                        || c == &SqlState::FOREIGN_KEY_VIOLATION
+                        || c == &SqlState::CHECK_VIOLATION
+                );
+
+                if fatal {
+                    let code_str = code.as_ref().map(|c| c.code()).unwrap_or("23xxx");
+                    let constraint_kind = if spec.unique { "unique" } else { "index" };
+                    // Drop the leftover INVALID entry so retries don't pile up.
+                    let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
+                    return Err(format!(
+                        "{{\"code\":\"unique_violation\",\"sqlstate\":\"{}\",\
+                        \"collection\":\"{}\",\"constraint\":\"{}\",\
+                        \"index\":\"{}\",\"columns\":{:?},\
+                        \"message\":\"{}\"}}",
+                        code_str,
+                        collection,
+                        constraint_kind,
+                        spec.name,
+                        spec.columns,
+                        fmt_db_err(&e).replace('"', "\\\"")
+                    ));
+                }
+
+                let transient = matches!(
+                    code.as_ref(),
+                    Some(c) if c == &SqlState::T_R_DEADLOCK_DETECTED
+                        || c == &SqlState::DISK_FULL
+                        || c == &SqlState::OUT_OF_MEMORY
+                );
+
+                tracing::warn!(
+                    app_id = %app_id,
+                    collection = %collection,
+                    index = %spec.name,
+                    attempt = attempt,
+                    sqlstate = ?code.as_ref().map(|c| c.code()),
+                    transient = transient,
+                    "CREATE INDEX CONCURRENTLY failed — TODO: A3 audit log"
+                );
+
+                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
+
+                if !transient || attempt == MAX_RETRIES {
+                    return Err(format!(
+                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
+                        \"collection\":\"{}\",\"index\":\"{}\",\
+                        \"sqlstate\":\"{}\",\"attempts\":{},\
+                        \"message\":\"{}\"}}",
+                        collection,
+                        spec.name,
+                        code.as_ref().map(|c| c.code()).unwrap_or("unknown"),
+                        attempt + 1,
+                        fmt_db_err(&e).replace('"', "\\\"")
+                    ));
+                }
+                // else: fall through to next loop iteration
+            }
+        }
+    }
+
+    // Should be unreachable — the loop returns inside.
+    Err(format!(
+        "db: create index '{}' exhausted retry budget without a terminal result",
+        spec.name
+    ))
 }
 
 // ---------------------------------------------------------------------------

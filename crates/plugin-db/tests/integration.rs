@@ -837,3 +837,116 @@ async fn aggregate_having_postgres_docs_example() {
     assert_eq!(rows[0]["cnt"], 3);
     assert_eq!(rows[0]["max_temp"], 41);
 }
+
+// ---------------------------------------------------------------------------
+// 22. A1 — `t.string().unique()` actually creates a unique index in Postgres.
+//
+// Pre-A1: SDK set FieldDef.unique = true, Rust emitted no index. Silent bug.
+// Post-A1: build_create_indexes emits CREATE UNIQUE INDEX CONCURRENTLY; this
+// test executes it end-to-end and verifies the index exists in pg_index
+// with the deterministic name, then asserts the duplicate-row insert fails
+// with SQLSTATE 23505 (unique_violation).
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn a1_unique_index_actually_enforces_uniqueness() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+
+    // Fresh schema + table — `build_create_table` is the production path.
+    let app = "a1_test";
+    let collection = "users";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&zeroship_plugin_db::query::build_create_schema(app), &[])
+        .await
+        .unwrap();
+
+    let schema = json!({
+        "email": {"type": "string", "required": true, "unique": true},
+        "handle": {"type": "string", "index": true},
+    });
+
+    let create_table = build_create_table(app, collection, &schema).unwrap();
+    pool.execute(&create_table, &[]).await.unwrap();
+
+    // Generate and execute the new index DDL.
+    let indexes =
+        zeroship_plugin_db::query::build_create_indexes(app, collection, &schema).unwrap();
+    assert_eq!(indexes.len(), 2, "expected 2 indexes, got: {indexes:?}");
+
+    for spec in &indexes {
+        pool.execute(&spec.sql, &[]).await.unwrap_or_else(|e| {
+            panic!("failed to run {}: {e}", spec.sql);
+        });
+    }
+
+    // Look up pg_index entries on the new schema.
+    let q = format!(
+        "SELECT c.relname AS idx_name, i.indisunique, i.indisvalid
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = '{app}'
+         ORDER BY c.relname"
+    );
+    let rows = pool.query_text_params(&q, &[]).await.unwrap();
+    // Two indexes (we don't count the PK; SERIAL PRIMARY KEY also makes an
+    // index, so total is at least 3 — but we assert specifically on names).
+    let names: Vec<(String, bool, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<_, String>("idx_name"),
+                r.get::<_, bool>("indisunique"),
+                r.get::<_, bool>("indisvalid"),
+            )
+        })
+        .collect();
+
+    let email_key = names.iter().find(|(n, _, _)| n == "users_email_key");
+    let handle_idx = names.iter().find(|(n, _, _)| n == "users_handle_idx");
+    assert!(
+        email_key.is_some(),
+        "expected users_email_key, found: {names:?}"
+    );
+    assert!(
+        handle_idx.is_some(),
+        "expected users_handle_idx, found: {names:?}"
+    );
+    let (_, unique, valid) = email_key.unwrap();
+    assert!(*unique, "users_email_key should be unique");
+    assert!(*valid, "users_email_key should be valid");
+    let (_, unique2, valid2) = handle_idx.unwrap();
+    assert!(!*unique2, "users_handle_idx should NOT be unique");
+    assert!(*valid2, "users_handle_idx should be valid");
+
+    // -----------------------------------------------------------------------
+    // The silent-bug live repro: insert two rows with the same email and
+    // assert the second one fails with SQLSTATE 23505.
+    // -----------------------------------------------------------------------
+    let ins1 = build_insert(app, collection, &json!({"email": "a@x.com"})).unwrap();
+    let p1: Vec<&str> = ins1.params.iter().map(String::as_str).collect();
+    pool.query_text_params(&ins1.sql, &p1).await.unwrap();
+
+    let ins2 = build_insert(app, collection, &json!({"email": "a@x.com"})).unwrap();
+    let p2: Vec<&str> = ins2.params.iter().map(String::as_str).collect();
+    let err = pool.query_text_params(&ins2.sql, &p2).await.unwrap_err();
+    let code = err.code().map(|c| c.code().to_string()).unwrap_or_default();
+    assert_eq!(
+        code, "23505",
+        "second insert with duplicate email should fail with 23505 unique_violation, got: {err}"
+    );
+
+    // -----------------------------------------------------------------------
+    // Idempotency — re-running build_create_indexes + executing the SQL
+    // again must be a no-op (the IF NOT EXISTS + deterministic naming
+    // contract).
+    // -----------------------------------------------------------------------
+    for spec in &indexes {
+        pool.execute(&spec.sql, &[]).await.unwrap_or_else(|e| {
+            panic!("idempotent re-run failed for {}: {e}", spec.sql);
+        });
+    }
+}

@@ -11,6 +11,12 @@ compio = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 v8 = { workspace = true }
+# `tracing` for INVALID-index recovery logging until A3 ships the
+# `__zeroship_migrations` audit table. `sha2` produces a deterministic
+# 8-char base32 suffix when the generated index name exceeds 60 bytes
+# (Postgres NAMEDATALEN=64 minus headroom).
+tracing = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
