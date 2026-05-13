@@ -5,6 +5,10 @@ export { createDb } from "./db.js";
 export { t, naming, schema } from "./types.js";
 export { ValidationError, OptimisticLockError } from "./errors.js";
 
+// C1 / P8a — reactive queries (in-process broker)
+export { subscribe } from "./subscribe.js";
+export type { Subscription, SubscriptionEvent } from "./subscribe.js";
+
 // Types
 export type { Db, TxCollection, TxQuery, TransactionOptions } from "./db.js";
 export type { FieldDef, FieldDefaultValue, PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, InferType, IsolationLevel, Id, FkAction, RefOptions } from "./types.js";

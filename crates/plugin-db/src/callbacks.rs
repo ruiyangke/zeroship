@@ -216,6 +216,69 @@ async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
     Ok(rows_to_json(&rows))
 }
 
+/// Execute a mutation, then emit a [`crate::wal_consumer::emit_local`]
+/// event into the in-process broker on success.
+///
+/// This is the P8a coarse-grained reactive-query bridge: every
+/// successful INSERT/UPDATE/DELETE produces one or more events on
+/// `(app_id, collection)` that wake any matching subscribers in the
+/// same isolate.
+///
+/// On error the broker is untouched — partial writes produce no
+/// events. The error message is forwarded verbatim.
+///
+/// `op` selects the [`crate::broker::ChangeOp`] tagged on the event;
+/// the caller knows whether it called `build_insert`, `build_update_one`,
+/// `build_delete_one`, etc. so we don't try to infer it from the SQL.
+///
+/// Future read-set narrowing (P8b) extends this helper to populate
+/// `changed_columns` from the SET clause and `pk` from the RETURNING
+/// row. For P8a we collect what's already in the result JSON.
+async fn exec_mutation_with_emit(
+    bq: BuiltQuery,
+    app_id: &str,
+    collection: &str,
+    op: crate::broker::ChangeOp,
+) -> Result<String, String> {
+    let json = exec_mutation(bq).await?;
+    // Parse the returned JSON to derive (pk per row, count of rows).
+    // The query builders all use RETURNING * (insert/update) or
+    // RETURNING id (delete) — see `query::build_*`. We pull `id` as
+    // i64 when present and treat the missing case as a non-affecting
+    // mutation (publish a single event with pk=None so subscribers
+    // can still re-fetch).
+    let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+    if rows.is_empty() {
+        // No rows affected — no broker event. UPDATE with a non-
+        // matching filter falls here; subscribers should not see a
+        // spurious change.
+        return Ok(json);
+    }
+    for row in &rows {
+        let pk = row
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .or_else(|| row.get("_id").and_then(|v| v.as_i64()));
+        // changed_columns: the keys present in the returned row,
+        // minus the system columns we never want to report. For
+        // INSERT this is "every declared column" — for UPDATE it's
+        // the post-image, which is a superset of what changed.
+        // Filtering down to "what changed" requires a before/after
+        // diff that we don't have here; P8b will compute it from the
+        // mutation's SET clause directly.
+        let columns: Vec<String> = match row {
+            Value::Object(m) => m
+                .keys()
+                .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        crate::wal_consumer::emit_local(app_id, collection, op, pk, columns);
+    }
+    Ok(json)
+}
+
 /// Convert rows to a JSON array string.
 fn rows_to_json(rows: &[compio_postgres::Row]) -> String {
     let arr: Vec<Value> = rows.iter().map(row_to_json).collect();
@@ -480,8 +543,17 @@ pub fn insert(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Insert,
+        )
+        .await
+        {
             Ok(json) => {
                 // Return the first (inserted) row
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
@@ -535,8 +607,17 @@ pub fn update_one(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Update,
+        )
+        .await
+        {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
@@ -586,8 +667,17 @@ pub fn delete_one(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Delete,
+        )
+        .await
+        {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
@@ -636,8 +726,17 @@ pub fn insert_many(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Insert,
+        )
+        .await
+        {
             Ok(value) => OpResult::Completed { op_id, value, request_id },
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
@@ -795,8 +894,17 @@ pub fn update_many(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Update,
+        )
+        .await
+        {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let n = arr.len();
@@ -846,8 +954,17 @@ pub fn delete_many(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Delete,
+        )
+        .await
+        {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let n = arr.len();
@@ -1810,8 +1927,21 @@ pub fn upsert(
         }
     };
 
+    let coll_for_emit = collection.clone();
+    let app_for_emit = app_id.clone();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_mutation(bq).await {
+        // Upsert can be either INSERT (new row) or UPDATE (existing).
+        // We tag as Update because the subscriber's reaction is the
+        // same — re-fetch. The proposal's read-set narrowing (P8b)
+        // will distinguish; P8a doesn't need to.
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Update,
+        )
+        .await
+        {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
@@ -2041,6 +2171,273 @@ pub fn migration_reset(
         };
         match crate::migrations::exec_reset(&pool, &app_id, &name, &collection).await {
             Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+// ===========================================================================
+// C1 (P8a) — reactive queries via the in-process subscription broker
+//
+// JS surface (defined in sdks/db/src/subscribe.ts):
+//
+//   const sub = env.db.subscribe(collection)          // → handle id (number)
+//   const msg = await env.db.subscribePoll(handle)    // → JSON event
+//   env.db.subscribeClose(handle)                     // synchronous
+//   await env.db.replicationSetup()                   // → JSON setup outcome
+//   await env.db.replicationWatchdog()                // → JSON [{slot,...}]
+//   await env.db.replicationDropAbandoned(seconds)    // → JSON [dropped slot names]
+//
+// The (handle, poll, close) split keeps each native call short-lived,
+// matching the existing promise-completion model. The AsyncIterable
+// shim in JS wraps the three primitives into a `for await ... of`
+// loop.
+// ===========================================================================
+
+// Per-isolate subscription registry. Maps handle → Subscription so
+// `subscribePoll(handle)` and `subscribeClose(handle)` can locate
+// the broker entry without keeping a JS-side reference that would
+// pin a V8 external.
+//
+// Handle numeric ids are monotonic — `next_handle_id` never recycles.
+// Subscriptions are auto-removed when the iterator drains the
+// `Closed` message (in `subscribe_poll`).
+thread_local! {
+    static SUBSCRIPTIONS: std::cell::RefCell<std::collections::HashMap<u32, crate::broker::Subscription>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    static NEXT_HANDLE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
+/// `zeroship.db.subscribe(collection)` → number (handle id)
+///
+/// Synchronous: registers a subscription on the thread-local broker
+/// and returns the integer handle. The handle is used by
+/// [`subscribe_poll`] to await the next event and by
+/// [`subscribe_close`] to terminate.
+pub fn subscribe(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    let sub = crate::broker::subscribe(&app_id, &collection);
+    let handle = NEXT_HANDLE.with(|c| {
+        let id = c.get();
+        c.set(id.wrapping_add(1).max(1));
+        id
+    });
+    SUBSCRIPTIONS.with(|m| {
+        m.borrow_mut().insert(handle, sub);
+    });
+
+    // Return the handle as a Number (u32 fits in V8 Number losslessly).
+    rv.set(v8::Number::new(scope, f64::from(handle)).into());
+}
+
+/// `zeroship.db.subscribePoll(handle)` → Promise<eventJson|null>
+///
+/// Resolves with the next pending event JSON for the given handle. If
+/// the queue is empty, the promise stays pending until an event
+/// arrives or the subscription closes. On `Closed` the handle is
+/// auto-removed and the promise resolves with `{"kind":"closed"}`;
+/// subsequent polls on a missing handle resolve with `null`.
+///
+/// ## Wakeup model
+///
+/// We can't directly hook the Waker into the V8 event loop from the
+/// broker side (the Waker would need to land back on the isolate
+/// thread, and the spawned-op pump is the canonical re-entry point).
+/// Instead, the polled future uses [`futures_util::future::poll_fn`]
+/// to register the broker's Waker — the broker's `push` wakes the
+/// future, which the spawned-op pump then re-polls. The pump already
+/// runs on the same thread, so there's no cross-thread synchronisation.
+pub fn subscribe_poll(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(handle_n) = get_i64_arg(scope, &args, 0) else {
+        let msg = v8::String::new(scope, "db: missing required argument 'handle'").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    };
+    let handle = handle_n as u32;
+
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // Look up the subscription. If it's gone (already closed
+        // and reaped), resolve with null so the iterator terminates
+        // cleanly.
+        let Some(sub) = SUBSCRIPTIONS.with(|m| m.borrow().get(&handle).cloned()) else {
+            return OpResult::Completed {
+                op_id,
+                value: "null".into(),
+                request_id,
+            };
+        };
+
+        // Polling loop — drain via poll_fn so the broker's wake_by_ref
+        // re-schedules us.
+        let msg = std::future::poll_fn(|cx| {
+            if let Some(m) = sub.pop() {
+                return std::task::Poll::Ready(m);
+            }
+            if sub.is_closed() && sub.is_terminal() {
+                return std::task::Poll::Ready(crate::broker::SubscriptionMessage::Closed);
+            }
+            sub.register_waker(cx.waker().clone());
+            // Re-check in case a push raced with register_waker.
+            if let Some(m) = sub.pop() {
+                return std::task::Poll::Ready(m);
+            }
+            std::task::Poll::Pending
+        })
+        .await;
+
+        // If we're returning Closed, remove the handle.
+        if matches!(msg, crate::broker::SubscriptionMessage::Closed) {
+            SUBSCRIPTIONS.with(|m| {
+                m.borrow_mut().remove(&handle);
+            });
+        }
+
+        let value = crate::broker::message_to_json(&msg);
+        OpResult::Completed { op_id, value, request_id }
+    }));
+
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.subscribeClose(handle)` → undefined
+///
+/// Synchronous. Closes the subscription and removes the handle from
+/// the registry. Pending polls resolve with `{"kind":"closed"}`.
+pub fn subscribe_close(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let Some(handle_n) = get_i64_arg(scope, &args, 0) else {
+        let msg = v8::String::new(scope, "db: missing required argument 'handle'").unwrap();
+        let exc = v8::Exception::type_error(scope, msg);
+        scope.throw_exception(exc);
+        return;
+    };
+    let handle = handle_n as u32;
+
+    let sub = SUBSCRIPTIONS.with(|m| m.borrow_mut().remove(&handle));
+    if let Some(s) = sub {
+        s.close();
+    }
+}
+
+/// `zeroship.db.replicationSetup()` → Promise<SetupOutcome JSON>
+///
+/// Idempotently provisions the per-app publication + logical
+/// replication slot. Returns the slot/publication names and current
+/// `confirmed_flush_lsn`. Operator-level surface — apps don't call
+/// this; the deploy orchestrator or the control plane does.
+pub fn replication_setup(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    // Optional app_id override (operator path); default to current
+    // app context.
+    let app_id = get_string_arg(scope, &args, 0).unwrap_or_else(|| get_app_id(&state));
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::replication::ensure_publication_and_slot(&pool, &app_id).await {
+            Ok(out) => OpResult::Completed {
+                op_id,
+                value: out.to_json(),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.replicationWatchdog()` → Promise<SlotHealth[] JSON>
+pub fn replication_watchdog(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::replication::watchdog_query(&pool).await {
+            Ok(rows) => OpResult::Completed {
+                op_id,
+                value: crate::replication::watchdog_to_json(&rows),
+                request_id,
+            },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.replicationDropAbandoned(inactiveSeconds)` → Promise<string[] JSON>
+pub fn replication_drop_abandoned(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let inactive_seconds = get_i64_arg(scope, &args, 0).unwrap_or(3600);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::replication::drop_abandoned_slots(&pool, inactive_seconds).await {
+            Ok(names) => OpResult::Completed {
+                op_id,
+                value: serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+                request_id,
+            },
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));

@@ -2433,3 +2433,238 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "expected FK validation failure, got: {err}"
     );
 }
+
+// ===========================================================================
+// C1 / P8a — replication slot + publication setup, watchdog, broker plumb
+//
+// These tests exercise the Rust-side primitives that the V8 layer
+// exposes as `zeroship.db.replicationSetup` / `replicationWatchdog` /
+// `replicationDropAbandoned` and the in-process broker.
+//
+// Tests that need `wal_level=logical` skip themselves when the
+// running Postgres is `replica`. The runbook
+// (`docs/runbooks/local-k3s-crun-krun.md` adjacent) documents how to
+// reconfigure the dev container; CI's `pg-test` image is started with
+// `-c wal_level=logical` once the rollout lands.
+// ===========================================================================
+
+/// True if the running cluster is configured for logical decoding.
+async fn pg_has_logical_wal(pool: &Pool) -> bool {
+    let rows = pool
+        .query_text_params("SHOW wal_level", &[])
+        .await
+        .unwrap();
+    let v: String = rows
+        .first()
+        .map(|r| r.get::<_, String>(0))
+        .unwrap_or_default();
+    v == "logical"
+}
+
+/// Drop any leftover slot / publication for the given app, so tests
+/// can re-run from a clean state. Tolerates "does not exist".
+async fn c1_cleanup(pool: &Pool, app: &str) {
+    let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
+    let slot = zeroship_plugin_db::replication::slot_name(app).unwrap();
+    let _ = pool
+        .execute(&format!(r#"DROP PUBLICATION IF EXISTS "{pub_name}""#), &[])
+        .await;
+    let _ = pool
+        .query_text_params(
+            "SELECT pg_drop_replication_slot($1) FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await;
+    let _ = pool
+        .execute(&format!(r#"DROP SCHEMA IF EXISTS "{app}" CASCADE"#), &[])
+        .await;
+}
+
+#[compio::test]
+async fn c1_setup_creates_publication_and_slot_idempotently() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping — server wal_level is not 'logical'");
+        return;
+    }
+
+    let app = "c1_setup_app";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+
+    // First call creates.
+    let first = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.slot, format!("__zs_slot_{app}"));
+    assert_eq!(first.publication, format!("__zs_pub_{app}"));
+
+    // Second call must observe the existing slot and return created=false.
+    let second = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    assert!(!second.created);
+    assert_eq!(second.slot, first.slot);
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn c1_watchdog_reports_new_slot() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping — server wal_level is not 'logical'");
+        return;
+    }
+
+    let app = "c1_watchdog_app";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+
+    let slots = zeroship_plugin_db::replication::watchdog_query(&pool)
+        .await
+        .unwrap();
+    let me = slots
+        .iter()
+        .find(|s| s.slot_name == format!("__zs_slot_{app}"));
+    assert!(me.is_some(), "watchdog must report our slot");
+    let me = me.unwrap();
+    // Newly created slot — not yet attached, so `active=false`.
+    assert!(!me.active);
+    // `wal_status` should be present and one of the documented values.
+    let status = me.wal_status.as_deref().unwrap_or("");
+    assert!(
+        matches!(status, "reserved" | "extended" | "unreserved" | "lost"),
+        "unexpected wal_status: {status:?}"
+    );
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn c1_drop_abandoned_reaps_inactive_slot() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping — server wal_level is not 'logical'");
+        return;
+    }
+
+    let app = "c1_abandoned_app";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    let setup = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    assert!(setup.created);
+
+    // The slot is brand-new and inactive (no consumer). Run the GC
+    // with a 0-byte floor — must reap.
+    let dropped = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, 0)
+        .await
+        .unwrap();
+    assert!(
+        dropped.contains(&format!("__zs_slot_{app}")),
+        "expected to reap our slot, got: {dropped:?}"
+    );
+
+    // A second sweep with the same threshold must not error.
+    let _ = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, 0)
+        .await
+        .unwrap();
+
+    c1_cleanup(&pool, app).await;
+}
+
+#[compio::test]
+async fn c1_setup_resumes_at_existing_lsn_across_restart() {
+    // "Worker restart" is simulated by tearing down the Pool (closes
+    // all connections — equivalent to a worker process exit) and
+    // re-running `ensure_publication_and_slot`. The slot survives
+    // and reports the same `confirmed_flush_lsn`.
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 2).await.unwrap();
+    if !pg_has_logical_wal(&pool).await {
+        eprintln!("Skipping — server wal_level is not 'logical'");
+        return;
+    }
+
+    let app = "c1_restart_app";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+
+    let first = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool, app)
+        .await
+        .unwrap();
+    assert!(first.created);
+    let first_slot = first.slot.clone();
+
+    // Simulate worker restart by dropping the pool and opening a new one.
+    drop(pool);
+    let pool2 = Pool::connect(&url, 2).await.unwrap();
+    let resumed = zeroship_plugin_db::replication::ensure_publication_and_slot(&pool2, app)
+        .await
+        .unwrap();
+    assert!(!resumed.created, "second call after 'restart' must observe existing slot");
+    assert_eq!(resumed.slot, first_slot);
+
+    c1_cleanup(&pool2, app).await;
+}
+
+// NOTE: a "publication-only on wal_level=replica" sanity test was
+// considered but removed: Postgres emits a NoticeResponse
+// (`wal_level is insufficient to publish logical changes`) on CREATE
+// PUBLICATION that exposes a deferred-notice handling path in
+// compio-postgres which we have not yet exercised under load — the
+// notice can block subsequent `setup()` calls inside the same test
+// process. The publication-creation code path is exercised by the
+// `c1_setup_creates_publication_and_slot_idempotently` test on a
+// logical-WAL server. Re-introduce this test alongside a
+// compio-postgres notice-handling audit (separate work).
+
+#[compio::test]
+async fn c1_broker_event_delivered_for_insert_via_emit() {
+    // End-to-end of the P8a local-emit path: the broker, attached
+    // on the same thread the test runs on, receives an insert event
+    // when `emit_local` is called. No Postgres needed — the broker
+    // is in-process.
+
+    // Clean slate.
+    zeroship_plugin_db::broker::drop_app(None);
+    let app = "c1_emit_app";
+    let sub = zeroship_plugin_db::broker::subscribe(app, "messages");
+
+    zeroship_plugin_db::wal_consumer::emit_local(
+        app,
+        "messages",
+        zeroship_plugin_db::broker::ChangeOp::Insert,
+        Some(7),
+        vec!["title".into()],
+    );
+
+    let msg = sub.pop().expect("expected an event");
+    match msg {
+        zeroship_plugin_db::broker::SubscriptionMessage::Change(ev) => {
+            assert_eq!(ev.collection, "messages");
+            assert_eq!(ev.pk, Some(7));
+            assert_eq!(ev.op, zeroship_plugin_db::broker::ChangeOp::Insert);
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    sub.close();
+    zeroship_plugin_db::broker::drop_app(None);
+}

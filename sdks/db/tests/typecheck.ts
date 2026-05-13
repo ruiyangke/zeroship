@@ -422,4 +422,30 @@ const lkBad: LitType = "logout";
 void lk;
 void lkBad;
 
+// === Phase 8a — subscribe() return type ===
+//
+// `subscribe(collection)` returns a `Subscription`, which is an
+// AsyncIterable<SubscriptionEvent>. The iterator must yield the
+// three-variant union { kind: "change" | "resync" | "closed" }.
+import { subscribe, type Subscription, type SubscriptionEvent } from "../src/subscribe.js";
+
+async function testSubscribeTypes() {
+  const sub: Subscription = subscribe("messages");
+  const h: number = sub.handle;
+  void h;
+  sub.close();
+  for await (const ev of sub) {
+    const e: SubscriptionEvent = ev;
+    if (e.kind === "change") {
+      const op: "insert" | "update" | "delete" = e.op;
+      void op;
+    } else if (e.kind === "resync") {
+      // no other fields
+    } else if (e.kind === "closed") {
+      // no other fields
+    }
+  }
+}
+void testSubscribeTypes;
+
 console.log("All type checks passed!");

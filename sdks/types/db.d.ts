@@ -269,4 +269,61 @@ interface ZeroshipDb {
    * dead_letter_pks → null). Used after a `cancelled` or `failed` run.
    */
   migrationReset(name: string, collection: string): Promise<string>;
+
+  // --- C1 / P8a — reactive queries (in-process broker) ---
+
+  /**
+   * Open a subscription on `collection`. Returns a numeric handle.
+   * Synchronous — calling it does not allocate any Postgres state;
+   * the handle merely registers a slot in the per-isolate broker
+   * routing table. Pair with [`subscribePoll`] and [`subscribeClose`].
+   *
+   * Today the events come from local mutations in the same isolate
+   * (coarse-grained, every change to `collection`). The proposal's
+   * read-set narrowing + cross-worker WAL pickup are P8b / P8a.2.
+   */
+  subscribe(collection: string): number;
+
+  /**
+   * Await the next pending event for `handle`. The promise stays
+   * pending until an event arrives or the subscription is closed.
+   *
+   * Resolved value is one of:
+   *
+   * - `{"kind":"change", "op":"insert"|"update"|"delete",
+   *    "collection":..., "pk": number|null, "columns": string[]}`
+   * - `{"kind":"resync"}` — bounded queue overflowed; the client
+   *   should re-fetch and discard cached results
+   * - `{"kind":"closed"}` — subscription was closed; iterator
+   *   should terminate
+   * - `null` — handle no longer exists (already closed and reaped)
+   */
+  subscribePoll(handle: number): Promise<string | null>;
+
+  /** Close `handle`. Any pending poll resolves with `{"kind":"closed"}`. */
+  subscribeClose(handle: number): void;
+
+  /**
+   * Operator-only: idempotently provision the per-app
+   * Postgres publication + logical replication slot. Returns a
+   * JSON `SetupOutcome` (`{publication, slot, created, confirmedFlushLsn}`).
+   *
+   * Requires `wal_level=logical` on the server.
+   */
+  replicationSetup(appId?: string): Promise<string>;
+
+  /**
+   * Operator-only: run the C1 watchdog query against
+   * `pg_replication_slots`. Returns a JSON array of slot health
+   * records `[{slot, active, restartLsn, confirmedFlushLsn, lagBytes, walStatus}]`.
+   */
+  replicationWatchdog(): Promise<string>;
+
+  /**
+   * Operator-only: drop replication slots that have been
+   * inactive for at least `inactiveSeconds`. Returns the names of
+   * dropped slots as a JSON array. Apps whose slot was reaped see a
+   * `resync` event on next subscriber attach.
+   */
+  replicationDropAbandoned(inactiveSeconds?: number): Promise<string>;
 }

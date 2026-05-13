@@ -18,10 +18,13 @@ use compio_postgres::{Client, Pool};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 pub mod audit;
+pub mod broker;
 pub mod callbacks;
 pub mod diff;
 pub mod migrations;
 pub mod query;
+pub mod replication;
+pub mod wal_consumer;
 
 // ---------------------------------------------------------------------------
 // Thread-local state
@@ -178,6 +181,14 @@ impl NativePlugin for DbPlugin {
         r.add("migrationStatus", callbacks::migration_status);
         r.add("migrationCancel", callbacks::migration_cancel);
         r.add("migrationReset", callbacks::migration_reset);
+        // C1 / P8a — reactive queries (in-process broker;
+        // streaming WAL consumer deferred to P8a.2)
+        r.add("subscribe", callbacks::subscribe);
+        r.add("subscribePoll", callbacks::subscribe_poll);
+        r.add("subscribeClose", callbacks::subscribe_close);
+        r.add("replicationSetup", callbacks::replication_setup);
+        r.add("replicationWatchdog", callbacks::replication_watchdog);
+        r.add("replicationDropAbandoned", callbacks::replication_drop_abandoned);
     }
 }
 
