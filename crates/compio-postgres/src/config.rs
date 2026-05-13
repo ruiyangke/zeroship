@@ -87,6 +87,30 @@ pub enum LoadBalanceHosts {
     Random,
 }
 
+/// Replication mode for the connection.
+///
+/// Setting this configures the `replication` startup parameter, which
+/// enables the Postgres streaming-replication protocol. Once the
+/// connection enters replication mode the regular `query` / `execute`
+/// surface is **not used**; replication commands (`IDENTIFY_SYSTEM`,
+/// `START_REPLICATION`, `CREATE_REPLICATION_SLOT`, …) are issued via
+/// the simple-query path and the connection returns
+/// `CopyBothResponse` for `START_REPLICATION`.
+///
+/// See: https://www.postgresql.org/docs/16/protocol-replication.html
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReplicationMode {
+    /// Physical replication. Streams the raw WAL — not used by
+    /// zeroship; documented for completeness because the startup
+    /// parameter value is just `replication=true`.
+    Physical,
+    /// Logical replication via a logical-decoding output plugin
+    /// (we use `pgoutput`). Startup parameter is
+    /// `replication=database`.
+    Logical,
+}
+
 /// A host specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Host {
@@ -234,6 +258,7 @@ pub struct Config {
     pub(crate) target_session_attrs: TargetSessionAttrs,
     pub(crate) channel_binding: ChannelBinding,
     pub(crate) load_balance_hosts: LoadBalanceHosts,
+    pub(crate) replication: Option<ReplicationMode>,
 }
 
 impl Default for Config {
@@ -268,6 +293,7 @@ impl Config {
             target_session_attrs: TargetSessionAttrs::Any,
             channel_binding: ChannelBinding::Prefer,
             load_balance_hosts: LoadBalanceHosts::Disable,
+            replication: None,
         }
     }
 
@@ -563,6 +589,25 @@ impl Config {
         self.load_balance_hosts
     }
 
+    /// Enable replication mode on this connection.
+    ///
+    /// The startup handshake includes `replication=<value>`, putting the
+    /// server in walsender mode. After authentication the connection
+    /// accepts replication commands (`IDENTIFY_SYSTEM`,
+    /// `START_REPLICATION`, …) via [`Client::simple_query`] /
+    /// [`Client::copy_both_simple`]; regular query pipelining is not
+    /// supported on a replication connection.
+    pub fn replication(&mut self, mode: ReplicationMode) -> &mut Config {
+        self.replication = Some(mode);
+        self
+    }
+
+    /// Gets the replication mode, if one has been set with the
+    /// [`Config::replication`] method.
+    pub fn get_replication(&self) -> Option<ReplicationMode> {
+        self.replication
+    }
+
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
         match key {
             "user" => {
@@ -710,6 +755,23 @@ impl Config {
                     }
                 };
                 self.load_balance_hosts(load_balance_hosts);
+            }
+            "replication" => {
+                // libpq accepts `database`, `true`, `on`, `1`, `yes`,
+                // or `false`/`off`/`0`/`no`. We accept the three the
+                // streaming-replication protocol RFC actually uses
+                // (`database` / `true` / `false`) plus a permissive
+                // off-equivalent set, matching libpq:
+                // https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNECT-REPLICATION
+                let mode = match value {
+                    "database" => Some(ReplicationMode::Logical),
+                    "true" | "on" | "1" | "yes" => Some(ReplicationMode::Physical),
+                    "false" | "off" | "0" | "no" => None,
+                    _ => {
+                        return Err(Error::config_parse(Box::new(InvalidValue("replication"))));
+                    }
+                };
+                self.replication = mode;
             }
             key => {
                 return Err(Error::config_parse(Box::new(UnknownOption(

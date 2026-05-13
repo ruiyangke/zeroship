@@ -19,7 +19,7 @@
 use crate::buf_stream::BufStream;
 use crate::client::Client;
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
-use crate::config::{self, Config};
+use crate::config::{self, Config, ReplicationMode};
 use crate::connect_tls::connect_tls;
 use crate::connection::Connection;
 use crate::maybe_tls_stream::MaybeTlsStream;
@@ -167,6 +167,45 @@ where
     Ok((client, connection))
 }
 
+/// Run the regular startup + auth + parameter-read handshake against
+/// an already-TLS-wrapped stream, but return the post-handshake stream
+/// (and parameter map) instead of wiring it into a Client/Connection
+/// pair.
+///
+/// Used by [`crate::replication::connect_replication`] — the
+/// replication-mode connection does NOT spawn a `Connection::run` task
+/// because the wire protocol after `START_REPLICATION` is bespoke
+/// (`CopyBothResponse` is not in postgres-protocol's tag list).
+///
+/// This is exported `pub(crate)` so the replication module can reuse
+/// the handshake state machine without duplicating ~250 LOC of
+/// auth/SASL code.
+pub(crate) async fn handshake_for_replication<S, T>(
+    stream: MaybeTlsStream<S, T>,
+    config: &Config,
+) -> Result<(MaybeTlsStream<S, T>, std::collections::HashMap<String, String>), Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: crate::tls::TlsStream + Unpin,
+{
+    let mut handshake = Handshake {
+        stream: BufStream::new(stream),
+        pending: BackendMessages::empty(),
+        delayed: VecDeque::new(),
+    };
+
+    let user = match config.get_user() {
+        Some(user) => Cow::Borrowed(user),
+        None => Cow::Owned(whoami::username().map_err(|err| Error::io(err.into()))?),
+    };
+
+    startup(&mut handshake, config, &user).await?;
+    authenticate(&mut handshake, config, &user).await?;
+    let (_pid, _key, parameters) = read_info(&mut handshake).await?;
+
+    Ok((handshake.stream.into_inner(), parameters))
+}
+
 async fn startup<S, T>(
     handshake: &mut Handshake<S, T>,
     config: &Config,
@@ -186,6 +225,22 @@ where
     }
     if let Some(application_name) = config.get_application_name() {
         params.push(("application_name", application_name));
+    }
+    // Streaming-replication protocol opt-in. `replication=database`
+    // selects the logical-decoding walsender (required for pgoutput +
+    // START_REPLICATION SLOT ... LOGICAL); `replication=true` selects
+    // the physical walsender. Either value puts the connection in
+    // walsender mode, restricting the post-handshake grammar to the
+    // replication subset documented in
+    // https://www.postgresql.org/docs/16/protocol-replication.html.
+    if let Some(mode) = config.get_replication() {
+        params.push((
+            "replication",
+            match mode {
+                ReplicationMode::Logical => "database",
+                ReplicationMode::Physical => "true",
+            },
+        ));
     }
 
     let mut buf = BytesMut::new();

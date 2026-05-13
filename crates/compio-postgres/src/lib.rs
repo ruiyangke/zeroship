@@ -117,6 +117,7 @@ mod socket;
 mod statement;
 pub mod tls;
 mod to_statement;
+pub mod replication;
 mod transaction;
 mod transaction_builder;
 pub mod types;
