@@ -3,7 +3,7 @@
 // Primary API
 export { createDb } from "./db.js";
 export { t, naming, schema } from "./types.js";
-export { ValidationError } from "./errors.js";
+export { ValidationError, OptimisticLockError } from "./errors.js";
 
 // Types
 export type { Db, TxCollection, TxQuery, TransactionOptions } from "./db.js";

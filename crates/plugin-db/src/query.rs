@@ -547,7 +547,16 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         Some("number") => "NUMERIC",
         Some("boolean") => "BOOLEAN",
         Some("date") => "TIMESTAMPTZ",
+        // D3 — `t.calendarDate()` is a `YYYY-MM-DD` value with no time
+        // and no timezone, distinct from `t.date()` (TIMESTAMPTZ stored
+        // as Unix-ms numbers at the SDK layer).
+        Some("calendarDate") => "DATE",
         Some("json") => "JSONB",
+        // D2 — `t.object({...})` declares a JSONB column. The nested
+        // shape is enforced application-side by `validate.ts`; no
+        // CHECK constraint is emitted (Postgres JSONB CHECKs are
+        // expressible but expensive at write time, see proposal D2).
+        Some("object") => "JSONB",
         Some("array") => "JSONB",
         Some("ref") => "INTEGER",
         _ => "TEXT",
@@ -588,14 +597,14 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
                     parts.push(format!("DEFAULT {b}"));
                 }
             }
-            Some("json") => parts.push("DEFAULT '{}'::jsonb".to_string()),
+            Some("json") | Some("object") => parts.push("DEFAULT '{}'::jsonb".to_string()),
             Some("array") => parts.push("DEFAULT '[]'::jsonb".to_string()),
             _ => {}
         }
     } else {
-        // Default defaults for json/array
+        // Default defaults for json/object/array
         match def.get("type").and_then(|t| t.as_str()) {
-            Some("json") => parts.push("DEFAULT '{}'::jsonb".to_string()),
+            Some("json") | Some("object") => parts.push("DEFAULT '{}'::jsonb".to_string()),
             Some("array") => parts.push("DEFAULT '[]'::jsonb".to_string()),
             _ => {}
         }
@@ -3333,5 +3342,86 @@ mod tests {
             sql.contains("REFERENCES \"app1\".\"employees\" (id)"),
             "{sql}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // D2 — nested object validators (JSONB column)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn d2_object_field_emits_jsonb_column() {
+        let schema = json!({
+            "profile": {
+                "type": "object",
+                "shape": {
+                    "bio": { "type": "string" },
+                    "avatar": { "type": "string" }
+                }
+            },
+        });
+        let sql = build_create_table("app1", "users", &schema).unwrap();
+        assert!(sql.contains("\"profile\" JSONB"), "{sql}");
+        // Defaults to an empty JSON object (like t.json()).
+        assert!(sql.contains("DEFAULT '{}'::jsonb"), "{sql}");
+    }
+
+    // -----------------------------------------------------------------
+    // D3 — calendar dates → DATE column type
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn d3_calendar_date_emits_date_column() {
+        let schema = json!({
+            "birthday": { "type": "calendarDate" },
+        });
+        let sql = build_create_table("app1", "users", &schema).unwrap();
+        // DATE, not TIMESTAMPTZ — the whole point of D3.
+        assert!(sql.contains("\"birthday\" DATE"), "{sql}");
+        assert!(!sql.contains("TIMESTAMPTZ DATE"), "{sql}");
+    }
+
+    #[test]
+    fn d3_calendar_date_distinct_from_date() {
+        // Verify t.date() still emits TIMESTAMPTZ alongside DATE for the
+        // calendar variant — no overlap.
+        let schema = json!({
+            "createdAt": { "type": "date" },
+            "birthday": { "type": "calendarDate" },
+        });
+        let sql = build_create_table("app1", "users", &schema).unwrap();
+        assert!(sql.contains("\"createdAt\" TIMESTAMPTZ"), "{sql}");
+        assert!(sql.contains("\"birthday\" DATE"), "{sql}");
+    }
+
+    #[test]
+    fn d3_add_column_calendar_date() {
+        // ALTER TABLE ADD COLUMN for a calendarDate field must also
+        // emit DATE so subsequent migrations stay consistent.
+        let sql = build_add_column(
+            "app1",
+            "users",
+            "birthday",
+            &json!({ "type": "calendarDate" }),
+        )
+        .unwrap();
+        assert!(sql.contains("ADD COLUMN IF NOT EXISTS \"birthday\" DATE"), "{sql}");
+    }
+
+    // -----------------------------------------------------------------
+    // D4 — version column injected by the SDK is treated as a plain
+    // INTEGER (well, NUMERIC) column at the DDL level. The SDK uses
+    // model.ts to inject `version: { type: "number", default: 1 }`
+    // so the DDL emission below matches.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn d4_version_column_default_one() {
+        let schema = json!({
+            "title": { "type": "string", "required": true },
+            "version": { "type": "number", "default": 1 },
+        });
+        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        assert!(sql.contains("\"version\" NUMERIC"), "{sql}");
+        assert!(sql.contains("DEFAULT 1"), "{sql}");
     }
 }

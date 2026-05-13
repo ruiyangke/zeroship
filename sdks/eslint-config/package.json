@@ -1,7 +1,7 @@
 {
-  "name": "@zeroship/db",
+  "name": "@zeroship/eslint-config",
   "version": "0.1.0",
-  "description": "Mongoose-compatible database SDK for zeroship",
+  "description": "ESLint rules and shareable config for zeroship apps — includes the D1 unindexed-query rule",
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,7 +10,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/zeroship-dev/zeroship",
-    "directory": "sdks/db"
+    "directory": "sdks/eslint-config"
   },
   "files": ["dist", "src"],
   "exports": {
@@ -18,19 +18,19 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./rules/no-unindexed-query": {
+      "types": "./dist/rules/no-unindexed-query.d.ts",
+      "import": "./dist/rules/no-unindexed-query.js",
+      "default": "./dist/rules/no-unindexed-query.js"
     }
   },
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build && npm test",
-    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
-  },
-  "dependencies": {
-    "@zeroship/types": "workspace:*"
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "devDependencies": {
     "tsx": "catalog:",
-    "typescript": "catalog:",
-    "zeroship": "workspace:*"
+    "typescript": "catalog:"
   }
 }

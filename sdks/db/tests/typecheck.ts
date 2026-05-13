@@ -296,4 +296,69 @@ function testRefBuilderType() {
 void testIdBrandIncompatibility;
 void testRefBuilderType;
 
+// === Tier D type-level checks ===
+
+// D2 — t.object() with nested optional/required keys.
+const dbObjects = createDb({
+  profiles: {
+    name: t.string().required(),
+    profile: t.object({
+      bio: t.string().max(500),
+      social: t.object({
+        twitter: t.string(),
+        github: t.string().required(),
+      }),
+    }),
+  },
+});
+
+async function testObjectInference() {
+  const { data } = await dbObjects.profiles.create({
+    name: "alice",
+    profile: { bio: "hi", social: { github: "alice" } },
+  });
+  if (data) {
+    // ✓ nested optional string
+    const bio: string | undefined = data.profile?.bio;
+    // ✓ nested required string within optional parent
+    const github: string | undefined = data.profile?.social?.github;
+    void bio;
+    void github;
+  }
+}
+void testObjectInference;
+
+// D3 — t.calendarDate() infers as string at the TS layer.
+const dbCal = createDb({
+  events: {
+    name: t.string().required(),
+    eventDate: t.calendarDate(),
+  },
+});
+async function testCalendarInference() {
+  const { data } = await dbCal.events.create({ name: "x", eventDate: "2026-05-15" });
+  if (data) {
+    const d: string | undefined = data.eventDate;
+    void d;
+  }
+}
+void testCalendarInference;
+
+// D4 — schema(...).withVersioning(): `version` may appear in filters and
+// in `Document<S>` (typed as optional number). We exercise the API shape.
+const dbVer = createDb({
+  posts: schema({
+    title: t.string().required(),
+  }).withVersioning(),
+});
+async function testVersionInference() {
+  await dbVer.posts.updateOne({ id: 1, version: 7 }, { title: "x" });
+  const { data } = await dbVer.posts.findOne({ id: 1 });
+  if (data) {
+    const v: number | undefined = data.version;
+    void v;
+  }
+}
+void testVersionInference;
+
 console.log("All type checks passed!");

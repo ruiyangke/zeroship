@@ -47,7 +47,8 @@ export function model<S extends Record<string, unknown>>(
   schema: S,
   nativeOverride?: NativeDb,
   namingStrategy: NamingStrategy = naming.snakeCase,
-  softDelete: boolean = false
+  softDelete: boolean = false,
+  versioning: boolean = false
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error("model name must be a non-empty string");
@@ -61,6 +62,14 @@ export function model<S extends Record<string, unknown>>(
   // When soft delete is enabled, inject the deletedAt field into the schema
   if (softDelete && !normalized.deletedAt) {
     normalized.deletedAt = { type: "date", required: false };
+  }
+
+  // D4 — when versioning is enabled, inject a `version` column into the
+  // normalized schema so DDL emits an INTEGER NOT NULL DEFAULT 1 column.
+  // The Collection's update path treats `version` in a filter as a CAS
+  // check and auto-increments it on success.
+  if (versioning && !normalized.version) {
+    normalized.version = { type: "number", required: false, default: 1 };
   }
 
   // Register model with the runtime — creates table + columns if not exists.
@@ -81,5 +90,5 @@ export function model<S extends Record<string, unknown>>(
     }
   }
 
-  return new Collection<S>(name, normalized, native, { naming: namingStrategy, ready: registrationPromise, softDelete });
+  return new Collection<S>(name, normalized, native, { naming: namingStrategy, ready: registrationPromise, softDelete, versioning });
 }

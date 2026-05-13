@@ -10,9 +10,31 @@ import { ValidationError, FieldError } from "./errors.js";
 type Doc = PlainObject;
 
 /**
+ * D3 — strict `YYYY-MM-DD` validator. Confirms the value is a 10-char
+ * date string AND a real calendar date (no Feb 31, no month 13).
+ * Returns false on any deviation.
+ */
+function isValidCalendarDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  if (m < 1 || m > 12) return false;
+  if (d < 1 || d > 31) return false;
+  // Round-trip through Date to catch overflow (e.g. 2026-02-31 → Mar 3).
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+/**
  * Validates a single field value against its FieldDef.
  * Appends a FieldError to `errors` if the value is invalid; otherwise returns
  * without side effects.
+ *
+ * `key` is the dotted path used for error reporting; the caller should pass
+ * `"parent.child"` when recursing into nested object validators (D2).
  */
 function checkField(
   key: string,
@@ -89,6 +111,45 @@ function checkField(
       };
       return;
     }
+  } else if (type === "calendarDate") {
+    // D3 — must be the literal `YYYY-MM-DD` shape AND a real date
+    // (rejects 2026-02-31, 2026-13-01, etc.). Stored as a Postgres
+    // `DATE` column with no timezone.
+    if (typeof value !== "string" || !isValidCalendarDate(value)) {
+      errors[key] = {
+        path: key,
+        message: `${key} must be a YYYY-MM-DD calendar date`,
+      };
+      return;
+    }
+  } else if (type === "object") {
+    // D2 — nested-object validator. The DB column is JSONB; we recurse
+    // into the declared `shape` and surface child errors using a dotted
+    // path so consumers see `errors["profile.social.twitter"]`.
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      errors[key] = { path: key, message: `${key} must be an object` };
+      return;
+    }
+    const shape = def.shape;
+    if (shape !== undefined) {
+      const obj = value as Record<string, unknown>;
+      for (const [childKey, childDef] of Object.entries(shape)) {
+        const childPath = `${key}.${childKey}`;
+        const childVal = obj[childKey];
+        const missing =
+          childVal === undefined ||
+          childVal === null ||
+          (childDef.type === "string" && childDef.required === true && childVal === "");
+        if (missing) {
+          if (childDef.required === true && childDef.default === undefined) {
+            errors[childPath] = { path: childPath, message: `${childPath} is required` };
+          }
+          continue;
+        }
+        checkField(childPath, childVal, childDef, errors);
+      }
+    }
+    return;
   } else if (type === "array") {
     if (!Array.isArray(value)) {
       errors[key] = { path: key, message: `${key} must be an array` };

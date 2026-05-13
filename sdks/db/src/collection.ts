@@ -5,7 +5,7 @@
  */
 import { NormalizedSchema } from "./schema.js";
 import { validateDoc, checkPartial } from "./validate.js";
-import { mapNativeError, ValidationError } from "./errors.js";
+import { mapNativeError, ValidationError, OptimisticLockError } from "./errors.js";
 import {
   mapResultDoc,
   mapDocOutbound,
@@ -27,6 +27,7 @@ export type NativeDb = ZeroshipDb;
  */
 function toResultError(e: unknown): Error {
   if (e instanceof ValidationError) return e;
+  if (e instanceof OptimisticLockError) return e;
   const msg = e instanceof Error ? e.message : String(e);
   return mapNativeError(msg);
 }
@@ -112,6 +113,78 @@ function validateArrayPushOps(
 }
 
 /**
+ * D1 — set of `${collection}:${sortedFilterKeys}` shapes already warned
+ * about. Module-scope so a single warning fires per shape across all
+ * Collection instances in the same isolate. Reset between tests by
+ * accessing `__zeroshipDbWarnedShapesForTest()`.
+ */
+const _warnedShapes: Set<string> = new Set();
+
+/** @internal — test-only reset hook. Not part of the public API. */
+export function __zeroshipDbResetIndexWarnings(): void {
+  _warnedShapes.clear();
+}
+
+/**
+ * D1 — emit a one-time `console.warn` if `filter` would do a sequential
+ * scan because no key in it has an `index: true` / `unique: true` marker
+ * in the normalized schema. Only fires when `process.env.NODE_ENV !==
+ * "production"`. Deduplicates by `${collection}:${sortedKeys}` so noisy
+ * code paths don't spam.
+ *
+ * The heuristic is intentionally simple: every top-level key in the
+ * filter that maps to a schema field is checked; if none of them is
+ * indexed and at least one is a single-field equality, we warn. False
+ * positives are acceptable for V1 (TODO: weight selectivity).
+ */
+function _maybeWarnUnindexedFilter(
+  collection: string,
+  schema: NormalizedSchema,
+  filter: PlainObject,
+): void {
+  // Avoid the work in production AND test. NODE_ENV is set to "test" by
+  // most JS test runners (vitest/jest set it automatically; node:test
+  // users typically set it explicitly via `NODE_ENV=test npm test`).
+  // Skipping in test keeps mock-based suites quiet without disabling the
+  // warning where it matters (dev: NODE_ENV unset or "development").
+  const nodeEnv = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env?.NODE_ENV;
+  if (nodeEnv === "production" || nodeEnv === "test") return;
+
+  if (filter === null || typeof filter !== "object") return;
+  const keys = Object.keys(filter).filter(
+    (k) => !k.startsWith("$") && k in schema,
+  );
+  if (keys.length === 0) return;
+  // `id` is always the primary key — never warn on it.
+  if (keys.length === 1 && (keys[0] === "id" || keys[0] === "_id")) return;
+
+  let anyIndexed = false;
+  for (const k of keys) {
+    const def = schema[k];
+    if (def && (def.index === true || def.unique === true)) {
+      anyIndexed = true;
+      break;
+    }
+  }
+  if (anyIndexed) return;
+
+  const shapeKey = `${collection}:${[...keys].sort().join(",")}`;
+  if (_warnedShapes.has(shapeKey)) return;
+  _warnedShapes.add(shapeKey);
+
+  const hint = keys
+    .map((k) => `t.<type>().index() on ${collection}.${k}`)
+    .join(" or ");
+  // `console.warn` is the standard channel here — matches Convex's
+  // ESLint rule shape. We do not throw: this is a nudge, not a hard error.
+  console.warn(
+    `[@zeroship/db] unindexed query on "${collection}" — ` +
+    `filter keys [${keys.join(", ")}] have no index. ` +
+    `Consider adding ${hint}.`,
+  );
+}
+
+/**
  * Represents a named collection and exposes the full CRUD + aggregate API.
  * The generic parameter `S` is the raw schema shape from which document and input
  * types are derived. Use `model()` or `createDb()` — do not construct directly.
@@ -125,13 +198,15 @@ export class Collection<S = PlainObject> {
   private _toField: (column: string) => string;
   private _ready: Promise<void> | null;
   private _softDelete: boolean;
+  private _versioning: boolean;
 
-  constructor(name: string, schema: NormalizedSchema, native: NativeDb, options?: { naming?: NamingStrategy; ready?: Promise<void> | null; softDelete?: boolean }) {
+  constructor(name: string, schema: NormalizedSchema, native: NativeDb, options?: { naming?: NamingStrategy; ready?: Promise<void> | null; softDelete?: boolean; versioning?: boolean }) {
     this._name = name;
     this._schema = schema;
     this._native = native;
     this._ready = options?.ready ?? null;
     this._softDelete = options?.softDelete ?? false;
+    this._versioning = options?.versioning ?? false;
 
     // Build field↔column lookup maps once at init — O(1) at query time
     const strategy = options?.naming ?? naming.asIs;
@@ -170,6 +245,38 @@ export class Collection<S = PlainObject> {
     } catch (e) {
       return err(toResultError(e));
     }
+  }
+
+  /**
+   * D4 — return the caller-supplied `version: N` value from a filter,
+   * but only when versioning is enabled on this collection AND the
+   * value is a plain number (not a `$gt`/`$in`/etc. operator). Returns
+   * `null` otherwise so callers can short-circuit to the non-CAS path.
+   */
+  private _extractCasVersion(filter: PlainObject): number | null {
+    if (!this._versioning) return null;
+    if (filter === null || typeof filter !== "object") return null;
+    const v = filter.version;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    return null;
+  }
+
+  /**
+   * D4 — when a CAS version is in play, layer `{ $inc: { version: 1 } }`
+   * on top of the user-supplied update so the bump happens atomically
+   * inside the same SQL statement as the SET. We merge into any
+   * existing `$inc` rather than overwriting.
+   */
+  private _augmentUpdateWithVersion(update: PlainObject, casVersion: number | null): PlainObject {
+    if (casVersion === null) return update;
+    const result: PlainObject = { ...update };
+    const existingInc = result.$inc;
+    const inc =
+      existingInc !== null && typeof existingInc === "object" && !Array.isArray(existingInc)
+        ? { ...(existingInc as PlainObject), version: 1 }
+        : { version: 1 };
+    result.$inc = inc;
+    return result;
   }
 
   /**
@@ -218,6 +325,7 @@ export class Collection<S = PlainObject> {
    * Field names in `filter` are mapped outbound before the native call.
    */
   async findOne(filter: Filter<S>): Promise<Result<Document<S> | null>> {
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const raw = await this._native.findOne(this._name, mapped);
@@ -245,6 +353,7 @@ export class Collection<S = PlainObject> {
    * and `.select()` before being awaited.
    */
   find(filter: Filter<S> = {} as Filter<S>): Query<S, Document<S>> {
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
     return new Query<S, Document<S>>(
       this._name,
@@ -294,11 +403,19 @@ export class Collection<S = PlainObject> {
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
+      // D4 — extract `version: N` from the filter when versioning is on
+      // and use it as a CAS guard. The update is augmented with $inc:1
+      // on `version` so the increment happens atomically with the SET.
+      const casVersion = this._extractCasVersion(filter as PlainObject);
+      const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
+      const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
       const raw = await this._native.updateOne(this._name, mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
       const matched = result !== null ? 1 : 0;
+      if (matched === 0 && casVersion !== null) {
+        throw new OptimisticLockError(casVersion, this._name);
+      }
       return { matchedCount: matched, modifiedCount: matched };
     });
   }
@@ -318,11 +435,18 @@ export class Collection<S = PlainObject> {
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
+      // D4 — same CAS handling as updateOne. updateMany with a CAS
+      // version still increments `version` on every matched row.
+      const casVersion = this._extractCasVersion(filter as PlainObject);
+      const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
+      const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
       const raw = await this._native.updateMany(this._name, mappedFilter, mappedUpdate);
       const result = parseRaw<{ updated: number }>(raw);
       const n = result?.updated ?? 0;
+      if (n === 0 && casVersion !== null) {
+        throw new OptimisticLockError(casVersion, this._name);
+      }
       return { matchedCount: n, modifiedCount: n };
     });
   }
@@ -341,11 +465,21 @@ export class Collection<S = PlainObject> {
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
+      // D4 — apply the same CAS augmentation as updateOne. A no-match
+      // when a version guard was supplied still surfaces as a typed
+      // OptimisticLockError instead of `null` so callers can branch.
+      const casVersion = this._extractCasVersion(filter as PlainObject);
+      const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const mappedUpdate = mapUpdateOutbound(updateObj, this._toColumn);
+      const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
       const raw = await this._native.updateOne(this._name, mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
-      if (result === null) return null;
+      if (result === null) {
+        if (casVersion !== null) {
+          throw new OptimisticLockError(casVersion, this._name);
+        }
+        return null;
+      }
       return mapResultDoc(result, this._toField) as Document<S>;
     });
   }
@@ -397,6 +531,7 @@ export class Collection<S = PlainObject> {
    * Returns `{ deletedCount: N }` where N is the number of documents removed.
    */
   async deleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     return this._run(async () => {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));

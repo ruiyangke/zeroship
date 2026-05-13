@@ -247,8 +247,9 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     const isBuilder = rawSchema instanceof SchemaBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
     const softDelete = isBuilder ? rawSchema.options.softDelete : false;
+    const versioning = isBuilder ? rawSchema.options.versioning : false;
     (collections as Record<string, Collection<SchemaInput>>)[name] =
-      model(name, fields as Record<string, unknown>, native, namingStrategy, softDelete);
+      model(name, fields as Record<string, unknown>, native, namingStrategy, softDelete, versioning);
   }
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions

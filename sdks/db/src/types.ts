@@ -59,11 +59,18 @@ export type InferSchema<S> = {
 /**
  * The persisted document type: user fields + auto-generated `id`, `createdAt`, `updatedAt`.
  * Extends InferSchema so required fields remain required.
+ *
+ * `version` is included as optional because `SchemaBuilder.withVersioning()`
+ * (D4) injects it at DDL time. Collections without versioning will never
+ * see it populated; collections with versioning treat it as a CAS guard
+ * key in filters (see `Collection.updateOne` and the `_extractCasVersion`
+ * helper).
  */
 export type Document<S> = InferSchema<S> & {
   id: number;
   createdAt: number;
   updatedAt: number;
+  version?: number;
 };
 
 /** Input type accepted by `create()` — required fields are required, auto-generated fields excluded. */
@@ -189,11 +196,14 @@ export function err<T>(error: Error): Result<T> {
 }
 
 /** Primitive field type names supported by the SDK. */
-export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
+export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json" | "calendarDate";
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
-/** All supported type names, including "array" and "ref" (B2 typed FK). */
-export type TypeName = PrimitiveTypeName | "array" | "ref";
+/**
+ * All supported type names. Includes "array", "ref" (B2 typed FK),
+ * "object" (D2 nested validators), and "calendarDate" (D3 — `YYYY-MM-DD`).
+ */
+export type TypeName = PrimitiveTypeName | "array" | "ref" | "object";
 
 /** Union of all values that can serve as a field default. */
 export type FieldDefaultValue = string | number | boolean | Date | null | PlainObject | string[] | number[] | boolean[];
@@ -269,6 +279,13 @@ export interface FieldDef {
    * DDL emit time: true (see RefOptions.deferrable).
    */
   deferrable?: boolean;
+  /**
+   * Nested-object shape (D2). Present iff `type === "object"`. The value
+   * is a normalised sub-schema — each entry maps a JS field name to a
+   * `FieldDef`. The DB column is JSONB; validation recurses into the
+   * shape and reports errors using a dotted path (e.g. `profile.bio`).
+   */
+  shape?: Record<string, FieldDef>;
 }
 
 /**
@@ -409,6 +426,52 @@ export const t = {
       deferrable: opts?.deferrable ?? true,
     });
   },
+  /**
+   * D2 — nested-object validator. The argument is a record of nested
+   * field declarations (each a `TypeBuilder`, including another
+   * `t.object()` for arbitrary depth). Storage is a JSONB column;
+   * validation recurses into the shape and reports errors using a
+   * dotted path like `profile.social.twitter`.
+   *
+   * ```ts
+   * profile: t.object({
+   *   bio:    t.string().max(500),
+   *   social: t.object({
+   *     twitter: t.string().optional(),
+   *   }),
+   * }),
+   * ```
+   *
+   * Type inference: `Document<S>["profile"]["social"]["twitter"]` is
+   * `string | undefined` — the same rules as the top-level schema apply
+   * recursively (`required()` keeps a key required, otherwise optional).
+   */
+  object<S extends Record<string, TypeBuilder<any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
+    if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
+      throw new Error("t.object(shape) requires a record of nested type builders");
+    }
+    const nested: Record<string, FieldDef> = {};
+    for (const [key, val] of Object.entries(shape)) {
+      if (!(val instanceof TypeBuilder)) {
+        throw new Error(`t.object: nested field "${key}" must be a TypeBuilder (use t.string(), t.number(), ...)`);
+      }
+      nested[key] = { ...val.toFieldDef() };
+    }
+    return new TypeBuilder<InferSchema<S>>({ type: "object", shape: nested });
+  },
+  /**
+   * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and
+   * stores it as a Postgres `DATE` column (no time, no timezone). This
+   * is distinct from `t.date()` which is a `TIMESTAMPTZ` stored as
+   * Unix-ms numbers at the JS layer.
+   *
+   * ```ts
+   * birthday: t.calendarDate(),
+   * ```
+   */
+  calendarDate(): TypeBuilder<string> {
+    return new TypeBuilder<string>({ type: "calendarDate" });
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -433,6 +496,14 @@ export type Strictness = "strict" | "lenient" | "off";
 export interface SchemaOptions {
   softDelete: boolean;
   strictness: Strictness;
+  /**
+   * D4 — optimistic concurrency. When `true` the collection auto-injects
+   * an `INTEGER NOT NULL DEFAULT 1` `version` column at DDL time and
+   * `updateOne`/`updateMany` honour a `{ version: N }` filter clause for
+   * compare-and-swap updates (mismatch returns an
+   * `optimistic_lock_failure` error).
+   */
+  versioning: boolean;
 }
 
 /**
@@ -445,7 +516,7 @@ export class SchemaBuilder<S> {
 
   constructor(fields: S) {
     this.fields = fields;
-    this._options = { softDelete: false, strictness: "strict" };
+    this._options = { softDelete: false, strictness: "strict", versioning: false };
   }
 
   /** Returns the collection options. */
@@ -454,6 +525,19 @@ export class SchemaBuilder<S> {
   /** Enable soft delete — deleteOne/deleteMany set `deletedAt` instead of removing rows. */
   softDelete(): this {
     this._options.softDelete = true;
+    return this;
+  }
+
+  /**
+   * D4 — enable optimistic concurrency. Auto-injects a `version` column
+   * (INTEGER NOT NULL DEFAULT 1) at DDL time. Update calls that include
+   * `{ version: N }` in the filter become compare-and-swap: rows are
+   * updated and `version` is incremented only when the stored version
+   * matches N. A mismatch returns
+   * `{ data: null, error: { code: "optimistic_lock_failure" } }`.
+   */
+  withVersioning(): this {
+    this._options.versioning = true;
     return this;
   }
 
