@@ -967,4 +967,127 @@ mod tests {
         assert_eq!(drops.len(), 1, "expected drop op: {ops:?}");
         assert_eq!(adds.len(), 1, "expected add op: {ops:?}");
     }
+
+    // -----------------------------------------------------------------
+    // C2 — discriminated unions: diff against flat-expanded columns
+    //
+    // The SDK pre-expands `t.union(...)` into a flat schema before the
+    // diff engine sees it (each variant field becomes a top-level
+    // column, the discriminator carries the `variants` JSON). For the
+    // diff engine, this is just a regular table with nullable columns,
+    // so the standard column-addition path classifies new-variant
+    // fields as additive.
+    //
+    // SCOPE NOTE: CHECK-constraint evolution (extending the
+    // discriminator's IN-list, adding per-variant integrity CHECKs)
+    // is NOT yet diffed — the proposal section §C2 calls it out as
+    // additive-by-construction. Re-running registerModel today does
+    // not amend existing CHECK constraints. This is a known follow-up.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn c2_new_variant_field_classifies_as_additive() {
+        // Live: table with the original 2-variant union flat schema
+        // (kind, userId, ip, message). New deploy adds a third variant
+        // with a `value` column.
+        let mut live = LiveSchema::default();
+        let mut cols = std::collections::HashMap::new();
+        for c in ["id", "kind", "userId", "ip", "message"] {
+            cols.insert(
+                c.to_string(),
+                ColumnInfo {
+                    pg_type: "text".into(),
+                    not_null: false,
+                    default_expr: None,
+                    default_volatility: None,
+                },
+            );
+        }
+        live.tables.insert("events".to_string(), cols);
+        live.row_counts.insert("events".to_string(), 5);
+
+        let declared = serde_json::json!({
+            "kind": {
+                "type": "string",
+                "required": true,
+                "enum": ["login", "error", "metric"],
+                "discriminator": "__discriminator__",
+                "variants": [
+                    { "kind": { "type": "literal", "literalValue": "login", "required": true },
+                      "userId": { "type": "number", "required": true }, "ip": { "type": "string", "required": true } },
+                    { "kind": { "type": "literal", "literalValue": "error", "required": true },
+                      "message": { "type": "string", "required": true } },
+                    { "kind": { "type": "literal", "literalValue": "metric", "required": true },
+                      "name": { "type": "string", "required": true }, "value": { "type": "number", "required": true } }
+                ]
+            },
+            "userId": { "type": "number" },
+            "ip": { "type": "string" },
+            "message": { "type": "string" },
+            "name": { "type": "string" },
+            "value": { "type": "number" }
+        });
+
+        let ops = compute_diff(&live, "app1", "events", &declared, "", &[]);
+        // Adds: `name` and `value` (new-variant fields). Both nullable
+        // → additive.
+        let new_field_ops: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::AddColumn))
+            .collect();
+        assert_eq!(new_field_ops.len(), 2, "ops: {ops:?}");
+        for op in &new_field_ops {
+            assert_eq!(op.class, ChangeClass::Additive, "{op:?}");
+        }
+        let fields: Vec<&str> = new_field_ops
+            .iter()
+            .filter_map(|o| o.field.as_deref())
+            .collect();
+        assert!(fields.contains(&"name"), "{fields:?}");
+        assert!(fields.contains(&"value"), "{fields:?}");
+    }
+
+    #[test]
+    fn c2_removed_variant_field_classifies_as_destructive() {
+        // Live includes a `legacy_metric_value` from a now-removed
+        // variant. After removal the declared schema no longer
+        // includes that column → DropColumn (destructive).
+        let mut live = LiveSchema::default();
+        let mut cols = std::collections::HashMap::new();
+        for c in ["id", "kind", "userId", "legacy_metric_value"] {
+            cols.insert(
+                c.to_string(),
+                ColumnInfo {
+                    pg_type: "text".into(),
+                    not_null: false,
+                    default_expr: None,
+                    default_volatility: None,
+                },
+            );
+        }
+        live.tables.insert("events".to_string(), cols);
+        live.row_counts.insert("events".to_string(), 1);
+
+        let declared = serde_json::json!({
+            "kind": {
+                "type": "string",
+                "required": true,
+                "enum": ["login"],
+                "discriminator": "__discriminator__",
+                "variants": [
+                    { "kind": { "type": "literal", "literalValue": "login", "required": true },
+                      "userId": { "type": "number", "required": true } }
+                ]
+            },
+            "userId": { "type": "number" }
+        });
+        let ops = compute_diff(&live, "app1", "events", &declared, "", &[]);
+        let drops: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::DropColumn))
+            .collect();
+        assert_eq!(drops.len(), 1, "ops: {ops:?}");
+        assert_eq!(drops[0].class, ChangeClass::Destructive);
+        assert_eq!(drops[0].field.as_deref(), Some("legacy_metric_value"));
+    }
 }

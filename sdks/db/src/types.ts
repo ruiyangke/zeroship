@@ -47,14 +47,73 @@ export type RequiredKeys<S> = {
 export type OptionalKeys<S> = Exclude<keyof S, RequiredKeys<S>>;
 
 /**
- * Infers the user-facing shape from a schema definition, honouring required/optional.
- * Required fields are non-optional; all others become `?`.
+ * True iff every value in S is some flavour of schema field declaration
+ * (TypeBuilder, Mongoose field def, bare constructor, etc.). Used to
+ * distinguish a *schema dict* from an *already-inferred shape* — the
+ * latter appears as the top-level S when `createDb({ events: t.union(...) })`
+ * unwraps a TypeBuilder whose `_type` brand is the user-facing union
+ * (no TypeBuilders left in the value positions).
  */
-export type InferSchema<S> = {
-  [K in RequiredKeys<S>]: InferFieldDef<S[K]>
-} & {
-  [K in OptionalKeys<S>]?: InferFieldDef<S[K]>
-};
+type IsSchemaDict<S> =
+  S extends Record<string, unknown>
+    ? // Pick any value type that "looks like" a schema field declaration.
+      // If at least one value is a TypeBuilder / constructor /
+      // Mongoose-style def, treat S as a schema dict and infer.
+      // Otherwise it's already an inferred shape (top-level union
+      // variant) and we return S unchanged.
+      //
+      // We strip optional modifiers with `-?:` so an absent value never
+      // injects `undefined` into the value union (which would make the
+      // `extends true` check spuriously false-positive).
+      true extends {
+        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any>
+          ? true
+          : NonNullable<S[K]> extends { type: unknown }
+          ? true
+          : NonNullable<S[K]> extends
+              | StringConstructor
+              | NumberConstructor
+              | BooleanConstructor
+              | DateConstructor
+              | ObjectConstructor
+            ? true
+            : NonNullable<S[K]> extends readonly (
+                | StringConstructor
+                | NumberConstructor
+                | BooleanConstructor
+                | DateConstructor
+                | ObjectConstructor
+              )[]
+              ? true
+              : false;
+      }[keyof S]
+      ? true
+      : false
+    : false;
+
+/**
+ * Infers the user-facing shape from a schema definition, honouring
+ * required/optional. Required fields are non-optional; all others
+ * become `?`.
+ *
+ * If S is already an inferred shape (no TypeBuilder values — e.g. a
+ * top-level union variant after `UnwrapSchema` peels the TypeBuilder
+ * brand), return S unchanged so `Document<S>` doesn't strip every
+ * field down to `unknown`.
+ *
+ * Distributes over unions so `InferSchema<A | B>` becomes
+ * `InferSchema<A> | InferSchema<B>` — discriminated narrowing then
+ * works on the result.
+ */
+export type InferSchema<S> = S extends infer T
+  ? IsSchemaDict<T> extends true
+    ? {
+        [K in RequiredKeys<T>]: InferFieldDef<T[K]>;
+      } & {
+        [K in OptionalKeys<T>]?: InferFieldDef<T[K]>;
+      }
+    : T
+  : never;
 
 /**
  * The persisted document type: user fields + auto-generated `id`, `createdAt`, `updatedAt`.
@@ -201,9 +260,11 @@ export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
 /**
  * All supported type names. Includes "array", "ref" (B2 typed FK),
- * "object" (D2 nested validators), and "calendarDate" (D3 — `YYYY-MM-DD`).
+ * "object" (D2 nested validators), "calendarDate" (D3 — `YYYY-MM-DD`),
+ * "literal" (C2 discriminator constant), and "union" (C2 discriminated
+ * union document shape — proposal §C2).
  */
-export type TypeName = PrimitiveTypeName | "array" | "ref" | "object";
+export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union";
 
 /** Union of all values that can serve as a field default. */
 export type FieldDefaultValue = string | number | boolean | Date | null | PlainObject | string[] | number[] | boolean[];
@@ -286,6 +347,43 @@ export interface FieldDef {
    * shape and reports errors using a dotted path (e.g. `profile.bio`).
    */
   shape?: Record<string, FieldDef>;
+  /**
+   * Literal value (C2). Present iff `type === "literal"`. The accepted
+   * value is matched by strict `===`; literal fields are the building
+   * block of `t.union()` discriminators (every variant declares its
+   * own `kind: t.literal("...")` so the SDK can dispatch at validate
+   * time and Postgres can enforce membership with a CHECK constraint).
+   */
+  literalValue?: string | number | boolean;
+  /**
+   * Union variants (C2). Present iff `type === "union"`. Each entry is
+   * the normalised shape (`Record<string, FieldDef>`) of one variant of
+   * a discriminated union. The discriminator key is captured separately
+   * in `discriminator`; values for that key are `FieldDef.literalValue`
+   * on each variant's discriminator field.
+   *
+   * Storage strategy is **flat columns** (proposal §C2): every union-
+   * wide field becomes a top-level column on the table, plus the
+   * discriminator column with a `CHECK (kind IN (...))` constraint.
+   * Per-variant integrity is enforced by additional CHECK constraints
+   * (`kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)`) so
+   * a `kind='login'` row cannot store NULL where the variant requires
+   * a value.
+   */
+  variants?: Record<string, FieldDef>[];
+  /**
+   * Discriminator field name (C2). Present iff `type === "union"`, or
+   * set to `true` on a flat-expanded discriminator column so the DDL
+   * emitter knows to attach per-variant CHECK constraints.
+   *
+   * - On a `type === "union"` FieldDef the value is the discriminator
+   *   field name.
+   * - On a flat-expanded primitive FieldDef the value is the literal
+   *   string `"__discriminator__"` — a sentinel asserting "this is the
+   *   discriminator column, and `variants` carries the per-variant
+   *   shape map needed for CHECK emission".
+   */
+  discriminator?: string;
 }
 
 /**
@@ -472,7 +570,190 @@ export const t = {
   calendarDate(): TypeBuilder<string> {
     return new TypeBuilder<string>({ type: "calendarDate" });
   },
+  /**
+   * C2 — literal-value field. Validation accepts only the exact value
+   * `v` (strict `===`). The value's TS literal type is preserved so
+   * `t.literal("login")` yields `TypeBuilder<"login">` and the
+   * containing `t.object({ kind: t.literal("login"), ... })` produces
+   * an inferred shape with `kind: "login"` rather than `kind: string`.
+   *
+   * Literals are the building block of `t.union()` discriminators:
+   * every variant declares its own `t.literal(<value>)` on the same
+   * key, and the SDK auto-detects the discriminator.
+   *
+   * Storage: a literal-typed field at the top level of a collection is
+   * stored as its underlying primitive (TEXT / NUMERIC / BOOLEAN) with
+   * a `CHECK (col = '<value>')` constraint. Inside a union, the
+   * literal value appears in the discriminator's per-variant CHECK
+   * constraint and the discriminator's `IN (...)` constraint.
+   */
+  literal<L extends string | number | boolean>(value: L): TypeBuilder<L, true> {
+    if (value === null || value === undefined) {
+      throw new Error("t.literal(value) requires a non-null primitive value");
+    }
+    const ty = typeof value;
+    if (ty !== "string" && ty !== "number" && ty !== "boolean") {
+      throw new Error(
+        `t.literal(value): value must be string | number | boolean, got ${ty}`,
+      );
+    }
+    // Literal values are inherently required — a literal field declares
+    // "this row carries exactly this value", so an absent value would
+    // make no sense. The `_required: true` brand surfaces in `InferSchema`
+    // so the inferred type keeps the literal key non-optional.
+    return new TypeBuilder<L, true>({ type: "literal", literalValue: value, required: true });
+  },
+  /**
+   * C2 — discriminated union over object shapes. Each argument must be
+   * a `t.object({...})` that declares at least one `t.literal(...)`
+   * field; the SDK auto-detects the discriminator (the single key that
+   * is a literal in every variant with mutually distinct values).
+   *
+   * ```ts
+   * events: t.union(
+   *   t.object({ kind: t.literal("login"), userId: t.ref("users"), ip: t.string() }),
+   *   t.object({ kind: t.literal("error"), message: t.string() }),
+   *   t.object({ kind: t.literal("metric"), name: t.string(), value: t.number() }),
+   * )
+   * ```
+   *
+   * **Storage** — flat columns (proposal §C2):
+   * - One column per union-wide field (each nullable, since it only
+   *   applies to a subset of variants). Fields that appear in multiple
+   *   variants with the same type are deduplicated.
+   * - The discriminator column carries `CHECK (kind IN (<all variant
+   *   values>))`. Per-variant CHECK constraints enforce that variant-
+   *   required fields are NOT NULL when the discriminator matches.
+   *
+   * **Validation** — dispatch on the discriminator value, run the
+   * matching variant's schema. An unknown discriminator value fails
+   * with a clear path-keyed error.
+   *
+   * **Type inference** — the union of each variant's inferred shape
+   * (`InferSchema<V1> | InferSchema<V2> | ...`), so a value of the
+   * inferred type narrows on the discriminator key:
+   *
+   * ```ts
+   * const e: InferUnion<...> = ...;
+   * if (e.kind === "login") {
+   *   e.userId  // ✓ Id<"users">
+   *   e.message // ✗ doesn't exist on the "login" variant
+   * }
+   * ```
+   */
+  union<V extends readonly TypeBuilder<any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
+    if (variants.length < 2) {
+      throw new Error(
+        `t.union(...) requires at least 2 variants, got ${variants.length}`,
+      );
+    }
+    const normalized: Record<string, FieldDef>[] = [];
+    for (let i = 0; i < variants.length; i++) {
+      const v = variants[i];
+      if (!(v instanceof TypeBuilder)) {
+        throw new Error(
+          `t.union: variant #${i} must be a t.object(...) (got ${typeof v})`,
+        );
+      }
+      const def = v.toFieldDef();
+      if (def.type !== "object" || def.shape === undefined) {
+        throw new Error(
+          `t.union: variant #${i} must be a t.object(...) (got type "${def.type}")`,
+        );
+      }
+      // Variant shape clone — we treat it as a self-contained sub-schema.
+      const cloned: Record<string, FieldDef> = {};
+      for (const [k, fd] of Object.entries(def.shape)) {
+        cloned[k] = { ...fd };
+      }
+      normalized.push(cloned);
+    }
+
+    // Discriminator auto-detection. The discriminator is the unique
+    // key that is `t.literal()` in EVERY variant AND has distinct
+    // literal values across variants.
+    const discriminator = detectDiscriminator(normalized);
+    return new TypeBuilder<InferUnion<V>>({
+      type: "union",
+      variants: normalized,
+      discriminator,
+    });
+  },
 };
+
+/**
+ * Identify the discriminator field across a set of normalized union
+ * variants. Returns the field name on success, throws an `Error` at
+ * schema-definition time on failure so misconfigured unions never
+ * reach validation.
+ *
+ * Algorithm: find every field name that appears as a `literal` in
+ * every variant, then require exactly one such field whose literal
+ * values are mutually distinct. If zero or more than one such field
+ * exists, the union is ambiguous.
+ */
+function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
+  if (variants.length === 0) {
+    throw new Error("t.union: no variants supplied");
+  }
+  // Candidate keys = keys that are `literal` in every variant.
+  const firstKeys = Object.keys(variants[0]);
+  const candidates: string[] = [];
+  for (const key of firstKeys) {
+    let ok = true;
+    for (const v of variants) {
+      const fd = v[key];
+      if (fd === undefined || fd.type !== "literal") {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) candidates.push(key);
+  }
+  if (candidates.length === 0) {
+    throw new Error(
+      "t.union: no discriminator field found — every variant must declare a `t.literal(...)` field with the same key (e.g. `kind: t.literal(\"login\")`)",
+    );
+  }
+  // For each candidate, the literal values must be mutually distinct.
+  const distinctCandidates = candidates.filter((key) => {
+    const seen = new Set<string>();
+    for (const v of variants) {
+      const lit = v[key]?.literalValue;
+      const tag = typeof lit + ":" + String(lit);
+      if (seen.has(tag)) return false;
+      seen.add(tag);
+    }
+    return true;
+  });
+  if (distinctCandidates.length === 0) {
+    throw new Error(
+      "t.union: discriminator candidate(s) have overlapping literal values — each variant must use a distinct literal value",
+    );
+  }
+  if (distinctCandidates.length > 1) {
+    throw new Error(
+      `t.union: ambiguous discriminator — multiple candidate keys with distinct literals: ${distinctCandidates.join(", ")}. Use only one literal field per variant or rename one of them.`,
+    );
+  }
+  return distinctCandidates[0];
+}
+
+// ---------------------------------------------------------------------------
+// C2 — Union type inference helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps a tuple of variant TypeBuilders to the TS union of each
+ * variant's inferred shape. Variants must each be `TypeBuilder<S>`
+ * where `S = InferSchema<variantShape>` (the result type of
+ * `t.object({...})`).
+ *
+ * The distributive `infer U` over a union of tuple elements gives us
+ * the TS union of every variant's inferred value type.
+ */
+export type InferUnion<V extends readonly TypeBuilder<any, any>[]> =
+  V[number] extends TypeBuilder<infer U, any> ? U : never;
 
 // ---------------------------------------------------------------------------
 // Schema builder — per-collection options via fluent API

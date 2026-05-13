@@ -28,14 +28,23 @@ import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
 import { type NormalizedSchema, validateRefTargets } from "./schema.js";
-import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, naming, ok, err } from "./types.js";
+import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** Schema definition — plain fields or schema() builder with options */
-type SchemaInput = Record<string, unknown> | SchemaBuilder<Record<string, unknown>>;
+/**
+ * Schema definition — plain fields, schema() builder with options, or
+ * a top-level `t.union(...)` whose row shape is a discriminated union
+ * (proposal §C2). The TypeBuilder form is type-erased to
+ * `TypeBuilder<unknown, any>` here so the conditional in `UnwrapSchema`
+ * can distribute over the union.
+ */
+type SchemaInput =
+  | Record<string, unknown>
+  | SchemaBuilder<Record<string, unknown>>
+  | TypeBuilder<unknown, any>;
 
 /**
  * A typed collection inside a transaction — same API as Collection but throws
@@ -82,8 +91,21 @@ export interface TransactionOptions {
   isolationLevel?: IsolationLevel;
 }
 
-/** Unwrap SchemaBuilder at the type level — extracts fields from schema() wrapper */
-type UnwrapSchema<T> = T extends SchemaBuilder<infer S> ? S : T;
+/**
+ * Unwrap SchemaBuilder / TypeBuilder at the type level so the collection
+ * receives the underlying field record (or, for a top-level
+ * `t.union(...)`, the inferred union shape — see proposal §C2).
+ *
+ * - `schema({...})` wraps a `Record<string, unknown>` and we strip it.
+ * - `t.union(...)` produces `TypeBuilder<UnionShape>`; we extract
+ *   `UnionShape` so the collection is `Collection<UnionShape>` and a
+ *   `find()` returns `Document<UnionShape>` whose discriminator key
+ *   narrows correctly under control flow analysis.
+ */
+type UnwrapSchema<T> =
+  T extends SchemaBuilder<infer S> ? S :
+  T extends TypeBuilder<infer U, any> ? U :
+  T;
 
 /** The db object returned by createDb — collections are fully typed per schema */
 export type Db<T extends Record<string, SchemaInput>> = {
@@ -245,11 +267,24 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   for (const [name, rawSchema] of Object.entries(schemas)) {
     // Unwrap SchemaBuilder to extract per-collection options
     const isBuilder = rawSchema instanceof SchemaBuilder;
+    // C2 — a top-level `t.union(...)` IS a valid schema input. `model()`
+    // calls `normalizeSchema` which now recognises the TypeBuilder and
+    // expands the union into flat columns. We pass it through unchanged.
+    const isUnion = rawSchema instanceof TypeBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
     const softDelete = isBuilder ? rawSchema.options.softDelete : false;
     const versioning = isBuilder ? rawSchema.options.versioning : false;
     (collections as Record<string, Collection<SchemaInput>>)[name] =
-      model(name, fields as Record<string, unknown>, native, namingStrategy, softDelete, versioning);
+      model(
+        name,
+        // The TypeBuilder branch can't be cast to Record<string, unknown>
+        // safely, but `model()` -> `normalizeSchema` accepts either form.
+        (isUnion ? fields : fields) as Record<string, unknown>,
+        native,
+        namingStrategy,
+        softDelete,
+        versioning,
+      );
   }
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions

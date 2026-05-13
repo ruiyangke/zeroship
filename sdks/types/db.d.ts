@@ -93,8 +93,29 @@ type ZeroshipDbAccumulator =
 // Schema types (zeroship.db.registerModel)
 // ---------------------------------------------------------------------------
 
-/** Supported primitive field type names. Includes `"ref"` for B2 typed FKs. */
-type ZeroshipDbTypeName = "string" | "number" | "boolean" | "date" | "json" | "array" | "ref";
+/**
+ * Supported field type names. Includes:
+ * - core primitives + `"json"` + `"array"`
+ * - `"ref"` (B2 typed FKs)
+ * - `"object"` (D2 nested validators, stored as JSONB)
+ * - `"calendarDate"` (D3, stored as Postgres DATE)
+ * - `"literal"` and `"union"` (C2 discriminated unions; a top-level
+ *   union is flattened by the SDK into discrete columns before it
+ *   reaches the native driver, but the discriminator column still
+ *   carries the `variants` metadata for DDL CHECK emission.)
+ */
+type ZeroshipDbTypeName =
+  | "string"
+  | "number"
+  | "boolean"
+  | "date"
+  | "json"
+  | "array"
+  | "ref"
+  | "object"
+  | "calendarDate"
+  | "literal"
+  | "union";
 
 /** Supported primitive item type names (for array fields). */
 type ZeroshipDbPrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
@@ -122,6 +143,19 @@ interface ZeroshipDbFieldDef {
   onUpdate?: ZeroshipDbFkAction;
   /** B2 — whether FK is `DEFERRABLE INITIALLY DEFERRED`. Default: true. */
   deferrable?: boolean;
+  /** D2 — nested-object shape (JSONB column, validated app-side). */
+  shape?: Record<string, ZeroshipDbFieldDef>;
+  /** C2 — literal value for `type === "literal"` (or per-variant disc field). */
+  literalValue?: string | number | boolean;
+  /** C2 — per-variant shape map for a flat-expanded union discriminator. */
+  variants?: Record<string, ZeroshipDbFieldDef>[];
+  /**
+   * C2 — discriminator marker. On a `type === "union"` def this is the
+   * field name; on a flat-expanded primitive column it's the literal
+   * `"__discriminator__"` sentinel telling the DDL emitter to attach
+   * per-variant CHECK constraints.
+   */
+  discriminator?: string;
 }
 
 /** Normalized schema — field name → definition. */

@@ -166,6 +166,7 @@ pub fn build_create_table_with_fks(
     ];
 
     let mut deferred_fks: Vec<String> = Vec::new();
+    let mut union_checks: Vec<String> = Vec::new();
 
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
@@ -194,6 +195,25 @@ pub fn build_create_table_with_fks(
                     }
                 }
             }
+
+            // C2 — per-variant CHECK constraints for a flat-expanded
+            // discriminated union. The SDK tags the discriminator
+            // column with `discriminator: "__discriminator__"` and
+            // attaches the full `variants` map; we emit one CHECK per
+            // variant of the shape:
+            //   CHECK (kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL))
+            // so a row of a given discriminator value cannot store NULL
+            // where the variant requires a value. The discriminator
+            // column itself already gets `CHECK (kind IN (...))` via
+            // the regular `enum` constraint emitted by
+            // `def_to_constraints`, so we don't repeat the IN-list here.
+            if def.get("discriminator").and_then(|v| v.as_str()) == Some("__discriminator__") {
+                if let Some(variants) = def.get("variants").and_then(|v| v.as_array()) {
+                    let constraint_clauses =
+                        emit_union_variant_checks(collection, field, def, variants);
+                    union_checks.extend(constraint_clauses);
+                }
+            }
         }
     }
 
@@ -203,6 +223,7 @@ pub fn build_create_table_with_fks(
     // Append all FK clauses *after* the regular columns so the SQL reads
     // top-to-bottom in a natural order (columns, then constraints).
     columns.extend(deferred_fks);
+    columns.extend(union_checks);
 
     Ok(format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
@@ -534,6 +555,145 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> String {
     format!("{} {} {}", quote_ident(field), pg_type, constraints).trim().to_string()
 }
 
+/// C2 — emit per-variant CHECK constraints for a flat-expanded
+/// discriminated union (proposal §C2). The discriminator field carries
+/// the per-variant shape map; for each variant we emit a clause like
+/// ```sql
+/// CONSTRAINT events_kind_login_chk CHECK (
+///   kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)
+/// )
+/// ```
+/// so a `kind='login'` row cannot store NULL where the variant requires
+/// a value. The discriminator column itself already gets
+/// `CHECK (kind IN ('login', 'error', ...))` from the regular `enum`
+/// constraint emitter (`def_to_constraints`).
+///
+/// The constraint name is content-addressed (`<table>_<disc>_<value>_chk`)
+/// and hash-truncated like our index names so it stays within Postgres'
+/// `NAMEDATALEN` (63-byte) limit.
+fn emit_union_variant_checks(
+    collection: &str,
+    disc_field: &str,
+    disc_def: &serde_json::Value,
+    variants: &[serde_json::Value],
+) -> Vec<String> {
+    let disc_col = quote_ident(disc_field);
+    let disc_primitive = disc_def.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+
+    let mut out = Vec::new();
+    for variant in variants {
+        let Some(variant_obj) = variant.as_object() else {
+            continue;
+        };
+        let Some(disc_field_def) = variant_obj.get(disc_field) else {
+            continue;
+        };
+        let Some(lit) = disc_field_def.get("literalValue") else {
+            continue;
+        };
+
+        // Required (non-discriminator) fields in this variant — only
+        // these need the NOT NULL clause inside the CHECK.
+        let mut required_cols: Vec<String> = Vec::new();
+        for (field, fd) in variant_obj {
+            if field == disc_field {
+                continue;
+            }
+            let is_required = fd.get("required").and_then(serde_json::Value::as_bool) == Some(true);
+            if is_required {
+                required_cols.push(quote_ident(field));
+            }
+        }
+
+        // The literal value rendering must match how the column is
+        // stored — string literals are single-quoted, numbers and
+        // booleans are bare.
+        let lit_sql = match disc_primitive {
+            "number" => lit.as_f64().map(|n| n.to_string()).unwrap_or_default(),
+            "boolean" => lit.as_bool().map(|b| b.to_string()).unwrap_or_default(),
+            _ => {
+                // string discriminator
+                let s = lit.as_str().unwrap_or("");
+                format!("'{}'", s.replace('\'', "''"))
+            }
+        };
+
+        // Skip variants with empty literal rendering — would produce
+        // bogus SQL like `kind <> ` (defensive — never hit when SDK
+        // emits well-formed JSON).
+        if lit_sql.is_empty() {
+            continue;
+        }
+
+        // Generate a deterministic identifier. Stringy values get
+        // included verbatim (lower-cased); for non-string discriminators
+        // we use the literal stringified form.
+        let value_tag = match disc_primitive {
+            "number" => lit.as_f64().map(|n| format!("{n}")).unwrap_or_default(),
+            "boolean" => lit.as_bool().map(|b| b.to_string()).unwrap_or_default(),
+            _ => lit.as_str().unwrap_or("").to_string(),
+        };
+        let sanitized_tag = sanitize_for_identifier(&value_tag);
+        let constraint_name =
+            union_check_constraint_name(collection, disc_field, &sanitized_tag);
+
+        let clause = if required_cols.is_empty() {
+            // No per-variant required fields means no integrity beyond
+            // the discriminator IN-list; skip emitting an empty CHECK.
+            continue;
+        } else {
+            let null_clause = required_cols
+                .iter()
+                .map(|c| format!("{c} IS NOT NULL"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!(
+                "CONSTRAINT {} CHECK ({} <> {} OR ({}))",
+                quote_ident(&constraint_name),
+                disc_col,
+                lit_sql,
+                null_clause
+            )
+        };
+        out.push(clause);
+    }
+    out
+}
+
+/// Sanitise a discriminator value (e.g. `login-x.y`) into a string safe
+/// to splice into a Postgres identifier — keep ASCII alphanumerics and
+/// underscores, replace everything else with `_`.
+fn sanitize_for_identifier(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('x');
+    }
+    out
+}
+
+/// Build the constraint name for a union-variant CHECK. NAMEDATALEN-safe
+/// (≤ 63 bytes) via the same hash-truncation strategy as index names.
+fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) -> String {
+    let full = format!("{collection}_{disc}_{value_tag}_chk");
+    if full.len() <= 60 {
+        return full;
+    }
+    let hash = short_hash_base32(&full);
+    let prefix_budget = 60usize.saturating_sub(9);
+    let mut prefix: String = full.chars().take(prefix_budget).collect();
+    if prefix.ends_with('_') {
+        prefix.pop();
+    }
+    format!("{prefix}_{hash}")
+}
+
 /// Map schema type to PostgreSQL type.
 ///
 /// B2 — a `ref` field is stored as `BIGINT` so it matches the `id`
@@ -559,6 +719,24 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         Some("object") => "JSONB",
         Some("array") => "JSONB",
         Some("ref") => "INTEGER",
+        // C2 — a top-level `t.union(...)` is flattened to discrete
+        // columns by the SDK before it reaches the DDL emitter, so this
+        // path should never fire for the discriminator column itself
+        // (it has the discriminator's primitive type, not "union").
+        // A *nested* `t.union(...)` (inside `t.object`) falls through
+        // to JSONB storage; per-variant integrity is application-side.
+        Some("union") => "JSONB",
+        // C2 — a top-level `t.literal()` field outside a union would
+        // store as TEXT/NUMERIC/BOOLEAN based on its literal type, but
+        // by the time the DDL emitter sees it the SDK normaliser keeps
+        // the `literal` tag. We pick the primitive type from the
+        // literal value so a `t.literal("login")` column becomes TEXT
+        // with a CHECK constraint elsewhere.
+        Some("literal") => match def.get("literalValue") {
+            Some(serde_json::Value::Number(_)) => "NUMERIC",
+            Some(serde_json::Value::Bool(_)) => "BOOLEAN",
+            _ => "TEXT",
+        },
         _ => "TEXT",
     }
 }
@@ -620,6 +798,26 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
         }
     } else if let (Some("number"), Some(max)) = (def.get("type").and_then(|t| t.as_str()), def.get("max").and_then(|v| v.as_f64())) {
         parts.push(format!("CHECK ({col} <= {max})"));
+    }
+
+    // C2 — standalone literal field. The value's primitive type is
+    // already mapped by `def_to_pg_type`; here we attach a CHECK so the
+    // column can hold only the literal value. Note this only fires for
+    // a `t.literal()` used as a top-level *non-union* column — inside a
+    // flat-expanded union the discriminator carries an `enum` of all
+    // variant literals (handled by the regular enum constraint below).
+    if def.get("type").and_then(|t| t.as_str()) == Some("literal") {
+        if let Some(lit) = def.get("literalValue") {
+            let lit_sql = match lit {
+                serde_json::Value::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                serde_json::Value::Bool(b) => Some(b.to_string()),
+                _ => None,
+            };
+            if let Some(rendered) = lit_sql {
+                parts.push(format!("CHECK ({col} = {rendered})"));
+            }
+        }
     }
 
     // Enum constraint — supports both string and numeric values
@@ -3423,5 +3621,241 @@ mod tests {
         let sql = build_create_table("app1", "posts", &schema).unwrap();
         assert!(sql.contains("\"version\" NUMERIC"), "{sql}");
         assert!(sql.contains("DEFAULT 1"), "{sql}");
+    }
+
+    // -----------------------------------------------------------------
+    // C2 — discriminated union document shapes (Phase 7)
+    //
+    // The SDK normalises `t.union(t.object({...}), t.object({...}))` into
+    // a flat schema where each variant's fields are top-level entries
+    // and the discriminator column carries a `variants` JSON payload
+    // plus `discriminator: "__discriminator__"`. The DDL emitter
+    // converts that into:
+    //   - TEXT/NUMERIC/BOOLEAN column for the discriminator with
+    //     `CHECK (col IN (...))` (via the regular enum constraint)
+    //   - nullable columns for every variant field
+    //   - per-variant CHECK constraint enforcing that required fields
+    //     for the active variant are NOT NULL
+    // -----------------------------------------------------------------
+
+    fn c2_events_union_schema() -> serde_json::Value {
+        // Equivalent of:
+        //   events: t.union(
+        //     t.object({ kind: t.literal("login"), userId: t.number().required(), ip: t.string().required() }),
+        //     t.object({ kind: t.literal("error"), message: t.string().required(), stack: t.string() }),
+        //     t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.number().required() }),
+        //   )
+        json!({
+            "kind": {
+                "type": "string",
+                "required": true,
+                "enum": ["login", "error", "metric"],
+                "discriminator": "__discriminator__",
+                "variants": [
+                    {
+                        "kind":   { "type": "literal", "literalValue": "login", "required": true },
+                        "userId": { "type": "number", "required": true },
+                        "ip":     { "type": "string", "required": true }
+                    },
+                    {
+                        "kind":    { "type": "literal", "literalValue": "error", "required": true },
+                        "message": { "type": "string", "required": true },
+                        "stack":   { "type": "string" }
+                    },
+                    {
+                        "kind":  { "type": "literal", "literalValue": "metric", "required": true },
+                        "name":  { "type": "string", "required": true },
+                        "value": { "type": "number", "required": true }
+                    }
+                ]
+            },
+            "userId":  { "type": "number" },
+            "ip":      { "type": "string" },
+            "message": { "type": "string" },
+            "stack":   { "type": "string" },
+            "name":    { "type": "string" },
+            "value":   { "type": "number" }
+        })
+    }
+
+    #[test]
+    fn c2_union_creates_flat_columns() {
+        // Verify that the DDL declares every union-wide field as a
+        // top-level column, with nullability reflecting "not in every
+        // variant" semantics (so the column is nullable at the table
+        // level; per-variant CHECK constraints enforce integrity).
+        let schema = c2_events_union_schema();
+        let sql = build_create_table("app1", "events", &schema).unwrap();
+
+        // Discriminator: TEXT, NOT NULL, with CHECK IN-list.
+        assert!(sql.contains("\"kind\" TEXT"), "expected kind TEXT: {sql}");
+        assert!(sql.contains("\"kind\" TEXT NOT NULL"), "expected kind NOT NULL: {sql}");
+        assert!(
+            sql.contains("CHECK (\"kind\" IN ('login', 'error', 'metric'))"),
+            "missing discriminator IN constraint: {sql}"
+        );
+
+        // Non-discriminator columns exist and are NOT marked NOT NULL.
+        for col in ["userId", "ip", "message", "stack", "name", "value"] {
+            assert!(sql.contains(&format!("\"{col}\"")), "missing column {col}: {sql}");
+            // No standalone `NOT NULL` immediately after the column type — these are nullable.
+            let bad = format!("\"{col}\" TEXT NOT NULL");
+            let bad2 = format!("\"{col}\" NUMERIC NOT NULL");
+            assert!(!sql.contains(&bad) && !sql.contains(&bad2), "column {col} must be nullable: {sql}");
+        }
+    }
+
+    #[test]
+    fn c2_union_emits_per_variant_check_constraints() {
+        // Per proposal §C2, each variant gets a CHECK constraint of the
+        // form: `kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)`.
+        let schema = c2_events_union_schema();
+        let sql = build_create_table("app1", "events", &schema).unwrap();
+
+        // The login variant requires userId AND ip.
+        assert!(
+            sql.contains("\"kind\" <> 'login' OR (\"userId\" IS NOT NULL AND \"ip\" IS NOT NULL)")
+                || sql.contains("\"kind\" <> 'login' OR (\"ip\" IS NOT NULL AND \"userId\" IS NOT NULL)"),
+            "missing login variant CHECK: {sql}"
+        );
+        // The error variant requires message (stack is optional → not in the NOT NULL list).
+        assert!(
+            sql.contains("\"kind\" <> 'error' OR (\"message\" IS NOT NULL)"),
+            "missing error variant CHECK: {sql}"
+        );
+        assert!(
+            !sql.contains("\"stack\" IS NOT NULL"),
+            "stack is optional and must not appear in CHECK: {sql}"
+        );
+        // The metric variant requires name AND value.
+        assert!(
+            sql.contains("\"kind\" <> 'metric' OR (\"name\" IS NOT NULL AND \"value\" IS NOT NULL)")
+                || sql.contains("\"kind\" <> 'metric' OR (\"value\" IS NOT NULL AND \"name\" IS NOT NULL)"),
+            "missing metric variant CHECK: {sql}"
+        );
+    }
+
+    #[test]
+    fn c2_union_constraint_names_are_unique_per_variant() {
+        let schema = c2_events_union_schema();
+        let sql = build_create_table("app1", "events", &schema).unwrap();
+        // Each variant constraint name follows `<table>_<disc>_<value>_chk`.
+        assert!(sql.contains("CONSTRAINT \"events_kind_login_chk\""), "{sql}");
+        assert!(sql.contains("CONSTRAINT \"events_kind_error_chk\""), "{sql}");
+        assert!(sql.contains("CONSTRAINT \"events_kind_metric_chk\""), "{sql}");
+    }
+
+    #[test]
+    fn c2_union_with_only_optional_variants_skips_check() {
+        // A variant with no required (non-discriminator) fields should
+        // not emit a CHECK constraint — the discriminator IN-list is
+        // sufficient.
+        let schema = json!({
+            "kind": {
+                "type": "string",
+                "required": true,
+                "enum": ["a", "b"],
+                "discriminator": "__discriminator__",
+                "variants": [
+                    {
+                        "kind": { "type": "literal", "literalValue": "a", "required": true },
+                        "x":    { "type": "string" }
+                    },
+                    {
+                        "kind": { "type": "literal", "literalValue": "b", "required": true },
+                        "y":    { "type": "string" }
+                    }
+                ]
+            },
+            "x": { "type": "string" },
+            "y": { "type": "string" }
+        });
+        let sql = build_create_table("app1", "evt", &schema).unwrap();
+        // No per-variant CHECK clauses, but discriminator IN-list still
+        // applies.
+        assert!(sql.contains("CHECK (\"kind\" IN ('a', 'b'))"), "{sql}");
+        assert!(
+            !sql.contains("\"kind\" <> 'a' OR ("),
+            "unexpected CHECK on variant with no requireds: {sql}"
+        );
+    }
+
+    #[test]
+    fn c2_union_numeric_discriminator() {
+        // Discriminator can be a number — verify the literal renders
+        // without single quotes and the IN-list does the same.
+        let schema = json!({
+            "code": {
+                "type": "number",
+                "required": true,
+                "enum": [1, 2],
+                "discriminator": "__discriminator__",
+                "variants": [
+                    {
+                        "code": { "type": "literal", "literalValue": 1, "required": true },
+                        "a":    { "type": "string", "required": true }
+                    },
+                    {
+                        "code": { "type": "literal", "literalValue": 2, "required": true },
+                        "b":    { "type": "string", "required": true }
+                    }
+                ]
+            },
+            "a": { "type": "string" },
+            "b": { "type": "string" }
+        });
+        let sql = build_create_table("app1", "evt", &schema).unwrap();
+        assert!(sql.contains("\"code\" NUMERIC"), "{sql}");
+        // Number enum members are bare (no quotes).
+        assert!(sql.contains("CHECK (\"code\" IN (1, 2))"), "{sql}");
+        assert!(sql.contains("\"code\" <> 1 OR (\"a\" IS NOT NULL)"), "{sql}");
+        assert!(sql.contains("\"code\" <> 2 OR (\"b\" IS NOT NULL)"), "{sql}");
+    }
+
+    #[test]
+    fn c2_standalone_literal_field_emits_check_equality() {
+        // A top-level (non-union) literal field — `kind: t.literal("login")`
+        // alone — gets a `CHECK (kind = 'login')` constraint.
+        let schema = json!({
+            "kind": { "type": "literal", "literalValue": "login", "required": true },
+        });
+        let sql = build_create_table("app1", "events", &schema).unwrap();
+        assert!(sql.contains("\"kind\" TEXT"), "{sql}");
+        assert!(sql.contains("CHECK (\"kind\" = 'login')"), "{sql}");
+    }
+
+    #[test]
+    fn c2_union_value_with_special_chars_sanitized_in_constraint_name() {
+        // Discriminator values containing characters not legal in a
+        // Postgres identifier (hyphens, dots, etc.) must be sanitised
+        // for the constraint name; the literal itself is still SQL-
+        // single-quoted with apostrophes escaped.
+        let schema = json!({
+            "kind": {
+                "type": "string",
+                "required": true,
+                "enum": ["page.view", "click-out"],
+                "discriminator": "__discriminator__",
+                "variants": [
+                    {
+                        "kind": { "type": "literal", "literalValue": "page.view", "required": true },
+                        "url":  { "type": "string", "required": true }
+                    },
+                    {
+                        "kind": { "type": "literal", "literalValue": "click-out", "required": true },
+                        "target": { "type": "string", "required": true }
+                    }
+                ]
+            },
+            "url":    { "type": "string" },
+            "target": { "type": "string" }
+        });
+        let sql = build_create_table("app1", "evt", &schema).unwrap();
+        // Sanitised identifiers (dots / hyphens → underscore).
+        assert!(sql.contains("CONSTRAINT \"evt_kind_page_view_chk\""), "{sql}");
+        assert!(sql.contains("CONSTRAINT \"evt_kind_click_out_chk\""), "{sql}");
+        // Literal still rendered correctly inside the CHECK body.
+        assert!(sql.contains("'page.view'"), "{sql}");
+        assert!(sql.contains("'click-out'"), "{sql}");
     }
 }

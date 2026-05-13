@@ -361,4 +361,65 @@ async function testVersionInference() {
 }
 void testVersionInference;
 
+// === C2 — discriminated union document shapes (Phase 7) ===
+//
+// `events: t.union(...)` declares a collection whose row shape is a
+// discriminated union. Narrowing on the discriminator key must compile
+// without explicit type assertions.
+
+const dbEvents = createDb({
+  users: { name: t.string().required() },
+  events: t.union(
+    t.object({ kind: t.literal("login"), userId: t.ref("users"), ip: t.string().required() }),
+    t.object({ kind: t.literal("error"), message: t.string().required(), stack: t.string() }),
+    t.object({ kind: t.literal("metric"), name: t.string().required(), value: t.number().required() }),
+  ),
+});
+
+async function testUnionNarrowing() {
+  const { data } = await dbEvents.events.findOne({});
+  if (!data) return;
+
+  // Narrowing on the discriminator key — TypeScript must filter the
+  // union members to the matching variant inside each branch.
+  if (data.kind === "login") {
+    // ✓ variant fields visible
+    const uid: Id<"users"> | undefined = data.userId;
+    const ip: string | undefined = data.ip;
+    void uid;
+    void ip;
+
+    // @ts-expect-error — `message` is not on the "login" variant
+    const m = data.message;
+    void m;
+  } else if (data.kind === "error") {
+    const msg: string | undefined = data.message;
+    void msg;
+
+    // @ts-expect-error — `userId` is not on the "error" variant
+    const u = data.userId;
+    void u;
+  } else if (data.kind === "metric") {
+    const name: string | undefined = data.name;
+    const value: number | undefined = data.value;
+    void name;
+    void value;
+  }
+}
+void testUnionNarrowing;
+
+// === Phase 7 — t.literal type-level brand ===
+//
+// A literal field's inferred type is the literal value, not the
+// underlying primitive — so a `kind: t.literal("login")` field is
+// typed as `kind: "login"`, NOT `kind: string`.
+const litKind = t.literal("login");
+type LitType = typeof litKind extends { _type: infer U } ? U : never;
+// The brand carries the literal type.
+const lk: LitType = "login";
+// @ts-expect-error — "logout" is not assignable to "login"
+const lkBad: LitType = "logout";
+void lk;
+void lkBad;
+
 console.log("All type checks passed!");

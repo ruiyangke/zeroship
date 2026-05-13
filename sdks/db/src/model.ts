@@ -5,7 +5,7 @@
 import { env } from "zeroship";
 import { normalizeSchema } from "./schema.js";
 import { Collection, NativeDb } from "./collection.js";
-import { NamingStrategy, naming } from "./types.js";
+import { NamingStrategy, naming, TypeBuilder } from "./types.js";
 
 /**
  * Resolve the native database driver off the runtime's composite `env`.
@@ -56,6 +56,12 @@ export function model<S extends Record<string, unknown>>(
   if (schema === null || schema === undefined || typeof schema !== "object") {
     throw new Error("model schema must be an object");
   }
+  // C2 — a top-level `t.union(...)` is a valid schema. The TypeBuilder
+  // is detected by `normalizeSchema` which expands the union into flat
+  // columns; the call below works for both record-of-fields AND a
+  // single `TypeBuilder<X>` of union type.
+  const _isUnion = schema instanceof TypeBuilder;
+  void _isUnion;
   const normalized = normalizeSchema(schema as Parameters<typeof normalizeSchema>[0]);
   const native = nativeOverride ?? getNativeDb();
 
