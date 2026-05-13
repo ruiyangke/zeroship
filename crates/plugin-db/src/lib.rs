@@ -18,6 +18,7 @@ use compio_postgres::{Client, Pool};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 pub mod audit;
+pub mod auth;
 pub mod broker;
 pub mod callbacks;
 pub mod diff;
