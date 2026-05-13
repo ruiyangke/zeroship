@@ -424,6 +424,14 @@ pub fn subscribe(app_id: &str, collection: &str) -> Subscription {
     BROKER.with(|b| b.borrow_mut().subscribe(app_id, collection))
 }
 
+/// Total live (not-yet-closed) subscriptions on this thread's broker.
+/// Tests use this to verify the [`crate::v8_classes::subscription`]
+/// Weak finalizer reclaims broker slots when V8 GCs an orphaned
+/// wrapper.
+pub fn live_subscription_count() -> usize {
+    BROKER.with(|b| b.borrow().subscription_count())
+}
+
 /// Drop ALL subscribers (for an app, or globally with `None`). Tests
 /// + worker shutdown use this.
 pub fn drop_app(app_id: Option<&str>) {

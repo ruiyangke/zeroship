@@ -2386,6 +2386,50 @@ pub fn subscribe_poll(
     rv.set(promise.into());
 }
 
+/// `zeroship.db.openSubscription(collection)` → `Subscription` wrapper
+///
+/// Stage 3 of the runtime-macros DB refactor — replaces the handle-id
+/// triple (`subscribe` / `subscribePoll` / `subscribeClose`) with a
+/// native `Subscription` v8_class instance whose Weak finalizer closes
+/// the broker entry on GC. Closes the P8a handle-leak: callers that
+/// drop the wrapper without explicit `.close()` still release the
+/// broker slot when V8 reclaims the wrapper.
+///
+/// Synchronous: subscribes on the thread-local broker, mints the
+/// wrapper, returns it directly. Use `.pollJson()` to drain events
+/// (returns a Promise<string|null>) and `.close()` for idempotent
+/// explicit teardown.
+///
+/// The legacy three-callback API is kept alongside this for back-compat
+/// with `sdks/db/src/subscribe.ts`'s current implementation; future SDK
+/// work routes `subscribe()` through this primitive and lets the GC
+/// finalizer handle the leak path. Existing tests continue to use the
+/// handle-id surface unchanged.
+pub fn open_subscription(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+
+    let app_id = get_app_id(&state);
+    match crate::v8_classes::subscription::mint_subscription(scope, &app_id, &collection) {
+        Ok(obj) => rv.set(obj.into()),
+        Err(e) => {
+            let msg = v8::String::new(scope, &e.message).unwrap();
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+        }
+    }
+}
+
 /// `zeroship.db.subscribeClose(handle)` → undefined
 ///
 /// Synchronous. Closes the subscription and removes the handle from

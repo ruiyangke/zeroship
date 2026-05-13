@@ -5914,6 +5914,7 @@ dependencies = [
  "uuid",
  "v8",
  "zeroship-runtime",
+ "zeroship-runtime-macros",
 ]
 
 [[package]]

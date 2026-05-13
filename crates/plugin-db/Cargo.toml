@@ -6,6 +6,7 @@ description = "Database plugin — zeroship.db.* native primitives"
 
 [dependencies]
 zeroship-runtime = { workspace = true }
+zeroship-runtime-macros = { workspace = true }
 compio-postgres = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }

@@ -24,6 +24,7 @@ pub mod diff;
 pub mod migrations;
 pub mod query;
 pub mod replication;
+pub mod v8_classes;
 pub mod wal_consumer;
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,11 @@ impl NativePlugin for DbPlugin {
         r.add("subscribe", callbacks::subscribe);
         r.add("subscribePoll", callbacks::subscribe_poll);
         r.add("subscribeClose", callbacks::subscribe_close);
+        // Stage 3 — v8_class-backed Subscription wrapper whose Weak
+        // finalizer closes the broker handle on GC. The handle-id
+        // triple above stays for back-compat with the existing SDK
+        // AsyncIterable shim.
+        r.add("openSubscription", callbacks::open_subscription);
         r.add("replicationSetup", callbacks::replication_setup);
         r.add("replicationWatchdog", callbacks::replication_watchdog);
         r.add("replicationDropAbandoned", callbacks::replication_drop_abandoned);

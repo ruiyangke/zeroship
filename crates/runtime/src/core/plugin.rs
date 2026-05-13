@@ -49,6 +49,37 @@ pub trait NativePlugin: Send + Sync + 'static {
     /// `register()` fire repeatedly as multiple Runtimes are constructed
     /// on it (one per app in multi-tenant workers). Init must be idempotent.
     fn register(&self, r: &mut NativeRegistrar);
+
+    /// Optional hook: build the V8 namespace object yourself instead of
+    /// letting the runtime allocate a plain `v8::Object` for you.
+    ///
+    /// Default returns `None`. When `None`, `build_env_object` allocates
+    /// a fresh `v8::Object`, then layers the callbacks from
+    /// [`NativePlugin::register`] onto it — the historical behaviour.
+    ///
+    /// When this returns `Some(obj)`, the runtime uses `obj` as the
+    /// namespace value (i.e. `env.{namespace}`) and STILL runs
+    /// [`NativePlugin::register`] to attach callbacks on top of it. This
+    /// lets a plugin ship a `#[v8_class]`-backed instance (with internal
+    /// fields + methods + getters + Weak finalizers) as the namespace
+    /// object while keeping its pre-existing flat callbacks working
+    /// unchanged.
+    ///
+    /// Plumbing for the macro-driven DB namespace (Stage 1 of the
+    /// `runtime-macros` refactor): `DbPlugin::build_instance` mints a
+    /// `Db` v8_class instance, the runtime overlays the 27 existing
+    /// `zeroship.db.*` callbacks on top, and SDK callers see no
+    /// behavioural change. Future-facing methods (`collection`,
+    /// `subscribe` returning a `Subscription` wrapper) are declared as
+    /// `#[v8_method]` on the v8_class and don't have to be wired through
+    /// `NativeRegistrar`.
+    fn build_instance<'s>(
+        &self,
+        _scope: &mut v8::PinScope<'s, '_>,
+        _app_id: &str,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        None
+    }
 }
 
 /// Collects function registrations from a plugin.
@@ -177,7 +208,27 @@ pub(crate) fn build_env_object(
         let mut registrar = NativeRegistrar::new();
         plugin.register(&mut registrar);
 
-        let ns_obj = v8::Object::new(scope);
+        // Stage 1: if the plugin provides a custom namespace instance
+        // (typically a `#[v8_class]`-backed object with internal fields
+        // + methods + Weak finalizers), use it as the namespace value.
+        // Otherwise fall back to a fresh `v8::Object` — the legacy
+        // shape every plugin still relies on. The callbacks from
+        // `register()` are layered on top in either case so existing
+        // surfaces (`env.db.find`, `env.kv.get`, …) keep working
+        // whether or not the plugin migrated to v8_class.
+        //
+        // `build_instance` reads the app_id from the runtime's
+        // `SharedState` slot so plugins can stamp it onto the boxed
+        // state at construction time (avoiding the per-callback
+        // `env_vars.get("APP_ID")` lookup the legacy flat callbacks
+        // do).
+        let app_id_for_instance = scope
+            .get_slot::<crate::state::SharedState>()
+            .and_then(|s| s.borrow().env_vars.get("APP_ID").cloned())
+            .unwrap_or_else(|| "default".to_string());
+        let ns_obj = plugin
+            .build_instance(scope, &app_id_for_instance)
+            .unwrap_or_else(|| v8::Object::new(scope));
         for (_name, apply_fn) in &registrar.entries {
             apply_fn(scope, ns_obj);
         }
