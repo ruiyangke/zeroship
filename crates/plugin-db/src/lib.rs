@@ -23,6 +23,7 @@ pub mod callbacks;
 pub mod diff;
 pub mod migrations;
 pub mod query;
+pub mod read_set;
 pub mod replication;
 pub mod v8_classes;
 pub mod wal_consumer;

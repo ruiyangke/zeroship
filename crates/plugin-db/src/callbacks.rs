@@ -305,15 +305,35 @@ async fn exec_mutation_with_emit(
         // Filtering down to "what changed" requires a before/after
         // diff that we don't have here; P8b will compute it from the
         // mutation's SET clause directly.
-        let columns: Vec<String> = match row {
-            Value::Object(m) => m
-                .keys()
-                .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
-                .cloned()
-                .collect(),
-            _ => Vec::new(),
+        let (columns, tuple): (Vec<String>, std::collections::HashMap<String, String>) = match row {
+            Value::Object(m) => {
+                let cols = m
+                    .keys()
+                    .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
+                    .cloned()
+                    .collect();
+                // P8b: render the full RETURNING row into a
+                // `column → text` map for the broker's predicate
+                // evaluation. Numbers / bools are stringified to
+                // match the WAL-consumer path's text encoding so the
+                // predicate-eval rules collapse to a single
+                // comparison code path.
+                let tuple = m
+                    .iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            Value::String(s) => s.clone(),
+                            Value::Null => "NULL".to_string(),
+                            other => other.to_string(),
+                        };
+                        (k.clone(), s)
+                    })
+                    .collect();
+                (cols, tuple)
+            }
+            _ => (Vec::new(), std::collections::HashMap::new()),
         };
-        crate::wal_consumer::emit_local(app_id, collection, op, pk, columns);
+        crate::wal_consumer::emit_local(app_id, collection, op, pk, columns, tuple);
     }
     Ok(json)
 }
@@ -461,6 +481,9 @@ pub fn find_one(
         return;
     };
 
+    // P8b — record into the active query's read-set so the broker can
+    // narrow events to this filter. No-op outside `query()` handlers.
+    crate::read_set::record_if_active(&collection, &filter);
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
@@ -516,6 +539,9 @@ pub fn find(
     };
     let opts = parse_json_arg(scope, &args, 2).unwrap_or(Value::Object(serde_json::Map::new()));
 
+    // P8b — record into the active query's read-set so the broker can
+    // narrow events to this filter. No-op outside `query()` handlers.
+    crate::read_set::record_if_active(&collection, &filter);
 
     let app_id = get_app_id(&state);
     let limit = opts.get("limit").and_then(Value::as_i64);
@@ -819,6 +845,20 @@ pub fn aggregate(
         return;
     };
 
+    // P8b — record into the active query's read-set so the broker can
+    // narrow events. If the first stage is `$match`, capture its filter;
+    // otherwise record a coarse-grained entry (empty filter) — the
+    // pipeline depends on the whole collection.
+    {
+        let captured_filter = pipeline
+            .as_array()
+            .and_then(|stages| stages.first())
+            .and_then(|stage| stage.get("$match"))
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        crate::read_set::record_if_active(&collection, &captured_filter);
+    }
+
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
@@ -1058,6 +1098,9 @@ pub fn count(
         return;
     };
 
+    // P8b — record into the active query's read-set so the broker can
+    // narrow events to this filter. No-op outside `query()` handlers.
+    crate::read_set::record_if_active(&collection, &filter);
 
     let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);

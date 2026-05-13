@@ -120,12 +120,19 @@ pub fn local_emit_suppressed() -> bool {
 /// When [`local_emit_suppressed`] is `true` this is a no-op — the WAL
 /// consumer is publishing the same event on the cross-worker path and
 /// emitting locally too would double-deliver.
+///
+/// P8b: the `new_tuple` is the row's post-image (or pre-image for
+/// DELETE) — used by the broker's read-set narrowing to test each
+/// subscriber's predicate. May be empty when the caller doesn't have a
+/// tuple snapshot to hand; predicate evaluation treats missing columns
+/// as non-matching (the conservative direction).
 pub fn emit_local(
     app_id: &str,
     collection: &str,
     op: ChangeOp,
     pk: Option<i64>,
     changed_columns: Vec<String>,
+    new_tuple: std::collections::HashMap<String, String>,
 ) {
     if local_emit_suppressed() {
         return;
@@ -136,6 +143,8 @@ pub fn emit_local(
         op,
         pk,
         changed_columns,
+        new_tuple,
+        old_tuple: None,
     });
 }
 
@@ -377,15 +386,24 @@ impl WalConsumer {
                 );
             }
             PgOutputMessage::Insert { rel_id, new_tuple } => {
-                self.emit_for_tuple(relations, *rel_id, ChangeOp::Insert, new_tuple);
+                self.emit_for_tuple(relations, *rel_id, ChangeOp::Insert, new_tuple, None);
             }
             PgOutputMessage::Update {
-                rel_id, new_tuple, ..
+                rel_id,
+                new_tuple,
+                old_tuple,
+                ..
             } => {
-                self.emit_for_tuple(relations, *rel_id, ChangeOp::Update, new_tuple);
+                self.emit_for_tuple(
+                    relations,
+                    *rel_id,
+                    ChangeOp::Update,
+                    new_tuple,
+                    old_tuple.as_ref(),
+                );
             }
             PgOutputMessage::Delete { rel_id, old_tuple } => {
-                self.emit_for_tuple(relations, *rel_id, ChangeOp::Delete, old_tuple);
+                self.emit_for_tuple(relations, *rel_id, ChangeOp::Delete, old_tuple, None);
             }
             // Begin/Commit/Origin/Type/Truncate/Message: not surfaced
             // to subscribers in P8a.2. Truncate could fan out to all
@@ -402,12 +420,18 @@ impl WalConsumer {
     /// `app_id` are surfaced — the slot may carry events from any
     /// publication that happens to be in scope, but we explicitly
     /// scope to this app for tenant isolation.
+    ///
+    /// P8b: the relation's column declarations are zipped with the
+    /// tuple's text values to populate `new_tuple` (and `old_tuple`
+    /// for UPDATE) — these maps drive the broker's predicate
+    /// evaluation on the subscriber-narrowing path.
     fn emit_for_tuple(
         &self,
         relations: &HashMap<u32, RelationEntry>,
         rel_id: u32,
         op: ChangeOp,
         tuple: &TupleData,
+        old_tuple: Option<&TupleData>,
     ) {
         let Some(rel) = relations.get(&rel_id) else {
             // Relation cache miss. pgoutput contracts that Relation
@@ -434,14 +458,52 @@ impl WalConsumer {
             .map(|c| c.name.clone())
             .collect();
 
+        let new_tuple_map = tuple_to_map(&rel.columns, tuple);
+        let old_tuple_map = old_tuple.map(|t| tuple_to_map(&rel.columns, t));
+
         publish(&ChangeEvent {
             app_id: self.app_id.clone(),
             collection: rel.table.clone(),
             op,
             pk,
             changed_columns,
+            new_tuple: new_tuple_map,
+            old_tuple: old_tuple_map,
         });
     }
+}
+
+/// Zip a pgoutput tuple with its relation's column declarations into a
+/// `column_name → text_value` map.
+///
+/// Only `TupleColumn::Text` values are surfaced; `Null` produces the
+/// sentinel `"NULL"` so the broker's predicate evaluation can treat
+/// it as a non-match against any scalar (the proposal explicitly
+/// punts on NULL-aware filters until a future phase). `Toasted` and
+/// `Binary` columns are skipped — the column simply doesn't appear in
+/// the map and predicate evaluation treats it as non-matching, which
+/// is the conservative choice (the subscriber sees fewer events, not
+/// more; the next event WITH the column populated re-triggers
+/// matching).
+fn tuple_to_map(
+    columns: &[pgoutput::RelationColumn],
+    tuple: &TupleData,
+) -> HashMap<String, String> {
+    let mut out = HashMap::with_capacity(columns.len());
+    for (col, val) in columns.iter().zip(tuple.columns.iter()) {
+        match val {
+            TupleColumn::Text(s) => {
+                out.insert(col.name.clone(), s.clone());
+            }
+            TupleColumn::Null => {
+                out.insert(col.name.clone(), "NULL".to_string());
+            }
+            // Toasted (unchanged TOAST values, not transmitted) and
+            // Binary (publication-options-dependent) skip the map.
+            TupleColumn::Toasted | TupleColumn::Binary(_) => {}
+        }
+    }
+    out
 }
 
 /// Add `replication=database` to a libpq-style URL if not already set.
@@ -484,7 +546,14 @@ mod tests {
         // thread; clean it before observing.
         crate::broker::drop_app(None);
         let sub = crate::broker::subscribe("xapp", "messages");
-        emit_local("xapp", "messages", ChangeOp::Insert, Some(99), vec!["title".into()]);
+        emit_local(
+            "xapp",
+            "messages",
+            ChangeOp::Insert,
+            Some(99),
+            vec!["title".into()],
+            HashMap::new(),
+        );
         match sub.pop() {
             Some(SubscriptionMessage::Change(ev)) => {
                 assert_eq!(ev.app_id, "xapp");
@@ -501,7 +570,14 @@ mod tests {
     #[test]
     fn emit_local_with_no_subscriber_is_noop() {
         let _ = Broker::new();
-        emit_local("nobody", "ghosts", ChangeOp::Delete, None, vec![]);
+        emit_local(
+            "nobody",
+            "ghosts",
+            ChangeOp::Delete,
+            None,
+            vec![],
+            HashMap::new(),
+        );
     }
 
     #[test]
@@ -510,12 +586,26 @@ mod tests {
         let sub = crate::broker::subscribe("xapp", "messages");
 
         set_local_emit_suppressed(true);
-        emit_local("xapp", "messages", ChangeOp::Insert, Some(1), vec!["title".into()]);
+        emit_local(
+            "xapp",
+            "messages",
+            ChangeOp::Insert,
+            Some(1),
+            vec!["title".into()],
+            HashMap::new(),
+        );
         // Suppressed — no event in the queue.
         assert!(sub.pop().is_none());
 
         set_local_emit_suppressed(false);
-        emit_local("xapp", "messages", ChangeOp::Insert, Some(2), vec!["title".into()]);
+        emit_local(
+            "xapp",
+            "messages",
+            ChangeOp::Insert,
+            Some(2),
+            vec!["title".into()],
+            HashMap::new(),
+        );
         // Unsuppressed — event delivered.
         assert!(matches!(sub.pop(), Some(SubscriptionMessage::Change(_))));
         crate::broker::drop_app(None);

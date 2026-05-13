@@ -2654,6 +2654,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
         zeroship_plugin_db::broker::ChangeOp::Insert,
         Some(7),
         vec!["title".into()],
+        std::collections::HashMap::new(),
     );
 
     let msg = sub.pop().expect("expected an event");
