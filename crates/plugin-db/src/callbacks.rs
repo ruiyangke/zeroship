@@ -129,6 +129,45 @@ fn get_app_id(state: &SharedState) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+/// B3 capability gate. Returns `true` if the caller refused the write
+/// because the active procedure kind is `query()` — in which case the
+/// callback has already set a rejected promise on `rv` and the caller
+/// must return immediately.
+///
+/// The error envelope matches the `capability_violation` shape (`code`,
+/// `wrapper`, `violated`, `remediation`) so the dispatch path can
+/// render a structured 500 instead of a generic exception.
+///
+/// Pure-Rust check: cheap thread-local read, no V8 work on the
+/// allow path. On refusal we build a plain V8 object (not an Error
+/// instance) and reject — matches the cached-admission-error pattern
+/// used elsewhere; structured fields render via the same
+/// `v8_exception_to_*` extraction the dispatcher uses for thrown
+/// values.
+fn refuse_if_query_capability<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    rv: &mut v8::ReturnValue,
+    op: &str,
+) -> bool {
+    if !matches!(
+        zeroship_runtime::rpc::current_kind(),
+        Some(zeroship_runtime::rpc::ProcedureKind::Query)
+    ) {
+        return false;
+    }
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let exc = zeroship_runtime::rpc::build_capability_violation(
+        scope,
+        "query",
+        op,
+        "Use mutation() if you need to write to the database. Queries are read-only.",
+    );
+    resolver.reject(scope, exc.into());
+    rv.set(promise.into());
+    true
+}
+
 /// Create a promise, allocate an op_id, store the resolver, and return
 /// (op_id, request_id, promise).
 fn setup_promise<'s>(
@@ -516,6 +555,10 @@ pub fn insert(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    // B3 capability gate: query() handlers cannot write.
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.insert") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -577,6 +620,9 @@ pub fn update_one(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.updateOne") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -640,6 +686,9 @@ pub fn delete_one(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.deleteOne") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -700,6 +749,9 @@ pub fn insert_many(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.insertMany") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -865,6 +917,9 @@ pub fn update_many(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.updateMany") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -928,6 +983,9 @@ pub fn delete_many(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.deleteMany") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
@@ -1898,6 +1956,9 @@ pub fn upsert(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.upsert") {
+        return;
+    }
     let state: SharedState = scope
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")

@@ -1749,6 +1749,12 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     // in the `zeroship` JS module can read the per-request platform
     // ctx out of V8's embedder-data slot.
     crate::rpc::install_dispatch_globals(scope, global);
+    // B3 capability enforcement: install `__zsEnterKind` /
+    // `__zsExitKind` so the synthetic SSR entry can mark the active
+    // procedure kind around each user handler invocation. DB write
+    // callbacks + the native fetch callback consult `current_kind()`
+    // to refuse capability-violating ops.
+    crate::rpc::install_capability_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).

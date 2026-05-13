@@ -140,11 +140,28 @@ impl AuthLevel {
 /// Procedure kind, declared on `rpc:` resource entries. Drives method
 /// gating (mutations refuse `GET`) and the wire shape (streams use SSE,
 /// subscriptions use WebSocket).
+///
+/// ## Wire back-compat for `Action`
+///
+/// `Action` is the B3 capability-scoped variant (no DB-write surface
+/// for `query`, no `fetch` for `mutation`, full surface for `action`).
+/// `ResourceEntry::kind` is `Option<ProcedureKind>` with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so
+/// **old manifests with no `kind` field continue to parse as `None`**.
+/// Consumers treat `None` and `Some(Action)` identically: no method
+/// restriction, no CSRF/idempotency gating (action is most permissive).
+///
+/// The vite-plugin manifest emitter currently OMITS `kind` for
+/// `action(...)` procedures (writes nothing rather than
+/// `kind: "action"`) — this stays valid. When a future emitter starts
+/// writing `kind: "action"` explicitly, deserialisation will produce
+/// `Some(Action)` and the gates handle it identically.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcedureKind {
     Query,
     Mutation,
+    Action,
     Stream,
     Subscription,
 }
@@ -430,4 +447,54 @@ fn glob_match(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
         return None;
     }
     Some(captures)
+}
+
+#[cfg(test)]
+mod procedure_kind_tests {
+    use super::*;
+
+    /// Old `.zship` manifests written before the `action` variant
+    /// landed have a `ResourceEntry` with no `kind` field at all. They
+    /// must still deserialise — `kind` is optional, default `None`,
+    /// and `None` is the wire form of action's "no method restriction"
+    /// semantics.
+    #[test]
+    fn bundle_old_manifest_without_kind_defaults_to_action() {
+        // Minimal ResourceEntry shape from a pre-B3 manifest — no `kind`.
+        let json = r#"{ "auth": "user" }"#;
+        let entry: ResourceEntry = serde_json::from_str(json).expect("must deserialise");
+        assert_eq!(entry.kind, None);
+        // `None` is what consumers (gateway dispatch, runtime kind
+        // marker) treat as Action — most permissive.
+    }
+
+    /// Explicit `kind: "action"` on a manifest deserialises into the
+    /// new variant. Forward-compat: future emitters that DO write the
+    /// field round-trip correctly.
+    #[test]
+    fn bundle_manifest_explicit_action_kind_round_trips() {
+        let json = r#"{ "kind": "action" }"#;
+        let entry: ResourceEntry = serde_json::from_str(json).expect("must deserialise");
+        assert_eq!(entry.kind, Some(ProcedureKind::Action));
+
+        // Round-trip serialise → deserialise must preserve the variant.
+        let back = serde_json::to_string(&entry).unwrap();
+        let again: ResourceEntry = serde_json::from_str(&back).unwrap();
+        assert_eq!(again.kind, Some(ProcedureKind::Action));
+    }
+
+    /// Pre-existing variants stay stable on the wire.
+    #[test]
+    fn bundle_existing_kinds_still_parse() {
+        for (s, k) in [
+            ("query", ProcedureKind::Query),
+            ("mutation", ProcedureKind::Mutation),
+            ("stream", ProcedureKind::Stream),
+            ("subscription", ProcedureKind::Subscription),
+        ] {
+            let json = format!(r#"{{ "kind": "{s}" }}"#);
+            let entry: ResourceEntry = serde_json::from_str(&json).expect("must deserialise");
+            assert_eq!(entry.kind, Some(k));
+        }
+    }
 }

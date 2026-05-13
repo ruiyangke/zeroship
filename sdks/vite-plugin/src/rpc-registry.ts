@@ -169,6 +169,15 @@ function _isZodStringSchema(s) {
 // and only attach \`.then\` when the user handler returns a thenable.
 // On the bench (sync ping/fib), this saves the per-request microtask
 // checkpoint.
+//
+// B3 capability marker. Around the user handler we set the runtime's
+// thread-local CURRENT_KIND via the native __zsEnterKind / __zsExitKind
+// callbacks. The Rust-side db write callbacks and fetch callback read
+// this marker to refuse capability-violating ops (query → no write,
+// mutation → no fetch). The token roundtrip is a stack so nested calls
+// (action → runMutation → mutation handler) restore the outer kind on
+// inner exit. Falls back to no-op when the natives aren't installed
+// (legacy embeddings / dev-bootstrap).
 function _zsRpc(name, input, ctx) {
   const fn = _procedures[name];
   if (typeof fn !== "function") {
@@ -192,11 +201,34 @@ function _zsRpc(name, input, ctx) {
     }
   }
 
-  const out = fn(validated, ctx);
-  if (out && typeof out.then === "function") {
-    return out.then((v) => _zsRpcPost(v, cfg));
+  // Resolve the procedure kind cheaply. fn.config.kind is the canonical
+  // source (set by the typed wrapper or by inferKind() at build time);
+  // fn.__zsKind is the non-enumerable fallback the wrappers attach so
+  // capability dispatch survives even when config is absent.
+  const kind = (cfg && typeof cfg.kind === "string" && cfg.kind) ||
+               (typeof fn.__zsKind === "string" && fn.__zsKind) ||
+               undefined;
+  const ek = (typeof globalThis !== "undefined") ? globalThis.__zsEnterKind : undefined;
+  const xk = (typeof globalThis !== "undefined") ? globalThis.__zsExitKind : undefined;
+  const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
+  try {
+    const out = fn(validated, ctx);
+    if (out && typeof out.then === "function") {
+      // Async path — pop the marker after the Promise settles, win OR lose,
+      // so a rejected handler still releases CURRENT_KIND. The .then chain
+      // returns the same value/error the user produced.
+      return out.then(
+        (v) => { if (tok >= 0 && typeof xk === "function") xk(tok); return _zsRpcPost(v, cfg); },
+        (e) => { if (tok >= 0 && typeof xk === "function") xk(tok); throw e; },
+      );
+    }
+    const post = _zsRpcPost(out, cfg);
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    return post;
+  } catch (e) {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw e;
   }
-  return _zsRpcPost(out, cfg);
 }
 
 // Output-validation + stream-tag tail. Runs after either sync return
@@ -494,6 +526,9 @@ function _isZodStringSchema(s) {
   return false;
 }
 
+// Phase-2 (static dispatch) _zsRpc. Mirrors the runtime path above —
+// including B3 capability marker (__zsEnterKind / __zsExitKind around
+// the user handler).
 function _zsRpc(name, input, ctx) {
   const fn = _procedures[name];
   if (typeof fn !== "function") {
@@ -517,11 +552,27 @@ function _zsRpc(name, input, ctx) {
     }
   }
 
-  const out = fn(validated, ctx);
-  if (out && typeof out.then === "function") {
-    return out.then((v) => _zsRpcPost(v, cfg));
+  const kind = (cfg && typeof cfg.kind === "string" && cfg.kind) ||
+               (typeof fn.__zsKind === "string" && fn.__zsKind) ||
+               undefined;
+  const ek = (typeof globalThis !== "undefined") ? globalThis.__zsEnterKind : undefined;
+  const xk = (typeof globalThis !== "undefined") ? globalThis.__zsExitKind : undefined;
+  const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
+  try {
+    const out = fn(validated, ctx);
+    if (out && typeof out.then === "function") {
+      return out.then(
+        (v) => { if (tok >= 0 && typeof xk === "function") xk(tok); return _zsRpcPost(v, cfg); },
+        (e) => { if (tok >= 0 && typeof xk === "function") xk(tok); throw e; },
+      );
+    }
+    const post = _zsRpcPost(out, cfg);
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    return post;
+  } catch (e) {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw e;
   }
-  return _zsRpcPost(out, cfg);
 }
 
 function _zsRpcPost(result, cfg) {

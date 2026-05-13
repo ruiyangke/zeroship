@@ -20,12 +20,17 @@
 //!     isolate.
 
 pub mod abort;
+pub mod capability;
 pub mod ctx_holder;
 pub mod dispatch;
 pub mod error;
 pub mod superjson;
 
 pub use abort::{entered_for_eviction, register_in_flight, AbortGuard};
+pub use capability::{
+    build_capability_violation, current_kind, install_globals as install_capability_globals,
+    KindGuard, ProcedureKind,
+};
 pub use ctx_holder::{mint_rpc_ctx, RpcCtx};
 pub use dispatch::{
     install_globals as install_dispatch_globals, rpc_ctx_als_key, with_rpc_context_lazy,

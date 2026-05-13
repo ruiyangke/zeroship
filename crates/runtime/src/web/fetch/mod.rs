@@ -255,6 +255,41 @@ fn fetch_callback(
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
 
+    // B3 capability gate. `mutation()` handlers must not call `fetch`
+    // — the TS layer rejects this at compile time; here we reject at
+    // request time so handlers compiled without strict type-checking
+    // still hit the rail. `query()` handlers are also forbidden from
+    // calling fetch (queries are read-only and tx-bound). `action()` /
+    // `stream()` / `subscription()` / no-marker code paths are allowed.
+    //
+    // The check fires BEFORE admission control / Request coercion so
+    // a refused fetch doesn't consume a `MAX_PENDING_FETCHES` slot.
+    match crate::rpc::current_kind() {
+        Some(crate::rpc::ProcedureKind::Query) => {
+            let exc = crate::rpc::build_capability_violation(
+                scope,
+                "query",
+                "fetch",
+                "Queries are read-only — use action() if you need to call external APIs, or runQuery to compose with other queries.",
+            );
+            resolver.reject(scope, exc.into());
+            rv.set(promise.into());
+            return;
+        }
+        Some(crate::rpc::ProcedureKind::Mutation) => {
+            let exc = crate::rpc::build_capability_violation(
+                scope,
+                "mutation",
+                "fetch",
+                "Use action() if you need to call external APIs. Mutations are transactional and must complete quickly; holding a DB tx open across an outbound HTTP call would block other writers.",
+            );
+            resolver.reject(scope, exc.into());
+            rv.set(promise.into());
+            return;
+        }
+        _ => {}
+    }
+
     // FIX E fast path: `fetch(string)` (or `fetch(string, undefined)`)
     // — the most common shape. Skip the Request constructor + headers
     // construction + AbortSignal wiring + snapshot_request entirely.

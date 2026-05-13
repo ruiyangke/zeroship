@@ -348,6 +348,14 @@ async fn execute_resource_tree(
                     || method == ntex::http::Method::HEAD
             }
             ProcedureKind::Mutation => method == ntex::http::Method::POST,
+            // Action is the most permissive variant — no method
+            // restriction. Mirrors the "no kind" path used by the
+            // current vite-plugin manifest emitter, which OMITS `kind`
+            // for `action(...)` procedures so today's `if let
+            // Some(kind)` check skips the gate entirely. When a future
+            // emitter writes `kind: "action"` explicitly, the gate
+            // still passes here.
+            ProcedureKind::Action => true,
             ProcedureKind::Stream => true,
             ProcedureKind::Subscription => method == ntex::http::Method::GET,
         };
@@ -383,7 +391,11 @@ async fn execute_resource_tree(
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
-    if matches!(policy.kind, Some(ProcedureKind::Mutation))
+    //
+    //    `Some(Action)` and `None` route identically — action is the
+    //    most permissive variant and the current manifest emitter omits
+    //    `kind` for it. Both forms must continue to gate the same way.
+    if matches!(policy.kind, Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action))
         || req.method() == ntex::http::Method::POST
         || req.method() == ntex::http::Method::PUT
         || req.method() == ntex::http::Method::PATCH
@@ -436,8 +448,15 @@ async fn execute_resource_tree(
     //
     //    Only mutations enter the dedupe path. Queries are inherently
     //    safe; streams and subscriptions do not use dedupe either.
+    //
+    //    `Some(Action)` is treated as `None` here — both mean "no kind
+    //    restriction"; the manifest emitter omits `kind` for action
+    //    procedures but a future emitter may write it explicitly.
     let idempotency_handle = if policy.idempotent
-        && matches!(policy.kind, Some(ProcedureKind::Mutation) | None)
+        && matches!(
+            policy.kind,
+            Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action) | None
+        )
         && matches!(policy.action, ResolvedAction::WorkerRpc)
     {
         match handle_idempotency_pre_dispatch(
@@ -1805,10 +1824,14 @@ mod tests {
             output_schema: None,
         };
         // The router gate: idempotency engages only when
-        //   policy.idempotent && kind in {Mutation, None} && action == WorkerRpc.
+        //   policy.idempotent && kind in {Mutation, Action, None} &&
+        //   action == WorkerRpc.
         // For subscription the kind clause is false, so we skip dedupe.
         let engages = policy.idempotent
-            && matches!(policy.kind, Some(ProcedureKind::Mutation) | None)
+            && matches!(
+                policy.kind,
+                Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action) | None
+            )
             && matches!(policy.action, crate::compiled::ResolvedAction::WorkerRpc);
         assert!(!engages, "idempotency must NOT engage for subscriptions");
     }

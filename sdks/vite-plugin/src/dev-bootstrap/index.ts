@@ -202,8 +202,27 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
     }
   }
 
-  const out: any = (fn as any).call(null, validated, ctx);
-  const result = (out && typeof out.then === "function") ? await out : out;
+  // B3 capability marker — see rpc-registry.ts comment. Around the user
+  // handler invocation we toggle the runtime's CURRENT_KIND so native
+  // DB writes (in a query handler) or fetch (in a mutation handler)
+  // get refused with a capability_violation envelope. No-op when the
+  // natives aren't installed (legacy embeddings).
+  const kind = (cfg && typeof cfg.kind === "string" && cfg.kind) ||
+               ((fn as any).__zsKind && typeof (fn as any).__zsKind === "string"
+                  ? (fn as any).__zsKind
+                  : undefined);
+  const ek = (typeof globalThis !== "undefined")
+    ? (globalThis as any).__zsEnterKind : undefined;
+  const xk = (typeof globalThis !== "undefined")
+    ? (globalThis as any).__zsExitKind : undefined;
+  const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
+  let result: any;
+  try {
+    const out: any = (fn as any).call(null, validated, ctx);
+    result = (out && typeof out.then === "function") ? await out : out;
+  } finally {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+  }
 
   // Tag async-iterator with output-schema hint for the SSE encoder.
   if (isAsyncIterator(result)) {
