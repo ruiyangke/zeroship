@@ -16,6 +16,7 @@ import {
   procedure,
   query,
   mutation,
+  action,
   stream,
   subscription,
 } from "../src/wrappers.js";
@@ -76,6 +77,32 @@ describe("wrappers — identity + kind tagging", () => {
       config?: { kind?: string };
     };
     assert.equal(wrapped.config?.kind, "subscription");
+  });
+
+  test("action() implies kind: 'action' on config (B3)", async () => {
+    // Untyped handler shape to bypass capability ctx-typing here; the
+    // ctx-shape enforcement is verified by the typecheck suite. This
+    // test just verifies runtime kind tagging.
+    const impl = async (_args: unknown, _ctx: unknown) => "done";
+    const wrapped = action(impl) as typeof impl & {
+      config?: { kind?: string };
+      __zsKind?: string;
+    };
+    assert.equal(wrapped.config?.kind, "action");
+    assert.equal(wrapped.__zsKind, "action");
+    // Identity: wrapping doesn't change the return value.
+    assert.equal(await wrapped("x", {}), "done");
+  });
+
+  test("action() with config — id propagates, kind defaults to 'action'", () => {
+    const wrapped = action(
+      async (_args: unknown, _ctx: unknown) => null,
+      { id: "send-email" },
+    ) as ((args: unknown, ctx: unknown) => Promise<null>) & {
+      config?: { id?: string; kind?: string };
+    };
+    assert.equal(wrapped.config?.id, "send-email");
+    assert.equal(wrapped.config?.kind, "action");
   });
 
   test("explicit config.kind overrides wrapper default", () => {

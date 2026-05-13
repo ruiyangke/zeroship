@@ -203,6 +203,19 @@ export function __makeServerProcedure<TIn = unknown, TOut = unknown>(
     });
   }
 
+  if (meta.kind === "action") {
+    // B3 — actions are imperative (fetch + runMutation). The hook
+    // mirrors mutation: it's a no-op during SSR because actions run
+    // on user interaction, not during render.
+    Object.defineProperty(fn, "useAction", {
+      value: (_options?: Record<string, unknown>): never => {
+        throw new Error(
+          `[zeroship/server] useAction is a no-op during SSR — actions run on user interaction, not during render. (proc: ${meta.id})`,
+        );
+      },
+    });
+  }
+
   return fn;
 }
 
@@ -237,8 +250,19 @@ export interface ServerSubscriptionProcedure<TIn, TOut>
   useSubscription: (input: TIn, options?: Record<string, unknown>) => never;
 }
 
+/**
+ * B3 — `action` capability. Imperative wrapper that may call `fetch`,
+ * `runQuery`, `runMutation`. Hook is a no-op during SSR (actions run
+ * on user interaction).
+ */
+export interface ServerActionProcedure<TIn, TOut>
+  extends ServerProcedureCommon<TIn, TOut> {
+  useAction: (options?: Record<string, unknown>) => never;
+}
+
 export type ServerProcedureFn<TIn, TOut> =
   | ServerQueryProcedure<TIn, TOut>
   | ServerMutationProcedure<TIn, TOut>
   | ServerStreamProcedure<TIn, TOut>
-  | ServerSubscriptionProcedure<TIn, TOut>;
+  | ServerSubscriptionProcedure<TIn, TOut>
+  | ServerActionProcedure<TIn, TOut>;

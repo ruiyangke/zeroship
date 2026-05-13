@@ -4,7 +4,7 @@ import MagicString from "magic-string";
 
 /**
  * Source modules whose named exports the transform recognizes as RPC
- * procedure wrappers (`procedure`/`query`/`mutation`/`stream`/
+ * procedure wrappers (`procedure`/`query`/`mutation`/`action`/`stream`/
  * `subscription`).
  *
  * `@zeroship/server` is the canonical home today (the wrappers ship
@@ -22,13 +22,28 @@ const WRAPPER_NAMES = new Set([
   "procedure",
   "query",
   "mutation",
+  "action",
   "stream",
   "subscription",
 ]);
 
 /** Wrapper-marker discriminator. `procedure` is generic; the others
- *  imply a kind the transform reads statically. */
-type WrapperKind = "query" | "mutation" | "stream" | "subscription" | "procedure";
+ *  imply a kind the transform reads statically.
+ *
+ *  B3 capability mapping (see `docs/proposals/zeroship-db-v2.md` §B3):
+ *    - `query`  → DB-read tx, no fetch
+ *    - `mutation` → DB-write tx, no fetch
+ *    - `action` / `stream` / `subscription` / `procedure` →
+ *      action-capability (no surrounding tx, fetch allowed). The
+ *      manifest emitter folds non-`action` legacy kinds back to their
+ *      original `kind` field for backwards-compat. */
+type WrapperKind =
+  | "query"
+  | "mutation"
+  | "action"
+  | "stream"
+  | "subscription"
+  | "procedure";
 
 /**
  * Per-procedure metadata stashed at transform time. Consumed by the
@@ -48,7 +63,18 @@ export interface DiscoveredProcedureRecord {
   filePath: string;
   exportName: string;
   moduleSlug: string;
-  kind: "query" | "mutation" | "stream" | "subscription";
+  /**
+   * Procedure kind, as resolved by the transform. `action` lands here
+   * when the user wrote `action(...)` explicitly. `procedure(...)`
+   * still resolves through `inferKind()` so name-based heuristics
+   * (`get*` → `query`, default → `mutation`) keep working.
+   *
+   * The Rust-side wire `ProcedureKind` enum currently lacks `action`
+   * (it predates B3). The manifest emitter folds `action` → `mutation`
+   * for wire-format back-compat; the SDK-level capability typing in
+   * `@zeroship/server` is what enforces the actual behaviour.
+   */
+  kind: "query" | "mutation" | "action" | "stream" | "subscription";
   isStream: boolean;
   config?: Record<string, unknown>;
   moduleConfig?: Record<string, unknown>;
@@ -461,6 +487,12 @@ function moduleSlug(root: string, id: string): string {
  *
  * Async generators get `kind: "stream"` regardless of name. An explicit
  * `.config = { kind: "..." }` overrides everything.
+ *
+ * Note: `action` is NOT in the heuristic. The only way to land on
+ * `kind: "action"` today is to use the `action(...)` wrapper explicitly
+ * (or write `.config.kind = "action"`). This is intentional —
+ * `procedure(...)` keeps its current name-based behaviour to preserve
+ * backwards compatibility with existing user code.
  */
 function inferKind(
   name: string,
@@ -944,6 +976,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             const explicitKind = cfg?.kind as
               | "query"
               | "mutation"
+              | "action"
               | "stream"
               | "subscription"
               | undefined;
@@ -951,12 +984,13 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
             //   1. Explicit `kind` field on either the legacy
             //      `<fn>.config = { kind: "..." }` assignment or the
             //      wrapper's second-arg config.
-            //   2. Wrapper marker name — `query`/`mutation`/`stream`/
-            //      `subscription` imply a kind; the generic
+            //   2. Wrapper marker name — `query`/`mutation`/`action`/
+            //      `stream`/`subscription` imply a kind; the generic
             //      `procedure()` marker doesn't (defers to step 3).
             //   3. Name-based inference (`get*`/`list*`/etc → query,
             //      default → mutation, async generator → stream).
-            const wrapperKind: "query" | "mutation" | "stream" | "subscription" | undefined =
+            const wrapperKind:
+              | "query" | "mutation" | "action" | "stream" | "subscription" | undefined =
               fn.markerKind === "procedure" ? undefined : fn.markerKind;
             const kind = explicitKind ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
             // Avoid duplicates if the transform fires twice (e.g., dev
@@ -1007,11 +1041,12 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         // can read it.
         const kindFor = (fn: ServerFn) => {
           const legacyKind = perFnForWireIds.get(fn.name)?.kind as
-            | "query" | "mutation" | "stream" | "subscription" | undefined;
+            | "query" | "mutation" | "action" | "stream" | "subscription" | undefined;
           const wrapperArgKind = fn.wrapperConfig?.kind as
-            | "query" | "mutation" | "stream" | "subscription" | undefined;
+            | "query" | "mutation" | "action" | "stream" | "subscription" | undefined;
           const explicit = legacyKind ?? wrapperArgKind;
-          const wrapperKind: "query" | "mutation" | "stream" | "subscription" | undefined =
+          const wrapperKind:
+            | "query" | "mutation" | "action" | "stream" | "subscription" | undefined =
             fn.markerKind === "procedure" ? undefined : fn.markerKind;
           return explicit ?? wrapperKind ?? inferKind(fn.name, fn.isStream);
         };

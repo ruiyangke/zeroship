@@ -11,6 +11,13 @@
 // SSR entry's dispatch reads these values at request time and calls
 // `.parse()` on them; failures throw a structured INVALID_ARGUMENT
 // envelope (status 400) carrying ZodError.issues to the wire.
+//
+// B3 capability typing: `QueryCtx` / `MutationCtx` / `ActionCtx`
+// surfaces below model the per-wrapper capability set defined by the
+// `docs/proposals/zeroship-db-v2.md` §B3 table. Wrappers in
+// `./wrappers.ts` constrain their `handler` argument to one of these
+// `ctx` surfaces, so misuse (a `query` that writes, a `mutation` that
+// calls `fetch`) is caught by `tsc` before any code runs.
 
 /**
  * Structural shape of any object accepted as a procedure schema. We
@@ -25,8 +32,32 @@ export interface ProcedureSchema<T = unknown> {
 /** Authentication level required to reach a resource. */
 export type AuthLevel = "anon" | "user" | "admin";
 
-/** Discriminator on RPC procedures. */
-export type ProcedureKind = "query" | "mutation" | "stream" | "subscription";
+/** Discriminator on RPC procedures.
+ *
+ * The five kinds split into two axes:
+ *
+ *  - **Capability** (B3 from `docs/proposals/zeroship-db-v2.md`):
+ *    - `query`     — DB reads only, no `fetch()`, runs inside a
+ *                    read-only Postgres transaction.
+ *    - `mutation`  — DB read + write, no `fetch()`, runs inside a
+ *                    serialisable transaction.
+ *    - `action`    — full surface: `fetch()`, `ctx.runQuery`,
+ *                    `ctx.runMutation`. No surrounding transaction.
+ *      `procedure()` (the generic wrapper) maps to the `action`
+ *      capability for backwards compatibility — existing user code
+ *      keeps working.
+ *  - **Wire shape** (orthogonal to capability):
+ *    - `stream` / `subscription` — long-lived async-iterator returns.
+ *      Internally treated as `action` capability (no DB tx; `fetch`
+ *      allowed) but reported here so the manifest emitter and SSR
+ *      adapter can dispatch on wire shape.
+ */
+export type ProcedureKind =
+  | "query"
+  | "mutation"
+  | "action"
+  | "stream"
+  | "subscription";
 
 /**
  * Shape of `<fn>.config = { ... }` declarations in user code.
@@ -212,4 +243,130 @@ export const DEFINE_APP_MARKER: unique symbol = Symbol.for("zeroship/defineApp")
 export interface DefinedApp {
   readonly [DEFINE_APP_MARKER]: true;
   readonly definition: AppDefinition;
+}
+
+// ── B3 capability typing ─────────────────────────────────────────────
+//
+// The three `*Ctx` types below model the wrapper-specific capability
+// surface. They are STRUCTURAL — any object satisfying the shape is
+// accepted, which lets the runtime hand in a richer concrete `ctx`
+// (with `requestId`, `traceId`, `signal`, etc.) without forcing
+// imports here. The wrappers in `./wrappers.ts` use them as the type
+// constraint on the `handler`'s first parameter.
+//
+// Capability matrix (mirrors `docs/proposals/zeroship-db-v2.md` §B3):
+//
+//   wrapper      DB read   DB write   fetch()   runQuery   runMutation
+//   ──────────────────────────────────────────────────────────────────
+//   query()      yes       no         no        yes        no
+//   mutation()   yes       yes        no        yes        no
+//   action()     via       via        yes       yes        yes
+//                runQuery  runMutation
+//
+// `stream` / `subscription` map to `action` capability internally (no
+// DB tx, `fetch()` allowed). `procedure()` (the legacy generic wrapper)
+// also maps to `action` so existing user code keeps compiling.
+
+/**
+ * Read-only collection projection. Strips every write-shaped method
+ * from `@zeroship/db`'s `Collection<S>` so a `query` handler that
+ * tries `ctx.db.users.create(...)` fails type-check.
+ *
+ * Structural — any object exposing only these methods satisfies it.
+ * Methods are typed as the loosest signatures that still preserve
+ * tuple discipline (`{ data, error }` returns); concrete `Db<T>`
+ * instances from `@zeroship/db` are assignable here.
+ */
+export interface ReadOnlyCollection<S = unknown> {
+  findOne(filter: unknown): Promise<{ data: S | null; error: unknown }>;
+  findById(id: number): Promise<{ data: S | null; error: unknown }>;
+  exists(filter: unknown): Promise<{ data: boolean; error: unknown }>;
+  /**
+   * Chainable read query. Typed as `unknown` here so SDK-level
+   * Query<S, P> types from `@zeroship/db` remain assignable without
+   * pulling that dep into `@zeroship/server`.
+   */
+  find(filter?: unknown): unknown;
+  countDocuments(filter?: unknown): Promise<{ data: number; error: unknown }>;
+  distinct(
+    field: string,
+    filter?: unknown,
+  ): Promise<{ data: (string | number | boolean | null)[]; error: unknown }>;
+  aggregate(
+    pipeline: unknown[],
+  ): Promise<{ data: unknown[]; error: unknown }>;
+}
+
+/**
+ * The `db` surface visible to a `query` handler — a map of
+ * collection-name → ReadOnlyCollection. The Vite-plugin emits the
+ * concrete `Db<T>` from `@zeroship/db`; we widen here so the import
+ * doesn't have to cross the SDK boundary.
+ */
+export type QueryCtxDb = Record<string, ReadOnlyCollection<unknown>>;
+
+/**
+ * Full DB surface visible to a `mutation` handler. Typed as
+ * `Record<string, unknown>` so the concrete `Db<T>` from
+ * `@zeroship/db` is structurally assignable without an import. The
+ * wrapper itself withholds `fetch()` — the *type* of `ctx` simply
+ * doesn't carry it.
+ */
+export type MutationCtxDb = Record<string, unknown>;
+
+/** Reference to another procedure as passed to `runQuery`/`runMutation`. */
+export type ProcedureRef = string | { __zsId: string };
+
+/**
+ * `ctx` surface for `query()`. Read-only DB, `runQuery` for cross-
+ * proc reads, NO `fetch`, NO `runMutation`.
+ *
+ * Field annotations match `docs/proposals/zeroship-db-v2.md` §B3:
+ *   - `ctx.db.<col>.find / findOne / exists / count`     — allowed
+ *   - `ctx.db.<col>.create / update / delete / upsert`   — type error
+ *   - `ctx.runQuery(proc, args)`                         — allowed
+ *   - `ctx.runMutation(...)` / `ctx.fetch(...)`          — type error
+ */
+export interface QueryCtx {
+  readonly db: QueryCtxDb;
+  runQuery<TArgs = unknown, TResult = unknown>(
+    proc: ProcedureRef,
+    args?: TArgs,
+  ): Promise<TResult>;
+}
+
+/**
+ * `ctx` surface for `mutation()`. Full DB read+write, `runQuery` for
+ * cross-proc reads, NO `fetch`, NO `runMutation` (mutations are
+ * already atomic; nesting is a footgun).
+ */
+export interface MutationCtx {
+  readonly db: MutationCtxDb;
+  runQuery<TArgs = unknown, TResult = unknown>(
+    proc: ProcedureRef,
+    args?: TArgs,
+  ): Promise<TResult>;
+}
+
+/**
+ * `ctx` surface for `action()`. Most permissive. `fetch` for outbound
+ * HTTP, `runQuery` + `runMutation` for transactional steps. No
+ * direct `ctx.db` write methods — actions compose them via
+ * `runMutation` (each `runMutation` is its own transaction; see the
+ * §B3 "Transactional boundary of action.runMutation" note).
+ *
+ * `fetch` here uses a structural signature compatible with the global
+ * WHATWG `fetch` (and the WinterCG-compatible `globalThis.fetch` the
+ * runtime polyfills) so call sites pass through unchanged.
+ */
+export interface ActionCtx {
+  fetch: typeof fetch;
+  runQuery<TArgs = unknown, TResult = unknown>(
+    proc: ProcedureRef,
+    args?: TArgs,
+  ): Promise<TResult>;
+  runMutation<TArgs = unknown, TResult = unknown>(
+    proc: ProcedureRef,
+    args?: TArgs,
+  ): Promise<TResult>;
 }

@@ -24,6 +24,14 @@ export {
   type RpcDefaults,
   type Timeout,
   type DefinedApp,
+  // B3 capability typing
+  type QueryCtx,
+  type MutationCtx,
+  type ActionCtx,
+  type QueryCtxDb,
+  type MutationCtxDb,
+  type ReadOnlyCollection,
+  type ProcedureRef,
   DEFINE_APP_MARKER,
 } from "./types.js";
 
@@ -53,7 +61,7 @@ export {
 //     async (input: ChargeArgs) => stripe.charge(input),
 //     { id: "charge", input: z.object({ amount: z.number() }) },
 //   );
-export { procedure, query, mutation, stream, subscription } from "./wrappers.js";
+export { procedure, query, mutation, action, stream, subscription } from "./wrappers.js";
 
 // `__makeServerProcedure` SSR adapter.
 //
@@ -73,6 +81,7 @@ export type {
   ServerMutationProcedure,
   ServerStreamProcedure,
   ServerSubscriptionProcedure,
+  ServerActionProcedure,
 } from "./make-server-procedure.js";
 
 // ── Zod re-export (optional peer dep) ────────────────────────────────
