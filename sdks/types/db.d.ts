@@ -175,4 +175,53 @@ interface ZeroshipDb {
 
   /** Rollback the active transaction. */
   rollbackTransaction(): Promise<void>;
+
+  // --- B1 — @zeroship/migrations primitives ---
+
+  /**
+   * Begin a data-backfill migration run. Acquires a session-scoped
+   * Postgres advisory lock keyed by (app_id, name); subsequent calls
+   * from other workers fail with `migration_already_running`.
+   *
+   * Returns a JSON string `{ auditId, cursor, processed, status, deadLetterPks }`.
+   */
+  migrationBegin(name: string, collection: string, dryRun: boolean, reset: boolean): Promise<string>;
+
+  /**
+   * Fetch the next batch of rows after `cursor`. Returns a JSON string
+   * `{ rows: [...] }`. Each row is a plain object keyed by column name.
+   */
+  migrationFetchBatch(cursor: number, batchSize: number): Promise<string>;
+
+  /**
+   * Commit one batch of per-row updates. `updatesJson` is a JSON array
+   * of `{ id: number, set: { col: value, ... } }`. `deadLetterPksJson`
+   * is a JSON array of row primary keys the SDK is skipping. If
+   * `isDone=true`, drives the audit row to `terminalStatus` and
+   * releases the advisory lock.
+   */
+  migrationCommitBatch(
+    updatesJson: string,
+    deadLetterPksJson: string,
+    nextCursor: number,
+    processedTotal: number,
+    isDone: boolean,
+    terminalStatus: string,
+    errorMessage: string,
+  ): Promise<string>;
+
+  /** Read the current audit-row state for a (collection, name) pair. */
+  migrationStatus(name: string, collection: string): Promise<string>;
+
+  /**
+   * Cancel a `pending` or `running` migration. Subsequent
+   * `migrationFetchBatch` calls return `migration_cancelled`.
+   */
+  migrationCancel(name: string, collection: string): Promise<string>;
+
+  /**
+   * Reset a migration's persisted state (status → pending, cursor → 0,
+   * dead_letter_pks → null). Used after a `cancelled` or `failed` run.
+   */
+  migrationReset(name: string, collection: string): Promise<string>;
 }

@@ -1450,3 +1450,582 @@ async fn a2_required_with_default_is_compatible() {
     assert_eq!(st, "active");
 }
 
+// ===========================================================================
+// B1 — @zeroship/migrations primitives
+//
+// These tests drive `zeroship_plugin_db::migrations::exec_*` directly
+// (no V8). They prove the native side of the data-backfill orchestrator
+// from the proposal's B1 section: cursor-resume, dry-run, dead-letter,
+// advisory locking, and the status / cancel / reset state machine.
+//
+// Layout per test:
+//   1. drop + recreate the app schema
+//   2. seed a target table with rows that need backfilling
+//   3. set DB_URL (thread-local) and clear MIG_LOCK
+//   4. drive `exec_begin -> exec_fetch_batch -> exec_commit_batch`
+//   5. assert on actual row state + `__zeroship_migrations` audit row
+// ===========================================================================
+
+use zeroship_plugin_db::migrations as mig;
+
+/// Drop + recreate the app schema and seed a `users` table with `n` rows.
+/// `with_role` controls whether the `role` column is pre-populated.
+async fn b1_setup_users(pool: &Pool, app: &str, n: i64, with_role: bool) {
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{app}"."users" (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                name TEXT NOT NULL,
+                role TEXT
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    for i in 1..=n {
+        let role_sql = if with_role { "'user'" } else { "NULL" };
+        pool.execute(
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (name, role) VALUES ('user-{i}', {role_sql})"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// Parse a JSON string returned by an `exec_*` call.
+fn parse(s: &str) -> Value {
+    serde_json::from_str(s).expect("exec_* should return valid JSON")
+}
+
+/// Drive a full migration loop (single-thread, no SDK): backfill all
+/// users to `role = 'user'` in batches.
+///
+/// `inject_dead_letter` / `inject_fail`: optional row-id callbacks that
+/// short-circuit one row out of the batch into dead-letter or failure.
+#[allow(clippy::too_many_arguments)]
+async fn b1_run_loop(
+    pool: &Pool,
+    app: &str,
+    name: &str,
+    batch_size: i64,
+    dry_run: bool,
+    reset: bool,
+    dead_letter_ids: &[i64],
+    fail_ids: &[i64],
+    failure_budget: usize,
+) -> (i64, Vec<i64>, String) {
+    let begin = parse(
+        &mig::exec_begin(pool, app, name, "users", dry_run, reset)
+            .await
+            .expect("exec_begin"),
+    );
+    let mut cursor: i64 = begin["cursor"].as_i64().unwrap_or(0);
+    let mut processed: i64 = begin["processed"].as_i64().unwrap_or(0);
+    let mut dead_letter: Vec<i64> = begin["deadLetterPks"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    let mut failures: usize = 0;
+
+    let mut terminal: String;
+
+    loop {
+        let fetched = parse(
+            &mig::exec_fetch_batch(app, cursor, batch_size)
+                .await
+                .expect("exec_fetch_batch"),
+        );
+        let rows = fetched["rows"].as_array().cloned().unwrap_or_default();
+        if rows.is_empty() {
+            // Final commit — mark done with `applied` (or
+            // `applied_with_dead_letter` if any rows were dead-lettered).
+            let final_term = if !dead_letter.is_empty() {
+                "applied_with_dead_letter"
+            } else {
+                "applied"
+            };
+            terminal = final_term.to_string();
+            let _ = mig::exec_commit_batch(
+                app,
+                &Value::Array(vec![]),
+                &Value::Array(dead_letter.iter().map(|i| Value::Number((*i).into())).collect()),
+                cursor,
+                processed,
+                true,
+                Some(final_term),
+                None,
+            )
+            .await
+            .expect("exec_commit_batch final");
+            break;
+        }
+
+        let mut updates: Vec<Value> = Vec::new();
+        for row in &rows {
+            let id = row["id"].as_i64().unwrap();
+            if fail_ids.contains(&id) {
+                failures += 1;
+                if failures > failure_budget {
+                    terminal = "failed".to_string();
+                    let _ = mig::exec_commit_batch(
+                        app,
+                        &Value::Array(vec![]),
+                        &Value::Array(dead_letter.iter().map(|i| Value::Number((*i).into())).collect()),
+                        cursor,
+                        processed,
+                        true,
+                        Some("failed"),
+                        Some("migration_failure_budget_exceeded"),
+                    )
+                    .await
+                    .expect("exec_commit_batch fail");
+                    return (processed, dead_letter, terminal);
+                }
+                dead_letter.push(id);
+                continue;
+            }
+            if dead_letter_ids.contains(&id) {
+                dead_letter.push(id);
+                continue;
+            }
+            updates.push(serde_json::json!({
+                "id": id,
+                "set": { "role": "user" }
+            }));
+        }
+        // Advance cursor to max id read in this batch.
+        let new_cursor = rows.iter().map(|r| r["id"].as_i64().unwrap()).max().unwrap();
+        processed += rows.len() as i64;
+
+        let _ = mig::exec_commit_batch(
+            app,
+            &Value::Array(updates),
+            &Value::Array(dead_letter.iter().map(|i| Value::Number((*i).into())).collect()),
+            new_cursor,
+            processed,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("exec_commit_batch batch");
+        cursor = new_cursor;
+    }
+
+    (processed, dead_letter, terminal)
+}
+
+// 32. B1 — simple backfill processes every row.
+#[compio::test]
+async fn b1_simple_backfill() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_simple";
+    b1_setup_users(&pool, app, 250, false).await;
+
+    let (processed, dlp, terminal) =
+        b1_run_loop(&pool, app, "backfill_role", 100, false, false, &[], &[], 0).await;
+
+    assert_eq!(processed, 250);
+    assert!(dlp.is_empty());
+    assert_eq!(terminal, "applied");
+
+    // Every row should now have role='user'.
+    let r = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*)::bigint AS n FROM \"{app}\".\"users\" WHERE role = 'user'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let n: i64 = r[0].get("n");
+    assert_eq!(n, 250);
+
+    // Audit row should be 'applied' with processed=250.
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["status"], "applied");
+    assert_eq!(st["processed"], 250);
+    assert_eq!(st["isDone"], true);
+}
+
+// 33. B1 — resume picks up after a partial run (simulated crash).
+#[compio::test]
+async fn b1_resume_after_crash() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_resume";
+    b1_setup_users(&pool, app, 250, false).await;
+
+    // Run one batch, then simulate crash by clearing MIG_LOCK without
+    // calling commit-with-done. The audit row stays `running`, cursor=100.
+    {
+        let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+            .await
+            .unwrap();
+        let fetched = parse(
+            &mig::exec_fetch_batch(app, 0, 100)
+                .await
+                .unwrap(),
+        );
+        let rows = fetched["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 100);
+        let max_id: i64 = rows.iter().map(|r| r["id"].as_i64().unwrap()).max().unwrap();
+        let updates: Vec<Value> = rows
+            .iter()
+            .map(|r| serde_json::json!({
+                "id": r["id"].as_i64().unwrap(),
+                "set": { "role": "user" }
+            }))
+            .collect();
+        let _ = mig::exec_commit_batch(
+            app,
+            &Value::Array(updates),
+            &Value::Array(vec![]),
+            max_id,
+            100,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Drop session client + clear lock = simulated crash. The
+        // audit row stays 'running' but no operator is holding it.
+        zeroship_plugin_db::clear_migration_lock_for_tests();
+        // Also clear status so a re-begin succeeds. Real recovery would
+        // either reset status to 'pending' via reset() OR begin would
+        // reclaim a stale 'running' row. The migrations module's begin
+        // path treats an existing row as resumable (any status except
+        // 'cancelled') so this works without manual intervention.
+    }
+
+    // Resume — should continue from cursor=100. The loop initializes
+    // `processed` from the existing audit row (=100) and adds 150 more,
+    // landing at the full 250.
+    let (processed, _dlp, _terminal) =
+        b1_run_loop(&pool, app, "backfill_role", 100, false, false, &[], &[], 0).await;
+    assert_eq!(processed, 250, "resume should land at full row count");
+
+    // Every row should have role='user'.
+    let r = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*)::bigint AS n FROM \"{app}\".\"users\" WHERE role = 'user'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let n: i64 = r[0].get("n");
+    assert_eq!(n, 250);
+
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["status"], "applied");
+}
+
+// 34. B1 — dry-run does not mutate rows or advance cursor.
+#[compio::test]
+async fn b1_dry_run_does_not_mutate() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_dryrun";
+    b1_setup_users(&pool, app, 50, false).await;
+
+    let (_processed, _dlp, terminal) =
+        b1_run_loop(&pool, app, "backfill_role", 25, true, false, &[], &[], 0).await;
+    assert_eq!(terminal, "applied");
+
+    // Zero rows should have been mutated (dry-run ROLLBACK).
+    let r = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*)::bigint AS n FROM \"{app}\".\"users\" WHERE role IS NOT NULL"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let n: i64 = r[0].get("n");
+    assert_eq!(n, 0, "dry-run must not commit row updates");
+
+    // Audit row cursor must stay 0 (dry-run does not advance state).
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["cursor"], 0, "dry-run must not persist cursor");
+    assert_eq!(st["processed"], 0, "dry-run must not persist processed count");
+}
+
+// 35. B1 — dead-letter under budget: terminal status is
+// applied_with_dead_letter, the bad row id appears in dead_letter_pks.
+#[compio::test]
+async fn b1_dead_letter_under_budget() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_dlu";
+    b1_setup_users(&pool, app, 100, false).await;
+
+    // Pick the actual id assigned to the "42nd" inserted row.
+    let r = pool
+        .query_text_params(
+            &format!("SELECT id FROM \"{app}\".\"users\" ORDER BY id LIMIT 1 OFFSET 41"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let bad_id: i64 = r[0].get("id");
+
+    let (_processed, dlp, terminal) = b1_run_loop(
+        &pool,
+        app,
+        "backfill_role",
+        50,
+        false,
+        false,
+        &[bad_id], // dead-letter this row
+        &[],
+        0,
+    )
+    .await;
+
+    assert_eq!(terminal, "applied_with_dead_letter");
+    assert!(dlp.contains(&bad_id));
+
+    // 99 rows should be 'user', the bad row stays NULL.
+    let r = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*)::bigint AS n FROM \"{app}\".\"users\" WHERE role = 'user'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let n: i64 = r[0].get("n");
+    assert_eq!(n, 99);
+
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["status"], "applied_with_dead_letter");
+    let dlp_audit: Vec<i64> = st["deadLetterPks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_i64)
+        .collect();
+    assert!(dlp_audit.contains(&bad_id));
+}
+
+// 36. B1 — failures over budget: terminal status is `failed`,
+// error message contains the budget-exceeded marker.
+#[compio::test]
+async fn b1_dead_letter_over_budget() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_dlo";
+    b1_setup_users(&pool, app, 30, false).await;
+
+    let all_ids: Vec<i64> = {
+        let r = pool
+            .query_text_params(
+                &format!("SELECT id FROM \"{app}\".\"users\" ORDER BY id"),
+                &[],
+            )
+            .await
+            .unwrap();
+        r.iter().map(|row| row.get::<_, i64>("id")).collect()
+    };
+
+    let (_processed, _dlp, terminal) = b1_run_loop(
+        &pool,
+        app,
+        "backfill_role",
+        10,
+        false,
+        false,
+        &[],
+        &all_ids, // every row fails
+        2,        // budget = 2 — third failure trips it
+    )
+    .await;
+
+    assert_eq!(terminal, "failed");
+
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["status"], "failed");
+    let err: String = st["error"].as_str().unwrap_or("").to_string();
+    assert!(err.contains("migration_failure_budget_exceeded"), "got error: {err:?}");
+}
+
+// 37. B1 — cancel during a running migration causes the next
+// fetch to return `migration_cancelled`.
+#[compio::test]
+async fn b1_cancel_running() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_cancel";
+    b1_setup_users(&pool, app, 100, false).await;
+
+    let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+        .await
+        .expect("begin");
+
+    // Operator cancels via a separate pool connection (just like an
+    // out-of-band admin would).
+    let cancel = parse(
+        &mig::exec_cancel(&pool, app, "backfill_role", "users")
+            .await
+            .expect("cancel"),
+    );
+    assert_eq!(cancel["ok"], true);
+
+    // Next fetch should return a `migration_cancelled` error envelope.
+    let fetch_err = mig::exec_fetch_batch(app, 0, 50).await.unwrap_err();
+    assert!(fetch_err.contains("migration_cancelled"), "got: {fetch_err}");
+
+    // Reset lock for subsequent tests.
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+}
+
+// 38. B1 — cancel against an already-applied migration returns
+// `migration_not_cancellable`.
+#[compio::test]
+async fn b1_cancel_completed_returns_error() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_cancel_done";
+    b1_setup_users(&pool, app, 25, false).await;
+
+    let _ = b1_run_loop(&pool, app, "backfill_role", 10, false, false, &[], &[], 0).await;
+
+    let cancel_err = mig::exec_cancel(&pool, app, "backfill_role", "users").await.unwrap_err();
+    assert!(
+        cancel_err.contains("migration_not_cancellable"),
+        "got: {cancel_err}"
+    );
+}
+
+// 39. B1 — advisory lock prevents concurrent begin from a second
+// session (simulated by manually grabbing the same lock on a sibling
+// connection).
+#[compio::test]
+async fn b1_advisory_lock_prevents_concurrent_runs() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_lock";
+    b1_setup_users(&pool, app, 5, false).await;
+
+    // Open a sibling session that grabs the advisory lock first.
+    let (sibling, sib_conn) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    compio::runtime::spawn(async move {
+        let _ = sib_conn.run().await;
+    })
+    .detach();
+
+    let _ = sibling
+        .query_text_params(
+            "SELECT pg_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)",
+            &[app, "backfill_role"],
+        )
+        .await
+        .unwrap();
+
+    // The migration's `exec_begin` must fail with `migration_already_running`.
+    let begin_err = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+        .await
+        .unwrap_err();
+    assert!(
+        begin_err.contains("migration_already_running"),
+        "got: {begin_err}"
+    );
+
+    // Release sibling lock.
+    let _ = sibling
+        .query_text_params(
+            "SELECT pg_advisory_unlock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)",
+            &[app, "backfill_role"],
+        )
+        .await;
+    drop(sibling);
+
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+}
+
+// 40. B1 — reset returns audit row to pending+cursor=0 so a fresh
+// run can re-apply (e.g. after operator deems a `cancelled` run
+// retryable).
+#[compio::test]
+async fn b1_reset_clears_state() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b1_reset";
+    b1_setup_users(&pool, app, 20, false).await;
+
+    let _ = b1_run_loop(&pool, app, "backfill_role", 10, false, false, &[], &[], 0).await;
+
+    // Reset and verify status returns to pending.
+    let r = parse(
+        &mig::exec_reset(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(r["ok"], true);
+
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["status"], "pending");
+    assert_eq!(st["cursor"], 0);
+    assert_eq!(st["processed"], 0);
+}
+

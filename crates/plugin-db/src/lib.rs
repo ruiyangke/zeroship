@@ -20,6 +20,7 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 pub mod audit;
 pub mod callbacks;
 pub mod diff;
+pub mod migrations;
 pub mod query;
 
 // ---------------------------------------------------------------------------
@@ -170,7 +171,29 @@ impl NativePlugin for DbPlugin {
         r.add("beginTransaction", callbacks::begin_transaction);
         r.add("commitTransaction", callbacks::commit_transaction);
         r.add("rollbackTransaction", callbacks::rollback_transaction);
+        // B1 — @zeroship/migrations primitives
+        r.add("migrationBegin", callbacks::migration_begin);
+        r.add("migrationFetchBatch", callbacks::migration_fetch_batch);
+        r.add("migrationCommitBatch", callbacks::migration_commit_batch);
+        r.add("migrationStatus", callbacks::migration_status);
+        r.add("migrationCancel", callbacks::migration_cancel);
+        r.add("migrationReset", callbacks::migration_reset);
     }
+}
+
+/// **Test-only**: set the per-thread `DB_URL` directly, bypassing the
+/// usual `DbPlugin::register()` path. Used by integration tests that
+/// drive `migrations::exec_*` without spinning up a full runtime.
+#[doc(hidden)]
+pub fn set_db_url_for_tests(url: &str) {
+    DB_URL.with(|u| *u.borrow_mut() = Some(url.to_string()));
+}
+
+/// **Test-only**: clear `MIG_LOCK` for the current thread. Safe across
+/// test boundaries when an earlier test left the lock held.
+#[doc(hidden)]
+pub fn clear_migration_lock_for_tests() {
+    migrations::release_active_lock();
 }
 
 /// Initialize the connection pool asynchronously.

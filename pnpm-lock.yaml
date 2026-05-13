@@ -586,6 +586,22 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  sdks/migrations:
+    dependencies:
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      zeroship:
+        specifier: workspace:*
+        version: link:../..
+
   sdks/payments:
     devDependencies:
       typescript:

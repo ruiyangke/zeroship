@@ -222,6 +222,12 @@ fn rows_to_json(rows: &[compio_postgres::Row]) -> String {
     Value::Array(arr).to_string()
 }
 
+/// Public re-export of [`row_to_json`] for cross-module use (B1).
+#[doc(hidden)]
+pub fn row_to_json_pub(row: &compio_postgres::Row) -> Value {
+    row_to_json(row)
+}
+
 /// Convert a single Row to a JSON object.
 ///
 /// Uses column OIDs to determine the appropriate JSON type:
@@ -1826,4 +1832,214 @@ async fn exec_end(cmd: &str) -> Result<(), String> {
     // Client is dropped here — the spawned Connection task observes the
     // closed sender, sends Terminate, flushes, and exits.
     Ok(())
+}
+
+// ===========================================================================
+// B1 — @zeroship/migrations primitives
+//
+// These callbacks are the V8 bridge for the migrations module
+// (`crate::migrations`). Each callback parses its arguments, sets up
+// a promise, and spawns an async op that delegates to the matching
+// `exec_*` function. See `migrations.rs` for the semantics.
+// ===========================================================================
+
+async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, String> {
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+    DB_POOL
+        .with(|p| p.borrow().as_ref().map(Rc::clone))
+        .ok_or_else(|| "db: pool not initialized".to_string())
+}
+
+/// `zeroship.db.migrationBegin(name, collection, dryRun, reset)` → Promise<json>
+pub fn migration_begin(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(name) = require_string_arg(scope, &args, 0, "name") else { return };
+    let Some(collection) = require_string_arg(scope, &args, 1, "collection") else { return };
+    let dry_run = args.get(2).boolean_value(scope);
+    let reset = args.get(3).boolean_value(scope);
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::migrations::exec_begin(&pool, &app_id, &name, &collection, dry_run, reset).await {
+            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.migrationFetchBatch(cursor, batchSize)` → Promise<{rows}>
+pub fn migration_fetch_batch(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let cursor = get_i64_arg(scope, &args, 0).unwrap_or(0);
+    let batch_size = get_i64_arg(scope, &args, 1).unwrap_or(100);
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        match crate::migrations::exec_fetch_batch(&app_id, cursor, batch_size).await {
+            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.migrationCommitBatch(updatesJson, deadLetterPksJson,
+///     nextCursor, processedTotal, isDone, terminalStatus, error)`
+pub fn migration_commit_batch(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(updates) = parse_json_arg(scope, &args, 0) else { return };
+    let Some(dlp) = parse_json_arg(scope, &args, 1) else { return };
+    let next_cursor = get_i64_arg(scope, &args, 2).unwrap_or(0);
+    let processed_total = get_i64_arg(scope, &args, 3).unwrap_or(0);
+    let is_done = args.get(4).boolean_value(scope);
+    let terminal_status = get_string_arg(scope, &args, 5);
+    let error_msg = get_string_arg(scope, &args, 6);
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        match crate::migrations::exec_commit_batch(
+            &app_id,
+            &updates,
+            &dlp,
+            next_cursor,
+            processed_total,
+            is_done,
+            terminal_status.as_deref(),
+            error_msg.as_deref(),
+        )
+        .await
+        {
+            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.migrationStatus(name, collection)` → Promise<status>
+pub fn migration_status(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(name) = require_string_arg(scope, &args, 0, "name") else { return };
+    let Some(collection) = require_string_arg(scope, &args, 1, "collection") else { return };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::migrations::exec_status(&pool, &app_id, &name, &collection).await {
+            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.migrationCancel(name, collection)` → Promise<{ok}>
+pub fn migration_cancel(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(name) = require_string_arg(scope, &args, 0, "name") else { return };
+    let Some(collection) = require_string_arg(scope, &args, 1, "collection") else { return };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::migrations::exec_cancel(&pool, &app_id, &name, &collection).await {
+            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// `zeroship.db.migrationReset(name, collection)` → Promise<{ok}>
+pub fn migration_reset(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let Some(name) = require_string_arg(scope, &args, 0, "name") else { return };
+    let Some(collection) = require_string_arg(scope, &args, 1, "collection") else { return };
+
+    let app_id = get_app_id(&state);
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        match crate::migrations::exec_reset(&pool, &app_id, &name, &collection).await {
+            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
+            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+        }
+    }));
+    rv.set(promise.into());
 }

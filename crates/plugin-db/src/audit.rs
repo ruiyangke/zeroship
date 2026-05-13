@@ -45,7 +45,7 @@ pub enum ActorKind {
 }
 
 impl ActorKind {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Auto => "auto",
         }
@@ -57,13 +57,17 @@ impl ActorKind {
 pub enum Phase {
     Ddl,
     Validation,
+    /// B1 data backfill phase — rows authored by `@zeroship/migrations`
+    /// orchestrator via `zeroship.db.migration*` primitives.
+    Backfill,
 }
 
 impl Phase {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Ddl => "ddl",
             Self::Validation => "validation",
+            Self::Backfill => "backfill",
         }
     }
 }
@@ -77,7 +81,7 @@ pub enum ChangeClass {
 }
 
 impl ChangeClass {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Additive => "additive",
             Self::Compatible => "compatible",
@@ -96,7 +100,7 @@ pub enum InitialStatus {
 }
 
 impl InitialStatus {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
@@ -108,14 +112,18 @@ impl InitialStatus {
 #[derive(Debug, Clone, Copy)]
 pub enum TerminalStatus {
     Applied,
+    AppliedWithDeadLetter,
     Failed,
+    Cancelled,
 }
 
 impl TerminalStatus {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Applied => "applied",
+            Self::AppliedWithDeadLetter => "applied_with_dead_letter",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -289,7 +297,7 @@ pub async fn update_audit_status(
                 error = COALESCE($3, error),
                 updated_at = NOW(),
                 applied_at = CASE
-                    WHEN $2 = 'applied' AND applied_at IS NULL THEN NOW()
+                    WHEN $2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL THEN NOW()
                     ELSE applied_at
                 END
             WHERE id = $1::bigint AND status IN ('running','pending')
@@ -347,13 +355,16 @@ mod tests {
         // verbatim, or INSERTs will fail with SQLSTATE 23514.
         assert_eq!(Phase::Ddl.as_sql(), "ddl");
         assert_eq!(Phase::Validation.as_sql(), "validation");
+        assert_eq!(Phase::Backfill.as_sql(), "backfill");
         assert_eq!(ChangeClass::Additive.as_sql(), "additive");
         assert_eq!(ChangeClass::Compatible.as_sql(), "compatible");
         assert_eq!(ChangeClass::Destructive.as_sql(), "destructive");
         assert_eq!(InitialStatus::Pending.as_sql(), "pending");
         assert_eq!(InitialStatus::Running.as_sql(), "running");
         assert_eq!(TerminalStatus::Applied.as_sql(), "applied");
+        assert_eq!(TerminalStatus::AppliedWithDeadLetter.as_sql(), "applied_with_dead_letter");
         assert_eq!(TerminalStatus::Failed.as_sql(), "failed");
+        assert_eq!(TerminalStatus::Cancelled.as_sql(), "cancelled");
         assert_eq!(ActorKind::Auto.as_sql(), "auto");
     }
 }

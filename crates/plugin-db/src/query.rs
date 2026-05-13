@@ -86,6 +86,20 @@ fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Public re-export for cross-module use (B1 migrations). Same as the
+/// private [`quote_ident`] — kept private at the SQL-build site so
+/// query.rs internals stay encapsulated.
+#[doc(hidden)]
+pub fn quote_ident_pub(name: &str) -> String {
+    quote_ident(name)
+}
+
+/// Public re-export of [`validate_collection`] for B1 migrations.
+#[doc(hidden)]
+pub fn validate_collection_pub(name: &str) -> Result<(), QueryError> {
+    validate_collection(name)
+}
+
 // ---------------------------------------------------------------------------
 // DDL builders for registerModel
 // ---------------------------------------------------------------------------
@@ -1494,6 +1508,12 @@ fn value_to_param(value: &Value) -> String {
         // For arrays/objects, serialize as JSON text (stored as JSONB in PG)
         other => other.to_string(),
     }
+}
+
+/// Public re-export of [`value_to_param`] for B1 migrations.
+#[doc(hidden)]
+pub fn value_to_param_pub(value: &Value) -> String {
+    value_to_param(value)
 }
 
 /// Build an UPSERT (INSERT ... ON CONFLICT DO UPDATE) query:
