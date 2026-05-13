@@ -620,6 +620,36 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.17)(lightningcss@1.32.0)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))
 
+  sdks/react:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
+      '@types/react':
+        specifier: catalog:react18
+        version: 18.3.28
+      '@types/react-dom':
+        specifier: catalog:react18
+        version: 18.3.7(@types/react@18.3.28)
+      '@zeroship/db':
+        specifier: workspace:*
+        version: link:../db
+      react:
+        specifier: catalog:react18
+        version: 18.3.1
+      react-dom:
+        specifier: catalog:react18
+        version: 18.3.1(react@18.3.1)
+      react-test-renderer:
+        specifier: catalog:react18
+        version: 18.3.1(react@18.3.1)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   sdks/rpc-client:
     optionalDependencies:
       superjson:

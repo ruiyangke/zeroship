@@ -1,0 +1,41 @@
+{
+  "name": "@zeroship/react",
+  "version": "0.1.0",
+  "private": true,
+  "description": "React bindings for @zeroship/db reactive queries — useQuery hook + Suspense variant on top of the broker subscription surface (P8b stage 4).",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "NODE_ENV=test node --import tsx --test test/*.test.tsx test/*.test.ts"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@zeroship/db": "*",
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/react": "catalog:react18",
+    "@types/react-dom": "catalog:react18",
+    "@zeroship/db": "workspace:*",
+    "react": "catalog:react18",
+    "react-dom": "catalog:react18",
+    "react-test-renderer": "catalog:react18",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}
