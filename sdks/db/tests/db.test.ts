@@ -317,3 +317,79 @@ describe("TxCollection upsert", () => {
     assert.ok(error !== null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// B2 — typed cross-table relations: module-init runtime validation
+//
+// These tests share the pre-existing `zeroship` workspace-resolution
+// failure that affects the whole `db.test.ts` file (createDb imports
+// `env` from "zeroship", which resolves to the workspace root without
+// a main entry). They will pass once that environment issue is fixed
+// independently. The same validation is also exercised by the
+// `b2_module_init_validation.test.ts` companion file (no zeroship
+// import path).
+// ---------------------------------------------------------------------------
+
+describe("B2 ref target validation", () => {
+  test("createDb accepts a ref pointing at a declared collection", () => {
+    const { native } = makeMockNative();
+    assert.doesNotThrow(() => {
+      createDb(
+        {
+          users: { name: t.string().required() },
+          posts: { title: t.string().required(), authorId: t.ref("users") },
+        },
+        { native },
+      );
+    });
+  });
+
+  test("createDb throws ref_target_not_found when target collection is missing", () => {
+    const { native } = makeMockNative();
+    try {
+      createDb(
+        {
+          posts: {
+            title: t.string().required(),
+            // `as any` simulates a runtime escape past the TS check.
+            authorId: t.ref("nonexistent" as any),
+          },
+        },
+        { native },
+      );
+      assert.fail("createDb should have thrown");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const parsed = JSON.parse(msg);
+      assert.equal(parsed.code, "ref_target_not_found");
+      assert.equal(parsed.collection, "posts");
+      assert.equal(parsed.field, "authorId");
+      assert.equal(parsed.target, "nonexistent");
+    }
+  });
+
+  test("createDb permits self-referencing ref (employees.managerId → employees)", () => {
+    const { native } = makeMockNative();
+    assert.doesNotThrow(() => {
+      createDb(
+        {
+          employees: { name: t.string().required(), managerId: t.ref("employees") },
+        },
+        { native },
+      );
+    });
+  });
+
+  test("createDb permits circular refs (users ↔ posts)", () => {
+    const { native } = makeMockNative();
+    assert.doesNotThrow(() => {
+      createDb(
+        {
+          users: { name: t.string().required(), favPostId: t.ref("posts") },
+          posts: { title: t.string().required(), authorId: t.ref("users") },
+        },
+        { native },
+      );
+    });
+  });
+});

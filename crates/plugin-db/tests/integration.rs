@@ -2029,3 +2029,407 @@ async fn b1_reset_clears_state() {
     assert_eq!(st["processed"], 0);
 }
 
+// ---------------------------------------------------------------------------
+// B2 — typed cross-table relations: foreign keys at the DB level
+// ---------------------------------------------------------------------------
+
+/// Helper: register two collections where `posts.authorId` is t.ref("users").
+async fn b2_setup_users_posts(pool: &Pool, app: &str) {
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    // Users first so the FK target exists when posts is created.
+    let users_schema = json!({"name": {"type": "string", "required": true}});
+    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        pool,
+        app,
+        "users",
+        &users_schema,
+        "b2_v1",
+    )
+    .await
+    .expect("users registerModel");
+    let posts_schema = json!({
+        "title": {"type": "string", "required": true},
+        "authorId": {"type": "ref", "refTarget": "users"},
+    });
+    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        pool,
+        app,
+        "posts",
+        &posts_schema,
+        "b2_v1",
+    )
+    .await
+    .expect("posts registerModel");
+}
+
+#[compio::test]
+async fn b2_ref_creates_foreign_key() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b2_fk_basic";
+    b2_setup_users_posts(&pool, app).await;
+
+    // Inspect pg_constraint for the FK on "posts.authorId".
+    let rows = pool
+        .query_text_params(
+            r#"
+SELECT con.conname AS name,
+       con.confdeltype::text AS on_delete,
+       con.confupdtype::text AS on_update,
+       con.condeferrable AS deferrable,
+       fcl.relname AS target
+  FROM pg_constraint con
+  JOIN pg_class cl ON cl.oid = con.conrelid
+  JOIN pg_class fcl ON fcl.oid = con.confrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+ WHERE n.nspname = $1 AND cl.relname = 'posts' AND con.contype = 'f'
+"#,
+            &[app],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "expected one FK on posts.authorId");
+    let target: String = rows[0].get("target");
+    assert_eq!(target, "users");
+    // Default ON DELETE RESTRICT = code 'r'
+    let on_delete: String = rows[0].get("on_delete");
+    assert_eq!(on_delete, "r", "expected RESTRICT, got {on_delete}");
+    let on_update: String = rows[0].get("on_update");
+    assert_eq!(on_update, "r");
+    let deferrable: bool = rows[0].get("deferrable");
+    assert!(deferrable, "expected DEFERRABLE INITIALLY DEFERRED");
+}
+
+#[compio::test]
+async fn b2_ref_blocks_orphan_insert() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b2_orphan_insert";
+    b2_setup_users_posts(&pool, app).await;
+
+    // Insert into posts with non-existent authorId; must fail with FK violation.
+    let result = pool
+        .query_text_params(
+            &format!(
+                "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+            ),
+            &["hello", "9999"],
+        )
+        .await;
+    let err = result.expect_err("orphan insert should fail");
+    let err_str = format!("{err:?}");
+    // SQLSTATE 23503 = foreign_key_violation
+    assert!(
+        err_str.contains("23503") || err_str.to_lowercase().contains("foreign key"),
+        "expected foreign_key_violation, got: {err_str}"
+    );
+}
+
+#[compio::test]
+async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b2_restrict_delete";
+    b2_setup_users_posts(&pool, app).await;
+
+    // Insert one user + one post that references it.
+    let user_rows = pool
+        .query_text_params(
+            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
+            &["alice"],
+        )
+        .await
+        .unwrap();
+    let user_id: i32 = user_rows[0].get("id");
+    pool.query_text_params(
+        &format!(
+            "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+        ),
+        &["hello", &user_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    // Now try to delete the user — RESTRICT must refuse.
+    let result = pool
+        .query_text_params(
+            &format!("DELETE FROM \"{app}\".\"users\" WHERE id = $1"),
+            &[&user_id.to_string()],
+        )
+        .await;
+    let err = result.expect_err("RESTRICT must block parent delete");
+    let err_str = format!("{err:?}");
+    assert!(
+        err_str.contains("23503") || err_str.to_lowercase().contains("foreign key"),
+        "expected foreign_key_violation, got: {err_str}"
+    );
+}
+
+#[compio::test]
+async fn b2_ref_on_delete_cascade_deletes_children() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b2_cascade_delete";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    let users_schema = json!({"name": {"type": "string", "required": true}});
+    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        &pool, app, "users", &users_schema, "b2_cas_v1",
+    )
+    .await
+    .unwrap();
+    // cascade override
+    let posts_schema = json!({
+        "title": {"type": "string", "required": true},
+        "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
+    });
+    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        &pool, app, "posts", &posts_schema, "b2_cas_v1",
+    )
+    .await
+    .unwrap();
+
+    // Insert user + 3 posts that reference it.
+    let user_rows = pool
+        .query_text_params(
+            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
+            &["bob"],
+        )
+        .await
+        .unwrap();
+    let user_id: i32 = user_rows[0].get("id");
+    for title in ["a", "b", "c"] {
+        pool.query_text_params(
+            &format!(
+                "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+            ),
+            &[title, &user_id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Delete the user — CASCADE should also delete the 3 posts.
+    pool.query_text_params(
+        &format!("DELETE FROM \"{app}\".\"users\" WHERE id = $1"),
+        &[&user_id.to_string()],
+    )
+    .await
+    .unwrap();
+
+    let count_rows = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*) AS n FROM \"{app}\".\"posts\""),
+            &[],
+        )
+        .await
+        .unwrap();
+    let n: i64 = count_rows[0].get("n");
+    assert_eq!(n, 0, "CASCADE should have deleted all child posts");
+}
+
+#[compio::test]
+async fn b2_circular_refs_via_deferrable() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b2_circular";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // a → ref(b), b → ref(a). Order matters for first creation:
+    // we register a then b. The FK from `a.bId → b.id` must be deferred
+    // until b is created. The current `build_create_table` always emits
+    // FK inline, so when registering `a` while `b` doesn't yet exist,
+    // we'd fail. We therefore register `b` first (no refs), then `a`
+    // (with FK to b), then ALTER b to add its FK to a.
+    //
+    // For this test we register both with FK clauses inline, but use
+    // DEFERRABLE INITIALLY DEFERRED so the runtime can insert into
+    // a + b within a single transaction in any order.
+    //
+    // The setup uses two separate calls; we drop the FK from `a.bId`
+    // temporarily and re-add it after both tables exist to side-step
+    // the cold-start ordering problem. The B2 implementation defers
+    // truly inter-table FK creation to a follow-up; today we exercise
+    // the DEFERRABLE behaviour by creating both tables, attaching the
+    // FK, then verifying a single transaction can insert in any order.
+
+    // Create the tables manually without FK, then add FKs.
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"a\" (id SERIAL PRIMARY KEY, b_id INTEGER, created_at TIMESTAMPTZ DEFAULT NOW())"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"b\" (id SERIAL PRIMARY KEY, a_id INTEGER, created_at TIMESTAMPTZ DEFAULT NOW())"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    // Add cyclic FKs as DEFERRABLE INITIALLY DEFERRED.
+    pool.execute(
+        &format!(
+            "ALTER TABLE \"{app}\".\"a\" ADD CONSTRAINT a_b_fkey FOREIGN KEY (b_id) REFERENCES \"{app}\".\"b\"(id) DEFERRABLE INITIALLY DEFERRED"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(
+            "ALTER TABLE \"{app}\".\"b\" ADD CONSTRAINT b_a_fkey FOREIGN KEY (a_id) REFERENCES \"{app}\".\"a\"(id) DEFERRABLE INITIALLY DEFERRED"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Verify both constraints are DEFERRABLE.
+    let rows = pool
+        .query_text_params(
+            r#"
+SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_deferred
+  FROM pg_constraint con
+  JOIN pg_class cl ON cl.oid = con.conrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+ WHERE n.nspname = $1 AND con.contype = 'f'
+ ORDER BY con.conname
+"#,
+            &[app],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let def: bool = row.get("def");
+        let init_deferred: bool = row.get("init_deferred");
+        let name: String = row.get("name");
+        assert!(def, "FK {name} must be DEFERRABLE");
+        assert!(init_deferred, "FK {name} must be INITIALLY DEFERRED");
+    }
+
+    // Insert pair in a single transaction — order doesn't matter
+    // because the FK check is deferred to COMMIT. We insert into `a`
+    // referencing a `b` row that doesn't exist yet, then create the
+    // `b` row referencing the `a` row, all within the tx.
+    let client = pool.get().await.unwrap();
+    client.execute("BEGIN", &[]).await.unwrap();
+    client
+        .execute(
+            &format!("INSERT INTO \"{app}\".\"a\" (id, b_id) VALUES (1, 1)"),
+            &[],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            &format!("INSERT INTO \"{app}\".\"b\" (id, a_id) VALUES (1, 1)"),
+            &[],
+        )
+        .await
+        .unwrap();
+    client.execute("COMMIT", &[]).await.unwrap();
+
+    // Confirm the rows exist.
+    let count_rows = pool
+        .query_text_params(
+            &format!("SELECT (SELECT COUNT(*) FROM \"{app}\".\"a\") AS na, (SELECT COUNT(*) FROM \"{app}\".\"b\") AS nb"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let na: i64 = count_rows[0].get("na");
+    let nb: i64 = count_rows[0].get("nb");
+    assert_eq!(na, 1);
+    assert_eq!(nb, 1);
+}
+
+#[compio::test]
+async fn b2_adding_fk_to_existing_data_validates() {
+    let url = require_pg().await;
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "b2_existing_data";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // V1 — users + posts with a bare number column.
+    let users_schema = json!({"name": {"type": "string", "required": true}});
+    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        &pool, app, "users", &users_schema, "v1",
+    )
+    .await
+    .unwrap();
+    let posts_schema_v1 = json!({
+        "title": {"type": "string", "required": true},
+        "authorId": {"type": "number"},
+    });
+    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        &pool, app, "posts", &posts_schema_v1, "v1",
+    )
+    .await
+    .unwrap();
+
+    // Insert valid + orphan rows.
+    let urows = pool
+        .query_text_params(
+            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
+            &["alice"],
+        )
+        .await
+        .unwrap();
+    let valid_uid: i32 = urows[0].get("id");
+    pool.query_text_params(
+        &format!("INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"),
+        &["valid", &valid_uid.to_string()],
+    )
+    .await
+    .unwrap();
+    pool.query_text_params(
+        &format!("INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"),
+        &["orphan", "9999"],
+    )
+    .await
+    .unwrap();
+
+    // V2 — declare authorId as t.ref("users"). The orchestrator should
+    // detect the live column already exists, classify the FK as
+    // Compatible, and attempt the ALTER TABLE ADD CONSTRAINT, which
+    // Postgres will refuse because the orphan row violates the FK.
+    let posts_schema_v2 = json!({
+        "title": {"type": "string", "required": true},
+        "authorId": {"type": "ref", "refTarget": "users"},
+    });
+    let res = zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+        &pool, app, "posts", &posts_schema_v2, "v2",
+    )
+    .await;
+    assert!(
+        res.is_err(),
+        "adding FK with orphan rows must fail; got: {res:?}"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        err.contains("foreign key") || err.contains("23503") || err.contains("add_foreign_key"),
+        "expected FK validation failure, got: {err}"
+    );
+}

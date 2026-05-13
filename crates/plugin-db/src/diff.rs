@@ -85,6 +85,13 @@ pub enum ChangeKind {
     AddIndex,
     /// `DROP INDEX` for an index no longer in the declared schema.
     DropIndex,
+    /// B2 — `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`. Emitted when a
+    /// column already exists but no FK constraint is attached, or when
+    /// the table was created with FK emission deferred (cross-table
+    /// declaration order).
+    AddForeignKey,
+    /// B2 — `ALTER TABLE … DROP CONSTRAINT` for a FK no longer declared.
+    DropForeignKey,
 }
 
 impl ChangeKind {
@@ -97,6 +104,8 @@ impl ChangeKind {
             Self::DropColumn => "drop_column",
             Self::AddIndex => "add_index",
             Self::DropIndex => "drop_index",
+            Self::AddForeignKey => "add_foreign_key",
+            Self::DropForeignKey => "drop_foreign_key",
         }
     }
 }
@@ -115,6 +124,10 @@ pub struct LiveSchema {
     /// fast-path additive vs. compatible paths). 0 means empty, which
     /// is sound for the "ADD NOT NULL on empty table is safe" rule.
     pub row_counts: std::collections::HashMap<String, i64>,
+    /// B2 — per-table foreign-key set, keyed by the local column name.
+    /// `foreign_keys[<table>][<column>] = ForeignKeyInfo`.
+    pub foreign_keys:
+        std::collections::HashMap<String, std::collections::HashMap<String, ForeignKeyInfo>>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +149,26 @@ pub struct IndexInfo {
     /// prior CREATE INDEX CONCURRENTLY failed; the diff engine flags it
     /// for retry.
     pub is_valid: bool,
+}
+
+/// B2 — observed FK constraint read from `pg_constraint`.
+#[derive(Debug, Clone)]
+pub struct ForeignKeyInfo {
+    /// Postgres constraint name (e.g. `"author_id_fkey"`).
+    pub constraint_name: String,
+    /// Local column the FK is attached to.
+    pub column: String,
+    /// Referenced table name (relative to the same app schema).
+    pub target_table: String,
+    /// Referenced column on the target table — typically `id`.
+    pub target_column: String,
+    /// ON DELETE policy in upper-case Postgres form (`RESTRICT`,
+    /// `CASCADE`, `SET NULL`, `NO ACTION`).
+    pub on_delete: String,
+    /// ON UPDATE policy.
+    pub on_update: String,
+    /// True if the constraint is `DEFERRABLE` (any timing).
+    pub deferrable: bool,
 }
 
 /// Introspect the live schema for the given app + collection. Returns an
@@ -200,6 +233,59 @@ SELECT c.relname AS table_name,
         );
     }
 
+    // ----- foreign keys -----
+    // pg_constraint.contype = 'f' is a foreign-key. confkey/conkey are
+    // arrays of column attribute numbers — we resolve them to names via
+    // pg_attribute joins. confdeltype / confupdtype are one-char codes
+    // mapped to the SQL keyword equivalents below.
+    let fk_sql = r#"
+SELECT con.conname AS constraint_name,
+       cl.relname AS table_name,
+       (SELECT a.attname FROM pg_attribute a
+         WHERE a.attrelid = con.conrelid AND a.attnum = con.conkey[1]) AS column_name,
+       fcl.relname AS target_table,
+       (SELECT a.attname FROM pg_attribute a
+         WHERE a.attrelid = con.confrelid AND a.attnum = con.confkey[1]) AS target_column,
+       con.confdeltype AS on_delete,
+       con.confupdtype AS on_update,
+       con.condeferrable AS deferrable
+  FROM pg_constraint con
+  JOIN pg_class cl ON cl.oid = con.conrelid
+  JOIN pg_class fcl ON fcl.oid = con.confrelid
+  JOIN pg_namespace n ON n.oid = cl.relnamespace
+ WHERE n.nspname = $1 AND con.contype = 'f'
+"#;
+    let rows = pool
+        .query_text_params(fk_sql, &params)
+        .await
+        .map_err(|e| format!("diff: read foreign_keys failed: {e}"))?;
+    for row in &rows {
+        let table: String = row.try_get("table_name").unwrap_or_default();
+        let constraint_name: String = row.try_get("constraint_name").unwrap_or_default();
+        let column: String = row.try_get("column_name").unwrap_or_default();
+        let target_table: String = row.try_get("target_table").unwrap_or_default();
+        let target_column: String = row.try_get("target_column").unwrap_or_default();
+        let on_delete_code: String = row.try_get("on_delete").unwrap_or_default();
+        let on_update_code: String = row.try_get("on_update").unwrap_or_default();
+        let deferrable: bool = row.try_get("deferrable").unwrap_or(false);
+
+        let on_delete = decode_fk_action(&on_delete_code);
+        let on_update = decode_fk_action(&on_update_code);
+
+        out.foreign_keys.entry(table).or_default().insert(
+            column.clone(),
+            ForeignKeyInfo {
+                constraint_name,
+                column,
+                target_table,
+                target_column,
+                on_delete: on_delete.to_string(),
+                on_update: on_update.to_string(),
+                deferrable,
+            },
+        );
+    }
+
     // ----- indexes -----
     let idx_sql = r#"
 SELECT c.relname AS table_name,
@@ -244,6 +330,20 @@ SELECT c.relname AS table_name,
     }
 
     Ok(out)
+}
+
+/// Decode Postgres' single-character FK action code into the SQL
+/// keyword equivalent. The pg_constraint columns confdeltype and
+/// confupdtype use these codes (per the Postgres source: `gram.y`).
+fn decode_fk_action(code: &str) -> &'static str {
+    match code.chars().next().unwrap_or('a') {
+        'a' => "NO ACTION",
+        'r' => "RESTRICT",
+        'c' => "CASCADE",
+        'n' => "SET NULL",
+        'd' => "SET DEFAULT",
+        _ => "NO ACTION",
+    }
 }
 
 /// Cheap row-count check used by the classifier. Returns 0 if the table
@@ -395,6 +495,154 @@ pub fn compute_diff(
             }),
             field: spec.columns.first().cloned(),
         });
+    }
+
+    // ----- foreign-key additions (B2) -----
+    //
+    // Walk the declared schema and emit an AddForeignKey op for every
+    // `t.ref("target")` field that doesn't already have a matching FK
+    // in the live snapshot.
+    //
+    // First-time CREATE TABLE inlines the FK in the same statement (see
+    // build_create_table_with_fks's Deferred mode), so when the table is
+    // brand new (`live_cols.is_none()`) we only emit AddForeignKey ops
+    // for refs whose target *doesn't* exist yet — but currently
+    // build_create_table emits FKs inline always. To stay safe and
+    // explicit, we let the orchestrator decide: when the table already
+    // exists, the FK might need to be attached; when it's a fresh
+    // create_table, the FK is already part of the CREATE TABLE SQL and
+    // we skip the standalone op.
+    //
+    // Classification:
+    // - new column + new FK (ref field, table is being created):
+    //   the FK is part of CREATE TABLE; no AddForeignKey op.
+    // - existing column + new FK (was bare number, now t.ref): the FK
+    //   needs ALTER TABLE ADD CONSTRAINT. Classification is **compatible**
+    //   — we'd need to validate every existing row before turning the
+    //   constraint on, but Postgres' `NOT VALID` + `VALIDATE` two-step
+    //   makes this safe (deferred to follow-up; today we attempt the add
+    //   and Postgres will refuse if data is bad).
+    // - existing FK, declared no longer (field removed from schema):
+    //   this is captured by the column-drop path; the FK drop is
+    //   implicit. We surface it explicitly when the column stays but the
+    //   ref marker is removed (rare: would require re-declaring as
+    //   t.number()).
+    let live_fk_set = live
+        .foreign_keys
+        .get(collection)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(obj) = schema.as_object() {
+        for (field, def) in obj {
+            if def.get("type").and_then(|t| t.as_str()) != Some("ref") {
+                continue;
+            }
+            let target = def
+                .get("refTarget")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if target.is_empty() {
+                continue;
+            }
+
+            let live_fk = live_fk_set.get(field);
+            let column_exists = live_cols.map(|c| c.contains_key(field)).unwrap_or(false);
+
+            if !column_exists {
+                // The column itself doesn't exist yet.
+                if live_cols.is_some() {
+                    // Existing table — AddColumn already emitted above;
+                    // emit AddForeignKey as a separate op so the
+                    // orchestrator can run ALTER TABLE ADD CONSTRAINT
+                    // after the column is created.
+                    let sql = crate::query::build_add_foreign_key(app_id, collection, field, def)
+                        .ok()
+                        .map(|s| s.to_string());
+                    ops.push(DiffOp {
+                        collection: collection.to_string(),
+                        change_kind: ChangeKind::AddForeignKey,
+                        class: ChangeClass::Compatible,
+                        sql,
+                        details: serde_json::json!({
+                            "kind": "add_foreign_key",
+                            "field": field,
+                            "target_table": target,
+                            "target_column": "id",
+                            "on_delete": def.get("onDelete").cloned().unwrap_or(Value::String("restrict".into())),
+                            "on_update": def.get("onUpdate").cloned().unwrap_or(Value::String("restrict".into())),
+                        }),
+                        field: Some(field.clone()),
+                    });
+                }
+                // First-time CREATE TABLE — FK is inlined in CREATE TABLE;
+                // skip standalone op.
+                continue;
+            }
+
+            // Column exists. Need to attach the FK if not present, or
+            // detect a policy mismatch.
+            if live_fk.is_none() {
+                let sql = crate::query::build_add_foreign_key(app_id, collection, field, def)
+                    .ok()
+                    .map(|s| s.to_string());
+                ops.push(DiffOp {
+                    collection: collection.to_string(),
+                    change_kind: ChangeKind::AddForeignKey,
+                    class: ChangeClass::Compatible,
+                    sql,
+                    details: serde_json::json!({
+                        "kind": "add_foreign_key",
+                        "field": field,
+                        "target_table": target,
+                        "target_column": "id",
+                        "on_delete": def.get("onDelete").cloned().unwrap_or(Value::String("restrict".into())),
+                        "on_update": def.get("onUpdate").cloned().unwrap_or(Value::String("restrict".into())),
+                    }),
+                    field: Some(field.clone()),
+                });
+            } else if let Some(fk) = live_fk {
+                // Detect policy mismatch — surfaced as paired DROP+ADD.
+                let declared_on_delete = crate::query::normalize_fk_action_pub(
+                    def.get("onDelete").and_then(|v| v.as_str()),
+                );
+                let declared_on_update = crate::query::normalize_fk_action_pub(
+                    def.get("onUpdate").and_then(|v| v.as_str()),
+                );
+                let declared_target = target;
+                if declared_on_delete != fk.on_delete
+                    || declared_on_update != fk.on_update
+                    || declared_target != fk.target_table
+                {
+                    ops.push(DiffOp {
+                        collection: collection.to_string(),
+                        change_kind: ChangeKind::DropForeignKey,
+                        class: ChangeClass::Compatible,
+                        sql: crate::query::build_drop_foreign_key(app_id, collection, &fk.constraint_name).ok(),
+                        details: serde_json::json!({
+                            "kind": "drop_foreign_key",
+                            "field": field,
+                            "constraint_name": fk.constraint_name,
+                        }),
+                        field: Some(field.clone()),
+                    });
+                    ops.push(DiffOp {
+                        collection: collection.to_string(),
+                        change_kind: ChangeKind::AddForeignKey,
+                        class: ChangeClass::Compatible,
+                        sql: crate::query::build_add_foreign_key(app_id, collection, field, def).ok(),
+                        details: serde_json::json!({
+                            "kind": "add_foreign_key",
+                            "field": field,
+                            "target_table": target,
+                            "target_column": "id",
+                            "on_delete": declared_on_delete,
+                            "on_update": declared_on_update,
+                        }),
+                        field: Some(field.clone()),
+                    });
+                }
+            }
+        }
     }
 
     // ----- column drops (destructive) -----
@@ -578,5 +826,145 @@ mod tests {
             .collect();
         assert_eq!(creates.len(), 1);
         assert_eq!(creates[0].class, ChangeClass::Additive);
+    }
+
+    // -----------------------------------------------------------------
+    // B2 — typed cross-table relations: diff classification
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn b2_add_fk_to_existing_column_is_compatible() {
+        // Existing table with a bare INTEGER column — now declared with
+        // t.ref("users"). The FK must be added as a separate op.
+        let mut live = LiveSchema::default();
+        let mut cols = std::collections::HashMap::new();
+        cols.insert(
+            "id".to_string(),
+            ColumnInfo {
+                pg_type: "integer".into(),
+                not_null: true,
+                default_expr: None,
+                default_volatility: None,
+            },
+        );
+        cols.insert(
+            "authorId".to_string(),
+            ColumnInfo {
+                pg_type: "integer".into(),
+                not_null: false,
+                default_expr: None,
+                default_volatility: None,
+            },
+        );
+        live.tables.insert("posts".to_string(), cols);
+
+        let declared = json!({
+            "authorId": {"type": "ref", "refTarget": "users"},
+        });
+        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        let fk_ops: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::AddForeignKey))
+            .collect();
+        assert_eq!(fk_ops.len(), 1, "ops: {ops:?}");
+        assert_eq!(fk_ops[0].class, ChangeClass::Compatible);
+        assert_eq!(fk_ops[0].field.as_deref(), Some("authorId"));
+    }
+
+    #[test]
+    fn b2_existing_fk_no_change_is_no_op() {
+        // Live FK matches declared: no op emitted.
+        let mut live = LiveSchema::default();
+        let mut cols = std::collections::HashMap::new();
+        cols.insert(
+            "id".to_string(),
+            ColumnInfo {
+                pg_type: "integer".into(),
+                not_null: true,
+                default_expr: None,
+                default_volatility: None,
+            },
+        );
+        cols.insert(
+            "authorId".to_string(),
+            ColumnInfo {
+                pg_type: "integer".into(),
+                not_null: false,
+                default_expr: None,
+                default_volatility: None,
+            },
+        );
+        live.tables.insert("posts".to_string(), cols);
+
+        let mut fks = std::collections::HashMap::new();
+        fks.insert(
+            "authorId".to_string(),
+            ForeignKeyInfo {
+                constraint_name: "authorId_fkey".into(),
+                column: "authorId".into(),
+                target_table: "users".into(),
+                target_column: "id".into(),
+                on_delete: "RESTRICT".into(),
+                on_update: "RESTRICT".into(),
+                deferrable: true,
+            },
+        );
+        live.foreign_keys.insert("posts".to_string(), fks);
+
+        let declared = json!({
+            "authorId": {"type": "ref", "refTarget": "users"},
+        });
+        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        assert!(
+            !ops.iter().any(|o| matches!(o.change_kind, ChangeKind::AddForeignKey | ChangeKind::DropForeignKey)),
+            "should not emit FK ops when policies match: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn b2_policy_change_emits_drop_then_add() {
+        let mut live = LiveSchema::default();
+        let mut cols = std::collections::HashMap::new();
+        cols.insert(
+            "authorId".to_string(),
+            ColumnInfo {
+                pg_type: "integer".into(),
+                not_null: false,
+                default_expr: None,
+                default_volatility: None,
+            },
+        );
+        live.tables.insert("posts".to_string(), cols);
+
+        let mut fks = std::collections::HashMap::new();
+        fks.insert(
+            "authorId".to_string(),
+            ForeignKeyInfo {
+                constraint_name: "authorId_fkey".into(),
+                column: "authorId".into(),
+                target_table: "users".into(),
+                target_column: "id".into(),
+                on_delete: "RESTRICT".into(),
+                on_update: "RESTRICT".into(),
+                deferrable: true,
+            },
+        );
+        live.foreign_keys.insert("posts".to_string(), fks);
+
+        // Declared now wants ON DELETE CASCADE.
+        let declared = json!({
+            "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
+        });
+        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        let drops: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::DropForeignKey))
+            .collect();
+        let adds: Vec<&DiffOp> = ops
+            .iter()
+            .filter(|o| matches!(o.change_kind, ChangeKind::AddForeignKey))
+            .collect();
+        assert_eq!(drops.len(), 1, "expected drop op: {ops:?}");
+        assert_eq!(adds.len(), 1, "expected add op: {ops:?}");
     }
 }

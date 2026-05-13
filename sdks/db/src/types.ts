@@ -192,11 +192,59 @@ export function err<T>(error: Error): Result<T> {
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
-/** All supported type names, including "array". */
-export type TypeName = PrimitiveTypeName | "array";
+/** All supported type names, including "array" and "ref" (B2 typed FK). */
+export type TypeName = PrimitiveTypeName | "array" | "ref";
 
 /** Union of all values that can serve as a field default. */
 export type FieldDefaultValue = string | number | boolean | Date | null | PlainObject | string[] | number[] | boolean[];
+
+/**
+ * Foreign-key action policy for `t.ref()` (proposal B2).
+ *
+ * - `restrict`  — refuse to delete the parent row if any child references it.
+ *                 This is the **default** per proposal R1 (`docs/proposals/zeroship-db-v2.md`
+ *                 around line 762): silent cascading deletes are catastrophic
+ *                 data-loss, so opt-in cascade is the safer default.
+ * - `cascade`   — child rows are deleted/updated along with the parent.
+ * - `set null`  — child reference column is nulled when parent is deleted.
+ *                 Only valid when the column is nullable.
+ * - `no action` — like `restrict` but check is deferrable (Postgres default
+ *                 inside DEFERRABLE constraints).
+ */
+export type FkAction = "restrict" | "cascade" | "set null" | "no action";
+
+/**
+ * Options accepted by `t.ref()` to control FK behaviour at the DB layer.
+ */
+export interface RefOptions {
+  /** ON DELETE policy. Default: "restrict". */
+  onDelete?: FkAction;
+  /** ON UPDATE policy. Default: "restrict". */
+  onUpdate?: FkAction;
+  /**
+   * Emit `DEFERRABLE INITIALLY DEFERRED` for this FK so the constraint
+   * check is queued until COMMIT (lets circular refs be inserted in any
+   * order within one tx). Default: `true` — flips per proposal B2's
+   * "Deferred-constraint cost" caveat which currently keeps it on.
+   */
+  deferrable?: boolean;
+}
+
+/**
+ * Cross-table typed ID (B2). Stored as an integer at the DB layer but
+ * brand-tagged at the type layer so `Id<"users">` and `Id<"posts">`
+ * are mutually incompatible — typos like
+ * `db.posts.findOne({ authorId: postId })` (where `postId` is `Id<"posts">`)
+ * become compile errors.
+ *
+ * Modelled after Convex's `Id<TableName>` brand
+ * ([docs.convex.dev/database/document-ids]). The brand is a phantom
+ * property typed but never assigned at runtime; the runtime value is
+ * just a number, so JSON serialisation is unchanged.
+ */
+export type Id<T extends string> = number & {
+  readonly __zeroshipTable: T;
+};
 
 /** Internal representation of a fully-specified field definition used by validate and collection. */
 export interface FieldDef {
@@ -210,6 +258,17 @@ export interface FieldDef {
   max?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
+  /** Target table name for `t.ref()`. Present iff `type === "ref"`. */
+  refTarget?: string;
+  /** ON DELETE policy for `t.ref()`. Default at DDL emit time: "restrict". */
+  onDelete?: FkAction;
+  /** ON UPDATE policy for `t.ref()`. Default at DDL emit time: "restrict". */
+  onUpdate?: FkAction;
+  /**
+   * Whether the FK is emitted DEFERRABLE INITIALLY DEFERRED. Default at
+   * DDL emit time: true (see RefOptions.deferrable).
+   */
+  deferrable?: boolean;
 }
 
 /**
@@ -322,6 +381,33 @@ export const t = {
   array<U>(items: TypeBuilder<U, any>): TypeBuilder<U[]> {
     const itemType = items.toFieldDef().type as PrimitiveTypeName;
     return new TypeBuilder<U[]>({ type: "array", items: itemType });
+  },
+  /**
+   * Creates a foreign-key field referencing `table` (B2). At the type
+   * level produces `TypeBuilder<Id<T>>` so consumers get a brand-typed
+   * `Id<"users">` rather than a bare `number`. At the DB level it
+   * materialises a `FOREIGN KEY (<column>) REFERENCES "<schema>"."<table>"(id)`
+   * constraint with the default `ON DELETE RESTRICT` policy (proposal R1).
+   *
+   * `opts.onDelete` / `opts.onUpdate` override the policy, e.g.:
+   * ```ts
+   * { authorId: t.ref("users", { onDelete: "cascade" }) }
+   * ```
+   *
+   * `opts.deferrable` (default true) emits `DEFERRABLE INITIALLY DEFERRED`
+   * so circular references can be inserted in any order within one tx.
+   */
+  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
+    if (typeof table !== "string" || table.length === 0) {
+      throw new Error("t.ref(table) requires a non-empty table name");
+    }
+    return new TypeBuilder<Id<T>>({
+      type: "ref",
+      refTarget: table,
+      onDelete: opts?.onDelete ?? "restrict",
+      onUpdate: opts?.onUpdate ?? "restrict",
+      deferrable: opts?.deferrable ?? true,
+    });
   },
 };
 

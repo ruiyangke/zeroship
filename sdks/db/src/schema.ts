@@ -2,7 +2,7 @@
  * Schema normalization: converts Mongoose-style schema definitions and TypeBuilder
  * instances into a unified NormalizedSchema used by the rest of the SDK.
  */
-import { TypeBuilder, SchemaBuilder, FieldDef, FieldDefaultValue, PrimitiveTypeName } from "./types.js";
+import { TypeBuilder, SchemaBuilder, FieldDef, FieldDefaultValue, PrimitiveTypeName, PlainObject } from "./types.js";
 
 /** A normalized schema mapping field names to their FieldDef. */
 export type NormalizedSchema = Record<string, FieldDef>;
@@ -104,7 +104,10 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
     const val = rawVal;
 
     if (val instanceof TypeBuilder) {
-      // Form 1: TypeBuilder instance
+      // Form 1: TypeBuilder instance — already structurally complete,
+      // including the B2 ref* fields (refTarget, onDelete, onUpdate,
+      // deferrable). Shallow-clone is correct: every member is a plain
+      // value or a function (`default`), never a mutable container.
       result[key] = { ...val.toFieldDef() };
     } else if (isMongooseFieldDef(val)) {
       // Form 2: Mongoose object definition { type: Constructor, ... }
@@ -143,4 +146,59 @@ export function normalizeSchema(input: SchemaInput): NormalizedSchema {
   }
 
   return result;
+}
+
+/**
+ * B2 — verify that every `t.ref("table")` in `schemas` points at a
+ * collection that is itself declared in `schemas`. Throws an `Error`
+ * whose `message` is a JSON-encoded envelope with code
+ * `ref_target_not_found` on the first violation.
+ *
+ * The check is intentionally string-based (not type-based) so it acts
+ * as a safety net for `t.ref("x" as any)` escapes that bypass the
+ * compile-time `Tables<S>` constraint. Cross-app refs are also blocked:
+ * the TS literal type for `table` always refers to a key inside the
+ * same `createDb({...})` literal, so a cross-app reference would have
+ * to be smuggled in via `as any`, which this check catches.
+ */
+export function validateRefTargets(
+  schemas: Record<string, unknown>,
+): void {
+  const declaredCollections = new Set(Object.keys(schemas));
+  for (const [collectionName, rawSchema] of Object.entries(schemas)) {
+    const fields =
+      rawSchema instanceof SchemaBuilder
+        ? (rawSchema as SchemaBuilder<Record<string, unknown>>).fields
+        : rawSchema;
+    if (fields === null || typeof fields !== "object") continue;
+    for (const [field, def] of Object.entries(fields as PlainObject)) {
+      let refTarget: string | undefined;
+      if (def instanceof TypeBuilder) {
+        const fd = def.toFieldDef();
+        if (fd.type === "ref") refTarget = fd.refTarget;
+      } else if (
+        def !== null &&
+        typeof def === "object" &&
+        "type" in (def as PlainObject) &&
+        (def as PlainObject).type === "ref"
+      ) {
+        // Raw FieldDef literal (rare path — `as any` escape).
+        refTarget = (def as { refTarget?: string }).refTarget;
+      }
+      if (refTarget !== undefined && !declaredCollections.has(refTarget)) {
+        throw new Error(
+          JSON.stringify({
+            code: "ref_target_not_found",
+            collection: collectionName,
+            field,
+            target: refTarget,
+            message:
+              `t.ref("${refTarget}") on ${collectionName}.${field} — ` +
+              `target collection "${refTarget}" is not declared in createDb(). ` +
+              `Add "${refTarget}" to the schema map, or fix the typo.`,
+          }),
+        );
+      }
+    }
+  }
 }

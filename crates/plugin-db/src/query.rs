@@ -114,10 +114,47 @@ pub fn build_create_schema(app_id: &str) -> String {
 /// Schema format: `{ "name": { "type": "string", "required": true, ... }, ... }`
 ///
 /// Auto-generates: id SERIAL PRIMARY KEY, created_at, updated_at.
+///
+/// B2 — `t.ref("table")` fields emit an inline `FOREIGN KEY` clause
+/// when (1) the target table is the same as `collection` (self-ref) or
+/// (2) the table is already in `existing_tables`. Otherwise the FK is
+/// deferred to a separate `ALTER TABLE … ADD CONSTRAINT` so the
+/// orchestrator can sequence DDL topologically. The unrestricted variant
+/// `build_create_table` keeps backwards compatibility for callers that
+/// don't track inter-table ordering — it always emits FK clauses inline,
+/// relying on Postgres' deferred validation when the constraint is
+/// `DEFERRABLE INITIALLY DEFERRED`.
 pub fn build_create_table(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
+) -> Result<String, QueryError> {
+    build_create_table_with_fks(app_id, collection, schema, &FkEmission::Inline)
+}
+
+/// Controls FK emission strategy for `build_create_table_with_fks`.
+///
+/// - `Inline` — every `t.ref(target)` becomes an inline `FOREIGN KEY`
+///   clause inside CREATE TABLE. The caller takes responsibility for
+///   ordering: parent tables must exist (or be in the same statement
+///   batch) before the FK is enforced.
+/// - `Deferred(existing)` — only emits inline FK clauses for refs whose
+///   target is `collection` itself (self-ref) or is in `existing` (already
+///   present in the live schema). Other refs are skipped here so the
+///   orchestrator can later attach them with `build_add_foreign_key` once
+///   all tables exist.
+#[derive(Debug)]
+pub enum FkEmission<'a> {
+    Inline,
+    Deferred(&'a std::collections::HashSet<String>),
+}
+
+#[doc(hidden)]
+pub fn build_create_table_with_fks(
+    app_id: &str,
+    collection: &str,
+    schema: &serde_json::Value,
+    fk_emit: &FkEmission<'_>,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -128,21 +165,170 @@ pub fn build_create_table(
         "id SERIAL PRIMARY KEY".to_string(),
     ];
 
+    let mut deferred_fks: Vec<String> = Vec::new();
+
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
             let col_def = field_to_column(field, def);
             columns.push(col_def);
+
+            // B2 — append FOREIGN KEY clause when this is a ref. Inline
+            // FK clauses live in the same CREATE TABLE statement as the
+            // column, after the column definition.
+            if def.get("type").and_then(|t| t.as_str()) == Some("ref") {
+                let target = def
+                    .get("refTarget")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !target.is_empty() {
+                    let should_inline = match fk_emit {
+                        FkEmission::Inline => true,
+                        FkEmission::Deferred(existing) => {
+                            target == collection || existing.contains(target)
+                        }
+                    };
+                    if should_inline {
+                        if let Ok(fk_clause) = build_fk_clause(app_id, field, def, target) {
+                            deferred_fks.push(fk_clause);
+                        }
+                    }
+                }
+            }
         }
     }
 
     columns.push("created_at TIMESTAMPTZ DEFAULT NOW()".to_string());
     columns.push("updated_at TIMESTAMPTZ DEFAULT NOW()".to_string());
 
+    // Append all FK clauses *after* the regular columns so the SQL reads
+    // top-to-bottom in a natural order (columns, then constraints).
+    columns.extend(deferred_fks);
+
     Ok(format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
         table,
         columns.join(",\n  ")
     ))
+}
+
+/// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
+///
+/// Used by the diff engine when both tables already exist and the FK has
+/// to be attached separately. The constraint name is content-addressed
+/// from `<collection>_<field>_fkey` and truncated to 63 bytes via the
+/// same hash strategy as A1 index names.
+pub fn build_add_foreign_key(
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    def: &serde_json::Value,
+) -> Result<String, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let target = def
+        .get("refTarget")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
+
+    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let fk_clause = build_fk_clause(app_id, field, def, target)?;
+    Ok(format!("ALTER TABLE {} ADD {}", table, fk_clause))
+}
+
+/// Build `ALTER TABLE … DROP CONSTRAINT` for an existing FK (B2 diff
+/// engine — `DropForeignKey` op).
+pub fn build_drop_foreign_key(
+    app_id: &str,
+    collection: &str,
+    constraint_name: &str,
+) -> Result<String, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    Ok(format!(
+        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+        table,
+        quote_ident(constraint_name)
+    ))
+}
+
+/// Build a deterministic, NAMEDATALEN-safe FK constraint identifier.
+///
+/// Postgres scopes constraint names per-table, so the name only needs
+/// to be unique among the constraints of a single table. We use
+/// `<field>_fkey` (the convention Postgres itself follows for
+/// auto-generated FK names). The second argument is reserved for future
+/// composite-FK use and is currently unused.
+pub fn fk_constraint_name(field: &str, _reserved: &str) -> String {
+    let full = format!("{field}_fkey");
+    if full.len() <= 60 {
+        return full;
+    }
+    let hash = short_hash_base32(&full);
+    let prefix_budget = 60usize.saturating_sub(9);
+    let mut prefix: String = full.chars().take(prefix_budget).collect();
+    if prefix.ends_with('_') {
+        prefix.pop();
+    }
+    format!("{prefix}_{hash}")
+}
+
+/// Build the `CONSTRAINT "name" FOREIGN KEY (...) REFERENCES …` clause
+/// shared by inline CREATE TABLE emission and standalone ALTER TABLE.
+///
+/// The constraint name uses only `<field>_fkey` (Postgres scopes
+/// constraint names per-table, so cross-table uniqueness is not needed)
+/// and is hash-truncated for ≤ 63 byte NAMEDATALEN budget.
+fn build_fk_clause(
+    app_id: &str,
+    field: &str,
+    def: &serde_json::Value,
+    target: &str,
+) -> Result<String, QueryError> {
+    validate_collection(target)?;
+    let constraint_name = fk_constraint_name(field, "");
+
+    let on_delete = normalize_fk_action(def.get("onDelete").and_then(|v| v.as_str()));
+    let on_update = normalize_fk_action(def.get("onUpdate").and_then(|v| v.as_str()));
+    let deferrable = def
+        .get("deferrable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let target_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(target));
+    let deferrable_clause = if deferrable {
+        " DEFERRABLE INITIALLY DEFERRED"
+    } else {
+        ""
+    };
+
+    Ok(format!(
+        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id) ON DELETE {} ON UPDATE {}{}",
+        quote_ident(&constraint_name),
+        quote_ident(field),
+        target_qualified,
+        on_delete,
+        on_update,
+        deferrable_clause,
+    ))
+}
+
+/// Normalise an FK action to the SQL keyword form Postgres accepts.
+fn normalize_fk_action(s: Option<&str>) -> &'static str {
+    match s.unwrap_or("restrict").to_ascii_lowercase().as_str() {
+        "cascade" => "CASCADE",
+        "set null" | "set_null" => "SET NULL",
+        "no action" | "no_action" => "NO ACTION",
+        _ => "RESTRICT",
+    }
+}
+
+/// Public re-export of [`normalize_fk_action`] for cross-module use
+/// (diff engine needs to compare declared vs. live policies).
+#[doc(hidden)]
+pub fn normalize_fk_action_pub(s: Option<&str>) -> &'static str {
+    normalize_fk_action(s)
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
@@ -349,6 +535,12 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> String {
 }
 
 /// Map schema type to PostgreSQL type.
+///
+/// B2 — a `ref` field is stored as `BIGINT` so it matches the `id`
+/// type of the target collection (auto-generated by `id SERIAL PRIMARY KEY`,
+/// which is `INTEGER`; we widen to `BIGINT` because Convex-style brand-typed
+/// IDs are always integers wide enough to hold any row count, and the
+/// referenced table's `id` is auto-cast on FK check).
 fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
@@ -357,6 +549,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         Some("date") => "TIMESTAMPTZ",
         Some("json") => "JSONB",
         Some("array") => "JSONB",
+        Some("ref") => "INTEGER",
         _ => "TEXT",
     }
 }
@@ -3007,6 +3200,138 @@ mod tests {
             !alter.contains(" UNIQUE"),
             "ADD COLUMN must not emit inline UNIQUE: {}",
             alter
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // B2 — typed cross-table relations
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn b2_create_table_with_ref_emits_inline_fk() {
+        let schema = json!({
+            "title": {"type": "string", "required": true},
+            "authorId": {"type": "ref", "refTarget": "users"},
+        });
+        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        // INTEGER column for the FK
+        assert!(sql.contains("\"authorId\" INTEGER"), "{sql}");
+        // Inline FK clause with default ON DELETE RESTRICT
+        assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
+        assert!(
+            sql.contains("REFERENCES \"app1\".\"users\" (id)"),
+            "{sql}"
+        );
+        assert!(sql.contains("ON DELETE RESTRICT"), "{sql}");
+        assert!(sql.contains("ON UPDATE RESTRICT"), "{sql}");
+        // Default deferrable
+        assert!(sql.contains("DEFERRABLE INITIALLY DEFERRED"), "{sql}");
+    }
+
+    #[test]
+    fn b2_ref_on_delete_cascade_override() {
+        let schema = json!({
+            "authorId": {
+                "type": "ref",
+                "refTarget": "users",
+                "onDelete": "cascade",
+                "onUpdate": "cascade",
+            },
+        });
+        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        assert!(sql.contains("ON DELETE CASCADE"), "{sql}");
+        assert!(sql.contains("ON UPDATE CASCADE"), "{sql}");
+    }
+
+    #[test]
+    fn b2_ref_deferrable_false_skips_clause() {
+        let schema = json!({
+            "authorId": {
+                "type": "ref",
+                "refTarget": "users",
+                "deferrable": false,
+            },
+        });
+        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        assert!(!sql.contains("DEFERRABLE"), "{sql}");
+    }
+
+    #[test]
+    fn b2_build_add_foreign_key_emits_alter_table() {
+        let def = json!({
+            "type": "ref",
+            "refTarget": "users",
+            "onDelete": "cascade",
+        });
+        let sql = build_add_foreign_key("app1", "posts", "authorId", &def).unwrap();
+        assert!(sql.starts_with("ALTER TABLE \"app1\".\"posts\" ADD"), "{sql}");
+        assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
+        assert!(sql.contains("REFERENCES \"app1\".\"users\" (id)"), "{sql}");
+        assert!(sql.contains("ON DELETE CASCADE"), "{sql}");
+    }
+
+    #[test]
+    fn b2_build_drop_foreign_key() {
+        let sql = build_drop_foreign_key("app1", "posts", "authorId_fkey").unwrap();
+        assert_eq!(
+            sql,
+            "ALTER TABLE \"app1\".\"posts\" DROP CONSTRAINT IF EXISTS \"authorId_fkey\""
+        );
+    }
+
+    #[test]
+    fn b2_fk_constraint_name_short() {
+        assert_eq!(fk_constraint_name("authorId", ""), "authorId_fkey");
+    }
+
+    #[test]
+    fn b2_fk_constraint_name_truncated() {
+        let long = "a".repeat(80);
+        let name = fk_constraint_name(&long, "");
+        assert!(name.len() <= 60, "got {} bytes: {name}", name.len());
+    }
+
+    #[test]
+    fn b2_deferred_emission_skips_unknown_target() {
+        let schema = json!({
+            "authorId": {"type": "ref", "refTarget": "users"},
+        });
+        let existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let sql = build_create_table_with_fks(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Deferred(&existing),
+        )
+        .unwrap();
+        // FK is deferred — column still present but no FOREIGN KEY clause
+        assert!(sql.contains("\"authorId\" INTEGER"), "{sql}");
+        assert!(
+            !sql.contains("FOREIGN KEY"),
+            "FK should be deferred: {sql}"
+        );
+    }
+
+    #[test]
+    fn b2_deferred_emission_inlines_self_ref() {
+        // Self-ref (employee.managerId → employee) inlines even when
+        // existing-set is empty because the table being created IS the
+        // target.
+        let schema = json!({
+            "managerId": {"type": "ref", "refTarget": "employees"},
+        });
+        let existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let sql = build_create_table_with_fks(
+            "app1",
+            "employees",
+            &schema,
+            &FkEmission::Deferred(&existing),
+        )
+        .unwrap();
+        assert!(sql.contains("FOREIGN KEY (\"managerId\")"), "{sql}");
+        assert!(
+            sql.contains("REFERENCES \"app1\".\"employees\" (id)"),
+            "{sql}"
         );
     }
 }

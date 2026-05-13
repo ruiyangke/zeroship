@@ -68,6 +68,14 @@ function checkField(
       };
       return;
     }
+  } else if (type === "ref") {
+    // B2 — refs are stored as integers at the DB level (BIGINT FK). The
+    // brand `Id<T>` is purely type-level; at runtime the value is a
+    // plain number. Validate as number and accept it.
+    if (typeof value !== "number" || isNaN(value as number)) {
+      errors[key] = { path: key, message: `${key} must be a numeric id` };
+      return;
+    }
   } else if (type === "boolean") {
     if (typeof value !== "boolean") {
       errors[key] = { path: key, message: `${key} must be a boolean` };

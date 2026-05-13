@@ -27,7 +27,7 @@ import { env } from "zeroship";
 import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
-import { type NormalizedSchema } from "./schema.js";
+import { type NormalizedSchema, validateRefTargets } from "./schema.js";
 import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, naming, ok, err } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -233,6 +233,14 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   const native = options?.native ?? getNativeDb();
   const namingStrategy = options?.naming ?? naming.snakeCase;
   const collections = {} as { [K in keyof T]: Collection<T[K]> };
+
+  // B2 — validate that every `t.ref("...")` target is a declared
+  // collection in this same schema map. The TS `Tables<S>` constraint
+  // catches the canonical case at compile-time; this runtime check is
+  // the safety net for `t.ref("x" as any)` escapes and ensures we never
+  // emit DDL that references a non-existent table (which would otherwise
+  // fail later with a confusing Postgres error).
+  validateRefTargets(schemas);
 
   for (const [name, rawSchema] of Object.entries(schemas)) {
     // Unwrap SchemaBuilder to extract per-collection options

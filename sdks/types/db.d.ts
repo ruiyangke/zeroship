@@ -93,11 +93,14 @@ type ZeroshipDbAccumulator =
 // Schema types (zeroship.db.registerModel)
 // ---------------------------------------------------------------------------
 
-/** Supported primitive field type names. */
-type ZeroshipDbTypeName = "string" | "number" | "boolean" | "date" | "json" | "array";
+/** Supported primitive field type names. Includes `"ref"` for B2 typed FKs. */
+type ZeroshipDbTypeName = "string" | "number" | "boolean" | "date" | "json" | "array" | "ref";
 
 /** Supported primitive item type names (for array fields). */
 type ZeroshipDbPrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json";
+
+/** B2 — foreign-key action policy emitted into FK DDL. */
+type ZeroshipDbFkAction = "restrict" | "cascade" | "set null" | "no action";
 
 /** Normalized schema field definition passed to registerModel. */
 interface ZeroshipDbFieldDef {
@@ -111,6 +114,14 @@ interface ZeroshipDbFieldDef {
   max?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
+  /** B2 — target collection name for `t.ref("...")`. Present iff `type === "ref"`. */
+  refTarget?: string;
+  /** B2 — ON DELETE policy. Default at DDL emit time: "restrict". */
+  onDelete?: ZeroshipDbFkAction;
+  /** B2 — ON UPDATE policy. Default at DDL emit time: "restrict". */
+  onUpdate?: ZeroshipDbFkAction;
+  /** B2 — whether FK is `DEFERRABLE INITIALLY DEFERRED`. Default: true. */
+  deferrable?: boolean;
 }
 
 /** Normalized schema — field name → definition. */

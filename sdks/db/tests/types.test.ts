@@ -120,4 +120,39 @@ describe("t type builder", () => {
     assert.equal(a.toFieldDef().required, true);
     assert.equal(b.toFieldDef().required, undefined);
   });
+
+  // B2 — t.ref()
+  test("t.ref(table) creates ref TypeBuilder with refTarget", () => {
+    const tb = t.ref("users");
+    assert.ok(tb instanceof TypeBuilder);
+    const def = tb.toFieldDef();
+    assert.equal(def.type, "ref");
+    assert.equal(def.refTarget, "users");
+  });
+
+  test("t.ref defaults to onDelete=restrict and onUpdate=restrict", () => {
+    const def = t.ref("users").toFieldDef();
+    assert.equal(def.onDelete, "restrict");
+    assert.equal(def.onUpdate, "restrict");
+  });
+
+  test("t.ref defaults to deferrable=true", () => {
+    const def = t.ref("users").toFieldDef();
+    assert.equal(def.deferrable, true);
+  });
+
+  test("t.ref accepts onDelete override", () => {
+    const def = t.ref("users", { onDelete: "cascade" }).toFieldDef();
+    assert.equal(def.onDelete, "cascade");
+    assert.equal(def.onUpdate, "restrict");
+  });
+
+  test("t.ref accepts deferrable=false override", () => {
+    const def = t.ref("users", { deferrable: false }).toFieldDef();
+    assert.equal(def.deferrable, false);
+  });
+
+  test("t.ref throws on empty table name", () => {
+    assert.throws(() => t.ref(""), /non-empty table/);
+  });
 });

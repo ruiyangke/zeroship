@@ -1174,7 +1174,10 @@ pub async fn exec_register_model_with_pool(
         };
 
         let result = match &op.change_kind {
-            crate::diff::ChangeKind::CreateTable | crate::diff::ChangeKind::AddColumn => {
+            crate::diff::ChangeKind::CreateTable
+            | crate::diff::ChangeKind::AddColumn
+            | crate::diff::ChangeKind::AddForeignKey
+            | crate::diff::ChangeKind::DropForeignKey => {
                 if let Some(sql) = &op.sql {
                     pool.query_text_params(sql, &empty)
                         .await

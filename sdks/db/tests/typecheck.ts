@@ -5,6 +5,7 @@
  */
 
 import { createDb, t, schema } from "../src/index.js";
+import type { Id } from "../src/types.js";
 
 // === Mongoose-style schema ===
 
@@ -252,5 +253,47 @@ async function testForceDelete() {
     const count: number = d2.deletedCount; // typed
   }
 }
+
+// --- B2: typed cross-table relations ---
+
+// `t.ref("users")` produces TypeBuilder<Id<"users">>; `Id<"users">` and
+// `Id<"posts">` are mutually incompatible brand types so accidental
+// cross-table assignment is a compile error.
+
+function testIdBrandIncompatibility() {
+  const userId = 1 as Id<"users">;
+  const postId = 1 as Id<"posts">;
+
+  // ✓ assigning Id<"users"> back to Id<"users"> is fine
+  const u2: Id<"users"> = userId;
+
+  // @ts-expect-error — Id<"posts"> is not assignable to Id<"users">
+  const u3: Id<"users"> = postId;
+
+  // Discard so noUnusedLocals doesn't complain.
+  void u2;
+  void u3;
+}
+
+function testRefBuilderType() {
+  // The builder factory preserves the literal-string type parameter so
+  // `t.ref("users")` yields `TypeBuilder<Id<"users">>`. We just exercise
+  // the builder here; the structural check happens inside createDb.
+  const dbRefs = createDb({
+    users: { name: t.string().required() },
+    posts: { title: t.string().required(), authorId: t.ref("users") },
+  });
+  // The collection has create + find typed via Document<S> + Id<"users">.
+  // We don't assert Document<S>.id is Id<"users"> here (scope reduction —
+  // Document<S> still types id as number in this PR).
+  void dbRefs;
+}
+
+// Runtime-only validation: t.ref("does_not_exist") throws at module-init.
+// This is exercised in db.test.ts; the type system permits the call
+// through because we don't enforce Tables<S> at compile time in this PR.
+
+void testIdBrandIncompatibility;
+void testRefBuilderType;
 
 console.log("All type checks passed!");
