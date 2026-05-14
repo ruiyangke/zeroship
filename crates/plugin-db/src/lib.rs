@@ -53,6 +53,18 @@ thread_local! {
     /// [`Client`] — which cannot live inside a thread-local. Instead we issue
     /// `BEGIN`/`COMMIT`/`ROLLBACK` via `client.execute(...)` directly.
     pub(crate) static TX_CONN: RefCell<Option<Client>> = const { RefCell::new(None) };
+
+    /// True when the active [`TX_CONN`] was opened by the auto-tx wrapper
+    /// (`__zsBeginAutoTx`) — defense-in-depth read-only/serializable
+    /// envelope around `query()`/`mutation()` handlers.
+    ///
+    /// User-driven `db.transaction(async tx => {...})` calls leave this
+    /// `false`, so the auto-tx end callback never touches a user-owned tx.
+    /// Conversely, if the auto-tx began the transaction, user-level
+    /// `commitTransaction`/`rollbackTransaction` are NOT expected to fire
+    /// — the auto-tx is opaque to user code; user-driven tx ops short
+    /// out at the "nested transactions not supported" check anyway.
+    pub(crate) static AUTO_TX_OWNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Check if a model is already registered for this app on this thread.
@@ -192,6 +204,15 @@ impl NativePlugin for DbPlugin {
         r.add("beginTransaction", callbacks::begin_transaction);
         r.add("commitTransaction", callbacks::commit_transaction);
         r.add("rollbackTransaction", callbacks::rollback_transaction);
+        // Tx wrapping deferral from T1 — install the auto-tx globals
+        // (`__zsBeginAutoTx` / `__zsEndAutoTx`) used by the synthetic
+        // SSR entry to wrap `query()` and `mutation()` handlers with a
+        // READ ONLY / SERIALIZABLE tx envelope. The capability gate
+        // (B3 runtime layer) is the primary enforcement; this is the
+        // Postgres-level defense-in-depth around it.
+        r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
+            callbacks::install_auto_tx_globals(scope);
+        });
         // B1 — @zeroship/migrations primitives
         r.add("migrationBegin", callbacks::migration_begin);
         r.add("migrationFetchBatch", callbacks::migration_fetch_batch);

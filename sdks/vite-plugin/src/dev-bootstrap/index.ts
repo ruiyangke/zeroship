@@ -216,13 +216,54 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   const xk = (typeof globalThis !== "undefined")
     ? (globalThis as any).__zsExitKind : undefined;
   const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
+
+  // T1 follow-up — Postgres-level auto-tx wrapping. See rpc-registry.ts
+  // for the full rationale. query()/mutation() handlers run inside a
+  // READ ONLY / SERIALIZABLE Postgres tx; action/stream/subscription
+  // bypass. Begin returns 0 if plugin-db decides not to wrap (kind
+  // unrelated, or a user-driven `db.transaction(...)` is already
+  // open) — End on token 0 is a noop.
+  const bt = (typeof globalThis !== "undefined")
+    ? (globalThis as any).__zsBeginAutoTx : undefined;
+  const et = (typeof globalThis !== "undefined")
+    ? (globalThis as any).__zsEndAutoTx : undefined;
+  const wantsAutoTx = (kind === "query" || kind === "mutation") &&
+                      typeof bt === "function" && typeof et === "function";
+  let token = 0;
+  if (wantsAutoTx) {
+    try { token = await bt(kind); }
+    catch (e) {
+      if (tok >= 0 && typeof xk === "function") xk(tok);
+      throw e;
+    }
+  }
+
+  // Two phases:
+  //   1. Run the handler. On throw, rollback + rethrow.
+  //   2. Commit. On commit failure, surface as caller error.
+  // The CURRENT_KIND marker is popped exactly once on every exit
+  // path (handler throw, commit throw, success).
   let result: any;
   try {
     const out: any = (fn as any).call(null, validated, ctx);
     result = (out && typeof out.then === "function") ? await out : out;
-  } finally {
+  } catch (handlerErr) {
+    if (wantsAutoTx) {
+      try { await et(token, false); } catch (_rb) { /* swallowed */ }
+    }
     if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw handlerErr;
   }
+  if (wantsAutoTx) {
+    try { await et(token, true); }
+    catch (commitErr) {
+      // Commit failure surfaces as the caller-visible error — data
+      // integrity wins over the handler's nominal success.
+      if (tok >= 0 && typeof xk === "function") xk(tok);
+      throw commitErr;
+    }
+  }
+  if (tok >= 0 && typeof xk === "function") xk(tok);
 
   // Tag async-iterator with output-schema hint for the SSE encoder.
   if (isAsyncIterator(result)) {

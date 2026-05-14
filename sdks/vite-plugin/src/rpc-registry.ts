@@ -178,6 +178,18 @@ function _isZodStringSchema(s) {
 // (action → runMutation → mutation handler) restore the outer kind on
 // inner exit. Falls back to no-op when the natives aren't installed
 // (legacy embeddings / dev-bootstrap).
+//
+// T1 follow-up — Postgres-level auto-tx wrapping. When kind is
+// "query" or "mutation" AND plugin-db is installed (i.e.
+// globalThis.__zsBeginAutoTx is present), wrap the handler call in a
+// READ ONLY / SERIALIZABLE transaction via the natives. The capability
+// gate is the primary enforcement; auto-tx is defense-in-depth: even if
+// a query handler smuggles past the gate (e.g. an SDK escape hatch
+// that calls raw SQL), Postgres refuses with SQLSTATE 25006. Action,
+// stream, subscription, and unknown kinds bypass the wrapper (stream/
+// subscription would hold a tx open across cell-aborting boundaries;
+// action is by design able to touch external IO so it'd starve the
+// pool). Begin returns 0 for unwrapped kinds — End is then a noop too.
 function _zsRpc(name, input, ctx) {
   const fn = _procedures[name];
   if (typeof fn !== "function") {
@@ -211,6 +223,18 @@ function _zsRpc(name, input, ctx) {
   const ek = (typeof globalThis !== "undefined") ? globalThis.__zsEnterKind : undefined;
   const xk = (typeof globalThis !== "undefined") ? globalThis.__zsExitKind : undefined;
   const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
+
+  // Auto-tx path: query/mutation when plugin-db is installed. Async by
+  // construction (begin/commit are awaited). Everything else stays on
+  // the sync-eligible fast path below.
+  const bt = (typeof globalThis !== "undefined") ? globalThis.__zsBeginAutoTx : undefined;
+  const et = (typeof globalThis !== "undefined") ? globalThis.__zsEndAutoTx : undefined;
+  const wantsAutoTx = (kind === "query" || kind === "mutation") &&
+                      typeof bt === "function" && typeof et === "function";
+  if (wantsAutoTx) {
+    return _zsRpcWithAutoTx(fn, validated, ctx, cfg, kind, tok, xk, bt, et);
+  }
+
   try {
     const out = fn(validated, ctx);
     if (out && typeof out.then === "function") {
@@ -229,6 +253,45 @@ function _zsRpc(name, input, ctx) {
     if (tok >= 0 && typeof xk === "function") xk(tok);
     throw e;
   }
+}
+
+// Async auto-tx envelope: BEGIN → handler → COMMIT (success) or
+// ROLLBACK (failure). Errors from the handler propagate after the
+// rollback completes; commit failures surface as the caller's error
+// (data integrity wins). CURRENT_KIND is popped exactly once on every
+// exit path (begin throw, handler throw, commit throw, success).
+async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
+  // Begin returns 0 for unwrapped/no-op cases (kind doesn't match, or
+  // a user-driven db.transaction is already open). End on 0 is a noop.
+  let token = 0;
+  try {
+    token = await bt(_kind);
+  } catch (beginErr) {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw beginErr;
+  }
+  // Phase 1 — run the handler. Rollback on throw.
+  let out;
+  try {
+    out = fn(input, ctx);
+    if (out && typeof out.then === "function") out = await out;
+  } catch (handlerErr) {
+    try { await et(token, false); } catch (_rb) { /* swallowed */ }
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw handlerErr;
+  }
+  // Phase 2 — commit. Commit failure becomes the caller-visible error.
+  try {
+    await et(token, true);
+  } catch (commitErr) {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw commitErr;
+  }
+  // Output validation runs in dev only inside _zsRpcPost; happens after
+  // commit so the tx isn't held open across the (synchronous) parse.
+  const post = _zsRpcPost(out, cfg);
+  if (tok >= 0 && typeof xk === "function") xk(tok);
+  return post;
 }
 
 // Output-validation + stream-tag tail. Runs after either sync return
@@ -528,7 +591,8 @@ function _isZodStringSchema(s) {
 
 // Phase-2 (static dispatch) _zsRpc. Mirrors the runtime path above —
 // including B3 capability marker (__zsEnterKind / __zsExitKind around
-// the user handler).
+// the user handler) AND the T1 follow-up auto-tx wrapper
+// (__zsBeginAutoTx / __zsEndAutoTx) for query/mutation kinds.
 function _zsRpc(name, input, ctx) {
   const fn = _procedures[name];
   if (typeof fn !== "function") {
@@ -558,6 +622,15 @@ function _zsRpc(name, input, ctx) {
   const ek = (typeof globalThis !== "undefined") ? globalThis.__zsEnterKind : undefined;
   const xk = (typeof globalThis !== "undefined") ? globalThis.__zsExitKind : undefined;
   const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
+
+  const bt = (typeof globalThis !== "undefined") ? globalThis.__zsBeginAutoTx : undefined;
+  const et = (typeof globalThis !== "undefined") ? globalThis.__zsEndAutoTx : undefined;
+  const wantsAutoTx = (kind === "query" || kind === "mutation") &&
+                      typeof bt === "function" && typeof et === "function";
+  if (wantsAutoTx) {
+    return _zsRpcWithAutoTx(fn, validated, ctx, cfg, kind, tok, xk, bt, et);
+  }
+
   try {
     const out = fn(validated, ctx);
     if (out && typeof out.then === "function") {
@@ -573,6 +646,34 @@ function _zsRpc(name, input, ctx) {
     if (tok >= 0 && typeof xk === "function") xk(tok);
     throw e;
   }
+}
+
+async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
+  let token = 0;
+  try {
+    token = await bt(_kind);
+  } catch (beginErr) {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw beginErr;
+  }
+  let out;
+  try {
+    out = fn(input, ctx);
+    if (out && typeof out.then === "function") out = await out;
+  } catch (handlerErr) {
+    try { await et(token, false); } catch (_rb) { /* swallowed */ }
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw handlerErr;
+  }
+  try {
+    await et(token, true);
+  } catch (commitErr) {
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw commitErr;
+  }
+  const post = _zsRpcPost(out, cfg);
+  if (tok >= 0 && typeof xk === "function") xk(tok);
+  return post;
 }
 
 function _zsRpcPost(result, cfg) {
