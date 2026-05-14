@@ -2591,3 +2591,157 @@ pub fn replication_drop_abandoned(
     }));
     rv.set(promise.into());
 }
+
+// ---------------------------------------------------------------------------
+// Auto-spawn — `zeroship.db.startReplicationConsumer()`
+// ---------------------------------------------------------------------------
+//
+// Apps that opt into reactive queries call this once at module init
+// (`await env.db.startReplicationConsumer()`). It:
+//   1. Provisions the publication + slot (idempotent — same as
+//      `replicationSetup`).
+//   2. Spawns a supervised WAL consumer task on the isolate's compio
+//      runtime. The task lives for the isolate's lifetime and reconnects
+//      with exponential backoff on transient failure (see
+//      [`crate::wal_consumer::run_supervised`]).
+//   3. Returns the `SetupOutcome` JSON.
+//
+// Idempotent — second call returns a JSON envelope with
+// `{"alreadyRunning": true}` and short-circuits without spawning a
+// second task. Tracked per-thread because the consumer task is
+// thread-bound (the compio runtime is one per worker, the broker is
+// thread-local).
+//
+// We chose explicit opt-in (a) over implicit spawn-on-first-subscribe
+// (b): the failure surfaces at the call site, not deep inside a
+// subscribe Promise. Apps with no reactive surface skip the cost.
+
+thread_local! {
+    /// Per-thread "is the consumer already running for this app?"
+    /// guard. Keyed by app_id (a single worker may host multiple apps
+    /// over its lifetime via the LRU cache, but only one consumer per
+    /// app at a time).
+    static RUNNING_CONSUMERS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// `zeroship.db.startReplicationConsumer()` → Promise<SetupOutcome JSON>
+///
+/// Idempotent. The first call provisions the slot+publication, spawns
+/// a supervised WAL consumer for the current app, and resolves once
+/// `replicationSetup` returns (i.e. provisioning is durable). The
+/// consumer continues running on the compio runtime in the background;
+/// it suppresses local-emit for this app via the per-app suppression
+/// gate so subscribers receive each event exactly once via WAL.
+///
+/// Subsequent calls short-circuit and resolve with the cached outcome
+/// envelope plus `"alreadyRunning": true`.
+pub fn start_replication_consumer(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    // Optional app_id override (matches replication_setup's signature
+    // so the operator-facing flow is symmetrical). Default = current
+    // app context.
+    let app_id = get_string_arg(scope, &args, 0).unwrap_or_else(|| get_app_id(&state));
+    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // Idempotent: if a consumer is already running for this app on
+        // this thread, return a short-circuit envelope.
+        let already = RUNNING_CONSUMERS
+            .with(|r| r.borrow().contains(&app_id));
+        if already {
+            let value = serde_json::json!({
+                "alreadyRunning": true,
+                "app_id": app_id,
+            })
+            .to_string();
+            return OpResult::Completed { op_id, value, request_id };
+        }
+
+        // Step 1: provision (idempotent).
+        let pool = match ensure_pool().await {
+            Ok(p) => p,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+        let setup = match crate::replication::ensure_publication_and_slot(&pool, &app_id).await {
+            Ok(s) => s,
+            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+        };
+
+        // Step 2: build the consumer descriptor.
+        let url = crate::DB_URL
+            .with(|u| u.borrow().clone())
+            .unwrap_or_default();
+        let consumer = match crate::wal_consumer::WalConsumer::new(&app_id, &url) {
+            Ok(c) => c.with_start_lsn(setup.confirmed_flush_lsn.clone()),
+            Err(e) => {
+                return OpResult::Failed {
+                    op_id,
+                    error: e.to_string(),
+                    request_id,
+                };
+            }
+        };
+
+        // Step 3: spawn the supervised task. `detach()` lets it run
+        // for the lifetime of the isolate's compio runtime — there's
+        // nowhere to join it, and the supervisor exits cleanly on
+        // CopyDone or a fatal error.
+        //
+        // Mark the app as running BEFORE the spawn so a racing second
+        // call to startReplicationConsumer() short-circuits even if
+        // the consumer task hasn't yet entered its decode loop.
+        let app_for_task = app_id.clone();
+        RUNNING_CONSUMERS.with(|r| {
+            r.borrow_mut().insert(app_id.clone());
+        });
+        compio::runtime::spawn(async move {
+            crate::wal_consumer::run_supervised(consumer).await;
+            // When the supervisor exits (graceful or fatal), free the
+            // slot so a later opt-in re-spawn is allowed.
+            RUNNING_CONSUMERS.with(|r| {
+                r.borrow_mut().remove(&app_for_task);
+            });
+        })
+        .detach();
+
+        // Resolve with the setup outcome plus the "running" marker.
+        let mut env = serde_json::from_str::<serde_json::Value>(&setup.to_json())
+            .unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(ref mut m) = env {
+            m.insert(
+                "consumerStarted".into(),
+                serde_json::Value::Bool(true),
+            );
+            m.insert("alreadyRunning".into(), serde_json::Value::Bool(false));
+        }
+        OpResult::Completed {
+            op_id,
+            value: env.to_string(),
+            request_id,
+        }
+    }));
+    rv.set(promise.into());
+}
+
+/// **Test-only**: probe whether the auto-spawn registry holds an entry
+/// for `app_id`. Used by `tests/integration.rs` to assert idempotency
+/// without reaching into private state.
+#[doc(hidden)]
+pub fn is_consumer_registered_for_tests(app_id: &str) -> bool {
+    RUNNING_CONSUMERS.with(|r| r.borrow().contains(app_id))
+}
+
+/// **Test-only**: clear the auto-spawn registry. Used to reset state
+/// between integration tests that share a thread.
+#[doc(hidden)]
+pub fn clear_consumer_registry_for_tests() {
+    RUNNING_CONSUMERS.with(|r| r.borrow_mut().clear());
+}

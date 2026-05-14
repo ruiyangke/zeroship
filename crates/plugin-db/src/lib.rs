@@ -197,6 +197,10 @@ impl NativePlugin for DbPlugin {
         r.add("replicationSetup", callbacks::replication_setup);
         r.add("replicationWatchdog", callbacks::replication_watchdog);
         r.add("replicationDropAbandoned", callbacks::replication_drop_abandoned);
+        // P8a.2 finish-up — auto-spawn the supervised consumer. Apps
+        // opt in once at module init: `await env.db.startReplicationConsumer()`.
+        // Idempotent — second call short-circuits.
+        r.add("startReplicationConsumer", callbacks::start_replication_consumer);
     }
 }
 

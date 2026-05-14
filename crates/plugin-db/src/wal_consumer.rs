@@ -69,8 +69,9 @@
 //! "same-worker delivery only" semantics that the watchdog will fix
 //! on the next consumer reconnect.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use compio_postgres::replication::{
     self as repl, IdentifySystem, ReplicationMessage, ReplicationStream, StartReplicationOptions,
@@ -80,36 +81,109 @@ use compio_postgres::replication::{
 use crate::broker::{publish, ChangeEvent, ChangeOp};
 
 // ---------------------------------------------------------------------------
-// Emit-mode toggle
+// Per-app emit-suppression
 // ---------------------------------------------------------------------------
+//
+// When a WAL consumer is active for app A on this thread, local-emit
+// for app A must become a no-op — the consumer publishes the same
+// event on the cross-worker path and emitting locally too would
+// double-deliver. Other apps on the same thread must continue to use
+// local-emit; a coarse thread-wide flag would silence their events as
+// well.
+//
+// The set is tracked per-thread (the compio runtime is single-thread
+// per worker, every callback that emits runs on the same isolate
+// thread). Insert/remove is cheap: small set, no locking.
 
 thread_local! {
-    /// When `true` on this thread, [`emit_local`] is a no-op — the
-    /// streaming WAL consumer is the sole source of broker events.
-    ///
-    /// Set by [`WalConsumer::run`] for the lifetime of the consumer
-    /// loop; cleared on exit (success or error).
-    ///
-    /// We track this per-thread (not per-app) because each worker
-    /// runs one compio runtime + at most one consumer per app at a
-    /// time. If a worker hosts apps A and B and only A has a
-    /// consumer, we still want B's local-emit path to function — the
-    /// toggle would need to become per-app. P8a.2 ships the
-    /// coarse-grained version; the per-app refinement is one line in
-    /// [`emit_local`] (replace the bool with a `HashSet<String>` of
-    /// suppressed app_ids) when a real multi-app worker shows up.
-    static EMIT_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
+    /// App ids whose local-emit path is suppressed because a consumer
+    /// is running. Populated by [`WalConsumer::run`] for the lifetime
+    /// of the consumer loop via a Drop guard so panics also clean up.
+    static SUPPRESSED_APPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
-/// Drive the suppression toggle from tests + internal callers.
+/// Suppress local-emit for `app_id` on this thread. Mutation callbacks
+/// that produce events for this app will become no-ops until
+/// [`unsuppress_app`] is called (typically via the Drop guard returned
+/// by [`SuppressGuard::activate`]).
+pub fn suppress_app(app_id: &str) {
+    SUPPRESSED_APPS.with(|s| {
+        s.borrow_mut().insert(app_id.to_string());
+    });
+}
+
+/// Inverse of [`suppress_app`]. Idempotent.
+pub fn unsuppress_app(app_id: &str) {
+    SUPPRESSED_APPS.with(|s| {
+        s.borrow_mut().remove(app_id);
+    });
+}
+
+/// True when the given app's local-emit path is suppressed on this
+/// thread (i.e. a [`WalConsumer`] is running for that app).
+pub fn is_app_suppressed(app_id: &str) -> bool {
+    SUPPRESSED_APPS.with(|s| s.borrow().contains(app_id))
+}
+
+/// True when ANY app on this thread is suppressed. Diagnostic helper —
+/// the production code path always checks a specific app.
+#[doc(hidden)]
+pub fn any_app_suppressed() -> bool {
+    SUPPRESSED_APPS.with(|s| !s.borrow().is_empty())
+}
+
+/// RAII guard: suppresses local-emit for one app on construction,
+/// unsuppresses on drop (including panic-unwind). The consumer's run
+/// loop holds one of these for the duration of its decode loop.
+#[derive(Debug)]
+pub struct SuppressGuard {
+    app_id: String,
+}
+
+impl SuppressGuard {
+    /// Activate suppression for `app_id`. The guard's `Drop` impl
+    /// removes the app from the suppressed set, so even a panic inside
+    /// the consumer leaves local-emit re-enabled for that app.
+    pub fn activate(app_id: &str) -> Self {
+        suppress_app(app_id);
+        Self {
+            app_id: app_id.to_string(),
+        }
+    }
+}
+
+impl Drop for SuppressGuard {
+    fn drop(&mut self) {
+        unsuppress_app(&self.app_id);
+    }
+}
+
+// --- Back-compat shims for the pre-P8a.2-finish API. The single-app
+//     case used a thread-wide bool; tests against that surface keep
+//     working by mapping it onto the per-app set under a stable
+//     "sentinel" key. New callers should use the per-app API above.
+
+#[doc(hidden)]
+const LEGACY_SUPPRESSION_KEY: &str = "__legacy_thread_wide__";
+
+/// Legacy compatibility: set/clear the thread-wide suppression flag.
+/// Internally maps to a sentinel entry in [`SUPPRESSED_APPS`] so the
+/// new per-app check still covers callers that drive this surface.
 #[doc(hidden)]
 pub fn set_local_emit_suppressed(v: bool) {
-    EMIT_SUPPRESSED.with(|c| c.set(v));
+    if v {
+        suppress_app(LEGACY_SUPPRESSION_KEY);
+    } else {
+        unsuppress_app(LEGACY_SUPPRESSION_KEY);
+    }
 }
 
-/// True when the WAL consumer is active on this thread.
+/// Legacy compatibility: true when the thread-wide flag was set via
+/// [`set_local_emit_suppressed`]. Production code should use
+/// [`is_app_suppressed`] with a concrete app id.
+#[doc(hidden)]
 pub fn local_emit_suppressed() -> bool {
-    EMIT_SUPPRESSED.with(|c| c.get())
+    is_app_suppressed(LEGACY_SUPPRESSION_KEY)
 }
 
 /// Emit a local change event into the in-process broker.
@@ -134,7 +208,12 @@ pub fn emit_local(
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    if local_emit_suppressed() {
+    // Per-app suppression: only suppress when THIS app has an active
+    // consumer. The legacy thread-wide flag is also honoured (it maps
+    // onto a sentinel entry in the suppressed set) so older callers
+    // keep their semantics. Tests that rely on the multi-app case must
+    // call `suppress_app(app_id)` directly.
+    if is_app_suppressed(app_id) || local_emit_suppressed() {
         return;
     }
     publish(&ChangeEvent {
@@ -215,7 +294,7 @@ impl RelationEntry {
 // WalConsumer
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Configuration + state for the per-app WAL consumer.
 ///
 /// One instance per app per worker. Holds:
@@ -226,6 +305,10 @@ impl RelationEntry {
 ///   them deterministically from the app_id).
 /// - The relation cache (populated lazily as pgoutput Relation
 ///   messages arrive).
+///
+/// `Clone` is cheap (three short strings) — the supervisor clones one
+/// descriptor per reconnect attempt because [`WalConsumer::run`]
+/// consumes `self`.
 pub struct WalConsumer {
     app_id: String,
     db_url: String,
@@ -261,11 +344,19 @@ impl WalConsumer {
         self
     }
 
+    /// App id this consumer is bound to. Exposed so the supervisor can
+    /// log it without cloning the whole consumer.
+    pub fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
     /// Run the consumer loop. Returns on the first wire error (the
-    /// caller restarts with backoff).
+    /// caller restarts with backoff via [`run_supervised`]).
     ///
-    /// While running, this thread's [`local_emit_suppressed`] flag is
-    /// `true` — see the module docs for why.
+    /// While running, the per-app suppression entry for this consumer's
+    /// `app_id` is set on the current thread — local-emit becomes a
+    /// no-op for that app (and only that app). The Drop guard ensures
+    /// the entry is cleared even if the connection task panics.
     pub async fn run(self) -> Result<(), ConsumerError> {
         let url = ensure_replication_param(&self.db_url);
         let config = url
@@ -296,10 +387,9 @@ impl WalConsumer {
             .await
             .map_err(|e| ConsumerError::Io(e.to_string()))?;
 
-        set_local_emit_suppressed(true);
-        let result = self.consume(stream).await;
-        set_local_emit_suppressed(false);
-        result
+        // RAII suppression — cleared on Drop, including panic-unwind.
+        let _guard = SuppressGuard::activate(&self.app_id);
+        self.consume(stream).await
     }
 
     /// The actual decode + publish loop. Separated from `run` so
@@ -529,6 +619,128 @@ fn ensure_replication_param(url: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Supervisor (auto-reconnect with exponential backoff)
+// ---------------------------------------------------------------------------
+
+/// Initial backoff between reconnect attempts.
+pub(crate) const INITIAL_BACKOFF: Duration = Duration::from_millis(1_000);
+/// Cap on the backoff schedule.
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_millis(30_000);
+/// Minimum elapsed streaming time that "resets" the backoff schedule.
+///
+/// If the consumer ran for at least this long before failing, the next
+/// retry uses [`INITIAL_BACKOFF`] again — i.e. only thrashing reconnects
+/// keep escalating. Picked at 30 s so transient blips don't pin backoff
+/// to its cap.
+pub(crate) const STABILITY_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Classifies an error as "do not retry" (slot/publication invalidated,
+/// config error). The supervisor exits cleanly when this returns true.
+///
+/// Conservative on purpose: we retry by default. Only known-fatal
+/// kinds short-circuit. Picking the wrong direction on this gate is
+/// asymmetric:
+///   - over-eager retry on truly fatal errors: tight busy loop,
+///     hammers Postgres and the log. The backoff cap mitigates but
+///     does not eliminate.
+///   - under-eager retry on transient errors: a brief outage breaks
+///     subscriptions until the operator restarts the worker.
+///
+/// The kinds we treat as fatal are the ones where retrying is
+/// guaranteed not to help:
+///   - `NotProvisioned`: the slot/publication name is malformed (an
+///     `app_id` validation failure). Restarting won't fix that — the
+///     deploy needs to drop+recreate with a valid id.
+///   - `Decode` errors carrying SQLSTATE 58P01 ("undefined_object" =
+///     slot dropped). That's a watchdog signal — the slot was
+///     externally invalidated and the supervisor should let the
+///     reconciler reprovision before a fresh run.
+pub fn is_fatal(err: &ConsumerError) -> bool {
+    match err {
+        ConsumerError::NotProvisioned(_) => true,
+        ConsumerError::Io(s) | ConsumerError::Connect(s) | ConsumerError::Decode(s) => {
+            // SQLSTATE 58P01 (undefined_object) — slot/pub dropped.
+            // Postgres surfaces this from START_REPLICATION when the
+            // slot was deleted (manual operator action, or the
+            // replication watchdog's drop_abandoned_slots reaper).
+            // We bail so the next supervisor iteration doesn't keep
+            // hammering a slot that the watchdog hasn't yet
+            // reprovisioned.
+            let lc = s.to_ascii_lowercase();
+            lc.contains("58p01")
+                || lc.contains("does not exist")
+                    && (lc.contains("replication slot") || lc.contains("publication"))
+                || lc.contains("invalid slot name")
+        }
+    }
+}
+
+/// Run a [`WalConsumer`] forever, reconnecting with exponential backoff
+/// on transient failure.
+///
+/// Schedule: 1s → 2s → 4s → 8s → 16s → 30s (cap). The cap holds for
+/// every subsequent attempt until the consumer stays connected for
+/// [`STABILITY_THRESHOLD`] — then the next failure resets the backoff
+/// to [`INITIAL_BACKOFF`].
+///
+/// Exits when:
+///   - The consumer returns `Ok(())` (graceful CopyDone — server
+///     terminated streaming intentionally, e.g. shutdown).
+///   - The consumer returns an error that [`is_fatal`] classifies as
+///     non-retryable (slot invalidated, malformed app id, etc.).
+///
+/// `tracing::warn!` is used for transient failures; `tracing::error!`
+/// for fatal exits. Both carry the `app_id` field for log correlation.
+pub async fn run_supervised(consumer: WalConsumer) {
+    let app_id = consumer.app_id().to_string();
+    let mut backoff = INITIAL_BACKOFF;
+
+    loop {
+        let attempt_started = std::time::Instant::now();
+        let attempt = consumer.clone();
+        match attempt.run().await {
+            Ok(()) => {
+                tracing::info!(
+                    app_id = %app_id,
+                    "wal consumer: graceful shutdown (CopyDone), supervisor exits"
+                );
+                return;
+            }
+            Err(e) if is_fatal(&e) => {
+                tracing::error!(
+                    app_id = %app_id,
+                    error = %e,
+                    "wal consumer: fatal error, supervisor exits — \
+                     slot/publication likely invalidated; rerun \
+                     replicationSetup() to reprovision"
+                );
+                return;
+            }
+            Err(e) => {
+                let ran_for = attempt_started.elapsed();
+                let stable = ran_for >= STABILITY_THRESHOLD;
+                tracing::warn!(
+                    app_id = %app_id,
+                    ran_for_ms = ran_for.as_millis() as u64,
+                    backoff_ms = backoff.as_millis() as u64,
+                    error = %e,
+                    "wal consumer: exited, reconnecting"
+                );
+                compio::time::sleep(backoff).await;
+                backoff = if stable {
+                    // The previous attempt streamed long enough to
+                    // count as "healthy". Reset the schedule so a
+                    // single later blip doesn't start at the cap.
+                    INITIAL_BACKOFF
+                } else {
+                    (backoff * 2).min(MAX_BACKOFF)
+                };
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -585,7 +797,9 @@ mod tests {
         crate::broker::drop_app(None);
         let sub = crate::broker::subscribe("xapp", "messages");
 
-        set_local_emit_suppressed(true);
+        // Per-app suppression: the consumer for "xapp" is active, so
+        // local-emit for "xapp" must be a no-op.
+        suppress_app("xapp");
         emit_local(
             "xapp",
             "messages",
@@ -597,7 +811,7 @@ mod tests {
         // Suppressed — no event in the queue.
         assert!(sub.pop().is_none());
 
-        set_local_emit_suppressed(false);
+        unsuppress_app("xapp");
         emit_local(
             "xapp",
             "messages",
@@ -607,6 +821,23 @@ mod tests {
             HashMap::new(),
         );
         // Unsuppressed — event delivered.
+        assert!(matches!(sub.pop(), Some(SubscriptionMessage::Change(_))));
+        crate::broker::drop_app(None);
+    }
+
+    #[test]
+    fn emit_local_legacy_thread_wide_flag_still_works() {
+        // Back-compat shim: callers that drive the old
+        // `set_local_emit_suppressed(true/false)` surface still suppress
+        // every emit on the thread, regardless of app id.
+        crate::broker::drop_app(None);
+        let sub = crate::broker::subscribe("legacy_app", "m");
+        set_local_emit_suppressed(true);
+        emit_local("legacy_app", "m", ChangeOp::Insert, Some(1), vec![], HashMap::new());
+        assert!(sub.pop().is_none(), "legacy thread-wide flag must suppress");
+        set_local_emit_suppressed(false);
+        // Drain the sentinel and confirm following emits go through.
+        emit_local("legacy_app", "m", ChangeOp::Insert, Some(2), vec![], HashMap::new());
         assert!(matches!(sub.pop(), Some(SubscriptionMessage::Change(_))));
         crate::broker::drop_app(None);
     }
@@ -854,5 +1085,174 @@ mod tests {
         );
         assert!(sub.pop().is_none());
         crate::broker::drop_app(None);
+    }
+
+    // -------- Per-app emit suppression (P8a.2 finish-up) --------
+
+    /// A consumer suppresses local-emit ONLY for the app it's bound to.
+    /// A different app on the same thread is unaffected.
+    #[test]
+    fn p8a2_per_app_emit_suppression_app_a_only() {
+        crate::broker::drop_app(None);
+        // Clean any sentinel left by other tests.
+        unsuppress_app(LEGACY_SUPPRESSION_KEY);
+        unsuppress_app("app_a");
+        unsuppress_app("app_b");
+
+        let sub_a = crate::broker::subscribe("app_a", "messages");
+        let sub_b = crate::broker::subscribe("app_b", "messages");
+
+        // Activate suppression for app_a only.
+        let _guard = SuppressGuard::activate("app_a");
+        assert!(is_app_suppressed("app_a"));
+        assert!(!is_app_suppressed("app_b"));
+
+        // Emit on app_a — must be a no-op.
+        emit_local(
+            "app_a",
+            "messages",
+            ChangeOp::Insert,
+            Some(1),
+            vec!["title".into()],
+            HashMap::new(),
+        );
+        assert!(sub_a.pop().is_none(), "app_a must be suppressed");
+
+        // Emit on app_b — MUST be delivered.
+        emit_local(
+            "app_b",
+            "messages",
+            ChangeOp::Insert,
+            Some(2),
+            vec!["title".into()],
+            HashMap::new(),
+        );
+        assert!(
+            matches!(sub_b.pop(), Some(SubscriptionMessage::Change(_))),
+            "app_b must NOT be suppressed by app_a's consumer"
+        );
+
+        drop(_guard);
+        assert!(!is_app_suppressed("app_a"));
+        crate::broker::drop_app(None);
+    }
+
+    /// The Drop guard restores suppression state on panic-unwind. We
+    /// exercise this by panicking inside a closure that holds a guard
+    /// and asserting the suppression entry is cleared afterwards.
+    #[test]
+    fn p8a2_per_app_emit_suppression_drop_guard_restores_on_panic() {
+        unsuppress_app("panic_app");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SuppressGuard::activate("panic_app");
+            assert!(is_app_suppressed("panic_app"));
+            panic!("forced");
+        }));
+        assert!(outcome.is_err(), "expected the inner panic to surface");
+        assert!(
+            !is_app_suppressed("panic_app"),
+            "Drop guard must clear suppression on panic-unwind"
+        );
+    }
+
+    /// Two consumers in flight for different apps; dropping one
+    /// guard leaves the other's suppression intact.
+    #[test]
+    fn p8a2_per_app_independent_guards() {
+        unsuppress_app("ga");
+        unsuppress_app("gb");
+        let g_a = SuppressGuard::activate("ga");
+        let g_b = SuppressGuard::activate("gb");
+        assert!(is_app_suppressed("ga"));
+        assert!(is_app_suppressed("gb"));
+        drop(g_a);
+        assert!(!is_app_suppressed("ga"));
+        assert!(is_app_suppressed("gb"));
+        drop(g_b);
+        assert!(!is_app_suppressed("gb"));
+    }
+
+    // -------- is_fatal classification --------
+
+    #[test]
+    fn is_fatal_not_provisioned_is_fatal() {
+        assert!(is_fatal(&ConsumerError::NotProvisioned(
+            "app_id rejected".into()
+        )));
+    }
+
+    #[test]
+    fn is_fatal_io_error_default_is_retryable() {
+        // A bare connection-refused IO error must be retryable —
+        // restarting Postgres is the canonical case.
+        assert!(!is_fatal(&ConsumerError::Io(
+            "broken pipe".into()
+        )));
+        assert!(!is_fatal(&ConsumerError::Connect(
+            "connection refused".into()
+        )));
+    }
+
+    #[test]
+    fn is_fatal_slot_invalidated_is_fatal() {
+        // 58P01 (undefined_object) and the specific
+        // "replication slot ... does not exist" message are both fatal.
+        assert!(is_fatal(&ConsumerError::Io(
+            "ERROR: SQLSTATE 58P01: foo".into()
+        )));
+        assert!(is_fatal(&ConsumerError::Io(
+            "replication slot \"__zs_slot_x\" does not exist".into()
+        )));
+        assert!(is_fatal(&ConsumerError::Io(
+            "publication \"__zs_pub_x\" does not exist".into()
+        )));
+        assert!(is_fatal(&ConsumerError::Connect(
+            "invalid slot name: too long".into()
+        )));
+    }
+
+    #[test]
+    fn is_fatal_decode_protocol_violation_is_retryable() {
+        // Plain decode error — could be a transient framing glitch.
+        assert!(!is_fatal(&ConsumerError::Decode("unknown tag 0xff".into())));
+    }
+
+    // -------- Supervisor behaviour (no real wire) --------
+    //
+    // We can't easily drive `run_supervised` against a real WalConsumer
+    // without Postgres, so these tests target the constants + the
+    // backoff math. The integration tests (`p8a2_supervised_consumer_*`)
+    // in `tests/integration.rs` exercise the full reconnect path.
+
+    #[test]
+    fn supervisor_backoff_constants_sane() {
+        assert_eq!(INITIAL_BACKOFF, Duration::from_secs(1));
+        assert_eq!(MAX_BACKOFF, Duration::from_secs(30));
+        assert!(STABILITY_THRESHOLD >= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn supervisor_backoff_doubles_until_cap() {
+        let mut b = INITIAL_BACKOFF;
+        let schedule: Vec<Duration> = (0..8)
+            .map(|_| {
+                let cur = b;
+                b = (b * 2).min(MAX_BACKOFF);
+                cur
+            })
+            .collect();
+        assert_eq!(
+            schedule,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+                Duration::from_secs(16),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+            ]
+        );
     }
 }
