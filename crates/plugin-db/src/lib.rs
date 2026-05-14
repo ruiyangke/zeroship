@@ -140,6 +140,21 @@ impl NativePlugin for DbPlugin {
         "database"
     }
 
+    /// Stage 2 — mint a `Db` v8_class instance as the namespace value
+    /// for `env.db`. The runtime then overlays the 27 flat callbacks
+    /// (registered via [`Self::register`]) on top, so existing user
+    /// code accessing `zeroship.db.find(...)` continues to work
+    /// unchanged. The v8_class additionally exposes `.collection(name)`
+    /// which returns a `Collection` v8_class wrapper whose CRUD
+    /// methods forward back to the flat callbacks.
+    fn build_instance<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        app_id: &str,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        v8_classes::db::mint_db(scope, app_id)
+    }
+
     fn register(&self, r: &mut NativeRegistrar) {
         // Poison the URL thread-local so `ensure_pool_initialized`
         // (invoked lazily on first callback) can find it. `register()`

@@ -11,13 +11,19 @@
 //!   `.return()` / `.close()`. Closes the P8a handle-leak that the
 //!   pre-refactor handle-id-based registry could not address.
 //!
+//! Stage 2 — shipped:
+//! - [`db`] — `Db` replaces the frozen `env.db` namespace object with
+//!   a v8_class instance. Exposes `.collection(name)` returning a
+//!   `Collection` v8_class. The 27 flat callbacks stay registered as
+//!   own properties on this instance via `NativeRegistrar`.
+//! - [`collection`] — per-collection CRUD dispatch wrapper. Each
+//!   method forwards to the same-named flat callback on the parent
+//!   Db with the collection name prepended (no SQL duplication).
+//!
 //! Future stages will add:
-//! - `Db` — replaces the frozen `env.db` namespace object with a
-//!   v8_class instance so `env.db.collection("users")` becomes a
-//!   native method that returns a `Collection` v8_class.
-//! - `Collection` — per-collection CRUD methods backed by the existing
-//!   `callbacks::*` futures.
 //! - `Migration`, `Transaction` — when the surrounding subsystems
 //!   stabilise.
 
+pub mod collection;
+pub mod db;
 pub mod subscription;
