@@ -1,0 +1,137 @@
+"use server";
+
+// db-v2-migrations-playground — focused demo of @zeroship/migrations (B1).
+//
+// Three migrations illustrating the expand-migrate-contract pattern:
+//   1. backfillSeverity — additive backfill (NULL → "info")
+//   2. expandKind        — rename `event_type` → `kind`
+//   3. addUserHash       — derived field from existing data
+//
+// All three are batched + resumable + dry-runnable + cancellable.
+// State lives in __zeroship_migrations (A3 audit table); a crash
+// mid-migration is recoverable from `validate_cursor`.
+
+import { createDb, t, schema } from "@zeroship/db";
+import { defineMigration } from "@zeroship/migrations";
+import { mutation, query } from "@zeroship/server";
+
+// ---------------------------------------------------------------------------
+// Schema — represents the "post-expand" shape. Both old and new fields
+// are present + nullable so reads see whichever shape exists during the
+// migration window.
+// ---------------------------------------------------------------------------
+
+export const db = createDb({
+  events: schema({
+    // Pre-expand: `event_type` was the only kind discriminator.
+    // Mid-expand: both `event_type` and `kind` exist; new writes set
+    //   both, old rows still have only event_type.
+    // Post-contract: drop event_type; kind is the canonical name.
+    event_type: t.string(),
+    kind:       t.string(),
+    severity:   t.string().enum("info", "warn", "error"),
+    user_id:    t.number(),
+    user_hash:  t.string(),
+    payload:    t.json(),
+  }),
+});
+
+// ---------------------------------------------------------------------------
+// 1. backfillSeverity — set severity="info" where null. The simplest
+//    case: any row with a null severity gets the default.
+// ---------------------------------------------------------------------------
+
+export const backfillSeverity = defineMigration({
+  name: "events.backfill_severity",
+  collection: "events",
+  batchSize: 100,
+  migrateOne: async (doc) => {
+    if (doc.severity == null) {
+      return { severity: "info" };
+    }
+    return undefined; // skip — already migrated
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 2. expandKind — copy event_type → kind for any row missing kind.
+//    Part of the expand-migrate-contract: ship a deploy that writes
+//    both fields, run this to backfill, then in a later deploy drop
+//    event_type from the schema.
+// ---------------------------------------------------------------------------
+
+export const expandKind = defineMigration({
+  name: "events.expand_kind",
+  collection: "events",
+  batchSize: 200,
+  migrateOne: async (doc) => {
+    if ((doc.kind == null || doc.kind === "") && typeof doc.event_type === "string") {
+      return { kind: doc.event_type };
+    }
+    return undefined;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// 3. addUserHash — derive a sha256-ish hash from user_id for analytics.
+//    This is the "derived field" pattern: the new column's value depends
+//    on existing column values, so a backfill (not just a default)
+//    is required.
+// ---------------------------------------------------------------------------
+
+function pseudoHash(n: number): string {
+  // Cheap deterministic synth — real code would use crypto.subtle.digest.
+  const x = (n * 2654435761) >>> 0;
+  return x.toString(16).padStart(8, "0");
+}
+
+export const addUserHash = defineMigration({
+  name: "events.add_user_hash",
+  collection: "events",
+  batchSize: 500,
+  migrateOne: async (doc) => {
+    if ((doc.user_hash == null || doc.user_hash === "") && typeof doc.user_id === "number") {
+      return { user_hash: pseudoHash(doc.user_id) };
+    }
+    return undefined;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Procedures to exercise the lifecycle from a smoke script
+// ---------------------------------------------------------------------------
+
+export const seedEvents = mutation(
+  async (
+    { count, includeNullSeverity }: { count: number; includeNullSeverity: boolean },
+    ctx,
+  ) => {
+    const col = (ctx.db as any).events;
+    const rows: unknown[] = [];
+    for (let i = 0; i < count; i++) {
+      rows.push({
+        event_type: i % 2 === 0 ? "login" : "logout",
+        kind:       "",
+        severity:   includeNullSeverity && i % 3 === 0 ? null : "info",
+        user_id:    1000 + i,
+        user_hash:  "",
+        payload:    { i },
+      });
+    }
+    return col.insertMany(rows);
+  },
+);
+
+export const eventCount = query(async (_input: Record<string, never>, ctx) => {
+  const col = (ctx.db as any).events;
+  return col.countDocuments({});
+});
+
+export const eventStats = query(async (_input: Record<string, never>, ctx) => {
+  const col = (ctx.db as any).events;
+  const total = await col.countDocuments({});
+  const nullSeverity = await col.countDocuments({ severity: null });
+  const emptyKind = await col.countDocuments({ kind: "" });
+  const emptyHash = await col.countDocuments({ user_hash: "" });
+  return { total, nullSeverity, emptyKind, emptyHash };
+});
