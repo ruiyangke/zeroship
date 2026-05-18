@@ -65,6 +65,37 @@ thread_local! {
     /// — the auto-tx is opaque to user code; user-driven tx ops short
     /// out at the "nested transactions not supported" check anyway.
     pub(crate) static AUTO_TX_OWNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Ownership token for the active transaction connection.
+    ///
+    /// Stamped non-zero by `begin_transaction` on success and cleared
+    /// to zero by any path that drains [`TX_CONN`] (the legacy
+    /// `commitTransaction` / `rollbackTransaction` flat callbacks, the
+    /// `Transaction` v8_class's `.commit()` / `.rollback()` methods, or
+    /// its Weak-finalizer-driven `Drop`).
+    ///
+    /// Each `Transaction` wrapper carries the token it was minted with;
+    /// commit / rollback / GC all compare against the live TX_TOKEN
+    /// before acting, so the wrapper never re-rolls a transaction that
+    /// the legacy SDK already committed via the flat callbacks.
+    pub(crate) static TX_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Monotonic counter feeding [`TX_TOKEN`]. Incremented inside
+    /// [`next_tx_token`]; never reset (a u64 at 1 GHz tx/s would take
+    /// ~584 years to wrap, so non-uniqueness within a worker lifetime
+    /// is a non-issue).
+    static TX_TOKEN_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Allocate a fresh non-zero TX_TOKEN value. Called by
+/// `callbacks::begin_transaction` right before stamping the token onto
+/// the freshly-minted `Transaction` wrapper.
+pub(crate) fn next_tx_token() -> u64 {
+    TX_TOKEN_COUNTER.with(|c| {
+        let n = c.get().wrapping_add(1);
+        c.set(n);
+        n
+    })
 }
 
 /// Check if a model is already registered for this app on this thread.

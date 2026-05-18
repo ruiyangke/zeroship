@@ -20,10 +20,20 @@
 //!   method forwards to the same-named flat callback on the parent
 //!   Db with the collection name prepended (no SQL duplication).
 //!
+//! Stage 3 — shipped:
+//! - [`transaction`] — `env.db.beginTransaction(isolationLevel?)` now
+//!   resolves with a `Transaction` v8_class instance whose Weak
+//!   finalizer auto-rollbacks if user code drops the handle without
+//!   committing. `.commit()` / `.rollback()` are explicit methods;
+//!   `.collection(name)` returns a Collection bound to the open
+//!   transaction. The legacy flat `commitTransaction` /
+//!   `rollbackTransaction` callbacks stay registered for back-compat
+//!   with the current `@zeroship/db` SDK.
+//!
 //! Future stages will add:
-//! - `Migration`, `Transaction` — when the surrounding subsystems
-//!   stabilise.
+//! - `Migration` — when the surrounding subsystem stabilises.
 
 pub mod collection;
 pub mod db;
 pub mod subscription;
+pub mod transaction;
