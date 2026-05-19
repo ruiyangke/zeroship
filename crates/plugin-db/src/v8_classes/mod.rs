@@ -20,10 +20,20 @@
 //!   method forwards to the same-named flat callback on the parent
 //!   Db with the collection name prepended (no SQL duplication).
 //!
+//! Stage 3 — shipped:
+//! - [`migration`] — `Migration` wraps an in-flight backfill run. GC
+//!   finalizer auto-cancels (transitions the audit row to `cancelled`
+//!   + releases the advisory lock) if user code drops the wrapper
+//!   without explicit `.cancel()` / `.reset()`. Parallel handle-leak
+//!   fix to [`subscription`]. Minted by the new `migrationStart`
+//!   callback; the flat `migrationBegin` / `migrationFetchBatch` /
+//!   `migrationCommitBatch` callbacks stay registered for back-compat
+//!   with the current `@zeroship/migrations` SDK.
+//!
 //! Future stages will add:
-//! - `Migration`, `Transaction` — when the surrounding subsystems
-//!   stabilise.
+//! - `Transaction` — when the surrounding subsystem stabilises.
 
 pub mod collection;
 pub mod db;
+pub mod migration;
 pub mod subscription;

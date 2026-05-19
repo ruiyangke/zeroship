@@ -2,23 +2,33 @@
 //!
 //! Stage 2 of the db plugin nativization. A `Collection` instance is
 //! returned by [`super::db::Db::collection`]; each CRUD method on it
-//! forwards to the same-named flat callback on the parent `Db` instance
-//! with the collection name prepended.
+//! decodes its V8 arguments directly into a `serde_json::Value` and
+//! calls the shared `dispatch_*` helper in [`crate::callbacks`].
 //!
-//! ## Why this is a thin dispatch wrapper
+//! ## Why this is no longer a thin dispatch wrapper
 //!
-//! The 27 flat callbacks on `env.db` (`find`, `findOne`, `insert`, …)
-//! already encode all the SQL/query logic. Re-implementing each one as
-//! a `#[v8_method]` on `Collection` would duplicate ~50 LOC of
-//! arg-extraction + query-building + spawn-op per method (×16+
-//! methods). Instead we forward via JS dispatch: each Collection
-//! method reads the same-named property off the parent Db wrapper and
-//! calls it with `[name, ...args]`. Zero duplicated SQL; one shared
-//! source of truth.
+//! The original Stage 2 design forwarded each method through a JS-level
+//! call back into `env.db.<name>(collection, ...)`, which round-tripped
+//! every argument through `JSON.stringify` → `serde_json::from_str`.
+//! That boundary turned out to be measurable on the CRUD hot path —
+//! every `find` / `insert` paid a parse cost proportional to the
+//! filter / document size.
 //!
-//! The dispatch is straight-through (no `Reflect.apply`), so error
-//! propagation, Promise return, and capability gates from the
-//! underlying callback all work unchanged.
+//! The current implementation:
+//!   1. Reads `v8::Local<v8::Value>` args directly off the call site
+//!   2. Walks each into `serde_json::Value` via
+//!      [`crate::callbacks::v8_value_to_serde_json`] (one parse, in
+//!      native code)
+//!   3. Calls the same `dispatch_*` helper the flat callback uses
+//!   4. Returns the resulting `Promise<string>` (same wire shape as
+//!      before — the SDK still calls `JSON.parse` on the resolved
+//!      value)
+//!
+//! The flat callbacks on `env.db` (`find`, `findOne`, …) stay
+//! registered for back-compat (the SDK and any third-party callers
+//! routing through `env.db.find(name, …)` keep working) and now also
+//! delegate to the same `dispatch_*` helpers, so SQL/query logic lives
+//! in exactly one place.
 //!
 //! ## State
 //!
@@ -30,6 +40,10 @@
 //!   the runtime's environment object, and once that lets go, both
 //!   wrappers are collected together. (See the README in
 //!   `crates/runtime-macros` for the Weak-finalizer semantics.)
+//!   The reference itself is unused by the native CRUD methods (they
+//!   no longer dispatch through JS) but is kept so that
+//!   `openSubscription` / `subscribe` — still forwarded through the
+//!   parent Db's callbacks — can find the same-named flat callback.
 
 #![allow(unsafe_code)]
 
@@ -39,16 +53,19 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
+use crate::callbacks;
+
 // ---------------------------------------------------------------------------
 // Collection state
 // ---------------------------------------------------------------------------
 
 pub struct Collection {
-    /// The collection name (e.g. `"users"`). Passed as the first
-    /// argument to every forwarded Db callback.
+    /// The collection name (e.g. `"users"`). Used as the first argument
+    /// to every dispatch helper.
     pub(crate) name: RefCell<String>,
-    /// The parent Db wrapper. Forwarded methods look up the matching
-    /// callback on this object and call it with `[name, ...args]`.
+    /// The parent Db wrapper. Retained so the subscription methods
+    /// (which still forward through JS) can find the matching callback
+    /// on the parent Db.
     pub(crate) db_obj: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
@@ -62,12 +79,15 @@ impl std::fmt::Debug for Collection {
 }
 
 // ---------------------------------------------------------------------------
-// Forwarding helper
+// Forwarding helper (still used by `subscribe` / `openSubscription`)
 // ---------------------------------------------------------------------------
 
 /// Forward a Collection method to the same-named callback on the
 /// parent Db wrapper, with the collection name prepended to the
 /// arg list.
+///
+/// Now only used by the subscription methods — every CRUD method has
+/// been converted to a direct native dispatch.
 ///
 /// Returns the result of the underlying call directly. On any failure
 /// (missing parent, missing method, non-callable, or the underlying
@@ -168,40 +188,59 @@ impl Collection {
         self.name.borrow().clone()
     }
 
-    // --- CRUD forwarders ---
+    // --- CRUD methods ---
     //
-    // Each method is a thin dispatcher to the parent Db's same-named
-    // flat callback with the collection name prepended. They all
-    // return the value the underlying call returns (typically a
-    // Promise), so error propagation and Promise semantics route
-    // through unchanged.
+    // Each method walks its V8 args directly into `serde_json::Value`
+    // (no JSON.stringify / JSON.parse round trip) and calls into the
+    // shared `dispatch_*` helper in `crate::callbacks`. The flat
+    // callbacks on `env.db` (still registered for SDK back-compat)
+    // call the same helpers.
 
     #[v8_method]
     #[v8_name = "findOne"]
     fn find_one<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "findOne", &rest)
+        let collection = self.name.borrow().clone();
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        callbacks::dispatch_find_one(scope, &app_id, &collection, filter_v).into()
     }
 
     #[v8_method]
     fn find<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "find", &rest)
+        let collection = self.name.borrow().clone();
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        callbacks::dispatch_find(scope, &app_id, &collection, filter_v, opts_v).into()
     }
 
     #[v8_method]
     fn insert<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        doc: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "insert", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) =
+            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.insert")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let doc_v = callbacks::read_json_arg(scope, Some(doc));
+        callbacks::dispatch_insert(scope, &app_id, &collection, doc_v).into()
     }
 
     #[v8_method]
@@ -209,9 +248,18 @@ impl Collection {
     fn insert_many<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        docs: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "insertMany", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) =
+            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.insertMany")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let docs_v = callbacks::read_json_arg(scope, Some(docs));
+        callbacks::dispatch_insert_many(scope, &app_id, &collection, docs_v).into()
     }
 
     #[v8_method]
@@ -219,9 +267,20 @@ impl Collection {
     fn update_one<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
+        update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "updateOne", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) =
+            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.updateOne")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        let update_v = callbacks::read_json_arg(scope, Some(update));
+        callbacks::dispatch_update_one(scope, &app_id, &collection, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -229,9 +288,20 @@ impl Collection {
     fn update_many<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
+        update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "updateMany", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) =
+            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.updateMany")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        let update_v = callbacks::read_json_arg(scope, Some(update));
+        callbacks::dispatch_update_many(scope, &app_id, &collection, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -239,9 +309,18 @@ impl Collection {
     fn delete_one<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "deleteOne", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) =
+            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.deleteOne")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        callbacks::dispatch_delete_one(scope, &app_id, &collection, filter_v).into()
     }
 
     #[v8_method]
@@ -249,46 +328,86 @@ impl Collection {
     fn delete_many<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "deleteMany", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) =
+            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.deleteMany")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        callbacks::dispatch_delete_many(scope, &app_id, &collection, filter_v).into()
     }
 
     #[v8_method]
     fn upsert<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        doc: v8::Local<v8::Value>,
+        conflict_fields: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "upsert", &rest)
+        let collection = self.name.borrow().clone();
+        if let Some(p) = callbacks::refuse_if_query_capability_returning(scope, "ctx.db.upsert")
+        {
+            return p.into();
+        }
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let doc_v = callbacks::read_json_arg(scope, Some(doc));
+        let conflict_v = callbacks::read_json_arg(scope, Some(conflict_fields));
+        callbacks::dispatch_upsert(scope, &app_id, &collection, doc_v, conflict_v).into()
     }
 
     #[v8_method]
     fn count<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "count", &rest)
+        let collection = self.name.borrow().clone();
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        callbacks::dispatch_count(scope, &app_id, &collection, filter_v).into()
     }
 
     #[v8_method]
     fn distinct<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        field: String,
+        filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "distinct", &rest)
+        let collection = self.name.borrow().clone();
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let filter_v = callbacks::read_json_arg(scope, Some(filter));
+        callbacks::dispatch_distinct(scope, &app_id, &collection, &field, filter_v).into()
     }
 
     #[v8_method]
     fn aggregate<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
+        pipeline: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "aggregate", &rest)
+        let collection = self.name.borrow().clone();
+        let state = callbacks::runtime_state(scope);
+        let app_id = callbacks::app_id_for(&state);
+        let pipeline_v = callbacks::read_json_arg(scope, Some(pipeline));
+        callbacks::dispatch_aggregate(scope, &app_id, &collection, pipeline_v).into()
     }
+
+    // --- Subscription forwarders (still routed through JS) ---
+    //
+    // The reactive-query path is more involved (handle bookkeeping,
+    // poll/close lifecycle, AsyncIterable shim) — keeping these on the
+    // forwarder for now lets the CRUD nativization land first. They
+    // remain back-compat through the parent Db's `subscribe` /
+    // `openSubscription` callbacks.
 
     #[v8_method]
     fn subscribe<'s>(

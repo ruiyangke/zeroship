@@ -220,6 +220,14 @@ impl NativePlugin for DbPlugin {
         r.add("migrationStatus", callbacks::migration_status);
         r.add("migrationCancel", callbacks::migration_cancel);
         r.add("migrationReset", callbacks::migration_reset);
+        // Stage 3 — v8_class-backed Migration wrapper. Mints a typed
+        // runner instance whose `.status()` / `.cancel()` / `.reset()`
+        // delegate to the same SQL the flat callbacks use, and whose
+        // GC finalizer auto-cancels the run if the wrapper is dropped
+        // without explicit teardown. The flat `migrationBegin`/`…`
+        // callbacks above stay registered for back-compat with the
+        // existing `@zeroship/migrations` SDK.
+        r.add("migrationStart", callbacks::migration_start);
         // C1 / P8a — reactive queries (in-process broker;
         // streaming WAL consumer deferred to P8a.2)
         r.add("subscribe", callbacks::subscribe);

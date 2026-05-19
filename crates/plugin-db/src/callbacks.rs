@@ -129,6 +129,12 @@ fn get_app_id(state: &SharedState) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+/// Public wrapper around [`get_app_id`] for sibling modules
+/// (`v8_classes::migration`) that need the same APP_ID convention.
+pub(crate) fn get_app_id_pub(state: &SharedState) -> String {
+    get_app_id(state)
+}
+
 /// B3 capability gate. Returns `true` if the caller refused the write
 /// because the active procedure kind is `query()` — in which case the
 /// callback has already set a rejected promise on `rv` and the caller
@@ -166,6 +172,147 @@ fn refuse_if_query_capability<'s>(
     resolver.reject(scope, exc.into());
     rv.set(promise.into());
     true
+}
+
+/// Promise-returning variant of [`refuse_if_query_capability`] for the
+/// v8_class `Collection` methods, which return `v8::Local<v8::Value>`
+/// directly rather than `rv.set`-ing on a `FunctionCallback`. Returns
+/// `Some(promise)` when the capability is violated (caller should
+/// return the rejected promise immediately); `None` when the write is
+/// allowed and the caller should continue.
+pub(crate) fn refuse_if_query_capability_returning<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    op: &str,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    if !matches!(
+        zeroship_runtime::rpc::current_kind(),
+        Some(zeroship_runtime::rpc::ProcedureKind::Query)
+    ) {
+        return None;
+    }
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let exc = zeroship_runtime::rpc::build_capability_violation(
+        scope,
+        "query",
+        op,
+        "Use mutation() if you need to write to the database. Queries are read-only.",
+    );
+    resolver.reject(scope, exc.into());
+    Some(promise)
+}
+
+/// Walk a `v8::Local<v8::Value>` directly into a `serde_json::Value`,
+/// skipping the JSON.stringify / serde_json::from_str round trip used by
+/// [`parse_json_arg`]. Used by the v8_class `Collection` methods on the
+/// hot path so we don't pay two parse costs per CRUD call.
+///
+/// Mirrors the small walker in `runtime/src/rpc/superjson.rs`. We
+/// duplicate rather than re-export because plugin-db must not pull in
+/// the entire `rpc` subtree (cyclic dep risk).
+///
+/// Mapping:
+/// - `undefined` / `null` → `Value::Null`
+/// - boolean → `Value::Bool`
+/// - number → `Value::Number` (lossless integer when representable,
+///   otherwise f64)
+/// - string → `Value::String`
+/// - array → `Value::Array` (recurse on each element)
+/// - object → `Value::Object` (recurse on each enumerable own property)
+/// - anything else (functions, symbols) → `Value::Null`
+pub(crate) fn v8_value_to_serde_json(
+    scope: &mut v8::PinScope<'_, '_>,
+    v: v8::Local<v8::Value>,
+) -> Value {
+    if v.is_null_or_undefined() {
+        return Value::Null;
+    }
+    if v.is_boolean() {
+        return Value::Bool(v.is_true());
+    }
+    if v.is_number() {
+        let n = v.number_value(scope).unwrap_or(0.0);
+        if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+            let i = n as i64;
+            if (i as f64) == n {
+                return Value::Number(serde_json::Number::from(i));
+            }
+        }
+        if let Some(num) = serde_json::Number::from_f64(n) {
+            return Value::Number(num);
+        }
+        return Value::Null;
+    }
+    if v.is_string() {
+        return Value::String(v.to_rust_string_lossy(scope));
+    }
+    if v.is_array() {
+        let arr: v8::Local<v8::Array> = v.try_into().unwrap();
+        let n = arr.length();
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let elem = arr
+                .get_index(scope, i)
+                .unwrap_or_else(|| v8::null(scope).into());
+            out.push(v8_value_to_serde_json(scope, elem));
+        }
+        return Value::Array(out);
+    }
+    if v.is_object() {
+        let obj: v8::Local<v8::Object> = match v.try_into() {
+            Ok(o) => o,
+            Err(_) => return Value::Null,
+        };
+        if let Some(names) =
+            obj.get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+        {
+            let mut map = serde_json::Map::new();
+            for i in 0..names.length() {
+                let key_v = match names.get_index(scope, i) {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let key = key_v.to_rust_string_lossy(scope);
+                let val_v = match obj.get(scope, key_v) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                map.insert(key, v8_value_to_serde_json(scope, val_v));
+            }
+            return Value::Object(map);
+        }
+    }
+    Value::Null
+}
+
+/// Read a CRUD method's object/array argument directly from V8 into a
+/// `serde_json::Value`. `undefined`/missing → empty object (matches
+/// [`parse_json_arg`]'s default).
+pub(crate) fn read_json_arg(
+    scope: &mut v8::PinScope<'_, '_>,
+    v: Option<v8::Local<v8::Value>>,
+) -> Value {
+    match v {
+        Some(val) if !val.is_null_or_undefined() => v8_value_to_serde_json(scope, val),
+        _ => Value::Object(serde_json::Map::new()),
+    }
+}
+
+/// Get the runtime state slot off the isolate. Shared by every callback
+/// + dispatch helper; consolidated here to avoid copy-pasting the
+/// expect.
+pub(crate) fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
+    scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone()
+}
+
+/// Public re-export of [`get_app_id`] for the v8_class `Collection`
+/// methods (which live in a sibling module and need the same fallback
+/// to `"default"` when `APP_ID` is unset).
+pub(crate) fn app_id_for(state: &SharedState) -> String {
+    get_app_id(state)
 }
 
 /// Create a promise, allocate an op_id, store the resolver, and return
@@ -450,6 +597,25 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
             }
             Err(_) => Value::Null,
         },
+        // NUMERIC = 1700 — Postgres' arbitrary-precision decimal. Map to
+        // a JSON number when it fits exactly; fall back to string (lossy
+        // float would corrupt big decimals). The SDK's `t.number()` maps
+        // to NUMERIC, so user-facing `doc.field` should be a number, not
+        // a string. Postgres serialises NUMERIC over the text protocol
+        // as a decimal string; parse it.
+        1700 => match row.try_get::<_, String>(name) {
+            Ok(s) => {
+                if let Ok(i) = s.parse::<i64>() {
+                    Value::Number(serde_json::Number::from(i))
+                } else if let Ok(f) = s.parse::<f64>() {
+                    serde_json::Number::from_f64(f)
+                        .map_or(Value::String(s), Value::Number)
+                } else {
+                    Value::String(s)
+                }
+            }
+            Err(_) => Value::Null,
+        },
         // TEXT = 25, VARCHAR = 1043, CHAR = 18, BPCHAR = 1042, NAME = 19
         // and everything else: treat as text
         _ => match row.try_get::<_, String>(name) {
@@ -463,39 +629,34 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
 // Callback: findOne(collection, filterJson, optsJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.findOne(collection, filterJson)` → Promise<object|null>
-pub fn find_one(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
+/// Shared dispatch for `findOne` — used by both the flat callback
+/// (`pub fn find_one`) and the `Collection.findOne` v8_method on the
+/// hot path. Both arrive with an already-decoded `serde_json::Value`
+/// filter (the flat path via `parse_json_arg`'s JSON round trip, the
+/// v8_class path via the direct V8→serde walker in
+/// [`v8_value_to_serde_json`]).
+///
+/// Resolves the Promise with a JSON STRING (the SDK side calls
+/// `JSON.parse` on the result); on error rejects with the message.
+pub(crate) fn dispatch_find_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     // P8b — record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
-    crate::read_set::record_if_active(&collection, &filter);
+    crate::read_set::record_if_active(collection, &filter);
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
-
-    let bq = match query::build_find(&app_id, &collection, &filter, Some(1), None, None, None) {
+    let bq = match query::build_find(app_id, collection, &filter, Some(1), None, None, None) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
@@ -511,6 +672,24 @@ pub fn find_one(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.findOne(collection, filterJson)` → Promise<object|null>
+pub fn find_one(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_find_one(scope, &app_id, &collection, filter);
     rv.set(promise.into());
 }
 
@@ -518,46 +697,33 @@ pub fn find_one(
 // Callback: find(collection, filterJson, optsJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.find(collection, filterJson, optsJson)` → Promise<array>
-///
-/// optsJson: `{ "limit": N, "offset": N, "orderBy": {...} }`
-pub fn find(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-    let opts = parse_json_arg(scope, &args, 2).unwrap_or(Value::Object(serde_json::Map::new()));
-
+/// Shared dispatch for `find` — see [`dispatch_find_one`] for the
+/// rationale. Reads `limit`/`offset`/`orderBy`/`select` out of `opts`.
+pub(crate) fn dispatch_find<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+    opts: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     // P8b — record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
-    crate::read_set::record_if_active(&collection, &filter);
+    crate::read_set::record_if_active(collection, &filter);
 
-    let app_id = get_app_id(&state);
     let limit = opts.get("limit").and_then(Value::as_i64);
     let offset = opts.get("offset").and_then(Value::as_i64);
     let order_by = opts.get("orderBy");
     let select = opts.get("select");
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_find(&app_id, &collection, &filter, limit, offset, order_by, select) {
+    let bq = match query::build_find(app_id, collection, &filter, limit, offset, order_by, select) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
@@ -568,6 +734,27 @@ pub fn find(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.find(collection, filterJson, optsJson)` → Promise<array>
+///
+/// optsJson: `{ "limit": N, "offset": N, "orderBy": {...} }`
+pub fn find(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let opts = parse_json_arg(scope, &args, 2).unwrap_or(Value::Object(serde_json::Map::new()));
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_find(scope, &app_id, &collection, filter, opts);
     rv.set(promise.into());
 }
 
@@ -575,45 +762,31 @@ pub fn find(
 // Callback: insert(collection, docJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.insert(collection, docJson)` → Promise<object>
-pub fn insert(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    // B3 capability gate: query() handlers cannot write.
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.insert") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(doc) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `insert`. The capability gate is the caller's
+/// responsibility — both `pub fn insert` (the flat callback) and
+/// `Collection.insert` check it before reaching here and return the
+/// rejected promise directly if violated.
+pub(crate) fn dispatch_insert<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    doc: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_insert(&app_id, &collection, &doc) {
+    let bq = match query::build_insert(app_id, collection, &doc) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_mutation_with_emit(
             bq,
@@ -633,6 +806,28 @@ pub fn insert(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.insert(collection, docJson)` → Promise<object>
+pub fn insert(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    // B3 capability gate: query() handlers cannot write.
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.insert") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(doc) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_insert(scope, &app_id, &collection, doc);
     rv.set(promise.into());
 }
 
@@ -640,47 +835,30 @@ pub fn insert(
 // Callback: updateOne(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.updateOne(collection, filterJson, updateJson)` → Promise<object|null>
-pub fn update_one(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.updateOne") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-    let Some(update) = parse_json_arg(scope, &args, 2) else {
-        return;
-    };
-
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `updateOne`. See [`dispatch_insert`] for the
+/// capability-gate contract.
+pub(crate) fn dispatch_update_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+    update: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_update_one(&app_id, &collection, &filter, &update) {
+    let bq = match query::build_update_one(app_id, collection, &filter, &update) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_mutation_with_emit(
             bq,
@@ -699,6 +877,30 @@ pub fn update_one(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.updateOne(collection, filterJson, updateJson)` → Promise<object|null>
+pub fn update_one(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.updateOne") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let Some(update) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_update_one(scope, &app_id, &collection, filter, update);
     rv.set(promise.into());
 }
 
@@ -706,44 +908,29 @@ pub fn update_one(
 // Callback: deleteOne(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.deleteOne(collection, filterJson)` → Promise<object|null>
-pub fn delete_one(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.deleteOne") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `deleteOne`. See [`dispatch_insert`] for the
+/// capability-gate contract.
+pub(crate) fn dispatch_delete_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_delete_one(&app_id, &collection, &filter) {
+    let bq = match query::build_delete_one(app_id, collection, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_mutation_with_emit(
             bq,
@@ -762,6 +949,27 @@ pub fn delete_one(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.deleteOne(collection, filterJson)` → Promise<object|null>
+pub fn delete_one(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.deleteOne") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_delete_one(scope, &app_id, &collection, filter);
     rv.set(promise.into());
 }
 
@@ -769,43 +977,29 @@ pub fn delete_one(
 // Callback: insertMany(collection, docsJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.insertMany(collection, docsJson)` → Promise<array>
-pub fn insert_many(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.insertMany") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(docs) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `insertMany`. See [`dispatch_insert`] for the
+/// capability-gate contract.
+pub(crate) fn dispatch_insert_many<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    docs: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_insert_many(&app_id, &collection, &docs) {
+    let bq = match query::build_insert_many(app_id, collection, &docs) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_mutation_with_emit(
             bq,
@@ -820,6 +1014,27 @@ pub fn insert_many(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.insertMany(collection, docsJson)` → Promise<array>
+pub fn insert_many(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.insertMany") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(docs) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_insert_many(scope, &app_id, &collection, docs);
     rv.set(promise.into());
 }
 
@@ -827,23 +1042,15 @@ pub fn insert_many(
 // Callback: aggregate(collection, pipelineJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.aggregate(collection, pipelineJson)` → Promise<array>
-pub fn aggregate(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(pipeline) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
+/// Shared dispatch for `aggregate`. Pipeline is a JSON array of stage
+/// objects.
+pub(crate) fn dispatch_aggregate<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    pipeline: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
 
     // P8b — record into the active query's read-set so the broker can
     // narrow events. If the first stage is `$match`, capture its filter;
@@ -856,20 +1063,18 @@ pub fn aggregate(
             .and_then(|stage| stage.get("$match"))
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        crate::read_set::record_if_active(&collection, &captured_filter);
+        crate::read_set::record_if_active(collection, &captured_filter);
     }
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_aggregate(&app_id, &collection, &pipeline) {
+    let bq = match query::build_aggregate(app_id, collection, &pipeline) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
@@ -880,6 +1085,24 @@ pub fn aggregate(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.aggregate(collection, pipelineJson)` → Promise<array>
+pub fn aggregate(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(pipeline) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_aggregate(scope, &app_id, &collection, pipeline);
     rv.set(promise.into());
 }
 
@@ -887,38 +1110,25 @@ pub fn aggregate(
 // Callback: distinct(collection, field, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.distinct(collection, field, filterJson)` → Promise<array>
-pub fn distinct(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(field) = require_string_arg(scope, &args, 1, "field") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 2) else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `distinct`. `field` is the column name; `filter`
+/// is the WHERE-clause JSON.
+pub(crate) fn dispatch_distinct<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    field: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_distinct(&app_id, &collection, &field, &filter) {
+    let bq = match query::build_distinct(app_id, collection, field, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
@@ -944,6 +1154,27 @@ pub fn distinct(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.distinct(collection, field, filterJson)` → Promise<array>
+pub fn distinct(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(field) = require_string_arg(scope, &args, 1, "field") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_distinct(scope, &app_id, &collection, &field, filter);
     rv.set(promise.into());
 }
 
@@ -951,46 +1182,30 @@ pub fn distinct(
 // Callback: updateMany(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.updateMany(collection, filterJson, updateJson)` → Promise<{ updated: number }>
-pub fn update_many(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.updateMany") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-    let Some(update) = parse_json_arg(scope, &args, 2) else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `updateMany`. Result shape:
+/// `{ "updated": <number-of-rows> }` JSON string.
+pub(crate) fn dispatch_update_many<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+    update: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_update_many(&app_id, &collection, &filter, &update) {
+    let bq = match query::build_update_many(app_id, collection, &filter, &update) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_mutation_with_emit(
             bq,
@@ -1010,6 +1225,30 @@ pub fn update_many(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.updateMany(collection, filterJson, updateJson)` → Promise<{ updated: number }>
+pub fn update_many(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.updateMany") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let Some(update) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_update_many(scope, &app_id, &collection, filter, update);
     rv.set(promise.into());
 }
 
@@ -1017,43 +1256,29 @@ pub fn update_many(
 // Callback: deleteMany(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.deleteMany(collection, filterJson)` → Promise<{ deleted: number }>
-pub fn delete_many(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.deleteMany") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `deleteMany`. Result shape:
+/// `{ "deleted": <number-of-rows> }` JSON string.
+pub(crate) fn dispatch_delete_many<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_delete_many(&app_id, &collection, &filter) {
+    let bq = match query::build_delete_many(app_id, collection, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_mutation_with_emit(
             bq,
@@ -1073,6 +1298,27 @@ pub fn delete_many(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.deleteMany(collection, filterJson)` → Promise<{ deleted: number }>
+pub fn delete_many(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.deleteMany") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_delete_many(scope, &app_id, &collection, filter);
     rv.set(promise.into());
 }
 
@@ -1080,39 +1326,28 @@ pub fn delete_many(
 // Callback: count(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.count(collection, filterJson)` → Promise<{ count: number }>
-pub fn count(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(filter) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
+/// Shared dispatch for `count`. Result shape:
+/// `{ "count": <number> }` JSON string.
+pub(crate) fn dispatch_count<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     // P8b — record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
-    crate::read_set::record_if_active(&collection, &filter);
+    crate::read_set::record_if_active(collection, &filter);
 
-    let app_id = get_app_id(&state);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_count(&app_id, &collection, &filter) {
+    let bq = match query::build_count(app_id, collection, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
@@ -1123,6 +1358,24 @@ pub fn count(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.count(collection, filterJson)` → Promise<{ count: number }>
+pub fn count(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(filter) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_count(scope, &app_id, &collection, filter);
     rv.set(promise.into());
 }
 
@@ -1288,9 +1541,6 @@ pub async fn exec_register_model_with_pool(
 
     let schema_version = crate::audit::next_schema_version(pool, app_id).await?;
 
-    // Build everything the diff classifier needs.
-    let create_table = query::build_create_table(app_id, collection, schema)
-        .map_err(|e| format!("db: {e}"))?;
     let declared_indexes = query::build_create_indexes(app_id, collection, schema)
         .map_err(|e| format!("db: {e}"))?;
 
@@ -1300,6 +1550,24 @@ pub async fn exec_register_model_with_pool(
     let mut live = crate::diff::read_live_schema(pool, app_id).await?;
     let rows_estimate = crate::diff::estimate_row_count(pool, app_id, collection).await?;
     live.row_counts.insert(collection.to_string(), rows_estimate);
+
+    // B2 — build CREATE TABLE with Deferred FK emission keyed on the live
+    // table set. Refs to tables that already exist inline their FK; refs
+    // to tables that don't exist yet skip the inline clause, and the diff
+    // engine emits a follow-on `ALTER TABLE … ADD CONSTRAINT` op. This
+    // breaks the cross-table cold-start race: concurrent
+    // `registerModel("users")` / `registerModel("todos")` calls serialize
+    // on the advisory lock; whichever runs second sees the first table in
+    // `live` and can inline the FK, or defers it to its own apply phase.
+    let existing_tables: std::collections::HashSet<String> =
+        live.tables.keys().cloned().collect();
+    let create_table = query::build_create_table_with_fks(
+        app_id,
+        collection,
+        schema,
+        &query::FkEmission::Deferred(&existing_tables),
+    )
+    .map_err(|e| format!("db: {e}"))?;
 
     let ops = crate::diff::compute_diff(
         &live,
@@ -1363,32 +1631,41 @@ pub async fn exec_register_model_with_pool(
 
     // -------------------------------------------------------------------
     // Apply phase: run additive + compatible ops in declared order.
+    //
+    // Split into two passes:
+    //   1. Transactional ops (CREATE TABLE / ADD COLUMN / ADD/DROP FK) run
+    //      while the advisory lock is held — they serialise per-app.
+    //   2. CREATE INDEX CONCURRENTLY ops run AFTER releasing the advisory
+    //      lock. CIC takes an internal snapshot and waits for all other
+    //      open snapshots on the target table to finish; another
+    //      orchestrator blocked on `pg_advisory_lock` holds a snapshot
+    //      that CIC waits on → deadlock. CIC is idempotent via
+    //      `IF NOT EXISTS` so it's safe to run unlocked.
     // -------------------------------------------------------------------
-    for op in &ops {
-        if op.class == crate::diff::ChangeClass::Destructive {
-            // Skipped above (refused or lenient-skipped).
-            continue;
-        }
-
-        let audit_id = match (crate::audit::AuditRow {
-            collection: op.collection.clone(),
-            phase: crate::audit::Phase::Ddl,
-            change_class: op.class.as_audit(),
-            change_kind: op.change_kind.as_sql().to_string(),
-            details: op.details.clone(),
-            ddl_sql: op.sql.clone(),
-            status: crate::audit::InitialStatus::Running,
-            deploy_id: deploy_id.to_string(),
-            schema_version,
-            actor: crate::audit::ActorKind::Auto,
-        }) {
-            row => match crate::audit::write_audit_row(pool, app_id, &row).await {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    tracing::warn!(error = %e, "audit: failed to insert running row");
-                    None
-                }
+    let run_op = async |op: &crate::diff::DiffOp| -> Result<(), String> {
+        let audit_id = match crate::audit::write_audit_row(
+            pool,
+            app_id,
+            &crate::audit::AuditRow {
+                collection: op.collection.clone(),
+                phase: crate::audit::Phase::Ddl,
+                change_class: op.class.as_audit(),
+                change_kind: op.change_kind.as_sql().to_string(),
+                details: op.details.clone(),
+                ddl_sql: op.sql.clone(),
+                status: crate::audit::InitialStatus::Running,
+                deploy_id: deploy_id.to_string(),
+                schema_version,
+                actor: crate::audit::ActorKind::Auto,
             },
+        )
+        .await
+        {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "audit: failed to insert running row");
+                None
+            }
         };
 
         let result = match &op.change_kind {
@@ -1406,8 +1683,6 @@ pub async fn exec_register_model_with_pool(
                 }
             }
             crate::diff::ChangeKind::AddIndex => {
-                // Find the matching IndexSpec so the recovery loop has the
-                // structured columns/unique flags.
                 let spec_owned = declared_indexes
                     .iter()
                     .find(|s| op.details.get("index_name").and_then(Value::as_str) == Some(s.name.as_str()))
@@ -1427,7 +1702,6 @@ pub async fn exec_register_model_with_pool(
                 }
             }
             crate::diff::ChangeKind::DropColumn | crate::diff::ChangeKind::DropIndex => {
-                // Destructive ops are filtered out above.
                 Ok(())
             }
         };
@@ -1457,16 +1731,39 @@ pub async fn exec_register_model_with_pool(
             }
         }
 
-        result?;
+        result
+    };
+
+    // Pass 1: transactional ops under advisory lock.
+    for op in &ops {
+        if op.class == crate::diff::ChangeClass::Destructive {
+            continue;
+        }
+        if matches!(op.change_kind, crate::diff::ChangeKind::AddIndex) {
+            continue;
+        }
+        run_op(op).await?;
     }
 
-    // Explicit unlock — best-effort. Dropping `lock_client` would also
-    // release session-level locks when the backend session ends, but we
-    // unlock proactively so the client returns to the pool clean.
+    // Release advisory lock BEFORE CIC. Two orchestrators racing on CIC
+    // is safe (IF NOT EXISTS), but holding the lock through CIC
+    // deadlocks: a second waiter blocked on pg_advisory_lock pins a
+    // snapshot that CIC waits on.
     let unlock_sql =
         "SELECT pg_advisory_unlock(hashtext('zs_reg:' || $1)::int4, hashtext('register_model')::int4)";
     let _ = lock_client.query_text_params(unlock_sql, &[app_id]).await;
     drop(lock_client);
+
+    // Pass 2: CIC ops, unlocked.
+    for op in &ops {
+        if op.class == crate::diff::ChangeClass::Destructive {
+            continue;
+        }
+        if !matches!(op.change_kind, crate::diff::ChangeKind::AddIndex) {
+            continue;
+        }
+        run_op(op).await?;
+    }
 
     Ok(())
 }
@@ -1993,46 +2290,31 @@ pub fn rollback_transaction(
 // Callback: upsert(collection, docJson, conflictFieldsJson)
 // ---------------------------------------------------------------------------
 
-/// `zeroship.db.upsert(collection, docJson, conflictFieldsJson)` → Promise<object>
-pub fn upsert(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    if refuse_if_query_capability(scope, &mut rv, "ctx.db.upsert") {
-        return;
-    }
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(doc) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-    let Some(conflict_fields) = parse_json_arg(scope, &args, 2) else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
+/// Shared dispatch for `upsert`. See [`dispatch_insert`] for the
+/// capability-gate contract. `conflict_fields` is the JSON array of
+/// column names that form the ON CONFLICT target.
+pub(crate) fn dispatch_upsert<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    doc: Value,
+    conflict_fields: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
-    let bq = match query::build_upsert(&app_id, &collection, &doc, &conflict_fields) {
+    let bq = match query::build_upsert(app_id, collection, &doc, &conflict_fields) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::Failed { op_id, error: e.to_string(), request_id }
             }));
-            rv.set(promise.into());
-            return;
+            return promise;
         }
     };
 
-    let coll_for_emit = collection.clone();
-    let app_for_emit = app_id.clone();
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Upsert can be either INSERT (new row) or UPDATE (existing).
         // We tag as Update because the subscriber's reaction is the
@@ -2055,6 +2337,30 @@ pub fn upsert(
         }
     }));
 
+    promise
+}
+
+/// `zeroship.db.upsert(collection, docJson, conflictFieldsJson)` → Promise<object>
+pub fn upsert(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    if refuse_if_query_capability(scope, &mut rv, "ctx.db.upsert") {
+        return;
+    }
+    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
+        return;
+    };
+    let Some(doc) = parse_json_arg(scope, &args, 1) else {
+        return;
+    };
+    let Some(conflict_fields) = parse_json_arg(scope, &args, 2) else {
+        return;
+    };
+    let state = runtime_state(scope);
+    let app_id = get_app_id(&state);
+    let promise = dispatch_upsert(scope, &app_id, &collection, doc, conflict_fields);
     rv.set(promise.into());
 }
 
@@ -2093,7 +2399,14 @@ async fn exec_end(cmd: &str) -> Result<(), String> {
 //
 // Picks isolation level by kind:
 //   query    → BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY
-//   mutation → BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE
+//   mutation → BEGIN ISOLATION LEVEL <override or READ COMMITTED> READ WRITE
+//
+// The mutation default is READ COMMITTED — same as Postgres's default
+// for explicit BEGIN. Apps that need write-skew protection bump to
+// `serializable` per-mutation via the wrapper config; apps that need
+// consistent re-reads inside the handler bump to `repeatable read`.
+// Stronger isolation costs throughput (SSI bookkeeping, more 40001
+// retries) and is opt-in by design.
 //
 // `action`, `stream`, `subscription` and unknown kinds are not wrapped:
 //   actions can hold open external IO, streams/subscriptions are long-
@@ -2114,10 +2427,14 @@ pub fn auto_begin_transaction(
         .clone();
 
     let kind = get_string_arg(scope, &args, 0);
+    // Optional second arg: per-mutation isolation override
+    // ("read committed" | "repeatable read" | "serializable"). Empty /
+    // missing → use the per-kind default in `auto_tx_begin_sql`.
+    let isolation = get_string_arg(scope, &args, 1);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_auto_begin(kind.as_deref()).await {
+        match exec_auto_begin(kind.as_deref(), isolation.as_deref()).await {
             Ok(token) => OpResult::Completed {
                 op_id,
                 value: token.to_string(),
@@ -2160,19 +2477,52 @@ pub fn auto_end_transaction(
     rv.set(promise.into());
 }
 
-/// Per-kind BEGIN SQL. Returns `None` for kinds we don't wrap.
-fn auto_tx_begin_sql(kind: Option<&str>) -> Option<&'static str> {
+/// Per-kind BEGIN SQL. Returns `None` for kinds we don't wrap. For
+/// mutations, `isolation` overrides the default READ COMMITTED.
+fn auto_tx_begin_sql(kind: Option<&str>, isolation: Option<&str>) -> Option<String> {
     match kind {
-        Some("query") => Some("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY"),
-        Some("mutation") => Some("BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE"),
+        Some("query") => {
+            Some("BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY".to_string())
+        }
+        Some("mutation") => {
+            let level = normalize_isolation(isolation).unwrap_or("READ COMMITTED");
+            Some(format!("BEGIN ISOLATION LEVEL {level} READ WRITE"))
+        }
         _ => None,
     }
 }
 
-async fn exec_auto_begin(kind: Option<&str>) -> Result<u32, String> {
+/// Case-fold + whitespace-collapse a user-supplied isolation string to
+/// one of Postgres' four accepted values. Unknown / empty → `None`
+/// (caller falls back to the default).
+fn normalize_isolation(s: Option<&str>) -> Option<&'static str> {
+    let raw = s?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let upper: String = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase();
+    match upper.as_str() {
+        "READ COMMITTED" => Some("READ COMMITTED"),
+        "REPEATABLE READ" => Some("REPEATABLE READ"),
+        "SERIALIZABLE" => Some("SERIALIZABLE"),
+        // READ UNCOMMITTED is accepted by Postgres but silently upgrades
+        // to READ COMMITTED — treat as alias.
+        "READ UNCOMMITTED" => Some("READ COMMITTED"),
+        _ => None,
+    }
+}
+
+async fn exec_auto_begin(
+    kind: Option<&str>,
+    isolation: Option<&str>,
+) -> Result<u32, String> {
     // Skip if this kind isn't wrapped (action / stream / subscription /
     // unknown). Token 0 → end is a no-op.
-    let Some(sql) = auto_tx_begin_sql(kind) else {
+    let Some(sql) = auto_tx_begin_sql(kind, isolation) else {
         return Ok(0);
     };
 
@@ -2201,7 +2551,7 @@ async fn exec_auto_begin(kind: Option<&str>) -> Result<u32, String> {
     })
     .detach();
 
-    client.execute(sql, &[])
+    client.execute(&sql, &[])
         .await
         .map_err(|e| format!("db: auto-tx BEGIN failed: {e}"))?;
 
@@ -2241,7 +2591,20 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), String> {
 
     result
         .map(|_| ())
-        .map_err(|e| format!("db: auto-tx {cmd} failed: {e}"))
+        .map_err(|e| {
+            // Walk the source chain so deferred-FK / unique violations
+            // surface with their SQLSTATE detail. compio-postgres' Display
+            // for Error::Db writes only "db error"; the real message
+            // (`ERROR: insert or update on table "todos" violates
+            // foreign key constraint ...`) lives on the cause.
+            let mut msg = format!("db: auto-tx {cmd} failed: {e}");
+            let mut cur: &dyn std::error::Error = &e;
+            while let Some(src) = std::error::Error::source(cur) {
+                msg.push_str(&format!(" — caused by: {src}"));
+                cur = src;
+            }
+            msg
+        })
 }
 
 /// Install `__zsBeginAutoTx` / `__zsEndAutoTx` on `globalThis`. Called
@@ -2438,6 +2801,36 @@ pub fn migration_cancel(
         }
     }));
     rv.set(promise.into());
+}
+
+/// `zeroship.db.migrationStart(spec)` → Promise<Migration>
+///
+/// Future-API counterpart to the flat `migrationBegin` /
+/// `migrationFetchBatch` / `migrationCommitBatch` / `migrationCancel` /
+/// `migrationStatus` / `migrationReset` callbacks the current
+/// `@zeroship/migrations` SDK uses. Acquires the advisory lock + writes
+/// the audit row (delegates to the same `migrations::exec_begin`), then
+/// returns a `Migration` v8_class instance whose `.status()` / `.cancel()`
+/// / `.reset()` methods delegate back to the same `exec_*` helpers.
+///
+/// The wrapper's GC finalizer spawns a best-effort `exec_cancel` if user
+/// code drops every reference without reaching a terminal state — closes
+/// the handle-leak parallel to [`subscribe`] (whose `Subscription`
+/// wrapper auto-closes the broker handle on GC).
+///
+/// `spec` is a JS object: `{ name, collection, batchSize?, dryRun? }`.
+/// `batchSize` is accepted for forward-compat (the SDK passes it for
+/// `migrationFetchBatch`); the callback itself doesn't use it.
+pub fn migration_start(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    rv: v8::ReturnValue,
+) {
+    // Thin shim — the real implementation lives in
+    // `crate::v8_classes::migration::migration_start_callback` so the
+    // post-`exec_begin` raw-pointer activation hop keeps its `unsafe`
+    // inside the one file that opts in to `#![allow(unsafe_code)]`.
+    crate::v8_classes::migration::migration_start_callback(scope, args, rv);
 }
 
 /// `zeroship.db.migrationReset(name, collection)` → Promise<{ok}>
