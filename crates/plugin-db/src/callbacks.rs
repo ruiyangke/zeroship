@@ -246,6 +246,37 @@ pub(crate) fn v8_value_to_serde_json(
     if v.is_string() {
         return Value::String(v.to_rust_string_lossy(scope));
     }
+    // Date — `JSON.stringify(new Date())` calls `Date.prototype.toJSON`
+    // which returns an ISO string. Mirror that here so date fields in
+    // filters/docs round-trip the same way they did under the legacy
+    // `JSON.stringify` boundary. Without this branch the object walk
+    // below sees `new Date()` as a plain object with no own properties
+    // and produces `{}` — silently losing the value.
+    if v.is_date() {
+        if let Ok(obj) = v8::Local::<v8::Object>::try_from(v) {
+            let to_iso_key = v8::String::new(scope, "toISOString").unwrap();
+            if let Some(fn_v) = obj.get(scope, to_iso_key.into()) {
+                if let Ok(to_iso) = v8::Local::<v8::Function>::try_from(fn_v) {
+                    if let Some(result) = to_iso.call(scope, v, &[]) {
+                        if result.is_string() {
+                            return Value::String(result.to_rust_string_lossy(scope));
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: produce the Unix-ms number (no ISO formatter
+        // reachable). The SDK accepts numeric dates anyway.
+        if let Ok(date) = v8::Local::<v8::Date>::try_from(v) {
+            let ms = date.value_of();
+            if ms.is_finite() {
+                if let Some(n) = serde_json::Number::from_f64(ms) {
+                    return Value::Number(n);
+                }
+            }
+        }
+        return Value::Null;
+    }
     if v.is_array() {
         let arr: v8::Local<v8::Array> = v.try_into().unwrap();
         let n = arr.length();

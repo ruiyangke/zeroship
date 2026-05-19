@@ -448,11 +448,11 @@ fn parse_spec(
     if !spec.is_object() {
         return Err("db: migrationStart: spec must be an object".into());
     }
-    let json_str = v8::json::stringify(scope, spec)
-        .ok_or_else(|| "db: migrationStart: failed to serialise spec".to_string())?
-        .to_rust_string_lossy(scope);
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| format!("db: migrationStart: invalid spec JSON: {e}"))?;
+    // Walk the V8 object directly into a serde_json::Value (no
+    // JSON.stringify / JSON.parse boundary). Same walker the
+    // Collection CRUD methods use — keeps the migration entry point
+    // consistent with the rest of the native surface.
+    let parsed = crate::callbacks::v8_value_to_serde_json(scope, spec);
     let obj = parsed
         .as_object()
         .ok_or_else(|| "db: migrationStart: spec must be an object".to_string())?;
