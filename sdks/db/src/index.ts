@@ -11,7 +11,7 @@ export type { Subscription, SubscriptionEvent } from "./subscribe.js";
 
 // Types
 export type { Db, TxCollection, TxQuery, TransactionOptions } from "./db.js";
-export type { FieldDef, FieldDefaultValue, PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, InferType, IsolationLevel, Id, FkAction, RefOptions } from "./types.js";
+export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, InferType, IsolationLevel, Id, FkAction, RefOptions } from "./types.js";
 export type { CreateDbOptions } from "./db.js";
 export type { NormalizedSchema } from "./schema.js";
 

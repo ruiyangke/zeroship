@@ -735,7 +735,7 @@ const db = createDb({
 });
 
 // At the type level:
-// db.users.insert returns Document<{...}> with id: Id<"users">
+// db.users.insert returns Row<{...}> with id: Id<"users">
 // db.posts.insert({ authorId: x }) requires x to be Id<"users">
 
 const u = await db.users.insert({ name: "alice" });

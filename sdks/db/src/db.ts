@@ -28,7 +28,7 @@ import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
 import { type NormalizedSchema, normalizeSchema, validateRefTargets } from "./schema.js";
-import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
+import { type PlainObject, type Result, type Row, type RowInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
 
 /**
  * Topologically sort schema names so parents precede children. A child
@@ -92,28 +92,28 @@ type SchemaInput =
  * on error instead of returning Result. Generic over schema shape S.
  */
 export type TxCollection<S = PlainObject> = {
-  insert(doc: CreateInput<S>): Promise<Document<S>>;
-  insertMany(docs: CreateInput<S>[]): Promise<Document<S>[]>;
-  get(id: number): Promise<Document<S> | null>;
-  findOne(filter: Filter<S>): Promise<Document<S> | null>;
+  insert(row: RowInput<S>): Promise<Row<S>>;
+  insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
+  get(id: number): Promise<Row<S> | null>;
+  findOne(filter: Filter<S>): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find(filter?: Filter<S>): TxQuery<S, Document<S>>;
-  upsert(doc: CreateInput<S>, options: { conflictFields: (string & keyof Document<S>)[] }): Promise<Document<S>>;
-  update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Document<S> | null>;
+  find(filter?: Filter<S>): TxQuery<S, Row<S>>;
+  upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
+  update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ matchedCount: number; modifiedCount: number }>;
-  delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }): Promise<Document<S> | null>;
+  delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>, opts?: { hard?: boolean }): Promise<{ deletedCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
-  distinct(field: string & keyof Document<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
+  distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
 };
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
-export type TxQuery<S = PlainObject, P = Document<S>> = {
+export type TxQuery<S = PlainObject, P = Row<S>> = {
   sort(s: Record<string, number> | string): TxQuery<S, P>;
   limit(n: number): TxQuery<S, P>;
   skip(n: number): TxQuery<S, P>;
-  select<K extends keyof Document<S> & string>(fields: K[]): TxQuery<S, Pick<Document<S>, K>>;
+  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>>;
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P>;
   after(id: number): TxQuery<S, P>;
   then<TResult1 = P[], TResult2 = never>(
@@ -136,7 +136,7 @@ export interface TransactionOptions {
  * - `schema({...})` wraps a `Record<string, unknown>` and we strip it.
  * - `t.union(...)` produces `TypeBuilder<UnionShape>`; we extract
  *   `UnionShape` so the collection is `Collection<UnionShape>` and a
- *   `find()` returns `Document<UnionShape>` whose discriminator key
+ *   `find()` returns `Row<UnionShape>` whose discriminator key
  *   narrows correctly under control flow analysis.
  */
 type UnwrapSchema<T> =
@@ -164,11 +164,11 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 
   const tx: TxCollection<S> = {
-    async insert(doc: CreateInput<S>) {
-      return unwrap(await collection.insert(doc));
+    async insert(row: RowInput<S>) {
+      return unwrap(await collection.insert(row));
     },
-    async insertMany(docs: CreateInput<S>[]) {
-      return unwrap(await collection.insertMany(docs));
+    async insertMany(rows: RowInput<S>[]) {
+      return unwrap(await collection.insertMany(rows));
     },
     async get(id: number) {
       return unwrap(await collection.get(id));
@@ -179,12 +179,12 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async exists(filter: Filter<S>) {
       return unwrap(await collection.exists(filter));
     },
-    find(filter: Filter<S> = {} as Filter<S>): TxQuery<S, Document<S>> {
+    find(filter: Filter<S> = {} as Filter<S>): TxQuery<S, Row<S>> {
       const query = collection.find(filter);
       return createTxQuery<S>(query);
     },
-    async upsert(doc: CreateInput<S>, options: { conflictFields: (string & keyof Document<S>)[] }) {
-      return unwrap(await collection.upsert(doc, options));
+    async upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }) {
+      return unwrap(await collection.upsert(row, options));
     },
     async update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>) {
       return unwrap(await collection.update(idOrFilter, patch));
@@ -201,7 +201,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async count(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.count(filter));
     },
-    async distinct(field: string & keyof Document<S>, filter: Filter<S> = {} as Filter<S>) {
+    async distinct(field: string & keyof Row<S>, filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.distinct(field, filter));
     },
     async aggregate(pipeline: ZeroshipDbAggregateStage[]) {
@@ -212,18 +212,18 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 }
 
 /** Wrap a Query to throw on error */
-function createTxQuery<S>(query: Query<S, Document<S>>): TxQuery<S, Document<S>> {
+function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
   return {
     sort(s: Record<string, number> | string) { query.sort(s); return this; },
     limit(n: number) { query.limit(n); return this; },
     skip(n: number) { query.skip(n); return this; },
     select(s: string | string[] | Record<string, number | boolean>) { query.select(s as any); return this as any; },
     after(id: number) { query.after(id); return this; },
-    then(resolve?: ((value: Document<S>[]) => any) | null, reject?: ((reason: unknown) => any) | null) {
+    then(resolve?: ((value: Row<S>[]) => any) | null, reject?: ((reason: unknown) => any) | null) {
       return query.then(
-        (result: Result<Document<S>[]>) => {
+        (result: Result<Row<S>[]>) => {
           if (result.error) throw result.error;
-          return resolve ? resolve(result.data as Document<S>[]) : result.data;
+          return resolve ? resolve(result.data as Row<S>[]) : result.data;
         },
         reject
       ) as any;

@@ -473,7 +473,7 @@ Native (crates/plugin-db/):
 - Auto-migration: `registerModel` creates schemas/tables/columns on cold start
 - TypeBuilder API: `t.string().required().min(3)` with full generic inference
 - Naming strategy: `naming.snakeCase` (default), `naming.asIs`, or custom
-- Typed filters (`Filter<S>`), typed updates (`UpdateExpression<S>`), typed documents (`Document<S>`)
+- Typed filters (`Filter<S>`), typed updates (`UpdateExpression<S>`), typed rows (`Row<S>`)
 - Aggregate pipeline translation: `$group`, `$match`, `$having`, `$sort`, `$limit`
 - Accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`
 

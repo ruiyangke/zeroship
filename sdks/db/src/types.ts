@@ -105,7 +105,7 @@ type IsSchemaDict<S> =
  *
  * If S is already an inferred shape (no TypeBuilder values — e.g. a
  * top-level union variant after `UnwrapSchema` peels the TypeBuilder
- * brand), return S unchanged so `Document<S>` doesn't strip every
+ * brand), return S unchanged so `Row<S>` doesn't strip every
  * field down to `unknown`.
  *
  * Distributes over unions so `InferSchema<A | B>` becomes
@@ -123,24 +123,26 @@ export type InferSchema<S> = S extends infer T
   : never;
 
 /**
- * The persisted document type: user fields + auto-generated `id`, `createdAt`, `updatedAt`.
- * Extends InferSchema so required fields remain required.
+ * The persisted row type: user fields + auto-generated `id`,
+ * `createdAt`, `updatedAt`. Extends `InferSchema` so required fields
+ * remain required.
  *
  * `version` is included as optional because `SchemaBuilder.withVersioning()`
- * (D4) injects it at DDL time. Collections without versioning will never
- * see it populated; collections with versioning treat it as a CAS guard
- * key in filters (see `Collection.updateOne` and the `_extractCasVersion`
- * helper).
+ * (D4) injects it at DDL time. Collections without versioning never
+ * populate it; versioned collections treat it as a CAS guard key in
+ * filters (see `Collection.update` and the `_extractCasVersion` helper).
  */
-export type Document<S> = InferSchema<S> & {
+export type Row<S> = InferSchema<S> & {
   id: number;
   createdAt: number;
   updatedAt: number;
   version?: number;
 };
 
-/** Input type accepted by `create()` — required fields are required, auto-generated fields excluded. */
-export type CreateInput<S> = InferSchema<S> & {
+/** Input type accepted by `insert()` / `upsert()` — required fields
+ * stay required, auto-generated fields (`id` / `createdAt` /
+ * `updatedAt`) are excluded. */
+export type RowInput<S> = InferSchema<S> & {
   id?: never;
   createdAt?: never;
   updatedAt?: never;
@@ -180,7 +182,7 @@ type FilterValue<T> =
 
 /** Typed filter for a document — each field accepts its value type or operators. */
 export type Filter<S> = {
-  [K in keyof Document<S>]?: FilterValue<Document<S>[K]>
+  [K in keyof Row<S>]?: FilterValue<Row<S>[K]>
 } & {
   $and?: Filter<S>[];
   $or?: Filter<S>[];
@@ -553,7 +555,7 @@ export const t = {
    * }),
    * ```
    *
-   * Type inference: `Document<S>["profile"]["social"]["twitter"]` is
+   * Type inference: `Row<S>["profile"]["social"]["twitter"]` is
    * `string | undefined` — the same rules as the top-level schema apply
    * recursively (`required()` keeps a key required, otherwise optional).
    */

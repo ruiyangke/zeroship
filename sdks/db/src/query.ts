@@ -4,7 +4,7 @@
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils.js";
-import { PlainObject, Result, Document, ok, err } from "./types.js";
+import { PlainObject, Result, Row, ok, err } from "./types.js";
 
 type NativeFn = (
   collection: string,
@@ -15,10 +15,10 @@ type NativeFn = (
 /**
  * Chainable query object returned by `Collection.find()`.
  * The generic parameter `S` is the raw schema shape; `P` is the projected document shape.
- * When `.select()` is called with typed field names, `P` narrows to `Pick<Document<S>, K>`.
+ * When `.select()` is called with typed field names, `P` narrows to `Pick<Row<S>, K>`.
  * Collects query options lazily and executes via the native layer when awaited.
  */
-export class Query<S = PlainObject, P = Document<S>> {
+export class Query<S = PlainObject, P = Row<S>> {
   private _collection: string;
   private _filter: ZeroshipDbFilter;
   private _toField: (s: string) => string;
@@ -96,9 +96,9 @@ export class Query<S = PlainObject, P = Document<S>> {
    * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
    *
    * When called with a typed array of literal field names, the return type narrows
-   * to `Query<S, Pick<Document<S>, K>>` so that awaited results only contain those fields.
+   * to `Query<S, Pick<Row<S>, K>>` so that awaited results only contain those fields.
    */
-  select<K extends keyof Document<S> & string>(fields: K[]): Query<S, Pick<Document<S>, K>>;
+  select<K extends keyof Row<S> & string>(fields: K[]): Query<S, Pick<Row<S>, K>>;
   select(s: string | string[] | Record<string, number | boolean>): Query<S, P>;
   select(s: string | string[] | Record<string, number | boolean>): Query<S, any> {
     if (Array.isArray(s)) {

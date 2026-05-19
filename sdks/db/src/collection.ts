@@ -14,7 +14,7 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-import { PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, type NamingStrategy, naming, ok, err } from "./types.js";
+import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type NamingStrategy, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
@@ -356,32 +356,31 @@ export class Collection<S = PlainObject> {
   }
 
   /**
-   * Inserts a single document after validating it against the schema.
-   * Returns the persisted document with `id`, `createdAt`, and `updatedAt` mapped.
+   * Inserts a single row after validating it against the schema.
+   * Returns the persisted row with `id`, `createdAt`, and `updatedAt` set.
    */
-  async insert(doc: CreateInput<S>): Promise<Result<Document<S>>> {
+  async insert(row: RowInput<S>): Promise<Result<Row<S>>> {
     return this._run(async () => {
-      const validated = validateDoc(doc as PlainObject, this._schema);
+      const validated = validateDoc(row as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const raw = await this._col().insert(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       const result = parseRaw<PlainObject>(raw);
-      return mapResultDoc(result!, this._toField) as Document<S>;
+      return mapResultDoc(result!, this._toField) as Row<S>;
     });
   }
 
-
   /**
-   * Inserts multiple documents after validating each one against the schema.
-   * Returns the persisted documents with field names mapped to the user-facing shape.
+   * Inserts multiple rows after validating each against the schema.
+   * Returns the persisted rows with field names mapped to the user-facing shape.
    */
-  async insertMany(docs: CreateInput<S>[]): Promise<Result<Document<S>[]>> {
-    if (docs.length === 0) return ok([] as Document<S>[]);
+  async insertMany(rows: RowInput<S>[]): Promise<Result<Row<S>[]>> {
+    if (rows.length === 0) return ok([] as Row<S>[]);
     return this._run(async () => {
-      const validated = (docs as PlainObject[]).map((doc) => validateDoc(doc, this._schema));
-      const outbound = validated.map(d => mapDocOutbound(d, this._toColumn));
-      const raw = await this._col().insertMany( outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
+      const validated = (rows as PlainObject[]).map((r) => validateDoc(r, this._schema));
+      const outbound = validated.map((r) => mapDocOutbound(r, this._toColumn));
+      const raw = await this._col().insertMany(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
       const results = parseRaw<PlainObject[]>(raw);
-      return (results ?? []).map(d => mapResultDoc(d, this._toField)) as Document<S>[];
+      return (results ?? []).map((r) => mapResultDoc(r, this._toField)) as Row<S>[];
     });
   }
 
@@ -389,7 +388,7 @@ export class Collection<S = PlainObject> {
    * Finds and returns the first document matching `filter`, or `null` if none exists.
    * Field names in `filter` are mapped outbound before the native call.
    */
-  async findOne(filter: Filter<S>): Promise<Result<Document<S> | null>> {
+  async findOne(filter: Filter<S>): Promise<Result<Row<S> | null>> {
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
@@ -397,12 +396,12 @@ export class Collection<S = PlainObject> {
       if (raw === null) return null;
       const result = parseRaw<PlainObject>(raw);
       if (result === null) return null;
-      return mapResultDoc(result, this._toField) as Document<S>;
+      return mapResultDoc(result, this._toField) as Row<S>;
     });
   }
 
   /** Fetch the document with the given `id`. Returns `null` if missing. */
-  async get(id: number): Promise<Result<Document<S> | null>> {
+  async get(id: number): Promise<Result<Row<S> | null>> {
     return this.findOne({ id } as Filter<S>);
   }
 
@@ -417,10 +416,10 @@ export class Collection<S = PlainObject> {
    * Returns a lazy Query that can be chained with `.sort()`, `.limit()`, `.skip()`,
    * and `.select()` before being awaited.
    */
-  find(filter: Filter<S> = {} as Filter<S>): Query<S, Document<S>> {
+  find(filter: Filter<S> = {} as Filter<S>): Query<S, Row<S>> {
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-    return new Query<S, Document<S>>(
+    return new Query<S, Row<S>>(
       this._name,
       mapped,
       async (_col, f, opts) => {
@@ -433,15 +432,15 @@ export class Collection<S = PlainObject> {
   }
 
   /**
-   * Inserts a document or updates it if a conflict occurs on the specified fields.
-   * Returns the persisted document (either newly inserted or updated).
+   * Inserts a row or updates it if a conflict occurs on the specified fields.
+   * Returns the persisted row (either newly inserted or updated).
    */
   async upsert(
-    doc: CreateInput<S>,
-    options: { conflictFields: (string & keyof Document<S>)[] }
-  ): Promise<Result<Document<S>>> {
+    row: RowInput<S>,
+    options: { conflictFields: (string & keyof Row<S>)[] }
+  ): Promise<Result<Row<S>>> {
     return this._run(async () => {
-      const validated = validateDoc(doc as PlainObject, this._schema);
+      const validated = validateDoc(row as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const conflictCols = options.conflictFields.map((f) => this._toColumn(f));
       const raw = await this._col().upsert(
@@ -449,7 +448,7 @@ export class Collection<S = PlainObject> {
         conflictCols,
       );
       const result = parseRaw<PlainObject>(raw);
-      return mapResultDoc(result!, this._toField) as Document<S>;
+      return mapResultDoc(result!, this._toField) as Row<S>;
     });
   }
 
@@ -469,7 +468,7 @@ export class Collection<S = PlainObject> {
   async update(
     idOrFilter: number | Filter<S>,
     patch: UpdateExpression<S>
-  ): Promise<Result<Document<S> | null>> {
+  ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
       const filter = (typeof idOrFilter === "number"
         ? ({ id: idOrFilter } as Filter<S>)
@@ -493,7 +492,7 @@ export class Collection<S = PlainObject> {
         }
         return null;
       }
-      return mapResultDoc(result, this._toField) as Document<S>;
+      return mapResultDoc(result, this._toField) as Row<S>;
     });
   }
 
@@ -540,7 +539,7 @@ export class Collection<S = PlainObject> {
   async delete(
     idOrFilter: number | Filter<S>,
     opts: { hard?: boolean } = {},
-  ): Promise<Result<Document<S> | null>> {
+  ): Promise<Result<Row<S> | null>> {
     return this._run(async () => {
       const filter = (typeof idOrFilter === "number"
         ? ({ id: idOrFilter } as Filter<S>)
@@ -551,12 +550,12 @@ export class Collection<S = PlainObject> {
         const col = this._toColumn("deletedAt");
         const raw = await this._col().updateOne(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<PlainObject>(raw);
-        return result === null ? null : (mapResultDoc(result, this._toField) as Document<S>);
+        return result === null ? null : (mapResultDoc(result, this._toField) as Row<S>);
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const raw = await this._col().deleteOne(mapped);
       const result = parseRaw<PlainObject>(raw);
-      return result === null ? null : (mapResultDoc(result, this._toField) as Document<S>);
+      return result === null ? null : (mapResultDoc(result, this._toField) as Row<S>);
     });
   }
 
@@ -603,7 +602,7 @@ export class Collection<S = PlainObject> {
    * Returns the unique values of `field` across documents matching `filter`.
    * Defaults to all documents when no filter is provided.
    */
-  async distinct(field: string & keyof Document<S>, filter: Filter<S> = {} as Filter<S>): Promise<Result<(string | number | boolean | null)[]>> {
+  async distinct(field: string & keyof Row<S>, filter: Filter<S> = {} as Filter<S>): Promise<Result<(string | number | boolean | null)[]>> {
     return this._run(async () => {
       if (!this._knownFields.has(field)) {
         throw new ValidationError({ [field]: { path: field, message: `unknown field: ${field}` } });
