@@ -202,7 +202,7 @@ Order of checks in `execute_outcome`'s `Outcome::Worker` arm:
 
 ## Resource-tree dispatch (v3 manifests)
 
-`docs/proposals/rpc-v2.md` §7 introduces a unified `Manifest.resources` map keyed by `rpc:<wireId>`, `/<path>`, or `*` (root). v3 manifests carry both `rules` (legacy) and `resources` (new); the gateway prefers the resource-tree path when it produces a match, falling through to the rule walker otherwise. Once Phase 1 is fully migrated and the build emits every URL path under `resources`, the rule walker retires.
+`docs/proposals/rpc.md` §7 introduces a unified `Manifest.resources` map keyed by `rpc:<wireId>`, `/<path>`, or `*` (root). v3 manifests carry both `rules` (legacy) and `resources` (new); the gateway prefers the resource-tree path when it produces a match, falling through to the rule walker otherwise. Once Phase 1 is fully migrated and the build emits every URL path under `resources`, the rule walker retires.
 
 ### Compile-time
 

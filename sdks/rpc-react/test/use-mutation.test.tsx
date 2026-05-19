@@ -6,7 +6,7 @@
  *   1. Happy path: `mutate(input)` invokes `call(input)`; the hook's
  *      `data` becomes the call result.
  *   2. Idempotency × retry (the load-bearing test from
- *      `docs/proposals/rpc-v2.md` §10): when a
+ *      `docs/proposals/rpc.md` §10): when a
  *      mutation declares `idempotent: true`, all retries of a single
  *      `mutate()` reuse the SAME UUIDv7 idempotency key. Server-side
  *      gateway dedupe can then replay the first response on retries

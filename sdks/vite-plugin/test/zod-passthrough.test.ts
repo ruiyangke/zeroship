@@ -3,7 +3,7 @@
  * validation. The synthetic entry's `_zsRpc` dispatcher passes input
  * directly to the handler — no Zod call, no envelope rewriting.
  *
- * Spec: `docs/proposals/rpc-v2.md` §4 — "Procedures without schemas
+ * Spec: `docs/proposals/rpc.md` §4 — "Procedures without schemas
  * pass arguments through unchecked. Typed clients are expected to
  * send well-formed data; if you can't trust the caller, declare a
  * schema."

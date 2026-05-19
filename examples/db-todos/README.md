@@ -1,4 +1,4 @@
-# db-v2-todos
+# db-todos
 
 End-to-end smoke test for the `@zeroship/db` v2 surfaces. A small todo
 list that exercises the Tier A/B features the v2 work shipped.
@@ -76,7 +76,7 @@ resumes from the last `validate_cursor` on a fresh `run()` after crash;
 
 These surfaces ship in v2 but aren't exercised here (see other examples):
 
-- C1 reactive queries / `useQuery` — see `examples/db-v2-chat/`
+- C1 reactive queries / `useQuery` — see `examples/db-chat/`
 - `t.union()` discriminated documents
 - `t.calendarDate()`, `t.object()`, `withVersioning()` — Tier D polish
 - P8c admin role / HMAC session init — deployment-tier concern

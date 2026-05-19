@@ -1,6 +1,6 @@
 "use server";
 
-// db-v2-todos — real-world example exercising @zeroship/db v2 surfaces.
+// db-todos — real-world example exercising @zeroship/db v2 surfaces.
 //
 // What this file demonstrates:
 //   • createDb({...}) with multi-collection schema

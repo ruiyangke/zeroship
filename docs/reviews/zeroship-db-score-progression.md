@@ -1,6 +1,6 @@
 # `@zeroship/db` v2 — score progression
 
-Critic-reviser loop log for `docs/proposals/zeroship-db-v2.md`.
+Critic-reviser loop log for `docs/proposals/zeroship-db.md`.
 
 **Baseline** (pre-loop): 3,382 words. Drafted 2026-05-12.
 

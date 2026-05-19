@@ -131,7 +131,7 @@ body's JSON.stringify dominates the sample (large = 350 µs vs tiny = 30 µs).
 
 ## Section 3 — Semantic constraints
 
-What the proposal commits to (`docs/proposals/rpc-v2.md` §3, lines 250–262):
+What the proposal commits to (`docs/proposals/rpc.md` §3, lines 250–262):
 
 - **Always-present fields:** `user`, `requestId`, `traceId`, `signal`,
   `idempotencyKey`, `headers`, `method`, `url`, `waitUntil`, `log`, `env`,
@@ -217,7 +217,7 @@ adoption window) pay zero V8-allocation cost.
 
 ### S2 — Vite-plugin static analysis: skip ALS install for ctx-free procedures
 **Mechanism.** The vite-plugin's transform pass already walks the procedure
-import graph for "use server" detection (`docs/proposals/rpc-v2.md` §1).
+import graph for "use server" detection (`docs/proposals/rpc.md` §1).
 Extend it to detect whether any imported binding from `@zeroship/server`
 is actually used by the procedure or its transitive imports. Annotate
 the synthetic entry's `_procedures[wid]` with `{ needsCtx: false }`. The
@@ -491,7 +491,7 @@ These need a profiler run or microbench before committing to a path.
 7. **Was there any other code change between `aab1153` (last good
    pre-bisect commit) and `9be897d` that might contribute?** The bisect
    identified `9be897d` definitively but there may have been parallel
-   landing of synthetic-entry changes (`docs/proposals/rpc-v2.md` §6's
+   landing of synthetic-entry changes (`docs/proposals/rpc.md` §6's
    `_zsRpc` slow path) that re-invoke the procedure for AsyncIterator.
    Confirm via `git log 9be897d~5..9be897d -- crates/runtime crates/worker`.
 8. **Does setting `app_id = None` on the worker (i.e. skipping

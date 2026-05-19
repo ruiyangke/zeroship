@@ -168,7 +168,7 @@ export async function add(input) { return input; }
   });
 
   test("graph-only marker: edge from marked file to undirected target", async () => {
-    // The `docs/proposals/rpc-v2.md` §1 case: client imports `helper`
+    // The `docs/proposals/rpc.md` §1 case: client imports `helper`
     // directly from a
     // file-level "use server" module, and that module re-exports
     // `helper` from a third file with NO directive. The third file's

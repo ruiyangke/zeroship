@@ -3,14 +3,14 @@
 // Compute the manifest's resource tree:
 //
 //   - resources    flat map of `<key> -> resource` per
-//                  `docs/proposals/rpc-v2.md` §7
+//                  `docs/proposals/rpc.md` §7
 //   - transformer  always "superjson" by default
 //
 // Validation is wired into the runtime dispatch — the synthetic SSR
 // entry calls `proc.config.input.parse(args)` before invoking the
 // user handler. The manifest never carries JSONSchemas.
 //
-// Wire identity (from `docs/proposals/rpc-v2.md` §2): a pure function
+// Wire identity (from `docs/proposals/rpc.md` §2): a pure function
 // of current source.
 //
 //   1. fn.config.id (explicit) wins.
@@ -22,9 +22,9 @@
 //
 // No previous-build alias state. No persistence. The wireId is always
 // what the current source says. (The earlier alias system is gone — see
-// the §2 update in `docs/proposals/rpc-v2.md`.)
+// the §2 update in `docs/proposals/rpc.md`.)
 //
-// Wireshape: see `docs/proposals/rpc-v2.md` §7.
+// Wireshape: see `docs/proposals/rpc.md` §7.
 
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
@@ -286,7 +286,7 @@ type WireIdResolution = {
 
 /**
  * Pick the wireId for a procedure. Resolution order (highest priority
- * first; see `docs/proposals/rpc-v2.md` §2):
+ * first; see `docs/proposals/rpc.md` §2):
  *
  *   1. `proc.config.id` (explicit, set on the procedure or on the
  *      module).
@@ -316,7 +316,7 @@ const KEY_FORMAT_RE = /^(?:\*|rpc:[a-zA-Z0-9._*-]+|\/[\w\-/.\[\]:*]*)$/;
 
 /**
  * Validate the authored, flattened resource map against the rules in
- * `docs/proposals/rpc-v2.md` §7 ("Validation"). Throws (production) or
+ * `docs/proposals/rpc.md` §7 ("Validation"). Throws (production) or
  * warns (dev) on failure.
  */
 function validateResources(
@@ -423,7 +423,7 @@ function validateResources(
  * segment (`/api/admin/users` → `/api/admin`). For RPC ids we drop the
  * last dot segment (`rpc:todos.delete` → `rpc:todos`). The bare `*`
  * is everyone's ultimate parent — but we don't infer it as a parent
- * for this check; `docs/proposals/rpc-v2.md` §7 talks about explicit
+ * for this check; `docs/proposals/rpc.md` §7 talks about explicit
  * parent declarations.
  */
 function parentResourceKey(key: string): string | null {

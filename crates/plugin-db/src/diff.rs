@@ -1,5 +1,5 @@
 //! Schema diff engine — A2 of the @zeroship/db v2 proposal
-//! (docs/proposals/zeroship-db-v2.md, section A2).
+//! (docs/proposals/zeroship-db.md, section A2).
 //!
 //! Compares a desired (declared) schema against the live `pg_catalog`
 //! state and classifies each change into **additive** (auto-apply),

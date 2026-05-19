@@ -1,7 +1,7 @@
 /**
  * Function-level `"use server"` detection.
  *
- * `docs/proposals/rpc-v2.md` §1 says a function whose first statement
+ * `docs/proposals/rpc.md` §1 says a function whose first statement
  * is `"use server"`
  * is a server function regardless of the enclosing file's directive.
  * The detector walks every function-like node — declarations,
@@ -74,7 +74,7 @@ h = function() {
   });
 
   test("Nested function inside another function is detected", () => {
-    // The `docs/proposals/rpc-v2.md` §1 RSC example: a server function
+    // The `docs/proposals/rpc.md` §1 RSC example: a server function
     // declared inside a server-component render body.
     const ast = parse(`
 export default async function PostPage({ params }) {

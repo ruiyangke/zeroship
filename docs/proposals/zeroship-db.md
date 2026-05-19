@@ -1373,7 +1373,7 @@ All sweepers are idempotent. Failure of a sweeper run never corrupts state; the 
 
 **zeroship internal:**
 - `docs/reference/db.md` — current `@zeroship/db` reference
-- `docs/proposals/rpc-v2.md` — current RPC contract (procedure/query/mutation/stream wrappers)
+- `docs/proposals/rpc.md` — current RPC contract (procedure/query/mutation/stream wrappers)
 - `docs/reference/billing-metering.md` — `zeroship.meter` integration for migration quotas (B1)
 - `AGENTS.md` — typed_id invariant referenced in B2 ID-system discussion
 - `ISSUES.md` ISS-24 — migration log requirement

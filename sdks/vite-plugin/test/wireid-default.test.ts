@@ -6,7 +6,7 @@
  * name. Path-derived slugs are gone from wireId derivation entirely
  * (they remain only for diagnostic messages).
  *
- * `docs/proposals/rpc-v2.md` §2:
+ * `docs/proposals/rpc.md` §2:
  *   1. fn.config.id (explicit)            wins
  *   2. <exportName> alone                  — default
  */

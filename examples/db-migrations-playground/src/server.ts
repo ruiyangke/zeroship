@@ -1,6 +1,6 @@
 "use server";
 
-// db-v2-migrations-playground — focused demo of @zeroship/migrations (B1).
+// db-migrations-playground — focused demo of @zeroship/migrations (B1).
 //
 // Three migrations illustrating the expand-migrate-contract pattern:
 //   1. backfillSeverity — additive backfill (NULL → "info")

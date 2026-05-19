@@ -1,7 +1,7 @@
 //! RPC v2 abort plumbing: per-isolate `AbortRegistry` plus
 //! eviction-time abort fan-out.
 //!
-//! See `docs/proposals/rpc-v2.md` §3 ("Abort source plumbing"). When the
+//! See `docs/proposals/rpc.md` §3 ("Abort source plumbing"). When the
 //! worker's LRU cache evicts an isolate, every in-flight procedure must
 //! get its `ctx.signal` aborted so user code (a `setTimeout` await, a
 //! pending `fetch`, an `addEventListener("abort", ...)` consumer) can

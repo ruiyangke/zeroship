@@ -1,5 +1,5 @@
 //! `__zeroship_migrations` audit table — A3 of the @zeroship/db v2 proposal
-//! (docs/proposals/zeroship-db-v2.md, section A3).
+//! (docs/proposals/zeroship-db.md, section A3).
 //!
 //! Provides an append-only, per-app schema migration log: every DDL,
 //! validation pass, and (future) backfill writes a row keyed by deploy

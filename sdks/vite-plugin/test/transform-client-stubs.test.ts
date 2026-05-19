@@ -1,7 +1,7 @@
 /**
  * Client-environment transform output.
  *
- * `docs/proposals/rpc-v2.md` §5 says the client transform replaces
+ * `docs/proposals/rpc.md` §5 says the client transform replaces
  * server-marked exports
  * with branded ProcedureRef stubs that:
  *

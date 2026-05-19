@@ -1,6 +1,6 @@
 //
 // `__makeProcedure(call, meta)` wraps a raw HTTP-RPC call in a
-// callable + hooks-on-function object. `docs/proposals/rpc-v2.md` §10
+// callable + hooks-on-function object. `docs/proposals/rpc.md` §10
 // defines the contract:
 //
 //   const list = __makeProcedure(input => callList(input), {
@@ -328,7 +328,7 @@ export function __makeProcedure<TIn = unknown, TOut = unknown>(
       get() {
         const useMutation = requireHook("useMutation");
         return (options?: Record<string, unknown>) => {
-          // Per `docs/proposals/rpc-v2.md` §10 "Idempotency × retry interaction": when
+          // Per `docs/proposals/rpc.md` §10 "Idempotency × retry interaction": when
           // `meta.idempotent === true`, we generate ONE key per
           // `mutate()` call and reuse it across React Query retries.
           //

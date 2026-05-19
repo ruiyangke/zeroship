@@ -14,7 +14,7 @@
 //
 // B3 capability typing: `QueryCtx` / `MutationCtx` / `ActionCtx`
 // surfaces below model the per-wrapper capability set defined by the
-// `docs/proposals/zeroship-db-v2.md` §B3 table. Wrappers in
+// `docs/proposals/zeroship-db.md` §B3 table. Wrappers in
 // `./wrappers.ts` constrain their `handler` argument to one of these
 // `ctx` surfaces, so misuse (a `query` that writes, a `mutation` that
 // calls `fetch`) is caught by `tsc` before any code runs.
@@ -36,7 +36,7 @@ export type AuthLevel = "anon" | "user" | "admin";
  *
  * The five kinds split into two axes:
  *
- *  - **Capability** (B3 from `docs/proposals/zeroship-db-v2.md`):
+ *  - **Capability** (B3 from `docs/proposals/zeroship-db.md`):
  *    - `query`     — DB reads only, no `fetch()`, runs inside a
  *                    read-only Postgres transaction.
  *    - `mutation`  — DB read + write, no `fetch()`, runs inside a
@@ -167,7 +167,7 @@ export interface StaticAction {
 
 /**
  * One node in the authoring resource tree. Mirrors the manifest shape
- * described in `docs/proposals/rpc-v2.md` §7. Children are an
+ * described in `docs/proposals/rpc.md` §7. Children are an
  * authoring convenience; the build flattens them to fully-qualified
  * keys.
  *
@@ -212,7 +212,7 @@ export interface Timeout {
 
 /**
  * App-level RPC defaults. Procedures inherit these unless overridden by
- * `fn.config` / module-level `$config`. `docs/proposals/rpc-v2.md` §1
+ * `fn.config` / module-level `$config`. `docs/proposals/rpc.md` §1
  * defines the resolution order:
  * `fn.config` → module `$config` → `defineApp({ rpc: { defaults } })` →
  * built-in defaults.
@@ -232,7 +232,7 @@ export interface RpcConfig {
    * If `true`, error redaction is disabled in production builds —
    * thrown errors keep their full message on the wire. Useful for
    * staging environments where you want production-like routing but
-   * readable errors. See `docs/proposals/rpc-v2.md` §16 for the
+   * readable errors. See `docs/proposals/rpc.md` §16 for the
    * production redaction rule.
    */
   dev?: boolean;
@@ -267,7 +267,7 @@ export interface DefinedApp {
 // imports here. The wrappers in `./wrappers.ts` use them as the type
 // constraint on the `handler`'s first parameter.
 //
-// Capability matrix (mirrors `docs/proposals/zeroship-db-v2.md` §B3):
+// Capability matrix (mirrors `docs/proposals/zeroship-db.md` §B3):
 //
 //   wrapper      DB read   DB write   fetch()   runQuery   runMutation
 //   ──────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 **Status:** Reference
 
-Plugin tracker for the build/transform side of zeroship apps. This page covers the rules for what becomes an RPC endpoint vs. what stays private to the server bundle. Other build-system pieces (Vite Environment API, the synthetic SSR entry, asset emission) live in `docs/reference/vite-environment-api.md` and `docs/proposals/rpc-v2.md`.
+Plugin tracker for the build/transform side of zeroship apps. This page covers the rules for what becomes an RPC endpoint vs. what stays private to the server bundle. Other build-system pieces (Vite Environment API, the synthetic SSR entry, asset emission) live in `docs/reference/vite-environment-api.md` and `docs/proposals/rpc.md`.
 
 ## What gets published as an RPC
 
@@ -79,6 +79,6 @@ If you need a custom wrapper helper (e.g., one that records an audit log before 
 
 ## See also
 
-- `docs/proposals/rpc-v2.md` — the complete RPC design (wire shape, wireId derivation, manifest emission)
+- `docs/proposals/rpc.md` — the complete RPC design (wire shape, wireId derivation, manifest emission)
 - `docs/reference/vite-environment-api.md` — Vite's Environment API and the V8 dev runtime
 - `ISSUES.md` — historical ISS-02 entry (closed) for the path-convention footgun

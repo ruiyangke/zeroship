@@ -1,4 +1,4 @@
-# db-v2-chat
+# db-chat
 
 Reactive-query example. Three related collections, channel-scoped live
 message stream. Exercises the C1 + P8b + React layers shipped in v2.
@@ -71,7 +71,7 @@ npm run smoke         # in a third shell — exercises 5 named checks
 ## What's NOT in this example
 
 - P8c admin role / HMAC session init (deployment-tier; not visible from app code)
-- `t.union` discriminated documents — see `examples/db-v2-todos/` (also doesn't have it; not yet illustrated)
+- `t.union` discriminated documents — see `examples/db-todos/` (also doesn't have it; not yet illustrated)
 - `withVersioning` optimistic concurrency
 - Real-WS multiplexing — the React hook uses the AsyncIterable path today;
   multiplexed transport is a perf follow-up

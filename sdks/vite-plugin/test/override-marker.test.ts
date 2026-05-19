@@ -1,7 +1,7 @@
 /**
  * Override marker validation.
  *
- * `docs/proposals/rpc-v2.md` §7 says that when a child resource
+ * `docs/proposals/rpc.md` §7 says that when a child resource
  * shadows an inherited field, it MUST list that field in
  * `override: [...]`. Without the marker, the build refuses with a
  * clear error.

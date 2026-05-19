@@ -474,7 +474,7 @@ export default { fetch: _zsFetch, rpc: _zsRpc };
 // generator a `ServerBinding` map keyed by `<sourceFile>::<exportName>`.
 // We emit one ESM import per target file (deduplicated) and a static
 // `_procedures` literal keyed by wireId. This matches the shape in
-// `docs/proposals/rpc-v2.md` §5.
+// `docs/proposals/rpc.md` §5.
 
 function buildPhase2Entry(
   userImport: string,

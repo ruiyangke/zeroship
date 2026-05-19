@@ -4,7 +4,7 @@
 //   "superjson"  (default; matches manifest.transformer)
 //      Wraps a value as `{ json, meta? }` so Date / BigInt / Map /
 //      Set / Decimal round-trip across the wire faithfully. Drives
-//      the "lossless" guarantee in `docs/proposals/rpc-v2.md` §6.
+//      the "lossless" guarantee in `docs/proposals/rpc.md` §6.
 //
 //   "json"
 //      Plain JSON.stringify / JSON.parse. Use when the server side

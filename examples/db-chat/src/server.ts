@@ -1,6 +1,6 @@
 "use server";
 
-// db-v2-chat (server module) — exercises C1 reactive queries + P8b
+// db-chat (server module) — exercises C1 reactive queries + P8b
 // read-set narrowing end-to-end.
 //
 // What this file demonstrates:

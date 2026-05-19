@@ -1,6 +1,6 @@
 //
 // `rpcInvalidate(prefix)` bulk-invalidates every cached query whose id
-// starts with the given prefix. `docs/proposals/rpc-v2.md` §10 defines
+// starts with the given prefix. `docs/proposals/rpc.md` §10 defines
 // this helper:
 //
 //   await rpcInvalidate("todos.");   // invalidates todos.list, todos.get, ...

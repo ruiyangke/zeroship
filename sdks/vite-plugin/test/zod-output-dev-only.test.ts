@@ -6,7 +6,7 @@
  * skip validation for hot-path performance. Toggled by
  * `process.env.NODE_ENV`.
  *
- * Spec: `docs/proposals/rpc-v2.md` §4 — "Output validation runs in
+ * Spec: `docs/proposals/rpc.md` §4 — "Output validation runs in
  * dev mode only (cheap dev-time correctness check); skipped in
  * production for hot-path performance."
  */

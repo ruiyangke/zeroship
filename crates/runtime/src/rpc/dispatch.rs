@@ -1,6 +1,6 @@
 //! RPC v2 ALS plumbing for the per-request `ctx`.
 //!
-//! See `docs/proposals/rpc-v2.md` §3 (Ambient context). The per-request
+//! See `docs/proposals/rpc.md` §3 (Ambient context). The per-request
 //! `ctx` itself is now a native `RpcCtx` v8_class with lazy accessors —
 //! see `crate::rpc::ctx_holder`. This file keeps the small surface that
 //! pumps the holder into V8's `ContinuationPreservedEmbedderData` slot

@@ -1,5 +1,5 @@
 {
-  "name": "db-v2-todos",
+  "name": "db-migrations-playground",
   "private": true,
   "type": "module",
   "scripts": {

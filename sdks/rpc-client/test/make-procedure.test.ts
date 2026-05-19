@@ -1,7 +1,7 @@
 /**
  * `__makeProcedure` + `_hookRegistry`.
  *
- * `docs/proposals/rpc-v2.md` §10 defines this surface:
+ * `docs/proposals/rpc.md` §10 defines this surface:
  *
  *   - `__makeProcedure(call, meta)` returns a callable that ALSO carries
  *     hook getters. The getters read from a closure-private hook
@@ -203,7 +203,7 @@ describe("__makeProcedure — populated registry plumbing", () => {
     assert.deepEqual(receivedKey, ["todos.list", { limit: 50 }]);
   });
 
-  // ── docs/proposals/rpc-v2.md §10 "Idempotency × retry interaction" ──
+  // ── docs/proposals/rpc.md §10 "Idempotency × retry interaction" ──
   //
   // React Query retries call the mutationFn multiple times for one
   // logical `mutate(input)` call. The transport must reuse a SINGLE

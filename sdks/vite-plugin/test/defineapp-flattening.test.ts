@@ -108,7 +108,7 @@ export default defineApp({
     // The manifest wire shape uses snake_case (rate_limit, max_input_bytes,
     // publicly_accessible, csrf_origins). The authoring API uses camelCase.
     // The flattener does the rename so the manifest matches
-    // `docs/proposals/rpc-v2.md` §7.
+    // `docs/proposals/rpc.md` §7.
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
 export default defineApp({

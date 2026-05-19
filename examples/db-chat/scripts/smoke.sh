@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for db-v2-chat.
+# End-to-end smoke test for db-chat.
 #
 # Exercises C1 reactive queries + P8b read-set narrowing + cross-worker
 # WAL propagation. Requires:

@@ -30,7 +30,7 @@ const WRAPPER_NAMES = new Set([
 /** Wrapper-marker discriminator. `procedure` is generic; the others
  *  imply a kind the transform reads statically.
  *
- *  B3 capability mapping (see `docs/proposals/zeroship-db-v2.md` §B3):
+ *  B3 capability mapping (see `docs/proposals/zeroship-db.md` §B3):
  *    - `query`  → DB-read tx, no fetch
  *    - `mutation` → DB-write tx, no fetch
  *    - `action` / `stream` / `subscription` / `procedure` →
@@ -151,7 +151,7 @@ export function detectFileLevelUseServer(ast: { body?: unknown[] }): boolean {
 /**
  * Function-level `"use server"` directive detector.
  *
- * `docs/proposals/rpc-v2.md` §1 says that a function whose first
+ * `docs/proposals/rpc.md` §1 says that a function whose first
  * statement is the string
  * literal `"use server"` is a server function regardless of whether
  * the enclosing file carries a file-level directive. The function may
@@ -706,7 +706,7 @@ function collectConfig(astBody: any[]): {
  * Emits a `__makeProcedure` call from `@zeroship/rpc-client` — the
  * builder attaches the `__SERVER_REFERENCE` brand, hook getters
  * (lazy-initialized via the `_hookRegistry`), and `{ id, kind, wire }`
- * metadata uniformly. `docs/proposals/rpc-v2.md` §5 requires this so
+ * metadata uniformly. `docs/proposals/rpc.md` §5 requires this so
  * RSC `<form action={fn}>` works without JS and runtime callers can
  * detect stubs passed as props by checking the brand. */
 function clientUnaryStub(name: string, methodName: string, kind: string): string {
@@ -1014,7 +1014,7 @@ export function transformPlugin(_rpcEndpoint: string, state: TransformState): Pl
         }
 
         // Resolve wireId using the order from
-        // `docs/proposals/rpc-v2.md` §2: explicit `id` wins (looked up
+        // `docs/proposals/rpc.md` §2: explicit `id` wins (looked up
         // in both the wrapper's second-arg config and the legacy
         // `<fn>.config = { ... }` assignment); default is the bare
         // export name. The production-only "missing id" check happens

@@ -7,7 +7,7 @@
  * the vite-plugin merges into the existing manifest:
  *
  *   - `manifest.resources`   — flat key map per
- *     `docs/proposals/rpc-v2.md` §7
+ *     `docs/proposals/rpc.md` §7
  *   - `manifest.transformer` — `"superjson"` (the current default)
  *
  * These tests feed the emitter a tmpdir fixture and inspect the output.

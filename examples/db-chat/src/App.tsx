@@ -1,4 +1,4 @@
-// db-v2-chat client — exercises @zeroship/react useQuery on top of the
+// db-chat client — exercises @zeroship/react useQuery on top of the
 // server's reactive query primitives.
 //
 // What this file demonstrates:

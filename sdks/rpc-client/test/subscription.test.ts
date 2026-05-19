@@ -11,7 +11,7 @@
  *   });
  *   handle.unsubscribe();   // or controller.abort()
  *
- * Wire — see `docs/proposals/rpc-v2.md` §6 (Subscription wire) and
+ * Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and
  * `crates/runtime/src/init.rs::_zsAcceptSubscription`.
  */
 

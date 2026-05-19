@@ -1,6 +1,6 @@
 //! Idempotency dedupe for `idempotent: true` mutations.
 //!
-//! Per `docs/proposals/rpc-v2.md` §8 (Idempotency). Implementation rules:
+//! Per `docs/proposals/rpc.md` §8 (Idempotency). Implementation rules:
 //!
 //! - Wire requires `Idempotency-Key` for any procedure whose
 //!   `EffectivePolicy.idempotent` is `true`.

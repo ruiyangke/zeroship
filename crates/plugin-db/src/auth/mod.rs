@@ -3,7 +3,7 @@
 //!
 //! ## What this module ships
 //!
-//! Per the zeroship-db-v2 proposal (R5-R8 of the review loop, line 285
+//! Per the zeroship-db proposal (R5-R8 of the review loop, line 285
 //! onward), the C1 replication-slot owner and audit-table writer must
 //! be a **platform service role** (`__zeroship_platform_role`), not the
 //! per-app role. App roles get USAGE on a privileged admin schema and

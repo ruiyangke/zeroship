@@ -351,7 +351,7 @@ function errorResponse(err) {
 // ── Subscription wire dispatch ────────────────────────────────────────────
 //
 // Subscription procedures are async generators wired over WebSocket per
-// `docs/proposals/rpc-v2.md` §6 (Subscription wire). Frame protocol:
+// `docs/proposals/rpc.md` §6 (Subscription wire). Frame protocol:
 //
 //   Client → server (first frame after upgrade):
 //     {"t":"hello","input":<json>}

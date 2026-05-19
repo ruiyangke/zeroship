@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke for db-v2-migrations-playground.
+# End-to-end smoke for db-migrations-playground.
 #
 # Walks the @zeroship/migrations lifecycle: seed → dry-run → run →
 # status → cancel/reset → audit-log inspection.

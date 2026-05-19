@@ -1216,7 +1216,7 @@ pub fn register_model(
 }
 
 /// Execute DDL for registerModel. Implements the four-phase orchestrator
-/// from proposal A2 (`docs/proposals/zeroship-db-v2.md`):
+/// from proposal A2 (`docs/proposals/zeroship-db.md`):
 ///
 ///   1. **Bootstrap**: ensure schema exists and the `__zeroship_migrations`
 ///      audit table is provisioned (A3).

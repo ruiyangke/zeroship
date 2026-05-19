@@ -1,7 +1,7 @@
 /**
  * Secure-by-default validation.
  *
- * `docs/proposals/rpc-v2.md` §7 ("Validation") requires
+ * `docs/proposals/rpc.md` §7 ("Validation") requires
  * `auth: "anon"` to be paired with `publiclyAccessible: true` on the
  * same resource. Build error in production; warning in dev.
  */

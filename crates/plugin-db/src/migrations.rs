@@ -1,5 +1,5 @@
 //! B1 — data backfill orchestrator. Native side of the
-//! `@zeroship/migrations` component (`docs/proposals/zeroship-db-v2.md`
+//! `@zeroship/migrations` component (`docs/proposals/zeroship-db.md`
 //! section B1).
 //!
 //! ## Surface (registered on `zeroship.db.*` by `lib.rs`)

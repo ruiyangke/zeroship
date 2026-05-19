@@ -22,7 +22,7 @@
 //! The point is to confirm dispatch overhead is roughly constant
 //! across header shapes, not to measure FormData decoding.
 //!
-//! Per `docs/proposals/rpc-v2.md` §5, this baseline decides whether
+//! Per `docs/proposals/rpc.md` §5, this baseline decides whether
 //! the current implementation stays on the single-call ABI or moves to a two-step
 //! `#[v8_method(fastcall)] enqueue` shape. If single-call dispatch is
 //! a small fraction of typical procedure latency, single-call wins;

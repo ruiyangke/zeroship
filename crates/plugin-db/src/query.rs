@@ -363,7 +363,7 @@ pub fn build_add_column(
 
 // ---------------------------------------------------------------------------
 // Index builders for registerModel — A1 of the @zeroship/db v2 proposal
-// (docs/proposals/zeroship-db-v2.md). Materialises `t.string().index()` /
+// (docs/proposals/zeroship-db.md). Materialises `t.string().index()` /
 // `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
 // the markers actually do something at the database layer.
 // ---------------------------------------------------------------------------
@@ -742,7 +742,7 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
     }
 
     // NOTE: `unique` is intentionally NOT emitted as a column-level constraint
-    // here. The proposal (zeroship-db-v2.md A1) mandates that every uniqueness
+    // here. The proposal (zeroship-db.md A1) mandates that every uniqueness
     // marker becomes a `CREATE UNIQUE INDEX CONCURRENTLY` so the build never
     // blocks writes. The inline `UNIQUE` keyword would build the index under
     // ACCESS EXCLUSIVE lock and would also produce a Postgres-auto-named index
@@ -3155,7 +3155,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // A1 — Materialised indexes (zeroship-db-v2 proposal §A1).
+    // A1 — Materialised indexes (zeroship-db proposal §A1).
     //
     // Before A1, `t.string().index()` and `t.string().unique()` set
     // `FieldDef.index/unique` in the SDK but the Rust DDL emitter produced

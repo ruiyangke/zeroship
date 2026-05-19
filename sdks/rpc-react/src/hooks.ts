@@ -50,7 +50,7 @@ class UnimplementedError extends Error {
   readonly code = "UNIMPLEMENTED";
   constructor() {
     super(
-      "useSubscription is not implemented yet. The planned WebSocket subscription transport is documented in docs/proposals/rpc-v2.md §6.",
+      "useSubscription is not implemented yet. The planned WebSocket subscription transport is documented in docs/proposals/rpc.md §6.",
     );
     this.name = "UnimplementedError";
   }

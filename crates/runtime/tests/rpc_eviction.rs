@@ -5,7 +5,7 @@
 //! eviction, automatic unregister via Drop, and the worker-style
 //! integration smoke (1-slot LRU evicting app A when app B loads).
 //!
-//! See `docs/proposals/rpc-v2.md` §3 ("Abort source plumbing").
+//! See `docs/proposals/rpc.md` §3 ("Abort source plumbing").
 
 mod common;
 

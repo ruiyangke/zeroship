@@ -4,7 +4,7 @@
  * When the plugin has run the reference-graph walk it hands the
  * generator a `Map<string, ServerBinding>`. The output emits one
  * namespace import per target file and a static `_procedures` literal
- * keyed by wireId. `docs/proposals/rpc-v2.md` §5 requires the
+ * keyed by wireId. `docs/proposals/rpc.md` §5 requires the
  * generated code to stay structurally compatible with `__dispatchRpc`;
  * until the upstream stub ships, we keep the older inline dispatch
  * behavior with a TODO.
@@ -74,7 +74,7 @@ describe("buildServerEntrySource — binding-fed emission", () => {
     assert.match(code, /"b1":\s*_user_TARGET_1_\.b1/);
   });
 
-  test("default export shape carries fetch + rpc per docs/proposals/rpc-v2.md §5", () => {
+  test("default export shape carries fetch + rpc per docs/proposals/rpc.md §5", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([

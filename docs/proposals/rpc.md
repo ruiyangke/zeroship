@@ -2135,7 +2135,7 @@ Output:
 
   Bump to v2: declare a new export with version: "2", id: "todos.add",
   and a deprecates: { version: "1", sunsetAt: <date> } block.
-  See docs/proposals/rpc-v2.md §13.
+  See docs/proposals/rpc.md §13.
 ```
 
 #### Bypass for false positives

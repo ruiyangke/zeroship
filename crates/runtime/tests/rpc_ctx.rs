@@ -6,7 +6,7 @@
 //! amendment), AbortSignal binding, and ALS-backed survival across
 //! `await` / `.then` boundaries.
 //!
-//! See `docs/proposals/rpc-v2.md` §3 (Ambient context).
+//! See `docs/proposals/rpc.md` §3 (Ambient context).
 
 mod common;
 use common::{dispatch, m};

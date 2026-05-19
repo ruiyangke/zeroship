@@ -13,7 +13,7 @@
 //!   read and cached on the holder.
 //! - `ctx.headers` and `ctx.url` are also cached — multiple reads return
 //!   the same JS object (so `ctx.headers === ctx.headers` is `true`).
-//!   Per the 2026-05-07 amendment to `docs/proposals/rpc-v2.md` §3 these
+//!   Per the 2026-05-07 amendment to `docs/proposals/rpc.md` §3 these
 //!   are NOT frozen — mutations succeed and are request-scoped.
 
 #![allow(unsafe_code)]

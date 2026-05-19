@@ -51,7 +51,7 @@ pub struct Manifest {
     /// Unified resource map. Keys are `"rpc:<wireId>"` or `"/<path>"`
     /// or `"*"`.
     ///
-    /// See `docs/proposals/rpc-v2.md` §7 for the full shape and merge
+    /// See `docs/proposals/rpc.md` §7 for the full shape and merge
     /// semantics. The gateway compiles this into per-resource
     /// `EffectivePolicy` records at app-load time so per-request lookup
     /// is a single `HashMap::get`.
@@ -135,7 +135,7 @@ pub struct ManifestMetadata {
 impl Manifest {
     /// Default schema version for `#[serde(default)]`.
     ///
-    /// v1 is the initial published shape — see `docs/proposals/rpc-v2.md`
+    /// v1 is the initial published shape — see `docs/proposals/rpc.md`
     /// §7. Future breaking changes bump to v2.
     fn default_version() -> u16 { 1 }
 

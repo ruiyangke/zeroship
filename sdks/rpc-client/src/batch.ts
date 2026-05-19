@@ -1,7 +1,7 @@
 //
 // Auto-batching link for queries (opt-in via `client({ batch: true })`).
 //
-// Semantics (`docs/proposals/rpc-v2.md` §6, "Batching"):
+// Semantics (`docs/proposals/rpc.md` §6, "Batching"):
 //   - Queries fired in the same microtask tick collapse into one
 //     POST /_zs/v1/_batch.
 //   - Mutations and streams are NEVER batched — they pass through

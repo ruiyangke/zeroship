@@ -4,7 +4,7 @@
 //! by the runtime's `setup_globals` path; we drive it through the
 //! synthetic-entry shim so the wire shape matches production.
 //!
-//! See `docs/proposals/rpc-v2.md` §RpcError surface for the contract.
+//! See `docs/proposals/rpc.md` §RpcError surface for the contract.
 
 mod common;
 use common::{dispatch, m};

@@ -527,7 +527,7 @@ export function streamCall<TOut = unknown>(
 
 // ── Subscriptions ────────────────────────────────────────────────────────
 //
-// Wire — see `docs/proposals/rpc-v2.md` §6 (Subscription wire) and the
+// Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and the
 // runtime's `_zsAcceptSubscription` (`crates/runtime/src/init.rs`).
 //
 //   GET wss://.../_zs/v1/<id>

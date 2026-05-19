@@ -84,7 +84,7 @@ interface Manifest {
   asset_version: 0;
   sourcemaps: Record<Sha256Hex, Sha256Hex>;
   metadata: ManifestMetadata;
-  /** Unified resource tree — see `docs/proposals/rpc-v2.md` §7. */
+  /** Unified resource tree — see `docs/proposals/rpc.md` §7. */
   resources?: Record<string, Record<string, unknown>>;
   /** Wire transformer: `"superjson"` (default) or `"json"`. */
   transformer?: "superjson" | "json";

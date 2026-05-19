@@ -282,7 +282,7 @@ export type FieldDefaultValue = string | number | boolean | Date | null | PlainO
  * Foreign-key action policy for `t.ref()` (proposal B2).
  *
  * - `restrict`  — refuse to delete the parent row if any child references it.
- *                 This is the **default** per proposal R1 (`docs/proposals/zeroship-db-v2.md`
+ *                 This is the **default** per proposal R1 (`docs/proposals/zeroship-db.md`
  *                 around line 762): silent cascading deletes are catastrophic
  *                 data-loss, so opt-in cascade is the safer default.
  * - `cascade`   — child rows are deleted/updated along with the parent.

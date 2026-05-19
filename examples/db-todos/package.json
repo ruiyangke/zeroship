@@ -1,5 +1,5 @@
 {
-  "name": "db-v2-chat",
+  "name": "db-todos",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,15 +10,11 @@
   },
   "dependencies": {
     "@zeroship/db": "workspace:*",
-    "@zeroship/react": "workspace:*",
+    "@zeroship/migrations": "workspace:*",
     "@zeroship/server": "workspace:*",
-    "@zeroship/vite-plugin": "workspace:*",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
     "typescript": "catalog:",
     "vite": "catalog:"
   }

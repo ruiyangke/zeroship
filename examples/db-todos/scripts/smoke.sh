@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for db-v2-todos.
+# End-to-end smoke test for db-todos.
 #
 # Verifies the @zeroship/db v2 surfaces this example exercises actually
 # work against a running dev server. Each check is named after the

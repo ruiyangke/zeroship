@@ -1,4 +1,4 @@
-# db-v2-migrations-playground
+# db-migrations-playground
 
 Focused demo of `@zeroship/migrations` (B1, commit `7ba2869`) — the
 batched + resumable + online + dry-runnable data backfill component.
