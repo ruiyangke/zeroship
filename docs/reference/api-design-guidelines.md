@@ -67,8 +67,8 @@ Read the code aloud. If it sounds like a sentence, it's right.
 // Reads as: "find one user where email is alice"
 await users.findOne({ email: "alice@example.com" });
 
-// Reads as: "update one product where id is X, increment stock"
-await products.updateOne({ id }, { stock: { $inc: 1 } });
+// Reads as: "update product X, increment stock" — returns the row
+await products.update(id, { stock: { $inc: 1 } });
 
 // Reads as: "delete many sessions where expires at is less than now"
 await sessions.deleteMany({ expires_at: { $lt: new Date() } });
@@ -186,17 +186,21 @@ Each method in the chain narrows or transforms the query. The chain executes on 
 
 | Pattern | Convention | Examples |
 |---|---|---|
-| Get one thing | `findOne`, `get` | `users.findOne({ id })` |
-| Get many things | `find`, `list` | `users.find({ role: "admin" })` |
-| Create | `insert` | `users.insert({ name: "Alice" })` |
-| Create many | `insertMany` | `users.insertMany([...])` |
-| Modify one | `updateOne` | `users.updateOne({ id }, { name: "Bob" })` |
-| Modify many | `updateMany` | `users.updateMany({ old: true }, { archived: true })` |
-| Remove one | `deleteOne` | `users.deleteOne({ id })` |
-| Remove many | `deleteMany` | `users.deleteMany({ expired: true })` |
+| Fetch by id | `get` | `users.get(5)` |
+| Fetch one by filter | `findOne` | `users.findOne({ email })` |
+| Fetch many | `find` | `users.find({ role: "admin" }).sort('-createdAt')` |
+| Insert | `insert` | `users.insert({ name: "Alice" })` |
+| Insert many | `insertMany` | `users.insertMany([...])` |
+| Modify one (return row) | `update` | `users.update(id, { name: "Bob" })` |
+| Modify many (return counts) | `updateMany` | `users.updateMany({ old: true }, { archived: true })` |
+| Remove one (return row) | `delete` | `users.delete(id)` |
+| Remove many (return counts) | `deleteMany` | `users.deleteMany({ expired: true })` |
 | Check existence | `exists` | `users.exists({ email })` |
 | Count | `count` | `users.count({ role: "admin" })` |
-| Atomic get+modify | `findOneAnd*` | `queue.findOneAndDelete({ status: "pending" })` |
+
+`update` and `delete` accept either an `id` (shorthand for `{ id }`) or
+a full filter object. They return the affected document (or `null` if
+nothing matched). The `*Many` variants take a filter and return counts.
 
 ### Filter operators
 

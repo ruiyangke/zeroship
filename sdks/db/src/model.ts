@@ -39,7 +39,7 @@ function getNativeDb(): NativeDb {
  *   name: t.string().required(),
  *   email: t.string().required().unique(),
  * });
- * await Users.create({ name: "Alice", email: "alice@example.com" });
+ * await Users.insert({ name: "Alice", email: "alice@example.com" });
  * ```
  */
 export function model<S extends Record<string, unknown>>(

@@ -735,12 +735,12 @@ const db = createDb({
 });
 
 // At the type level:
-// db.users.create returns Document<{...}> with id: Id<"users">
-// db.posts.create({ authorId: x }) requires x to be Id<"users">
+// db.users.insert returns Document<{...}> with id: Id<"users">
+// db.posts.insert({ authorId: x }) requires x to be Id<"users">
 
-const u = await db.users.create({ name: "alice" });
-const p = await db.posts.create({ authorId: u.data!.id, title: "hi" });  // ✓
-const bad = await db.posts.create({ authorId: 42, title: "hi" });         // ✗ type error
+const u = await db.users.insert({ name: "alice" });
+const p = await db.posts.insert({ authorId: u.data!.id, title: "hi" });  // ✓
+const bad = await db.posts.insert({ authorId: 42, title: "hi" });         // ✗ type error
 
 // Cross-table typo:
 db.posts.findOne({ authorId: p.data!.id });  // ✗ p.data.id is Id<"posts">, not Id<"users">
@@ -864,7 +864,7 @@ posts: { authorId: t.number(), title: t.string() }
 posts: { authorId: t.ref("users"), title: t.string() }
 ```
 
-The change adds an FK constraint (caught by A2 as an additive change — accepted if no orphan rows; surfaces as destructive otherwise). On the TS side, all call sites that pass a bare `number` to `authorId` now fail to type-check; the migration is to source from a `db.users.create(...)` or `db.users.findOne(...)` return (which gives `Id<"users">`).
+The change adds an FK constraint (caught by A2 as an additive change — accepted if no orphan rows; surfaces as destructive otherwise). On the TS side, all call sites that pass a bare `number` to `authorId` now fail to type-check; the migration is to source from a `db.users.insert(...)` or `db.users.findOne(...)` return (which gives `Id<"users">`).
 
 Codemod: `zeroship migrate codemod refs` walks the app sources, finds `t.number()` fields used as FK targets (heuristic: column name matches `<table>Id` where `<table>` is a declared collection) and rewrites them to `t.ref("<table>")`. The codemod is conservative — it only rewrites unambiguous cases and emits a manual-review report for ambiguous ones.
 
@@ -898,7 +898,7 @@ import { query, mutation, action, env, runQuery, runMutation, currentUser } from
 export const getTodo = query(async ({ id }) => db.todos.findOne({ id }));
 
 export const markDone = mutation(async ({ id }) =>
-  db.todos.updateOne({ id, userId: currentUser()?.id }, { done: true })
+  db.todos.update({ id, userId: currentUser()?.id }, { done: true })
 );
 
 export const shareToWebhook = action(async ({ id, url }) => {
@@ -1150,7 +1150,7 @@ Storage: JSONB column. Validation: nested traversal in `validate.ts`. Type infer
 
 **Mechanism.**
 
-`t.calendarDate()` for `YYYY-MM-DD` without timezone. Stored as Postgres `DATE`. Distinct from `t.date()` (timestamp; Unix ms).
+`t.calendarDate()` for `YYYY-MM-DD` without timezone. Stored as Postgres `DATE`. Distinct from `t.timestamp()` (timestamp; Unix ms).
 
 ### D4. Optimistic concurrency
 
@@ -1165,7 +1165,7 @@ posts: defineCollection({
 }).withVersioning();  // auto-injects `version: number`, auto-increments on update
 
 // Update with CAS:
-await db.posts.updateOne({ id, version: 7 }, { title: "x" });
+await db.posts.update({ id, version: 7 }, { title: "x" });
 // → returns error if version mismatch
 ```
 

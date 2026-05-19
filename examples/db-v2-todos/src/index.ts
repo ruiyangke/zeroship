@@ -68,7 +68,7 @@ export const getTodo = query(
 
 export const todoCount = query(
   async ({ userId }: { userId: UserId }) => {
-    return db.todos.countDocuments({ userId });
+    return db.todos.count({ userId });
   },
 );
 
@@ -84,7 +84,7 @@ type CreateTodoInput = {
 
 export const createTodo = mutation(
   async (args: CreateTodoInput) => {
-    return db.todos.create({
+    return db.todos.insert({
       userId:   args.userId,
       title:    args.title,
       priority: args.priority ?? "medium",
@@ -97,19 +97,19 @@ export const createTodo = mutation(
 
 export const completeTodo = mutation(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.updateOne({ id }, { done: true });
+    return db.todos.update(id, { done: true });
   },
 );
 
 export const archiveTodo = mutation(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.updateOne({ id }, { archived: true });
+    return db.todos.update(id, { archived: true });
   },
 );
 
 export const deleteTodo = mutation(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.deleteOne({ id });
+    return db.todos.delete(id);
   },
 );
 
@@ -143,7 +143,7 @@ type SeedUserInput = { email: string; name: string; handle: string };
 
 export const seedUser = mutation(
   async ({ email, name, handle }: SeedUserInput) => {
-    return db.users.create({ email, name, handle });
+    return db.users.insert({ email, name, handle });
   },
 );
 

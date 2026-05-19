@@ -498,15 +498,6 @@ export const t = {
   timestamp(): TypeBuilder<number> {
     return new TypeBuilder<number>({ type: "date" });
   },
-  /**
-   * @deprecated Renamed to {@link timestamp} — the field stores a
-   * `number` (Unix ms), not a `Date` object, so the new name is
-   * honest about the wire shape. `t.date()` is preserved as a thin
-   * alias for back-compat.
-   */
-  date(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "date" });
-  },
   /** Creates a JSON/object field definition for arbitrary nested data. */
   json(): TypeBuilder<Record<string, unknown>> {
     return new TypeBuilder<Record<string, unknown>>({ type: "json" });

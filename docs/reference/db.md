@@ -22,7 +22,7 @@ const db = createDb({
   },
 });
 
-const { data: user, error } = await db.users.create({ name: "Alice", email: "alice@example.com" });
+const { data: user, error } = await db.users.insert({ name: "Alice", email: "alice@example.com" });
 const { data: admins } = await db.users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
 ```
 
@@ -40,7 +40,7 @@ Creator code
 zeroship.db.* (Rust, frozen global)       ← native layer: security boundary, SQL generation
   zeroship.db.find(collection, filter, opts)
   zeroship.db.insert(collection, doc)
-  zeroship.db.updateOne(collection, filter, update)
+  zeroship.db.update(collection, filter, patch)
   │
   │  validates → parameterized SQL → executes
   ▼
@@ -58,9 +58,9 @@ zeroship.db.find(collection, filter, opts)          → Promise<string>
 zeroship.db.findOne(collection, filter)             → Promise<string | null>
 zeroship.db.insert(collection, doc)                 → Promise<string>
 zeroship.db.insertMany(collection, docs)            → Promise<string>
-zeroship.db.updateOne(collection, filter, update)   → Promise<string>
+zeroship.db.update(collection, filter, patch)   → Promise<string>
 zeroship.db.updateMany(collection, filter, update)  → Promise<string>
-zeroship.db.deleteOne(collection, filter)           → Promise<string>
+zeroship.db.delete(collection, filter)           → Promise<string>
 zeroship.db.deleteMany(collection, filter)          → Promise<string>
 zeroship.db.count(collection, filter)               → Promise<string>
 zeroship.db.aggregate(collection, pipeline)         → Promise<string>
@@ -138,7 +138,7 @@ const db = createDb({
 | `String` | `t.string()` | TEXT |
 | `Number` | `t.number()` | NUMERIC |
 | `Boolean` | `t.boolean()` | BOOLEAN |
-| `Date` | `t.date()` | TIMESTAMPTZ |
+| `Date` | `t.timestamp()` | TIMESTAMPTZ |
 | `Object` | `t.json()` | JSONB |
 | `[String]` | `t.array(t.string())` | JSONB |
 
@@ -171,17 +171,17 @@ Every SDK method returns `{ data, error }` — never throws.
 
 ```javascript
 // Success
-const { data, error } = await users.create({ name: "Alice", email: "a@b.com" });
+const { data, error } = await users.insert({ name: "Alice", email: "a@b.com" });
 // data = { id: 1, name: "Alice", email: "a@b.com", role: "user", createdAt: 1713000000000, updatedAt: 1713000000000 }
 // error = null
 
 // Failure
-const { data, error } = await users.create({ name: "" });
+const { data, error } = await users.insert({ name: "" });
 // data = null
 // error = { name: "ValidationError", errors: { name: { message: "required", path: "name" } } }
 
 // Duplicate key
-const { data, error } = await users.create({ name: "Alice", email: "existing@b.com" });
+const { data, error } = await users.insert({ name: "Alice", email: "existing@b.com" });
 // data = null
 // error = { code: 11000, message: "duplicate key error: email" }
 ```
@@ -194,7 +194,7 @@ No try/catch needed. Errors are values, not exceptions.
 
 ```javascript
 // Insert one
-const { data } = await users.create({ name: "Alice", email: "alice@example.com" });
+const { data } = await users.insert({ name: "Alice", email: "alice@example.com" });
 // → { id: 1, name: "Alice", email: "alice@example.com", role: "user", createdAt: ..., updatedAt: ... }
 
 // Insert (alias for create)
@@ -216,7 +216,7 @@ const { data } = await users.findOne({ email: "alice@example.com" });
 // → { id, name, email, ... } or null
 
 // Find by ID (shorthand)
-const { data } = await users.findById(1);
+const { data } = await users.get(1);
 
 // Find many — returns Query (thenable), supports chaining
 const { data } = await users
@@ -228,7 +228,7 @@ const { data } = await users
 // → [{ name, email }, ...]
 
 // Count
-const { data: count } = await users.countDocuments({ role: "admin" });
+const { data: count } = await users.count({ role: "admin" });
 // → 5
 
 // Distinct values
@@ -243,54 +243,50 @@ const { data: exists } = await users.exists({ email: "alice@example.com" });
 ### Update
 
 ```javascript
-// Update one — returns { matchedCount, modifiedCount }
-const { data } = await users.updateOne(
-  { id: 1 },
-  { name: "Alice Smith", role: "admin" }
-);
-// → { matchedCount: 1, modifiedCount: 1 }
+// Update one — returns the updated document (or null if nothing matched).
+// First arg is an id (shorthand for `{ id }`) or a filter object.
+const { data: user } = await users.update(1, { name: "Alice Smith", role: "admin" });
+if (user === null) throw new Error("not found");
 
-// Update many
-const { data } = await users.updateMany(
-  { role: "user" },
-  { role: "member" }
-);
+// Update many — returns { matchedCount, modifiedCount }
+const { data } = await users.updateMany({ role: "user" }, { role: "member" });
 // → { matchedCount: 342, modifiedCount: 342 }
 
-// Atomic operations (per-field operators)
-const { data } = await products.updateOne(
-  { id: 1 },
-  {
-    stock: { $dec: 1 },
-    sold:  { $inc: 1 },
-    tags:  { $push: "sale" },
-  }
-);
+// Per-field atomic operators
+const { data } = await products.update(1, {
+  stock: { $dec: 1 },
+  sold:  { $inc: 1 },
+  tags:  { $push: "sale" },
+});
 
-// Mongoose-style top-level operators also work (translated by SDK)
-const { data } = await products.updateOne(
-  { id: 1 },
-  { $inc: { views: 1 }, $push: { tags: "popular" } }
-);
+// MongoDB-style top-level operators are also accepted (translated by the SDK)
+const { data } = await products.update(1, {
+  $inc: { views: 1 },
+  $push: { tags: "popular" },
+});
 
-// Optimistic lock (conditional update)
-const { data } = await products.updateOne(
+// Optimistic-lock (compound filter — match-and-update atomically)
+const { data: stocked } = await products.update(
   { id: 1, stock: { $gte: 1 } },
   { stock: { $dec: 1 } }
 );
-if (data.matchedCount === 0) throw new Error("Out of stock");
+if (stocked === null) throw new Error("Out of stock");
 ```
 
 ### Delete
 
 ```javascript
-// Delete one — returns { deletedCount }
-const { data } = await users.deleteOne({ id: 1 });
-// → { deletedCount: 1 }
+// Delete one — returns the deleted document (or null if nothing matched).
+const { data: deleted } = await users.delete(1);
+if (deleted === null) throw new Error("not found");
 
-// Delete many
+// Delete many — returns { deletedCount }
 const { data } = await sessions.deleteMany({ expiresAt: { $lt: Date.now() } });
 // → { deletedCount: 42 }
+
+// Soft-delete collections — `delete` flips `deletedAt`; pass `{ hard: true }`
+// to bypass the soft semantics and permanently remove the row.
+await users.delete(1, { hard: true });
 ```
 
 ### Aggregate
@@ -398,15 +394,15 @@ Runs in the SDK (JS) before every `create()`, `insertMany()`, `updateOne()`, `up
 
 ```javascript
 // Fails validation — returns error, doesn't hit database
-const { error } = await users.create({ name: "" });
+const { error } = await users.insert({ name: "" });
 // error = { name: "ValidationError", errors: { name: { message: "name is required", path: "name" } } }
 
 // Type mismatch
-const { error } = await users.create({ name: "Alice", age: "thirty" });
+const { error } = await users.insert({ name: "Alice", age: "thirty" });
 // error = { name: "ValidationError", errors: { age: { message: "age must be a number", path: "age" } } }
 
 // On update: only validates provided fields (partial)
-const { error } = await users.updateOne({ id: 1 }, { age: -1 });
+const { error } = await users.update({ id: 1 }, { age: -1 });
 // error = { name: "ValidationError", errors: { age: { message: "age must be at least 0", path: "age" } } }
 ```
 

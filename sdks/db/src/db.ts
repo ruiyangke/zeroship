@@ -13,12 +13,12 @@
  *   });
  *
  *   // CRUD — { data, error }
- *   const { data } = await db.employees.create({ name: "Alice" });
+ *   const { data } = await db.employees.insert({ name: "Alice" });
  *
  *   // Transaction — tx mirrors db, throws on error
  *   const { data, error } = await db.transaction(async (tx) => {
- *     const emp = await tx.employees.create({ name: "Alice" });
- *     await tx.departments.updateOne({ id: 1 }, { headcount: { $inc: 1 } });
+ *     const emp = await tx.employees.insert({ name: "Alice" });
+ *     await tx.departments.update(1, { headcount: { $inc: 1 } });
  *     return emp;
  *   });
  */
@@ -93,25 +93,17 @@ type SchemaInput =
  */
 export type TxCollection<S = PlainObject> = {
   insert(doc: CreateInput<S>): Promise<Document<S>>;
-  /** Mongoose-compatible alias for {@link TxCollection.insert}. */
-  create(doc: CreateInput<S>): Promise<Document<S>>;
   insertMany(docs: CreateInput<S>[]): Promise<Document<S>[]>;
+  get(id: number): Promise<Document<S> | null>;
   findOne(filter: Filter<S>): Promise<Document<S> | null>;
-  findById(id: number): Promise<Document<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
   find(filter?: Filter<S>): TxQuery<S, Document<S>>;
   upsert(doc: CreateInput<S>, options: { conflictFields: (string & keyof Document<S>)[] }): Promise<Document<S>>;
-  updateOne(filter: Filter<S>, update: UpdateExpression<S>): Promise<{ matchedCount: number; modifiedCount: number }>;
-  updateMany(filter: Filter<S>, update: UpdateExpression<S>): Promise<{ matchedCount: number; modifiedCount: number }>;
-  findOneAndUpdate(filter: Filter<S>, update: UpdateExpression<S>): Promise<Document<S> | null>;
-  findOneAndDelete(filter: Filter<S>): Promise<Document<S> | null>;
-  deleteOne(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  forceDelete(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  forceDeleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
+  update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Document<S> | null>;
+  updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ matchedCount: number; modifiedCount: number }>;
+  delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }): Promise<Document<S> | null>;
+  deleteMany(filter: Filter<S>, opts?: { hard?: boolean }): Promise<{ deletedCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
-  /** Mongoose-compatible alias for {@link TxCollection.count}. */
-  countDocuments(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Document<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
 };
@@ -175,17 +167,14 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async insert(doc: CreateInput<S>) {
       return unwrap(await collection.insert(doc));
     },
-    async create(doc: CreateInput<S>) {
-      return unwrap(await collection.insert(doc));
-    },
     async insertMany(docs: CreateInput<S>[]) {
       return unwrap(await collection.insertMany(docs));
     },
+    async get(id: number) {
+      return unwrap(await collection.get(id));
+    },
     async findOne(filter: Filter<S>) {
       return unwrap(await collection.findOne(filter));
-    },
-    async findById(id: number) {
-      return unwrap(await collection.findById(id));
     },
     async exists(filter: Filter<S>) {
       return unwrap(await collection.exists(filter));
@@ -197,34 +186,19 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async upsert(doc: CreateInput<S>, options: { conflictFields: (string & keyof Document<S>)[] }) {
       return unwrap(await collection.upsert(doc, options));
     },
-    async updateOne(filter: Filter<S>, update: UpdateExpression<S>) {
-      return unwrap(await collection.updateOne(filter, update));
+    async update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>) {
+      return unwrap(await collection.update(idOrFilter, patch));
     },
-    async updateMany(filter: Filter<S>, update: UpdateExpression<S>) {
-      return unwrap(await collection.updateMany(filter, update));
+    async updateMany(filter: Filter<S>, patch: UpdateExpression<S>) {
+      return unwrap(await collection.updateMany(filter, patch));
     },
-    async findOneAndUpdate(filter: Filter<S>, update: UpdateExpression<S>) {
-      return unwrap(await collection.findOneAndUpdate(filter, update));
+    async delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }) {
+      return unwrap(await collection.delete(idOrFilter, opts));
     },
-    async findOneAndDelete(filter: Filter<S>) {
-      return unwrap(await collection.findOneAndDelete(filter));
-    },
-    async deleteOne(filter: Filter<S>) {
-      return unwrap(await collection.deleteOne(filter));
-    },
-    async deleteMany(filter: Filter<S>) {
-      return unwrap(await collection.deleteMany(filter));
-    },
-    async forceDelete(filter: Filter<S>) {
-      return unwrap(await collection.forceDelete(filter));
-    },
-    async forceDeleteMany(filter: Filter<S>) {
-      return unwrap(await collection.forceDeleteMany(filter));
+    async deleteMany(filter: Filter<S>, opts?: { hard?: boolean }) {
+      return unwrap(await collection.deleteMany(filter, opts));
     },
     async count(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.count(filter));
-    },
-    async countDocuments(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.count(filter));
     },
     async distinct(field: string & keyof Document<S>, filter: Filter<S> = {} as Filter<S>) {

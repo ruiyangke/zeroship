@@ -127,16 +127,16 @@ export const seedEvents = mutation(
 );
 
 export const eventCount = query(async (_input: Record<string, never>) => {
-  return db.events.countDocuments({});
+  return db.events.count({});
 });
 
 export const eventStats = query(async (_input: Record<string, never>) => {
   const col = db.events;
   // Unwrap each Result so the smoke can grep `"total":N` directly.
-  const total = (await col.countDocuments({})).data ?? 0;
-  const nullSeverity = (await col.countDocuments({ severity: null })).data ?? 0;
-  const emptyKind = (await col.countDocuments({ kind: "" })).data ?? 0;
-  const emptyHash = (await col.countDocuments({ user_hash: "" })).data ?? 0;
+  const total = (await col.count({})).data ?? 0;
+  const nullSeverity = (await col.count({ severity: null })).data ?? 0;
+  const emptyKind = (await col.count({ kind: "" })).data ?? 0;
+  const emptyHash = (await col.count({ user_hash: "" })).data ?? 0;
   return { total, nullSeverity, emptyKind, emptyHash };
 });
 

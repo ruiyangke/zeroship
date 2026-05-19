@@ -353,7 +353,7 @@ Creators don't configure JWT secrets, session duration, or cookie settings. The 
 
 - Read the current user: `auth.getUser()`
 - Require authentication: `auth.requireUser()` (triggers login redirect via 401)
-- Reference users in its own data: `db.profiles.create({ userId: user.id, ... })`
+- Reference users in its own data: `db.profiles.insert({ userId: user.id, ... })`
 - Sign the user out: `auth.signOut()` (client-side redirect)
 
 ## Implementation Order

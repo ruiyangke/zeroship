@@ -16,7 +16,7 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
-| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `docs/reference/mongoose-compat.md` · `crates/plugin-db/` |
+| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** | `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/` |
@@ -175,7 +175,6 @@ Stable contracts, live in `docs/reference/`:
 - `plugin-system.md` — how to add a `zeroship.*` namespace
 - `node-compat.md` — Node.js module resolution in V8
 - `vite-environment-api.md` — Vite dev server inside the V8 runtime
-- `mongoose-compat.md` — what `@zeroship/db` matches from Mongoose
 - `zerobench.md` — the HTTP/SSE/WS benchmark tool
 
 ---

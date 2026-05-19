@@ -48,10 +48,10 @@ export async function searchEmployees(query: string) {
 }
 
 export async function getDashboardStats() {
-  const { data: totalEmps } = await db.employees.countDocuments({ status: "active" });
-  const { data: totalDepts } = await db.departments.countDocuments({});
-  const { data: pendingLeaves } = await db.leave_requests.countDocuments({ status: "pending" });
-  const { data: openPositions } = await db.employees.countDocuments({ status: "terminated" });
+  const { data: totalEmps } = await db.employees.count({ status: "active" });
+  const { data: totalDepts } = await db.departments.count({});
+  const { data: pendingLeaves } = await db.leave_requests.count({ status: "pending" });
+  const { data: openPositions } = await db.employees.count({ status: "terminated" });
   return {
     data: { totalEmps, totalDepts, pendingLeaves, openPositions },
     error: null,

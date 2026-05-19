@@ -369,10 +369,6 @@ export class Collection<S = PlainObject> {
     });
   }
 
-  /** Mongoose-compatible alias for {@link insert}. */
-  create(doc: CreateInput<S>): Promise<Result<Document<S>>> {
-    return this.insert(doc);
-  }
 
   /**
    * Inserts multiple documents after validating each one against the schema.
@@ -405,14 +401,14 @@ export class Collection<S = PlainObject> {
     });
   }
 
-  /** Shorthand for `findOne({ id })`. */
-  async findById(id: number): Promise<Result<Document<S> | null>> {
+  /** Fetch the document with the given `id`. Returns `null` if missing. */
+  async get(id: number): Promise<Result<Document<S> | null>> {
     return this.findOne({ id } as Filter<S>);
   }
 
   /** Returns true if at least one document matches `filter`. */
   async exists(filter: Filter<S>): Promise<Result<boolean>> {
-    const { data, error } = await this.countDocuments(filter);
+    const { data, error } = await this.count(filter);
     if (error) return err(error);
     return ok((data ?? 0) > 0);
   }
@@ -458,34 +454,46 @@ export class Collection<S = PlainObject> {
   }
 
   /**
-   * Updates the first document matching `filter` using the given `update`.
-   * Validates the fields in `$set` and bare (non-`$`) keys against the schema.
-   * Validates `$push`/`$addToSet` values against the declared array item type.
+   * Updates the first document matching `idOrFilter` and returns the
+   * updated document (or `null` if nothing matched). When the first
+   * argument is a number it is treated as `{ id: <n> }`; otherwise a
+   * full filter is accepted (e.g. compound filters for optimistic
+   * concurrency: `{ id, version: 3 }`).
+   *
+   * `patch` accepts either MongoDB-style operators
+   * (`{ $set: {...}, $inc: { n: 1 } }`) or a bare field map (treated as
+   * `$set`). The fields are validated against the schema; array push
+   * operations are validated against the declared item type.
    * Returns `{ matchedCount, modifiedCount }` indicating whether a document was found.
    */
-  async updateOne(
-    filter: Filter<S>,
-    update: UpdateExpression<S>
-  ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
+  async update(
+    idOrFilter: number | Filter<S>,
+    patch: UpdateExpression<S>
+  ): Promise<Result<Document<S> | null>> {
     return this._run(async () => {
-      const updateObj = update as PlainObject;
+      const filter = (typeof idOrFilter === "number"
+        ? ({ id: idOrFilter } as Filter<S>)
+        : idOrFilter);
+      const updateObj = patch as PlainObject;
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
       // D4 — extract `version: N` from the filter when versioning is on
-      // and use it as a CAS guard. The update is augmented with $inc:1
+      // and use it as a CAS guard. The patch is augmented with $inc:1
       // on `version` so the increment happens atomically with the SET.
       const casVersion = this._extractCasVersion(filter as PlainObject);
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._col().updateOne( mappedFilter, mappedUpdate);
+      const raw = await this._col().updateOne(mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
-      const matched = result !== null ? 1 : 0;
-      if (matched === 0 && casVersion !== null) {
-        throw new OptimisticLockError(casVersion, this._name);
+      if (result === null) {
+        if (casVersion !== null) {
+          throw new OptimisticLockError(casVersion, this._name);
+        }
+        return null;
       }
-      return { matchedCount: matched, modifiedCount: matched };
+      return mapResultDoc(result, this._toField) as Document<S>;
     });
   }
 
@@ -521,96 +529,58 @@ export class Collection<S = PlainObject> {
   }
 
   /**
-   * Updates the first document matching `filter` and returns the updated document.
-   * Returns `null` if no document matches the filter.
-   * Same validation as updateOne: validates $set fields and $push/$addToSet ops.
+   * Deletes the first document matching `idOrFilter` and returns the
+   * deleted document (or `null` if nothing matched). When the first
+   * argument is a number it is treated as `{ id: <n> }`.
+   *
+   * When the collection has `softDelete: true`, this sets `deletedAt`
+   * instead of removing the row; pass `{ hard: true }` to bypass and
+   * permanently remove the row.
    */
-  async findOneAndUpdate(
-    filter: Filter<S>,
-    update: UpdateExpression<S>
+  async delete(
+    idOrFilter: number | Filter<S>,
+    opts: { hard?: boolean } = {},
   ): Promise<Result<Document<S> | null>> {
     return this._run(async () => {
-      const updateObj = update as PlainObject;
-      const fields = extractUpdateFields(updateObj);
-      checkPartial(fields, this._schema);
-      validateArrayPushOps(updateObj, this._schema);
-      // D4 — apply the same CAS augmentation as updateOne. A no-match
-      // when a version guard was supplied still surfaces as a typed
-      // OptimisticLockError instead of `null` so callers can branch.
-      const casVersion = this._extractCasVersion(filter as PlainObject);
-      const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
-      const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._col().updateOne( mappedFilter, mappedUpdate);
-      const result = parseRaw<PlainObject>(raw);
-      if (result === null) {
-        if (casVersion !== null) {
-          throw new OptimisticLockError(casVersion, this._name);
-        }
-        return null;
-      }
-      return mapResultDoc(result, this._toField) as Document<S>;
-    });
-  }
-
-  /**
-   * Deletes the first document matching `filter` and returns the deleted document.
-   * When soft delete is enabled, sets `deleted_at` and returns the document.
-   * Returns `null` if no document matches the filter.
-   */
-  async findOneAndDelete(filter: Filter<S>): Promise<Result<Document<S> | null>> {
-    return this._run(async () => {
-      if (this._softDelete) {
+      const filter = (typeof idOrFilter === "number"
+        ? ({ id: idOrFilter } as Filter<S>)
+        : idOrFilter);
+      const hard = opts.hard === true;
+      if (this._softDelete && !hard) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._col().updateOne( mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        const raw = await this._col().updateOne(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<PlainObject>(raw);
-        return result === null ? null : mapResultDoc(result, this._toField) as Document<S>;
+        return result === null ? null : (mapResultDoc(result, this._toField) as Document<S>);
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteOne( mapped);
+      const raw = await this._col().deleteOne(mapped);
       const result = parseRaw<PlainObject>(raw);
-      return result === null ? null : mapResultDoc(result, this._toField) as Document<S>;
+      return result === null ? null : (mapResultDoc(result, this._toField) as Document<S>);
     });
   }
 
   /**
-   * Deletes the first document matching `filter`.
-   * When soft delete is enabled, sets `deleted_at` instead of removing the row.
-   * Returns `{ deletedCount: 1 }` if a document was found, `{ deletedCount: 0 }` otherwise.
+   * Deletes all documents matching `filter`. Returns
+   * `{ deletedCount: N }`. When the collection has `softDelete: true`,
+   * sets `deletedAt` on each row; pass `{ hard: true }` to bypass.
    */
-  async deleteOne(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    return this._run(async () => {
-      if (this._softDelete) {
-        const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-        const col = this._toColumn("deletedAt");
-        const raw = await this._col().updateOne( mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
-        const result = parseRaw<PlainObject>(raw);
-        return { deletedCount: result !== null ? 1 : 0 };
-      }
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteOne( mapped);
-      return { deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 };
-    });
-  }
-
-  /**
-   * Deletes all documents matching `filter`.
-   * When soft delete is enabled, sets `deleted_at` instead of removing rows.
-   * Returns `{ deletedCount: N }` where N is the number of documents removed.
-   */
-  async deleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
+  async deleteMany(
+    filter: Filter<S>,
+    opts: { hard?: boolean } = {},
+  ): Promise<Result<{ deletedCount: number }>> {
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     return this._run(async () => {
-      if (this._softDelete) {
+      const hard = opts.hard === true;
+      if (this._softDelete && !hard) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._col().updateMany( mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        const raw = await this._col().updateMany(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<{ updated: number }>(raw);
         return { deletedCount: result?.updated ?? 0 };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteMany( mapped);
+      const raw = await this._col().deleteMany(mapped);
       const result = parseRaw<{ deleted: number }>(raw);
       return { deletedCount: result?.deleted ?? 0 };
     });
@@ -627,11 +597,6 @@ export class Collection<S = PlainObject> {
       const result = parseRaw<{ count: number }>(raw);
       return result?.count ?? 0;
     });
-  }
-
-  /** Mongoose-compatible alias for {@link count}. */
-  countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
-    return this.count(filter);
   }
 
   /**
@@ -681,28 +646,4 @@ export class Collection<S = PlainObject> {
     });
   }
 
-  /**
-   * Permanently deletes the first document matching `filter`, bypassing soft delete.
-   * Always performs a real DELETE regardless of the soft-delete setting.
-   */
-  async forceDelete(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    return this._run(async () => {
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteOne( mapped);
-      return { deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 };
-    });
-  }
-
-  /**
-   * Permanently deletes all documents matching `filter`, bypassing soft delete.
-   * Always performs a real DELETE regardless of the soft-delete setting.
-   */
-  async forceDeleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
-    return this._run(async () => {
-      const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteMany( mapped);
-      const result = parseRaw<{ deleted: number }>(raw);
-      return { deletedCount: result?.deleted ?? 0 };
-    });
-  }
 }

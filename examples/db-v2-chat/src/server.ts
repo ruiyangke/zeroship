@@ -81,13 +81,13 @@ export const sendMessage = mutation(
   async (
     { channelId, authorId, body }: { channelId: ChannelId; authorId: UserId; body: string },
   ) => {
-    return db.messages.create({ channelId, authorId, body, flagged: false });
+    return db.messages.insert({ channelId, authorId, body, flagged: false });
   },
 );
 
 export const flagMessage = mutation(
   async ({ id }: { id: MessageId }) => {
-    return db.messages.updateOne({ id }, { flagged: true });
+    return db.messages.update(id, { flagged: true });
   },
 );
 
@@ -95,14 +95,14 @@ export const createChannel = mutation(
   async (
     { slug, name, topic }: { slug: string; name: string; topic?: string },
   ) => {
-    return db.channels.create({ slug, name, topic });
+    return db.channels.insert({ slug, name, topic });
   },
 );
 
 // Seed helper — used by smoke.sh to provision a user.
 export const createUser = mutation(
   async ({ handle, name }: { handle: string; name: string }) => {
-    return db.users.create({ handle, name });
+    return db.users.insert({ handle, name });
   },
 );
 
