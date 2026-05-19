@@ -2158,9 +2158,24 @@ async fn create_index_with_recovery(
 // All CRUD callbacks (exec_query, exec_mutation, etc.) automatically use
 // TX_CONN when it's set, via the run_sql() helper.
 
-/// `zeroship.db.beginTransaction(isolationLevel?)` → Promise<void>
-/// Opens a dedicated connection, runs BEGIN, stores in TX_CONN.
-/// All subsequent CRUD ops use this connection until commit/rollback.
+/// `zeroship.db.beginTransaction(isolationLevel?)` → Promise<Transaction>
+///
+/// Opens a dedicated connection, runs BEGIN, stores it in TX_CONN, and
+/// resolves with a fresh [`crate::v8_classes::transaction::Transaction`]
+/// v8_class instance. The wrapper's Weak finalizer auto-rollbacks if
+/// the handle is dropped without `.commit()` / `.rollback()` — closes
+/// the connection-leak footgun the pre-wrapper API had.
+///
+/// All subsequent CRUD ops use the transaction connection until
+/// commit/rollback (whether issued through the wrapper or through the
+/// legacy flat `commitTransaction` / `rollbackTransaction` callbacks).
+///
+/// The Transaction wrapper is minted *synchronously* before the BEGIN
+/// future runs (we need a V8 scope to allocate it). On BEGIN success
+/// the future stamps the wrapper's pre-allocated `token` onto
+/// [`crate::TX_TOKEN`] and resolves the promise with the wrapper; on
+/// failure the wrapper is left with a token that never matches
+/// TX_TOKEN, so its `Drop` is a no-op when V8 eventually collects it.
 pub fn begin_transaction(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -2172,12 +2187,76 @@ pub fn begin_transaction(
         .clone();
 
     let isolation_level = get_string_arg(scope, &args, 0);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+
+    // Allocate the ownership token + mint the wrapper synchronously.
+    // We need a scope to allocate the V8 object; the spawned future
+    // doesn't have one. On BEGIN success the future stamps TX_TOKEN
+    // with this same token; on failure TX_TOKEN stays 0 so the
+    // wrapper's Drop sees `current(0) != token` and no-ops.
+    let token = crate::next_tx_token();
+    let tx_obj = match crate::v8_classes::transaction::mint_transaction(scope, token) {
+        Ok(obj) => obj,
+        Err(e) => {
+            let msg = v8::String::new(scope, &e.message).unwrap();
+            let exc = v8::Exception::error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+
+    // Layer the flat CRUD callbacks onto the wrapper so a
+    // `tx.collection("x").find(...)` forwarder can find `find` on the
+    // parent. Reads the callbacks straight off `env.db` (the receiver).
+    let env_db_local: v8::Local<v8::Object> = match args.this().try_into() {
+        Ok(o) => o,
+        Err(_) => {
+            let msg = v8::String::new(
+                scope,
+                "beginTransaction: receiver is not an object",
+            )
+            .unwrap();
+            let exc = v8::Exception::type_error(scope, msg);
+            scope.throw_exception(exc);
+            return;
+        }
+    };
+    crate::v8_classes::transaction::install_flat_callbacks_on(scope, tx_obj, env_db_local);
+
+    let tx_obj_as_value: v8::Local<v8::Value> = tx_obj.into();
+    let tx_global: v8::Global<v8::Value> = v8::Global::new(scope, tx_obj_as_value);
+
+    // Use the JsValue resolution path so we can hand back a real JS
+    // object (not a JSON string).
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let resolver_global = v8::Global::new(scope, resolver);
+    let request_id = state.borrow().executing_request_id;
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        use zeroship_runtime::state::{OpError, ResolveValue};
         match exec_begin(isolation_level.as_deref()).await {
-            Ok(()) => OpResult::Completed { op_id, value: "null".to_string(), request_id },
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Ok(()) => {
+                // Stamp ownership now that TX_CONN holds the client —
+                // the wrapper's commit / rollback / Drop all gate on
+                // this matching the wrapper's `token`.
+                crate::TX_TOKEN.with(|t| t.set(token));
+                OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::JsGlobal(tx_global),
+                    request_id,
+                }
+            }
+            Err(e) => {
+                // Wrapper's `token` never matches TX_TOKEN(=0), so when
+                // V8 collects the wrapper (no JS reference survives a
+                // rejected await) the Drop is a no-op.
+                drop(tx_global);
+                OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::RejectError(OpError::error(e)),
+                    request_id,
+                }
+            }
         }
     }));
 
@@ -2367,6 +2446,14 @@ pub fn upsert(
 async fn exec_end(cmd: &str) -> Result<(), String> {
     let client = crate::TX_CONN.with(|tx| tx.borrow_mut().take())
         .ok_or_else(|| "db: no active transaction".to_string())?;
+
+    // Clear the ownership token so any live `Transaction` v8_class
+    // wrapper that was minted for this same TX_CONN sees the mismatch
+    // on subsequent commit / rollback / GC and short-circuits. The
+    // wrapper's `Drop` checks `token == TX_TOKEN` and no-ops on
+    // mismatch, so the legacy flat path remains the source of truth
+    // when both are in play.
+    crate::TX_TOKEN.with(|t| t.set(0));
 
     client.execute(cmd, &[])
         .await

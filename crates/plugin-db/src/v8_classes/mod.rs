@@ -16,9 +16,12 @@
 //!   a v8_class instance. Exposes `.collection(name)` returning a
 //!   `Collection` v8_class. The 27 flat callbacks stay registered as
 //!   own properties on this instance via `NativeRegistrar`.
-//! - [`collection`] — per-collection CRUD dispatch wrapper. Each
-//!   method forwards to the same-named flat callback on the parent
-//!   Db with the collection name prepended (no SQL duplication).
+//! - [`collection`] — per-collection CRUD dispatch. Each method walks
+//!   its v8::Local<Value> args directly into a `serde_json::Value` via
+//!   `callbacks::v8_value_to_serde_json` (no JSON.stringify/parse
+//!   boundary) and calls a shared `callbacks::dispatch_*` helper that
+//!   the flat callbacks also delegate to — SQL build lives in one
+//!   place.
 //!
 //! Stage 3 — shipped:
 //! - [`migration`] — `Migration` wraps an in-flight backfill run. GC
@@ -29,11 +32,19 @@
 //!   callback; the flat `migrationBegin` / `migrationFetchBatch` /
 //!   `migrationCommitBatch` callbacks stay registered for back-compat
 //!   with the current `@zeroship/migrations` SDK.
-//!
-//! Future stages will add:
-//! - `Transaction` — when the surrounding subsystem stabilises.
+//! - [`transaction`] — `env.db.beginTransaction(isolationLevel?)` now
+//!   resolves with a `Transaction` v8_class instance whose Weak
+//!   finalizer auto-rollbacks if user code drops the handle without
+//!   committing. `.commit()` / `.rollback()` are explicit methods;
+//!   `.collection(name)` returns a Collection bound to the open
+//!   transaction (CRUD ops route through `TX_CONN` automatically).
+//!   The legacy flat `commitTransaction` / `rollbackTransaction`
+//!   callbacks stay registered for back-compat with the current
+//!   `@zeroship/db` SDK; coexistence is mediated by a `TX_TOKEN`
+//!   ownership tag.
 
 pub mod collection;
 pub mod db;
 pub mod migration;
 pub mod subscription;
+pub mod transaction;
