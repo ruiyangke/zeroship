@@ -1,8 +1,12 @@
 /**
  * `migrations.status` — read the persisted state of a migration.
  *
- * Wraps the native `migrationStatus(name, collection)` primitive and
- * normalises its JSON envelope into a `MigrationStatusSnapshot`.
+ * Calls the standalone `env.db.migrationStatus(name, collection)`
+ * primitive — separate from the Migration v8_class wrapper because
+ * status reads must be safe to call from any worker, including ones
+ * that don't own the run. The Migration wrapper's `.status()` method
+ * delegates to the same underlying SQL but requires the caller to
+ * hold the wrapper's `MIG_LOCK`.
  */
 
 import type { NativeMigrations } from "./native.js";

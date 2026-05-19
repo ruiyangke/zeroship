@@ -203,6 +203,78 @@ impl Migration {
             .await
             .map_err(OpError::error)
     }
+
+    /// `migration.fetchBatch(cursor, batchSize)` — read the next batch
+    /// of rows after `cursor`. Resolves with `{ rows: [...] }` JSON.
+    /// Delegates to `exec_fetch_batch` (which itself checks the
+    /// `MIG_LOCK` thread-local for ownership / cancellation).
+    #[v8_async_method]
+    #[v8_name = "fetchBatch"]
+    async fn fetch_batch(&self, cursor: f64, batch_size: f64) -> Result<String, OpError> {
+        let owner = self
+            .inner
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
+        crate::migrations::exec_fetch_batch(&owner.app_id, cursor as i64, batch_size as i64)
+            .await
+            .map_err(OpError::error)
+    }
+
+    /// `migration.commitBatch(updatesJson, deadLetterPksJson, nextCursor,
+    /// processedTotal, isDone, terminalStatus, errorMessage)` — apply
+    /// one batch of per-row updates, advance the cursor, optionally
+    /// finalise the run. JSON-stringified args match the
+    /// `migrationCommitBatch` flat-callback shape exactly so the SDK
+    /// loop can swap to the wrapper without restructuring its
+    /// per-batch encoding. On `isDone=true`, clears the wrapper's
+    /// inner state so subsequent calls + the finalizer no-op.
+    #[v8_async_method]
+    #[v8_name = "commitBatch"]
+    async fn commit_batch(
+        &self,
+        updates_json: String,
+        dead_letter_pks_json: String,
+        next_cursor: f64,
+        processed_total: f64,
+        is_done: bool,
+        terminal_status: String,
+        error_message: String,
+    ) -> Result<String, OpError> {
+        let owner = self
+            .inner
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
+        let updates: serde_json::Value = serde_json::from_str(&updates_json)
+            .map_err(|e| OpError::error(format!("db: commitBatch: invalid updates JSON: {e}")))?;
+        let dead_letter_pks: serde_json::Value = serde_json::from_str(&dead_letter_pks_json)
+            .map_err(|e| OpError::error(format!("db: commitBatch: invalid deadLetterPks JSON: {e}")))?;
+        let terminal_status_opt = if terminal_status.is_empty() { None } else { Some(terminal_status.as_str()) };
+        let error_message_opt = if error_message.is_empty() { None } else { Some(error_message.as_str()) };
+        let _ = ensure_pool().await?; // ensures DB_POOL.with(...) works inside exec_commit_batch
+        let result = crate::migrations::exec_commit_batch(
+            &owner.app_id,
+            &updates,
+            &dead_letter_pks,
+            next_cursor as i64,
+            processed_total as i64,
+            is_done,
+            terminal_status_opt,
+            error_message_opt,
+        )
+        .await
+        .map_err(OpError::error)?;
+        if is_done {
+            // Migration reached a terminal status — clear the active
+            // marker so the finalizer doesn't try to cancel an
+            // already-settled run.
+            *self.inner.borrow_mut() = None;
+        }
+        Ok(result)
+    }
 }
 
 /// Lazy pool accessor shared by every async method on `Migration`.

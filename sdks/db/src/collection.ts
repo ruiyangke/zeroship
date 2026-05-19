@@ -217,10 +217,28 @@ function _maybeWarnUnindexedFilter(
  * The generic parameter `S` is the raw schema shape from which document and input
  * types are derived. Use `model()` or `createDb()` — do not construct directly.
  */
+/** Subset of the native Collection v8_class instance the SDK calls. */
+interface NativeCollection {
+  find(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string>;
+  findOne(filter: ZeroshipDbFilter): Promise<string | null>;
+  insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
+  insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
+  updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
+  updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
+  deleteOne(filter: ZeroshipDbFilter): Promise<string>;
+  deleteMany(filter: ZeroshipDbFilter): Promise<string>;
+  count(filter: ZeroshipDbFilter): Promise<string>;
+  distinct(field: string, filter: ZeroshipDbFilter): Promise<string>;
+  aggregate(pipeline: unknown[]): Promise<string>;
+  upsert(doc: unknown, conflictFields: string[]): Promise<string>;
+}
+
 export class Collection<S = PlainObject> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
+  /** Lazily resolved Collection v8_class instance — see `_col()`. */
+  private _nativeCol: NativeCollection | null;
   private _knownFields: Set<string>;
   private _toColumn: (field: string) => string;
   private _toField: (column: string) => string;
@@ -232,6 +250,7 @@ export class Collection<S = PlainObject> {
     this._name = name;
     this._schema = schema;
     this._native = native;
+    this._nativeCol = null;
     this._ready = options?.ready ?? null;
     this._softDelete = options?.softDelete ?? false;
     this._versioning = options?.versioning ?? false;
@@ -263,6 +282,27 @@ export class Collection<S = PlainObject> {
       await this._ready;
       this._ready = null; // Only await once
     }
+  }
+
+  /**
+   * Resolve the Collection v8_class instance for this collection name.
+   * Cached on first call so subsequent CRUD ops are a single property
+   * read. The native runtime exposes `env.db.collection(name)` as a
+   * Db v8_method that returns a typed Collection wrapper; calling it
+   * twice with the same `name` returns the same JS object (identity is
+   * cached on the Db wrapper).
+   */
+  private _col(): NativeCollection {
+    if (this._nativeCol) return this._nativeCol;
+    const dbAny = this._native as unknown as { collection?: (n: string) => NativeCollection };
+    if (typeof dbAny.collection !== "function") {
+      throw new Error(
+        "@zeroship/db: env.db.collection(name) not available — " +
+        "runtime is missing the Collection v8_class surface.",
+      );
+    }
+    this._nativeCol = dbAny.collection(this._name);
+    return this._nativeCol;
   }
 
   /** @internal — used by `createDb` to chain registrations sequentially
@@ -336,7 +376,7 @@ export class Collection<S = PlainObject> {
     return this._run(async () => {
       const validated = validateDoc(doc as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
-      const raw = await this._native.insert(this._name, outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
+      const raw = await this._col().insert( outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       const result = parseRaw<PlainObject>(raw);
       return mapResultDoc(result!, this._toField) as Document<S>;
     });
@@ -351,7 +391,7 @@ export class Collection<S = PlainObject> {
     return this._run(async () => {
       const validated = (docs as PlainObject[]).map((doc) => validateDoc(doc, this._schema));
       const outbound = validated.map(d => mapDocOutbound(d, this._toColumn));
-      const raw = await this._native.insertMany(this._name, outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
+      const raw = await this._col().insertMany( outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
       const results = parseRaw<PlainObject[]>(raw);
       return (results ?? []).map(d => mapResultDoc(d, this._toField)) as Document<S>[];
     });
@@ -365,7 +405,7 @@ export class Collection<S = PlainObject> {
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const raw = await this._native.findOne(this._name, mapped);
+      const raw = await this._col().findOne( mapped);
       if (raw === null) return null;
       const result = parseRaw<PlainObject>(raw);
       if (result === null) return null;
@@ -395,9 +435,9 @@ export class Collection<S = PlainObject> {
     return new Query<S, Document<S>>(
       this._name,
       mapped,
-      async (col, f, opts) => {
+      async (_col, f, opts) => {
         await this.ensureReady();
-        return this._native.find(col, f, opts);
+        return this._col().find(f, opts);
       },
       this._toField,
       this._toColumn,
@@ -416,10 +456,9 @@ export class Collection<S = PlainObject> {
       const validated = validateDoc(doc as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const conflictCols = options.conflictFields.map((f) => this._toColumn(f));
-      const raw = await this._native.upsert(
-        this._name,
+      const raw = await this._col().upsert(
         outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
-        conflictCols
+        conflictCols,
       );
       const result = parseRaw<PlainObject>(raw);
       return mapResultDoc(result!, this._toField) as Document<S>;
@@ -448,7 +487,7 @@ export class Collection<S = PlainObject> {
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._native.updateOne(this._name, mappedFilter, mappedUpdate);
+      const raw = await this._col().updateOne( mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
       const matched = result !== null ? 1 : 0;
       if (matched === 0 && casVersion !== null) {
@@ -479,7 +518,7 @@ export class Collection<S = PlainObject> {
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._native.updateMany(this._name, mappedFilter, mappedUpdate);
+      const raw = await this._col().updateMany( mappedFilter, mappedUpdate);
       const result = parseRaw<{ updated: number }>(raw);
       const n = result?.updated ?? 0;
       if (n === 0 && casVersion !== null) {
@@ -510,7 +549,7 @@ export class Collection<S = PlainObject> {
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._native.updateOne(this._name, mappedFilter, mappedUpdate);
+      const raw = await this._col().updateOne( mappedFilter, mappedUpdate);
       const result = parseRaw<PlainObject>(raw);
       if (result === null) {
         if (casVersion !== null) {
@@ -532,12 +571,12 @@ export class Collection<S = PlainObject> {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._native.updateOne(this._name, mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        const raw = await this._col().updateOne( mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<PlainObject>(raw);
         return result === null ? null : mapResultDoc(result, this._toField) as Document<S>;
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._native.deleteOne(this._name, mapped);
+      const raw = await this._col().deleteOne( mapped);
       const result = parseRaw<PlainObject>(raw);
       return result === null ? null : mapResultDoc(result, this._toField) as Document<S>;
     });
@@ -553,12 +592,12 @@ export class Collection<S = PlainObject> {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._native.updateOne(this._name, mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        const raw = await this._col().updateOne( mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<PlainObject>(raw);
         return { deletedCount: result !== null ? 1 : 0 };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._native.deleteOne(this._name, mapped);
+      const raw = await this._col().deleteOne( mapped);
       return { deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 };
     });
   }
@@ -574,12 +613,12 @@ export class Collection<S = PlainObject> {
       if (this._softDelete) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._native.updateMany(this._name, mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        const raw = await this._col().updateMany( mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
         const result = parseRaw<{ updated: number }>(raw);
         return { deletedCount: result?.updated ?? 0 };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._native.deleteMany(this._name, mapped);
+      const raw = await this._col().deleteMany( mapped);
       const result = parseRaw<{ deleted: number }>(raw);
       return { deletedCount: result?.deleted ?? 0 };
     });
@@ -592,7 +631,7 @@ export class Collection<S = PlainObject> {
   async countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const raw = await this._native.count(this._name, mapped);
+      const raw = await this._col().count( mapped);
       const result = parseRaw<{ count: number }>(raw);
       return result?.count ?? 0;
     });
@@ -609,7 +648,7 @@ export class Collection<S = PlainObject> {
       }
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const column = this._toColumn(field);
-      const raw = await this._native.distinct(this._name, column, mapped);
+      const raw = await this._col().distinct( column, mapped);
       const result = parseRaw<(string | number | boolean | null)[]>(raw);
       return result ?? [];
     });
@@ -633,7 +672,7 @@ export class Collection<S = PlainObject> {
         }
       }
       const translated = translateAggregatePipeline(effectivePipeline, this._toColumn) as ZeroshipDbAggregateStage[];
-      const raw = await this._native.aggregate(this._name, translated);
+      const raw = await this._col().aggregate( translated);
       const results = parseRaw<PlainObject[]>(raw);
       return (results ?? []).map(d => mapResultDoc(d, this._toField));
     });
@@ -646,7 +685,7 @@ export class Collection<S = PlainObject> {
   async forceDelete(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
     return this._run(async () => {
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._native.deleteOne(this._name, mapped);
+      const raw = await this._col().deleteOne( mapped);
       return { deletedCount: raw !== null && raw !== undefined && raw !== "" ? 1 : 0 };
     });
   }
@@ -658,7 +697,7 @@ export class Collection<S = PlainObject> {
   async forceDeleteMany(filter: Filter<S>): Promise<Result<{ deletedCount: number }>> {
     return this._run(async () => {
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._native.deleteMany(this._name, mapped);
+      const raw = await this._col().deleteMany( mapped);
       const result = parseRaw<{ deleted: number }>(raw);
       return { deletedCount: result?.deleted ?? 0 };
     });

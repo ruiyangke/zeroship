@@ -219,55 +219,39 @@ impl NativePlugin for DbPlugin {
                 DB_POOL.with(|p| *p.borrow_mut() = None);
             }
         });
-        r.add("findOne", callbacks::find_one);
-        r.add("find", callbacks::find);
-        r.add("insert", callbacks::insert);
-        r.add("insertMany", callbacks::insert_many);
-        r.add("updateOne", callbacks::update_one);
-        r.add("updateMany", callbacks::update_many);
-        r.add("deleteOne", callbacks::delete_one);
-        r.add("deleteMany", callbacks::delete_many);
-        r.add("upsert", callbacks::upsert);
-        r.add("count", callbacks::count);
-        r.add("distinct", callbacks::distinct);
-        r.add("aggregate", callbacks::aggregate);
+        // v2-only surface — CRUD lives on the Collection v8_class
+        // (`env.db.collection(name).find(...)`, etc.); the pre-v2 flat
+        // callbacks (`env.db.find(name, ...)` etc.) have been removed.
         r.add("registerModel", callbacks::register_model);
+        // Transaction entry point. Returns a Transaction v8_class
+        // instance whose `.commit()` / `.rollback()` / `.collection(n)`
+        // are explicit methods; Drop auto-rollbacks via connection
+        // close.
         r.add("beginTransaction", callbacks::begin_transaction);
-        r.add("commitTransaction", callbacks::commit_transaction);
-        r.add("rollbackTransaction", callbacks::rollback_transaction);
         // Tx wrapping deferral from T1 — install the auto-tx globals
         // (`__zsBeginAutoTx` / `__zsEndAutoTx`) used by the synthetic
         // SSR entry to wrap `query()` and `mutation()` handlers with a
-        // READ ONLY / SERIALIZABLE tx envelope. The capability gate
+        // READ ONLY / READ COMMITTED tx envelope. The capability gate
         // (B3 runtime layer) is the primary enforcement; this is the
         // Postgres-level defense-in-depth around it.
         r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
             callbacks::install_auto_tx_globals(scope);
         });
-        // B1 — @zeroship/migrations primitives
-        r.add("migrationBegin", callbacks::migration_begin);
-        r.add("migrationFetchBatch", callbacks::migration_fetch_batch);
-        r.add("migrationCommitBatch", callbacks::migration_commit_batch);
+        // B1 — @zeroship/migrations. `migrationStart` mints a Migration
+        // v8_class runner; `.fetchBatch()` / `.commitBatch()` /
+        // `.status()` / `.cancel()` / `.reset()` are methods on the
+        // wrapper. The flat `migrationStatus` / `migrationCancel` /
+        // `migrationReset` standalone callbacks coexist as the
+        // observe-by-name path (status reads from any worker without
+        // acquiring the advisory lock; the Migration wrapper's
+        // `.status()` is for the owning worker).
+        r.add("migrationStart", callbacks::migration_start);
         r.add("migrationStatus", callbacks::migration_status);
         r.add("migrationCancel", callbacks::migration_cancel);
         r.add("migrationReset", callbacks::migration_reset);
-        // Stage 3 — v8_class-backed Migration wrapper. Mints a typed
-        // runner instance whose `.status()` / `.cancel()` / `.reset()`
-        // delegate to the same SQL the flat callbacks use, and whose
-        // GC finalizer auto-cancels the run if the wrapper is dropped
-        // without explicit teardown. The flat `migrationBegin`/`…`
-        // callbacks above stay registered for back-compat with the
-        // existing `@zeroship/migrations` SDK.
-        r.add("migrationStart", callbacks::migration_start);
-        // C1 / P8a — reactive queries (in-process broker;
-        // streaming WAL consumer deferred to P8a.2)
-        r.add("subscribe", callbacks::subscribe);
-        r.add("subscribePoll", callbacks::subscribe_poll);
-        r.add("subscribeClose", callbacks::subscribe_close);
-        // Stage 3 — v8_class-backed Subscription wrapper whose Weak
-        // finalizer closes the broker handle on GC. The handle-id
-        // triple above stays for back-compat with the existing SDK
-        // AsyncIterable shim.
+        // C1 / P8a — reactive queries. `openSubscription` mints a
+        // Subscription v8_class wrapper whose `.pollJson()` / `.close()`
+        // are methods; Weak finalizer closes the broker handle on GC.
         r.add("openSubscription", callbacks::open_subscription);
         r.add("replicationSetup", callbacks::replication_setup);
         r.add("replicationWatchdog", callbacks::replication_watchdog);

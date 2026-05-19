@@ -305,15 +305,15 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   // fail later with a confusing Postgres error).
   validateRefTargets(schemas);
 
-  // B2 — pass a native shim with `registerModel: undefined` so `model()`
-  // skips the eager fire-and-store. `createDb` chains the
-  // `registerModel` calls itself in topological order below — parent
-  // tables are created before child tables.
-  const { registerModel: _omitRegister, ...nativeNoRegisterRest } =
-    native as unknown as Record<string, unknown>;
-  void _omitRegister;
-  const nativeNoRegister = nativeNoRegisterRest as unknown as NativeDb;
-
+  // B2 — pass `skipRegister=true` so `model()` doesn't eagerly fire
+  // `registerModel` itself. `createDb` runs the registrations in
+  // topological order below, so parent tables (referenced via
+  // `t.ref(...)`) get created before child tables. We can't strip
+  // `registerModel` by wrapping `native` because env.db is a
+  // `#[v8_class]` instance whose other methods (`.collection`,
+  // `.beginTransaction`, …) need the original `this` binding —
+  // `Object.create(env.db)` would lose internal-field access and
+  // method calls would throw "Illegal invocation".
   for (const [name, rawSchema] of Object.entries(schemas)) {
     // Unwrap SchemaBuilder to extract per-collection options
     const isBuilder = rawSchema instanceof SchemaBuilder;
@@ -330,10 +330,11 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         // The TypeBuilder branch can't be cast to Record<string, unknown>
         // safely, but `model()` -> `normalizeSchema` accepts either form.
         (isUnion ? fields : fields) as Record<string, unknown>,
-        nativeNoRegister,
+        native,
         namingStrategy,
         softDelete,
         versioning,
+        /* skipRegister */ true,
       );
   }
 
@@ -382,34 +383,34 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     ...collections,
 
     async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<T[K]> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
-      // Detect native error envelope: Rust resolves (not rejects) with {"error":"..."}
-      function checkTxResult(raw: unknown): void {
-        if (raw && typeof raw === "string") {
-          try {
-            const parsed = JSON.parse(raw);
-            if (parsed && typeof parsed === "object" && typeof parsed.error === "string") {
-              throw new Error(parsed.error);
-            }
-          } catch (e) {
-            if (e instanceof Error && !e.message.startsWith("Unexpected")) throw e;
-          }
-        }
+      // BEGIN — the native runtime returns a Transaction wrapper
+      // (v8_class) whose .commit() / .rollback() are explicit methods.
+      // The wrapper's Drop auto-rollbacks if a thrown handler skips the
+      // explicit teardown.
+      const nativeAny = native as unknown as {
+        beginTransaction?: (level?: string) => Promise<{
+          commit(): Promise<void>;
+          rollback(): Promise<void>;
+        }>;
+      };
+      if (typeof nativeAny.beginTransaction !== "function") {
+        return err(new Error(
+          "@zeroship/db: env.db.beginTransaction not available — " +
+          "runtime is missing the Transaction v8_class surface.",
+        ));
       }
-
-      // BEGIN
-      const beginResult = await native.beginTransaction?.(options?.isolationLevel);
-      checkTxResult(beginResult);
+      const tx = await nativeAny.beginTransaction(options?.isolationLevel);
 
       try {
         const result = await fn(txCollections);
-        const commitResult = await native.commitTransaction?.();
-        checkTxResult(commitResult);
+        await tx.commit();
         return ok(result);
       } catch (e) {
         try {
-          await native.rollbackTransaction?.();
+          await tx.rollback();
         } catch {
-          // Ignore rollback errors — connection cleanup handles it
+          // Ignore rollback errors — wrapper's Drop also rolls back via
+          // connection close as a safety net.
         }
         return err(e instanceof Error ? e : new Error(String(e)));
       }

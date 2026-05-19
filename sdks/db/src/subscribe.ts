@@ -8,10 +8,10 @@
  * cross-worker WAL fanout (P8a.2) + React `useQuery` (P8b) are
  * deferred.
  *
- * The native surface is three primitives (`subscribe`,
- * `subscribePoll`, `subscribeClose`) — see `sdks/types/db.d.ts`.
- * This module wraps them into an `AsyncIterable` so callers can
- * write:
+ * The native surface is the Subscription v8_class (returned from
+ * `env.db.openSubscription(collection)`) with `.pollJson()` →
+ * Promise<string|null> and `.close()`. This module wraps it into an
+ * `AsyncIterable` so callers can write:
  *
  * ```ts
  * for await (const ev of db.subscribe("messages")) {
@@ -21,9 +21,11 @@
  *
  * The iterator terminates on the first `closed` event. If the
  * consumer breaks out of the `for await` loop early (or throws),
- * the iterator's `return` method runs `subscribeClose(handle)`
- * to release the broker slot — same semantics as
- * `EventEmitter`-backed AsyncIterables in Node.
+ * the iterator's `return` method runs `.close()` on the wrapper to
+ * release the broker slot — same semantics as `EventEmitter`-backed
+ * AsyncIterables in Node. The wrapper's GC finalizer is a safety net
+ * for the case where the user drops every reference without
+ * iterating to completion.
  */
 
 import { env } from "zeroship";
@@ -50,38 +52,40 @@ export type SubscriptionEvent =
 
 /**
  * A live subscription — an `AsyncIterable<SubscriptionEvent>` that
- * additionally exposes `close()` for explicit teardown and `handle`
- * for diagnostics.
+ * additionally exposes `close()` for explicit teardown.
  *
  * Lifetime: the underlying broker slot is held until either:
  * - the iterator drains a `closed` event (auto-reaped), OR
  * - `close()` is called, OR
  * - the iterator's `return()` is invoked (e.g. via `for await`
- *   `break`).
+ *   `break`), OR
+ * - the wrapper is garbage-collected (Subscription v8_class GC
+ *   finalizer is the safety-net release).
  */
 export interface Subscription extends AsyncIterable<SubscriptionEvent> {
-  /** Numeric handle the broker uses internally. Stable for the
-   *  lifetime of the subscription. Exposed for debugging only. */
-  readonly handle: number;
   /** Idempotent close. Subsequent iterator polls resolve with
    *  `{kind:"closed"}` and the iterator terminates. */
   close(): void;
 }
 
-/** The native zeroship.db handle resolved off the runtime env. */
+/** Minimal interface of the native Subscription v8_class wrapper. */
+interface NativeSubscription {
+  pollJson(): Promise<string | null>;
+  close(): void;
+}
+
+/** The native zeroship.db surface this module consumes. */
 type NativeDb = {
-  subscribe: (collection: string) => number;
-  subscribePoll: (handle: number) => Promise<string | null>;
-  subscribeClose: (handle: number) => void;
+  openSubscription: (collection: string) => NativeSubscription;
 };
 
 /** Pull the native handle off `env`, throwing on a misconfigured runtime. */
 function getNativeDb(): NativeDb {
   const db = (env as { db?: NativeDb } | undefined)?.db;
-  if (!db || typeof db.subscribe !== "function") {
+  if (!db || typeof db.openSubscription !== "function") {
     throw new Error(
-      "@zeroship/db/subscribe: env.db is not available — " +
-        "is the DbPlugin registered on this runtime?",
+      "@zeroship/db/subscribe: env.db.openSubscription not available — " +
+        "runtime is missing the Subscription v8_class surface.",
     );
   }
   return db;
@@ -91,31 +95,6 @@ function getNativeDb(): NativeDb {
  * Open a subscription on `collection`. Returns an
  * `AsyncIterable<SubscriptionEvent>` that yields one event per
  * `next()` call.
- *
- * Errors:
- * - throws if `env.db` isn't available (plugin not registered)
- * - throws if the underlying poll resolves with malformed JSON
- *   (should not happen in practice — the native layer always
- *   emits well-formed objects)
- *
- * Example:
- *
- * ```ts
- * import { subscribe } from "@zeroship/db";
- *
- * const sub = subscribe("messages");
- * try {
- *   for await (const ev of sub) {
- *     if (ev.kind === "change") {
- *       console.log("messages changed:", ev.op, ev.pk);
- *     } else if (ev.kind === "resync") {
- *       await refetchAll();
- *     }
- *   }
- * } finally {
- *   sub.close();
- * }
- * ```
  */
 export function subscribe(collection: string): Subscription {
   if (typeof collection !== "string" || collection.length === 0) {
@@ -124,17 +103,17 @@ export function subscribe(collection: string): Subscription {
     );
   }
   const native = getNativeDb();
-  const handle = native.subscribe(collection);
+  const sub = native.openSubscription(collection);
   let closed = false;
 
   function doClose(): void {
     if (closed) return;
     closed = true;
     try {
-      native.subscribeClose(handle);
+      sub.close();
     } catch {
       // Idempotent — the native side may already have reaped the
-      // handle if the iterator drained a `closed` event.
+      // wrapper if the iterator drained a `closed` event.
     }
   }
 
@@ -143,9 +122,9 @@ export function subscribe(collection: string): Subscription {
       if (closed) {
         return { value: undefined, done: true };
       }
-      const raw = await native.subscribePoll(handle);
+      const raw = await sub.pollJson();
       if (raw === null) {
-        // Handle is gone — equivalent to a closed event we missed.
+        // Wrapper is closed — equivalent to a closed event we missed.
         closed = true;
         return { value: undefined, done: true };
       }
@@ -176,7 +155,6 @@ export function subscribe(collection: string): Subscription {
   };
 
   return {
-    handle,
     close: doClose,
     [Symbol.asyncIterator](): AsyncIterator<SubscriptionEvent> {
       return iter;

@@ -401,28 +401,12 @@ impl Collection {
         callbacks::dispatch_aggregate(scope, &app_id, &collection, pipeline_v).into()
     }
 
-    // --- Subscription forwarders (still routed through JS) ---
-    //
-    // The reactive-query path is more involved (handle bookkeeping,
-    // poll/close lifecycle, AsyncIterable shim) — keeping these on the
-    // forwarder for now lets the CRUD nativization land first. They
-    // remain back-compat through the parent Db's `subscribe` /
-    // `openSubscription` callbacks.
-
-    #[v8_method]
-    fn subscribe<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
-    ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "subscribe", &rest)
-    }
-
-    /// `collection.openSubscription()` — returns the new v8_class
-    /// Subscription wrapper directly. Equivalent to
-    /// `env.db.openSubscription(name)` and `subscribePoll` /
-    /// `subscribeClose` are NOT called: the wrapper closes its broker
-    /// handle on `.close()` or GC.
+    /// `collection.openSubscription()` — convenience forwarder to the
+    /// parent Db's `openSubscription(name)` entry point. Returns the
+    /// Subscription v8_class wrapper whose Weak finalizer closes the
+    /// broker handle on GC. The handle-id `subscribe`/`subscribePoll`/
+    /// `subscribeClose` flat callbacks were removed when plugin-db
+    /// consolidated to the v2 surface.
     #[v8_method]
     #[v8_name = "openSubscription"]
     fn open_subscription<'s>(

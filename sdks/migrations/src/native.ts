@@ -12,13 +12,21 @@
  */
 
 /**
- * Subset of `ZeroshipDb` the migrations SDK calls. We pull only the
- * `migration*` methods so test mocks stay small.
+ * Native Migration v8_class wrapper — minted by
+ * `env.db.migrationStart(spec)` and used through this SDK's run loop.
+ * Each method delegates to a `#[v8_async_method]` on the Rust-side
+ * `Migration` struct (`crates/plugin-db/src/v8_classes/migration.rs`).
+ *
+ * The wrapper holds the (app_id, name, collection) triple internally
+ * and its Weak finalizer auto-cancels if the wrapper is GC'd without
+ * an explicit teardown.
  */
-export interface NativeMigrations {
-  migrationBegin(name: string, collection: string, dryRun: boolean, reset: boolean): Promise<string>;
-  migrationFetchBatch(cursor: number, batchSize: number): Promise<string>;
-  migrationCommitBatch(
+export interface NativeMigration {
+  status(): Promise<string>;
+  cancel(): Promise<string>;
+  reset(): Promise<string>;
+  fetchBatch(cursor: number, batchSize: number): Promise<string>;
+  commitBatch(
     updatesJson: string,
     deadLetterPksJson: string,
     nextCursor: number,
@@ -27,6 +35,30 @@ export interface NativeMigrations {
     terminalStatus: string,
     errorMessage: string,
   ): Promise<string>;
+}
+
+/**
+ * Native surface used by `@zeroship/migrations`. The SDK splits two
+ * concerns:
+ *
+ * - **Running** a migration: `migrationStart(spec)` mints a Migration
+ *   wrapper; the SDK's loop drives `fetchBatch` / `commitBatch` on
+ *   it; Drop auto-cancels if abandoned.
+ *
+ * - **Observing / controlling** an already-persisted migration row
+ *   (status / cancel / reset by name+collection): the standalone
+ *   `migrationStatus(...)` / `migrationCancel(...)` / `migrationReset(...)`
+ *   Db methods. These read the audit table directly and don't
+ *   acquire the advisory lock — calling them while another worker
+ *   has an active run is safe.
+ */
+export interface NativeMigrations {
+  migrationStart(spec: {
+    name: string;
+    collection: string;
+    dryRun?: boolean;
+    reset?: boolean;
+  }): Promise<NativeMigration>;
   migrationStatus(name: string, collection: string): Promise<string>;
   migrationCancel(name: string, collection: string): Promise<string>;
   migrationReset(name: string, collection: string): Promise<string>;
@@ -35,7 +67,7 @@ export interface NativeMigrations {
 import { env } from "zeroship";
 
 /**
- * Resolve the live native namespace from the per-isolate env.
+ * Resolve the live native entry point from the per-isolate env.
  *
  * Static top-level import so the synthetic `zeroship` module resolves
  * at module-init time, not on first call. A dynamic `await
@@ -47,13 +79,14 @@ let cachedNative: NativeMigrations | null = null;
 export async function getNativeMigrations(): Promise<NativeMigrations> {
   if (cachedNative) return cachedNative;
   const db = (env as { db?: NativeMigrations } | undefined)?.db;
-  if (db && typeof db.migrationBegin === "function") {
+  if (db && typeof db.migrationStart === "function"
+      && typeof db.migrationStatus === "function") {
     cachedNative = db;
     return db;
   }
   throw new Error(
-    "@zeroship/migrations: env.db.migration* not available — " +
-      "is the DbPlugin registered on this runtime?",
+    "@zeroship/migrations: env.db migration surface not available — " +
+      "runtime is missing migrationStart / migrationStatus.",
   );
 }
 

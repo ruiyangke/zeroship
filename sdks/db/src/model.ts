@@ -48,7 +48,11 @@ export function model<S extends Record<string, unknown>>(
   nativeOverride?: NativeDb,
   namingStrategy: NamingStrategy = naming.snakeCase,
   softDelete: boolean = false,
-  versioning: boolean = false
+  versioning: boolean = false,
+  /** @internal — `createDb` sets this so it can chain `registerModel`
+   *  calls itself in dependency order. Standalone `model()` callers
+   *  leave it false and get the eager fire-and-store behaviour. */
+  skipRegister: boolean = false,
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error("model name must be a non-empty string");
@@ -88,7 +92,7 @@ export function model<S extends Record<string, unknown>>(
   }
 
   let registrationPromise: Promise<void> | null = null;
-  if (native.registerModel) {
+  if (!skipRegister && native.registerModel) {
     try {
       registrationPromise = native.registerModel(name, dbSchema) as Promise<void>;
     } catch {

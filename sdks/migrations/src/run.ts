@@ -1,28 +1,29 @@
 /**
  * `migrations.run` — orchestrate a backfill end-to-end.
  *
- * Loop, in JS:
- *   1. `migrationBegin(name, collection, dryRun, reset)` →
- *      `{ auditId, cursor, processed, deadLetterPks }`. Acquires the
- *      Postgres advisory lock; subsequent runs from other workers fail
- *      with `migration_already_running`.
- *   2. Repeatedly:
- *        a. `migrationFetchBatch(cursor, batchSize)` → `{ rows }`.
- *        b. For each row, call `migrateOne(row, ctx)`. Build an updates
- *           list. Per-row throws push the row's id onto a dead-letter
- *           list (subject to `failureBudget`).
- *        c. `migrationCommitBatch(updates, deadLetterPks, nextCursor,
- *           processed, false, "", "")`. The native side BEGIN/COMMITs;
- *           dry-runs ROLLBACK.
- *      until rows.length === 0.
- *   3. Final `migrationCommitBatch(..., true, terminal, error)` to drive
- *      the audit row to its terminal state and release the lock.
+ * Surface: the SDK calls `env.db.migrationStart(spec)` to mint a
+ * Migration v8_class wrapper, then drives the loop:
  *
- * All loop state is local to this function — the native side stores
- * only what's persisted in `__zeroship_migrations` for crash recovery.
+ *   1. `m.fetchBatch(cursor, batchSize)` → `{ rows }`.
+ *   2. For each row, call `migrateOne(row, ctx)`. Build an updates
+ *      list. Per-row throws push the row's id onto a dead-letter list
+ *      (subject to `failureBudget`).
+ *   3. `m.commitBatch(updates, deadLetterPks, nextCursor, processed,
+ *      false, "", "")`. The native side BEGIN/COMMITs; dry-runs
+ *      ROLLBACK.
+ *   4. Loop until `rows.length === 0`.
+ *   5. Final `m.commitBatch(..., true, terminal, error)` drives the
+ *      audit row to its terminal state and releases the advisory
+ *      lock. After `isDone=true`, the wrapper's internal `inner` is
+ *      cleared so the GC finalizer no longer auto-cancels.
+ *
+ * On cancellation (another worker / operator), `fetchBatch` throws
+ * `migration_cancelled` — the SDK returns the cancelled status
+ * without calling the terminal commitBatch (the cancel already
+ * settled the audit row).
  */
 
-import type { NativeMigrations } from "./native.js";
+import type { NativeMigration, NativeMigrations } from "./native.js";
 import { getNativeMigrations, parseNative, toNativeError } from "./native.js";
 import type {
   Migration,
@@ -33,14 +34,6 @@ import type {
   RunResult,
 } from "./types.js";
 
-interface BeginResponse {
-  auditId: number;
-  cursor: number;
-  processed: number;
-  status: MigrationStatus;
-  deadLetterPks: number[];
-}
-
 interface FetchResponse {
   rows: PlainObject[];
 }
@@ -50,8 +43,8 @@ interface FetchResponse {
  * returns a Result — never throws.
  *
  * Note: `resume` is the default. Pass `reset: true` to start from
- * scratch (clears persisted state before the run). The two options are
- * mutually exclusive — `reset` wins if both are set.
+ * scratch (clears persisted state before the run). The two options
+ * are mutually exclusive — `reset` wins if both are set.
  */
 export async function runMigration<Row extends PlainObject, Update extends PlainObject>(
   migration: Migration<Row, Update>,
@@ -62,24 +55,21 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
   const dryRun = options.dryRun === true;
   const reset = options.reset === true;
 
-  let begin: BeginResponse;
+  let m: NativeMigration;
   try {
-    const raw = await native.migrationBegin(
-      migration.name,
-      migration.collection,
+    m = await native.migrationStart({
+      name: migration.name,
+      collection: migration.collection,
       dryRun,
       reset,
-    );
-    begin = parseNative<BeginResponse>(raw);
+    });
   } catch (e) {
     return { data: null, error: toNativeError(e) };
   }
 
-  let cursor = begin.cursor ?? 0;
-  let processed = begin.processed ?? 0;
-  const deadLetter: number[] = Array.isArray(begin.deadLetterPks)
-    ? [...begin.deadLetterPks]
-    : [];
+  let cursor = 0;
+  let processed = 0;
+  const deadLetter: number[] = [];
   let failures = 0;
   const budget = migration.failureBudget ?? 0;
 
@@ -90,7 +80,7 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     error: string,
   ): Promise<RunResult> {
     try {
-      const raw = await native.migrationCommitBatch(
+      const raw = await m.commitBatch(
         JSON.stringify([]),
         JSON.stringify(deadLetter),
         cursor,
@@ -113,12 +103,13 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
   for (;;) {
     let fetched: FetchResponse;
     try {
-      const raw = await native.migrationFetchBatch(cursor, migration.batchSize);
+      const raw = await m.fetchBatch(cursor, migration.batchSize);
       fetched = parseNative<FetchResponse>(raw);
     } catch (e) {
       const err = toNativeError(e);
       if (err.code === "migration_cancelled" || err.message.includes("migration_cancelled")) {
-        // Don't try to drive the audit row — cancel already terminalised it.
+        // Don't try to drive the audit row — cancel already
+        // terminalised it.
         return {
           data: { status: "cancelled", processed, deadLetterPks: deadLetter, cursor },
           error: null,
@@ -145,7 +136,11 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
       let out: Update | undefined | null;
       try {
         out = await migration.migrateOne(row as Row, {
-          auditId: begin.auditId,
+          // auditId is no longer surfaced through the entry point —
+          // the row count is what the migrate callback needs in
+          // practice; if a use case for auditId emerges, expose a
+          // `m.auditId` getter on the wrapper.
+          auditId: 0,
           cursor,
           processed,
         });
@@ -178,7 +173,7 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     processed += rows.length;
 
     try {
-      const raw = await native.migrationCommitBatch(
+      const raw = await m.commitBatch(
         JSON.stringify(updates),
         JSON.stringify(deadLetter),
         nextCursor,
