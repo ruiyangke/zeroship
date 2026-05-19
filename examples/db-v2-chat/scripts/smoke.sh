@@ -17,7 +17,8 @@ FAILED=0
 
 rpc() {
   local proc="$1"; shift
-  local body="${1:-{}}"
+  local body="${1-}"
+  [ -z "$body" ] && body="{}"
   curl -sS -X POST -H 'content-type: application/json' \
     "${RPC}/${proc}" -d "{\"json\":${body}}"
 }
@@ -35,17 +36,22 @@ contains() { echo "$1" | grep -q -- "$2"; }
 
 echo "[setup] seeding channels + author"
 
-GENERAL=$(rpc createChannel '{"slug":"general","name":"General"}')
-RANDOM_CH=$(rpc createChannel '{"slug":"random","name":"Random"}')
+# Unique suffixes so the smoke is re-runnable against a persistent
+# Postgres without UNIQUE conflicts.
+SUFFIX=$(date +%s%N | head -c10)
+GENERAL=$(rpc createChannel "{\"slug\":\"general-${SUFFIX}\",\"name\":\"General\"}")
+RANDOM_CH=$(rpc createChannel "{\"slug\":\"random-${SUFFIX}\",\"name\":\"Random\"}")
+AUTHOR_RES=$(rpc createUser "{\"handle\":\"user_${SUFFIX}\",\"name\":\"Alice\"}")
 
 GENERAL_ID=$(echo "$GENERAL" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
 RANDOM_ID=$(echo "$RANDOM_CH" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
-AUTHOR_ID=1
+AUTHOR_ID=$(echo "$AUTHOR_RES" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
 
-if [ -z "$GENERAL_ID" ] || [ -z "$RANDOM_ID" ]; then
-  echo "  ⚠ channel creation failed — running degraded checks only"
-  GENERAL_ID=1; RANDOM_ID=2
+if [ -z "$GENERAL_ID" ] || [ -z "$RANDOM_ID" ] || [ -z "$AUTHOR_ID" ]; then
+  echo "  ✗ setup failed — general=$GENERAL random=$RANDOM_CH author=$AUTHOR_RES"
+  exit 1
 fi
+echo "  seeded general=$GENERAL_ID random=$RANDOM_ID author=$AUTHOR_ID"
 
 # ---------------------------------------------------------------------------
 # Check 1: sendMessage to general (mutation auto-tx)
@@ -85,20 +91,58 @@ check "general channel still doesn't see random's messages" \
 echo "[check 4] FK enforcement — orphan channel rejected (B2)"
 
 BAD=$(rpc sendMessage "{\"channelId\":99999,\"authorId\":${AUTHOR_ID},\"body\":\"orphan\"}")
-check "orphan channel insert produced an error" contains "$BAD" '"error"'
+check "orphan channel insert produced an error" \
+  bash -c "echo '$BAD' | grep -qiE 'error|violation|foreign'"
 
 # ---------------------------------------------------------------------------
-# Check 5: WAL consumer status (P8a.2)
+# Check 5: flagMessage updates row and listMessages filters it out
 # ---------------------------------------------------------------------------
 
-echo "[check 5] WAL consumer reachable (cross-worker propagation requires wal_level=logical)"
+echo "[check 5] flagMessage updates row and listMessages filters it out"
 
-# The WAL consumer's status endpoint isn't user-facing today; we check
-# the broker's published events via a quick subscription poll. If
-# wal_level=replica, this still works via local-emit; only multi-worker
-# delivery requires wal_level=logical.
-WAL_OK=$(curl -sS "${URL}/_zs/db/wal/status" 2>/dev/null || echo '{}')
-check "WAL endpoint reachable (best-effort)" bash -c "[ -n '$WAL_OK' ]"
+M_ID=$(echo "$M1" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+if [ -n "$M_ID" ]; then
+  rpc flagMessage "{\"id\":${M_ID}}" >/dev/null
+  LIST_AFTER_FLAG=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
+  check "flagged message no longer in listMessages" \
+    bash -c "! echo '$LIST_AFTER_FLAG' | grep -q '\"id\":${M_ID},'"
+else
+  check "obtained M1 id for flag test" bash -c "false"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 6: action — runQuery (read) + runMutation (write) round-trip
+# ---------------------------------------------------------------------------
+
+echo "[check 6] action — runQuery (read) + runMutation (write) round-trip"
+
+# Spin up a tiny one-shot moderation stub. Returns {"unsafe":true} so
+# the action takes the flag-via-runMutation branch.
+MOD_PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();})')
+node -e "
+const http = require('http');
+const srv = http.createServer((req, res) => {
+  res.writeHead(200, {'content-type': 'application/json'});
+  res.end(JSON.stringify({unsafe: true}));
+  setImmediate(() => process.exit(0));
+});
+srv.listen(${MOD_PORT}, '127.0.0.1');
+" &
+MOD_PID=$!
+sleep 1
+
+NEW_MSG=$(rpc sendMessage "{\"channelId\":${GENERAL_ID},\"authorId\":${AUTHOR_ID},\"body\":\"will be flagged\"}")
+NEW_ID=$(echo "$NEW_MSG" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+
+MODERATE_RES=$(rpc moderateMessage "{\"id\":${NEW_ID:-1},\"moderationUrl\":\"http://127.0.0.1:${MOD_PORT}/\"}")
+kill $MOD_PID 2>/dev/null || true
+
+check "moderateMessage took the unsafe-branch (action → runQuery + fetch + runMutation)" \
+  bash -c "echo '$MODERATE_RES' | grep -q '\"flagged\":true'"
+
+LIST_AFTER_MOD=$(rpc listMessages "{\"channelId\":${GENERAL_ID}}")
+check "flagged message via runMutation is filtered from listMessages" \
+  bash -c "! echo '$LIST_AFTER_MOD' | grep -q '\"id\":${NEW_ID},'"
 
 # ---------------------------------------------------------------------------
 # Result

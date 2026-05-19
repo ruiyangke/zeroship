@@ -27,8 +27,49 @@ import { env } from "zeroship";
 import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
-import { type NormalizedSchema, validateRefTargets } from "./schema.js";
+import { type NormalizedSchema, normalizeSchema, validateRefTargets } from "./schema.js";
 import { type PlainObject, type Result, type Document, type CreateInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
+
+/**
+ * Topologically sort schema names so parents precede children. A child
+ * is a collection with `t.ref(parent)` somewhere in its field set.
+ * Used by `createDb` to chain `registerModel` calls in dependency
+ * order. Cycles (mutual refs) fall back to declaration order — they're
+ * resolved by `DEFERRABLE INITIALLY DEFERRED` at the SQL layer.
+ */
+function topoSortByRefs(schemas: Record<string, unknown>): string[] {
+  const names = Object.keys(schemas);
+  const deps = new Map<string, Set<string>>();
+  for (const name of names) {
+    deps.set(name, new Set());
+    const raw = schemas[name];
+    const fields = (raw instanceof SchemaBuilder ? raw.fields : raw) as Record<string, unknown> | unknown;
+    if (!fields || typeof fields !== "object") continue;
+    for (const fd of Object.values(fields as Record<string, unknown>)) {
+      const def = fd instanceof TypeBuilder ? fd.toFieldDef() : (fd as { type?: string; refTarget?: string });
+      if (def && (def as { type?: string }).type === "ref") {
+        const target = (def as { refTarget?: string }).refTarget;
+        if (target && target !== name && names.includes(target)) {
+          deps.get(name)!.add(target);
+        }
+      }
+    }
+  }
+  const visited = new Set<string>();
+  const onStack = new Set<string>();
+  const out: string[] = [];
+  function visit(n: string): void {
+    if (visited.has(n)) return;
+    if (onStack.has(n)) return; // cycle — break; DEFERRABLE handles it
+    onStack.add(n);
+    for (const d of deps.get(n)!) visit(d);
+    onStack.delete(n);
+    visited.add(n);
+    out.push(n);
+  }
+  for (const n of names) visit(n);
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -264,6 +305,15 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   // fail later with a confusing Postgres error).
   validateRefTargets(schemas);
 
+  // B2 — pass a native shim with `registerModel: undefined` so `model()`
+  // skips the eager fire-and-store. `createDb` chains the
+  // `registerModel` calls itself in topological order below — parent
+  // tables are created before child tables.
+  const { registerModel: _omitRegister, ...nativeNoRegisterRest } =
+    native as unknown as Record<string, unknown>;
+  void _omitRegister;
+  const nativeNoRegister = nativeNoRegisterRest as unknown as NativeDb;
+
   for (const [name, rawSchema] of Object.entries(schemas)) {
     // Unwrap SchemaBuilder to extract per-collection options
     const isBuilder = rawSchema instanceof SchemaBuilder;
@@ -280,11 +330,45 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         // The TypeBuilder branch can't be cast to Record<string, unknown>
         // safely, but `model()` -> `normalizeSchema` accepts either form.
         (isUnion ? fields : fields) as Record<string, unknown>,
-        native,
+        nativeNoRegister,
         namingStrategy,
         softDelete,
         versioning,
       );
+  }
+
+  // Chain registerModel calls in topological order so parent tables
+  // (referenced via `t.ref(...)`) are created before child tables. The
+  // native orchestrator's advisory lock makes concurrent calls safe
+  // but not deterministic: whichever orchestrator acquires the lock
+  // first runs first, and a child running before its parent fails
+  // inline-FK CREATE TABLE. Sequencing in JS removes the race
+  // entirely.
+  const refOrder = topoSortByRefs(schemas as Record<string, unknown>);
+  let chain: Promise<void> = Promise.resolve();
+  for (const name of refOrder) {
+    const col = (collections as Record<string, Collection<SchemaInput>>)[name];
+    if (!col) continue;
+    const rawSchema = schemas[name as keyof T];
+    const fields =
+      rawSchema instanceof SchemaBuilder ? rawSchema.fields : rawSchema;
+    // Same normalisation `model()` does — TypeBuilder → plain field
+    // defs (carries `type: "ref"` + `refTarget`), Mongoose-style →
+    // field defs, union expansion. The Rust orchestrator expects this
+    // shape.
+    const normalized = normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]);
+    const dbSchema: ZeroshipDbSchema = {};
+    for (const [key, def] of Object.entries(normalized)) {
+      dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
+    }
+    chain = chain
+      .catch(() => undefined)
+      .then(() =>
+        native.registerModel
+          ? (native.registerModel(name, dbSchema) as Promise<void>)
+          : Promise.resolve(),
+      );
+    (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions

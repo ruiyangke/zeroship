@@ -17,7 +17,7 @@
 // the `listMessages` proc and auto-rerenders on broker events.
 
 import { createDb, t, schema, type Id } from "@zeroship/db";
-import { query, mutation, action } from "@zeroship/server";
+import { query, mutation, action, runQuery, runMutation } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -54,9 +54,8 @@ type MessageId = Id<"messages">;
 // ---------------------------------------------------------------------------
 
 export const listMessages = query(
-  async ({ channelId, limit = 50 }: { channelId: ChannelId; limit?: number }, ctx) => {
-    const col = (ctx.db as any).messages;
-    return col
+  async ({ channelId, limit = 50 }: { channelId: ChannelId; limit?: number }) => {
+    return db.messages
       .find({ channelId, flagged: false })
       .sort({ createdAt: -1 })
       .limit(limit);
@@ -64,15 +63,13 @@ export const listMessages = query(
 );
 
 export const getMessage = query(
-  async ({ id }: { id: MessageId }, ctx) => {
-    const col = (ctx.db as any).messages;
-    return col.findOne({ id });
+  async ({ id }: { id: MessageId }) => {
+    return db.messages.findOne({ id });
   },
 );
 
-export const listChannels = query(async (_input: Record<string, never>, ctx) => {
-  const col = (ctx.db as any).channels;
-  return col.find({}).sort({ slug: 1 });
+export const listChannels = query(async (_input: Record<string, never>) => {
+  return db.channels.find({}).sort({ slug: 1 });
 });
 
 // ---------------------------------------------------------------------------
@@ -83,27 +80,29 @@ export const listChannels = query(async (_input: Record<string, never>, ctx) => 
 export const sendMessage = mutation(
   async (
     { channelId, authorId, body }: { channelId: ChannelId; authorId: UserId; body: string },
-    ctx,
   ) => {
-    const col = (ctx.db as any).messages;
-    return col.create({ channelId, authorId, body, flagged: false });
+    return db.messages.create({ channelId, authorId, body, flagged: false });
   },
 );
 
 export const flagMessage = mutation(
-  async ({ id }: { id: MessageId }, ctx) => {
-    const col = (ctx.db as any).messages;
-    return col.updateOne({ id }, { flagged: true });
+  async ({ id }: { id: MessageId }) => {
+    return db.messages.updateOne({ id }, { flagged: true });
   },
 );
 
 export const createChannel = mutation(
   async (
     { slug, name, topic }: { slug: string; name: string; topic?: string },
-    ctx,
   ) => {
-    const col = (ctx.db as any).channels;
-    return col.create({ slug, name, topic });
+    return db.channels.create({ slug, name, topic });
+  },
+);
+
+// Seed helper — used by smoke.sh to provision a user.
+export const createUser = mutation(
+  async ({ handle, name }: { handle: string; name: string }) => {
+    return db.users.create({ handle, name });
   },
 );
 
@@ -113,13 +112,13 @@ export const createChannel = mutation(
 // ---------------------------------------------------------------------------
 
 export const moderateMessage = action(
-  async ({ id, moderationUrl }: { id: MessageId; moderationUrl: string }, ctx) => {
-    const message = (await ctx.runQuery(getMessage as any, { id })) as
+  async ({ id, moderationUrl }: { id: MessageId; moderationUrl: string }) => {
+    const message = (await runQuery(getMessage, { id })) as
       | { body: string }
       | null;
     if (!message) return { handled: false, reason: "not_found" };
 
-    const resp = await ctx.fetch(moderationUrl, {
+    const resp = await fetch(moderationUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ body: message.body }),
@@ -127,7 +126,7 @@ export const moderateMessage = action(
     const result = (await resp.json()) as { unsafe?: boolean };
 
     if (result.unsafe) {
-      await ctx.runMutation(flagMessage as any, { id });
+      await runMutation(flagMessage, { id });
       return { handled: true, flagged: true };
     }
     return { handled: true, flagged: false };

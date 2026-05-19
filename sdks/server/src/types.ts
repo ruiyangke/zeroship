@@ -102,6 +102,19 @@ export interface ProcedureConfig<TIn = unknown, TOut = unknown> {
    */
   middleware?: string[];
   /**
+   * Postgres isolation level for the auto-tx envelope wrapping this
+   * procedure. Only meaningful for `mutation` (and ignored for the
+   * other kinds — queries always use `READ COMMITTED READ ONLY`,
+   * actions are not wrapped).
+   *
+   * Default: `"read committed"`. Bump to `"repeatable read"` for
+   * snapshot isolation (consistent re-reads inside the tx), or to
+   * `"serializable"` for write-skew prevention. Higher levels trade
+   * throughput for correctness — Postgres SSI may raise SQLSTATE
+   * 40001 on commit, requiring the SDK retry loop.
+   */
+  isolation?: "read committed" | "repeatable read" | "serializable";
+  /**
    * Zod schema (or any `.parse()`-shaped object) validating the first
    * argument. When set, the synthetic SSR entry calls
    * `input.parse(args[0])` before invoking the handler; failures

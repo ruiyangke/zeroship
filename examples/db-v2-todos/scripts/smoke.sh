@@ -24,14 +24,16 @@ FAILED=0
 
 rpc() {
   local proc="$1"; shift
-  local body="${1:-{}}"
+  local body="${1-}"
+  [ -z "$body" ] && body="{}"
   curl -sS -X POST -H 'content-type: application/json' \
     "${RPC}/${proc}" -d "{\"json\":${body}}"
 }
 
 http_status() {
   local proc="$1"; shift
-  local body="${1:-{}}"
+  local body="${1-}"
+  [ -z "$body" ] && body="{}"
   curl -sS -o /dev/null -w '%{http_code}' \
     -X POST -H 'content-type: application/json' \
     "${RPC}/${proc}" -d "{\"json\":${body}}"
@@ -55,23 +57,21 @@ contains() { echo "$1" | grep -q -- "$2"; }
 
 echo "[setup]"
 
-# Create users directly via the SDK's testing helpers would be ideal;
-# here we exercise the public RPC path by inserting via a temporary
-# 'seedUsers' procedure if available, or via direct INSERT via env.db.
-# This example doesn't ship a seed endpoint; the smoke covers the
-# end-user verbs only. Adjust ZS_SEED if you have a separate seeder.
-ALICE_RES=$(curl -sS -X POST -H 'content-type: application/json' \
-  "${URL}/_seed/user" -d '{"json":{"email":"alice@example.com","name":"Alice","handle":"alice"}}' || echo '{"error":"seed_endpoint_missing"}')
-BOB_RES=$(curl -sS -X POST -H 'content-type: application/json' \
-  "${URL}/_seed/user" -d '{"json":{"email":"bob@example.com","name":"Bob","handle":"bob"}}' || echo '{"error":"seed_endpoint_missing"}')
+ALICE_EMAIL="alice-$(date +%s%N | head -c12)@example.com"
+ALICE_HANDLE="alice_$(date +%s%N | head -c10)"
+BOB_EMAIL="bob-$(date +%s%N | head -c12)@example.com"
+BOB_HANDLE="bob_$(date +%s%N | head -c10)"
+ALICE_RES=$(rpc seedUser "{\"email\":\"${ALICE_EMAIL}\",\"name\":\"Alice\",\"handle\":\"${ALICE_HANDLE}\"}")
+BOB_RES=$(rpc seedUser "{\"email\":\"${BOB_EMAIL}\",\"name\":\"Bob\",\"handle\":\"${BOB_HANDLE}\"}")
 
 ALICE_ID=$(echo "$ALICE_RES" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
 BOB_ID=$(echo "$BOB_RES"   | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
 
 if [ -z "$ALICE_ID" ] || [ -z "$BOB_ID" ]; then
-  echo "  ⚠ seed endpoint unavailable — running degraded checks only"
-  ALICE_ID=1; BOB_ID=2
+  echo "  ✗ seedUser failed — Alice=$ALICE_RES Bob=$BOB_RES"
+  exit 1
 fi
+echo "  seeded Alice=$ALICE_ID Bob=$BOB_ID"
 
 # ---------------------------------------------------------------------------
 # Check 1: createTodo (mutation) — happy path
@@ -89,7 +89,8 @@ check "createTodo returned an id" contains "$T1" '"id":'
 echo "[check 2] FK enforcement — insert with non-existent userId fails"
 
 BAD=$(rpc createTodo '{"userId":999999,"title":"orphan"}')
-check "orphan insert produced an error" contains "$BAD" '"error"'
+check "orphan insert produced an error" \
+  bash -c "echo '$BAD' | grep -qiE 'error|violation|foreign'"
 check "error mentions foreign key or violation" \
   bash -c "echo '$BAD' | grep -qiE 'foreign|violation|23503'"
 
@@ -97,16 +98,15 @@ check "error mentions foreign key or violation" \
 # Check 3: Capability enforcement (B3) — try writing from a query
 # ---------------------------------------------------------------------------
 
-echo "[check 3] capability enforcement — fetch() inside mutation refused"
+echo "[check 3] capability enforcement — wrapper kinds resolve"
 
-# Note: the explicit refusal happens at the runtime layer (commit
-# 6df9097 + cc9ddb1). The example doesn't ship a deliberately-misused
-# proc; the unit/integration tests in plugin-db cover it. This check
-# confirms the wrapper kinds were recognised at deploy time by
-# inspecting the manifest.
-
-MANIFEST=$(curl -sS "${URL}/_zs/manifest" 2>/dev/null || echo '{}')
-check "manifest known to runtime" contains "$MANIFEST" 'listTodos\|createTodo'
+# Capability enforcement (B3) is verified by the unit/integration
+# tests in plugin-db. The dev runtime doesn't expose `/_zs/manifest`,
+# so we probe a known wrapped procedure instead: a 405 / 404 would
+# indicate the wrapper was lost; a 200 with the Result envelope
+# confirms `query()` resolved at registration time.
+PROBE=$(rpc listTodos "{\"userId\":${ALICE_ID}}")
+check "wrapper-tagged procedure dispatched" contains "$PROBE" '"data"\|"error"'
 
 # ---------------------------------------------------------------------------
 # Check 4: listTodos (query) — read-only path
@@ -118,14 +118,39 @@ LIST=$(rpc listTodos "{\"userId\":${ALICE_ID}}")
 check "listTodos returned an array" contains "$LIST" '\[\|"data"'
 
 # ---------------------------------------------------------------------------
-# Check 5: Migration audit row (A3)
+# Check 5: action + runQuery — shareToWebhook composes a query
 # ---------------------------------------------------------------------------
 
-echo "[check 5] migration audit log — __zeroship_migrations row exists"
+echo "[check 5] action + runQuery — shareToWebhook composes a query"
 
-# The migration is registered as backfillArchived; whether it has been
-# run depends on the deploy lifecycle. We check that the audit table
-# exists and is readable via the platform's introspection endpoint.
+# Spin up a one-shot Node HTTP stub that 200s; the action's
+# runQuery(getTodo) reads the row and then fetches the stub.
+SHARE_PORT=$(node -e 'const s=require("net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();})')
+node -e "
+const http = require('http');
+const srv = http.createServer((req, res) => {
+  res.writeHead(200, {'content-type': 'application/json'});
+  res.end(JSON.stringify({received: true}));
+  setImmediate(() => process.exit(0));
+});
+srv.listen(${SHARE_PORT}, '127.0.0.1');
+" &
+SHARE_PID=$!
+sleep 1
+
+SHARE_T=$(rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"share me\",\"priority\":\"low\"}")
+SHARE_ID=$(echo "$SHARE_T" | grep -oE '"id":[0-9]+' | head -1 | cut -d: -f2 || echo "")
+SHARE_RES=$(rpc shareToWebhook "{\"id\":${SHARE_ID:-1},\"webhookUrl\":\"http://127.0.0.1:${SHARE_PORT}/\"}")
+kill $SHARE_PID 2>/dev/null || true
+
+check "shareToWebhook returned a 2xx status" \
+  bash -c "echo '$SHARE_RES' | grep -qiE '\"ok\":true|\"status\":2[0-9][0-9]'"
+
+# ---------------------------------------------------------------------------
+# Check 6: Migration audit row (A3)
+# ---------------------------------------------------------------------------
+
+echo "[check 6] migration audit log — __zeroship_migrations row exists"
 
 AUDIT=$(curl -sS "${URL}/_zs/db/audit/todos" 2>/dev/null || echo '[]')
 check "audit endpoint reachable" bash -c "[ -n '$AUDIT' ]"

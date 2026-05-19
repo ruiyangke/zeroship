@@ -44,7 +44,68 @@ function getRequest() {
   return req;
 }
 
-export { env, waitUntil, getRequest };
+// runQuery / runMutation — see crates/runtime/src/core/init.rs
+// ZEROSHIP_MODULE_JS for the canonical comments.
+async function _runWithKind(kind, fn, args) {
+  if (typeof fn !== "function") {
+    throw new TypeError("runQuery/runMutation: first arg must be a procedure function");
+  }
+  const ek = globalThis.__zsEnterKind;
+  const xk = globalThis.__zsExitKind;
+  const bt = globalThis.__zsBeginAutoTx;
+  const et = globalThis.__zsEndAutoTx;
+  const tok = (typeof ek === "function") ? ek(kind) : -1;
+  const cfg = fn.config;
+  const isolation = (cfg && typeof cfg.isolation === "string") ? cfg.isolation : "";
+  let token = 0;
+  const wantsAutoTx = typeof bt === "function" && typeof et === "function";
+  if (wantsAutoTx) {
+    try { token = await bt(kind, isolation); }
+    catch (e) {
+      if (tok >= 0 && typeof xk === "function") xk(tok);
+      throw e;
+    }
+  }
+  let result;
+  try {
+    const out = fn(args);
+    result = (out && typeof out.then === "function") ? await out : out;
+  } catch (handlerErr) {
+    if (wantsAutoTx) { try { await et(token, false); } catch (_e) {} }
+    if (tok >= 0 && typeof xk === "function") xk(tok);
+    throw handlerErr;
+  }
+  if (wantsAutoTx) {
+    try { await et(token, true); }
+    catch (commitErr) {
+      if (tok >= 0 && typeof xk === "function") xk(tok);
+      throw commitErr;
+    }
+  }
+  if (tok >= 0 && typeof xk === "function") xk(tok);
+  return result;
+}
+function runQuery(fn, args) { return _runWithKind("query", fn, args); }
+function runMutation(fn, args) { return _runWithKind("mutation", fn, args); }
+
+// Per-request accessors.
+function _requireCtx(name) {
+  const ctx = globalThis.__zeroshipGetRpcCtx && globalThis.__zeroshipGetRpcCtx();
+  if (!ctx) throw new Error(name + ": called outside a request handler");
+  return ctx;
+}
+function currentUser()           { return _requireCtx("currentUser").user; }
+function currentRequestId()      { return _requireCtx("currentRequestId").requestId; }
+function currentTraceId()        { return _requireCtx("currentTraceId").traceId; }
+function currentSignal()         { return _requireCtx("currentSignal").signal; }
+function currentHeaders()        { return _requireCtx("currentHeaders").headers; }
+function currentIdempotencyKey() { return _requireCtx("currentIdempotencyKey").idempotencyKey; }
+
+export {
+  env, waitUntil, getRequest, runQuery, runMutation,
+  currentUser, currentRequestId, currentTraceId,
+  currentSignal, currentHeaders, currentIdempotencyKey,
+};
 `;
 
 export function zeroshipModulePlugin(): Plugin {

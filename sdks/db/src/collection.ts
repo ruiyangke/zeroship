@@ -26,10 +26,38 @@ export type NativeDb = ZeroshipDb;
  * constraint violations receive code 11000.
  */
 function toResultError(e: unknown): Error {
-  if (e instanceof ValidationError) return e;
-  if (e instanceof OptimisticLockError) return e;
-  const msg = e instanceof Error ? e.message : String(e);
-  return mapNativeError(msg);
+  let out: Error;
+  if (e instanceof ValidationError) out = e;
+  else if (e instanceof OptimisticLockError) out = e;
+  else {
+    const msg = e instanceof Error ? e.message : String(e);
+    out = mapNativeError(msg);
+  }
+  // Errors serialize to `{}` by default (message/name are
+  // non-enumerable). Attach `toJSON` so the RPC wire
+  // (`JSON.stringify({ data, error })`) preserves message + code
+  // instead of dropping them.
+  try {
+    Object.defineProperty(out, "toJSON", {
+      value: function () {
+        const obj: Record<string, unknown> = {
+          name: (this as Error).name,
+          message: (this as Error).message,
+        };
+        const code = (this as { code?: unknown }).code;
+        if (code !== undefined) obj.code = code;
+        const errs = (this as { errors?: unknown }).errors;
+        if (errs !== undefined) obj.errors = errs;
+        return obj;
+      },
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  } catch {
+    /* frozen error — no-op */
+  }
+  return out;
 }
 
 /** Parses a raw JSON string (or already-parsed value) from the native layer. */
@@ -237,6 +265,15 @@ export class Collection<S = PlainObject> {
     }
   }
 
+  /** @internal — used by `createDb` to chain registrations sequentially
+   *  for B2 cross-table FK ordering. Replaces the per-collection `_ready`
+   *  promise set during `model()` construction with a chained one so
+   *  that parent-table registration completes before child-table
+   *  registration starts. */
+  _setReady(p: Promise<void> | null): void {
+    this._ready = p;
+  }
+
   /** Wraps an operation in ensureReady + try/catch → Result. Eliminates boilerplate per method. */
   private async _run<T>(fn: () => Promise<T>): Promise<Result<T>> {
     try {
@@ -362,7 +399,8 @@ export class Collection<S = PlainObject> {
         await this.ensureReady();
         return this._native.find(col, f, opts);
       },
-      this._toField
+      this._toField,
+      this._toColumn,
     );
   }
 

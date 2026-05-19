@@ -50,4 +50,49 @@ declare module "zeroship" {
    * outside a request (e.g. at module-init time).
    */
   export function getRequest(): Request;
+
+  /**
+   * RPC composition primitive — invoke a `query()` procedure. Threads
+   * the inner kind onto the capability stack so capability gates
+   * (auto-tx envelope, fetch refusal, DB-write refusal) see the inner
+   * procedure's kind, not the caller's.
+   */
+  export function runQuery<TIn, TOut>(
+    fn: (input: TIn) => Promise<TOut> | TOut,
+    input: TIn,
+  ): Promise<TOut>;
+
+  /**
+   * RPC composition primitive — invoke a `mutation()` procedure. The
+   * inner mutation runs inside its own auto-tx envelope (READ COMMITTED
+   * by default; honours `fn.config.isolation`). Each `runMutation`
+   * boundary commits independently — an action calling two
+   * `runMutation`s in sequence has two distinct atomic units.
+   */
+  export function runMutation<TIn, TOut>(
+    fn: (input: TIn) => Promise<TOut> | TOut,
+    input: TIn,
+  ): Promise<TOut>;
+
+  // ── Per-request accessors ──────────────────────────────────────────
+  // Each throws "<name>: called outside a request handler" when no
+  // dispatch frame is active.
+
+  /** Authenticated user from the gateway JWT, or `null` if unauthenticated. */
+  export function currentUser(): unknown | null;
+
+  /** Per-request request id (e.g. `req_<16 hex>`). */
+  export function currentRequestId(): string;
+
+  /** Per-request W3C trace id (32 hex chars). */
+  export function currentTraceId(): string;
+
+  /** AbortSignal that fires when the request times out or is cancelled. */
+  export function currentSignal(): AbortSignal;
+
+  /** Incoming HTTP headers (mutable, request-scoped). */
+  export function currentHeaders(): Headers;
+
+  /** `Idempotency-Key` request header value, or `undefined`. */
+  export function currentIdempotencyKey(): string | undefined;
 }

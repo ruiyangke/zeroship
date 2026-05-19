@@ -876,67 +876,80 @@ Codemod: `zeroship migrate codemod refs` walks the app sources, finds `t.number(
 
 ### B3. Capability-scoped function kinds
 
-**Motivation.** The RPC markers (`procedure`/`query`/`mutation`/`stream` from `@zeroship/server`) are routing-only today. They don't constrain what the function can do. AI-generated code freely mixes `fetch()`, DB writes, and reads inside a single `procedure`. This breaks transactionality guarantees and makes reactive-query subscription (Tier C) impossible.
+> **Shipped 2026-05.** This section was rewritten to match the implementation. Diff vs. the original draft: the `ctx` handler parameter was removed entirely (composition + per-request state are imports from `@zeroship/server`); default mutation isolation lowered from SERIALIZABLE to READ COMMITTED with per-mutation opt-in; `ctx.fetch` removed in favour of the global `fetch` (runtime gate unchanged).
 
-**Design.**
+**Motivation.** The RPC markers (`procedure`/`query`/`mutation`/`stream` from `@zeroship/server`) were routing-only. They didn't constrain what the function could do. AI-generated code freely mixed `fetch()`, DB writes, and reads inside a single `procedure`. That breaks transactionality guarantees and makes reactive-query subscription (Tier C) impossible.
 
-Adopt Convex's three-kind model ([docs.convex.dev/tutorial/actions](https://docs.convex.dev/tutorial/actions)):
+**Design.** Three wrapper kinds, distinguished by transactional envelope and external-IO permission:
 
-| Wrapper | Reads DB? | Writes DB? | External `fetch()`? | `ctx.db.invalidate()`? | `ctx.runMutation`? | Atomic? |
-|---|---|---|---|---|---|---|
-| `query()` | yes (snapshot) | no | no | no | no | yes (read-only tx) |
-| `mutation()` | yes | yes | no | yes (synchronous fanout, same node) | no | yes (RW tx, retried) |
-| `action()` | indirectly via `ctx.runQuery` | indirectly via `ctx.runMutation` | yes | yes (issues invalidations to the broker; no tx) | yes | no |
+| Wrapper | Reads DB? | Writes DB? | External `fetch()`? | Surrounding tx |
+|---|---|---|---|---|
+| `query()` | yes | no | no | `BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY` |
+| `mutation()` | yes | yes | no | `BEGIN ISOLATION LEVEL <override or READ COMMITTED> READ WRITE` |
+| `action()` | indirectly via `runQuery` | indirectly via `runMutation` | yes | none |
 
-`migrateOne` (B1 callback) uses `MutationCtx` — DB read+write, no fetch, no invalidate (the migration component issues a coarse invalidation per batch).
+`migrateOne` (B1 callback) runs in a mutation-shaped context — DB read+write, no fetch.
 
-Existing markers map:
-- `procedure` → `action` (default — most permissive)
-- `query` → `query`
-- `mutation` → `mutation`
-- `stream` → `action` (with stream return; see streaming note below)
-
-**Streaming wrappers and reactivity.** The existing `stream` wrapper supports bidirectional WebSocket payloads (client→server and server→client) with user-defined framing. After C1 ships, two patterns:
-
-- **For one-way live data (server→client read updates):** prefer `query` + `useQuery`. The subscription mechanism is automatic and re-execution is invalidation-driven.
-- **For bidirectional or coarse-grained streams (chat-with-AI, file uploads):** `stream` remains the right primitive — it maps to `action` semantics (no DB transaction; fetch allowed) with a `WritableStream`/`ReadableStream` pair on `ctx`.
-
-`stream` is not deprecated. The two wrappers solve different problems: `query` is for *typed reactive data*, `stream` is for *arbitrary byte/JSON flows*.
-
-**Enforcement.**
-
-Two layers:
-1. **Type-level.** Each wrapper provides a `ctx` typed to its capability surface. A `mutation`'s `ctx` has `ctx.db.find`, `ctx.db.create`, etc. but **no `ctx.fetch`**. An `action`'s `ctx` has `ctx.fetch` + `ctx.runMutation` but no direct `ctx.db.create`. Types prevent the misuse from compiling.
-2. **Runtime.** The kernel observes the wrapper kind from the synthetic registry and refuses operations that violate the capability. Defense-in-depth against type erasure. Violation throws a `CapabilityViolationError` (a normal JS exception inside V8, NOT a Rust panic) which the wrapper converts to a `{ data: null, error: { code: "capability_violation", … } }` tuple (note: `code`, not `kind` — consistent with the rest of `@zeroship/db`'s error taxonomy). Matches Convex's runtime-error model.
-
-**Return-contract bridge.** Today `@zeroship/db` returns `{ data, error }` tuples; Convex `mutation` handlers throw. We keep the tuple contract **inside** the handler body so existing code is unchanged:
+**No `ctx` parameter.** Handlers take `(input)` only. Composition primitives, bindings, and per-request state are top-level imports:
 
 ```ts
-export const createPost = mutation({
-  args: { authorId: t.ref("users"), title: t.string() },
-  handler: async (ctx, args) => {
-    const { data: post, error } = await ctx.db.posts.create(args);
-    if (error) return { ok: false, code: error.code };  // user owns the surface
-    return { ok: true, id: post.id };
-  },
+import { query, mutation, action, env, runQuery, runMutation, currentUser } from "@zeroship/server";
+
+export const getTodo = query(async ({ id }) => db.todos.findOne({ id }));
+
+export const markDone = mutation(async ({ id }) =>
+  db.todos.updateOne({ id, userId: currentUser()?.id }, { done: true })
+);
+
+export const shareToWebhook = action(async ({ id, url }) => {
+  const todo = await runQuery(getTodo, { id });
+  await fetch(url, { method: "POST", body: JSON.stringify(todo) });
 });
+
+// Opt into stricter isolation per-mutation when write-skew protection matters:
+export const transfer = mutation(
+  async ({ from, to, amount }) => { /* ... */ },
+  { isolation: "serializable" },
+);
 ```
 
-The wrapper does NOT auto-unwrap; user code keeps the tuple discipline. If the wrapper handler itself throws (uncaught), the wrapper translates to a structured error at the RPC layer (matches Convex). Migration impact for existing apps: zero — `procedure(...)` keeps the current semantics; `query` / `mutation` / `action` are new wrappers chosen at the wrapper-import site.
+The dropped `ctx` was conceptually composed of:
+1. **Bindings** (`ctx.db`) — moved to `env` (already isolate-scope; reachable via `import { env } from "@zeroship/server"`).
+2. **Composition** (`ctx.runQuery` / `ctx.runMutation`) — moved to module-level imports. They thread the inner procedure's kind onto the capability stack and open the appropriate auto-tx envelope.
+3. **Per-request state** (`ctx.user` / `ctx.signal` / `ctx.requestId` / `ctx.headers`) — replaced with accessors (`currentUser()`, `currentSignal()`, …) backed by the existing `__zeroshipGetRpcCtx` CPED slot. Lazy: a handler that never calls `currentUser()` doesn't pay the JWT-parse cost.
+4. **`ctx.fetch`** — removed entirely. Users call global `fetch`. The runtime capability gate (the same `__zsEnterKind` mechanism that refuses DB writes inside queries) extends to refuse `fetch` from inside `query()`/`mutation()` handlers. Type-level guards don't apply to globals; runtime is the actual safety net and applies to every fetch path (global, SDK-internal, dynamic-import bootstrap).
 
-**Transactional boundary of `action.runMutation`.** Each `ctx.runMutation` call from an `action` is **its own transaction**, committed before the action continues. This matches Convex's documented model and is forced by the action's ability to call external `fetch()` — a long-running action holding a DB transaction would block other writers indefinitely. Implication: two consecutive `ctx.runMutation` calls are **not** atomic with each other. If the second fails after the first commits, the user must compose compensation explicitly. This is called out in the docs (`docs/reference/db.md`) with an example.
+**Composition: `runQuery` vs `runMutation`.** Both invoke a wrapped procedure with the inner procedure's kind on the capability stack:
 
-**HTTP wire format.** All wrappers (`procedure`, `query`, `mutation`, `action`, `stream`) share the same HTTP RPC wire format — the `query` wrapper's reactive path is overlaid on top of an identical one-shot HTTP fetch. This guarantees that the SSR fallback for `useQuery` (which uses the HTTP path) sees the same `{data, error}` envelope as a `procedure` call. The reactive subscription is a WS upgrade layered on the same wire shape; invalidation messages carry only `{ subscription_id, lsn }` and trigger a re-fetch over the WS multiplexed RPC.
+- `runQuery(fn, args)` — for symmetry; usually replaceable with `await fn(args)` directly since the auto-tx wrapping is defense-in-depth. Earns its keep mainly for reactive-query read-set capture inside other queries.
+- `runMutation(fn, args)` — **load-bearing**. Bundles the inner mutation's writes in its own short tx, independent of the calling action. Each `runMutation` is its own atomic boundary; actions chain side-effect → write → side-effect → write without holding any DB tx across external calls.
 
-**Why this matters for AI codegen.**
+**`runMutation` vs `db.transaction`.** Both are supported:
 
-When AI generates a server function, the wrapper choice (`query` vs `mutation` vs `action`) commits to a capability. If the model emits `query(...)` and then writes `await ctx.db.users.create(...)`, that's a compile error before the code ever runs. The wrapper becomes a strong nudge toward the right shape.
+| Situation | Prefer |
+|---|---|
+| Write logic shared across call sites / RPC-callable / needs Zod input validation / wants automatic retry on 40001 | `runMutation` (named procedure) |
+| One-off, locally-scoped write with closure-captured state | `db.transaction` (inline block) |
+
+**Enforcement.** Two layers — the type-level layer is thinner now that there's no `ctx`:
+
+1. **Type-level.** Wrapper signatures constrain the *return* shape and tag the function with `__zsKind`. The lack of `ctx` arg means the type-level fetch/write refusal moved to the runtime side.
+2. **Runtime.** The kernel observes the wrapper kind via `__zsEnterKind`/`__zsExitKind`. DB write callbacks refuse inside a query kind; the fetch callback refuses inside query/mutation kinds; the auto-tx wrapper opens the correct envelope per kind. Violation throws a structured `capability_violation` error.
+
+**Isolation default.** Mutations now default to `READ COMMITTED READ WRITE`, matching Postgres' own default for explicit `BEGIN`. Higher isolation is opt-in via `mutation(handler, { isolation: "repeatable read" | "serializable" })`. The original draft picked SERIALIZABLE for safety; the implemented default is READ COMMITTED for throughput (SSI bookkeeping + 40001 retries dominate on contention-heavy workloads). Apps that need write-skew protection (on-call doctor case, balance invariants) bump per-mutation explicitly.
+
+**Transactional boundary of `runMutation`.** Each `runMutation` call from an action is its own transaction, committed before the action continues. This is forced by the action's ability to call external `fetch()` — a long-running action holding a DB transaction would block other writers indefinitely. Two consecutive `runMutation` calls are **not** atomic with each other; if the second fails after the first commits, the action composes compensation explicitly.
+
+**HTTP wire format.** All wrappers share the same HTTP RPC wire format. The `query` wrapper's reactive path (C1) is overlaid on top of an identical one-shot HTTP fetch. The reactive subscription is a WS upgrade layered on the same wire shape.
+
+**Why this matters for AI codegen.** When AI generates a server function, the wrapper choice (`query` vs `mutation` vs `action`) commits to a capability. If the model emits `query(...)` and writes to the DB inside it, that's a runtime refusal — and the resulting error message names the wrapper, telling the model exactly which one to switch to. The lack of `ctx` keeps the handler signature minimal so codegen has fewer things to invent.
 
 **Implementation.**
 
-- `@zeroship/server` ships new `ctx` types per wrapper kind
-- Runtime: vite-plugin's synthetic entry tags each registered procedure with `kind: "query" | "mutation" | "action"`. Worker dispatches via kind-specific paths (read-only tx for query — `SET TRANSACTION READ ONLY`; RW tx for mutation with deterministic retry on serialisation conflict; no tx for action).
-- Migration path: existing `procedure(...)` keeps working (maps to `action` semantics with a deprecation warning). Users opt into `query` / `mutation` for stricter guarantees. AI codegen prompt (`docs/research/ai-builder-features.md`) updates to prefer the more-specific kinds.
+- `@zeroship/server` ships the wrappers + re-exports `env, runQuery, runMutation, currentUser, currentRequestId, currentTraceId, currentSignal, currentHeaders, currentIdempotencyKey, waitUntil, getRequest` from the synthetic `"zeroship"` module so user code has one import surface.
+- The `"zeroship"` virtual module (kernel-built + vite-plugin-resolved in dev) carries the runtime primitives. Other SDKs (`@zeroship/db`, `@zeroship/auth`, `@zeroship/migrations`) import from it directly.
+- Runtime: vite-plugin's synthetic entry tags each registered procedure with `kind: "query" | "mutation" | "action"`. Worker dispatches via kind-specific paths; the auto-tx wrapper reads `cfg.isolation` for the override.
+- Migration path: existing `procedure(...)` still works (maps to `action` semantics). Users opt into `query` / `mutation` for stricter guarantees.
 
 ---
 

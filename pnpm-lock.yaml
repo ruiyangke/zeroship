@@ -778,6 +778,10 @@ importers:
         version: 5.9.3
 
   sdks/server:
+    dependencies:
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../types
     devDependencies:
       '@tanstack/react-query':
         specifier: 'catalog:'
@@ -806,6 +810,9 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
+      zeroship:
+        specifier: workspace:*
+        version: link:../..
       zod:
         specifier: 'catalog:'
         version: 3.25.76

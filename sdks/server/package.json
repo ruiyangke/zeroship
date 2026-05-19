@@ -39,6 +39,9 @@
       "optional": true
     }
   },
+  "dependencies": {
+    "@zeroship/types": "workspace:*"
+  },
   "devDependencies": {
     "@tanstack/react-query": "catalog:",
     "@types/node": "catalog:",
@@ -49,6 +52,7 @@
     "react-test-renderer": "catalog:react18",
     "tsx": "catalog:",
     "typescript": "catalog:",
+    "zeroship": "workspace:*",
     "zod": "catalog:"
   }
 }

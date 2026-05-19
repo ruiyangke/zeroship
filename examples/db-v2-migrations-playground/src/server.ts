@@ -12,7 +12,7 @@
 // mid-migration is recoverable from `validate_cursor`.
 
 import { createDb, t, schema } from "@zeroship/db";
-import { defineMigration } from "@zeroship/migrations";
+import { defineMigration, migrations } from "@zeroship/migrations";
 import { mutation, query } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
@@ -104,34 +104,73 @@ export const addUserHash = defineMigration({
 export const seedEvents = mutation(
   async (
     { count, includeNullSeverity }: { count: number; includeNullSeverity: boolean },
-    ctx,
   ) => {
-    const col = (ctx.db as any).events;
-    const rows: unknown[] = [];
+    const col = db.events;
+    // Cast through `unknown` because seedEvents deliberately writes
+    // `severity: null` to exercise the backfill migration. The schema
+    // types severity as `string | undefined`; null is rejected by the
+    // typed API but allowed by the underlying column.
+    type Row = Parameters<typeof col.insertMany>[0][number];
+    const rows: Row[] = [];
     for (let i = 0; i < count; i++) {
       rows.push({
         event_type: i % 2 === 0 ? "login" : "logout",
         kind:       "",
-        severity:   includeNullSeverity && i % 3 === 0 ? null : "info",
+        severity:   (includeNullSeverity && i % 3 === 0 ? null : "info") as unknown as string,
         user_id:    1000 + i,
         user_hash:  "",
         payload:    { i },
-      });
+      } as Row);
     }
     return col.insertMany(rows);
   },
 );
 
-export const eventCount = query(async (_input: Record<string, never>, ctx) => {
-  const col = (ctx.db as any).events;
-  return col.countDocuments({});
+export const eventCount = query(async (_input: Record<string, never>) => {
+  return db.events.countDocuments({});
 });
 
-export const eventStats = query(async (_input: Record<string, never>, ctx) => {
-  const col = (ctx.db as any).events;
-  const total = await col.countDocuments({});
-  const nullSeverity = await col.countDocuments({ severity: null });
-  const emptyKind = await col.countDocuments({ kind: "" });
-  const emptyHash = await col.countDocuments({ user_hash: "" });
+export const eventStats = query(async (_input: Record<string, never>) => {
+  const col = db.events;
+  // Unwrap each Result so the smoke can grep `"total":N` directly.
+  const total = (await col.countDocuments({})).data ?? 0;
+  const nullSeverity = (await col.countDocuments({ severity: null })).data ?? 0;
+  const emptyKind = (await col.countDocuments({ kind: "" })).data ?? 0;
+  const emptyHash = (await col.countDocuments({ user_hash: "" })).data ?? 0;
   return { total, nullSeverity, emptyKind, emptyHash };
 });
+
+// ---------------------------------------------------------------------------
+// Migration drivers — thin RPC wrappers around `@zeroship/migrations`
+// so the smoke can `POST /_zs/v1/runMigration` etc. without depending
+// on a control-plane HTTP endpoint that doesn't exist in the dev
+// runtime.
+// ---------------------------------------------------------------------------
+
+const byName: Record<string, ReturnType<typeof defineMigration>> = {
+  "events.backfill_severity": backfillSeverity,
+  "events.expand_kind":        expandKind,
+  "events.add_user_hash":      addUserHash,
+};
+
+function lookup(name: string) {
+  const m = byName[name];
+  if (!m) throw new Error(`unknown migration: ${name}`);
+  return m;
+}
+
+export const runMigration = mutation(
+  async ({ name, dryRun }: { name: string; dryRun?: boolean }) => {
+    const m = lookup(name);
+    const result = await migrations.run(m, dryRun ? { dryRun: true } : undefined);
+    return result.data ?? { error: result.error?.message ?? "unknown" };
+  },
+);
+
+export const migrationStatus = query(
+  async ({ name }: { name: string }) => {
+    const m = lookup(name);
+    const result = await migrations.status(m);
+    return result.data ?? { error: result.error?.message ?? "unknown" };
+  },
+);

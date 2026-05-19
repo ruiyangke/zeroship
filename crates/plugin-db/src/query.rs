@@ -704,7 +704,13 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
-        Some("number") => "NUMERIC",
+        // `t.number()` maps to DOUBLE PRECISION (FLOAT8). JS `number`
+        // is an IEEE-754 double, so this is the exact 1:1 mapping.
+        // NUMERIC would be more precise but compio-postgres' text-out
+        // path doesn't decode it back to a JS value cleanly;
+        // `t.bigInteger()` exists for callers who need exact 64-bit
+        // ints.
+        Some("number") => "DOUBLE PRECISION",
         Some("boolean") => "BOOLEAN",
         Some("date") => "TIMESTAMPTZ",
         // D3 — `t.calendarDate()` is a `YYYY-MM-DD` value with no time
@@ -960,8 +966,17 @@ pub fn build_insert(
 
     for (key, value) in obj {
         columns.push(quote_ident(key));
-        params.push(value_to_param(value));
-        placeholders.push(format!("${}", params.len()));
+        // Postgres' text-format param protocol (`query_text_params`,
+        // `&[&str]`) cannot represent NULL — an empty string would be
+        // encoded as `""`, failing CHECK constraints on enum columns
+        // and producing silently-empty TEXT cells. Inline `NULL` as a
+        // SQL literal so JSON `null` round-trips faithfully.
+        if value.is_null() {
+            placeholders.push("NULL".to_string());
+        } else {
+            params.push(value_to_param(value));
+            placeholders.push(format!("${}", params.len()));
+        }
     }
 
     let sql = format!(
@@ -1181,8 +1196,14 @@ pub fn build_insert_many(
         let mut placeholders = Vec::new();
         for key in &column_names {
             let val = obj.get(*key).unwrap_or(&Value::Null);
-            params.push(value_to_param(val));
-            placeholders.push(format!("${}", params.len()));
+            // See build_insert: text-format params can't carry NULL;
+            // inline as a SQL literal instead.
+            if val.is_null() {
+                placeholders.push("NULL".to_string());
+            } else {
+                params.push(value_to_param(val));
+                placeholders.push(format!("${}", params.len()));
+            }
         }
         value_groups.push(format!("({})", placeholders.join(", ")));
     }

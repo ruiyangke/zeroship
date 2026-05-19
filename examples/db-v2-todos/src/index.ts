@@ -17,7 +17,7 @@
 //   exports become RPC procedures at /_zs/v1/<name>.
 
 import { createDb, t, schema, type Id } from "@zeroship/db";
-import { query, mutation, action } from "@zeroship/server";
+import { query, mutation, action, runQuery } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -55,23 +55,20 @@ type TodoId = Id<"todos">;
 // ---------------------------------------------------------------------------
 
 export const listTodos = query(
-  async ({ userId }: { userId: UserId }, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.find({ userId, archived: false }).sort({ createdAt: -1 });
+  async ({ userId }: { userId: UserId }) => {
+    return db.todos.find({ userId, archived: false }).sort({ createdAt: -1 });
   },
 );
 
 export const getTodo = query(
-  async ({ id }: { id: TodoId }, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.findOne({ id });
+  async ({ id }: { id: TodoId }) => {
+    return db.todos.findOne({ id });
   },
 );
 
 export const todoCount = query(
-  async ({ userId }: { userId: UserId }, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.countDocuments({ userId });
+  async ({ userId }: { userId: UserId }) => {
+    return db.todos.countDocuments({ userId });
   },
 );
 
@@ -86,9 +83,8 @@ type CreateTodoInput = {
 };
 
 export const createTodo = mutation(
-  async (args: CreateTodoInput, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.create({
+  async (args: CreateTodoInput) => {
+    return db.todos.create({
       userId:   args.userId,
       title:    args.title,
       priority: args.priority ?? "medium",
@@ -100,23 +96,20 @@ export const createTodo = mutation(
 );
 
 export const completeTodo = mutation(
-  async ({ id }: { id: TodoId }, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.updateOne({ id }, { done: true });
+  async ({ id }: { id: TodoId }) => {
+    return db.todos.updateOne({ id }, { done: true });
   },
 );
 
 export const archiveTodo = mutation(
-  async ({ id }: { id: TodoId }, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.updateOne({ id }, { archived: true });
+  async ({ id }: { id: TodoId }) => {
+    return db.todos.updateOne({ id }, { archived: true });
   },
 );
 
 export const deleteTodo = mutation(
-  async ({ id }: { id: TodoId }, ctx) => {
-    const col = (ctx.db as any).todos;
-    return col.deleteOne({ id });
+  async ({ id }: { id: TodoId }) => {
+    return db.todos.deleteOne({ id });
   },
 );
 
@@ -129,18 +122,28 @@ export const deleteTodo = mutation(
 type ShareInput = { id: TodoId; webhookUrl: string };
 
 export const shareToWebhook = action(
-  async ({ id, webhookUrl }: ShareInput, ctx) => {
-    // Read through a query — actions can't access ctx.db.* directly.
-    const todo = await ctx.runQuery(getTodo as any, { id });
+  async ({ id, webhookUrl }: ShareInput) => {
+    // Read through a query so the call lands inside a read-only tx
+    // (defense-in-depth — getTodo couldn't write anyway).
+    const todo = await runQuery(getTodo, { id });
     if (!todo) {
       throw new Error("not_found");
     }
-    const resp = await ctx.fetch(webhookUrl, {
+    const resp = await fetch(webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ todo }),
     });
     return { status: resp.status, ok: resp.ok };
+  },
+);
+
+// Seed helper — used by smoke.sh to provision users.
+type SeedUserInput = { email: string; name: string; handle: string };
+
+export const seedUser = mutation(
+  async ({ email, name, handle }: SeedUserInput) => {
+    return db.users.create({ email, name, handle });
   },
 );
 

@@ -22,6 +22,7 @@ export class Query<S = PlainObject, P = Document<S>> {
   private _collection: string;
   private _filter: ZeroshipDbFilter;
   private _toField: (s: string) => string;
+  private _toColumn: (s: string) => string;
   private _native: NativeFn;
 
   private _sort: Record<string, number> | undefined;
@@ -35,12 +36,14 @@ export class Query<S = PlainObject, P = Document<S>> {
     collection: string,
     filter: ZeroshipDbFilter,
     native: NativeFn,
-    toField?: (s: string) => string
+    toField?: (s: string) => string,
+    toColumn?: (s: string) => string,
   ) {
     this._collection = collection;
     this._filter = filter;
     this._native = native;
     this._toField = toField ?? (s => s);
+    this._toColumn = toColumn ?? (s => s);
   }
 
   /**
@@ -131,10 +134,17 @@ export class Query<S = PlainObject, P = Document<S>> {
   /** Executes the query and returns the mapped result documents. */
   async _exec(): Promise<Result<P[]>> {
     const opts: ZeroshipDbFindOpts = {};
-    if (this._sort !== undefined) opts.orderBy = this._sort as Record<string, 1 | -1>;
+    if (this._sort !== undefined) {
+      // Map JS field names → DB column names for the native call.
+      const mapped: Record<string, 1 | -1> = {};
+      for (const [k, v] of Object.entries(this._sort)) {
+        mapped[this._toColumn(k)] = v as 1 | -1;
+      }
+      opts.orderBy = mapped;
+    }
     if (this._limit !== undefined) opts.limit = this._limit;
     if (this._skip !== undefined) opts.offset = this._skip;
-    if (this._select !== undefined) opts.select = this._select;
+    if (this._select !== undefined) opts.select = this._select.map(f => this._toColumn(f));
 
     // Merge cursor condition into filter
     let filter: ZeroshipDbFilter = this._filter;

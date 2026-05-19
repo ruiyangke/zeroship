@@ -229,9 +229,13 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
     ? (globalThis as any).__zsEndAutoTx : undefined;
   const wantsAutoTx = (kind === "query" || kind === "mutation") &&
                       typeof bt === "function" && typeof et === "function";
+  // Per-mutation isolation override (default READ COMMITTED on the
+  // native side when empty). See rpc-registry.ts for the rationale.
+  const isolation = (cfg && typeof (cfg as any).isolation === "string")
+    ? (cfg as any).isolation : "";
   let token = 0;
   if (wantsAutoTx) {
-    try { token = await bt(kind); }
+    try { token = await bt(kind, isolation); }
     catch (e) {
       if (tok >= 0 && typeof xk === "function") xk(tok);
       throw e;

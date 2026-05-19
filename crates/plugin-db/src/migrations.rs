@@ -643,7 +643,14 @@ pub async fn exec_status(
     let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
     let processed = read_processed_from_row(row);
     let dlp = read_dead_letter_pks(row);
-    let error: Option<String> = row.try_get::<_, String>("error").ok();
+    // SQL NULL and empty-string both mean "no error". The migrations
+    // SDK's parseNative treats any string in `error` as a thrown
+    // exception (`throw new Error(errVal)`), so emitting `""` would
+    // surface as a zero-message failure on the caller side.
+    let error: Option<String> = row
+        .try_get::<_, String>("error")
+        .ok()
+        .filter(|s| !s.is_empty());
     let is_done = matches!(
         status.as_str(),
         "applied" | "applied_with_dead_letter" | "failed" | "cancelled"

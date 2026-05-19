@@ -263,9 +263,12 @@ function _zsRpc(name, input, ctx) {
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
   // Begin returns 0 for unwrapped/no-op cases (kind doesn't match, or
   // a user-driven db.transaction is already open). End on 0 is a noop.
+  // Second arg to bt is the per-mutation isolation override; default
+  // is READ COMMITTED, opt-in via wrapper config.
+  const isolation = (cfg && typeof cfg.isolation === "string") ? cfg.isolation : "";
   let token = 0;
   try {
-    token = await bt(_kind);
+    token = await bt(_kind, isolation);
   } catch (beginErr) {
     if (tok >= 0 && typeof xk === "function") xk(tok);
     throw beginErr;
@@ -649,9 +652,11 @@ function _zsRpc(name, input, ctx) {
 }
 
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
+  // See runtime-mode copy above for the isolation rationale.
+  const isolation = (cfg && typeof cfg.isolation === "string") ? cfg.isolation : "";
   let token = 0;
   try {
-    token = await bt(_kind);
+    token = await bt(_kind, isolation);
   } catch (beginErr) {
     if (tok >= 0 && typeof xk === "function") xk(tok);
     throw beginErr;

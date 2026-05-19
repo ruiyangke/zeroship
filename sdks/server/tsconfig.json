@@ -12,7 +12,8 @@
     "rootDir": "src",
     "skipLibCheck": true,
     "jsx": "react-jsx",
-    "lib": ["ES2022", "DOM"]
+    "lib": ["ES2022", "DOM"],
+    "types": ["@zeroship/types"]
   },
   "include": ["src"]
 }

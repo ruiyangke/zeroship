@@ -159,7 +159,7 @@ export function procedure<H extends Handler>(handler: H, config?: ProcedureConfi
  * separately when the runtime side ships.
  */
 export function query<TIn, TOut>(
-  handler: (input: TIn, ctx: QueryCtx) => Promise<TOut> | TOut,
+  handler: (input: TIn) => Promise<TOut> | TOut,
   config?: ProcedureConfig,
 ): typeof handler {
   return attach(handler as unknown as Handler, "query", config) as typeof handler;
@@ -174,7 +174,7 @@ export function query<TIn, TOut>(
  * atomic).
  */
 export function mutation<TIn, TOut>(
-  handler: (input: TIn, ctx: MutationCtx) => Promise<TOut> | TOut,
+  handler: (input: TIn) => Promise<TOut> | TOut,
   config?: ProcedureConfig,
 ): typeof handler {
   return attach(handler as unknown as Handler, "mutation", config) as typeof handler;
@@ -197,7 +197,7 @@ export function mutation<TIn, TOut>(
  *   });
  */
 export function action<TIn, TOut>(
-  handler: (input: TIn, ctx: ActionCtx) => Promise<TOut> | TOut,
+  handler: (input: TIn) => Promise<TOut> | TOut,
   config?: ProcedureConfig,
 ): typeof handler {
   return attach(handler as unknown as Handler, "action", config) as typeof handler;

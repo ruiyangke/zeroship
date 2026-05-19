@@ -32,19 +32,21 @@ export interface NativeMigrations {
   migrationReset(name: string, collection: string): Promise<string>;
 }
 
+import { env } from "zeroship";
+
 /**
  * Resolve the live native namespace from the per-isolate env.
  *
- * Uses a dynamic import so the synthetic `zeroship` module resolution
- * is deferred until the runtime is actually present. The Promise is
- * cached after first resolution; subsequent calls are synchronous-ish.
+ * Static top-level import so the synthetic `zeroship` module resolves
+ * at module-init time, not on first call. A dynamic `await
+ * import("zeroship")` inside a mutation handler would trip the B3
+ * capability gate ("mutation handlers cannot call fetch") because the
+ * dev-bootstrap's module loader is fetch-based.
  */
 let cachedNative: NativeMigrations | null = null;
 export async function getNativeMigrations(): Promise<NativeMigrations> {
   if (cachedNative) return cachedNative;
-  const mod = await import("zeroship");
-  const env = (mod as { env?: { db?: NativeMigrations } }).env;
-  const db = env?.db;
+  const db = (env as { db?: NativeMigrations } | undefined)?.db;
   if (db && typeof db.migrationBegin === "function") {
     cachedNative = db;
     return db;

@@ -63,6 +63,27 @@ export {
 //   );
 export { procedure, query, mutation, action, stream, subscription } from "./wrappers.js";
 
+// Re-exports of the runtime substrate (the synthetic `"zeroship"`
+// module). One import surface for user code — @zeroship/server covers
+// wrappers + bindings + composition + per-request state. The
+// `"zeroship"` virtual module stays as the internal substrate that
+// other SDKs (@zeroship/db, @zeroship/auth, @zeroship/migrations)
+// import from, but user-facing app code shouldn't need to know it
+// exists.
+export {
+  env,
+  waitUntil,
+  getRequest,
+  runQuery,
+  runMutation,
+  currentUser,
+  currentRequestId,
+  currentTraceId,
+  currentSignal,
+  currentHeaders,
+  currentIdempotencyKey,
+} from "zeroship";
+
 // `__makeServerProcedure` SSR adapter.
 //
 // The vite-plugin's SSR-enabled-app variant wraps each user procedure
