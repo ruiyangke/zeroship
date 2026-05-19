@@ -183,9 +183,11 @@ impl NativePlugin for DbPlugin {
                 DB_POOL.with(|p| *p.borrow_mut() = None);
             }
         });
-        // v2-only surface — CRUD lives on the Collection v8_class
-        // (`env.db.collection(name).find(...)`, etc.); the pre-v2 flat
-        // callbacks (`env.db.find(name, ...)` etc.) have been removed.
+        // Per-collection CRUD lives on the Collection v8_class instance
+        // returned by `env.db.collection(name)` — see `v8_classes::collection`.
+        // The Db-level entry points below mint those wrappers (and the
+        // Transaction / Migration / Subscription wrappers) plus the few
+        // genuinely Db-scoped ops (schema registration, replication).
         r.add("registerModel", callbacks::register_model);
         // Transaction entry point. Returns a Transaction v8_class
         // instance whose `.commit()` / `.rollback()` / `.collection(n)`

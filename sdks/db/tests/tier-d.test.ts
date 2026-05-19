@@ -1,5 +1,5 @@
 /**
- * @zeroship/db v2 — Tier D polish:
+ * @zeroship/db — Tier D polish:
  *   D1. Index awareness — dev-mode runtime warnings
  *   D2. Nested object validators — `t.object({...})`
  *   D3. Calendar dates — `t.calendarDate()`

@@ -1,5 +1,5 @@
 //! Replication slot + publication lifecycle — foundation for C1
-//! (reactive queries via Postgres WAL fanout) of the @zeroship/db v2
+//! (reactive queries via Postgres WAL fanout) of the @zeroship/db
 //! proposal (docs/proposals/zeroship-db.md, section C1).
 //!
 //! This module ships the **P8a-reduced** scope: it provisions and

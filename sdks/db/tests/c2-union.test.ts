@@ -1,5 +1,5 @@
 /**
- * @zeroship/db v2 — Phase 7 / C2: discriminated union document shapes.
+ * @zeroship/db — Phase 7 / C2: discriminated union document shapes.
  *
  * Exercises `t.literal()`, `t.union(...)`, the auto-detected
  * discriminator, validation dispatch, and the normalized flat-column

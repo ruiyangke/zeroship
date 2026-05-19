@@ -362,7 +362,7 @@ pub fn build_add_column(
 }
 
 // ---------------------------------------------------------------------------
-// Index builders for registerModel — A1 of the @zeroship/db v2 proposal
+// Index builders for registerModel — A1 of the @zeroship/db proposal
 // (docs/proposals/zeroship-db.md). Materialises `t.string().index()` /
 // `t.string().unique()` markers as CONCURRENTLY-built Postgres indexes so
 // the markers actually do something at the database layer.

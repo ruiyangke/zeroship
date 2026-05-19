@@ -1,5 +1,5 @@
 /**
- * @zeroship/db v2 — Tier D1 ESLint rule.
+ * @zeroship/db — Tier D1 ESLint rule.
  *
  * Flags `.find({...})`, `.findOne({...})`, and `.deleteMany({...})` calls
  * whose filter is a single-field equality on a column that is unlikely

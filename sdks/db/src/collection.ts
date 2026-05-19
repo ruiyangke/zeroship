@@ -166,7 +166,8 @@ export function __zeroshipDbResetIndexWarnings(): void {
  * The heuristic is intentionally simple: every top-level key in the
  * filter that maps to a schema field is checked; if none of them is
  * indexed and at least one is a single-field equality, we warn. False
- * positives are acceptable for V1 (TODO: weight selectivity).
+ * positives are acceptable; weighting by selectivity is a future
+ * refinement.
  */
 function _maybeWarnUnindexedFilter(
   collection: string,

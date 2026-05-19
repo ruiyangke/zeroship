@@ -1,7 +1,7 @@
 /**
  * Core type definitions and the `t` type-builder API for @zeroship/db.
- * Use `t.string()`, `t.number()`, etc. to declare schema fields with optional
- * constraints, then pass the result to `model()`.
+ * Use `t.string()`, `t.number()`, etc. to declare schema fields with
+ * optional constraints, then pass the result to `createDb({ ... })`.
  */
 
 /** Generic plain object type used throughout the SDK. */
@@ -739,7 +739,7 @@ export type InferUnion<V extends readonly TypeBuilder<any, any>[]> =
 
 /**
  * Per-collection strictness for deploy-time data validation
- * (proposal @zeroship/db v2, section A2). The default is `strict` to
+ * (proposal @zeroship/db, section A2). The default is `strict` to
  * match Convex's `schemaValidation: true` default.
  *
  * - `strict`  — refuse the deploy on any validation violation. The
@@ -802,7 +802,7 @@ export class SchemaBuilder<S> {
 
   /**
    * Set the deploy-time data-validation strictness for this collection
-   * (A2 of the @zeroship/db v2 proposal). Default is `strict`.
+   * (A2 of the @zeroship/db proposal). Default is `strict`.
    *
    * - `strict`  — refuse the push on any violation.
    * - `lenient` — warn but allow.

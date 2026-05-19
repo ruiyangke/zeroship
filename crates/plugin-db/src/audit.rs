@@ -1,4 +1,4 @@
-//! `__zeroship_migrations` audit table — A3 of the @zeroship/db v2 proposal
+//! `__zeroship_migrations` audit table — A3 of the @zeroship/db proposal
 //! (docs/proposals/zeroship-db.md, section A3).
 //!
 //! Provides an append-only, per-app schema migration log: every DDL,

@@ -242,9 +242,9 @@ export interface RpcConfig {
 export interface AppDefinition {
   resources?: ResourceTree;
   /**
-   * App-level RPC config. Replaces the legacy `[rpc]` /
-   * `[rpc.defaults]` blocks from `zeroship.toml` — defaults now live
-   * inline, in `src/server/config.ts`.
+   * App-level RPC config. Per-procedure overrides are pulled from
+   * each procedure's `fn.config`; this block sets the app-wide
+   * defaults inherited by procedures that don't override.
    */
   rpc?: RpcConfig;
 }
@@ -277,13 +277,11 @@ export interface DefinedApp {
 //                runQuery  runMutation
 //
 // `stream` / `subscription` map to `action` capability internally (no
-// DB tx, `fetch()` allowed). `procedure()` (the legacy generic wrapper)
-// also maps to `action` so existing user code keeps compiling.
+// DB tx, `fetch()` allowed). `procedure()` (the generic wrapper for
+// handlers with multi-arg signatures) also maps to `action`.
 //
-// Enforcement: runtime-only. The wrappers no longer accept a `ctx`
-// argument — composition primitives (`runQuery` / `runMutation` /
-// `currentUser` / etc.) are module imports from `@zeroship/server`,
-// and capability violations are caught request-time by the native
-// gate (`crates/runtime/src/rpc/capability.rs`). The compile-time
-// `*Ctx` interfaces from earlier drafts were dropped along with the
-// `ctx` parameter.
+// Enforcement: runtime-only. Handlers take `(input)` only — composition
+// primitives (`runQuery` / `runMutation` / `currentUser` / etc.) are
+// module imports from `@zeroship/server`, and capability violations
+// are caught request-time by the native gate
+// (`crates/runtime/src/rpc/capability.rs`).

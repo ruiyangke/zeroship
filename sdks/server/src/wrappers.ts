@@ -31,10 +31,9 @@
 // pin the kind explicitly. `stream` / `subscription` map to `action`
 // capability internally.
 
-// Re-use the canonical config type from `./types.ts`. The wrappers and
-// the legacy `<fnName>.config = { ... }` assignment surface produce
-// indistinguishable runtime objects, so the manifest emitter +
-// synthetic SSR entry's config-extraction code keeps working unchanged.
+// Re-use the canonical config type from `./types.ts`. The wrappers
+// attach `.config` to the returned function; the manifest emitter and
+// the synthetic SSR entry's config-extraction code read it directly.
 import type { ProcedureConfig } from "./types.js";
 export type { ProcedureConfig } from "./types.js";
 

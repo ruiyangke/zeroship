@@ -1,4 +1,4 @@
-//! Schema diff engine — A2 of the @zeroship/db v2 proposal
+//! Schema diff engine — A2 of the @zeroship/db proposal
 //! (docs/proposals/zeroship-db.md, section A2).
 //!
 //! Compares a desired (declared) schema against the live `pg_catalog`

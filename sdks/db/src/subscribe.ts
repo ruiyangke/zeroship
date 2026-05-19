@@ -1,6 +1,6 @@
 /**
  * Reactive-query subscription primitive — P8a of the C1 reactive
- * queries phase of the @zeroship/db v2 proposal.
+ * queries phase of the @zeroship/db proposal.
  *
  * P8a-scope: coarse-grained, in-process. A subscription on
  * `collection` fires for every change to that collection by
