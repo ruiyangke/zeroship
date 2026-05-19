@@ -24,28 +24,15 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
 // Schema-to-TypeScript inference utilities
 // ---------------------------------------------------------------------------
 
-/** Maps a JS constructor to its corresponding TypeScript primitive type. */
-export type InferType<T> =
-  T extends StringConstructor ? string :
-  T extends NumberConstructor ? number :
-  T extends BooleanConstructor ? boolean :
-  T extends DateConstructor ? number :        // timestamps stored as Unix ms
-  T extends ObjectConstructor ? Record<string, unknown> :
-  T extends readonly (infer U)[] ? InferType<U>[] :
-  unknown;
-
-/** Infers the value type from a field definition (Mongoose-style, bare constructor, or builder). */
+/** Infers the value type from a field definition built via `t.*`. */
 export type InferFieldDef<T> =
-  T extends { type: infer U } ? InferType<U> :
-  T extends StringConstructor | NumberConstructor | BooleanConstructor | DateConstructor | ObjectConstructor ? InferType<T> :
-  T extends readonly (infer U)[] ? InferType<U>[] :
   T extends TypeBuilder<infer U, any> ? U :
   unknown;
 
-/** Keys that are explicitly marked required: true in the field definition or via TypeBuilder.required(). */
+/** Keys whose field builder was marked `.required()` (the `R` brand of
+ *  `TypeBuilder<_, R>`). */
 export type RequiredKeys<S> = {
   [K in keyof S]:
-    S[K] extends { required: true } ? K :
     S[K] extends TypeBuilder<any, true> ? K :
     never
 }[keyof S];
@@ -54,45 +41,21 @@ export type RequiredKeys<S> = {
 export type OptionalKeys<S> = Exclude<keyof S, RequiredKeys<S>>;
 
 /**
- * True iff every value in S is some flavour of schema field declaration
- * (TypeBuilder, Mongoose field def, bare constructor, etc.). Used to
- * distinguish a *schema dict* from an *already-inferred shape* — the
+ * True iff every value in S is a `TypeBuilder` (i.e. the input is a
+ * schema dictionary, not an already-inferred shape). Used to
+ * distinguish a schema dict from an already-inferred shape — the
  * latter appears as the top-level S when `createDb({ events: t.union(...) })`
  * unwraps a TypeBuilder whose `_type` brand is the user-facing union
  * (no TypeBuilders left in the value positions).
  */
 type IsSchemaDict<S> =
   S extends Record<string, unknown>
-    ? // Pick any value type that "looks like" a schema field declaration.
-      // If at least one value is a TypeBuilder / constructor /
-      // Mongoose-style def, treat S as a schema dict and infer.
+    ? // Pick any value type that's a TypeBuilder. If at least one
+      // value is a TypeBuilder we treat S as a schema dict and infer.
       // Otherwise it's already an inferred shape (top-level union
       // variant) and we return S unchanged.
-      //
-      // We strip optional modifiers with `-?:` so an absent value never
-      // injects `undefined` into the value union (which would make the
-      // `extends true` check spuriously false-positive).
       true extends {
-        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any>
-          ? true
-          : NonNullable<S[K]> extends { type: unknown }
-          ? true
-          : NonNullable<S[K]> extends
-              | StringConstructor
-              | NumberConstructor
-              | BooleanConstructor
-              | DateConstructor
-              | ObjectConstructor
-            ? true
-            : NonNullable<S[K]> extends readonly (
-                | StringConstructor
-                | NumberConstructor
-                | BooleanConstructor
-                | DateConstructor
-                | ObjectConstructor
-              )[]
-              ? true
-              : false;
+        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any> ? true : false;
       }[keyof S]
       ? true
       : false

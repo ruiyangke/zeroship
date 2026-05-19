@@ -127,19 +127,19 @@ function attach<H extends Handler>(
 }
 
 /**
- * Generic procedure marker. Use when the kind isn't naturally
- * `query`/`mutation`/`action`/`stream` (or when you want the transform
- * to fall back to its name-based heuristic: `get*`/`list*`/etc →
- * query, default → mutation, async generator → stream).
+ * Generic procedure wrapper for handlers whose shape doesn't fit the
+ * single-`input`-arg model that `query` / `mutation` / `action` enforce
+ * — e.g. handlers that take positional args or whose kind should be
+ * inferred by the build-time transform's name heuristic (`get*`/`list*`/
+ * etc → query, default → mutation, async generator → stream).
  *
  *   export const greet = procedure(async (name: string) => `hi ${name}`);
- *   export const greet2 = procedure(handler, { id: "greet-v2" });
+ *   export const charge = procedure(handler, { id: "charge" });
  *
- * Backwards compatibility: `procedure()` keeps its broad `Handler`
- * type — its `ctx` parameter (the second arg, if any) is whatever the
- * user declares. Capability-wise this maps to `action` semantics
- * (most permissive). Existing user code using `procedure(...)` keeps
- * compiling without changes.
+ * Capability-wise `procedure()` maps to `action` semantics (most
+ * permissive: `fetch`, `runQuery`, `runMutation` all allowed). Prefer
+ * one of the typed wrappers when the handler takes a single input
+ * object — they pin the capability at compile time.
  */
 export function procedure<H extends Handler>(handler: H, config?: ProcedureConfig): H {
   return attach(handler, "procedure", config);
