@@ -29,9 +29,6 @@
 "use server";
 
 export { defineMigration } from "./define.js";
-export { runMigration } from "./run.js";
-export { statusOf } from "./status.js";
-export { cancelMigration, resetMigration } from "./cancel.js";
 
 export type {
   Migration,

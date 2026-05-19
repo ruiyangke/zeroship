@@ -8,7 +8,14 @@
 export type PlainObject = Record<string, unknown>;
 
 /** PostgreSQL transaction isolation levels. */
-export type IsolationLevel = "read uncommitted" | "read committed" | "repeatable read" | "serializable";
+/**
+ * Postgres transaction isolation level. Alias of the ambient
+ * `ZeroshipIsolationLevel` from `@zeroship/types/shared.d.ts` so the
+ * `db.transaction({ isolationLevel })` option and the procedure
+ * `config.isolation` field share one canonical type — drift between
+ * the two would be a silent footgun.
+ */
+export type IsolationLevel = ZeroshipIsolationLevel;
 
 /** Return type for all Collection methods. Never throws — errors are values. */
 export type Result<T> = { data: T; error: null } | { data: null; error: Error };
@@ -481,7 +488,22 @@ export const t = {
   boolean(): TypeBuilder<boolean> {
     return new TypeBuilder<boolean>({ type: "boolean" });
   },
-  /** Creates a date field definition (accepts `Date` objects or ISO date strings). */
+  /**
+   * Creates a timestamp field — `TIMESTAMPTZ` in Postgres, Unix-ms
+   * `number` at the JS layer. Accepts `Date`, ISO string, or `number`
+   * on input (the SDK normalises in `validate`). Reads come back as
+   * `number` (millisecond epoch). For wall-clock dates without a
+   * time-of-day component, use {@link calendarDate} instead.
+   */
+  timestamp(): TypeBuilder<number> {
+    return new TypeBuilder<number>({ type: "date" });
+  },
+  /**
+   * @deprecated Renamed to {@link timestamp} — the field stores a
+   * `number` (Unix ms), not a `Date` object, so the new name is
+   * honest about the wire shape. `t.date()` is preserved as a thin
+   * alias for back-compat.
+   */
   date(): TypeBuilder<number> {
     return new TypeBuilder<number>({ type: "date" });
   },

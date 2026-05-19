@@ -92,6 +92,8 @@ type SchemaInput =
  * on error instead of returning Result. Generic over schema shape S.
  */
 export type TxCollection<S = PlainObject> = {
+  insert(doc: CreateInput<S>): Promise<Document<S>>;
+  /** Mongoose-compatible alias for {@link TxCollection.insert}. */
   create(doc: CreateInput<S>): Promise<Document<S>>;
   insertMany(docs: CreateInput<S>[]): Promise<Document<S>[]>;
   findOne(filter: Filter<S>): Promise<Document<S> | null>;
@@ -107,9 +109,11 @@ export type TxCollection<S = PlainObject> = {
   deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
   forceDelete(filter: Filter<S>): Promise<{ deletedCount: number }>;
   forceDeleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
+  count(filter?: Filter<S>): Promise<number>;
+  /** Mongoose-compatible alias for {@link TxCollection.count}. */
   countDocuments(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Document<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
-  aggregate(pipeline: PlainObject[]): Promise<PlainObject[]>;
+  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
 };
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
@@ -167,9 +171,12 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
 
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 
-  return {
+  const tx: TxCollection<S> = {
+    async insert(doc: CreateInput<S>) {
+      return unwrap(await collection.insert(doc));
+    },
     async create(doc: CreateInput<S>) {
-      return unwrap(await collection.create(doc));
+      return unwrap(await collection.insert(doc));
     },
     async insertMany(docs: CreateInput<S>[]) {
       return unwrap(await collection.insertMany(docs));
@@ -214,16 +221,20 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async forceDeleteMany(filter: Filter<S>) {
       return unwrap(await collection.forceDeleteMany(filter));
     },
+    async count(filter: Filter<S> = {} as Filter<S>) {
+      return unwrap(await collection.count(filter));
+    },
     async countDocuments(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.countDocuments(filter));
+      return unwrap(await collection.count(filter));
     },
     async distinct(field: string & keyof Document<S>, filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.distinct(field, filter));
     },
-    async aggregate(pipeline: PlainObject[]) {
+    async aggregate(pipeline: ZeroshipDbAggregateStage[]) {
       return unwrap(await collection.aggregate(pipeline));
     },
   };
+  return tx;
 }
 
 /** Wrap a Query to throw on error */

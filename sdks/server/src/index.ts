@@ -1,9 +1,12 @@
 // Public surface of `@zeroship/server`.
 //
-// This package currently ships the build-time pieces: the `defineApp`
-// authoring helper and the type vocabulary for the resource tree.
-// Runtime helpers (`user()`, `requireRole`, `RpcError`) are reserved
-// here but still throw when called.
+// Two layers:
+//   1. Build-time authoring — `defineApp`, the procedure wrappers
+//      (`query` / `mutation` / `action` / `stream` / `subscription` /
+//      `procedure`), the type vocabulary, and the optional Zod re-export.
+//   2. Runtime substrate re-exports — the synthetic `"zeroship"` module
+//      (`env`, `runQuery`, `runMutation`, `currentUser`, …) so user code
+//      has one import surface for everything wrapper + composition + state.
 
 export { defineApp } from "./define-app.js";
 export {
@@ -24,14 +27,6 @@ export {
   type RpcDefaults,
   type Timeout,
   type DefinedApp,
-  // B3 capability typing
-  type QueryCtx,
-  type MutationCtx,
-  type ActionCtx,
-  type QueryCtxDb,
-  type MutationCtxDb,
-  type ReadOnlyCollection,
-  type ProcedureRef,
   DEFINE_APP_MARKER,
 } from "./types.js";
 
@@ -155,37 +150,7 @@ export const z: ZodNamespace = _zodModule
       },
     ) as unknown as ZodNamespace);
 
-// ── Runtime Helper Stubs ─────────────────────────────────────────────
-// Exported so user code can import them today; calling them throws.
-//
-// The stub form reserves the name and shape so user code can adopt the
-// API before the runtime wiring exists.
-
-const NOT_IMPLEMENTED = "Not implemented in this build of @zeroship/server";
-
-/** Returns the request's authenticated user once runtime auth wiring exists. */
-export function user(): never {
-  throw new Error(NOT_IMPLEMENTED);
-}
-
-/** Returns the request's user or `null` for anonymous callers once wired. */
-export function userOrNull(): never {
-  throw new Error(NOT_IMPLEMENTED);
-}
-
-/** Throws `PERMISSION_DENIED` if the user lacks the role once wired. */
-export function requireRole(_role: string): never {
-  throw new Error(NOT_IMPLEMENTED);
-}
-
-/** Structured RPC error with a fixed code enum. */
-export class RpcError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-    public readonly details?: unknown,
-  ) {
-    super(message);
-    this.name = "RpcError";
-  }
-}
+// Per-request user/role helpers + RpcError class are reserved for a
+// future build of `@zeroship/server`. Use `currentUser()` (re-exported
+// from the synthetic `zeroship` module above) to read the
+// gateway-injected user context in the meantime.

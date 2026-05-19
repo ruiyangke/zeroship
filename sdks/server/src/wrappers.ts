@@ -21,29 +21,21 @@
 // kind without re-reading the AST (the transform reads kind statically
 // via the wrapper name; this is belt-and-suspenders).
 //
-// B3 capability typing. `query`/`mutation`/`action` constrain the
-// `handler` argument to a wrapper-specific `ctx` shape (`QueryCtx`,
-// `MutationCtx`, `ActionCtx`) so misuse is caught at type-check time:
-//
-//   - `query()` handler tries `ctx.db.users.create(...)` → compile error
-//   - `mutation()` handler tries `await fetch(...)` (via `ctx.fetch`)  → compile error
-//   - `action()` is the most permissive (fetch + runMutation allowed)
-//
-// `procedure()` (the legacy generic wrapper) keeps its broad `unknown`
-// `ctx` so existing user code continues to compile unchanged. The
-// kind metadata it emits maps to `action` at the manifest layer.
-// `stream` / `subscription` also map to `action` capability.
+// B3 capability typing. The `ctx` parameter was removed entirely —
+// composition + per-request state are imports from `@zeroship/server`
+// (`runQuery` / `runMutation` / `currentUser` / `fetch` from
+// `globalThis`). Wrappers now take `(input)` only and the runtime
+// gate (`crates/runtime/src/rpc/capability.rs`) enforces the
+// query/mutation/action capabilities at request time. `procedure()`
+// remains the kind-inferred generic form; the four named wrappers
+// pin the kind explicitly. `stream` / `subscription` map to `action`
+// capability internally.
 
 // Re-use the canonical config type from `./types.ts`. The wrappers and
 // the legacy `<fnName>.config = { ... }` assignment surface produce
 // indistinguishable runtime objects, so the manifest emitter +
 // synthetic SSR entry's config-extraction code keeps working unchanged.
-import type {
-  ProcedureConfig,
-  QueryCtx,
-  MutationCtx,
-  ActionCtx,
-} from "./types.js";
+import type { ProcedureConfig } from "./types.js";
 export type { ProcedureConfig } from "./types.js";
 
 /**
@@ -56,7 +48,15 @@ export type { ProcedureConfig } from "./types.js";
  * proxying or method binding so handlers that close over `this` (rare,
  * but legal) keep working.
  */
-type Handler = (...args: never[]) => unknown;
+// `Handler` is the upper-bound constraint shared by every wrapper —
+// the wrappers are identity functions, so any user handler shape
+// must be assignable to it. The variadic-`any` parameter list keeps
+// arity contravariance permissive: a concrete `(input: T) => U`,
+// `() => U`, or async-generator factory all satisfy it without the
+// user seeing a confusing `(...args: never[])` in hover. Return is
+// `unknown` (broader than `any`) so the actual return-type narrowing
+// happens through the wrapper's own generic parameters.
+type Handler = (...args: any[]) => unknown;
 
 /** Wrapper-marker name. `procedure` is the generic form (no implicit kind);
  *  the others tag the procedure's kind. */
@@ -148,15 +148,12 @@ export function procedure<H extends Handler>(handler: H, config?: ProcedureConfi
 /**
  * Read-only RPC procedure. Implies `kind: "query"`.
  *
- * The handler's first arg is treated as the user input; the second is
- * a `QueryCtx` — read-only `ctx.db`, `ctx.runQuery`, NO `ctx.fetch`,
- * NO `ctx.runMutation`. A `query` that tries `ctx.db.x.create(...)`
- * or `ctx.fetch(...)` is a type error.
- *
- * Capability surface follows the §B3 table in
- * `docs/proposals/zeroship-db-v2.md`. Runtime defense-in-depth
- * (read-only Postgres tx + DB-write callback refusal) is wired
- * separately when the runtime side ships.
+ * Capability: read DB, call `runQuery`. NOT allowed: DB writes,
+ * `fetch`, `runMutation`. Enforced by the runtime capability gate
+ * (`crates/runtime/src/rpc/capability.rs`); a query attempting a
+ * forbidden op fails request-time with `code: "capability_violation"`.
+ * The handler runs inside a `BEGIN ISOLATION LEVEL READ COMMITTED
+ * READ ONLY` Postgres tx auto-opened by the SSR dispatcher.
  */
 export function query<TIn, TOut>(
   handler: (input: TIn) => Promise<TOut> | TOut,
@@ -168,10 +165,11 @@ export function query<TIn, TOut>(
 /**
  * Side-effecting RPC procedure. Implies `kind: "mutation"`.
  *
- * The handler's second arg is a `MutationCtx` — full `ctx.db`
- * (read + write), `ctx.runQuery`. NO `ctx.fetch` (use `action` if you
- * need external HTTP). NO `ctx.runMutation` (mutations are already
- * atomic).
+ * Capability: read+write DB, call `runQuery`. NOT allowed: `fetch`,
+ * `runMutation` (mutations are already atomic; nesting is a footgun).
+ * Use `action` if you need external HTTP. The handler runs inside a
+ * `BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE` Postgres tx
+ * (override via `config.isolation`).
  */
 export function mutation<TIn, TOut>(
   handler: (input: TIn) => Promise<TOut> | TOut,
@@ -183,17 +181,17 @@ export function mutation<TIn, TOut>(
 /**
  * Most-permissive RPC procedure. Implies `kind: "action"`.
  *
- * The handler's second arg is an `ActionCtx` — `ctx.fetch` for
- * outbound HTTP, `ctx.runQuery` + `ctx.runMutation` for transactional
- * steps. No direct `ctx.db.*` writes; compose them via
- * `ctx.runMutation` so each step is its own transaction (an action
- * can call `fetch` for minutes; holding a DB tx that long would block
- * other writers).
+ * Capability: `fetch` (outbound HTTP), `runQuery`, `runMutation`. No
+ * auto-tx — actions can hold open external I/O for minutes; wrapping
+ * them in a Postgres tx would block other writers. Compose database
+ * work via `runQuery` / `runMutation` so each step is its own tx.
  *
- *   export const sendEmail = action(async (args, ctx) => {
- *     const user = await ctx.runQuery(api.getUser, { id: args.userId });
- *     await ctx.fetch("https://email-svc/send", { ... });
- *     await ctx.runMutation(api.recordEmailSent, { userId: args.userId });
+ *   import { action, runQuery, runMutation } from "@zeroship/server";
+ *
+ *   export const sendEmail = action(async (args) => {
+ *     const user = await runQuery(getUser, { id: args.userId });
+ *     await fetch("https://email-svc/send", { ... });
+ *     await runMutation(recordEmailSent, { userId: args.userId });
  *   });
  */
 export function action<TIn, TOut>(

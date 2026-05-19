@@ -359,14 +359,19 @@ export class Collection<S = PlainObject> {
    * Inserts a single document after validating it against the schema.
    * Returns the persisted document with `id`, `createdAt`, and `updatedAt` mapped.
    */
-  async create(doc: CreateInput<S>): Promise<Result<Document<S>>> {
+  async insert(doc: CreateInput<S>): Promise<Result<Document<S>>> {
     return this._run(async () => {
       const validated = validateDoc(doc as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
-      const raw = await this._col().insert( outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
+      const raw = await this._col().insert(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       const result = parseRaw<PlainObject>(raw);
       return mapResultDoc(result!, this._toField) as Document<S>;
     });
+  }
+
+  /** Mongoose-compatible alias for {@link insert}. */
+  create(doc: CreateInput<S>): Promise<Result<Document<S>>> {
+    return this.insert(doc);
   }
 
   /**
@@ -615,13 +620,18 @@ export class Collection<S = PlainObject> {
    * Counts documents matching `filter`. Defaults to counting all documents when
    * no filter is provided.
    */
-  async countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
+  async count(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const raw = await this._col().count( mapped);
+      const raw = await this._col().count(mapped);
       const result = parseRaw<{ count: number }>(raw);
       return result?.count ?? 0;
     });
+  }
+
+  /** Mongoose-compatible alias for {@link count}. */
+  countDocuments(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
+    return this.count(filter);
   }
 
   /**
@@ -645,23 +655,29 @@ export class Collection<S = PlainObject> {
    * Runs an aggregation pipeline (MongoDB-style) and returns the mapped results.
    * `$group`, `$match`, and accumulator expressions are translated to the native format.
    */
-  async aggregate(pipeline: PlainObject[]): Promise<Result<PlainObject[]>> {
+  async aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<Result<PlainObject[]>> {
     return this._run(async () => {
-      let effectivePipeline = pipeline;
+      let effectivePipeline: ZeroshipDbAggregateStage[] = pipeline;
       if (this._softDelete) {
-        const softFilter = { [this._toColumn("deletedAt")]: null };
-        const hasLeadingMatch = pipeline.length > 0 && "$match" in pipeline[0];
-        if (hasLeadingMatch) {
-          const existing = pipeline[0].$match as ZeroshipDbFilter;
-          effectivePipeline = [{ $match: { $and: [existing, softFilter] } as ZeroshipDbFilter }, ...pipeline.slice(1)];
+        const softFilter: ZeroshipDbFilter = { [this._toColumn("deletedAt")]: null };
+        const head = pipeline[0] as { $match?: ZeroshipDbFilter } | undefined;
+        if (head && head.$match !== undefined) {
+          const existing = head.$match;
+          effectivePipeline = [
+            { $match: { $and: [existing, softFilter] } as ZeroshipDbFilter },
+            ...pipeline.slice(1),
+          ];
         } else {
           effectivePipeline = [{ $match: softFilter }, ...pipeline];
         }
       }
-      const translated = translateAggregatePipeline(effectivePipeline, this._toColumn) as ZeroshipDbAggregateStage[];
-      const raw = await this._col().aggregate( translated);
+      const translated = translateAggregatePipeline(
+        effectivePipeline as unknown as PlainObject[],
+        this._toColumn,
+      ) as ZeroshipDbAggregateStage[];
+      const raw = await this._col().aggregate(translated);
       const results = parseRaw<PlainObject[]>(raw);
-      return (results ?? []).map(d => mapResultDoc(d, this._toField));
+      return (results ?? []).map((d) => mapResultDoc(d, this._toField));
     });
   }
 

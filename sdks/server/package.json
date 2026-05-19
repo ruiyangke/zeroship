@@ -2,7 +2,7 @@
   "name": "@zeroship/server",
   "version": "0.1.0",
   "private": true,
-  "description": "Server-side helpers for zeroship apps — defineApp, RpcError, ambient context",
+  "description": "Server-side helpers for zeroship apps — defineApp, procedure wrappers, ambient runtime substrate",
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
