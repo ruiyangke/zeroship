@@ -742,7 +742,6 @@ pub async fn exec_reset(
 /// Internal helper for the worker shutdown path — drop any active
 /// migration lock so the connection is released. Safe to call when no
 /// migration is active.
-#[allow(dead_code)]
 pub fn release_active_lock() {
     MIG_LOCK.with(|m| *m.borrow_mut() = None);
 }

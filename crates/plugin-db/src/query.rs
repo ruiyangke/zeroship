@@ -109,28 +109,14 @@ pub fn build_create_schema(app_id: &str) -> String {
     format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id))
 }
 
-/// Build CREATE TABLE IF NOT EXISTS from a normalized schema JSON.
-///
-/// Schema format: `{ "name": { "type": "string", "required": true, ... }, ... }`
-///
-/// Auto-generates: id SERIAL PRIMARY KEY, created_at, updated_at.
-///
-/// B2 — `t.ref("table")` fields emit an inline `FOREIGN KEY` clause
-/// when (1) the target table is the same as `collection` (self-ref) or
-/// (2) the table is already in `existing_tables`. Otherwise the FK is
-/// deferred to a separate `ALTER TABLE … ADD CONSTRAINT` so the
-/// orchestrator can sequence DDL topologically. The unrestricted variant
-/// `build_create_table` keeps backwards compatibility for callers that
-/// don't track inter-table ordering — it always emits FK clauses inline,
-/// relying on Postgres' deferred validation when the constraint is
-/// `DEFERRABLE INITIALLY DEFERRED`.
-pub fn build_create_table(
-    app_id: &str,
-    collection: &str,
-    schema: &serde_json::Value,
-) -> Result<String, QueryError> {
-    build_create_table_with_fks(app_id, collection, schema, &FkEmission::Inline)
-}
+// `build_create_table` (the non-`_with_fks` wrapper that hardcoded
+// `FkEmission::Inline`) was removed during the v2-only consolidation.
+// Production paths (`exec_register_model_with_pool`) always pass the
+// orchestrator's live table set to `build_create_table_with_fks` so
+// FKs to not-yet-created targets get deferred to a separate
+// `ALTER TABLE … ADD CONSTRAINT`. Tests that need the legacy "always
+// inline" behaviour call `build_create_table_with_fks(..., &Inline)`
+// directly.
 
 /// Controls FK emission strategy for `build_create_table_with_fks`.
 ///
@@ -2631,9 +2617,13 @@ mod tests {
     fn test_insert_with_null_field() {
         let doc = json!({"name": "alice", "bio": null});
         let q = build_insert("app1", "users", &doc).unwrap();
-        // null → empty string param
+        // null is inlined as a SQL `NULL` literal — not bound as a
+        // text-format parameter (the wire protocol can't represent
+        // NULL as a parameter; empty string would fail enum / NOT
+        // NULL CHECKs).
         assert!(q.params.contains(&"alice".to_string()));
-        assert!(q.params.contains(&String::new()), "null should produce empty string param");
+        assert!(!q.params.contains(&String::new()), "null must not be bound as empty-string param");
+        assert!(q.sql.contains("NULL"), "null should appear as a SQL literal in: {}", q.sql);
     }
 
     #[test]
@@ -3409,7 +3399,7 @@ mod tests {
         let schema = json!({
             "email": {"type": "string", "required": true, "unique": true},
         });
-        let create = build_create_table("app1", "users", &schema).unwrap();
+        let create = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
         assert!(create.contains("NOT NULL"), "still emits NOT NULL: {}", create);
         assert!(
             !create.contains(" UNIQUE"),
@@ -3441,7 +3431,7 @@ mod tests {
             "title": {"type": "string", "required": true},
             "authorId": {"type": "ref", "refTarget": "users"},
         });
-        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         // INTEGER column for the FK
         assert!(sql.contains("\"authorId\" INTEGER"), "{sql}");
         // Inline FK clause with default ON DELETE RESTRICT
@@ -3466,7 +3456,7 @@ mod tests {
                 "onUpdate": "cascade",
             },
         });
-        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("ON DELETE CASCADE"), "{sql}");
         assert!(sql.contains("ON UPDATE CASCADE"), "{sql}");
     }
@@ -3480,7 +3470,7 @@ mod tests {
                 "deferrable": false,
             },
         });
-        let sql = build_create_table("app1", "posts", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(!sql.contains("DEFERRABLE"), "{sql}");
     }
 
@@ -3578,7 +3568,7 @@ mod tests {
                 }
             },
         });
-        let sql = build_create_table("app1", "users", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"profile\" JSONB"), "{sql}");
         // Defaults to an empty JSON object (like t.json()).
         assert!(sql.contains("DEFAULT '{}'::jsonb"), "{sql}");
@@ -3593,7 +3583,7 @@ mod tests {
         let schema = json!({
             "birthday": { "type": "calendarDate" },
         });
-        let sql = build_create_table("app1", "users", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
         // DATE, not TIMESTAMPTZ — the whole point of D3.
         assert!(sql.contains("\"birthday\" DATE"), "{sql}");
         assert!(!sql.contains("TIMESTAMPTZ DATE"), "{sql}");
@@ -3607,7 +3597,7 @@ mod tests {
             "createdAt": { "type": "date" },
             "birthday": { "type": "calendarDate" },
         });
-        let sql = build_create_table("app1", "users", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"createdAt\" TIMESTAMPTZ"), "{sql}");
         assert!(sql.contains("\"birthday\" DATE"), "{sql}");
     }
@@ -3639,8 +3629,8 @@ mod tests {
             "title": { "type": "string", "required": true },
             "version": { "type": "number", "default": 1 },
         });
-        let sql = build_create_table("app1", "posts", &schema).unwrap();
-        assert!(sql.contains("\"version\" NUMERIC"), "{sql}");
+        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+        assert!(sql.contains("\"version\" DOUBLE PRECISION"), "{sql}");
         assert!(sql.contains("DEFAULT 1"), "{sql}");
     }
 
@@ -3706,7 +3696,7 @@ mod tests {
         // variant" semantics (so the column is nullable at the table
         // level; per-variant CHECK constraints enforce integrity).
         let schema = c2_events_union_schema();
-        let sql = build_create_table("app1", "events", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
 
         // Discriminator: TEXT, NOT NULL, with CHECK IN-list.
         assert!(sql.contains("\"kind\" TEXT"), "expected kind TEXT: {sql}");
@@ -3731,7 +3721,7 @@ mod tests {
         // Per proposal §C2, each variant gets a CHECK constraint of the
         // form: `kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)`.
         let schema = c2_events_union_schema();
-        let sql = build_create_table("app1", "events", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
 
         // The login variant requires userId AND ip.
         assert!(
@@ -3759,7 +3749,7 @@ mod tests {
     #[test]
     fn c2_union_constraint_names_are_unique_per_variant() {
         let schema = c2_events_union_schema();
-        let sql = build_create_table("app1", "events", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
         // Each variant constraint name follows `<table>_<disc>_<value>_chk`.
         assert!(sql.contains("CONSTRAINT \"events_kind_login_chk\""), "{sql}");
         assert!(sql.contains("CONSTRAINT \"events_kind_error_chk\""), "{sql}");
@@ -3791,7 +3781,7 @@ mod tests {
             "x": { "type": "string" },
             "y": { "type": "string" }
         });
-        let sql = build_create_table("app1", "evt", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
         // No per-variant CHECK clauses, but discriminator IN-list still
         // applies.
         assert!(sql.contains("CHECK (\"kind\" IN ('a', 'b'))"), "{sql}");
@@ -3825,8 +3815,8 @@ mod tests {
             "a": { "type": "string" },
             "b": { "type": "string" }
         });
-        let sql = build_create_table("app1", "evt", &schema).unwrap();
-        assert!(sql.contains("\"code\" NUMERIC"), "{sql}");
+        let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
+        assert!(sql.contains("\"code\" DOUBLE PRECISION"), "{sql}");
         // Number enum members are bare (no quotes).
         assert!(sql.contains("CHECK (\"code\" IN (1, 2))"), "{sql}");
         assert!(sql.contains("\"code\" <> 1 OR (\"a\" IS NOT NULL)"), "{sql}");
@@ -3840,7 +3830,7 @@ mod tests {
         let schema = json!({
             "kind": { "type": "literal", "literalValue": "login", "required": true },
         });
-        let sql = build_create_table("app1", "events", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"kind\" TEXT"), "{sql}");
         assert!(sql.contains("CHECK (\"kind\" = 'login')"), "{sql}");
     }
@@ -3871,7 +3861,7 @@ mod tests {
             "url":    { "type": "string" },
             "target": { "type": "string" }
         });
-        let sql = build_create_table("app1", "evt", &schema).unwrap();
+        let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
         // Sanitised identifiers (dots / hyphens → underscore).
         assert!(sql.contains("CONSTRAINT \"evt_kind_page_view_chk\""), "{sql}");
         assert!(sql.contains("CONSTRAINT \"evt_kind_click_out_chk\""), "{sql}");

@@ -652,6 +652,15 @@ function _zsRpc(name, input, ctx) {
 }
 
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
+  // Await platform-readiness BEFORE the auto-tx BEGIN — see
+  // dev-bootstrap/index.ts and sdks/db/src/db.ts for the rationale
+  // (pglite-socket serializes per-connection-in-tx). No-op on the
+  // warm path once registerModel has settled.
+  const ready = globalThis.__zeroshipPlatformReady;
+  if (ready && typeof ready.then === "function") {
+    try { await ready; } catch { /* user-facing errors surface via the handler */ }
+  }
+
   // See runtime-mode copy above for the isolation rationale.
   const isolation = (cfg && typeof cfg.isolation === "string") ? cfg.isolation : "";
   let token = 0;

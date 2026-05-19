@@ -13,7 +13,7 @@
 
 import { createDb, t, schema } from "@zeroship/db";
 import { defineMigration, migrations } from "@zeroship/migrations";
-import { mutation, query } from "@zeroship/server";
+import { action, mutation, query } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
 // Schema — represents the "post-expand" shape. Both old and new fields
@@ -159,7 +159,14 @@ function lookup(name: string) {
   return m;
 }
 
-export const runMigration = mutation(
+// `action` (not `mutation`): the migration opens its own dedicated
+// session-scoped advisory-lock connection, so it must not run inside
+// the dispatcher's auto-tx — that would put the user-tx connection
+// and the migration's lock connection in two different windows on
+// the same Postgres backend, deadlocking pglite-socket's single-
+// instance serializer. Real long-running migrations don't belong in
+// a request-scope tx anyway.
+export const runMigration = action(
   async ({ name, dryRun }: { name: string; dryRun?: boolean }) => {
     const m = lookup(name);
     const result = await migrations.run(m, dryRun ? { dryRun: true } : undefined);
@@ -167,7 +174,12 @@ export const runMigration = mutation(
   },
 );
 
-export const migrationStatus = query(
+// `action` (not `query`): `migrations.status` calls
+// `env.db.migrationStatus(name, collection)` which uses its own
+// pooled connection. Under pglite-socket's per-tx serializer, a
+// read-only auto-tx would still pin the user-side connection and
+// stall the pool query. Status reads aren't tx-scoped reads anyway.
+export const migrationStatus = action(
   async ({ name }: { name: string }) => {
     const m = lookup(name);
     const result = await migrations.status(m);

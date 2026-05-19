@@ -345,6 +345,14 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   // first runs first, and a child running before its parent fails
   // inline-FK CREATE TABLE. Sequencing in JS removes the race
   // entirely.
+  //
+  // We also publish the chain on `globalThis.__zeroshipPlatformReady`
+  // so the SSR dispatch shim can await it BEFORE opening the
+  // request-scope auto-tx. pglite-socket's TCP proxy serializes
+  // pglite queries per-connection-in-tx, so opening an auto-tx
+  // connection while the orchestrator's registerModel connection
+  // holds `pg_advisory_lock` deadlocks. Awaiting the chain pre-tx
+  // keeps the two off the same socket window.
   const refOrder = topoSortByRefs(schemas as Record<string, unknown>);
   let chain: Promise<void> = Promise.resolve();
   for (const name of refOrder) {
@@ -371,6 +379,15 @@ export function createDb<const T extends Record<string, SchemaInput>>(
       );
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
+
+  // Publish a "platform ready" promise the SSR dispatch shim awaits
+  // before opening the auto-tx. Multiple createDb calls in the same
+  // isolate (rare but possible if a user composes two app bundles)
+  // are sequenced through one promise so the shim only needs to
+  // `await` a single handle.
+  const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
+  const prev = g.__zeroshipPlatformReady ?? Promise.resolve();
+  g.__zeroshipPlatformReady = prev.then(() => chain).catch(() => undefined);
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions
   const txCollections = {} as { [K in keyof T]: TxCollection<T[K]> };

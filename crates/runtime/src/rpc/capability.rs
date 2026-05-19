@@ -47,6 +47,7 @@
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 /// Procedure kind, runtime-local. Wire shape lives in
 /// `zeroship_bundle::ProcedureKind`; we don't depend on bundle here to
@@ -85,14 +86,32 @@ thread_local! {
     /// Per-thread active kind. `None` outside any RPC dispatch frame.
     static CURRENT_KIND: Cell<Option<ProcedureKind>> = const { Cell::new(None) };
 
-    /// Stack of saved kinds — pushed on `enter`, popped on matching
-    /// `exit`. Used by the JS-side enter/exit callbacks so nested
-    /// procedure calls (e.g. action → runMutation → mutation handler)
-    /// restore the outer kind correctly. The token returned to JS is
-    /// the stack depth before push (`u32` rather than `usize` so it
-    /// round-trips through a V8 `Integer` cleanly).
-    static KIND_STACK: RefCell<Vec<Option<ProcedureKind>>> =
-        const { RefCell::new(Vec::new()) };
+    /// Map from unique token to the saved kind to restore on exit.
+    /// `__zsEnterKind` / `__zsClearKind` mint a fresh token each call,
+    /// store the pre-call `CURRENT_KIND` under it, and return the
+    /// token to JS. `__zsExitKind(token)` removes the entry and
+    /// restores the saved value. Token-keyed lookup tolerates
+    /// non-LIFO exit order — necessary because `setInterval` fetches
+    /// (HMR poll) and `await fetch` (Vite SSR transport) can settle
+    /// out of order. The previous depth-based stack assumed strict
+    /// LIFO and corrupted on interleave.
+    static KIND_SAVES: RefCell<HashMap<u32, Option<ProcedureKind>>> =
+        RefCell::new(HashMap::new());
+
+    /// Monotonic token counter. `u32` so tokens round-trip through a
+    /// V8 `Integer` without loss.
+    static KIND_TOKEN_COUNTER: Cell<u32> = const { Cell::new(1) };
+}
+
+/// Mint a fresh token. Skips 0 — the SSR-entry treats `tok < 0` as
+/// "no enter" and `tok == 0` would conflict with the previous depth=0
+/// semantics; we just stay above it.
+fn next_kind_token() -> u32 {
+    KIND_TOKEN_COUNTER.with(|c| {
+        let v = c.get();
+        c.set(v.wrapping_add(1).max(1));
+        v
+    })
 }
 
 /// Snapshot of `CURRENT_KIND`. `None` outside any RPC dispatch.
@@ -134,10 +153,11 @@ impl Drop for KindGuard {
 
 /// `globalThis.__zsEnterKind(kindStr): number`
 ///
-/// Pushes the current kind onto the stack and sets `CURRENT_KIND` to
-/// the parsed kind. Returns a numeric token that `__zsExitKind` uses to
-/// restore. Unknown / non-string arguments are silently ignored — the
-/// returned token still works (best-effort).
+/// Saves the active kind under a fresh token and sets `CURRENT_KIND`
+/// to the parsed kind. Returns the token; `__zsExitKind(token)`
+/// restores the saved kind by token lookup. Unknown / non-string
+/// arguments leave `CURRENT_KIND` as-is — the matching exit still
+/// works (best-effort).
 fn enter_kind_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -154,20 +174,13 @@ fn enter_kind_callback(
         None
     };
 
-    let token = KIND_STACK.with(|s| {
-        let prev = CURRENT_KIND.with(|c| c.get());
-        let mut stack = s.borrow_mut();
-        let depth = stack.len();
-        stack.push(prev);
-        depth as u32
+    let token = next_kind_token();
+    let prev = CURRENT_KIND.with(|c| c.get());
+    KIND_SAVES.with(|m| {
+        m.borrow_mut().insert(token, prev);
     });
     if let Some(k) = kind {
         CURRENT_KIND.with(|c| c.set(Some(k)));
-    } else {
-        // Unknown kind → leave CURRENT_KIND as-is. The stack push is
-        // still recorded so the matching exit pops correctly. This keeps
-        // the protocol symmetric (every enter has an exit) without
-        // changing the active gate.
     }
 
     rv.set(v8::Integer::new_from_unsigned(scope, token).into());
@@ -194,28 +207,44 @@ fn exit_kind_callback(
     if tok_i64 < 0 {
         return;
     }
-    let tok = tok_i64 as usize;
+    let tok = tok_i64 as u32;
 
-    KIND_STACK.with(|s| {
-        let mut stack = s.borrow_mut();
-        if tok >= stack.len() {
-            // Out-of-range token — the matching enter must have
-            // happened on a different frame, or two exits ran for one
-            // enter. Either way: clamp to the current depth and do
-            // nothing.
-            return;
-        }
-        // Pop everything down to depth `tok`, restoring CURRENT_KIND
-        // from the value saved AT depth `tok` (the value present
-        // BEFORE the matching enter pushed).
-        let restored = stack[tok];
-        stack.truncate(tok);
-        CURRENT_KIND.with(|c| c.set(restored));
-    });
+    // Token-keyed lookup tolerates out-of-order exits — necessary
+    // when `setInterval`-scheduled fetches interleave with
+    // request-handler awaits. Missing token (already exited, or
+    // never minted) is a no-op.
+    let restored = KIND_SAVES.with(|m| m.borrow_mut().remove(&tok));
+    if let Some(saved) = restored {
+        CURRENT_KIND.with(|c| c.set(saved));
+    }
 }
 
-/// Wire `__zsEnterKind` / `__zsExitKind` onto `globalThis`. Called from
-/// `crate::rpc::dispatch::install_globals`.
+/// `globalThis.__zsClearKind(): number`
+///
+/// Pushes the active kind onto the stack and sets `CURRENT_KIND` to
+/// `None` for the scope, returning a token the JS shim pairs with a
+/// `__zsExitKind(token)` call.
+///
+/// Used by dev-bootstrap infrastructure code (HMR poll, Vite SSR
+/// transport) that must call `fetch` from inside a request whose
+/// active capability frame would otherwise refuse it. The fetches are
+/// part of the dev kernel, not user code, so they bypass the gate.
+fn clear_kind_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let token = next_kind_token();
+    let prev = CURRENT_KIND.with(|c| c.get());
+    KIND_SAVES.with(|m| {
+        m.borrow_mut().insert(token, prev);
+    });
+    CURRENT_KIND.with(|c| c.set(None));
+    rv.set(v8::Integer::new_from_unsigned(scope, token).into());
+}
+
+/// Wire `__zsEnterKind` / `__zsExitKind` / `__zsClearKind` onto
+/// `globalThis`. Called from `crate::rpc::dispatch::install_globals`.
 pub fn install_globals<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     global: v8::Local<v8::Object>,
@@ -226,6 +255,10 @@ pub fn install_globals<'s>(
 
     let f = v8::Function::new(scope, exit_kind_callback).unwrap();
     let key = v8::String::new(scope, "__zsExitKind").unwrap();
+    global.set(scope, key.into(), f.into());
+
+    let f = v8::Function::new(scope, clear_kind_callback).unwrap();
+    let key = v8::String::new(scope, "__zsClearKind").unwrap();
     global.set(scope, key.into(), f.into());
 }
 
@@ -351,7 +384,7 @@ mod tests {
     fn current_kind_outside_dispatch_is_none() {
         // Note: tests share a thread, so we reset the stack first to
         // guard against pollution from earlier failed tests.
-        KIND_STACK.with(|s| s.borrow_mut().clear());
+        KIND_SAVES.with(|m| m.borrow_mut().clear());
         CURRENT_KIND.with(|c| c.set(None));
         assert_eq!(current_kind(), None);
     }
@@ -359,7 +392,7 @@ mod tests {
     /// `KindGuard::enter` sets the kind; drop restores `None`.
     #[test]
     fn b3_runtime_kind_guard_basic() {
-        KIND_STACK.with(|s| s.borrow_mut().clear());
+        KIND_SAVES.with(|m| m.borrow_mut().clear());
         CURRENT_KIND.with(|c| c.set(None));
         {
             let _g = KindGuard::enter(ProcedureKind::Query);
@@ -372,7 +405,7 @@ mod tests {
     /// on inner drop.
     #[test]
     fn b3_runtime_nested_calls_preserve_kind() {
-        KIND_STACK.with(|s| s.borrow_mut().clear());
+        KIND_SAVES.with(|m| m.borrow_mut().clear());
         CURRENT_KIND.with(|c| c.set(None));
         let _outer = KindGuard::enter(ProcedureKind::Action);
         assert_eq!(current_kind(), Some(ProcedureKind::Action));
@@ -388,7 +421,7 @@ mod tests {
     /// path.
     #[test]
     fn b3_runtime_kind_guard_restores_on_panic() {
-        KIND_STACK.with(|s| s.borrow_mut().clear());
+        KIND_SAVES.with(|m| m.borrow_mut().clear());
         CURRENT_KIND.with(|c| c.set(None));
         let result = std::panic::catch_unwind(|| {
             let _g = KindGuard::enter(ProcedureKind::Query);

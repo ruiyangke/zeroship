@@ -1,5 +1,11 @@
 /**
- * Database primitives (zeroship.db.*)
+ * Database primitives (zeroship.db.*) — v2 surface.
+ *
+ * The runtime exposes `env.db` as a Db v8_class instance with a small set
+ * of entry-point methods. Per-collection CRUD lives on the Collection
+ * wrapper returned by `env.db.collection(name)`. Transactions, migration
+ * runs, and reactive subscriptions are also separate wrappers. The
+ * flat-method surface from v1 was removed in 2026-05.
  */
 
 // ---------------------------------------------------------------------------
@@ -162,81 +168,88 @@ interface ZeroshipDbFieldDef {
 type ZeroshipDbSchema = Record<string, ZeroshipDbFieldDef>;
 
 // ---------------------------------------------------------------------------
-// Native driver interface
+// Wrapper v8_classes — the v2 native surface.
 // ---------------------------------------------------------------------------
 
-/** The zeroship.db namespace — all methods return JSON strings from the native layer. */
-interface ZeroshipDb {
-  // --- CRUD ---
-
+/**
+ * A typed Collection wrapper minted by `env.db.collection(name)`. All
+ * CRUD methods return JSON strings (or null) from the native layer.
+ * Identity is cached on the Db wrapper — calling `.collection(name)`
+ * twice with the same name returns the same JS object.
+ */
+interface ZeroshipCollection {
   /** Find multiple documents. Returns JSON array string. */
-  find(collection: string, filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<string>;
+  find(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string>;
 
   /** Find one document. Returns JSON string or null. */
-  findOne(collection: string, filter: ZeroshipDbFilter): Promise<string | null>;
+  findOne(filter: ZeroshipDbFilter): Promise<string | null>;
 
   /** Insert one document. Returns JSON string of the inserted row. */
-  insert(collection: string, doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
+  insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
 
   /** Insert multiple documents. Returns JSON array string. */
-  insertMany(collection: string, docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
+  insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
 
   /** Update one document. Returns JSON string of the updated row or null. */
-  updateOne(collection: string, filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
+  updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
 
   /** Update multiple documents. Returns JSON string with { updated: N }. */
-  updateMany(collection: string, filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
+  updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
 
   /** Delete one document. Returns JSON string of the deleted row or null. */
-  deleteOne(collection: string, filter: ZeroshipDbFilter): Promise<string>;
+  deleteOne(filter: ZeroshipDbFilter): Promise<string>;
 
   /** Delete multiple documents. Returns JSON string with { deleted: N }. */
-  deleteMany(collection: string, filter: ZeroshipDbFilter): Promise<string>;
+  deleteMany(filter: ZeroshipDbFilter): Promise<string>;
 
   /** Upsert a document (insert or update on conflict). Returns JSON string of the row. */
-  upsert(collection: string, doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>, conflictFields: string[]): Promise<string>;
+  upsert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>, conflictFields: string[]): Promise<string>;
 
   /** Count documents matching filter. Returns JSON string with { count: N }. */
-  count(collection: string, filter: ZeroshipDbFilter): Promise<string>;
+  count(filter: ZeroshipDbFilter): Promise<string>;
 
   /** Get distinct values for a field. Returns JSON array string. */
-  distinct(collection: string, field: string, filter: ZeroshipDbFilter): Promise<string>;
+  distinct(field: string, filter: ZeroshipDbFilter): Promise<string>;
 
   /** Run an aggregation pipeline. Returns JSON array string. */
-  aggregate(collection: string, pipeline: ZeroshipDbAggregateStage[]): Promise<string>;
+  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<string>;
+}
 
-  // --- Schema ---
+/**
+ * A live transaction wrapper minted by `env.db.beginTransaction(level?)`.
+ * Subsequent CRUD ops issued on Collection wrappers in the same isolate
+ * tick run on the transaction's connection. The wrapper's Drop
+ * auto-rollbacks if neither `.commit()` nor `.rollback()` is called.
+ */
+interface ZeroshipTransaction {
+  /** Commit the transaction. Idempotent if already settled. */
+  commit(): Promise<void>;
+  /** Rollback the transaction. Idempotent if already settled. */
+  rollback(): Promise<void>;
+}
 
-  /** Register a model — creates table and columns if not exist. */
-  registerModel(collection: string, schema: ZeroshipDbSchema): Promise<void>;
-
-  // --- Transactions ---
-
-  /** Begin a transaction. All subsequent CRUD ops use the same connection. */
-  beginTransaction(isolationLevel?: string): Promise<void>;
-
-  /** Commit the active transaction. */
-  commitTransaction(): Promise<void>;
-
-  /** Rollback the active transaction. */
-  rollbackTransaction(): Promise<void>;
-
-  // --- B1 — @zeroship/migrations primitives ---
-
-  /**
-   * Begin a data-backfill migration run. Acquires a session-scoped
-   * Postgres advisory lock keyed by (app_id, name); subsequent calls
-   * from other workers fail with `migration_already_running`.
-   *
-   * Returns a JSON string `{ auditId, cursor, processed, status, deadLetterPks }`.
-   */
-  migrationBegin(name: string, collection: string, dryRun: boolean, reset: boolean): Promise<string>;
+/**
+ * A live migration-run wrapper minted by `env.db.migrationStart(spec)`.
+ * Holds the (app_id, name, collection) triple plus the session-scoped
+ * Postgres advisory lock that fences concurrent runs. The wrapper's
+ * Weak finalizer auto-cancels if the wrapper is GC'd without an
+ * explicit terminal `commitBatch(isDone=true, ...)`.
+ *
+ * `status` / `cancel` / `reset` here operate on this exact run; the
+ * standalone `migrationStatus(name, collection)` / `migrationCancel` /
+ * `migrationReset` methods on `ZeroshipDb` operate by name+collection
+ * and don't hold the advisory lock.
+ */
+interface ZeroshipMigration {
+  status(): Promise<string>;
+  cancel(): Promise<string>;
+  reset(): Promise<string>;
 
   /**
    * Fetch the next batch of rows after `cursor`. Returns a JSON string
    * `{ rows: [...] }`. Each row is a plain object keyed by column name.
    */
-  migrationFetchBatch(cursor: number, batchSize: number): Promise<string>;
+  fetchBatch(cursor: number, batchSize: number): Promise<string>;
 
   /**
    * Commit one batch of per-row updates. `updatesJson` is a JSON array
@@ -245,7 +258,7 @@ interface ZeroshipDb {
    * `isDone=true`, drives the audit row to `terminalStatus` and
    * releases the advisory lock.
    */
-  migrationCommitBatch(
+  commitBatch(
     updatesJson: string,
     deadLetterPksJson: string,
     nextCursor: number,
@@ -254,13 +267,89 @@ interface ZeroshipDb {
     terminalStatus: string,
     errorMessage: string,
   ): Promise<string>;
+}
+
+/**
+ * A live subscription wrapper minted by `env.db.openSubscription(name)`.
+ * Synchronous to mint — calling it does not allocate any Postgres state;
+ * the wrapper merely registers a slot in the per-isolate broker routing
+ * table. The wrapper's GC finalizer is the safety-net release.
+ *
+ * `pollJson` resolves with one of:
+ *
+ * - `{"kind":"change", "op":"insert"|"update"|"delete",
+ *    "collection":..., "pk": number|null, "columns": string[]}`
+ * - `{"kind":"resync"}` — bounded queue overflowed; the client should
+ *   re-fetch and discard cached results
+ * - `{"kind":"closed"}` — subscription was closed; iterator terminates
+ * - `null` — handle no longer exists (already closed and reaped)
+ */
+interface ZeroshipSubscription {
+  pollJson(): Promise<string | null>;
+  close(): void;
+}
+
+// ---------------------------------------------------------------------------
+// Db entry point — env.db
+// ---------------------------------------------------------------------------
+
+/**
+ * The `zeroship.db` namespace surfaced as `env.db` on every isolate.
+ * Owns the lifecycle of the pooled connection and mints typed wrappers
+ * for collections, transactions, migration runs, and subscriptions.
+ *
+ * The flat per-collection CRUD methods from v1 were removed in 2026-05
+ * — call `.collection(name)` first and use the returned wrapper.
+ */
+interface ZeroshipDb {
+  // --- Schema ---
+
+  /** Register a model — creates table and columns if not exist. */
+  registerModel(collection: string, schema: ZeroshipDbSchema): Promise<void>;
+
+  // --- Collection wrapper mint ---
+
+  /**
+   * Mint (or return the cached) Collection wrapper for `name`. Identity
+   * is cached on the Db wrapper so repeated calls with the same name
+   * return the same JS object — the SDK relies on this for per-name
+   * lazy resolution.
+   */
+  collection(name: string): ZeroshipCollection;
+
+  // --- Transactions ---
+
+  /**
+   * Begin a transaction. Returns a Transaction wrapper whose
+   * `.commit()` / `.rollback()` are explicit methods. The wrapper's
+   * Drop auto-rollbacks via connection close if neither is called.
+   */
+  beginTransaction(isolationLevel?: string): Promise<ZeroshipTransaction>;
+
+  // --- Migration runs (B1) ---
+
+  /**
+   * Start a data-backfill migration run. Acquires a session-scoped
+   * Postgres advisory lock keyed by (app_id, name); subsequent calls
+   * from other workers fail with `migration_already_running`.
+   *
+   * Returns a Migration wrapper that drives `fetchBatch` / `commitBatch`.
+   * The wrapper's Weak finalizer auto-cancels if it's GC'd without an
+   * explicit terminal commitBatch.
+   */
+  migrationStart(spec: {
+    name: string;
+    collection: string;
+    dryRun?: boolean;
+    reset?: boolean;
+  }): Promise<ZeroshipMigration>;
 
   /** Read the current audit-row state for a (collection, name) pair. */
   migrationStatus(name: string, collection: string): Promise<string>;
 
   /**
    * Cancel a `pending` or `running` migration. Subsequent
-   * `migrationFetchBatch` calls return `migration_cancelled`.
+   * `fetchBatch` calls on the live wrapper return `migration_cancelled`.
    */
   migrationCancel(name: string, collection: string): Promise<string>;
 
@@ -270,38 +359,21 @@ interface ZeroshipDb {
    */
   migrationReset(name: string, collection: string): Promise<string>;
 
-  // --- C1 / P8a — reactive queries (in-process broker) ---
+  // --- Reactive subscriptions (C1 / P8a) ---
 
   /**
-   * Open a subscription on `collection`. Returns a numeric handle.
-   * Synchronous — calling it does not allocate any Postgres state;
-   * the handle merely registers a slot in the per-isolate broker
-   * routing table. Pair with [`subscribePoll`] and [`subscribeClose`].
+   * Open a subscription on `collection`. Returns a Subscription wrapper.
+   * Synchronous — calling it does not allocate any Postgres state; the
+   * wrapper merely registers a slot in the per-isolate broker routing
+   * table.
    *
    * Today the events come from local mutations in the same isolate
    * (coarse-grained, every change to `collection`). The proposal's
    * read-set narrowing + cross-worker WAL pickup are P8b / P8a.2.
    */
-  subscribe(collection: string): number;
+  openSubscription(collection: string): ZeroshipSubscription;
 
-  /**
-   * Await the next pending event for `handle`. The promise stays
-   * pending until an event arrives or the subscription is closed.
-   *
-   * Resolved value is one of:
-   *
-   * - `{"kind":"change", "op":"insert"|"update"|"delete",
-   *    "collection":..., "pk": number|null, "columns": string[]}`
-   * - `{"kind":"resync"}` — bounded queue overflowed; the client
-   *   should re-fetch and discard cached results
-   * - `{"kind":"closed"}` — subscription was closed; iterator
-   *   should terminate
-   * - `null` — handle no longer exists (already closed and reaped)
-   */
-  subscribePoll(handle: number): Promise<string | null>;
-
-  /** Close `handle`. Any pending poll resolves with `{"kind":"closed"}`. */
-  subscribeClose(handle: number): void;
+  // --- Replication operator surface ---
 
   /**
    * Operator-only: idempotently provision the per-app

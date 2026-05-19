@@ -110,46 +110,10 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
     REGISTERED_MODELS.with(|r| { r.borrow_mut().insert(key); });
 }
 
-/// Ensure the pool is initialized. If not, try to create it from `DB_URL`.
-///
-/// Returns `Some(())` on success, `None` if the pool could not be created
-/// (throws a V8 exception in that case).
-#[allow(dead_code)]
-pub(crate) fn ensure_pool(scope: &mut v8::PinScope<'_, '_>) -> Option<()> {
-    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
-    if has_pool {
-        return Some(());
-    }
-
-    // No pool yet — we need the URL to create one.
-    // But Pool::connect is async. We can't block here in a V8 callback.
-    // The pool must be created before V8 callbacks run.
-    //
-    // If we reach here, the URL was not set at plugin register-time.
-    let has_url = DB_URL.with(|u| u.borrow().is_some());
-    if !has_url {
-        let msg = v8::String::new(
-            scope,
-            "db: not configured — pass a URL to DbPlugin::new()",
-        )
-        .unwrap();
-        let exc = v8::Exception::error(scope, msg);
-        scope.throw_exception(exc);
-        return None;
-    }
-
-    // We have a URL but no pool. The pool should have been created in init_pool_async().
-    // If we're here, the async init hasn't completed yet — this shouldn't happen in practice
-    // since init() is called before any JS execution.
-    let msg = v8::String::new(
-        scope,
-        "db: pool not ready — init_pool_async() must complete before JS execution",
-    )
-    .unwrap();
-    let exc = v8::Exception::error(scope, msg);
-    scope.throw_exception(exc);
-    None
-}
+// The synchronous `ensure_pool(scope)` helper that used to live here
+// has been removed — every callback dispatches through
+// `init_pool_async()` + `DB_POOL.with(...)` directly (or the
+// `callbacks::ensure_pool` async helper that wraps the same).
 
 // ---------------------------------------------------------------------------
 // DbPlugin

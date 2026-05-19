@@ -103,7 +103,6 @@ fn parse_json_arg(
 }
 
 /// Parse an optional integer argument.
-#[allow(dead_code)]
 fn get_i64_arg(
     scope: &mut v8::PinScope<'_, '_>,
     args: &v8::FunctionCallbackArguments,
@@ -144,42 +143,13 @@ pub(crate) fn get_app_id_pub(state: &SharedState) -> String {
 /// `wrapper`, `violated`, `remediation`) so the dispatch path can
 /// render a structured 500 instead of a generic exception.
 ///
-/// Pure-Rust check: cheap thread-local read, no V8 work on the
-/// allow path. On refusal we build a plain V8 object (not an Error
-/// instance) and reject — matches the cached-admission-error pattern
-/// used elsewhere; structured fields render via the same
-/// `v8_exception_to_*` extraction the dispatcher uses for thrown
-/// values.
-fn refuse_if_query_capability<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    rv: &mut v8::ReturnValue,
-    op: &str,
-) -> bool {
-    if !matches!(
-        zeroship_runtime::rpc::current_kind(),
-        Some(zeroship_runtime::rpc::ProcedureKind::Query)
-    ) {
-        return false;
-    }
-    let resolver = v8::PromiseResolver::new(scope).unwrap();
-    let promise = resolver.get_promise(scope);
-    let exc = zeroship_runtime::rpc::build_capability_violation(
-        scope,
-        "query",
-        op,
-        "Use mutation() if you need to write to the database. Queries are read-only.",
-    );
-    resolver.reject(scope, exc.into());
-    rv.set(promise.into());
-    true
-}
-
-/// Promise-returning variant of [`refuse_if_query_capability`] for the
-/// v8_class `Collection` methods, which return `v8::Local<v8::Value>`
-/// directly rather than `rv.set`-ing on a `FunctionCallback`. Returns
-/// `Some(promise)` when the capability is violated (caller should
-/// return the rejected promise immediately); `None` when the write is
-/// allowed and the caller should continue.
+/// Refuse a write op from inside a `query()` handler. Returns
+/// `Some(rejected_promise)` to the caller (which returns it as the JS
+/// value); `None` when the write is allowed. The FunctionCallback-shape
+/// variant of this gate (`fn(scope, &mut rv, op) -> bool`) used to live
+/// alongside this one for the flat callbacks (find/insert/etc.); those
+/// callbacks were deleted in the v2-only consolidation, so this is the
+/// only entry now.
 pub(crate) fn refuse_if_query_capability_returning<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     op: &str,
@@ -1803,164 +1773,6 @@ async fn create_index_with_recovery_audited(
     ))
 }
 
-/// Run a single `CREATE INDEX CONCURRENTLY` with INVALID-index recovery.
-///
-/// On success, returns `Ok(())`. On a fatal data violation
-/// (`23505/23502/23503/23514`), returns a structured `validation_refused`
-/// JSON envelope (see proposal A1/A2 — the envelope shape matches A2's
-/// `validation_refused` so the deploy pipeline can consume the two paths
-/// uniformly). Transient failures (deadlock, disk pressure) are retried up
-/// to 3 times after `DROP INDEX CONCURRENTLY`.
-///
-/// Kept for the `tests/` path that exercises pre-A2 semantics; the
-/// production `exec_register_model` path uses
-/// `create_index_with_recovery_audited` which writes to
-/// `__zeroship_migrations` on every retry.
-#[allow(dead_code)]
-async fn create_index_with_recovery(
-    pool: &compio_postgres::Pool,
-    app_id: &str,
-    collection: &str,
-    spec: &query::IndexSpec,
-) -> Result<(), String> {
-    use compio_postgres::error::SqlState;
-
-    const MAX_RETRIES: u32 = 3;
-    let empty: Vec<&str> = Vec::new();
-    let qualified_idx = format!("\"{}\".\"{}\"", app_id, spec.name);
-    let drop_idx_sql = format!(
-        "DROP INDEX CONCURRENTLY IF EXISTS \"{}\".\"{}\"",
-        app_id, spec.name
-    );
-
-    for attempt in 0..=MAX_RETRIES {
-        // Issue the CREATE. Note: `IF NOT EXISTS` means an already-VALID
-        // index is a no-op; an existing INVALID one would still be a no-op
-        // here, which is why we always follow up with the indisvalid check.
-        let create_res = pool.query_text_params(&spec.sql, &empty).await;
-
-        match create_res {
-            Ok(_) => {
-                // Verify the index landed VALID.
-                let check_sql = format!(
-                    "SELECT indisvalid FROM pg_index WHERE indexrelid = '{}'::regclass",
-                    qualified_idx.replace('\'', "''")
-                );
-                let rows = pool
-                    .query_text_params(&check_sql, &empty)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "db: failed to verify index '{}' validity: {}",
-                            spec.name,
-                            fmt_db_err(&e)
-                        )
-                    })?;
-
-                let valid = rows
-                    .first()
-                    .map(|r| r.try_get::<_, bool>("indisvalid").unwrap_or(false))
-                    .unwrap_or(false);
-
-                if valid {
-                    return Ok(());
-                }
-
-                // Index exists but is INVALID. Drop and retry as a
-                // transient failure (we have no SQLSTATE to inspect — the
-                // CREATE itself succeeded so a concurrent failure left
-                // the entry behind). TODO: A3 — log to
-                // `__zeroship_migrations` with change_kind='index_retry'.
-                tracing::warn!(
-                    app_id = %app_id,
-                    collection = %collection,
-                    index = %spec.name,
-                    attempt = attempt,
-                    "index landed INVALID — dropping and retrying (TODO: A3 audit log)"
-                );
-
-                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-                if attempt == MAX_RETRIES {
-                    return Err(format!(
-                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
-                        \"collection\":\"{}\",\"index\":\"{}\",\
-                        \"reason\":\"index repeatedly landed INVALID after {} retries\"}}",
-                        collection, spec.name, MAX_RETRIES
-                    ));
-                }
-            }
-            Err(e) => {
-                let code = e.code().cloned();
-                let fatal = matches!(
-                    code.as_ref(),
-                    Some(c) if c == &SqlState::UNIQUE_VIOLATION
-                        || c == &SqlState::NOT_NULL_VIOLATION
-                        || c == &SqlState::FOREIGN_KEY_VIOLATION
-                        || c == &SqlState::CHECK_VIOLATION
-                );
-
-                if fatal {
-                    let code_str = code.as_ref().map(|c| c.code()).unwrap_or("23xxx");
-                    let constraint_kind = if spec.unique { "unique" } else { "index" };
-                    // Drop the leftover INVALID entry so retries don't pile up.
-                    let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-                    return Err(format!(
-                        "{{\"code\":\"unique_violation\",\"sqlstate\":\"{}\",\
-                        \"collection\":\"{}\",\"constraint\":\"{}\",\
-                        \"index\":\"{}\",\"columns\":{:?},\
-                        \"message\":\"{}\"}}",
-                        code_str,
-                        collection,
-                        constraint_kind,
-                        spec.name,
-                        spec.columns,
-                        fmt_db_err(&e).replace('"', "\\\"")
-                    ));
-                }
-
-                let transient = matches!(
-                    code.as_ref(),
-                    Some(c) if c == &SqlState::T_R_DEADLOCK_DETECTED
-                        || c == &SqlState::DISK_FULL
-                        || c == &SqlState::OUT_OF_MEMORY
-                );
-
-                tracing::warn!(
-                    app_id = %app_id,
-                    collection = %collection,
-                    index = %spec.name,
-                    attempt = attempt,
-                    sqlstate = ?code.as_ref().map(|c| c.code()),
-                    transient = transient,
-                    "CREATE INDEX CONCURRENTLY failed — TODO: A3 audit log"
-                );
-
-                let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-
-                if !transient || attempt == MAX_RETRIES {
-                    return Err(format!(
-                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
-                        \"collection\":\"{}\",\"index\":\"{}\",\
-                        \"sqlstate\":\"{}\",\"attempts\":{},\
-                        \"message\":\"{}\"}}",
-                        collection,
-                        spec.name,
-                        code.as_ref().map(|c| c.code()).unwrap_or("unknown"),
-                        attempt + 1,
-                        fmt_db_err(&e).replace('"', "\\\"")
-                    ));
-                }
-                // else: fall through to next loop iteration
-            }
-        }
-    }
-
-    // Should be unreachable — the loop returns inside.
-    Err(format!(
-        "db: create index '{}' exhausted retry budget without a terminal result",
-        spec.name
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // Transaction callbacks: begin / commit / rollback
@@ -2184,28 +1996,6 @@ pub(crate) fn dispatch_upsert<'s>(
     }));
 
     promise
-}
-
-
-async fn exec_end(cmd: &str) -> Result<(), String> {
-    let client = crate::TX_CONN.with(|tx| tx.borrow_mut().take())
-        .ok_or_else(|| "db: no active transaction".to_string())?;
-
-    // Clear the ownership token so any live `Transaction` v8_class
-    // wrapper that was minted for this same TX_CONN sees the mismatch
-    // on subsequent commit / rollback / GC and short-circuits. The
-    // wrapper's `Drop` checks `token == TX_TOKEN` and no-ops on
-    // mismatch, so the legacy flat path remains the source of truth
-    // when both are in play.
-    crate::TX_TOKEN.with(|t| t.set(0));
-
-    client.execute(cmd, &[])
-        .await
-        .map_err(|e| format!("db: {cmd} failed: {e}"))?;
-
-    // Client is dropped here — the spawned Connection task observes the
-    // closed sender, sends Terminate, flushes, and exits.
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

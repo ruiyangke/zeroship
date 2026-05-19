@@ -98,6 +98,13 @@ function startHmrPoll(runner: ModuleRunner) {
   const pollUrl = `${viteOrigin}/__zeroship_hmr_check`;
 
   setInterval(async () => {
+    // The poll is dev-kernel infrastructure — bypass the active
+    // capability frame so the fetch isn't refused if it fires inside
+    // a query/mutation handler's await window. See transport.ts for
+    // the full rationale.
+    const ck = (globalThis as any).__zsClearKind;
+    const xk = (globalThis as any).__zsExitKind;
+    const tok = (typeof ck === "function") ? ck() : -1;
     try {
       const resp = await fetch(pollUrl);
       const { changed } = await resp.json() as { changed: string[] };
@@ -117,6 +124,8 @@ function startHmrPoll(runner: ModuleRunner) {
       console.log(`[zeroship:hmr] ${changed.length} module(s) updated`);
     } catch {
       // Vite not ready or restarting — silently ignore
+    } finally {
+      if (tok >= 0 && typeof xk === "function") xk(tok);
     }
   }, 500);
 }
@@ -233,6 +242,18 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   // native side when empty). See rpc-registry.ts for the rationale.
   const isolation = (cfg && typeof (cfg as any).isolation === "string")
     ? (cfg as any).isolation : "";
+  // Await any platform-readiness promises BEFORE opening the auto-tx.
+  // `@zeroship/db`'s `createDb` publishes its registerModel chain on
+  // `globalThis.__zeroshipPlatformReady`; under pglite-socket's
+  // per-connection-in-tx serialization, opening an auto-tx while
+  // registerModel still holds `pg_advisory_lock` deadlocks the
+  // socket. Awaiting here keeps the two windows disjoint. The await
+  // is a no-op on the warm path (chain already settled).
+  const ready = (globalThis as any).__zeroshipPlatformReady;
+  if (ready && typeof ready.then === "function") {
+    try { await ready; } catch { /* user-facing errors surface via the handler */ }
+  }
+
   let token = 0;
   if (wantsAutoTx) {
     try { token = await bt(kind, isolation); }

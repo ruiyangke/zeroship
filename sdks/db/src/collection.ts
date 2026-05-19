@@ -19,6 +19,9 @@ import { PlainObject, Result, Document, CreateInput, UpdateExpression, Filter, t
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
 
+/** The native Collection wrapper from @zeroship/types. */
+export type NativeCollection = ZeroshipCollection;
+
 /**
  * Converts a caught value to an Error for inclusion in a Result.
  * ValidationError instances are returned as-is (they are already well-typed).
@@ -217,22 +220,6 @@ function _maybeWarnUnindexedFilter(
  * The generic parameter `S` is the raw schema shape from which document and input
  * types are derived. Use `model()` or `createDb()` — do not construct directly.
  */
-/** Subset of the native Collection v8_class instance the SDK calls. */
-interface NativeCollection {
-  find(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string>;
-  findOne(filter: ZeroshipDbFilter): Promise<string | null>;
-  insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
-  insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
-  updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
-  updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
-  deleteOne(filter: ZeroshipDbFilter): Promise<string>;
-  deleteMany(filter: ZeroshipDbFilter): Promise<string>;
-  count(filter: ZeroshipDbFilter): Promise<string>;
-  distinct(field: string, filter: ZeroshipDbFilter): Promise<string>;
-  aggregate(pipeline: unknown[]): Promise<string>;
-  upsert(doc: unknown, conflictFields: string[]): Promise<string>;
-}
-
 export class Collection<S = PlainObject> {
   private _name: string;
   private _schema: NormalizedSchema;
