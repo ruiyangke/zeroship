@@ -101,6 +101,11 @@ export const addUserHash = defineMigration({
 // Procedures to exercise the lifecycle from a smoke script
 // ---------------------------------------------------------------------------
 
+// Outside `db.transaction(...)` every Collection method returns
+// `Result<T> = { data, error }`. Each handler unwraps so the wire
+// carries the bare value; thrown errors flow through the platform's
+// uniform error envelope.
+
 export const seedEvents = mutation(
   async (
     { count, includeNullSeverity }: { count: number; includeNullSeverity: boolean },
@@ -122,12 +127,16 @@ export const seedEvents = mutation(
         payload:    { i },
       } as Row);
     }
-    return col.insertMany(rows);
+    const { data, error } = await col.insertMany(rows);
+    if (error) throw error;
+    return data ?? [];
   },
 );
 
 export const eventCount = query(async (_input: Record<string, never>) => {
-  return db.events.count({});
+  const { data, error } = await db.events.count({});
+  if (error) throw error;
+  return data ?? 0;
 });
 
 export const eventStats = query(async (_input: Record<string, never>) => {

@@ -53,23 +53,34 @@ type MessageId = typeof db.messages.Id;
 // the broker only fires events for messages in this specific channel.
 // ---------------------------------------------------------------------------
 
+// Outside `db.transaction(...)` every Collection method returns
+// `Result<T> = { data, error }`. Each handler unwraps so the RPC wire
+// carries the bare value; the platform error envelope renders thrown
+// errors uniformly.
+
 export const listMessages = query(
   async ({ channelId, limit = 50 }: { channelId: ChannelId; limit?: number }) => {
-    return db.messages
+    const { data, error } = await db.messages
       .find({ channelId, flagged: false })
       .sort({ createdAt: -1 })
       .limit(limit);
+    if (error) throw error;
+    return data ?? [];
   },
 );
 
 export const getMessage = query(
   async ({ id }: { id: MessageId }) => {
-    return db.messages.get(id);
+    const { data, error } = await db.messages.get(id);
+    if (error) throw error;
+    return data;
   },
 );
 
 export const listChannels = query(async (_input: Record<string, never>) => {
-  return db.channels.find({}).sort({ slug: 1 });
+  const { data, error } = await db.channels.find({}).sort({ slug: 1 });
+  if (error) throw error;
+  return data ?? [];
 });
 
 // ---------------------------------------------------------------------------
@@ -81,13 +92,17 @@ export const sendMessage = mutation(
   async (
     { channelId, authorId, body }: { channelId: ChannelId; authorId: UserId; body: string },
   ) => {
-    return db.messages.insert({ channelId, authorId, body, flagged: false });
+    const { data, error } = await db.messages.insert({ channelId, authorId, body, flagged: false });
+    if (error) throw error;
+    return data;
   },
 );
 
 export const flagMessage = mutation(
   async ({ id }: { id: MessageId }) => {
-    return db.messages.update(id, { flagged: true });
+    const { data, error } = await db.messages.update(id, { flagged: true });
+    if (error) throw error;
+    return data;
   },
 );
 
@@ -95,14 +110,18 @@ export const createChannel = mutation(
   async (
     { slug, name, topic }: { slug: string; name: string; topic?: string },
   ) => {
-    return db.channels.insert({ slug, name, topic });
+    const { data, error } = await db.channels.insert({ slug, name, topic });
+    if (error) throw error;
+    return data;
   },
 );
 
 // Seed helper — used by smoke.sh to provision a user.
 export const createUser = mutation(
   async ({ handle, name }: { handle: string; name: string }) => {
-    return db.users.insert({ handle, name });
+    const { data, error } = await db.users.insert({ handle, name });
+    if (error) throw error;
+    return data;
   },
 );
 

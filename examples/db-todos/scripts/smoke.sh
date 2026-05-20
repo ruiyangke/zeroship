@@ -103,10 +103,12 @@ echo "[check 3] capability enforcement — wrapper kinds resolve"
 # Capability enforcement (B3) is verified by the unit/integration
 # tests in plugin-db. The dev runtime doesn't expose `/_zs/manifest`,
 # so we probe a known wrapped procedure instead: a 405 / 404 would
-# indicate the wrapper was lost; a 200 with the Result envelope
-# confirms `query()` resolved at registration time.
+# indicate the wrapper was lost; a 200 with the platform's `{json: ...}`
+# envelope confirms `query()` resolved at registration time.
+PROBE_STATUS=$(http_status listTodos "{\"userId\":${ALICE_ID}}")
 PROBE=$(rpc listTodos "{\"userId\":${ALICE_ID}}")
-check "wrapper-tagged procedure dispatched" contains "$PROBE" '"data"\|"error"'
+check "wrapper-tagged procedure dispatched" \
+  bash -c "[ '$PROBE_STATUS' = '200' ] && echo '$PROBE' | grep -q '\"json\":'"
 
 # ---------------------------------------------------------------------------
 # Check 4: listTodos (query) — read-only path

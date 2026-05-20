@@ -54,21 +54,34 @@ type TodoId = typeof db.todos.Id;
 // Queries — read-only; auto-wrapped in BEGIN TRANSACTION READ ONLY (T1)
 // ---------------------------------------------------------------------------
 
+// Outside `db.transaction(...)` every Collection method returns
+// `Result<T> = { data, error }`. These handlers unwrap so the RPC wire
+// carries the bare value — throwing on error lets the platform's
+// error envelope handle the rejection uniformly.
+
 export const listTodos = query(
   async ({ userId }: { userId: UserId }) => {
-    return db.todos.find({ userId, archived: false }).sort({ createdAt: -1 });
+    const { data, error } = await db.todos
+      .find({ userId, archived: false })
+      .sort({ createdAt: -1 });
+    if (error) throw error;
+    return data ?? [];
   },
 );
 
 export const getTodo = query(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.get(id);
+    const { data, error } = await db.todos.get(id);
+    if (error) throw error;
+    return data;
   },
 );
 
 export const todoCount = query(
   async ({ userId }: { userId: UserId }) => {
-    return db.todos.count({ userId });
+    const { data, error } = await db.todos.count({ userId });
+    if (error) throw error;
+    return data ?? 0;
   },
 );
 
@@ -84,7 +97,7 @@ type CreateTodoInput = {
 
 export const createTodo = mutation(
   async (args: CreateTodoInput) => {
-    return db.todos.insert({
+    const { data, error } = await db.todos.insert({
       userId:   args.userId,
       title:    args.title,
       priority: args.priority ?? "medium",
@@ -92,24 +105,32 @@ export const createTodo = mutation(
       done:     false,
       archived: false,
     });
+    if (error) throw error;
+    return data;
   },
 );
 
 export const completeTodo = mutation(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.update(id, { done: true });
+    const { data, error } = await db.todos.update(id, { done: true });
+    if (error) throw error;
+    return data;
   },
 );
 
 export const archiveTodo = mutation(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.update(id, { archived: true });
+    const { data, error } = await db.todos.update(id, { archived: true });
+    if (error) throw error;
+    return data;
   },
 );
 
 export const deleteTodo = mutation(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.delete(id);
+    const { data, error } = await db.todos.delete(id);
+    if (error) throw error;
+    return data;
   },
 );
 
@@ -143,7 +164,9 @@ type SeedUserInput = { email: string; name: string; handle: string };
 
 export const seedUser = mutation(
   async ({ email, name, handle }: SeedUserInput) => {
-    return db.users.insert({ email, name, handle });
+    const { data, error } = await db.users.insert({ email, name, handle });
+    if (error) throw error;
+    return data;
   },
 );
 
