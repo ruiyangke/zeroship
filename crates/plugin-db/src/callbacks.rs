@@ -2050,6 +2050,84 @@ pub(crate) fn dispatch_upsert<'s>(
 }
 
 // ---------------------------------------------------------------------------
+// Callback: findOrCreate(collection, docJson, conflictFieldsJson)
+// ---------------------------------------------------------------------------
+
+/// Shared dispatch for `findOrCreate`. Same SQL shape as upsert except
+/// the ON CONFLICT branch is a no-op self-assignment (so RETURNING
+/// fires without mutating the row) and the RETURNING list appends
+/// `(xmax = 0) AS __created` — true when the row was a fresh insert,
+/// false when the conflict path matched an existing row.
+///
+/// Resolves with a JSON object `{ "row": {...}, "created": bool }`;
+/// the SDK consumes both fields verbatim.
+pub(crate) fn dispatch_find_or_create<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    doc: Value,
+    conflict_fields: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    let bq = match query::build_find_or_create(app_id, collection, &doc, &conflict_fields) {
+        Ok(q) => q,
+        Err(e) => {
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
+            }));
+            return promise;
+        }
+    };
+
+    let coll_for_emit = collection.to_string();
+    let app_for_emit = app_id.to_string();
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // Tag as Insert — the broker reaction is the same as upsert
+        // (subscribers re-fetch), and tagging conservatively keeps us
+        // from missing wake-ups when the row really was created.
+        match exec_mutation_with_emit(
+            bq,
+            &app_for_emit,
+            &coll_for_emit,
+            crate::broker::ChangeOp::Insert,
+        )
+        .await
+        {
+            Ok(json) => {
+                let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+                let mut row = arr.into_iter().next().unwrap_or(Value::Null);
+                let created = match row.as_object_mut() {
+                    Some(obj) => obj
+                        .remove("__created")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    None => false,
+                };
+                let payload = serde_json::json!({ "row": row, "created": created });
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(payload.to_string()),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
+        }
+    }));
+
+    promise
+}
+
+// ---------------------------------------------------------------------------
 // Auto-tx wrappers — defense-in-depth around query() / mutation() handlers
 // ---------------------------------------------------------------------------
 //

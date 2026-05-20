@@ -214,6 +214,15 @@ interface ZeroshipCollection {
     opts: { conflictFields: string[] },
   ): Promise<Record<string, unknown> | null>;
 
+  /** Find a row matching `opts.conflictFields` or insert `doc`.
+   *  Resolves with `{ row, created }` — `created` is `true` when the
+   *  insert path fired, `false` when an existing row was returned.
+   *  `opts.conflictFields` must be a non-empty array of column names. */
+  findOrCreate(
+    doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
+    opts: { conflictFields: string[] },
+  ): Promise<{ row: Record<string, unknown>; created: boolean }>;
+
   /** Count documents matching `filter`. No opts — `count` is
    *  conceptually unbounded; use `find` with a `limit` to cap a row
    *  scan. */

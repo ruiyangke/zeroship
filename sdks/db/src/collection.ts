@@ -455,6 +455,63 @@ export class Collection<S = PlainObject, N extends string = string> {
   }
 
   /**
+   * Returns the row matching `filter`, or inserts `create` and returns
+   * the new row when no match exists. The single SQL statement is
+   * `INSERT ... ON CONFLICT DO UPDATE` with a no-op SET; the second
+   * return value flags whether the row was freshly created (`true`) or
+   * already existed (`false`).
+   *
+   * `opts.conflictFields` defaults to the unique single-key filter
+   * column when the filter has exactly one key and that column carries
+   * `.unique()` in the schema. Filters with multiple keys (or a key that
+   * isn't unique) require explicit `opts.conflictFields`.
+   */
+  async findOrCreate(
+    filter: Filter<S>,
+    create: RowInput<S>,
+    opts?: { conflictFields?: (string & keyof Row<S>)[] },
+  ): Promise<Result<{ row: Row<S>; created: boolean }>> {
+    return this._run(async () => {
+      const filterKeys = Object.keys(filter as PlainObject).filter((k) => !k.startsWith("$"));
+      let conflictFields = opts?.conflictFields;
+      if (conflictFields === undefined || conflictFields.length === 0) {
+        if (filterKeys.length !== 1) {
+          throw new TypeError(
+            `findOrCreate: opts.conflictFields is required when filter has ${filterKeys.length} keys (only single-key unique filters auto-infer)`,
+          );
+        }
+        const k = filterKeys[0];
+        const def = this._schema[k];
+        if (!def || def.unique !== true) {
+          throw new TypeError(
+            `findOrCreate: filter key "${k}" is not declared .unique() — pass opts.conflictFields explicitly`,
+          );
+        }
+        conflictFields = [k as string & keyof Row<S>];
+      }
+      // The persisted document is the filter merged into the create
+      // payload — filter values are the identity of the row we want, so
+      // they always win over `create` for the conflict columns.
+      const merged: PlainObject = { ...(create as PlainObject), ...(filter as PlainObject) };
+      const validated = validateDoc(merged, this._schema);
+      const outbound = mapDocOutbound(validated, this._toColumn);
+      const conflictCols = conflictFields.map((f) => this._toColumn(f as string));
+      const colAny = this._col() as unknown as {
+        findOrCreate(
+          doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
+          opts: { conflictFields: string[] },
+        ): Promise<{ row: Record<string, unknown>; created: boolean }>;
+      };
+      const raw = await colAny.findOrCreate(
+        outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
+        { conflictFields: conflictCols },
+      );
+      const row = mapResultDoc(raw.row as PlainObject, this._toField) as Row<S>;
+      return { row, created: raw.created === true };
+    });
+  }
+
+  /**
    * Inserts a row or updates it if a conflict occurs on the specified fields.
    * Returns the persisted row (either newly inserted or updated).
    */

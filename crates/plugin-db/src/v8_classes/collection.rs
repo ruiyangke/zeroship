@@ -228,6 +228,53 @@ impl Collection {
         Ok(callbacks::dispatch_upsert(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
     }
 
+    /// `collection.findOrCreate(doc, opts)` — return the existing row
+    /// matching the conflict target, or insert + return a new one.
+    ///
+    /// Resolves with `{ row, created }`. `opts.conflictFields` is the
+    /// non-empty array of ON CONFLICT target columns; missing / empty
+    /// rejects with `TypeError`.
+    #[v8_method]
+    #[v8_name = "findOrCreate"]
+    fn find_or_create<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        doc: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.findOrCreate") {
+            return Ok(p.into());
+        }
+        let doc_v = callbacks::read_json_arg(scope, Some(doc));
+        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let conflict_v = opts_v
+            .get("conflictFields")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let conflict_arr = match conflict_v.as_array() {
+            Some(arr) => arr,
+            None => {
+                let detail = match &conflict_v {
+                    Value::Null => "missing".to_string(),
+                    Value::String(_) => "string".to_string(),
+                    Value::Number(_) => "number".to_string(),
+                    Value::Bool(_) => "boolean".to_string(),
+                    Value::Object(_) => "object".to_string(),
+                    Value::Array(_) => unreachable!(),
+                };
+                return Err(OpError::type_error(format!(
+                    "findOrCreate: opts.conflictFields must be an array of strings (got {detail})"
+                )));
+            }
+        };
+        if conflict_arr.is_empty() {
+            return Err(OpError::type_error(
+                "findOrCreate: opts.conflictFields must be a non-empty array of strings",
+            ));
+        }
+        Ok(callbacks::dispatch_find_or_create(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
+    }
+
     #[v8_method]
     fn count<'s>(
         &self,

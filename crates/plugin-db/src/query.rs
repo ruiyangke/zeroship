@@ -2004,6 +2004,89 @@ pub fn build_upsert(
     Ok(BuiltQuery { sql, params })
 }
 
+/// Build a findOrCreate query. Same shape as [`build_upsert`] but the
+/// ON CONFLICT branch is a no-op self-assignment on the conflict column
+/// (the existing row is returned untouched) and the RETURNING list
+/// appends `(xmax = 0) AS __created` so the caller can tell whether
+/// the row was newly inserted (xmax = 0) or pre-existing (xmax != 0).
+pub fn build_find_or_create(
+    app_id: &str,
+    collection: &str,
+    doc: &Value,
+    conflict_fields: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let obj = doc.as_object().ok_or_else(|| {
+        QueryError::InvalidFilter("findOrCreate document must be an object".to_string())
+    })?;
+
+    if obj.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "findOrCreate document cannot be empty".to_string(),
+        ));
+    }
+
+    let conflict_arr = conflict_fields.as_array().ok_or_else(|| {
+        QueryError::InvalidFilter("conflict_fields must be an array".to_string())
+    })?;
+
+    if conflict_arr.is_empty() {
+        return Err(QueryError::InvalidFilter(
+            "conflict_fields cannot be empty".to_string(),
+        ));
+    }
+
+    let first_conflict = conflict_arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .next()
+        .ok_or_else(|| {
+            QueryError::InvalidFilter(
+                "conflict_fields must contain string values".to_string(),
+            )
+        })?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+
+    let mut columns = Vec::new();
+    let mut placeholders = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    for (key, value) in obj {
+        columns.push(quote_ident(key));
+        params.push(value_to_param(value));
+        placeholders.push(format!("${}", params.len()));
+    }
+
+    let conflict_cols: Vec<String> = conflict_arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(quote_ident)
+        .collect();
+
+    // The DO UPDATE branch is a self-assignment so RETURNING fires for
+    // both INSERT and UPDATE (DO NOTHING wouldn't return the existing
+    // row). The row's data is left exactly as it was on conflict.
+    let no_op = format!(
+        "{} = {schema}.{table}.{}",
+        quote_ident(first_conflict),
+        quote_ident(first_conflict)
+    );
+
+    let sql = format!(
+        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING *, (xmax = 0) AS __created",
+        columns.join(", "),
+        placeholders.join(", "),
+        conflict_cols.join(", "),
+        no_op,
+    );
+
+    Ok(BuiltQuery { sql, params })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2896,6 +2979,42 @@ mod tests {
         let conflict = json!(["name"]);
         let result = build_upsert("app1", "users; DROP TABLE", &doc, &conflict);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_or_create_emits_xmax_returning() {
+        let doc = json!({"email": "a@b.com", "name": "alice"});
+        let conflict = json!(["email"]);
+        let q = build_find_or_create("app1", "users", &doc, &conflict).unwrap();
+        assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
+        assert!(q.sql.contains(r#"ON CONFLICT ("email")"#), "sql: {}", q.sql);
+        // No-op self-assignment on the conflict column so RETURNING
+        // fires for the existing row without mutating it.
+        assert!(
+            q.sql.contains(r#"DO UPDATE SET "email" = "app1"."users"."email""#),
+            "sql: {}", q.sql,
+        );
+        // The created flag is appended to the RETURNING list.
+        assert!(
+            q.sql.contains("(xmax = 0) AS __created"),
+            "sql: {}", q.sql,
+        );
+        assert!(q.sql.contains("RETURNING *"), "sql: {}", q.sql);
+        assert_eq!(q.params.len(), 2);
+    }
+
+    #[test]
+    fn test_find_or_create_rejects_empty_conflict() {
+        let doc = json!({"email": "a@b.com"});
+        let conflict = json!([]);
+        assert!(build_find_or_create("app1", "users", &doc, &conflict).is_err());
+    }
+
+    #[test]
+    fn test_find_or_create_rejects_empty_doc() {
+        let doc = json!({});
+        let conflict = json!(["email"]);
+        assert!(build_find_or_create("app1", "users", &doc, &conflict).is_err());
     }
 
     // -----------------------------------------------------------------------
