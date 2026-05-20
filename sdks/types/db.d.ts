@@ -337,10 +337,20 @@ type ZeroshipSubscriptionEvent =
  * the wrapper merely registers a slot in the per-isolate broker routing
  * table. The wrapper's GC finalizer is the safety-net release.
  *
- * `next` (async) resolves with the next event or `null` once the
- * wrapper is closed and drained. `close` is synchronous by design —
- * a local state flip on the broker entry with no I/O — even though
- * `next` (which awaits the broker) is async.
+ * `next` (async) resolves with the next event, OR with the terminal
+ * `{ kind: "closed" }` event exactly once, after which subsequent
+ * polls resolve `null`. So a polling loop sees this sequence:
+ *
+ *   change* (any number) → resync? → closed → null → null → ...
+ *
+ * `null` means "subscription closed AND already drained" — the
+ * `{ kind: "closed" }` event was returned on a previous poll. Callers
+ * iterating with `for await` should break on `null` or on a
+ * `kind === "closed"` payload; both are valid terminators.
+ *
+ * `close` is synchronous by design — a local state flip on the broker
+ * entry with no I/O — even though `next` (which awaits the broker) is
+ * async.
  */
 interface ZeroshipSubscription {
   next(): Promise<ZeroshipSubscriptionEvent | null>;

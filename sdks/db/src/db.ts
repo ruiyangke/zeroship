@@ -185,6 +185,21 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
   return result.data as T;
 }
 
+/**
+ * Wraps the outer Collection so its CRUD methods return the bare value
+ * and throw on error (vs Result<T>). The tx adapter does NOT re-route
+ * the call to a different native handle — every call goes through the
+ * same `Collection.{insert,update,...}` you'd use outside the tx, and
+ * routing onto the transaction's Postgres connection happens in Rust
+ * via the `TX_CONN` thread-local (`crates/plugin-db/src/callbacks.rs`
+ * around the dispatch site). Two consequences worth knowing:
+ *
+ * - `db.users` and `tx.users` are the SAME Collection instance; the
+ *   only difference is the surface adapter that strips Result.
+ * - There is no `Collection<tx>` vs `Collection<db>` split in JS.
+ *   Schema validation, naming, and the soft-delete / versioning
+ *   plumbing all live on one object.
+ */
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 
   const tx: TxCollection<S> = {
@@ -235,24 +250,42 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   return tx;
 }
 
-/** Wrap a Query to throw on error */
+/** Wrap a Query to throw on error. The `select` overloads mirror the
+ *  underlying `Query.select` so a typed-fields call narrows the result
+ *  to `Pick<Row<S>, K>` — the runtime path stays untyped, but the
+ *  generic signatures preserve the narrowing across the wrapper. */
 function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
-  return {
-    sort(s: Record<string, number> | string) { query.sort(s); return this; },
-    limit(n: number) { query.limit(n); return this; },
-    skip(n: number) { query.skip(n); return this; },
-    select(s: string | string[] | Record<string, number | boolean>) { query.select(s as any); return this as any; },
-    after(id: number) { query.after(id); return this; },
-    then(resolve?: ((value: Row<S>[]) => any) | null, reject?: ((reason: unknown) => any) | null) {
+  function selectImpl(
+    s: string | string[] | Record<string, number | boolean>,
+  ): unknown {
+    (query.select as (arg: unknown) => unknown)(s);
+    // Both overloads return the same wrapper instance; only the type
+    // narrows at the call boundary via the TxQuery type's signatures.
+    return wrapped;
+  }
+  const wrapped: TxQuery<S, Row<S>> = {
+    sort(s: Record<string, number> | string) { query.sort(s); return wrapped; },
+    limit(n: number) { query.limit(n); return wrapped; },
+    skip(n: number) { query.skip(n); return wrapped; },
+    // The overloads on TxQuery.select carry the K[] narrowing; the
+    // runtime implementation is a single function that delegates to
+    // the underlying Query — the cast is local to the call site.
+    select: selectImpl as TxQuery<S, Row<S>>["select"],
+    after(id: number) { query.after(id); return wrapped; },
+    then<TResult1 = Row<S>[], TResult2 = never>(
+      resolve?: ((value: Row<S>[]) => TResult1 | PromiseLike<TResult1>) | null,
+      reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+    ): Promise<TResult1 | TResult2> {
       return query.then(
         (result: Result<Row<S>[]>) => {
           if (result.error) throw result.error;
-          return resolve ? resolve(result.data as Row<S>[]) : result.data;
+          return resolve ? resolve(result.data as Row<S>[]) : (result.data as unknown as TResult1);
         },
-        reject
-      ) as any;
+        reject,
+      ) as Promise<TResult1 | TResult2>;
     },
   };
+  return wrapped;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +427,12 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   // isolate (rare but possible if a user composes two app bundles)
   // are sequenced through one promise so the shim only needs to
   // `await` a single handle.
+  //
+  // Consumers: `sdks/vite-plugin/src/rpc-registry.ts` (production
+  // dispatch shim) and `sdks/vite-plugin/src/dev-bootstrap/index.ts`
+  // (dev bootstrap). Both read this exact name; renaming it would
+  // also need a coordinated rename there. The sigil is intentionally
+  // namespaced (`__zeroship*`) to avoid colliding with user globals.
   const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
   const prev = g.__zeroshipPlatformReady ?? Promise.resolve();
   g.__zeroshipPlatformReady = prev.then(() => chain).catch(() => undefined);

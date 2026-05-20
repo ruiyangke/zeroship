@@ -419,7 +419,16 @@ export class Collection<S = PlainObject, N extends string = string> {
     });
   }
 
-  /** Returns true if at least one document matches `filter`. */
+  /**
+   * Returns true if at least one document matches `filter`.
+   *
+   * **Cost note** — this is implemented as `count(filter) > 0`, which
+   * scans every matching row (Postgres has no short-circuit `EXISTS`
+   * on the native primitive yet). Pass a tight filter (indexed
+   * equality, narrow time range, etc.) for predictable cost; for large
+   * tables, an unfiltered `exists({})` is a full-table count and will
+   * be slow.
+   */
   async exists(filter: Filter<S>): Promise<Result<boolean>> {
     const { data, error } = await this.count(filter);
     if (error) return err(error);
