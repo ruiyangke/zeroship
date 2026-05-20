@@ -128,7 +128,7 @@ export type TxCollection<S = PlainObject> = {
   find(filter?: Filter<S>): TxQuery<S, Row<S>>;
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
   update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
-  updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ matchedCount: number; modifiedCount: number }>;
+  updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
   delete(idOrFilter: number | Filter<S>, opts?: { hard?: boolean }): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>, opts?: { hard?: boolean }): Promise<{ deletedCount: number }>;
   count(filter?: Filter<S>): Promise<number>;

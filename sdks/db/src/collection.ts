@@ -434,17 +434,14 @@ export class Collection<S = PlainObject, N extends string = string> {
   /**
    * Returns true if at least one document matches `filter`.
    *
-   * **Cost note** — this is implemented as `count(filter) > 0`, which
-   * scans every matching row (Postgres has no short-circuit `EXISTS`
-   * on the native primitive yet). Pass a tight filter (indexed
-   * equality, narrow time range, etc.) for predictable cost; for large
-   * tables, an unfiltered `exists({})` is a full-table count and will
-   * be slow.
+   * Implemented as `find(filter).limit(1)` so Postgres can short-circuit
+   * on an index scan once a single row matches (vs. a full `COUNT(*)`
+   * scan). Cost is bounded by the cost of producing one matching row.
    */
   async exists(filter: Filter<S>): Promise<Result<boolean>> {
-    const { data, error } = await this.count(filter);
+    const { data, error } = await this.find(filter).limit(1);
     if (error) return err(error);
-    return ok((data ?? 0) > 0);
+    return ok((data?.length ?? 0) > 0);
   }
 
   /**
@@ -554,7 +551,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * (`{ $set: {...}, $inc: { n: 1 } }`) or a bare field map (treated as
    * `$set`). The fields are validated against the schema; array push
    * operations are validated against the declared item type.
-   * Returns `{ matchedCount, modifiedCount }` indicating whether a document was found.
+   * Returns the updated row (or `null` if no row matched).
    */
   async update(
     idOrFilter: number | Filter<S>,
@@ -590,19 +587,20 @@ export class Collection<S = PlainObject, N extends string = string> {
    * Updates all documents matching `filter` using the given `update`.
    * Validates the fields in `$set` and bare keys against the schema.
    * Validates `$push`/`$addToSet` values against the declared array item type.
-   * Returns `{ matchedCount, modifiedCount }` with the count from the native layer.
+   * Returns `{ count }` — the number of rows affected. The legacy
+   * `{ matchedCount, modifiedCount }` shape always carried identical
+   * values (the native layer only reports one count); collapsing to a
+   * single field is cleaner.
    */
   async updateMany(
     filter: Filter<S>,
     update: UpdateExpression<S>
-  ): Promise<Result<{ matchedCount: number; modifiedCount: number }>> {
+  ): Promise<Result<{ count: number }>> {
     return this._run(async () => {
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
       validateArrayPushOps(updateObj, this._schema);
-      // D4 — same CAS handling as updateOne. updateMany with a CAS
-      // version still increments `version` on every matched row.
       const casVersion = this._extractCasVersion(filter as PlainObject);
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
@@ -611,7 +609,7 @@ export class Collection<S = PlainObject, N extends string = string> {
       if (n === 0 && casVersion !== null) {
         throw new OptimisticLockError(casVersion, this._name);
       }
-      return { matchedCount: n, modifiedCount: n };
+      return { count: n };
     });
   }
 

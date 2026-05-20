@@ -10,16 +10,16 @@ import { PlainObject } from "./types.js";
 // Document mapping (native → user)
 // ---------------------------------------------------------------------------
 
-/** @internal Convert column names to JS field names. Mutates in-place (safe on freshly parsed JSON). */
+/** @internal Convert column names to JS field names. Returns a new object;
+ *  the native side hands back real JS objects we don't own (see commit
+ *  9393287), so mutating in place would leak rename side-effects to any
+ *  other reference the runtime keeps. */
 export function mapResultDoc(doc: PlainObject, toField: (s: string) => string): PlainObject {
+  const out: PlainObject = {};
   for (const key of Object.keys(doc)) {
-    const field = toField(key);
-    if (field !== key) {
-      doc[field] = doc[key];
-      delete doc[key];
-    }
+    out[toField(key)] = doc[key];
   }
-  return doc;
+  return out;
 }
 
 /** @internal Convert JS field names to column names for native insert. */
