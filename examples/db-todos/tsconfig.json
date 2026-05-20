@@ -8,7 +8,11 @@
     "skipLibCheck": true,
     "noEmit": true,
     "isolatedModules": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": ["@zeroship/types"],
+    "paths": {
+      "zeroship-schema": ["./src/index.ts"]
+    }
   },
   "include": ["src/**/*"]
 }

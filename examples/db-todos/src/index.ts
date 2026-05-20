@@ -16,14 +16,22 @@
 // Wire conventions match the existing examples (hono-demo etc.):
 //   exports become RPC procedures at /_zs/v1/<name>.
 
-import { createDb, t, schema, type InferRowInput } from "@zeroship/db";
+import { t, schema, type InferRowInput } from "@zeroship/db";
+import { env } from "zeroship";
 import { query, mutation, action, runQuery } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
-// Schema
+// Schema — the `export default { schema }` convention
 // ---------------------------------------------------------------------------
+//
+// dev-bootstrap reads `default.schema` at app boot and hands it to
+// `@zeroship/db/internal::__registerSchemas`, which both registers the
+// models AND installs typed Collection wrappers as own properties on
+// `env.db`. From handlers we just write `env.db.users.find(...)` —
+// the type comes from the tsconfig `paths` entry that maps
+// `zeroship-schema` to this file.
 
-export const db = createDb({
+const dbSchema = {
   users: {
     email:  t.string().required().unique(),
     name:   t.string().required().max(100),
@@ -42,7 +50,13 @@ export const db = createDb({
     // then tighten if needed.
     archived: t.boolean().default(false),
   }),
-});
+};
+
+export default { schema: dbSchema };
+
+// Local `db` shorthand for use inside this module — same wrappers
+// `env.db` carries, but spelled the way it'll feel in user code.
+const db = env.db;
 
 // Brand types flow from t.ref(): `typeof db.users.Id` is `Id<"users">`
 // and `typeof db.todos.Id` is `Id<"todos">` — passing a post id where

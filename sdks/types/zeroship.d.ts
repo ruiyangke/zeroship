@@ -31,12 +31,20 @@ declare module "zeroship" {
    * variables appear as string keys at the top level.
    *
    * Frozen: direct assignment to properties throws in strict mode.
+   *
+   * The interface is named (vs. a structural literal) so user code can
+   * augment `env.db` with collection-typed accessors via the
+   * `zeroship-schema` virtual path — see `sdks/types/zeroship-schema.d.ts`.
    */
-  export const env: {
-    db?: ZeroshipDb;
-    auth?: ZeroshipAuth;
+  export interface Env {
+    // `db` and `auth` are populated by their respective augmentations
+    // in `zeroship-schema.d.ts` (db) and `auth.d.ts` (auth). Keeping
+    // them out of the base declaration lets the augmentations BE the
+    // source of truth — declaring them here would conflict with the
+    // narrower types the augmentations need to install.
     [key: string]: unknown;
-  };
+  }
+  export const env: Env;
 
   /**
    * Register a promise the runtime should await before the request's

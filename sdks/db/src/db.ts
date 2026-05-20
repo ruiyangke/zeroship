@@ -380,7 +380,33 @@ export interface CreateDbOptions {
   native?: NativeDb;
   /** Column naming strategy. Default: `naming.snakeCase`. */
   naming?: NamingStrategy;
+  /**
+   * If `true`, install the typed Collection wrappers as own
+   * properties on `env.db` so user code can write `env.db.users.find(...)`
+   * directly (mirrors the `export default { schema }` convention).
+   * Defaults to `false` for `createDb` callers; `__registerSchemas`
+   * sets it to `true` in dev-bootstrap.
+   */
+  installOnEnvDb?: boolean;
 }
+
+/**
+ * Names on the `env.db` v8_class instance that the SDK MUST NOT
+ * overwrite when installing Collection wrappers via `installOnEnvDb`.
+ * Mirrors the public method surface of `ZeroshipDb` in
+ * `sdks/types/db.d.ts` — schema authors who pick one of these names
+ * for a collection get a thrown `Error` at boot, not a silent
+ * shadowing of the native method.
+ */
+const RESERVED_ENV_DB_NAMES = new Set<string>([
+  "collection",
+  "migrations",
+  "replication",
+  "beginTransaction",
+  "openSubscription",
+  "registerModel",
+  "startReplicationConsumer",
+]);
 
 /**
  * Create a typed database client with all models defined upfront.
@@ -390,6 +416,28 @@ export interface CreateDbOptions {
  * @returns A db object with typed collections and transaction support
  */
 export function createDb<const T extends Record<string, SchemaInput>>(
+  schemas: T,
+  options?: CreateDbOptions,
+): Db<T> {
+  return __registerSchemas(schemas, options);
+}
+
+/**
+ * Internal helper — schema registration + (optional) `env.db` mutation.
+ *
+ * Used by both `createDb(schemas, options?)` and the dev-bootstrap
+ * default-export auto-discovery path (`@zeroship/db/internal`). The
+ * implementation walks the schema map, runs `registerModel` in
+ * topological order, and (when `options.installOnEnvDb` is true)
+ * defines the resulting Collection wrappers as own properties on
+ * `env.db` so `env.db.<name>` resolves to the typed wrapper.
+ *
+ * Re-entrant: a second call with overlapping names re-installs the
+ * Collection wrappers (the `defineProperty` descriptor is
+ * `configurable: true`), but throws on a name colliding with a
+ * reserved native method (see `RESERVED_ENV_DB_NAMES`).
+ */
+export function __registerSchemas<const T extends Record<string, SchemaInput>>(
   schemas: T,
   options?: CreateDbOptions,
 ): Db<T> {
@@ -647,6 +695,41 @@ export function createDb<const T extends Record<string, SchemaInput>>(
       return ok(bodyResult);
     },
   };
+
+  // Install typed Collection wrappers as own properties on the live
+  // `env.db` v8_class instance so user code can write
+  // `env.db.<collection>.find(...)`. Opt-in via `options.installOnEnvDb`
+  // — dev-bootstrap's default-export discovery sets it; the explicit
+  // `createDb(...)` path leaves env.db untouched.
+  //
+  // Why `Object.defineProperty` with `configurable: true,
+  // enumerable: true, writable: false`:
+  // - `writable: false` keeps app code from rebinding `env.db.users`,
+  //   matching how the native methods feel.
+  // - `configurable: true` lets a second `__registerSchemas` call
+  //   redefine the same names without throwing (HMR, multi-bundle
+  //   composition).
+  //
+  // Reserved names that overlap the native v8_class method surface
+  // throw — silently shadowing `env.db.collection` (the native mint)
+  // or `env.db.beginTransaction` is worse than failing fast at boot.
+  if (options?.installOnEnvDb) {
+    const target = native as unknown as Record<string, unknown>;
+    for (const [name, col] of Object.entries(collections)) {
+      if (RESERVED_ENV_DB_NAMES.has(name)) {
+        throw new Error(
+          `@zeroship/db: schema name "${name}" collides with a native env.db method — ` +
+          `rename the collection. Reserved: ${[...RESERVED_ENV_DB_NAMES].join(", ")}.`,
+        );
+      }
+      Object.defineProperty(target, name, {
+        value: col,
+        configurable: true,
+        enumerable: true,
+        writable: false,
+      });
+    }
+  }
 
   return db as Db<T>;
 }

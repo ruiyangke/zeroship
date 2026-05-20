@@ -15,6 +15,14 @@ await build({
   outfile: out,
   // vite/module-runner MUST be bundled: the V8 runtime has no module resolver
   // for external npm packages. ModuleRunner is small and self-contained.
+  //
+  // BUT `zeroship` MUST stay external — bundling it would baked the stub's
+  // empty `env` into the bootstrap; at runtime the V8 kernel synthesizes the
+  // real `"zeroship"` virtual module (`crates/runtime/src/init.rs::ZEROSHIP_MODULE_JS`)
+  // that exposes the live `env.db` plugin handle. `@zeroship/db/internal`
+  // re-exports `__registerSchemas`, which dereferences `env.db` to install
+  // typed Collection wrappers — must read the live env, not the stub.
+  external: ["zeroship"],
   banner: {
     js: "// Auto-generated dev bootstrap for zeroship V8 runtime\n",
   },

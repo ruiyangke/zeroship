@@ -15,7 +15,9 @@
     "@zeroship/vite-plugin": "workspace:*"
   },
   "devDependencies": {
+    "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
-    "vite": "catalog:"
+    "vite": "catalog:",
+    "zeroship": "workspace:*"
   }
 }

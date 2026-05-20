@@ -10,7 +10,19 @@
  * when they matter.
  */
 
+/**
+ * Composite env exposed to user handlers. The interface is exported
+ * (not a structural literal) so user projects can augment it via
+ * `@zeroship/types`'s `zeroship-schema.d.ts` — the augmentation lifts
+ * `env.db` from the bare native handle to a typed `Db<schema>`.
+ */
+export interface Env {
+  // Intentionally permissive — plugins attach namespaces and apps add
+  // scalar secrets/vars; augmentations narrow specific keys.
+  [key: string]: unknown;
+}
+
 // Intentionally mutable for test injection — see index.js for rationale.
-export const env: { [key: string]: unknown };
+export const env: Env;
 export function waitUntil(promise: Promise<unknown>): void;
 export function getRequest(): Request;

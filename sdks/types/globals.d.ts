@@ -16,3 +16,4 @@
 /// <reference path="db.d.ts" />
 /// <reference path="auth.d.ts" />
 /// <reference path="zeroship.d.ts" />
+/// <reference path="zeroship-schema.d.ts" />
