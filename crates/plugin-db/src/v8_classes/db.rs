@@ -53,9 +53,10 @@ use crate::v8_classes::collection::mint_collection;
 /// the wrapped Collection state.
 pub struct Db {
     /// The app_id this Db belongs to. Captured at instance-build time
-    /// from `SharedState.env_vars["APP_ID"]`. Avoids a per-callback
-    /// slot lookup on the Collection's forwarded dispatch.
-    pub(crate) app_id: RefCell<String>,
+    /// from `SharedState.env_vars["APP_ID"]`. Never mutated after mint,
+    /// so a plain `String` (not `RefCell`) — borrowed by `&self.app_id`
+    /// on the Collection's forwarded dispatch.
+    pub(crate) app_id: String,
     /// Cache of `(collection_name -> Collection JS wrapper)`. Populated
     /// on the first `.collection(name)` call for each name; subsequent
     /// calls return the same Global so identity holds:
@@ -74,7 +75,7 @@ pub struct Db {
 impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
-            .field("app_id", &self.app_id.borrow())
+            .field("app_id", &self.app_id)
             .field("collection_cache_len", &self.collection_cache.borrow().len())
             .finish()
     }
@@ -125,8 +126,7 @@ impl Db {
 
         // Slow path: mint a new Collection and stash a Global in the
         // cache so the next call hits the fast path.
-        let app_id = self.app_id.borrow().clone();
-        let obj = mint_collection(scope, name.clone(), app_id)?;
+        let obj = mint_collection(scope, name.clone(), self.app_id.clone())?;
         let global = v8::Global::new(scope, obj);
         self.collection_cache
             .borrow_mut()
@@ -151,8 +151,7 @@ impl Db {
             ));
         }
         let schema_v = callbacks::read_json_arg(scope, Some(schema));
-        let app_id = self.app_id.borrow().clone();
-        Ok(callbacks::register_model_dispatch(scope, &app_id, &collection, schema_v).into())
+        Ok(callbacks::register_model_dispatch(scope, &self.app_id, &collection, schema_v).into())
     }
 
     /// `db.beginTransaction(opts?)` — open a transaction.
@@ -182,7 +181,7 @@ impl Db {
                 None => None,
             }
         };
-        Ok(callbacks::begin_transaction_dispatch(scope, isolation).into())
+        Ok(callbacks::begin_transaction_dispatch(scope, isolation, self.app_id.clone()).into())
     }
 
     /// `db.openSubscription(collection)` — mint a [`super::subscription::Subscription`]
@@ -199,8 +198,7 @@ impl Db {
                 "db.openSubscription: collection must be a non-empty string",
             ));
         }
-        let app_id = self.app_id.borrow().clone();
-        let obj = super::subscription::mint_subscription(scope, &app_id, &collection)?;
+        let obj = super::subscription::mint_subscription(scope, &self.app_id, &collection)?;
         Ok(obj.into())
     }
 
@@ -221,7 +219,7 @@ impl Db {
         } else {
             None
         };
-        let app_id = app_id_override.unwrap_or_else(|| self.app_id.borrow().clone());
+        let app_id = app_id_override.unwrap_or_else(|| self.app_id.clone());
         callbacks::start_replication_consumer_dispatch(scope, app_id).into()
     }
 
@@ -236,8 +234,7 @@ impl Db {
         if let Some(existing) = self.replication_obj.borrow().as_ref() {
             return Ok(v8::Local::new(scope, existing));
         }
-        let app_id = self.app_id.borrow().clone();
-        let obj = super::replication::mint_replication(scope, &app_id)?;
+        let obj = super::replication::mint_replication(scope, &self.app_id)?;
         let global = v8::Global::new(scope, obj);
         *self.replication_obj.borrow_mut() = Some(global);
         Ok(obj)
@@ -262,8 +259,7 @@ impl Db {
         if let Some(existing) = self.migrations_obj.borrow().as_ref() {
             return Ok(v8::Local::new(scope, existing));
         }
-        let app_id = self.app_id.borrow().clone();
-        let obj = super::migrations::mint_migrations(scope, &app_id)?;
+        let obj = super::migrations::mint_migrations(scope, &self.app_id)?;
         let global = v8::Global::new(scope, obj);
         *self.migrations_obj.borrow_mut() = Some(global);
         Ok(obj)
@@ -316,7 +312,7 @@ pub fn mint_db<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = Db {
-        app_id: RefCell::new(app_id.to_string()),
+        app_id: app_id.to_string(),
         collection_cache: RefCell::new(HashMap::new()),
         migrations_obj: RefCell::new(None),
         replication_obj: RefCell::new(None),

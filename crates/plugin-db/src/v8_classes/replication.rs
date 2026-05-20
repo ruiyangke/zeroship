@@ -7,8 +7,6 @@
 
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
-
 use serde_json::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
@@ -17,14 +15,15 @@ use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 use crate::callbacks;
 
 pub struct Replication {
-    /// app_id stamped at mint time from the parent Db wrapper.
-    pub(crate) app_id: RefCell<String>,
+    /// app_id stamped at mint time from the parent Db wrapper. Never
+    /// mutated; plain `String`, no `RefCell`.
+    pub(crate) app_id: String,
 }
 
 impl std::fmt::Debug for Replication {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Replication")
-            .field("app_id", &self.app_id.borrow())
+            .field("app_id", &self.app_id)
             .finish()
     }
 }
@@ -51,7 +50,7 @@ impl Replication {
             .get("appId")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| self.app_id.borrow().clone());
+            .unwrap_or_else(|| self.app_id.clone());
         callbacks::replication_setup_dispatch(scope, app_id).into()
     }
 
@@ -106,7 +105,7 @@ pub fn mint_replication<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = Replication {
-        app_id: RefCell::new(app_id.to_string()),
+        app_id: app_id.to_string(),
     };
     let boxed: Box<Replication> = Box::new(state);
     let raw = Box::into_raw(boxed);

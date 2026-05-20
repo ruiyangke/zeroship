@@ -20,8 +20,6 @@
 
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
-
 use serde_json::Value;
 
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
@@ -36,15 +34,16 @@ use crate::callbacks;
 
 /// Owned state for the `env.db.migrations` v8_class instance.
 /// `app_id` is captured at mint time from the parent `Db` wrapper so
-/// the method bodies don't have to re-read it per call.
+/// the method bodies don't have to re-read it per call. Never mutated;
+/// plain `String`.
 pub struct Migrations {
-    pub(crate) app_id: RefCell<String>,
+    pub(crate) app_id: String,
 }
 
 impl std::fmt::Debug for Migrations {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Migrations")
-            .field("app_id", &self.app_id.borrow())
+            .field("app_id", &self.app_id)
             .finish()
     }
 }
@@ -85,7 +84,7 @@ impl Migrations {
         scope: &mut v8::PinScope<'s, '_>,
         spec: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let app_id = self.app_id.borrow().clone();
+        let app_id = self.app_id.clone();
         dispatch_by_spec(scope, app_id, spec, MigrationOp::Status).into()
     }
 
@@ -96,7 +95,7 @@ impl Migrations {
         scope: &mut v8::PinScope<'s, '_>,
         spec: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let app_id = self.app_id.borrow().clone();
+        let app_id = self.app_id.clone();
         dispatch_by_spec(scope, app_id, spec, MigrationOp::Cancel).into()
     }
 
@@ -107,7 +106,7 @@ impl Migrations {
         scope: &mut v8::PinScope<'s, '_>,
         spec: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let app_id = self.app_id.borrow().clone();
+        let app_id = self.app_id.clone();
         dispatch_by_spec(scope, app_id, spec, MigrationOp::Reset).into()
     }
 }
@@ -245,7 +244,7 @@ pub fn mint_migrations<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = Migrations {
-        app_id: RefCell::new(app_id.to_string()),
+        app_id: app_id.to_string(),
     };
     let boxed: Box<Migrations> = Box::new(state);
     let raw = Box::into_raw(boxed);

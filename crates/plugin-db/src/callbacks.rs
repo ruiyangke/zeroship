@@ -241,13 +241,6 @@ pub(crate) fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
         .clone()
 }
 
-/// Public re-export of [`get_app_id`] for the v8_class `Collection`
-/// methods (which live in a sibling module and need the same fallback
-/// to `"default"` when `APP_ID` is unset).
-pub(crate) fn app_id_for(state: &SharedState) -> String {
-    get_app_id(state)
-}
-
 /// Create a promise, allocate an op_id, store the resolver, and return
 /// (op_id, request_id, promise).
 fn setup_promise<'s>(
@@ -1874,6 +1867,7 @@ async fn create_index_with_recovery_audited(
 pub fn begin_transaction_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     isolation_level: Option<String>,
+    app_id: String,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
@@ -1883,7 +1877,7 @@ pub fn begin_transaction_dispatch<'s>(
     // with this same token; on failure TX_TOKEN stays 0 so the
     // wrapper's Drop sees `current(0) != token` and no-ops.
     let token = crate::next_tx_token();
-    let tx_obj = match crate::v8_classes::transaction::mint_transaction(scope, token) {
+    let tx_obj = match crate::v8_classes::transaction::mint_transaction(scope, token, app_id) {
         Ok(obj) => obj,
         Err(e) => {
             let resolver = v8::PromiseResolver::new(scope).unwrap();

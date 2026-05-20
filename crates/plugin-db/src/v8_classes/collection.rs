@@ -8,8 +8,6 @@
 
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
-
 use serde_json::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
@@ -23,18 +21,19 @@ use crate::callbacks;
 
 pub struct Collection {
     /// The collection name (e.g. `"users"`). Used as the first argument
-    /// to every dispatch helper.
-    pub(crate) name: RefCell<String>,
+    /// to every dispatch helper. Never mutated after mint — plain
+    /// `String`, no `RefCell`.
+    pub(crate) name: String,
     /// The app_id captured at mint time so CRUD callbacks don't have
-    /// to read the runtime slot for every dispatch.
-    pub(crate) app_id: RefCell<String>,
+    /// to read the runtime slot for every dispatch. Never mutated.
+    pub(crate) app_id: String,
 }
 
 impl std::fmt::Debug for Collection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Collection")
-            .field("name", &self.name.borrow())
-            .field("app_id", &self.app_id.borrow())
+            .field("name", &self.name)
+            .field("app_id", &self.app_id)
             .finish()
     }
 }
@@ -68,11 +67,9 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
-        callbacks::dispatch_find_one(scope, &app_id, &collection, filter_v, opts_v).into()
+        callbacks::dispatch_find_one(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
     #[v8_method]
@@ -82,11 +79,9 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
-        callbacks::dispatch_find(scope, &app_id, &collection, filter_v, opts_v).into()
+        callbacks::dispatch_find(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
     #[v8_method]
@@ -95,15 +90,13 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         doc: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
         if let Some(p) =
             callbacks::refuse_if_query_capability(scope, "ctx.db.insert")
         {
             return p.into();
         }
-        let app_id = self.app_id.borrow().clone();
         let doc_v = callbacks::read_json_arg(scope, Some(doc));
-        callbacks::dispatch_insert(scope, &app_id, &collection, doc_v).into()
+        callbacks::dispatch_insert(scope, &self.app_id, &self.name, doc_v).into()
     }
 
     #[v8_method]
@@ -113,15 +106,13 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         docs: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
         if let Some(p) =
             callbacks::refuse_if_query_capability(scope, "ctx.db.insertMany")
         {
             return p.into();
         }
-        let app_id = self.app_id.borrow().clone();
         let docs_v = callbacks::read_json_arg(scope, Some(docs));
-        callbacks::dispatch_insert_many(scope, &app_id, &collection, docs_v).into()
+        callbacks::dispatch_insert_many(scope, &self.app_id, &self.name, docs_v).into()
     }
 
     #[v8_method]
@@ -132,16 +123,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
         if let Some(p) =
             callbacks::refuse_if_query_capability(scope, "ctx.db.updateOne")
         {
             return p.into();
         }
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let update_v = callbacks::read_json_arg(scope, Some(update));
-        callbacks::dispatch_update_one(scope, &app_id, &collection, filter_v, update_v).into()
+        callbacks::dispatch_update_one(scope, &self.app_id, &self.name, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -152,16 +141,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
         if let Some(p) =
             callbacks::refuse_if_query_capability(scope, "ctx.db.updateMany")
         {
             return p.into();
         }
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let update_v = callbacks::read_json_arg(scope, Some(update));
-        callbacks::dispatch_update_many(scope, &app_id, &collection, filter_v, update_v).into()
+        callbacks::dispatch_update_many(scope, &self.app_id, &self.name, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -171,15 +158,13 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
         if let Some(p) =
             callbacks::refuse_if_query_capability(scope, "ctx.db.deleteOne")
         {
             return p.into();
         }
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_delete_one(scope, &app_id, &collection, filter_v).into()
+        callbacks::dispatch_delete_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
     #[v8_method]
@@ -189,15 +174,13 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
         if let Some(p) =
             callbacks::refuse_if_query_capability(scope, "ctx.db.deleteMany")
         {
             return p.into();
         }
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_delete_many(scope, &app_id, &collection, filter_v).into()
+        callbacks::dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
     /// `collection.upsert(doc, opts)` — insert or update on conflict.
@@ -211,12 +194,10 @@ impl Collection {
         doc: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let collection = self.name.borrow().clone();
         if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.upsert")
         {
             return Ok(p.into());
         }
-        let app_id = self.app_id.borrow().clone();
         let doc_v = callbacks::read_json_arg(scope, Some(doc));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
         let conflict_v = opts_v
@@ -229,7 +210,7 @@ impl Collection {
         if conflict_arr.is_empty() {
             return Err(OpError::type_error("upsert: opts.conflictFields required"));
         }
-        Ok(callbacks::dispatch_upsert(scope, &app_id, &collection, doc_v, conflict_v).into())
+        Ok(callbacks::dispatch_upsert(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
     }
 
     #[v8_method]
@@ -238,10 +219,8 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_count(scope, &app_id, &collection, filter_v).into()
+        callbacks::dispatch_count(scope, &self.app_id, &self.name, filter_v).into()
     }
 
     /// `collection.distinct(filter, opts)` — return the unique values
@@ -254,8 +233,6 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let collection = self.name.borrow().clone();
-        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
         let field = opts_v
@@ -266,7 +243,7 @@ impl Collection {
                 "distinct: opts.field must be a non-empty string",
             ))?
             .to_string();
-        Ok(callbacks::dispatch_distinct(scope, &app_id, &collection, &field, filter_v).into())
+        Ok(callbacks::dispatch_distinct(scope, &self.app_id, &self.name, &field, filter_v).into())
     }
 
     #[v8_method]
@@ -275,10 +252,8 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         pipeline: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let collection = self.name.borrow().clone();
-        let app_id = self.app_id.borrow().clone();
         let pipeline_v = callbacks::read_json_arg(scope, Some(pipeline));
-        callbacks::dispatch_aggregate(scope, &app_id, &collection, pipeline_v).into()
+        callbacks::dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v).into()
     }
 
     /// `collection.openSubscription()` — returns a
@@ -291,9 +266,7 @@ impl Collection {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let app_id = self.app_id.borrow().clone();
-        let name = self.name.borrow().clone();
-        let obj = super::subscription::mint_subscription(scope, &app_id, &name)?;
+        let obj = super::subscription::mint_subscription(scope, &self.app_id, &self.name)?;
         Ok(obj.into())
     }
 }
@@ -330,8 +303,8 @@ pub fn mint_collection<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = Collection {
-        name: RefCell::new(name),
-        app_id: RefCell::new(app_id),
+        name,
+        app_id,
     };
     let boxed: Box<Collection> = Box::new(state);
     let raw = Box::into_raw(boxed);

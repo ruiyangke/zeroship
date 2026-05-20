@@ -68,6 +68,12 @@ pub struct Transaction {
     /// Further `.commit()` / `.rollback()` calls resolve void; new
     /// `.collection()` calls reject (the tx connection is gone).
     pub(crate) settled: Cell<bool>,
+    /// app_id inherited from the parent `Db` wrapper at mint time. The
+    /// canonical source for `tx.collection(name)`-minted Collections so
+    /// they bind to the same app as the Db that began the transaction
+    /// (rather than re-reading the runtime slot, which can drift if a
+    /// nested execution context replaces the SharedState).
+    pub(crate) app_id: String,
     /// Cache of `(collection_name -> Collection JS wrapper)`. Same shape
     /// as `Db::collection_cache` so identity holds across calls:
     /// `tx.collection("users") === tx.collection("users")`.
@@ -161,8 +167,7 @@ impl Transaction {
         if let Some(existing) = self.collection_cache.borrow().get(&name) {
             return Ok(v8::Local::new(scope, existing));
         }
-        let app_id = crate::callbacks::app_id_for(&crate::callbacks::runtime_state(scope));
-        let obj = mint_collection(scope, name.clone(), app_id)?;
+        let obj = mint_collection(scope, name.clone(), self.app_id.clone())?;
         let global = v8::Global::new(scope, obj);
         self.collection_cache.borrow_mut().insert(name, global);
         Ok(obj)
@@ -258,6 +263,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
 pub fn mint_transaction<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     token: u64,
+    app_id: String,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let class_tmpl = Transaction::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -278,6 +284,7 @@ pub fn mint_transaction<'s>(
     let state = Transaction {
         token: Cell::new(token),
         settled: Cell::new(false),
+        app_id,
         collection_cache: RefCell::new(std::collections::HashMap::new()),
     };
     let boxed: Box<Transaction> = Box::new(state);
