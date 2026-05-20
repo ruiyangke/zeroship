@@ -69,6 +69,13 @@ pub(crate) struct MigrationLock {
     /// Dry-run runs do not persist `validate_cursor`, dead_letter_pks,
     /// or processed updates (proposal B1.6).
     pub(crate) dry_run: bool,
+    /// `audit_generation` snapshot captured at `exec_begin`. The audit
+    /// row's generation is bumped by `exec_reset`; any subsequent
+    /// `commit_batch` whose stored generation no longer matches the
+    /// row's must ROLLBACK and surface `migration_reset_externally`
+    /// (Gap X). Lives in the lock so `exec_commit_batch` reads it
+    /// without an extra round-trip.
+    pub(crate) start_generation: i64,
     pub(crate) client: Option<Client>,
 }
 
@@ -107,6 +114,18 @@ fn err_cancelled_mid_run() -> OpError {
         "migration_cancelled",
         "migration was cancelled by an operator",
         None,
+    )
+}
+
+fn err_reset_externally() -> OpError {
+    coded(
+        "migration_reset_externally",
+        "audit row was reset by an operator while this run was in flight",
+        Some(
+            "another operator called `migrations.reset({name, collection})` while \
+             this worker held the advisory lock. Mint a fresh wrapper via \
+             `env.db.migrations.start(spec)` to resume from the new cursor.",
+        ),
     )
 }
 
@@ -165,7 +184,7 @@ fn return_lock_client(client: Client) {
     });
 }
 
-fn lock_snapshot() -> Option<(String, String, i64, bool)> {
+fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
     MIG_LOCK.with(|m| {
         m.borrow().as_ref().map(|l| {
             (
@@ -173,6 +192,7 @@ fn lock_snapshot() -> Option<(String, String, i64, bool)> {
                 l.collection.clone(),
                 l.audit_id,
                 l.dry_run,
+                l.start_generation,
             )
         })
     })
@@ -238,6 +258,7 @@ pub async fn exec_begin(
     }
 
     if reset {
+        // Same generation bump as `exec_reset` — see Gap X.
         let sql = format!(
             r#"UPDATE "{app_id}"."__zeroship_migrations"
                 SET status = 'pending',
@@ -246,6 +267,7 @@ pub async fn exec_begin(
                     error = NULL,
                     applied_at = NULL,
                     updated_at = NOW(),
+                    audit_generation = audit_generation + 1,
                     details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
                 WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
         );
@@ -256,7 +278,7 @@ pub async fn exec_begin(
     }
 
     let lookup_sql = format!(
-        r#"SELECT id, status, validate_cursor, dead_letter_pks, details
+        r#"SELECT id, status, validate_cursor, dead_letter_pks, details, audit_generation
             FROM "{app_id}"."__zeroship_migrations"
             WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
             ORDER BY id DESC LIMIT 1"#
@@ -266,7 +288,7 @@ pub async fn exec_begin(
         .await
         .map_err(|e| OpError::error(format!("db: migration lookup failed: {e}")))?;
 
-    let (audit_id, cursor, processed, dead_letter_pks) = if let Some(row) = existing.first() {
+    let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing.first() {
         let id: i64 = row.get("id");
         let status: String = row.get("status");
         if status == "cancelled" {
@@ -278,6 +300,7 @@ pub async fn exec_begin(
         let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
         let processed = read_processed_from_row(row);
         let dlp = read_dead_letter_pks(row);
+        let gen: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
 
         let upd_sql = format!(
             r#"UPDATE "{app_id}"."__zeroship_migrations"
@@ -293,7 +316,7 @@ pub async fn exec_begin(
             .query_text_params(&upd_sql, &[id_s.as_str()])
             .await
             .map_err(|e| OpError::error(format!("db: migration set running failed: {e}")))?;
-        (id, cursor, processed, dlp)
+        (id, cursor, processed, dlp, gen)
     } else {
         let schema_version =
             crate::audit::next_schema_version(pool, app_id).await.unwrap_or(1);
@@ -334,7 +357,8 @@ pub async fn exec_begin(
             .first()
             .map(|r| r.get::<_, i64>("id"))
             .ok_or_else(|| OpError::error("db: migration insert returned no row"))?;
-        (id, 0i64, 0i64, Value::Array(vec![]))
+        // Freshly INSERTed row — DEFAULT 0 for audit_generation.
+        (id, 0i64, 0i64, Value::Array(vec![]), 0i64)
     };
 
     MIG_LOCK.with(|m| {
@@ -343,6 +367,7 @@ pub async fn exec_begin(
             collection: collection.to_string(),
             audit_id,
             dry_run,
+            start_generation,
             client: Some(client),
         });
     });
@@ -395,7 +420,7 @@ pub async fn exec_fetch_batch(
         ));
     }
 
-    let Some((name, collection, _audit_id, _dry_run)) = lock_snapshot() else {
+    let Some((name, collection, _audit_id, _dry_run, _start_gen)) = lock_snapshot() else {
         return Err(coded(
             "no_active_migration",
             "migrationFetchBatch called without migrationBegin",
@@ -488,7 +513,7 @@ pub async fn exec_commit_batch(
     terminal_status: Option<&str>,
     error_message: Option<&str>,
 ) -> Result<String, OpError> {
-    let Some((name, collection, audit_id, dry_run)) = lock_snapshot() else {
+    let Some((name, collection, audit_id, dry_run, start_generation)) = lock_snapshot() else {
         return Err(coded(
             "no_active_migration",
             "migrationCommitBatch called without migrationBegin",
@@ -521,7 +546,7 @@ pub async fn exec_commit_batch(
     // to whatever the SDK requested (or stay running for another pass).
     let id_s = audit_id.to_string();
     let status_sql = format!(
-        r#"SELECT status FROM "{app_id}"."__zeroship_migrations"
+        r#"SELECT status, audit_generation FROM "{app_id}"."__zeroship_migrations"
             WHERE id = $1::bigint FOR UPDATE"#
     );
     let status_rows = match client
@@ -541,6 +566,16 @@ pub async fn exec_commit_batch(
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
             return Err(err_cancelled_mid_run());
+        }
+        // Gap X: an operator's `migrations.reset` bumps
+        // `audit_generation`. If our snapshot is stale we MUST NOT
+        // advance the cursor past the new reset point — abort with a
+        // coded error so the SDK mints a fresh wrapper.
+        let current_gen: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
+        if current_gen != start_generation {
+            let _ = client.execute("ROLLBACK", &[]).await;
+            return_lock_client(client);
+            return Err(err_reset_externally());
         }
     }
 
@@ -822,6 +857,10 @@ pub async fn exec_reset(
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
         .map_err(OpError::error)?;
+    // Gap X: bump `audit_generation` so any in-flight worker holding
+    // the old generation aborts its next `commit_batch` with
+    // `migration_reset_externally` instead of overwriting the cursor
+    // we just zeroed.
     let upd_sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET status = 'pending',
@@ -830,6 +869,7 @@ pub async fn exec_reset(
                 error = NULL,
                 applied_at = NULL,
                 updated_at = NOW(),
+                audit_generation = audit_generation + 1,
                 details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
             WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
     );

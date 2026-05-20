@@ -182,6 +182,7 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
   owner_session_id    TEXT,
   last_heartbeat_at   TIMESTAMPTZ,
   dead_letter_pks     JSONB,
+  audit_generation    BIGINT NOT NULL DEFAULT 0,
   CONSTRAINT __zeroship_migrations_phase_chk CHECK (
     phase IN ('ddl','validation','backfill','audit')
   ),
@@ -198,6 +199,19 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
     pool.query_text_params(&create_sql, &empty)
         .await
         .map_err(|e| format!("audit: create __zeroship_migrations failed: {e}"))?;
+
+    // Gap X: idempotent column add for tables created before this
+    // commit. `audit_generation` is bumped by `exec_reset` so a
+    // worker that started a run on generation `g` can detect that
+    // its run got reset out from under it (generation changes →
+    // commit_batch ROLLBACKs with `migration_reset_externally`).
+    let add_gen = format!(
+        r#"ALTER TABLE "{app_id}"."__zeroship_migrations"
+            ADD COLUMN IF NOT EXISTS audit_generation BIGINT NOT NULL DEFAULT 0"#
+    );
+    pool.query_text_params(&add_gen, &empty)
+        .await
+        .map_err(|e| format!("audit: add audit_generation column failed: {e}"))?;
 
     // Indexes — proposal section A3. These are plain (non-CONCURRENT)
     // because we're inside the cold-start orchestration that has the

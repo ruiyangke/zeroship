@@ -2022,6 +2022,102 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
     zeroship_plugin_db::clear_migration_lock_for_tests();
 }
 
+// Gap X — reset landing mid-run must abort the next commit, not let
+// the worker silently advance the cursor past the new (zeroed)
+// reset point. `exec_reset` bumps `audit_generation`; `commit_batch`
+// fails its FOR-UPDATE generation check and surfaces
+// `migration_reset_externally`.
+#[compio::test]
+async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "gap_x_reset";
+    b1_setup_users(&pool, app, 50, false).await;
+
+    // Begin + fetch the first batch.
+    let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+        .await
+        .expect("begin");
+    let fetched = parse(
+        &mig::exec_fetch_batch(app, 0, 10)
+            .await
+            .expect("fetch_batch"),
+    );
+    let rows = fetched.as_array().cloned().unwrap_or_default();
+    assert_eq!(rows.len(), 10);
+
+    // Operator resets the run via a separate pool connection — bumps
+    // audit_generation, zeroes the cursor. Status flips back to
+    // 'pending' (not 'cancelled') so the existing cancel guard won't
+    // catch it.
+    let r = parse(
+        &mig::exec_reset(&pool, app, "backfill_role", "users")
+            .await
+            .expect("reset"),
+    );
+    assert_eq!(r["ok"], true);
+
+    // commitBatch must now refuse with `migration_reset_externally`.
+    let updates: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r["id"].as_i64().unwrap(),
+                "set": { "role": "user" }
+            })
+        })
+        .collect();
+    let commit_err = mig::exec_commit_batch(
+        app,
+        &Value::Array(updates),
+        &Value::Array(vec![]),
+        rows.last().unwrap()["id"].as_i64().unwrap(),
+        rows.len() as i64,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &commit_err.kind,
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. }
+                if code == "migration_reset_externally"
+        ),
+        "got: {commit_err:?}"
+    );
+
+    // Reset wiped cursor; no row should have been mutated by our
+    // commitBatch attempt (ROLLBACK).
+    let rows_after = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*) AS c FROM \"{app}\".\"users\" WHERE role IS NOT NULL"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let count: i64 = rows_after[0].get("c");
+    assert_eq!(count, 0, "no rows must be mutated when commit refused");
+
+    // The audit row should still be `pending` with cursor=NULL (i.e.
+    // status() reports cursor=0, processed=0) — the operator's reset
+    // took effect cleanly.
+    let st = parse(
+        &mig::exec_status(&pool, app, "backfill_role", "users")
+            .await
+            .unwrap(),
+    );
+    assert_eq!(st["status"], "pending");
+    assert_eq!(st["cursor"], 0);
+    assert_eq!(st["processed"], 0);
+
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+}
+
 // 38. B1 — cancel against an already-applied migration returns
 // `migration_not_cancellable`.
 #[compio::test]
