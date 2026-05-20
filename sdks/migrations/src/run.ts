@@ -26,6 +26,7 @@
 import type { NativeMigration, NativeMigrations } from "./native.js";
 import { getNativeMigrations, toNativeError } from "./native.js";
 import type {
+  DeadLetterEntry,
   Migration,
   MigrationStatus,
   PlainObject,
@@ -65,20 +66,31 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
 
   let cursor = 0;
   let processed = 0;
-  const deadLetter: number[] = [];
+  const deadLetters: DeadLetterEntry[] = [];
   let failures = 0;
   const budget = migration.failureBudget ?? 0;
 
+  /** PK-only view of `deadLetters` — the audit row stores PKs only,
+   *  so this is what we ship to native.commitBatch. The richer entry
+   *  list with `.error` lives in the JS-side RunResult. */
+  function deadLetterPks(): number[] {
+    return deadLetters.map((d) => d.id);
+  }
+
   // Helper to send the final commit. `terminal` is the audit status
   // we want persisted; `error` is the message stored in the audit row.
+  // Returns a Result rather than a bare RunResult so the caller can
+  // surface a post-commit failure (audit row UPDATE rejected) instead
+  // of swallowing it and lying about "applied".
   async function finish(
     terminal: MigrationStatus,
     error: string,
-  ): Promise<RunResult> {
+  ): Promise<Result<RunResult>> {
+    const pks = deadLetterPks();
     try {
       await m.commitBatch({
         updates: [],
-        deadLetterPks: deadLetter,
+        deadLetterPks: pks,
         nextCursor: cursor,
         processedTotal: processed,
         isDone: true,
@@ -86,12 +98,22 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
         errorMessage: error,
       });
     } catch (e) {
-      // Suppress — the audit row was already touched and the loop is
-      // unwinding. Re-throwing would lose the terminal status the
-      // caller needs.
-      void toNativeError(e);
+      // Audit row update / advisory-lock release failed AFTER the SDK
+      // already drove every per-row update through native. Surface as
+      // an error — the migration did not fully apply if its terminal
+      // commit didn't reach Postgres.
+      return { data: null, error: toNativeError(e) };
     }
-    return { status: terminal, processed, deadLetterPks: deadLetter, cursor };
+    return {
+      data: {
+        status: terminal,
+        processed,
+        deadLetters,
+        deadLetterPks: pks,
+        cursor,
+      },
+      error: null,
+    };
   }
 
   // Main loop.
@@ -105,7 +127,13 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
         // Don't try to drive the audit row — cancel already
         // terminalised it.
         return {
-          data: { status: "cancelled", processed, deadLetterPks: deadLetter, cursor },
+          data: {
+            status: "cancelled",
+            processed,
+            deadLetters,
+            deadLetterPks: deadLetterPks(),
+            cursor,
+          },
           error: null,
         };
       }
@@ -113,11 +141,10 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     }
 
     if (rows.length === 0) {
-      const terminal: MigrationStatus = deadLetter.length > 0
+      const terminal: MigrationStatus = deadLetters.length > 0
         ? "applied_with_dead_letter"
         : "applied";
-      const result = await finish(terminal, "");
-      return { data: result, error: null };
+      return finish(terminal, "");
     }
 
     const updates: Array<{ id: number; set: PlainObject }> = [];
@@ -141,19 +168,22 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
         failures += 1;
         if (failures > budget) {
           const msg = rowErr instanceof Error ? rowErr.message : String(rowErr);
-          const result = await finish(
+          return finish(
             "failed",
             `migration_failure_budget_exceeded: ${msg}`,
           );
-          return { data: result, error: null };
         }
-        deadLetter.push(id);
+        const err = rowErr instanceof Error ? rowErr : new Error(String(rowErr));
+        deadLetters.push({ id, error: err });
         continue;
       }
 
       if (out === null) {
-        // Caller asked to dead-letter this row explicitly.
-        deadLetter.push(id);
+        // Caller explicitly asked to dead-letter this row. Synthesise
+        // an Error so the entry is uniform — consumers can branch on
+        // `.error.message === "dead_letter"` if they need to distinguish
+        // explicit-opt-out from a thrown handler failure.
+        deadLetters.push({ id, error: new Error("dead_letter") });
         continue;
       }
       if (out === undefined) {
@@ -168,7 +198,7 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     try {
       await m.commitBatch({
         updates,
-        deadLetterPks: deadLetter,
+        deadLetterPks: deadLetterPks(),
         nextCursor,
         processedTotal: processed,
         isDone: false,
