@@ -277,7 +277,7 @@ export interface RefOptions {
  * Cross-table typed ID (B2). Stored as an integer at the DB layer but
  * brand-tagged at the type layer so `Id<"users">` and `Id<"posts">`
  * are mutually incompatible — typos like
- * `db.posts.findOne({ authorId: postId })` (where `postId` is `Id<"posts">`)
+ * `db.posts.get({ authorId: postId })` (where `postId` is `Id<"posts">`)
  * become compile errors.
  *
  * Modelled after Convex's `Id<TableName>` brand

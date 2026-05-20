@@ -30,7 +30,7 @@ But a code-level review surfaced **three classes of silent gaps** that ship to p
 Beyond V1 safety, the comparison to Convex (the closest peer for an AI-friendly TypeScript database SDK) reveals **structural design choices** we should adopt:
 
 - Capability-scoped function kinds (query/mutation/action) so AI-generated code can't accidentally call `fetch()` inside a transaction
-- Typed cross-table IDs so `db.posts.findOne({ authorId: postId })` is a compile error
+- Typed cross-table IDs so `db.posts.get({ authorId: postId })` is a compile error
 - Reactive queries so live UI doesn't need polling
 - A separate **migrations component** for data backfills (vs. coupling DDL and data transformation)
 
@@ -709,7 +709,7 @@ AI codegen / docs teach the three-deploy pattern for breaking changes:
 
 ### B2. Typed cross-table relations
 
-**Motivation.** Today's `id: number` means `db.posts.findOne({ authorId: postId })` is a runtime bug — types accept any number. Convex's `v.id("users")` brand makes this a compile error ([docs.convex.dev/database/document-ids](https://docs.convex.dev/database/document-ids): "IDs are strings at runtime, but the Id type can be used to distinguish IDs from other strings at compile time").
+**Motivation.** Today's `id: number` means `db.posts.get({ authorId: postId })` is a runtime bug — types accept any number. Convex's `v.id("users")` brand makes this a compile error ([docs.convex.dev/database/document-ids](https://docs.convex.dev/database/document-ids): "IDs are strings at runtime, but the Id type can be used to distinguish IDs from other strings at compile time").
 
 **ID system alignment.** zeroship's platform-level entities use typed_id (UUIDv7 + base62 + entity prefix — `usr_01H…`, `app_01H…`). Application data inside `@zeroship/db` collections currently uses `BIGINT IDENTITY`. Three options were considered:
 
@@ -743,7 +743,7 @@ const p = await db.posts.insert({ authorId: u.data!.id, title: "hi" });  // ✓
 const bad = await db.posts.insert({ authorId: 42, title: "hi" });         // ✗ type error
 
 // Cross-table typo:
-db.posts.findOne({ authorId: p.data!.id });  // ✗ p.data.id is Id<"posts">, not Id<"users">
+db.posts.get({ authorId: p.data!.id });  // ✗ p.data.id is Id<"posts">, not Id<"users">
 ```
 
 **Implementation.**
@@ -864,7 +864,7 @@ posts: { authorId: t.number(), title: t.string() }
 posts: { authorId: t.ref("users"), title: t.string() }
 ```
 
-The change adds an FK constraint (caught by A2 as an additive change — accepted if no orphan rows; surfaces as destructive otherwise). On the TS side, all call sites that pass a bare `number` to `authorId` now fail to type-check; the migration is to source from a `db.users.insert(...)` or `db.users.findOne(...)` return (which gives `Id<"users">`).
+The change adds an FK constraint (caught by A2 as an additive change — accepted if no orphan rows; surfaces as destructive otherwise). On the TS side, all call sites that pass a bare `number` to `authorId` now fail to type-check; the migration is to source from a `db.users.insert(...)` or `db.users.get(...)` return (which gives `Id<"users">`).
 
 Codemod: `zeroship migrate codemod refs` walks the app sources, finds `t.number()` fields used as FK targets (heuristic: column name matches `<table>Id` where `<table>` is a declared collection) and rewrites them to `t.ref("<table>")`. The codemod is conservative — it only rewrites unambiguous cases and emits a manual-review report for ambiguous ones.
 
@@ -895,7 +895,7 @@ Codemod: `zeroship migrate codemod refs` walks the app sources, finds `t.number(
 ```ts
 import { query, mutation, action, env, runQuery, runMutation, currentUser } from "@zeroship/server";
 
-export const getTodo = query(async ({ id }) => db.todos.findOne({ id }));
+export const getTodo = query(async ({ id }) => db.todos.get({ id }));
 
 export const markDone = mutation(async ({ id }) =>
   db.todos.update({ id, userId: currentUser()?.id }, { done: true })

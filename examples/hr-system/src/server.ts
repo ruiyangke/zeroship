@@ -361,7 +361,7 @@ export const getEmployees = procedure(async (filters?: Record<string, unknown>) 
 });
 
 export const getEmployee = procedure(async (id: number) => {
-  return db.employees.findOne({ id });
+  return db.employees.get({ id });
 });
 
 export const updateEmployee = procedure(async (id: number, changes: Record<string, unknown>) => {
@@ -369,7 +369,7 @@ export const updateEmployee = procedure(async (id: number, changes: Record<strin
 });
 
 export const terminateEmployee = procedure(async (id: number) => {
-  const { data: emp } = await db.employees.findOne({ id });
+  const { data: emp } = await db.employees.get({ id });
   if (!emp) return { data: null, error: { message: "Employee not found" } };
 
   await db.employees.update({ id }, { status: "terminated" });
@@ -470,7 +470,7 @@ export const getDepartments = procedure(async () => {
 });
 
 export const getDepartment = procedure(async (id: number) => {
-  return db.departments.findOne({ id });
+  return db.departments.get({ id });
 });
 
 export const updateDepartment = procedure(async (id: number, changes: Record<string, unknown>) => {
@@ -563,7 +563,7 @@ export const getJobPostings = procedure(async (filters?: Record<string, unknown>
 });
 
 export const getJobPosting = procedure(async (id: number) => {
-  return db.jobPostings.findOne({ id });
+  return db.jobPostings.get({ id });
 });
 
 export const publishJobPosting = procedure(async (id: number) => {
@@ -636,7 +636,7 @@ export const submitInterviewFeedback = procedure(async (
 
 export const clockIn = procedure(async (employeeId: number, date: number, notes?: string) => {
   // Check if a timesheet already exists for today
-  const { data: existing } = await db.timesheets.findOne({ employeeId, date });
+  const { data: existing } = await db.timesheets.get({ employeeId, date });
   if (existing) {
     return { data: null, error: { message: "Already clocked in for this date" } };
   }
@@ -649,7 +649,7 @@ export const clockIn = procedure(async (employeeId: number, date: number, notes?
 });
 
 export const clockOut = procedure(async (employeeId: number, date: number) => {
-  const { data: ts } = await db.timesheets.findOne({ employeeId, date });
+  const { data: ts } = await db.timesheets.get({ employeeId, date });
   if (!ts) return { data: null, error: { message: "No clock-in found for this date" } };
 
   const tsData = ts as Record<string, unknown>;
@@ -697,7 +697,7 @@ export const updateWorkSchedule = procedure(async (
   endTime: string,
   isRemote?: boolean
 ) => {
-  const { data: existing } = await db.workSchedules.findOne({ employeeId, dayOfWeek });
+  const { data: existing } = await db.workSchedules.get({ employeeId, dayOfWeek });
   if (existing) {
     return db.workSchedules.update(
       { id: (existing as Record<string, unknown>)._id as number },
@@ -792,7 +792,7 @@ export const getLeaveBalance = procedure(async (employeeId: number) => {
   const currentYear = new Date().getFullYear();
 
   // Check if there's an explicit balance record
-  const { data: balanceRecord } = await db.leaveBalances.findOne({ employeeId, year: currentYear });
+  const { data: balanceRecord } = await db.leaveBalances.get({ employeeId, year: currentYear });
 
   if (balanceRecord) {
     return { data: balanceRecord, error: null };
@@ -944,7 +944,7 @@ export const getPayrollRuns = procedure(async (filters?: Record<string, unknown>
 });
 
 export const getPayslip = procedure(async (id: number) => {
-  return db.payslips.findOne({ id });
+  return db.payslips.get({ id });
 });
 
 export const getPayslipsByEmployee = procedure(async (employeeId: number) => {
@@ -952,7 +952,7 @@ export const getPayslipsByEmployee = procedure(async (employeeId: number) => {
 });
 
 export const getPayrollSummary = procedure(async (period: string) => {
-  const { data: run } = await db.payrollRuns.findOne({ period });
+  const { data: run } = await db.payrollRuns.get({ period });
   if (!run) return { data: null, error: { message: "Payroll run not found" } };
 
   const { data: slips } = await db.payslips.find({

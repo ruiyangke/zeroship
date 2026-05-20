@@ -386,24 +386,42 @@ export class Collection<S = PlainObject> {
   }
 
   /**
-   * Finds and returns the first document matching `filter`, or `null` if none exists.
-   * Field names in `filter` are mapped outbound before the native call.
+   * Fetch a single row. The first argument is either an `id` (shorthand
+   * for `{ id }`) or a full filter. When the filter matches multiple
+   * rows, `opts.orderBy` decides which one is returned; without an
+   * orderBy the choice is undefined. Returns `null` if no row matches.
+   *
+   * `opts.select` projects to a subset of columns.
    */
-  async findOne(filter: Filter<S>): Promise<Result<Row<S> | null>> {
-    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
+  async get(
+    idOrFilter: number | Filter<S>,
+    opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> } = {},
+  ): Promise<Result<Row<S> | null>> {
+    const filter = (typeof idOrFilter === "number"
+      ? ({ id: idOrFilter } as Filter<S>)
+      : idOrFilter);
+    if (typeof idOrFilter !== "number") {
+      _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
+    }
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const raw = await this._col().findOne( mapped);
+      const nativeOpts: ZeroshipDbFindOpts = {};
+      if (opts.select !== undefined) {
+        nativeOpts.select = opts.select.map((f) => this._toColumn(f));
+      }
+      if (opts.orderBy !== undefined) {
+        const mappedOrder: Record<string, 1 | -1> = {};
+        for (const [k, v] of Object.entries(opts.orderBy)) {
+          mappedOrder[this._toColumn(k)] = v as 1 | -1;
+        }
+        nativeOpts.orderBy = mappedOrder;
+      }
+      const raw = await this._col().findOne(mapped, nativeOpts);
       if (raw === null) return null;
       const result = parseRaw<PlainObject>(raw);
       if (result === null) return null;
       return mapResultDoc(result, this._toField) as Row<S>;
     });
-  }
-
-  /** Fetch the document with the given `id`. Returns `null` if missing. */
-  async get(id: number): Promise<Result<Row<S> | null>> {
-    return this.findOne({ id } as Filter<S>);
   }
 
   /** Returns true if at least one document matches `filter`. */
@@ -446,7 +464,7 @@ export class Collection<S = PlainObject> {
       const conflictCols = options.conflictFields.map((f) => this._toColumn(f));
       const raw = await this._col().upsert(
         outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
-        conflictCols,
+        { conflictFields: conflictCols },
       );
       const result = parseRaw<PlainObject>(raw);
       return mapResultDoc(result!, this._toField) as Row<S>;
@@ -594,8 +612,8 @@ export class Collection<S = PlainObject> {
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const raw = await this._col().count(mapped);
-      const result = parseRaw<{ count: number }>(raw);
-      return result?.count ?? 0;
+      const result = parseRaw<number>(raw);
+      return result ?? 0;
     });
   }
 

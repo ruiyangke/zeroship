@@ -377,6 +377,10 @@ async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
 }
 
 /// Execute a built query expecting a count result.
+///
+/// Resolves the Promise with the raw integer as a JSON number string
+/// (`"42"`) — no `{count: N}` wrap. The SDK reads it directly via
+/// `JSON.parse(raw)` as a number.
 async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = run_sql(&bq.sql, &param_refs).await
@@ -387,7 +391,7 @@ async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
         .map(|r| r.get::<_, i64>("count"))
         .unwrap_or(0);
 
-    Ok(serde_json::json!({ "count": count }).to_string())
+    Ok(count.to_string())
 }
 
 /// Execute an insert/update/delete query, returning the affected rows.
@@ -632,14 +636,18 @@ pub(crate) fn dispatch_find_one<'s>(
     app_id: &str,
     collection: &str,
     filter: Value,
+    opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     // P8b — record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
+    let order_by = opts.get("orderBy");
+    let select = opts.get("select");
+
     let (op_id, request_id, promise) = setup_promise(scope, &state);
-    let bq = match query::build_find(app_id, collection, &filter, Some(1), None, None, None) {
+    let bq = match query::build_find(app_id, collection, &filter, Some(1), None, order_by, select) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2423,9 +2431,15 @@ pub fn replication_setup(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    // Optional app_id override (operator path); default to current
-    // app context.
-    let app_id = get_string_arg(scope, &args, 0).unwrap_or_else(|| get_app_id(&state));
+    // Options bag: `{ appId?: string }`. The optional `appId` override
+    // is the operator path (called by the control plane for any app);
+    // omitting it defaults to the current isolate's app context.
+    let opts = parse_json_arg(scope, &args, 0).unwrap_or(Value::Object(serde_json::Map::new()));
+    let app_id = opts
+        .get("appId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| get_app_id(&state));
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2474,7 +2488,10 @@ pub fn replication_watchdog(
     rv.set(promise.into());
 }
 
-/// `zeroship.db.replicationDropAbandoned(inactiveSeconds)` → Promise<string[] JSON>
+/// `zeroship.db.replicationDropAbandoned(opts?)` → Promise<string[] JSON>
+///
+/// Options: `{ inactiveSeconds?: number }` — threshold for "abandoned"
+/// (default 3600s = 1h). Returns the names of dropped slots.
 pub fn replication_drop_abandoned(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -2484,7 +2501,11 @@ pub fn replication_drop_abandoned(
         .get_slot::<SharedState>()
         .expect("RuntimeState not in isolate slot")
         .clone();
-    let inactive_seconds = get_i64_arg(scope, &args, 0).unwrap_or(3600);
+    let opts = parse_json_arg(scope, &args, 0).unwrap_or(Value::Object(serde_json::Map::new()));
+    let inactive_seconds = opts
+        .get("inactiveSeconds")
+        .and_then(Value::as_i64)
+        .unwrap_or(3600);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {

@@ -23,6 +23,7 @@
 
 use std::cell::RefCell;
 
+use serde_json::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
@@ -170,18 +171,26 @@ impl Collection {
     // callbacks on `env.db` (still registered for SDK back-compat)
     // call the same helpers.
 
+    /// `collection.findOne(filter, opts?)` — fetch the first matching row.
+    ///
+    /// `opts.select` (string[]) projects to a subset of columns;
+    /// `opts.orderBy` (Record<col, 1|-1>) deterministically picks
+    /// which row to return when the filter matches several. `limit` /
+    /// `offset` from `find`'s opts are ignored here.
     #[v8_method]
     #[v8_name = "findOne"]
     fn find_one<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         let state = callbacks::runtime_state(scope);
         let app_id = callbacks::app_id_for(&state);
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_find_one(scope, &app_id, &collection, filter_v).into()
+        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        callbacks::dispatch_find_one(scope, &app_id, &collection, filter_v, opts_v).into()
     }
 
     #[v8_method]
@@ -316,12 +325,16 @@ impl Collection {
         callbacks::dispatch_delete_many(scope, &app_id, &collection, filter_v).into()
     }
 
+    /// `collection.upsert(doc, opts)` — insert or update on conflict.
+    ///
+    /// `opts.conflictFields` (string[]) names the ON CONFLICT target
+    /// columns. Other opts keys are reserved for future use.
     #[v8_method]
     fn upsert<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         doc: v8::Local<v8::Value>,
-        conflict_fields: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.upsert")
@@ -331,7 +344,14 @@ impl Collection {
         let state = callbacks::runtime_state(scope);
         let app_id = callbacks::app_id_for(&state);
         let doc_v = callbacks::read_json_arg(scope, Some(doc));
-        let conflict_v = callbacks::read_json_arg(scope, Some(conflict_fields));
+        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        // Extract `opts.conflictFields` — a JSON array of column names.
+        // Missing / wrong-shape produces an empty array, which causes
+        // `build_upsert` to reject with a clear error message.
+        let conflict_v = opts_v
+            .get("conflictFields")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
         callbacks::dispatch_upsert(scope, &app_id, &collection, doc_v, conflict_v).into()
     }
 

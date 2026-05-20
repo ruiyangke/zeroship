@@ -94,8 +94,10 @@ type SchemaInput =
 export type TxCollection<S = PlainObject> = {
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
-  get(id: number): Promise<Row<S> | null>;
-  findOne(filter: Filter<S>): Promise<Row<S> | null>;
+  get(
+    idOrFilter: number | Filter<S>,
+    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+  ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>>;
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
@@ -170,11 +172,11 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async insertMany(rows: RowInput<S>[]) {
       return unwrap(await collection.insertMany(rows));
     },
-    async get(id: number) {
-      return unwrap(await collection.get(id));
-    },
-    async findOne(filter: Filter<S>) {
-      return unwrap(await collection.findOne(filter));
+    async get(
+      idOrFilter: number | Filter<S>,
+      opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+    ) {
+      return unwrap(await collection.get(idOrFilter, opts));
     },
     async exists(filter: Filter<S>) {
       return unwrap(await collection.exists(filter));

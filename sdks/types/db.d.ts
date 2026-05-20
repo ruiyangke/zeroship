@@ -182,7 +182,7 @@ interface ZeroshipCollection {
   find(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string>;
 
   /** Find one document. Returns JSON string or null. */
-  findOne(filter: ZeroshipDbFilter): Promise<string | null>;
+  findOne(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string | null>;
 
   /** Insert one document. Returns JSON string of the inserted row. */
   insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
@@ -202,10 +202,15 @@ interface ZeroshipCollection {
   /** Delete multiple documents. Returns JSON string with { deleted: N }. */
   deleteMany(filter: ZeroshipDbFilter): Promise<string>;
 
-  /** Upsert a document (insert or update on conflict). Returns JSON string of the row. */
-  upsert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>, conflictFields: string[]): Promise<string>;
+  /** Upsert a document (insert or update on conflict). Returns JSON string of the row.
+   *  `opts.conflictFields` names the ON CONFLICT target columns. */
+  upsert(
+    doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
+    opts: { conflictFields: string[] },
+  ): Promise<string>;
 
-  /** Count documents matching filter. Returns JSON string with { count: N }. */
+  /** Count documents matching filter. Returns the integer as a JSON
+   *  number string (`"42"`); the SDK parses it to a number directly. */
   count(filter: ZeroshipDbFilter): Promise<string>;
 
   /** Get distinct values for a field. Returns JSON array string. */
@@ -382,7 +387,7 @@ interface ZeroshipDb {
    *
    * Requires `wal_level=logical` on the server.
    */
-  replicationSetup(appId?: string): Promise<string>;
+  replicationSetup(opts?: { appId?: string }): Promise<string>;
 
   /**
    * Operator-only: run the C1 watchdog query against
@@ -393,9 +398,9 @@ interface ZeroshipDb {
 
   /**
    * Operator-only: drop replication slots that have been
-   * inactive for at least `inactiveSeconds`. Returns the names of
-   * dropped slots as a JSON array. Apps whose slot was reaped see a
-   * `resync` event on next subscriber attach.
+   * inactive for at least `opts.inactiveSeconds` (default 3600).
+   * Returns the names of dropped slots as a JSON array. Apps whose
+   * slot was reaped see a `resync` event on next subscriber attach.
    */
-  replicationDropAbandoned(inactiveSeconds?: number): Promise<string>;
+  replicationDropAbandoned(opts?: { inactiveSeconds?: number }): Promise<string>;
 }

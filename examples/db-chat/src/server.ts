@@ -64,7 +64,7 @@ export const listMessages = query(
 
 export const getMessage = query(
   async ({ id }: { id: MessageId }) => {
-    return db.messages.findOne({ id });
+    return db.messages.get(id);
   },
 );
 

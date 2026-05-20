@@ -1,7 +1,7 @@
 /**
  * @zeroship/db — Tier D1 ESLint rule.
  *
- * Flags `.find({...})`, `.findOne({...})`, and `.deleteMany({...})` calls
+ * Flags `.find({...})`, `.get({...})`, and `.deleteMany({...})` calls
  * whose filter is a single-field equality on a column that is unlikely
  * to be indexed. The selectivity heuristic is intentionally simple for
  * V1 — false positives are acceptable (TODO: cross-reference the

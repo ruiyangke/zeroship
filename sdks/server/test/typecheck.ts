@@ -33,7 +33,7 @@ import {
 
 // ✓ reads compile
 export const listUsers = query<unknown, unknown[]>(async (_args, ctx) => {
-  const { data: u } = await ctx.db.users.findOne({ id: 1 });
+  const { data: u } = await ctx.db.users.get({ id: 1 });
   await ctx.db.users.countDocuments({});
   await ctx.db.users.exists({ id: 1 });
   return [u];

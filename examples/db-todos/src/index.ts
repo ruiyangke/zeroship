@@ -62,7 +62,7 @@ export const listTodos = query(
 
 export const getTodo = query(
   async ({ id }: { id: TodoId }) => {
-    return db.todos.findOne({ id });
+    return db.todos.get(id);
   },
 );
 

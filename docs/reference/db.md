@@ -55,7 +55,7 @@ Low-level "syscalls" the SDK calls. SDK authors may use these directly.
 
 ```typescript
 zeroship.db.find(collection, filter, opts)          → Promise<string>
-zeroship.db.findOne(collection, filter)             → Promise<string | null>
+zeroship.db.get(collection, filter)             → Promise<string | null>
 zeroship.db.insert(collection, doc)                 → Promise<string>
 zeroship.db.insertMany(collection, docs)            → Promise<string>
 zeroship.db.update(collection, filter, patch)   → Promise<string>
@@ -212,7 +212,7 @@ const { data } = await users.insertMany([
 
 ```javascript
 // Find one — returns document or null
-const { data } = await users.findOne({ email: "alice@example.com" });
+const { data } = await users.get({ email: "alice@example.com" });
 // → { id, name, email, ... } or null
 
 // Find by ID (shorthand)

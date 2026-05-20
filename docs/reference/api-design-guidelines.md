@@ -15,7 +15,7 @@ db.users.find({ id })
 db.collection("users").where("id", id).get()
 
 // Good: one way
-await users.findOne({ id });
+await users.get({ id });
 ```
 
 ### 2. Zero setup
@@ -65,7 +65,7 @@ Read the code aloud. If it sounds like a sentence, it's right.
 
 ```javascript
 // Reads as: "find one user where email is alice"
-await users.findOne({ email: "alice@example.com" });
+await users.get({ email: "alice@example.com" });
 
 // Reads as: "update product X, increment stock" — returns the row
 await products.update(id, { stock: { $inc: 1 } });
@@ -82,30 +82,30 @@ await users.count({ role: "admin" });
 Every method follows: `(what to match, what to do)`.
 
 ```
-findOne(filter)
+get(idOrFilter, opts?)
 find(filter)
-updateOne(filter, changes)
-updateMany(filter, changes)
-deleteOne(filter)
-deleteMany(filter)
-insert(data)              ← no filter needed
+update(idOrFilter, patch)
+updateMany(filter, patch)
+delete(idOrFilter, opts?)
+deleteMany(filter, opts?)
+insert(row)              ← no filter needed
 ```
 
-Never: `(data, filter)`, `(options, filter, data)`, or any other order.
+Never: `(row, filter)`, `(options, filter, row)`, or any other order.
 
 ### 6. Predictable return types
 
 The return type should be obvious from the method name:
 
 ```
-insert(doc)              → document (the created doc with id)
-insertMany([docs])       → [documents]
-findOne(filter)          → document | null
-find(filter)             → [documents]
-updateOne(filter, data)  → { updated: 0 | 1 }
-updateMany(filter, data) → { updated: n }
-deleteOne(filter)        → { deleted: 0 | 1 }
-deleteMany(filter)       → { deleted: n }
+insert(row)              → row (with id, createdAt, updatedAt)
+insertMany([rows])       → [rows]
+get(idOrFilter)          → row | null
+find(filter)             → [rows]
+update(idOrFilter, p)    → row | null
+updateMany(filter, p)    → { matchedCount, modifiedCount }
+delete(idOrFilter)       → row | null
+deleteMany(filter)       → { deletedCount }
 count(filter)            → number
 exists(filter)           → boolean
 ```
@@ -186,8 +186,7 @@ Each method in the chain narrows or transforms the query. The chain executes on 
 
 | Pattern | Convention | Examples |
 |---|---|---|
-| Fetch by id | `get` | `users.get(5)` |
-| Fetch one by filter | `findOne` | `users.findOne({ email })` |
+| Fetch one (id or filter) | `get` | `users.get(5)` · `users.get({ email })` |
 | Fetch many | `find` | `users.find({ role: "admin" }).sort('-createdAt')` |
 | Insert | `insert` | `users.insert({ name: "Alice" })` |
 | Insert many | `insertMany` | `users.insertMany([...])` |
@@ -304,10 +303,11 @@ find(id)                  // find by id
 find({ role: "admin" })   // find by filter
 find("admin")             // find by... role? name?
 
-// Good: separate methods
-findOne({ id })           // find one by filter
-find({})                  // find all
-find({ role: "admin" })   // find by filter
+// Good: get() narrows to one row; find() always returns many
+get(id)                   // by id
+get({ email })            // by filter
+find({})                  // all rows
+find({ role: "admin" })   // many by filter
 ```
 
 ### Don't: return different types from the same method
@@ -318,7 +318,7 @@ users.get(id)     // returns one user (object)
 users.get()       // returns all users (array)
 
 // Good:
-users.findOne({ id })   // always object | null
+users.get({ id })   // always object | null
 users.find({})          // always array
 ```
 
