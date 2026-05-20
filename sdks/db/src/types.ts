@@ -216,6 +216,36 @@ export const naming = {
   } satisfies NamingStrategy,
 };
 
+// ---------------------------------------------------------------------------
+// Infer<> — type-only helpers that pull `Row` / `RowInput` / `Id` out of a
+// Collection without `Parameters<typeof col.insertMany>[0][number]` plumbing.
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic identity passthrough. Mostly useful so users can write
+ * `Infer<typeof db.users.RowInput>` symmetrically with `InferRow<...>` etc.
+ * — the input is already the resolved type; this just gives the idiom a
+ * single named entry point.
+ */
+export type Infer<T> = T extends infer X ? X : never;
+
+/** Persisted-row type for a Collection — `Row<S>` for `Collection<S, _>`. */
+export type InferRow<C> =
+  C extends { readonly _schema_brand?: infer S } ? Row<S> :
+  C extends import("./collection.js").Collection<infer S, any> ? Row<S> :
+  never;
+
+/** Insert-shape type for a Collection — `RowInput<S>` for `Collection<S, _>`. */
+export type InferRowInput<C> =
+  C extends { readonly _schema_brand?: infer S } ? RowInput<S> :
+  C extends import("./collection.js").Collection<infer S, any> ? RowInput<S> :
+  never;
+
+/** Branded `Id<N>` for a Collection — `Id<"users">` for `Collection<_, "users">`. */
+export type InferId<C> =
+  C extends import("./collection.js").Collection<any, infer N extends string> ? Id<N> :
+  never;
+
 /** Wraps a successful value in Result. */
 export function ok<T>(data: T): Result<T> {
   return { data, error: null };

@@ -16,7 +16,7 @@
 // Wire conventions match the existing examples (hono-demo etc.):
 //   exports become RPC procedures at /_zs/v1/<name>.
 
-import { createDb, t, schema } from "@zeroship/db";
+import { createDb, t, schema, type InferRowInput } from "@zeroship/db";
 import { query, mutation, action, runQuery } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
@@ -160,7 +160,7 @@ export const shareToWebhook = action(
 );
 
 // Seed helper — used by smoke.sh to provision users.
-type SeedUserInput = { email: string; name: string; handle: string };
+type SeedUserInput = InferRowInput<typeof db.users>;
 
 export const seedUser = mutation(
   async ({ email, name, handle }: SeedUserInput) => {
