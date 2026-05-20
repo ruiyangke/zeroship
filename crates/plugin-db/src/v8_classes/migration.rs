@@ -236,9 +236,10 @@ impl Migration {
     fn commit_batch<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
+        wrapper: v8::Local<v8::Object>,
         spec_val: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        commit_batch_with_spec(scope, self, spec_val).into()
+        commit_batch_with_spec(scope, self, wrapper, spec_val).into()
     }
 }
 
@@ -287,9 +288,20 @@ struct CommitSpec {
 /// Synchronously parse the spec, mint a Promise, and spawn the
 /// `exec_commit_batch` future. Resolves with `undefined`; rejects on
 /// Postgres error.
+///
+/// `wrapper` is the JS Migration object (`args.this()`); we capture a
+/// `v8::Global` of it into the async block so V8 can't finalise the
+/// Box<Migration> behind `this` while the future is alive. Sync
+/// `#[v8_method]`s don't auto-pin their receiver (only
+/// `#[v8_async_method]` does — see `runtime-macros/.../method.rs`), so
+/// without this Global a JS-side `m.commitBatch(spec)` whose only
+/// reference is dropped before the spawned op settles would let GC
+/// reclaim the wrapper mid-await; the post-`exec_commit_batch` `&*` of
+/// `this_addr` would then be a use-after-free.
 fn commit_batch_with_spec<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     this: &Migration,
+    wrapper: v8::Local<v8::Object>,
     spec_val: v8::Local<v8::Value>,
 ) -> v8::Local<'s, v8::Promise> {
     use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
@@ -343,15 +355,17 @@ fn commit_batch_with_spec<'s>(
     let request_id = state.borrow().executing_request_id;
     let is_done = spec.is_done;
 
-    // Capture a raw pointer to `this` so the future can flip
-    // `inner = None` on isDone. The Migration wrapper is reachable via
-    // the JS-side caller; the macro-invoked callback path already holds
-    // the wrapper alive for the duration of the call, and we don't
-    // await before the pointer use.
+    // Pin the JS wrapper across the await so the Box<Migration> behind
+    // `this_addr` stays live. `#[v8_method]` (sync) doesn't pin the
+    // receiver — only `#[v8_async_method]` does. The raw pointer is a
+    // typed shortcut into the Box; the Global is what keeps the Box
+    // alive.
+    let wrapper_global = v8::Global::new(scope, wrapper);
     let this_ptr: *const Migration = this;
     let this_addr = this_ptr as usize;
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let _keepalive = wrapper_global;
         let pool_check = ensure_pool().await;
         if let Err(e) = pool_check {
             return OpResult::JsValue {
@@ -376,12 +390,11 @@ fn commit_batch_with_spec<'s>(
         match result {
             Ok(_) => {
                 if is_done {
-                    // SAFETY: the V8 callback that invoked
-                    // `commitBatch` keeps `this` alive for the lifetime
-                    // of this future via the JS-side promise — the user
-                    // can't drop the wrapper while still awaiting the
-                    // returned promise. Clearing `inner` is a RefCell
-                    // mutation, no aliasing risk.
+                    // SAFETY: `_keepalive` (the wrapper Global captured
+                    // above) is still in scope here, pinning the Box
+                    // behind `this_addr`. Clearing `inner` is a RefCell
+                    // mutation; the macro rejects `&mut self` async, so
+                    // no aliasing risk from a concurrent &mut.
                     let inst: &Migration = unsafe { &*(this_addr as *const Migration) };
                     *inst.inner.borrow_mut() = None;
                 }
