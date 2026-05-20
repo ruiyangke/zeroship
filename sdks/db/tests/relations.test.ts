@@ -323,17 +323,22 @@ describe("with: { fk: true } — relation-aware reads", () => {
 });
 
 describe("with: type-level inference (compile-time)", () => {
-  test("Row<S> & WithRelations<W> exposes the joined key at the type layer", async () => {
+  test("Row<S> & WithRelations<S, W, AllSchemas> resolves the joined key to Row<TargetSchema>", async () => {
     const { db } = makeDb();
     const { data } = await db.todos.find({ projectId: 10 }, { with: { userId: true } });
     if (!data) return;
     const first = data[0];
-    // `userId` widens to `PlainObject | null` — narrowing on null is a real
-    // runtime check; the rest is type-only assertion via assignability.
+    // After the v2 generics refactor `first.userId` is `Row<usersSchema> | null`
+    // — no cast needed. `first.userId.email` is `string`, `first.userId.id`
+    // is `number`, etc. This is the load-bearing assertion: it would NOT
+    // compile under the v1 `WithRelations<W>` (which widened to PlainObject).
     if (first.userId !== null) {
-      // The joined value is the target row; we know it has an `id` field.
-      const _id: unknown = (first.userId as Record<string, unknown>).id;
-      assert.ok(_id !== undefined);
+      const email: string = first.userId.email;
+      const name: string = first.userId.name;
+      const id: number = first.userId.id;
+      assert.equal(typeof email, "string");
+      assert.equal(typeof name, "string");
+      assert.equal(typeof id, "number");
     }
   });
 });

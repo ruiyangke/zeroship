@@ -257,16 +257,72 @@ export type InferId<C> =
 export type WithSpec = Record<string, true>;
 
 /**
- * v1 type-level shape for joined rows. Each key in `W` becomes a field
- * on the row carrying the target's plain object (or `null`). The
- * target's full `Row<T>` shape is not plumbed through here: that would
- * require threading the parent db's schema map into every Collection's
- * generic, which is a larger refactor. Users who want stricter typing
- * can cast (`row.user as Row<UsersSchema>`), or wait for the v2 type
- * plumbing tracked in `docs/reference/db.md` Relations section.
+ * Extract the target table name (e.g. `"users"`) from whatever shape the
+ * user wrote at `S[K]` for a `t.ref(...)` field. The user-facing schema
+ * dict carries a `TypeBuilder<Id<TargetName>>` at that key; the brand
+ * tag inside `Id<T>` is the lookup key for `AllSchemas[T]`.
+ *
+ * Also handles the Mongoose-style raw `{ type: "ref"; refTarget: T }`
+ * literal shape so users who skip `t.*` still get strong relation typing.
+ *
+ * Resolves to `never` when the field at `K` is not a ref — that lets
+ * callers surface a "not a t.ref field" error at the type layer.
  */
-export type WithRelations<W extends WithSpec> = {
-  [K in keyof W]: PlainObject | null;
+export type ExtractRefTarget<X> =
+  X extends TypeBuilder<infer U, any>
+    ? U extends Id<infer T>
+      ? T
+      : never
+    : X extends { type: "ref"; refTarget: infer T extends string }
+      ? T
+      : never;
+
+/**
+ * Unwrap whatever shape an `AllSchemas[name]` slot holds into the raw
+ * field-record the `Row<...>` machinery understands. Mirrors the
+ * `UnwrapSchema<T>` alias in `db.ts` but lives here so `WithRelations`
+ * can call it without importing across the module boundary.
+ *
+ * - `schema({...})` wraps `Record<string, TypeBuilder>` — strip it.
+ * - A top-level `t.union(...)` yields `TypeBuilder<UnionShape>` — strip
+ *   to `UnionShape` so the discriminator narrows correctly.
+ * - Plain field-record passes through unchanged.
+ */
+export type UnwrapSchemaForRelation<T> =
+  T extends SchemaBuilder<infer S> ? S :
+  T extends TypeBuilder<infer U, any> ? U :
+  T;
+
+/**
+ * Resolve the target table's `Row<...>` given the field type at `S[K]`
+ * and the parent db's schema map. Falls back to `PlainObject` when the
+ * target name can't be matched against any declared collection — that
+ * preserves the v1 behaviour for unknown targets without breaking
+ * compilation. Tightens to the real `Row<TargetSchema>` whenever
+ * `createDb`'s schema map carries the target name (the common case).
+ */
+export type ResolveTargetRow<X, AllSchemas> =
+  ExtractRefTarget<X> extends infer Target
+    ? Target extends keyof AllSchemas
+      ? Row<UnwrapSchemaForRelation<AllSchemas[Target]>>
+      : Target extends string
+        ? PlainObject
+        : never
+    : never;
+
+/**
+ * Type-level shape for joined rows. Each key in `W` becomes a field on
+ * the row carrying the target's full `Row<TargetSchema>` (or `null`).
+ *
+ * `AllSchemas` is the schema map that `createDb` was given — threading
+ * it through `Collection<S, N, AllSchemas>` lets us look up each key's
+ * `t.ref(target)` and resolve `target` to the target collection's `Row`.
+ * The default `Record<string, unknown>` keeps direct `Collection`/`Query`
+ * users (e.g. `model("users", ...)`) compiling — they degrade to
+ * `PlainObject` per relation, exactly the v1 behaviour.
+ */
+export type WithRelations<S, W extends WithSpec, AllSchemas = Record<string, unknown>> = {
+  [K in keyof W & keyof S]: ResolveTargetRow<S[K], AllSchemas> | null;
 };
 
 /** Wraps a successful value in Result. */

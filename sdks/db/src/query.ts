@@ -85,9 +85,21 @@ function sameOrderBy(a: Record<string, 1 | -1>, b: Record<string, 1 | -1>): bool
  * Chainable query object returned by `Collection.find()`.
  * The generic parameter `S` is the raw schema shape; `P` is the projected document shape.
  * When `.select()` is called with typed field names, `P` narrows to `Pick<Row<S>, K>`.
+ *
+ * `AllSchemas` is the parent db's full schema map (threaded in by
+ * `createDb` via `Collection<S, N, AllSchemas>`). It lets `.with({ fk:
+ * true })` resolve the joined field's type to the target collection's
+ * `Row<...>` instead of the safe-default `PlainObject`. Direct `new
+ * Query(...)` callers inherit the safe default, so the v1 behaviour is
+ * unchanged for tests that build a Query without a parent db.
+ *
  * Collects query options lazily and executes via the native layer when awaited.
  */
-export class Query<S = PlainObject, P = Row<S>> {
+export class Query<
+  S = PlainObject,
+  P = Row<S>,
+  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
+> {
   private _collection: string;
   private _filter: ZeroshipDbFilter;
   private _toField: (s: string) => string;
@@ -172,9 +184,9 @@ export class Query<S = PlainObject, P = Row<S>> {
    * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
    * `data[i].user` typechecks without a cast.
    */
-  with<W extends WithSpec>(spec: W): Query<S, P & WithRelations<W>>;
-  with(spec: WithSpec): Query<S, any>;
-  with(spec: WithSpec): Query<S, any> {
+  with<W extends WithSpec>(spec: W): Query<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with(spec: WithSpec): Query<S, any, AllSchemas>;
+  with(spec: WithSpec): Query<S, any, AllSchemas> {
     // Reject early when the Query was constructed without a relation
     // loader (e.g. someone called `new Query(...)` directly outside
     // `Collection.find`). The old behaviour was a silent no-op — the
@@ -187,7 +199,7 @@ export class Query<S = PlainObject, P = Row<S>> {
       );
     }
     this._with = { ...(this._with ?? {}), ...spec };
-    return this as unknown as Query<S, any>;
+    return this as unknown as Query<S, any, AllSchemas>;
   }
 
   /**
@@ -199,9 +211,9 @@ export class Query<S = PlainObject, P = Row<S>> {
    * When called with a typed array of literal field names, the return type narrows
    * to `Query<S, Pick<Row<S>, K>>` so that awaited results only contain those fields.
    */
-  select<K extends keyof Row<S> & string>(fields: K[]): Query<S, Pick<Row<S>, K>>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, P>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, any> {
+  select<K extends keyof Row<S> & string>(fields: K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select(s: string | string[] | Record<string, number | boolean>): Query<S, P, AllSchemas>;
+  select(s: string | string[] | Record<string, number | boolean>): Query<S, any, AllSchemas> {
     if (Array.isArray(s)) {
       this._select = s;
     } else if (typeof s === "string") {
@@ -218,7 +230,7 @@ export class Query<S = PlainObject, P = Row<S>> {
         .filter(([, v]) => v)
         .map(([k]) => k);
     }
-    return this as unknown as Query<S, any>;
+    return this as unknown as Query<S, any, AllSchemas>;
   }
 
   /**

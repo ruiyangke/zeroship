@@ -271,9 +271,19 @@ function _filterCoveredByIndex(
  * types are derived. `N` carries the table name as a string-literal so the
  * `Id` accessor below produces `Id<N>` rather than `Id<string>`.
  *
+ * `AllSchemas` is the parent db's full schema map — threaded in by
+ * `createDb` so a `find({...}, { with: { userId: true } })` can resolve
+ * the joined field's type to the target collection's `Row<...>` rather
+ * than the v1 fallback of `PlainObject`. Standalone `model()` callers
+ * inherit the safe default and degrade to `PlainObject` per relation.
+ *
  * Use `model()` or `createDb()` — do not construct directly.
  */
-export class Collection<S = PlainObject, N extends string = string> {
+export class Collection<
+  S = PlainObject,
+  N extends string = string,
+  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
+> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
@@ -631,7 +641,7 @@ export class Collection<S = PlainObject, N extends string = string> {
   async get<W extends WithSpec>(
     idOrFilter: number | Id<N> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
-  ): Promise<Result<(Row<S> & WithRelations<W>) | null>>;
+  ): Promise<Result<(Row<S> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
     idOrFilter: number | Id<N> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
@@ -745,13 +755,13 @@ export class Collection<S = PlainObject, N extends string = string> {
   find<W extends WithSpec>(
     filter: Filter<S>,
     opts: { with: W },
-  ): Query<S, Row<S> & WithRelations<W>>;
-  find(filter?: Filter<S>): Query<S, Row<S>>;
-  find(filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): Query<S, Row<S>> {
+  ): Query<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
+  find(filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): Query<S, Row<S>, AllSchemas> {
     trackCollectionAccess(this._name);
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-    const q = new Query<S, Row<S>>(
+    const q = new Query<S, Row<S>, AllSchemas>(
       this._name,
       mapped,
       async (_col, f, fopts) => {

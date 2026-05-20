@@ -113,8 +113,14 @@ type SchemaInput =
 /**
  * A typed collection inside a transaction — same API as Collection but throws
  * on error instead of returning Result. Generic over schema shape S.
+ *
+ * `AllSchemas` mirrors `Collection<S, N, AllSchemas>` — `createDb` passes
+ * the full schema map so `tx.x.find({...}, { with: { fk: true } })`
+ * resolves the joined field to the target collection's `Row<...>` at the
+ * type layer. Default `Record<string, unknown>` keeps direct `TxCollection`
+ * consumers compiling (joined fields degrade to `PlainObject`).
  */
-export type TxCollection<S = PlainObject> = {
+export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
@@ -124,14 +130,14 @@ export type TxCollection<S = PlainObject> = {
   get<W extends WithSpec>(
     idOrFilter: number | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
-  ): Promise<(Row<S> & WithRelations<W>) | null>;
+  ): Promise<(Row<S> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: number | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<W>>;
-  find(filter?: Filter<S>): TxQuery<S, Row<S>>;
+  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
   update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
@@ -143,14 +149,18 @@ export type TxCollection<S = PlainObject> = {
 };
 
 /** Query inside a transaction — same chainable API but resolves to data directly */
-export type TxQuery<S = PlainObject, P = Row<S>> = {
-  sort(s: Record<string, number> | string): TxQuery<S, P>;
-  limit(n: number): TxQuery<S, P>;
-  skip(n: number): TxQuery<S, P>;
-  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>>;
-  select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P>;
-  after(id: number): TxQuery<S, P>;
-  with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<W>>;
+export type TxQuery<
+  S = PlainObject,
+  P = Row<S>,
+  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  sort(s: Record<string, number> | string): TxQuery<S, P, AllSchemas>;
+  limit(n: number): TxQuery<S, P, AllSchemas>;
+  skip(n: number): TxQuery<S, P, AllSchemas>;
+  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
+  select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
+  after(id: number): TxQuery<S, P, AllSchemas>;
+  with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
   then<TResult1 = P[], TResult2 = never>(
     resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
     reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
@@ -181,9 +191,9 @@ type UnwrapSchema<T> =
 
 /** The db object returned by createDb — collections are fully typed per schema */
 export type Db<T extends Record<string, SchemaInput>> = {
-  [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string>
+  [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>
 } & {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   /**
    * Reactive query layer. Runs `queryFn`, yields the initial result,
    * then re-runs and yields a fresh result on every change to any
@@ -523,8 +533,11 @@ export function createDb<const T extends Record<string, SchemaInput>>(
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions.
   // Mirror the outer `Db<T>`'s `UnwrapSchema<T[K]>` normalisation so
-  // `tx.x.insert(...)` infers identically to `db.x.insert(...)`.
-  const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> };
+  // `tx.x.insert(...)` infers identically to `db.x.insert(...)`. The third
+  // generic `T` threads the parent db's full schema map through TxCollection
+  // → TxQuery so `tx.x.find({...}, { with: { userId: true } })` resolves the
+  // joined field to `Row<TargetSchema>` (mirrors the outer Db<T>).
+  const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
   for (const [name, col] of Object.entries(collections)) {
     (txCollections as Record<string, TxCollection<unknown>>)[name] =
       createTxCollection(col as Collection<unknown>);
@@ -540,7 +553,7 @@ export function createDb<const T extends Record<string, SchemaInput>>(
       return createLive<R>(db, queryFn, liveOptions);
     },
 
-    async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
+    async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
       // BEGIN — the native runtime returns a Transaction wrapper
       // (v8_class) whose .commit() / .rollback() are explicit methods.
       // The wrapper's Drop auto-rollbacks if a thrown handler skips the
