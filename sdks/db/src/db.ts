@@ -532,24 +532,39 @@ export function createDb<const T extends Record<string, SchemaInput>>(
           "runtime is missing the Transaction v8_class surface.",
         ));
       }
-      const tx = await nativeAny.beginTransaction(
-        options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
-      );
-
-      // Bypass the per-collection IdLoader for the duration of the
-      // tx body — batched reads route through `TX_CONN` correctly,
-      // but mixing a tx-active load with a non-tx load already
-      // queued in the same microtask would blur the connection
-      // boundary. Each Collection's `_txDepth` counter is bumped
-      // here and decremented in the `finally` below.
+      // DRAIN BEFORE BEGIN — pending non-tx batched reads must complete
+      // against the non-tx connection. `beginTransaction` plants TX_CONN
+      // synchronously on resolution; any deferred batch that runs after
+      // BEGIN would route its `find(...)` onto the tx connection, mixing
+      // its results into the wrong scope. Drain awaits the underlying
+      // batched fetches before we open the tx.
+      //
+      // The IdLoader scheduling discipline ("flush on next microtask")
+      // means a `get(id)` queued in the same turn as `db.transaction(...)`
+      // would otherwise lose this race: the BEGIN promise and the flush
+      // microtask interleave nondeterministically. Awaiting drain forces
+      // a happens-before edge.
       const collectionList = Object.values(collections).map(
         (c) => c as unknown as {
           _txDepth: number;
           _idLoader: { _drain(): Promise<void> } | null;
         },
       );
+      await Promise.all(
+        collectionList
+          .map((c) => c._idLoader?._drain())
+          .filter((p): p is Promise<void> => p !== undefined),
+      );
+
+      const tx = await nativeAny.beginTransaction(
+        options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
+      );
+
+      // Bypass the per-collection IdLoader for the duration of the
+      // tx body — every `get(id)` inside the callback dispatches
+      // directly through the tx connection. Decremented in every
+      // exit path of the body/commit logic below.
       for (const c of collectionList) {
-        if (c._idLoader !== null) void c._idLoader._drain();
         c._txDepth += 1;
       }
 
