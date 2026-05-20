@@ -99,18 +99,21 @@ export function model<S extends Record<string, unknown>>(
     ...(idx.unique ? { unique: true } : {}),
   }));
 
+  // Mirror db.ts:467-475 — call via `.call(native, ...)` so the v8_class
+  // brand check sees the right receiver. The unbound-fn form drops `this`
+  // and triggers "Illegal invocation"; see commit e564c010 for the sibling
+  // fix in createDb. The narrow catch only swallows the synchronous
+  // env-resolution path (covered by `getNativeDb`); a native rejection
+  // becomes a rejected promise stored on the Collection and surfaces as
+  // `result.error` on first CRUD, which is the correct signal.
   let registrationPromise: Promise<void> | null = null;
   if (!skipRegister && native.registerModel) {
-    try {
-      const registerAny = native.registerModel as unknown as (
-        collection: string,
-        schema: ZeroshipDbSchema,
-        indexes?: ZeroshipDbNamedIndex[],
-      ) => Promise<void>;
-      registrationPromise = registerAny(name, dbSchema, wireIndexes) as Promise<void>;
-    } catch {
-      // Ignore in non-runtime environments (tests, SSR)
-    }
+    registrationPromise = (native.registerModel as unknown as (
+      this: typeof native,
+      collection: string,
+      schema: ZeroshipDbSchema,
+      indexes?: ZeroshipDbNamedIndex[],
+    ) => Promise<void>).call(native, name, dbSchema, wireIndexes);
   }
 
   return new Collection<S>(name, normalized, native, {
