@@ -510,6 +510,40 @@ pub async fn exec_commit_batch(
         return Err(OpError::error(format!("db: BEGIN failed: {e}")));
     }
 
+    // Gap C: lock the audit row FOR UPDATE inside the batch's own
+    // transaction so a concurrent `migrations.cancel({name, collection})`
+    // on another connection serialises against the commit. If the row
+    // is already `cancelled` (operator cancelled between fetchBatch
+    // and commitBatch), ROLLBACK and surface a coded error so the SDK
+    // can stop the loop cleanly. The row lock holds for the rest of
+    // the batch's mutations, which means concurrent cancels block
+    // until COMMIT — at which point they see `status='running'` flip
+    // to whatever the SDK requested (or stay running for another pass).
+    let id_s = audit_id.to_string();
+    let status_sql = format!(
+        r#"SELECT status FROM "{app_id}"."__zeroship_migrations"
+            WHERE id = $1::bigint FOR UPDATE"#
+    );
+    let status_rows = match client
+        .query_text_params(&status_sql, &[id_s.as_str()])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            let _ = client.execute("ROLLBACK", &[]).await;
+            return_lock_client(client);
+            return Err(OpError::error(format!("db: audit lock failed: {e}")));
+        }
+    };
+    if let Some(row) = status_rows.first() {
+        let status: String = row.get("status");
+        if status == "cancelled" {
+            let _ = client.execute("ROLLBACK", &[]).await;
+            return_lock_client(client);
+            return Err(err_cancelled_mid_run());
+        }
+    }
+
     // Apply each update.
     for upd in updates_arr {
         let Some(obj) = upd.as_object() else {

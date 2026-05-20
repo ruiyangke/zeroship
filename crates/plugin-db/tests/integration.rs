@@ -1937,6 +1937,91 @@ async fn b1_cancel_running() {
     zeroship_plugin_db::clear_migration_lock_for_tests();
 }
 
+// Gap C — cancel landing between fetchBatch and commitBatch must
+// abort the commit, not let the batch silently mutate rows. The
+// audit row is locked FOR UPDATE inside the commit's own tx so the
+// cancel serialises against it; if status is already "cancelled"
+// when the lock is acquired, the batch ROLLBACKs and returns
+// `migration_cancelled` instead of writing.
+#[compio::test]
+async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "gap_c_cancel";
+    b1_setup_users(&pool, app, 50, false).await;
+
+    // Phase 1: begin + fetch the first batch (cursor=0, size=10).
+    let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+        .await
+        .expect("begin");
+    let fetched = parse(
+        &mig::exec_fetch_batch(app, 0, 10)
+            .await
+            .expect("fetch_batch"),
+    );
+    let rows = fetched.as_array().cloned().unwrap_or_default();
+    assert_eq!(rows.len(), 10, "fetch should return 10 rows");
+
+    // Phase 2: a separate connection cancels the run. exec_cancel uses
+    // `pool` (auto-checkout), simulating an out-of-band operator
+    // hitting the `/migrations.cancel` endpoint on a peer worker.
+    let cancel = parse(
+        &mig::exec_cancel(&pool, app, "backfill_role", "users")
+            .await
+            .expect("cancel"),
+    );
+    assert_eq!(cancel["ok"], true);
+
+    // Phase 3: commitBatch must now refuse and surface a coded
+    // `migration_cancelled` error. Pre-fix it would happily write the
+    // batch's UPDATEs because nothing re-checked status post-fetch.
+    let updates: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r["id"].as_i64().unwrap(),
+                "set": { "role": "user" }
+            })
+        })
+        .collect();
+    let commit_err = mig::exec_commit_batch(
+        app,
+        &Value::Array(updates),
+        &Value::Array(vec![]),
+        rows.last().unwrap()["id"].as_i64().unwrap(),
+        rows.len() as i64,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &commit_err.kind,
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. }
+                if code == "migration_cancelled"
+        ),
+        "got: {commit_err:?}"
+    );
+
+    // No row should have been mutated — the batch ROLLBACKed.
+    let rows_after = pool
+        .query_text_params(
+            &format!("SELECT COUNT(*) AS c FROM \"{app}\".\"users\" WHERE role IS NOT NULL"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let count: i64 = rows_after[0].get("c");
+    assert_eq!(count, 0, "no rows must be mutated when commit refused");
+
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+}
+
 // 38. B1 — cancel against an already-applied migration returns
 // `migration_not_cancellable`.
 #[compio::test]
