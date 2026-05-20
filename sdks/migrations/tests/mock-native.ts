@@ -66,10 +66,13 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
   }
 
   function rejectWith(code: string, message: string): Promise<never> {
-    // Native side resolves with `{ error: { code, message } }` for
-    // structured errors. We emulate by rejecting with the JSON string —
-    // toNativeError() unwraps it.
-    return Promise.reject(new Error(JSON.stringify({ code, message })));
+    // Native side now rejects with a real Error that carries `.code`
+    // (and optionally `.hint`) as properties — see `OpError::coded` in
+    // Rust. The mock mirrors that shape so tests exercise the same
+    // SDK path as production.
+    const err = new Error(message) as Error & { code: string };
+    err.code = code;
+    return Promise.reject(err);
   }
 
   function statusSnapshot(): NativeStatus {

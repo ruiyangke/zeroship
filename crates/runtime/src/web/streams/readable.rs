@@ -1157,6 +1157,20 @@ pub(crate) fn throw_op_error(scope: &mut v8::PinScope, err: &OpError) {
         crate::state::OpErrorKind::NodeError(code) => {
             crate::node_error::build_node_exception(scope, code, &err.message)
         }
+        crate::state::OpErrorKind::CodedError { code, hint } => {
+            let e = v8::Exception::error(scope, msg);
+            if let Ok(obj) = v8::Local::<v8::Object>::try_from(e) {
+                let ck = v8::String::new(scope, "code").unwrap();
+                let cv = v8::String::new(scope, code).unwrap();
+                obj.set(scope, ck.into(), cv.into());
+                if let Some(h) = hint {
+                    let hk = v8::String::new(scope, "hint").unwrap();
+                    let hv = v8::String::new(scope, h).unwrap();
+                    obj.set(scope, hk.into(), hv.into());
+                }
+            }
+            e
+        }
         crate::state::OpErrorKind::Error => v8::Exception::error(scope, msg),
         crate::state::OpErrorKind::JsValue(_) => unreachable!(),
     };

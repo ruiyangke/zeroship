@@ -101,7 +101,7 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
       rows = (await m.fetchBatch(cursor, migration.batchSize)) as PlainObject[];
     } catch (e) {
       const err = toNativeError(e);
-      if (err.code === "migration_cancelled" || err.message.includes("migration_cancelled")) {
+      if (err.code === "migration_cancelled") {
         // Don't try to drive the audit row — cancel already
         // terminalised it.
         return {

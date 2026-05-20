@@ -162,7 +162,6 @@ impl Migration {
         crate::migrations::exec_status(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(JsonValue)
-            .map_err(OpError::error)
     }
 
     /// `migration.cancel()` — transition the audit row to `cancelled`.
@@ -178,12 +177,11 @@ impl Migration {
             .inner
             .borrow_mut()
             .take()
-            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
+            .ok_or_else(crate::migrations::err_not_active)?;
         let pool = ensure_pool().await?;
         crate::migrations::exec_cancel(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
-            .map_err(OpError::error)
     }
 
     /// `migration.reset()` — clear the audit row's cursor / processed /
@@ -196,12 +194,11 @@ impl Migration {
             .inner
             .borrow_mut()
             .take()
-            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
+            .ok_or_else(crate::migrations::err_not_active)?;
         let pool = ensure_pool().await?;
         crate::migrations::exec_reset(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
-            .map_err(OpError::error)
     }
 
     /// `migration.fetchBatch(cursor, batchSize)` — read the next batch
@@ -216,13 +213,12 @@ impl Migration {
             .borrow()
             .as_ref()
             .cloned()
-            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
+            .ok_or_else(crate::migrations::err_not_active)?;
         let cursor_i = checked_int(cursor, "cursor")?;
         let batch_size_i = checked_int(batch_size, "batchSize")?;
         crate::migrations::exec_fetch_batch(&owner.app_id, cursor_i, batch_size_i)
             .await
             .map(JsonValue)
-            .map_err(OpError::error)
     }
 
     /// `migration.commitBatch(spec)` — apply one batch of per-row
@@ -309,12 +305,25 @@ fn commit_batch_with_spec<'s>(
     let owner = match this.inner.borrow().as_ref().cloned() {
         Some(o) => o,
         None => {
-            let m = v8::String::new(
-                scope,
-                "Migration: not active (already cancelled or finalised)",
-            )
-            .unwrap();
+            // Build the same coded error here that the async methods
+            // surface via `OpError::coded` — so the SDK sees the same
+            // `e.code = "migration_not_active"` regardless of which
+            // entry point caught the inactive wrapper.
+            let err = crate::migrations::err_not_active();
+            let m = v8::String::new(scope, &err.message).unwrap();
             let exc = v8::Exception::error(scope, m);
+            if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
+                if let zeroship_runtime::state::OpErrorKind::CodedError { code, hint } = &err.kind {
+                    let ck = v8::String::new(scope, "code").unwrap();
+                    let cv = v8::String::new(scope, code).unwrap();
+                    obj.set(scope, ck.into(), cv.into());
+                    if let Some(h) = hint {
+                        let hk = v8::String::new(scope, "hint").unwrap();
+                        let hv = v8::String::new(scope, h).unwrap();
+                        obj.set(scope, hk.into(), hv.into());
+                    }
+                }
+            }
             resolver.reject(scope, exc);
             return promise;
         }
@@ -384,7 +393,7 @@ fn commit_batch_with_spec<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver: resolver_global,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e),
                 request_id,
             },
         }
@@ -658,7 +667,7 @@ pub fn migration_start_with_spec<'s>(
                 drop(migration_global);
                 OpResult::JsValue {
                     resolver: resolver_global,
-                    value: ResolveValue::RejectError(OpError::error(e)),
+                    value: ResolveValue::RejectError(e),
                     request_id,
                 }
             }

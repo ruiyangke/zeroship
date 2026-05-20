@@ -45,6 +45,7 @@ use std::cell::RefCell;
 
 use compio_postgres::{Client, Pool};
 use serde_json::Value;
+use zeroship_runtime::state::OpError;
 
 use crate::audit::{ActorKind, ChangeClass, TerminalStatus};
 use crate::query::{quote_ident, validate_collection};
@@ -71,30 +72,64 @@ pub(crate) struct MigrationLock {
     pub(crate) client: Option<Client>,
 }
 
-/// Sentinel structured error envelope — matches the SDK's expected
-/// `error.code` JSON shape.
-fn err(code: &str, message: &str) -> String {
-    serde_json::json!({ "code": code, "message": message }).to_string()
+/// Build a coded `OpError` for a migration lifecycle failure. The
+/// runtime pump materialises a JS `Error` with `e.code` (and optional
+/// `e.hint`) attached — the SDK branches on `e.code` directly, no
+/// substring matching, no `JSON.parse(e.message)`.
+fn coded(code: &str, message: &str, hint: Option<&str>) -> OpError {
+    OpError::coded(code, message, hint.map(str::to_string))
 }
 
-fn err_already_running() -> String {
-    err(
+fn err_already_running() -> OpError {
+    coded(
         "migration_already_running",
         "another worker is currently running this migration",
+        Some(
+            "another worker already holds the advisory lock. \
+             Call `migrations.cancel({name, collection})` from there or wait for it to finish.",
+        ),
     )
 }
 
-fn err_cancelled() -> String {
-    err(
+fn err_cancelled_on_start() -> OpError {
+    coded(
+        "migration_cancelled",
+        "this migration was previously cancelled",
+        Some(
+            "run was cancelled. Call `migrations.reset({name, collection})` first, \
+             or pass `{ reset: true }` to start fresh.",
+        ),
+    )
+}
+
+fn err_cancelled_mid_run() -> OpError {
+    coded(
         "migration_cancelled",
         "migration was cancelled by an operator",
+        None,
     )
 }
 
-fn err_not_cancellable(state: &str) -> String {
-    err(
+fn err_not_cancellable(state: &str) -> OpError {
+    coded(
         "migration_not_cancellable",
         &format!("migration in state '{state}' cannot be cancelled"),
+        None,
+    )
+}
+
+/// "This `Migration` wrapper is no longer live" — returned by
+/// `fetchBatch` / `commitBatch` after the run has been finalised /
+/// cancelled / reset. Surfaced with a recovery hint so SDK consumers
+/// know how to mint a fresh wrapper.
+pub(crate) fn err_not_active() -> OpError {
+    coded(
+        "migration_not_active",
+        "this Migration wrapper has finalised",
+        Some(
+            "this Migration wrapper has finalised (commit `isDone: true`, cancel, or reset). \
+             Mint a fresh one via `env.db.migrations.start(spec)`.",
+        ),
     )
 }
 
@@ -151,18 +186,23 @@ pub async fn exec_begin(
     collection: &str,
     dry_run: bool,
     reset: bool,
-) -> Result<String, String> {
+) -> Result<String, OpError> {
     validate_collection(collection)
-        .map_err(|e| format!("db: invalid collection: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: invalid collection: {e}")))?;
     if name.is_empty() {
-        return Err(err("invalid_argument", "migration name must not be empty"));
+        return Err(coded(
+            "invalid_argument",
+            "migration name must not be empty",
+            None,
+        ));
     }
 
     let already_active = MIG_LOCK.with(|m| m.borrow().is_some());
     if already_active {
-        return Err(err(
+        return Err(coded(
             "migration_already_active",
             "another migration is already active on this worker",
+            None,
         ));
     }
 
@@ -174,17 +214,19 @@ pub async fn exec_begin(
     let empty: Vec<&str> = Vec::new();
     pool.query_text_params(&create_schema, &empty)
         .await
-        .map_err(|e| format!("db: create schema failed: {e}"))?;
-    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
+        .map_err(|e| OpError::error(format!("db: create schema failed: {e}")))?;
+    crate::audit::ensure_audit_table_exists(pool, app_id)
+        .await
+        .map_err(OpError::error)?;
 
-    let client = open_dedicated_client().await?;
+    let client = open_dedicated_client().await.map_err(OpError::error)?;
 
     let lock_sql =
         "SELECT pg_try_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4) AS got";
     let lock_rows = client
         .query_text_params(lock_sql, &[app_id, name])
         .await
-        .map_err(|e| format!("db: advisory_lock query failed: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: advisory_lock query failed: {e}")))?;
     let got: bool = lock_rows
         .first()
         .map(|r| r.try_get::<_, bool>("got").unwrap_or(false))
@@ -210,7 +252,7 @@ pub async fn exec_begin(
         client
             .query_text_params(&sql, &[collection, name])
             .await
-            .map_err(|e| format!("db: migration reset failed: {e}"))?;
+            .map_err(|e| OpError::error(format!("db: migration reset failed: {e}")))?;
     }
 
     let lookup_sql = format!(
@@ -222,7 +264,7 @@ pub async fn exec_begin(
     let existing = client
         .query_text_params(&lookup_sql, &[collection, name])
         .await
-        .map_err(|e| format!("db: migration lookup failed: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: migration lookup failed: {e}")))?;
 
     let (audit_id, cursor, processed, dead_letter_pks) = if let Some(row) = existing.first() {
         let id: i64 = row.get("id");
@@ -231,7 +273,7 @@ pub async fn exec_begin(
             // Refuse — operator must reset to clear state.
             let _ = release_advisory(&client, app_id, name).await;
             drop(client);
-            return Err(err_cancelled());
+            return Err(err_cancelled_on_start());
         }
         let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
         let processed = read_processed_from_row(row);
@@ -250,7 +292,7 @@ pub async fn exec_begin(
         client
             .query_text_params(&upd_sql, &[id_s.as_str()])
             .await
-            .map_err(|e| format!("db: migration set running failed: {e}"))?;
+            .map_err(|e| OpError::error(format!("db: migration set running failed: {e}")))?;
         (id, cursor, processed, dlp)
     } else {
         let schema_version =
@@ -287,11 +329,11 @@ pub async fn exec_begin(
                 ],
             )
             .await
-            .map_err(|e| format!("db: migration insert failed: {e}"))?;
+            .map_err(|e| OpError::error(format!("db: migration insert failed: {e}")))?;
         let id: i64 = rows
             .first()
             .map(|r| r.get::<_, i64>("id"))
-            .ok_or_else(|| "db: migration insert returned no row".to_string())?;
+            .ok_or_else(|| OpError::error("db: migration insert returned no row"))?;
         (id, 0i64, 0i64, Value::Array(vec![]))
     };
 
@@ -344,21 +386,30 @@ pub async fn exec_fetch_batch(
     app_id: &str,
     cursor: i64,
     batch_size: i64,
-) -> Result<String, String> {
+) -> Result<String, OpError> {
     if batch_size <= 0 || batch_size > 10_000 {
-        return Err(err("invalid_argument", "batchSize must be in (0, 10000]"));
+        return Err(coded(
+            "invalid_argument",
+            "batchSize must be in (0, 10000]",
+            None,
+        ));
     }
 
     let Some((name, collection, _audit_id, _dry_run)) = lock_snapshot() else {
-        return Err(err(
+        return Err(coded(
             "no_active_migration",
             "migrationFetchBatch called without migrationBegin",
+            None,
         ));
     };
 
     // Re-check cancel state under the lock client.
     let client = take_lock_client().ok_or_else(|| {
-        err("no_active_migration", "lock client missing — migration not active")
+        coded(
+            "no_active_migration",
+            "lock client missing — migration not active",
+            None,
+        )
     })?;
 
     let status_sql = format!(
@@ -377,12 +428,12 @@ pub async fn exec_fetch_batch(
                 .unwrap_or_default();
             if status == "cancelled" {
                 return_lock_client(client);
-                return Err(err_cancelled());
+                return Err(err_cancelled_mid_run());
             }
         }
         Err(e) => {
             return_lock_client(client);
-            return Err(format!("db: status read failed: {e}"));
+            return Err(OpError::error(format!("db: status read failed: {e}")));
         }
     }
 
@@ -411,7 +462,7 @@ pub async fn exec_fetch_batch(
 
     return_lock_client(client);
 
-    let rows = rows_result.map_err(|e| format!("db: migration fetch failed: {e}"))?;
+    let rows = rows_result.map_err(|e| OpError::error(format!("db: migration fetch failed: {e}")))?;
     let row_jsons: Vec<Value> = rows.iter().map(crate::callbacks::row_to_json).collect();
     Ok(Value::Array(row_jsons).to_string())
 }
@@ -436,26 +487,27 @@ pub async fn exec_commit_batch(
     is_done: bool,
     terminal_status: Option<&str>,
     error_message: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, OpError> {
     let Some((name, collection, audit_id, dry_run)) = lock_snapshot() else {
-        return Err(err(
+        return Err(coded(
             "no_active_migration",
             "migrationCommitBatch called without migrationBegin",
+            None,
         ));
     };
 
     let updates_arr = updates.as_array().ok_or_else(|| {
-        err("invalid_argument", "updates must be a JSON array")
+        coded("invalid_argument", "updates must be a JSON array", None)
     })?;
 
     let client = take_lock_client().ok_or_else(|| {
-        err("no_active_migration", "lock client missing")
+        coded("no_active_migration", "lock client missing", None)
     })?;
 
     // BEGIN
     if let Err(e) = client.execute("BEGIN", &[]).await {
         return_lock_client(client);
-        return Err(format!("db: BEGIN failed: {e}"));
+        return Err(OpError::error(format!("db: BEGIN failed: {e}")));
     }
 
     // Apply each update.
@@ -463,9 +515,10 @@ pub async fn exec_commit_batch(
         let Some(obj) = upd.as_object() else {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
-            return Err(err(
+            return Err(coded(
                 "invalid_argument",
                 "each update entry must be an object",
+                None,
             ));
         };
         let id = match obj.get("id").and_then(Value::as_i64) {
@@ -473,9 +526,10 @@ pub async fn exec_commit_batch(
             None => {
                 let _ = client.execute("ROLLBACK", &[]).await;
                 return_lock_client(client);
-                return Err(err(
+                return Err(coded(
                     "invalid_argument",
                     "each update entry must have a numeric id",
+                    None,
                 ));
             }
         };
@@ -518,7 +572,9 @@ pub async fn exec_commit_batch(
         if let Err(e) = client.query_text_params(&sql, &param_refs).await {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
-            return Err(format!("db: migration row UPDATE failed (id={id}): {e}"));
+            return Err(OpError::error(format!(
+                "db: migration row UPDATE failed (id={id}): {e}"
+            )));
         }
     }
 
@@ -526,7 +582,7 @@ pub async fn exec_commit_batch(
     let final_sql = if dry_run { "ROLLBACK" } else { "COMMIT" };
     if let Err(e) = client.execute(final_sql, &[]).await {
         return_lock_client(client);
-        return Err(format!("db: migration {final_sql} failed: {e}"));
+        return Err(OpError::error(format!("db: migration {final_sql} failed: {e}")));
     }
 
     // Audit row update — only persist cursor/dead_letter/processed on a
@@ -550,7 +606,7 @@ pub async fn exec_commit_batch(
             .await
         {
             return_lock_client(client);
-            return Err(format!("db: audit row update failed: {e}"));
+            return Err(OpError::error(format!("db: audit row update failed: {e}")));
         }
     }
 
@@ -564,9 +620,10 @@ pub async fn exec_commit_batch(
             "cancelled" => TerminalStatus::Cancelled,
             other => {
                 return_lock_client(client);
-                return Err(err(
+                return Err(coded(
                     "invalid_argument",
                     &format!("unknown terminalStatus '{other}'"),
+                    None,
                 ));
             }
         };
@@ -618,8 +675,10 @@ pub async fn exec_status(
     app_id: &str,
     name: &str,
     collection: &str,
-) -> Result<String, String> {
-    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
+) -> Result<String, OpError> {
+    crate::audit::ensure_audit_table_exists(pool, app_id)
+        .await
+        .map_err(OpError::error)?;
     let sql = format!(
         r#"SELECT id, status, validate_cursor, dead_letter_pks, details, error
             FROM "{app_id}"."__zeroship_migrations"
@@ -629,7 +688,7 @@ pub async fn exec_status(
     let rows = pool
         .query_text_params(&sql, &[collection, name])
         .await
-        .map_err(|e| format!("db: migration status read failed: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: migration status read failed: {e}")))?;
     let Some(row) = rows.first() else {
         return Ok(serde_json::json!({
             "exists": false,
@@ -678,8 +737,10 @@ pub async fn exec_cancel(
     app_id: &str,
     name: &str,
     collection: &str,
-) -> Result<String, String> {
-    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
+) -> Result<String, OpError> {
+    crate::audit::ensure_audit_table_exists(pool, app_id)
+        .await
+        .map_err(OpError::error)?;
     // Read current status.
     let lookup_sql = format!(
         r#"SELECT id, status FROM "{app_id}"."__zeroship_migrations"
@@ -689,7 +750,7 @@ pub async fn exec_cancel(
     let rows = pool
         .query_text_params(&lookup_sql, &[collection, name])
         .await
-        .map_err(|e| format!("db: migration cancel lookup failed: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: migration cancel lookup failed: {e}")))?;
     let Some(row) = rows.first() else {
         return Err(err_not_cancellable("missing"));
     };
@@ -710,7 +771,7 @@ pub async fn exec_cancel(
     let id_s = id.to_string();
     pool.query_text_params(&upd_sql, &[id_s.as_str()])
         .await
-        .map_err(|e| format!("db: migration cancel update failed: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: migration cancel update failed: {e}")))?;
 
     Ok(serde_json::json!({ "ok": true }).to_string())
 }
@@ -723,8 +784,10 @@ pub async fn exec_reset(
     app_id: &str,
     name: &str,
     collection: &str,
-) -> Result<String, String> {
-    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
+) -> Result<String, OpError> {
+    crate::audit::ensure_audit_table_exists(pool, app_id)
+        .await
+        .map_err(OpError::error)?;
     let upd_sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET status = 'pending',
@@ -738,7 +801,7 @@ pub async fn exec_reset(
     );
     pool.query_text_params(&upd_sql, &[collection, name])
         .await
-        .map_err(|e| format!("db: migration reset failed: {e}"))?;
+        .map_err(|e| OpError::error(format!("db: migration reset failed: {e}")))?;
     Ok(serde_json::json!({ "ok": true }).to_string())
 }
 

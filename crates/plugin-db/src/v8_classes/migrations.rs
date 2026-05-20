@@ -186,7 +186,7 @@ fn dispatch_by_spec<'s>(
                 MigrationOp::Status => ResolveValue::Json(json),
                 MigrationOp::Cancel | MigrationOp::Reset => ResolveValue::Undefined,
             },
-            Err(e) => ResolveValue::RejectError(OpError::error(e)),
+            Err(e) => ResolveValue::RejectError(e),
         };
         OpResult::JsValue { resolver: resolver_global, value, request_id }
     }));

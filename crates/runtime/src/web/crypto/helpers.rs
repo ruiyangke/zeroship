@@ -258,6 +258,20 @@ pub fn op_error_to_v8<'s>(
         crate::state::OpErrorKind::NodeError(code) => {
             crate::node_error::build_node_exception(scope, code, &err.message)
         }
+        crate::state::OpErrorKind::CodedError { code, hint } => {
+            let exc = v8::Exception::error(scope, msg);
+            if let Ok(obj) = v8::Local::<v8::Object>::try_from(exc) {
+                let code_key = v8::String::new(scope, "code").unwrap();
+                let code_val = v8::String::new(scope, code).unwrap();
+                obj.set(scope, code_key.into(), code_val.into());
+                if let Some(h) = hint {
+                    let hint_key = v8::String::new(scope, "hint").unwrap();
+                    let hint_val = v8::String::new(scope, h).unwrap();
+                    obj.set(scope, hint_key.into(), hint_val.into());
+                }
+            }
+            exc
+        }
         // Unreachable due to early-return above; keeps the match
         // exhaustive for the compiler.
         crate::state::OpErrorKind::JsValue(_) => unreachable!(),

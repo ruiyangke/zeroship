@@ -122,25 +122,14 @@ export async function getNativeMigrations(): Promise<NativeMigrations> {
 }
 
 /**
- * Some native ops throw structured `{ code, message }` strings via the
- * promise reject path. Convert them to Error instances with `.code`.
+ * Coerce a thrown value to an `Error` with a `.code` property. Native
+ * v8_class rejections now attach `e.code` (and optionally `e.hint`)
+ * directly on the JS exception — `OpError::coded` in Rust constructs a
+ * plain Error and sets `code` / `hint` on it before the pump calls
+ * `resolver.reject(...)`. The SDK reads `e.code` straight off the
+ * Error; no more `JSON.parse(e.message)` envelope-fishing.
  */
-export function toNativeError(e: unknown): Error & { code?: string } {
-  if (e instanceof Error) {
-    // Try to parse a JSON envelope from the message.
-    try {
-      const parsed = JSON.parse(e.message);
-      if (parsed && typeof parsed === "object" && "code" in parsed) {
-        const code = String(parsed.code);
-        const msg = "message" in parsed ? String(parsed.message) : code;
-        const wrapped = new Error(msg) as Error & { code: string };
-        wrapped.code = code;
-        return wrapped;
-      }
-    } catch {
-      // not JSON — leave as-is
-    }
-    return e;
-  }
+export function toNativeError(e: unknown): Error & { code?: string; hint?: string } {
+  if (e instanceof Error) return e as Error & { code?: string; hint?: string };
   return new Error(String(e));
 }

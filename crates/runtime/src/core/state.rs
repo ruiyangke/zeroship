@@ -57,6 +57,17 @@ pub enum OpErrorKind {
     /// and assigns the `code` property as a static string. npm packages
     /// branch on `e.code === "ERR_..."`.
     NodeError(&'static str),
+    /// A plugin-side coded error: a plain JS `Error` with a dynamic
+    /// `e.code` (and optional `e.hint`) property attached. Use this
+    /// when the code is determined at runtime (e.g. plugin-db migration
+    /// lifecycle errors like `"migration_already_running"`) and so
+    /// can't be expressed as the `&'static str` payload `NodeError`
+    /// carries. The plumbing in `core::runtime::OpResult::JsValue`
+    /// builds a JS `Error`, sets `e.code = code`, and if `hint` is
+    /// non-empty also sets `e.hint = hint`. The optional `hint` is a
+    /// human-facing recovery note (one line) for messages we know
+    /// rejecters often need.
+    CodedError { code: String, hint: Option<String> },
     /// A pre-built JS exception value, captured from a user-thrown
     /// exception in a nested V8 callback (custom `toString`,
     /// `Symbol.toPrimitive`, throwing `valueOf`, etc.). The macro's
@@ -123,6 +134,26 @@ impl OpError {
     pub fn node(code: &'static str, msg: impl Into<String>) -> Self {
         Self {
             kind: OpErrorKind::NodeError(code),
+            message: msg.into(),
+        }
+    }
+
+    /// Construct a plugin-side coded error. Builds a JS `Error` with
+    /// `e.code = code` (and `e.hint = hint` when provided). Use for
+    /// runtime-determined codes that don't fit `OpError::node`'s
+    /// `&'static str` constraint — e.g. plugin-db migration lifecycle
+    /// codes (`"migration_already_running"`, `"migration_cancelled"`,
+    /// …) that the SDK branches on with `if (e.code === "...")`.
+    pub fn coded(
+        code: impl Into<String>,
+        msg: impl Into<String>,
+        hint: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            kind: OpErrorKind::CodedError {
+                code: code.into(),
+                hint: hint.map(Into::into),
+            },
             message: msg.into(),
         }
     }
