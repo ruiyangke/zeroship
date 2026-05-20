@@ -539,24 +539,6 @@ export class Collection<S = PlainObject, N extends string = string> {
     return this._idLoader.load(id);
   }
 
-  /** @internal — tx wrapper hook. Increments `_txDepth` so the loader
-   *  is bypassed for the duration of the callback. Any pending batch
-   *  is drained synchronously into a microtask so a tx-active read
-   *  never lands in a non-tx batch. */
-  async _withTxBypass<T>(fn: () => Promise<T>): Promise<T> {
-    if (this._idLoader !== null) {
-      // Fire-and-forget — pending non-tx loads continue against the
-      // non-tx connection; the tx call follows on its own dispatch.
-      void this._idLoader._drain();
-    }
-    this._txDepth += 1;
-    try {
-      return await fn();
-    } finally {
-      this._txDepth -= 1;
-    }
-  }
-
   /**
    * Returns true if at least one document matches `filter`.
    *

@@ -304,6 +304,88 @@ describe("db.live — reactive query layer", () => {
     live.close();
   });
 
+  test("queue is bounded — fast producer doesn't grow memory unbounded", async () => {
+    // A live query with no consumer should NOT accumulate every rerun
+    // forever. The internal queue is capped (currently 64) and overflow
+    // drops the oldest value to make room for the newest.
+    const ctx = makeMockNative();
+    installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
+    const db = createDb(
+      { todos: { title: t.string().required() } },
+      { native: ctx.native },
+    );
+    await db.todos.insert({ title: "x" });
+    const live = db.live(() => db.todos.find({}));
+
+    // Drain the initial result so subsequent reruns land in the queue
+    // (we never call .next() again, simulating a stalled consumer).
+    await live.next();
+
+    // Fire 1000 events without consuming. The internal queue should not
+    // grow past the cap. We probe the iterator's underlying state via
+    // a draining loop after all events are scheduled — if the cap is
+    // working, only a bounded number of entries remain queued.
+    for (let i = 0; i < 1000; i += 1) {
+      ctx.fire("todos");
+      // Yield to the microtask queue so rerun() actually runs and
+      // populates the queue. Without this all 1000 rerun chains stay
+      // pending and the cap can't kick in.
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+
+    // Now drain the queue and count items received. The cap is 64, and
+    // we drop oldest-value on overflow, so a bounded number of values
+    // ≤ cap+initial should be drainable before next() blocks.
+    let drained = 0;
+    while (drained < 1000) {
+      const tick = await Promise.race([
+        live.next(),
+        new Promise<{ done: true; value: undefined }>((r) =>
+          setTimeout(() => r({ done: true, value: undefined }), 20),
+        ),
+      ]);
+      if (tick.done) break;
+      drained += 1;
+    }
+    // Cap is 64. We expect strictly less than the 1000 events we fired —
+    // the cap kept the queue bounded. (Some events also collapse into
+    // pending resolvers, which is fine: the property is "bounded", not
+    // "exactly 64".)
+    assert.ok(
+      drained <= 128,
+      `expected drained <= 128 with cap=64, got ${drained}`,
+    );
+    live.close();
+  });
+
+  test("Result-shape detection is strict — rows that happen to have {data, error} columns are preserved", async () => {
+    // Regression for the loose `"data" in obj && "error" in obj` check.
+    // A user queryFn that returns rows containing both `data` and
+    // `error` columns (e.g. an event-log table) used to be
+    // mis-interpreted as a Result<R[]> and unwrapped to the value of
+    // `data`. Strict detection (exactly 2 keys, both `data` and `error`)
+    // preserves the rows verbatim.
+    const ctx = makeMockNative();
+    installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
+    const db = createDb(
+      { todos: { title: t.string().required() } },
+      { native: ctx.native },
+    );
+    const live = db.live<{ data: number; error: null; extra: string }>(
+      async () => [
+        { data: 1, error: null, extra: "first row preserved" },
+        { data: 2, error: null, extra: "second row preserved" },
+      ],
+      { tables: ["todos"] },
+    );
+    const first = await live.next();
+    assert.equal(Array.isArray(first.value), true);
+    assert.equal((first.value as AnyRec[]).length, 2);
+    assert.equal((first.value as AnyRec[])[0].extra, "first row preserved");
+    assert.equal((first.value as AnyRec[])[0].data, 1);
+    live.close();
+  });
+
   test("Query thenable resolves to data array (Result unwrap)", async () => {
     // The Query builder's awaited form returns Result<T[]>. db.live
     // detects that shape and yields the data (or throws on error).

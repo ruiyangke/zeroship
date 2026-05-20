@@ -114,18 +114,32 @@ function anyCollectionInTx(db: Record<string, unknown>): boolean {
 /**
  * Unwrap whatever `queryFn` returned into a `Promise<R[]>`. A Query
  * builder resolves to `Result<R[]>` (`{data, error}`); a bare Promise
- * resolves to `R[]` directly. We detect the Result shape by structural
- * test on the resolved value.
+ * resolves to `R[]` directly. We detect the Result shape strictly: the
+ * resolved object must have EXACTLY the keys `data` and `error` (length
+ * 2, no extras). The loose `"data" in obj && "error" in obj` check
+ * false-positives on user rows that happen to include both columns —
+ * e.g. `db.live(() => [{data: 1, error: null}])` would be unwrapped to
+ * the value of `data` instead of preserved verbatim.
  */
 function unwrapQueryFnResult<R>(value: QueryFnResult<R>): Promise<R[]> {
   return Promise.resolve(value as unknown as Promise<unknown>).then((resolved) => {
-    if (resolved !== null && typeof resolved === "object" && "data" in (resolved as object) && "error" in (resolved as object)) {
+    if (isResultEnvelope(resolved)) {
       const r = resolved as { data: R[] | null; error: Error | null };
       if (r.error) throw r.error;
       return (r.data ?? []) as R[];
     }
     return resolved as R[];
   });
+}
+
+/** Strict shape test for the `Result<T>` envelope. The object must have
+ *  exactly two own enumerable keys, both named `data` and `error`. This
+ *  avoids the false positive on rows whose payload happens to include
+ *  both keys among others (e.g. an event log row). */
+function isResultEnvelope(v: unknown): v is { data: unknown; error: unknown } {
+  if (v === null || typeof v !== "object") return false;
+  const keys = Object.keys(v as object);
+  return keys.length === 2 && keys.includes("data") && keys.includes("error");
 }
 
 /**
@@ -150,7 +164,15 @@ export function createLive<R>(
   // single-slot pending resolver if a consumer is waiting. The queue
   // can also hold a terminal `done` sentinel (`null`) so `close()`
   // wakes up a pending `next()` cleanly.
+  //
+  // Bounded at MAX_QUEUE_DEPTH to keep producers from outrunning a slow
+  // consumer indefinitely. On overflow we drop the OLDEST value entry
+  // (never the newest, never a `done`/`error` sentinel) — the freshest
+  // result is what callers care about for a "current snapshot" reactive
+  // view, and any consumer that's lagging can only act on the latest
+  // anyway. Matches the broker's overflow semantics (newest wins).
   type QueueItem = { kind: "value"; value: R[] } | { kind: "error"; error: Error } | { kind: "done" };
+  const MAX_QUEUE_DEPTH = 64;
   const queue: QueueItem[] = [];
   let pendingResolve: ((r: IteratorResult<R[]>) => void) | null = null;
   let pendingReject: ((e: unknown) => void) | null = null;
@@ -172,6 +194,12 @@ export function createLive<R>(
         else resolve({ value: undefined as unknown as R[], done: true });
       }
       return;
+    }
+    if (queue.length >= MAX_QUEUE_DEPTH) {
+      // Drop the oldest VALUE entry to make room. Preserve any errors
+      // or the done sentinel so close/failure signals always propagate.
+      const dropIdx = queue.findIndex((q) => q.kind === "value");
+      if (dropIdx >= 0) queue.splice(dropIdx, 1);
     }
     queue.push(item);
   }
