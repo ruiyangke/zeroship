@@ -64,9 +64,32 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     return { data: null, error: toNativeError(e) };
   }
 
+  // Resume — read the audit row's persisted cursor / processed /
+  // dead-letter set so an interrupted run picks up where it left off.
+  // `reset: true` paths already wiped the audit state in `start`, so
+  // the snapshot reads 0/0/[]; non-reset paths inherit the partial
+  // progress. Without this seed, the loop would re-fetch from id=0 and
+  // re-run `migrateOne` for every already-processed row.
   let cursor = 0;
   let processed = 0;
   const deadLetters: DeadLetterEntry[] = [];
+  try {
+    const snap = await m.status();
+    if (typeof snap.cursor === "number") cursor = snap.cursor;
+    if (typeof snap.processed === "number") processed = snap.processed;
+    if (Array.isArray(snap.deadLetterPks)) {
+      // Audit row only stores the PK list — we don't have the per-row
+      // error messages from the previous run, so reconstitute opaque
+      // entries with a synthetic "resumed" sentinel. The SDK loop only
+      // reads `.id` off these for the next `commitBatch`.
+      for (const id of snap.deadLetterPks) {
+        deadLetters.push({ id, error: new Error("dead_letter") });
+      }
+    }
+  } catch {
+    // Status read is best-effort — a failure here just means we start
+    // at cursor=0 (safe, re-processes idempotent migrateOne calls).
+  }
   let failures = 0;
   const budget = migration.failureBudget ?? 0;
 
