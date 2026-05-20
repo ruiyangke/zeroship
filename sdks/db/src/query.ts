@@ -175,6 +175,17 @@ export class Query<S = PlainObject, P = Row<S>> {
   with<W extends WithSpec>(spec: W): Query<S, P & WithRelations<W>>;
   with(spec: WithSpec): Query<S, any>;
   with(spec: WithSpec): Query<S, any> {
+    // Reject early when the Query was constructed without a relation
+    // loader (e.g. someone called `new Query(...)` directly outside
+    // `Collection.find`). The old behaviour was a silent no-op — the
+    // `_with` spec accumulated but never fired, so callers got back the
+    // bare FK values they hoped to join and had no clue why. A loud
+    // TypeError makes the contract explicit.
+    if (this._loadRelations === null) {
+      throw new TypeError(
+        "Query.with() requires the Query to be constructed via Collection.find — direct Query construction is not supported",
+      );
+    }
     this._with = { ...(this._with ?? {}), ...spec };
     return this as unknown as Query<S, any>;
   }

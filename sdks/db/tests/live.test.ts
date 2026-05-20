@@ -386,6 +386,65 @@ describe("db.live — reactive query layer", () => {
     live.close();
   });
 
+  test("live + with: { fk: true } re-runs on BOTH watched and joined-target tables", async () => {
+    // Locks the contract: a queryFn that joins `todos` to `users` via
+    // `with: { userId: true }` must auto-detect BOTH tables and trigger
+    // a rerun when EITHER mutates. The relation loader calls
+    // `targetCol.find(...)` which in turn calls
+    // `trackCollectionAccess(this._name)` — so the tracker picks up
+    // `users` even though the queryFn never names it.
+    const ctx = makeMockNative();
+    installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
+    const db = createDb(
+      {
+        users: { name: t.string().required() },
+        todos: { userId: t.ref("users"), title: t.string().required() },
+      },
+      { native: ctx.native },
+    );
+    await db.users.insert({ id: 1, name: "Alice" });
+    await db.todos.insert({ id: 100, userId: 1, title: "buy milk" });
+
+    const live = db.live(() => db.todos.find({}, { with: { userId: true } }));
+
+    // Drain initial result.
+    const first = await live.next();
+    assert.equal(Array.isArray(first.value), true);
+
+    // Both tables should have been auto-subscribed. The `users` sub is
+    // the key claim — it's only opened if the relation loader's
+    // `targetCol.find` fired through `trackCollectionAccess`.
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(
+      (ctx.subs["todos"] ?? []).length,
+      1,
+      "live + with must subscribe to the parent table (todos)",
+    );
+    assert.equal(
+      (ctx.subs["users"] ?? []).length,
+      1,
+      "live + with must subscribe to the joined-target table (users) — if this fails, _loadRelations is not tracking",
+    );
+
+    // Mutation on `todos` triggers a rerun.
+    await db.todos.insert({ id: 101, userId: 1, title: "write tests" });
+    ctx.fire("todos");
+    const afterTodos = await live.next();
+    assert.equal(afterTodos.done, false);
+
+    // Mutation on `users` (the joined target) ALSO triggers a rerun.
+    const findsBefore = ctx.calls.find;
+    ctx.fire("users");
+    // Wait for the rerun to land in the queue.
+    const afterUsers = await live.next();
+    assert.equal(afterUsers.done, false);
+    assert.ok(
+      ctx.calls.find > findsBefore,
+      "an event on the joined-target table must trigger a queryFn rerun",
+    );
+    live.close();
+  });
+
   test("Query thenable resolves to data array (Result unwrap)", async () => {
     // The Query builder's awaited form returns Result<T[]>. db.live
     // detects that shape and yields the data (or throws on error).

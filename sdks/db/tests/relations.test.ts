@@ -17,7 +17,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createDb } from "../src/db.js";
-import { t } from "../src/types.js";
+import { t, schema } from "../src/types.js";
+import { Query } from "../src/query.js";
 
 type AnyRec = Record<string, unknown>;
 
@@ -334,5 +335,359 @@ describe("with: type-level inference (compile-time)", () => {
       const _id: unknown = (first.userId as Record<string, unknown>).id;
       assert.ok(_id !== undefined);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parallelism: two relations load concurrently, not in series. The old
+// `for..of await` loop in `_loadRelations` made N relations a 2× / 3× latency
+// hit even though each relation hits a disjoint target table.
+// ---------------------------------------------------------------------------
+
+describe("with: parallel relation loading", () => {
+  /** Build a mock that injects an artificial 50ms delay into every
+   *  `find` against the named target tables. Allows us to assert that
+   *  two relation loaders run concurrently (≈ 50ms, not 100ms). */
+  function makeSlowMock(
+    tables: Record<string, Record<number, AnyRec>>,
+    slowTargets: Set<string>,
+    delayMs: number,
+  ): { native: ZeroshipDb; calls: CallLog } {
+    const calls: CallLog = { find: [], findOne: [] };
+    const native = {
+      registerModel: () => Promise.resolve(),
+      beginTransaction: async () => ({
+        commit: async () => undefined,
+        rollback: async () => undefined,
+      }),
+      collection(name: string) {
+        return {
+          async findOne(filter: AnyRec, opts: AnyRec) {
+            calls.findOne.push({ collection: name, filter, opts });
+            return null;
+          },
+          async find(filter: AnyRec, opts: AnyRec) {
+            calls.find.push({ collection: name, filter, opts });
+            if (slowTargets.has(name)) {
+              await new Promise((r) => setTimeout(r, delayMs));
+            }
+            const rows = tables[name] ?? {};
+            const idClause = filter.id as { $in?: number[] } | number | undefined;
+            if (
+              idClause !== null &&
+              typeof idClause === "object" &&
+              Array.isArray((idClause as AnyRec).$in)
+            ) {
+              const ids = (idClause as { $in: number[] }).$in;
+              return ids.map((i) => rows[i]).filter(Boolean);
+            }
+            const out: AnyRec[] = [];
+            for (const r of Object.values(rows)) {
+              let ok = true;
+              for (const [k, v] of Object.entries(filter)) {
+                if (k.startsWith("$")) continue;
+                if (r[k] !== v) { ok = false; break; }
+              }
+              if (ok) out.push(r);
+            }
+            return out;
+          },
+          async insert(_doc: AnyRec) { return _doc; },
+        };
+      },
+    };
+    return { native: native as unknown as ZeroshipDb, calls };
+  }
+
+  test("two slow relations load in parallel, not sequentially", async () => {
+    const tables: Record<string, Record<number, AnyRec>> = {
+      users: { 1: { id: 1, name: "Alice" }, 2: { id: 2, name: "Bob" } },
+      projects: { 10: { id: 10, name: "Apollo" }, 11: { id: 11, name: "Beacon" } },
+      todos: {
+        100: { id: 100, userId: 1, projectId: 10, title: "buy milk" },
+        101: { id: 101, userId: 2, projectId: 11, title: "write tests" },
+      },
+    };
+    const mock = makeSlowMock(tables, new Set(["users", "projects"]), 50);
+    const db = createDb(
+      {
+        users: { name: t.string().required() },
+        projects: { name: t.string().required() },
+        todos: {
+          userId: t.ref("users"),
+          projectId: t.ref("projects").required(),
+          title: t.string().required(),
+        },
+      },
+      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const started = performance.now();
+    const { data, error } = await db.todos.find({}, { with: { userId: true, projectId: true } });
+    const elapsed = performance.now() - started;
+
+    assert.equal(error, null);
+    assert.ok(data);
+    // Sanity check that the joins actually happened — otherwise a
+    // timing assertion would pass for the wrong reason.
+    const t100 = data!.find((r) => r.id === 100) as AnyRec;
+    assert.deepEqual(t100.userId, { id: 1, name: "Alice" });
+    assert.deepEqual(t100.projectId, { id: 10, name: "Apollo" });
+
+    // Sequential: ≥ 100ms (50 + 50). Parallel: ~50ms. We give parallel
+    // a generous 80ms ceiling to cover scheduler jitter on slow CI.
+    assert.ok(
+      elapsed < 80,
+      `expected < 80ms for parallel relation loading, got ${elapsed.toFixed(1)}ms (sequential would be >= 100ms)`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Safety: Query.with() must throw if the Query was constructed without a
+// relation loader (i.e. via `new Query(...)` directly, bypassing
+// `Collection.find`). Old behaviour: silent no-op.
+// ---------------------------------------------------------------------------
+
+describe("Query.with — guards against direct Query construction", () => {
+  test("calling .with() on a Query with no loader throws TypeError", () => {
+    // Construct a Query directly, skipping the optional `loadRelations`
+    // argument that `Collection.find` normally passes.
+    const q = new Query<unknown, unknown>(
+      "todos",
+      {} as ZeroshipDbFilter,
+      async () => [],
+    );
+    assert.throws(
+      () => q.with({ userId: true }),
+      (e: unknown) => {
+        assert.ok(e instanceof TypeError);
+        assert.match((e as Error).message, /Collection\.find/);
+        assert.match((e as Error).message, /direct Query construction/);
+        return true;
+      },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FK coercion: non-numeric strings used to silently null out joined rows;
+// the new contract is loud failure (TypeError with a clear message).
+// bigint values coerce to number for the IN clause.
+// ---------------------------------------------------------------------------
+
+describe("with: non-numeric FK coercion + loud failure", () => {
+  test("string FK value triggers a clear error, not a silent null", async () => {
+    const tables: Record<string, Record<number, AnyRec>> = {
+      users: { 1: { id: 1, name: "Alice" } },
+      todos: {
+        // userId is a STRING — used to silently null out the joined
+        // userId field; the new contract is to throw loudly so the
+        // schema mismatch (a string-typed FK column) surfaces.
+        100: { id: 100, userId: "1" as unknown as number, title: "buy milk" },
+      },
+    };
+    const mock = makeMock(tables);
+    const db = createDb(
+      {
+        users: { name: t.string().required() },
+        todos: {
+          userId: t.ref("users"),
+          title: t.string().required(),
+        },
+      },
+      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const { data, error } = await db.todos.find({}, { with: { userId: true } });
+    assert.equal(data, null, "string FK must NOT yield a silent join result");
+    assert.ok(error);
+    assert.match(error!.message, /_loadRelations: FK value for field 'userId' is not a number-like value \(got string\)/);
+  });
+
+  test("bigint FK value coerces and joins successfully", async () => {
+    const tables: Record<string, Record<number, AnyRec>> = {
+      users: { 1: { id: 1, name: "Alice" } },
+      todos: {
+        100: { id: 100, userId: 1n as unknown as number, title: "buy milk" },
+      },
+    };
+    const mock = makeMock(tables);
+    const db = createDb(
+      {
+        users: { name: t.string().required() },
+        todos: {
+          userId: t.ref("users"),
+          title: t.string().required(),
+        },
+      },
+      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const { data, error } = await db.todos.find({}, { with: { userId: true } });
+    assert.equal(error, null);
+    assert.ok(data);
+    const t100 = data!.find((r) => r.id === 100) as AnyRec;
+    assert.deepEqual(t100.userId, { id: 1, name: "Alice" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Soft-delete + relations: the documented contract is that a FK pointing at
+// a soft-deleted target yields `null` (because the target's `_mergeFilter`
+// hides soft-deleted rows from every read, including the relation loader's
+// batched IN). Conflates "null FK", "missing target", and "soft-deleted
+// target" — but is intentional. Lock the contract.
+// ---------------------------------------------------------------------------
+
+describe("with: soft-delete + relations contract", () => {
+  test("FK pointing at a soft-deleted target yields null in the joined field", async () => {
+    // Mock that honours the `deletedAt: null` filter clause for the
+    // `$in` branch (the default mock skips this — we need it here).
+    const tables: Record<string, Record<number, AnyRec>> = {
+      users: {
+        1: { id: 1, name: "Alice", deletedAt: null },
+        2: { id: 2, name: "Bob", deletedAt: 1700000000000 }, // soft-deleted
+      },
+      todos: {
+        100: { id: 100, userId: 1, title: "alice todo" },
+        101: { id: 101, userId: 2, title: "bob todo" },
+      },
+    };
+    const calls: CallLog = { find: [], findOne: [] };
+    const native = {
+      registerModel: () => Promise.resolve(),
+      beginTransaction: async () => ({
+        commit: async () => undefined,
+        rollback: async () => undefined,
+      }),
+      collection(name: string) {
+        return {
+          async findOne(filter: AnyRec, opts: AnyRec) {
+            calls.findOne.push({ collection: name, filter, opts });
+            return null;
+          },
+          async find(filter: AnyRec, opts: AnyRec) {
+            calls.find.push({ collection: name, filter, opts });
+            const rows = tables[name] ?? {};
+            // _mergeFilter on a soft-delete collection wraps the user's
+            // filter in `{ $and: [orig, { deletedAt: null }] }` (when the
+            // original filter is non-empty) — flatten the top-level
+            // `$and` so the id IN clause and the deletedAt clause are
+            // both visible to the matcher.
+            const clauses: AnyRec[] =
+              Array.isArray(filter.$and)
+                ? (filter.$and as AnyRec[])
+                : [filter];
+            let idIn: number[] | null = null;
+            let wantDeletedAtNull = false;
+            for (const c of clauses) {
+              const idClause = c.id as { $in?: number[] } | number | undefined;
+              if (
+                idClause !== null &&
+                typeof idClause === "object" &&
+                Array.isArray((idClause as AnyRec).$in)
+              ) {
+                idIn = (idClause as { $in: number[] }).$in;
+              }
+              if ("deletedAt" in c && c.deletedAt === null) wantDeletedAtNull = true;
+            }
+            const matchSoftDelete = (r: AnyRec): boolean =>
+              wantDeletedAtNull ? r.deletedAt === null : true;
+            if (idIn !== null) {
+              return idIn
+                .map((i) => rows[i])
+                .filter((r): r is AnyRec => Boolean(r) && matchSoftDelete(r));
+            }
+            // Whole-table scan honouring soft-delete only.
+            const out: AnyRec[] = [];
+            for (const r of Object.values(rows)) {
+              if (!matchSoftDelete(r)) continue;
+              out.push(r);
+            }
+            return out;
+          },
+          async insert(_doc: AnyRec) { return _doc; },
+        };
+      },
+    };
+    const db = createDb(
+      {
+        users: schema({ name: t.string().required() }).softDelete(),
+        todos: {
+          userId: t.ref("users"),
+          title: t.string().required(),
+        },
+      },
+      { native: native as unknown as ZeroshipDb, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const { data, error } = await db.todos.find({}, { with: { userId: true } });
+    assert.equal(error, null);
+    assert.ok(data);
+    const t100 = data!.find((r) => r.id === 100) as AnyRec;
+    const t101 = data!.find((r) => r.id === 101) as AnyRec;
+    assert.deepEqual(t100.userId, { id: 1, name: "Alice", deletedAt: null });
+    assert.equal(
+      t101.userId,
+      null,
+      "FK to a soft-deleted user must yield null in the joined field",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-referencing FK: `users.managerId: t.ref("users")` must work, including
+// when a row is its own manager and when many rows share the same manager
+// (dedup to one IN clause).
+// ---------------------------------------------------------------------------
+
+describe("with: self-referencing FK", () => {
+  test("self-ref join works, including a user that manages itself, and dedupes", async () => {
+    const tables: Record<string, Record<number, AnyRec>> = {
+      users: {
+        1: { id: 1, name: "Alice", managerId: null },
+        2: { id: 2, name: "Bob", managerId: 1 },
+        3: { id: 3, name: "Carol", managerId: 1 }, // shares manager with Bob → dedup
+        5: { id: 5, name: "Eve", managerId: 5 },   // manages themselves
+      },
+    };
+    const mock = makeMock(tables);
+    const db = createDb(
+      {
+        users: {
+          name: t.string().required(),
+          managerId: t.ref("users"),
+        },
+      },
+      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const { data, error } = await db.users.find({}, { with: { managerId: true } });
+    assert.equal(error, null);
+    assert.ok(data);
+    const alice = data!.find((r) => r.id === 1) as AnyRec;
+    const bob = data!.find((r) => r.id === 2) as AnyRec;
+    const carol = data!.find((r) => r.id === 3) as AnyRec;
+    const eve = data!.find((r) => r.id === 5) as AnyRec;
+
+    assert.equal(alice.managerId, null, "null manager FK stays null");
+    assert.deepEqual(bob.managerId, { id: 1, name: "Alice", managerId: null });
+    assert.deepEqual(carol.managerId, { id: 1, name: "Alice", managerId: null });
+    // Self-reference: Eve's manager is Eve. The joined row carries the
+    // PRE-join shape — i.e. managerId: 5 (a number), not infinite-depth.
+    assert.deepEqual(eve.managerId, { id: 5, name: "Eve", managerId: 5 });
+
+    // The relation loader fired exactly ONE find against `users`
+    // (the relation target). Dedup: distinct ids in the IN clause
+    // should be [1, 5] (Alice + Eve), not [1, 1, 5].
+    const userFinds = mock.calls.find.filter((c) => c.collection === "users");
+    // First find is the outer `db.users.find({})`; the relation loader's
+    // batched IN is the second.
+    assert.equal(userFinds.length, 2);
+    const idClause = userFinds[1].filter.id as { $in: number[] };
+    const seen = new Set(idClause.$in);
+    assert.equal(seen.size, idClause.$in.length, "ids must be deduped");
+    assert.deepEqual([...seen].sort((a, b) => a - b), [1, 5]);
   });
 });

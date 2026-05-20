@@ -410,67 +410,97 @@ export class Collection<S = PlainObject, N extends string = string> {
     withSpec: WithSpec,
   ): Promise<void> {
     if (rows.length === 0) return;
-    for (const [field, spec] of Object.entries(withSpec)) {
-      if (spec !== true) {
-        throw new Error(
-          `find/get: with: { ${field}: ${JSON.stringify(spec)} } — only \`true\` is supported in v1`,
-        );
-      }
-      const fieldDef = this._schema[field];
-      if (!fieldDef || fieldDef.type !== "ref") {
-        throw new Error(
-          `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${this._name}"`,
-        );
-      }
-      const targetName = fieldDef.refTarget;
-      if (typeof targetName !== "string" || targetName.length === 0) {
-        throw new Error(
-          `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
-        );
-      }
-      const resolve = this._resolveCollection;
-      if (resolve === null) {
-        throw new Error(
-          `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
-          `so sibling collections cannot be resolved. Use createDb({...}) to enable relation loading.`,
-        );
-      }
-      const targetCol = resolve(targetName);
-      if (!targetCol) {
-        throw new Error(
-          `find/get: with: { ${field}: true } — target collection "${targetName}" is not declared on this db`,
-        );
-      }
-      const ids: number[] = [];
-      const seen = new Set<number>();
-      for (const r of rows) {
-        const v = r[field];
-        if (typeof v === "number" && !seen.has(v)) {
-          seen.add(v);
-          ids.push(v);
+    // Each entry mutates a DISJOINT key on the same `rows` array, so
+    // running the per-relation loaders in parallel is race-safe — two
+    // `with` keys (e.g. `userId` and `projectId`) used to serialise to
+    // 2× latency under the old `for..of await` loop.
+    await Promise.all(
+      Object.entries(withSpec).map(async ([field, spec]) => {
+        if (spec !== true) {
+          throw new Error(
+            `find/get: with: { ${field}: ${JSON.stringify(spec)} } — only \`true\` is supported in v1`,
+          );
         }
-      }
-      if (ids.length === 0) {
-        // No non-null FK values across the page — every row's relation is null.
-        for (const r of rows) r[field] = null;
-        continue;
-      }
-      const { data: targetRows, error } = await targetCol.find({ id: { $in: ids } } as Filter<unknown>);
-      if (error) throw error;
-      const byId = new Map<number, PlainObject>();
-      for (const tr of (targetRows ?? []) as PlainObject[]) {
-        const tid = tr.id;
-        if (typeof tid === "number") byId.set(tid, tr);
-      }
-      for (const r of rows) {
-        const v = r[field];
-        if (typeof v !== "number") {
-          r[field] = null;
-        } else {
-          r[field] = byId.get(v) ?? null;
+        const fieldDef = this._schema[field];
+        if (!fieldDef || fieldDef.type !== "ref") {
+          throw new Error(
+            `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${this._name}"`,
+          );
         }
-      }
-    }
+        const targetName = fieldDef.refTarget;
+        if (typeof targetName !== "string" || targetName.length === 0) {
+          throw new Error(
+            `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
+          );
+        }
+        const resolve = this._resolveCollection;
+        if (resolve === null) {
+          throw new Error(
+            `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
+            `so sibling collections cannot be resolved. Use createDb({...}) to enable relation loading.`,
+          );
+        }
+        const targetCol = resolve(targetName);
+        if (!targetCol) {
+          throw new Error(
+            `find/get: with: { ${field}: true } — target collection "${targetName}" is not declared on this db`,
+          );
+        }
+        // Collect distinct FK values for this relation. The previous
+        // `typeof v === "number"` gate silently nulled bigint / string
+        // FKs; now we accept number + bigint (coerced to number for the
+        // IN clause) and throw loudly on a non-numeric string so the
+        // caller learns about the schema mismatch instead of seeing a
+        // mysterious null in the joined field.
+        const ids: number[] = [];
+        const seen = new Set<number>();
+        for (const r of rows) {
+          const v = r[field];
+          if (v === null || v === undefined) continue;
+          let n: number;
+          if (typeof v === "number") {
+            if (!Number.isFinite(v)) continue;
+            n = v;
+          } else if (typeof v === "bigint") {
+            n = Number(v);
+          } else {
+            throw new TypeError(
+              `_loadRelations: FK value for field '${field}' is not a number-like value (got ${typeof v})`,
+            );
+          }
+          if (!seen.has(n)) {
+            seen.add(n);
+            ids.push(n);
+          }
+        }
+        if (ids.length === 0) {
+          // No non-null FK values across the page — every row's relation is null.
+          for (const r of rows) r[field] = null;
+          return;
+        }
+        const { data: targetRows, error } = await targetCol.find({ id: { $in: ids } } as Filter<unknown>);
+        if (error) throw error;
+        const byId = new Map<number, PlainObject>();
+        for (const tr of (targetRows ?? []) as PlainObject[]) {
+          const tid = tr.id;
+          if (typeof tid === "number") byId.set(tid, tr);
+        }
+        for (const r of rows) {
+          const v = r[field];
+          if (v === null || v === undefined) {
+            r[field] = null;
+          } else if (typeof v === "number" && Number.isFinite(v)) {
+            r[field] = byId.get(v) ?? null;
+          } else if (typeof v === "bigint") {
+            r[field] = byId.get(Number(v)) ?? null;
+          } else {
+            // We threw above for non-numeric strings; anything reaching
+            // here would be an impossible mid-iteration type flip.
+            r[field] = null;
+          }
+        }
+      }),
+    );
   }
 
   /** Wraps an operation in ensureReady + try/catch → Result. Eliminates boilerplate per method. */
