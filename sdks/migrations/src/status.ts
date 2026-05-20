@@ -10,7 +10,7 @@
  */
 
 import type { NativeMigrations } from "./native.js";
-import { getNativeMigrations, parseNative, toNativeError } from "./native.js";
+import { getNativeMigrations, toNativeError } from "./native.js";
 import type {
   Migration,
   MigrationStatus,
@@ -19,30 +19,19 @@ import type {
   Result,
 } from "./types.js";
 
-interface NativeStatus {
-  exists: boolean;
-  status: MigrationStatus | null;
-  cursor: number;
-  processed: number;
-  deadLetterPks: number[];
-  isDone: boolean;
-  error: string | null;
-}
-
 export async function statusOf<Row extends PlainObject, Update extends PlainObject>(
   migration: Migration<Row, Update>,
   nativeOverride?: NativeMigrations,
 ): Promise<Result<MigrationStatusSnapshot>> {
   const native = nativeOverride ?? (await getNativeMigrations());
   try {
-    const raw = await native.status({ name: migration.name, collection: migration.collection });
-    const parsed = parseNative<NativeStatus>(raw);
+    const parsed = await native.status({ name: migration.name, collection: migration.collection });
     return {
       data: {
         name: migration.name,
         collection: migration.collection,
         exists: !!parsed.exists,
-        status: parsed.status ?? null,
+        status: (parsed.status as MigrationStatus | null) ?? null,
         cursor: parsed.cursor ?? 0,
         processed: parsed.processed ?? 0,
         isDone: !!parsed.isDone,

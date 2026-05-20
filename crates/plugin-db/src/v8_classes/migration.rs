@@ -30,7 +30,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use zeroship_runtime::state::OpError;
+use zeroship_runtime::state::{JsonValue, OpError};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};
@@ -141,11 +141,11 @@ impl Migration {
         }
     }
 
-    /// `migration.status()` — read the current audit-row state. Resolves
-    /// with the same JSON shape `env.db.migrations.status({name,
-    /// collection})` returns (delegates to `exec_status`).
+    /// `migration.status()` — read the current audit-row state.
+    /// Resolves with the typed status object (mirrors the SDK's
+    /// `NativeStatus` interface).
     #[v8_async_method]
-    async fn status(&self) -> Result<String, OpError> {
+    async fn status(&self) -> Result<JsonValue, OpError> {
         let owner = self
             .inner
             .borrow()
@@ -155,6 +155,7 @@ impl Migration {
         let pool = ensure_pool().await?;
         crate::migrations::exec_status(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
+            .map(JsonValue)
             .map_err(OpError::error)
     }
 
@@ -163,7 +164,7 @@ impl Migration {
     /// will observe the cancellation and abort. Idempotent at the
     /// wrapper level (subsequent calls error with "not active").
     #[v8_async_method]
-    async fn cancel(&self) -> Result<String, OpError> {
+    async fn cancel(&self) -> Result<(), OpError> {
         // `take()` so the finalizer becomes a no-op once the user has
         // explicitly cancelled. Idempotency at the SQL layer is owned
         // by `exec_cancel` itself.
@@ -175,6 +176,7 @@ impl Migration {
         let pool = ensure_pool().await?;
         crate::migrations::exec_cancel(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
+            .map(|_| ())
             .map_err(OpError::error)
     }
 
@@ -183,7 +185,7 @@ impl Migration {
     /// `env.db.migrations.reset({name, collection})`. Marks the wrapper
     /// inactive so the finalizer no longer auto-cancels.
     #[v8_async_method]
-    async fn reset(&self) -> Result<String, OpError> {
+    async fn reset(&self) -> Result<(), OpError> {
         let owner = self
             .inner
             .borrow_mut()
@@ -192,6 +194,7 @@ impl Migration {
         let pool = ensure_pool().await?;
         crate::migrations::exec_reset(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
+            .map(|_| ())
             .map_err(OpError::error)
     }
 

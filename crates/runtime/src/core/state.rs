@@ -670,6 +670,12 @@ pub enum ResolveValue {
     Bytes(Vec<u8>),
     /// Resolve with a JS string materialised from this UTF-8 buffer.
     String(String),
+    /// Resolve with the JS value produced by `JSON.parse(<this>)`.
+    /// Used by callers (e.g. plugin-db CRUD) that need to hand back
+    /// real JS objects / `null` / numbers without pre-building the
+    /// `v8::Global<Value>` (which would require carrying a V8 scope
+    /// across the spawned async op).
+    Json(String),
     /// Resolve with a JS Boolean.
     Bool(bool),
     /// Resolve with a JS Number from an unsigned 32-bit integer.
@@ -751,6 +757,19 @@ impl IntoResolveValue for f64 {
 impl IntoResolveValue for v8::Global<v8::Value> {
     fn into_resolve_value(self) -> ResolveValue {
         ResolveValue::JsGlobal(self)
+    }
+}
+
+/// Newtype wrapper that resolves a JS Promise by `JSON.parse`-ing the
+/// inner UTF-8 buffer. Use this from `#[v8_async_method]` bodies that
+/// want to hand back a real JS object / `null` / number — instead of
+/// `String` (which resolves with the raw JS string).
+#[derive(Debug)]
+pub struct JsonValue(pub String);
+
+impl IntoResolveValue for JsonValue {
+    fn into_resolve_value(self) -> ResolveValue {
+        ResolveValue::Json(self.0)
     }
 }
 

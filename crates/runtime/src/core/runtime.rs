@@ -2047,6 +2047,12 @@ impl RuntimeInner {
                             let v = v8::String::new(scope, &s).unwrap();
                             r.resolve(scope, v.into());
                         }
+                        ResolveValue::Json(s) => {
+                            let v = v8::String::new(scope, &s)
+                                .and_then(|js| v8::json::parse(scope, js))
+                                .unwrap_or_else(|| v8::null(scope).into());
+                            r.resolve(scope, v);
+                        }
                         ResolveValue::Bool(b) => {
                             let v = v8::Boolean::new(scope, b);
                             r.resolve(scope, v.into());

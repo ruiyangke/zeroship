@@ -172,26 +172,30 @@ type ZeroshipDbSchema = Record<string, ZeroshipDbFieldDef>;
 // ---------------------------------------------------------------------------
 
 /**
- * A typed Collection wrapper minted by `env.db.collection(name)`. All
- * CRUD methods return JSON strings (or null) from the native layer.
+ * A typed Collection wrapper minted by `env.db.collection(name)`.
  * Identity is cached on the Db wrapper — calling `.collection(name)`
  * twice with the same name returns the same JS object.
+ *
+ * `find` / `insertMany` / `updateMany` / `deleteMany` / `distinct` /
+ * `aggregate` still cross the native boundary as JSON strings (the
+ * SDK parses them once). The scalar shapes — `findOne` / `insert` /
+ * `updateOne` / `upsert` / `count` — resolve real JS values.
  */
 interface ZeroshipCollection {
   /** Find multiple documents. Returns JSON array string. */
-  find(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string>;
+  find(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<string>;
 
-  /** Find one document. Returns JSON string or null. */
-  findOne(filter: ZeroshipDbFilter, opts: ZeroshipDbFindOpts): Promise<string | null>;
+  /** Find one document. Returns the row object or `null` when nothing matches. */
+  findOne(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown> | null>;
 
-  /** Insert one document. Returns JSON string of the inserted row. */
-  insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<string>;
+  /** Insert one document. Returns the inserted row. */
+  insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<Record<string, unknown>>;
 
   /** Insert multiple documents. Returns JSON array string. */
   insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
 
-  /** Update one document. Returns JSON string of the updated row or null. */
-  updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
+  /** Update one document. Returns the updated row or `null` when nothing matched. */
+  updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<Record<string, unknown> | null>;
 
   /** Update multiple documents. Returns JSON string with { updated: N }. */
   updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
@@ -202,16 +206,15 @@ interface ZeroshipCollection {
   /** Delete multiple documents. Returns JSON string with { deleted: N }. */
   deleteMany(filter: ZeroshipDbFilter): Promise<string>;
 
-  /** Upsert a document (insert or update on conflict). Returns JSON string of the row.
+  /** Upsert a document (insert or update on conflict). Returns the row.
    *  `opts.conflictFields` names the ON CONFLICT target columns. */
   upsert(
     doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
     opts: { conflictFields: string[] },
-  ): Promise<string>;
+  ): Promise<Record<string, unknown>>;
 
-  /** Count documents matching filter. Returns the integer as a JSON
-   *  number string (`"42"`); the SDK parses it to a number directly. */
-  count(filter: ZeroshipDbFilter): Promise<string>;
+  /** Count documents matching `filter`. */
+  count(filter: ZeroshipDbFilter): Promise<number>;
 
   /** Get distinct values for a field. Returns JSON array string. */
   distinct(field: string, filter: ZeroshipDbFilter): Promise<string>;
@@ -245,10 +248,26 @@ interface ZeroshipTransaction {
  * `.cancel({name, collection})` / `.reset({name, collection})` methods
  * operate by name+collection and don't hold the advisory lock.
  */
+/**
+ * Status snapshot returned by `ZeroshipMigration.status()` and
+ * `ZeroshipMigrations.status(spec)`. Mirrors the audit-row shape; the
+ * `@zeroship/migrations` SDK maps it to its public
+ * `MigrationStatusSnapshot` type.
+ */
+interface ZeroshipMigrationStatus {
+  exists: boolean;
+  status: string | null;
+  cursor: number;
+  processed: number;
+  deadLetterPks: number[];
+  isDone: boolean;
+  error: string | null;
+}
+
 interface ZeroshipMigration {
-  status(): Promise<string>;
-  cancel(): Promise<string>;
-  reset(): Promise<string>;
+  status(): Promise<ZeroshipMigrationStatus>;
+  cancel(): Promise<void>;
+  reset(): Promise<void>;
 
   /**
    * Fetch the next batch of rows after `cursor`. Returns a JSON string
@@ -308,9 +327,9 @@ interface ZeroshipMigrations {
     dryRun?: boolean;
     reset?: boolean;
   }): Promise<ZeroshipMigration>;
-  status(spec: { name: string; collection: string }): Promise<string>;
-  cancel(spec: { name: string; collection: string }): Promise<string>;
-  reset(spec: { name: string; collection: string }): Promise<string>;
+  status(spec: { name: string; collection: string }): Promise<ZeroshipMigrationStatus>;
+  cancel(spec: { name: string; collection: string }): Promise<void>;
+  reset(spec: { name: string; collection: string }): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

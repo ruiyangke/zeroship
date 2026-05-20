@@ -12,7 +12,7 @@
 
 use std::rc::Rc;
 
-use zeroship_runtime::state::{OpResult, SharedState};
+use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 use serde_json::Value;
 
 use crate::query::{self, BuiltQuery};
@@ -331,6 +331,25 @@ fn setup_promise<'s>(
     (op_id, request_id, promise)
 }
 
+/// Create a promise for the `OpResult::JsValue` resolution path —
+/// returns `(resolver_global, request_id, promise)`. Use when the
+/// dispatch helper resolves with a real JS value (number, object,
+/// `null`, `undefined`) rather than a JSON string.
+pub(crate) fn setup_js_promise<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    state: &SharedState,
+) -> (
+    v8::Global<v8::PromiseResolver>,
+    Option<u64>,
+    v8::Local<'s, v8::Promise>,
+) {
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+    let global_resolver = v8::Global::new(scope, resolver);
+    let request_id = state.borrow().executing_request_id;
+    (global_resolver, request_id, promise)
+}
+
 /// Format a compio_postgres::Error with its full source chain — surfaces
 /// the underlying Postgres DbError message instead of the bare wrapper
 /// kinds ("db error", "unexpected message from server").
@@ -378,20 +397,18 @@ async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
 
 /// Execute a built query expecting a count result.
 ///
-/// Resolves the Promise with the raw integer as a JSON number string
-/// (`"42"`) — no `{count: N}` wrap. The SDK reads it directly via
-/// `JSON.parse(raw)` as a number.
-async fn exec_count(bq: BuiltQuery) -> Result<String, String> {
+/// Returns the raw integer; callers wrap into the appropriate
+/// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
+/// `number`).
+async fn exec_count(bq: BuiltQuery) -> Result<i64, String> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = run_sql(&bq.sql, &param_refs).await
         .map_err(|e| format!("db query error: {e}"))?;
 
-    let count: i64 = rows
+    Ok(rows
         .first()
         .map(|r| r.get::<_, i64>("count"))
-        .unwrap_or(0);
-
-    Ok(count.to_string())
+        .unwrap_or(0))
 }
 
 /// Execute an insert/update/delete query, returning the affected rows.
@@ -629,8 +646,9 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
 /// `serde_json::Value` via [`v8_value_to_serde_json`] — no JSON
 /// round-trip on the hot path.
 ///
-/// Resolves the Promise with a JSON STRING (the SDK side calls
-/// `JSON.parse` on the result); on error rejects with the message.
+/// Resolves with the row as a real JS object or real JS `null` if no
+/// row matched (via `ResolveValue::Json`); on error rejects with the
+/// message.
 pub(crate) fn dispatch_find_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -646,12 +664,16 @@ pub(crate) fn dispatch_find_one<'s>(
     let order_by = opts.get("orderBy");
     let select = opts.get("select");
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let bq = match query::build_find(app_id, collection, &filter, Some(1), None, order_by, select) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -660,12 +682,19 @@ pub(crate) fn dispatch_find_one<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_query(bq).await {
             Ok(json) => {
-                // findOne returns the first element or null
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(value),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -732,13 +761,17 @@ pub(crate) fn dispatch_insert<'s>(
     doc: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_insert(app_id, collection, &doc) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -756,12 +789,19 @@ pub(crate) fn dispatch_insert<'s>(
         .await
         {
             Ok(json) => {
-                // Return the first (inserted) row
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(value),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -783,13 +823,17 @@ pub(crate) fn dispatch_update_one<'s>(
     update: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_update_one(app_id, collection, &filter, &update) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -809,9 +853,17 @@ pub(crate) fn dispatch_update_one<'s>(
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(value),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -1121,8 +1173,8 @@ pub(crate) fn dispatch_delete_many<'s>(
 // Callback: count(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `count`. Result shape:
-/// `{ "count": <number> }` JSON string.
+/// Shared dispatch for `count`. Resolves with a real JS `number`
+/// (not a JSON-stringified integer).
 pub(crate) fn dispatch_count<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1134,13 +1186,17 @@ pub(crate) fn dispatch_count<'s>(
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_count(app_id, collection, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -1148,8 +1204,17 @@ pub(crate) fn dispatch_count<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_count(bq).await {
-            Ok(value) => OpResult::Completed { op_id, value, request_id },
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Ok(n) => OpResult::JsValue {
+                resolver,
+                #[allow(clippy::cast_precision_loss)]
+                value: ResolveValue::F64(n as f64),
+                request_id,
+            },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -1936,13 +2001,17 @@ pub(crate) fn dispatch_upsert<'s>(
     conflict_fields: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_upsert(app_id, collection, &doc, &conflict_fields) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -1966,9 +2035,17 @@ pub(crate) fn dispatch_upsert<'s>(
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(value),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 

@@ -64,7 +64,7 @@ function toResultError(e: unknown): Error {
 }
 
 /** Parses a raw JSON string (or already-parsed value) from the native layer. */
-function parseRaw<T>(raw: string | null | undefined): T | null {
+function parseRaw<T>(raw: string | PlainObject | null | undefined): T | null {
   if (raw === null || raw === undefined) return null;
   let parsed: unknown;
   if (typeof raw === "string") {
@@ -611,9 +611,8 @@ export class Collection<S = PlainObject> {
   async count(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const raw = await this._col().count(mapped);
-      const result = parseRaw<number>(raw);
-      return result ?? 0;
+      const n = await this._col().count(mapped);
+      return typeof n === "number" ? n : 0;
     });
   }
 

@@ -7,7 +7,7 @@
  * Node without a Postgres instance.
  */
 
-import type { NativeMigration, NativeMigrations } from "../src/native.js";
+import type { NativeMigration, NativeMigrations, NativeStatus } from "../src/native.js";
 
 export interface MockOpts {
   /** Initial table rows. `id` must be present. */
@@ -69,33 +69,36 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
     return JSON.stringify(payload);
   }
 
-  function rejectWith(code: string, message: string): Promise<string> {
+  function rejectWith(code: string, message: string): Promise<never> {
     // Native side resolves with `{ error: { code, message } }` for
     // structured errors. We emulate by rejecting with the JSON string —
     // toNativeError() unwraps it.
     return Promise.reject(new Error(JSON.stringify({ code, message })));
   }
 
+  function statusSnapshot(): NativeStatus {
+    const a = state.audit;
+    return {
+      exists: a.exists,
+      status: a.exists ? a.status : null,
+      cursor: a.cursor,
+      processed: a.processed,
+      deadLetterPks: [...a.deadLetterPks],
+      isDone: ["applied", "applied_with_dead_letter", "failed", "cancelled"].includes(a.status),
+      error: a.error,
+    };
+  }
+
   function makeMigration(): NativeMigration {
     return {
       async status() {
         record("Migration.status", []);
-        const a = state.audit;
-        return envelope({
-          exists: a.exists,
-          status: a.exists ? a.status : null,
-          cursor: a.cursor,
-          processed: a.processed,
-          deadLetterPks: [...a.deadLetterPks],
-          isDone: ["applied", "applied_with_dead_letter", "failed", "cancelled"].includes(a.status),
-          error: a.error,
-        });
+        return statusSnapshot();
       },
       async cancel() {
         record("Migration.cancel", []);
         state.cancelled = true;
         state.audit.status = "cancelled";
-        return envelope({ ok: true });
       },
       async reset() {
         record("Migration.reset", []);
@@ -108,7 +111,6 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
           error: null,
           exists: state.audit.exists,
         };
-        return envelope({ ok: true });
       },
       async fetchBatch(cursor, batchSize) {
         record("fetchBatch", [cursor, batchSize]);
@@ -198,26 +200,16 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
 
     async status(spec) {
       record("status", [spec.name, spec.collection]);
-      const a = state.audit;
-      return envelope({
-        exists: a.exists,
-        status: a.exists ? a.status : null,
-        cursor: a.cursor,
-        processed: a.processed,
-        deadLetterPks: [...a.deadLetterPks],
-        isDone: ["applied", "applied_with_dead_letter", "failed", "cancelled"].includes(a.status),
-        error: a.error,
-      });
+      return statusSnapshot();
     },
 
     async cancel(spec) {
       record("cancel", [spec.name, spec.collection]);
       if (!["pending", "running"].includes(state.audit.status)) {
-        return rejectWith("migration_not_cancellable", `state '${state.audit.status}'`);
+        await rejectWith("migration_not_cancellable", `state '${state.audit.status}'`);
       }
       state.cancelled = true;
       state.audit.status = "cancelled";
-      return envelope({ ok: true });
     },
 
     async reset(spec) {
@@ -232,7 +224,6 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
         exists: state.audit.exists,
       };
       state.cancelled = false;
-      return envelope({ ok: true });
     },
   };
 

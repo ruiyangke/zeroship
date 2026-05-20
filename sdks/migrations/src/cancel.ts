@@ -11,12 +11,8 @@
  */
 
 import type { NativeMigrations } from "./native.js";
-import { getNativeMigrations, parseNative, toNativeError } from "./native.js";
+import { getNativeMigrations, toNativeError } from "./native.js";
 import type { Migration, PlainObject, Result } from "./types.js";
-
-interface OkResponse {
-  ok: boolean;
-}
 
 export async function cancelMigration<Row extends PlainObject, Update extends PlainObject>(
   migration: Migration<Row, Update>,
@@ -24,9 +20,8 @@ export async function cancelMigration<Row extends PlainObject, Update extends Pl
 ): Promise<Result<{ ok: boolean }>> {
   const native = nativeOverride ?? (await getNativeMigrations());
   try {
-    const raw = await native.cancel({ name: migration.name, collection: migration.collection });
-    const parsed = parseNative<OkResponse>(raw);
-    return { data: { ok: !!parsed.ok }, error: null };
+    await native.cancel({ name: migration.name, collection: migration.collection });
+    return { data: { ok: true }, error: null };
   } catch (e) {
     return { data: null, error: toNativeError(e) };
   }
@@ -38,9 +33,8 @@ export async function resetMigration<Row extends PlainObject, Update extends Pla
 ): Promise<Result<{ ok: boolean }>> {
   const native = nativeOverride ?? (await getNativeMigrations());
   try {
-    const raw = await native.reset({ name: migration.name, collection: migration.collection });
-    const parsed = parseNative<OkResponse>(raw);
-    return { data: { ok: !!parsed.ok }, error: null };
+    await native.reset({ name: migration.name, collection: migration.collection });
+    return { data: { ok: true }, error: null };
   } catch (e) {
     return { data: null, error: toNativeError(e) };
   }

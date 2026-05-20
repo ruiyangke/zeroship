@@ -21,10 +21,25 @@
  * and its Weak finalizer auto-cancels if the wrapper is GC'd without
  * an explicit teardown.
  */
+/**
+ * Audit-row status snapshot returned by `status()`. Matches the Rust
+ * `exec_status` JSON shape that the native layer resolves directly as
+ * a JS object (no `JSON.parse` on the SDK side).
+ */
+export interface NativeStatus {
+  exists: boolean;
+  status: string | null;
+  cursor: number;
+  processed: number;
+  deadLetterPks: number[];
+  isDone: boolean;
+  error: string | null;
+}
+
 export interface NativeMigration {
-  status(): Promise<string>;
-  cancel(): Promise<string>;
-  reset(): Promise<string>;
+  status(): Promise<NativeStatus>;
+  cancel(): Promise<void>;
+  reset(): Promise<void>;
   fetchBatch(cursor: number, batchSize: number): Promise<string>;
   commitBatch(
     updatesJson: string,
@@ -58,9 +73,9 @@ export interface NativeMigrations {
     dryRun?: boolean;
     reset?: boolean;
   }): Promise<NativeMigration>;
-  status(spec: { name: string; collection: string }): Promise<string>;
-  cancel(spec: { name: string; collection: string }): Promise<string>;
-  reset(spec: { name: string; collection: string }): Promise<string>;
+  status(spec: { name: string; collection: string }): Promise<NativeStatus>;
+  cancel(spec: { name: string; collection: string }): Promise<void>;
+  reset(spec: { name: string; collection: string }): Promise<void>;
 }
 
 import { env } from "zeroship";

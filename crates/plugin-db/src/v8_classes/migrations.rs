@@ -24,7 +24,7 @@ use std::cell::RefCell;
 
 use serde_json::Value;
 
-use zeroship_runtime::state::{OpError, OpResult, SharedState};
+use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method};
 
@@ -128,7 +128,8 @@ enum MigrationOp {
 /// Extract `(name, collection)` from a `{ name, collection }` spec
 /// object, then run the matching `migrations::exec_*` against the
 /// pool. Shared by `status` / `cancel` / `reset` because all three
-/// take the same input shape and have the same error envelope.
+/// take the same input shape; resolution differs by op (typed object
+/// for status, void for cancel/reset).
 fn dispatch_by_spec<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: String,
@@ -155,13 +156,19 @@ fn dispatch_by_spec<'s>(
         }
     };
 
+    let resolver_global = v8::Global::new(scope, resolver);
     let request_id = state.borrow().executing_request_id;
-    let (op_id, _, _) = setup_promise_with(scope, &state, &resolver);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let pool = match callbacks::ensure_pool().await {
             Ok(p) => p,
-            Err(e) => return OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::RejectError(OpError::error(e)),
+                    request_id,
+                };
+            }
         };
         let result = match op {
             MigrationOp::Status => {
@@ -174,33 +181,17 @@ fn dispatch_by_spec<'s>(
                 crate::migrations::exec_reset(&pool, &app_id, &name, &collection).await
             }
         };
-        match result {
-            Ok(json) => OpResult::Completed { op_id, value: json, request_id },
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
-        }
+        let value = match result {
+            Ok(json) => match op {
+                MigrationOp::Status => ResolveValue::Json(json),
+                MigrationOp::Cancel | MigrationOp::Reset => ResolveValue::Undefined,
+            },
+            Err(e) => ResolveValue::RejectError(OpError::error(e)),
+        };
+        OpResult::JsValue { resolver: resolver_global, value, request_id }
     }));
 
     promise
-}
-
-/// Bind `resolver` to a fresh op_id in the runtime state so the
-/// async future can resolve / reject it via `OpResult`. Mirrors
-/// `callbacks::setup_promise` but accepts an existing
-/// `PromiseResolver` (so we can synchronously reject for parse errors
-/// before reaching the future).
-fn setup_promise_with<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    state: &SharedState,
-    resolver: &v8::Local<v8::PromiseResolver>,
-) -> (u32, Option<u64>, v8::Local<'s, v8::Promise>) {
-    let global = v8::Global::new(scope, *resolver);
-    let promise = resolver.get_promise(scope);
-    let mut s = state.borrow_mut();
-    let op_id = s.next_op_id;
-    s.next_op_id += 1;
-    s.pending_resolvers.insert(op_id, global);
-    let request_id = s.executing_request_id;
-    (op_id, request_id, promise)
 }
 
 fn parse_name_and_collection(
