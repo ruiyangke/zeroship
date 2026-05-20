@@ -660,13 +660,17 @@ pub(crate) fn dispatch_find<'s>(
     let offset = opts.get("offset").and_then(Value::as_i64);
     let order_by = opts.get("orderBy");
     let select = opts.get("select");
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_find(app_id, collection, &filter, limit, offset, order_by, select) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -674,8 +678,16 @@ pub(crate) fn dispatch_find<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_query(bq).await {
-            Ok(value) => OpResult::Completed { op_id, value, request_id },
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Ok(value) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::Json(value),
+                request_id,
+            },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -820,13 +832,17 @@ pub(crate) fn dispatch_delete_one<'s>(
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_delete_one(app_id, collection, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -846,9 +862,17 @@ pub(crate) fn dispatch_delete_one<'s>(
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
                 let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(value),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -869,13 +893,17 @@ pub(crate) fn dispatch_insert_many<'s>(
     docs: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_insert_many(app_id, collection, &docs) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -892,8 +920,16 @@ pub(crate) fn dispatch_insert_many<'s>(
         )
         .await
         {
-            Ok(value) => OpResult::Completed { op_id, value, request_id },
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Ok(value) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::Json(value),
+                request_id,
+            },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -929,13 +965,17 @@ pub(crate) fn dispatch_aggregate<'s>(
         crate::read_set::record_if_active(collection, &captured_filter);
     }
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_aggregate(app_id, collection, &pipeline) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -943,8 +983,16 @@ pub(crate) fn dispatch_aggregate<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_query(bq).await {
-            Ok(value) => OpResult::Completed { op_id, value, request_id },
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Ok(value) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::Json(value),
+                request_id,
+            },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -966,13 +1014,17 @@ pub(crate) fn dispatch_distinct<'s>(
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_distinct(app_id, collection, field, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -994,9 +1046,17 @@ pub(crate) fn dispatch_distinct<'s>(
                     })
                     .collect();
                 let value = Value::Array(flat).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::Json(value),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -1008,8 +1068,8 @@ pub(crate) fn dispatch_distinct<'s>(
 // Callback: updateMany(collection, filterJson, updateJson)
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `updateMany`. Result shape:
-/// `{ "updated": <number-of-rows> }` JSON string.
+/// Shared dispatch for `updateMany`. Resolves with the count of
+/// affected rows as a JS `number`.
 pub(crate) fn dispatch_update_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1018,13 +1078,17 @@ pub(crate) fn dispatch_update_many<'s>(
     update: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_update_many(app_id, collection, &filter, &update) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -1043,11 +1107,19 @@ pub(crate) fn dispatch_update_many<'s>(
         {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-                let n = arr.len();
-                let value = serde_json::json!({ "updated": n }).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                #[allow(clippy::cast_precision_loss)]
+                let n = arr.len() as f64;
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::F64(n),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 
@@ -1059,8 +1131,8 @@ pub(crate) fn dispatch_update_many<'s>(
 // Callback: deleteMany(collection, filterJson)
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `deleteMany`. Result shape:
-/// `{ "deleted": <number-of-rows> }` JSON string.
+/// Shared dispatch for `deleteMany`. Resolves with the count of
+/// affected rows as a JS `number`.
 pub(crate) fn dispatch_delete_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1068,13 +1140,17 @@ pub(crate) fn dispatch_delete_many<'s>(
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let bq = match query::build_delete_many(app_id, collection, &filter) {
         Ok(q) => q,
         Err(e) => {
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                OpResult::Failed { op_id, error: e.to_string(), request_id }
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    request_id,
+                }
             }));
             return promise;
         }
@@ -1093,11 +1169,19 @@ pub(crate) fn dispatch_delete_many<'s>(
         {
             Ok(json) => {
                 let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-                let n = arr.len();
-                let value = serde_json::json!({ "deleted": n }).to_string();
-                OpResult::Completed { op_id, value, request_id }
+                #[allow(clippy::cast_precision_loss)]
+                let n = arr.len() as f64;
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::F64(n),
+                    request_id,
+                }
             }
-            Err(e) => OpResult::Failed { op_id, error: e, request_id },
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
         }
     }));
 

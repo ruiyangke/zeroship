@@ -176,14 +176,13 @@ type ZeroshipDbSchema = Record<string, ZeroshipDbFieldDef>;
  * Identity is cached on the Db wrapper — calling `.collection(name)`
  * twice with the same name returns the same JS object.
  *
- * `find` / `insertMany` / `updateMany` / `deleteMany` / `distinct` /
- * `aggregate` still cross the native boundary as JSON strings (the
- * SDK parses them once). The scalar shapes — `findOne` / `insert` /
- * `updateOne` / `upsert` / `count` — resolve real JS values.
+ * Every CRUD method resolves a real JS value — no JSON.stringify
+ * boundary. `updateMany` / `deleteMany` resolve with the raw integer
+ * count of affected rows.
  */
 interface ZeroshipCollection {
-  /** Find multiple documents. Returns JSON array string. */
-  find(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<string>;
+  /** Find multiple documents. Returns the row array. */
+  find(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown>[]>;
 
   /** Find one document. Returns the row object or `null` when nothing matches. */
   findOne(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown> | null>;
@@ -191,20 +190,20 @@ interface ZeroshipCollection {
   /** Insert one document. Returns the inserted row. */
   insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<Record<string, unknown>>;
 
-  /** Insert multiple documents. Returns JSON array string. */
-  insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<string>;
+  /** Insert multiple documents. Returns the inserted rows. */
+  insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<Record<string, unknown>[]>;
 
   /** Update one document. Returns the updated row or `null` when nothing matched. */
   updateOne(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<Record<string, unknown> | null>;
 
-  /** Update multiple documents. Returns JSON string with { updated: N }. */
-  updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<string>;
+  /** Update multiple documents. Returns the count of affected rows. */
+  updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<number>;
 
-  /** Delete one document. Returns JSON string of the deleted row or null. */
-  deleteOne(filter: ZeroshipDbFilter): Promise<string>;
+  /** Delete one document. Returns the deleted row or `null` when nothing matched. */
+  deleteOne(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
-  /** Delete multiple documents. Returns JSON string with { deleted: N }. */
-  deleteMany(filter: ZeroshipDbFilter): Promise<string>;
+  /** Delete multiple documents. Returns the count of affected rows. */
+  deleteMany(filter: ZeroshipDbFilter): Promise<number>;
 
   /** Upsert a document (insert or update on conflict). Returns the row.
    *  `opts.conflictFields` names the ON CONFLICT target columns — must
@@ -213,7 +212,7 @@ interface ZeroshipCollection {
   upsert(
     doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
     opts: { conflictFields: string[] },
-  ): Promise<Record<string, unknown>>;
+  ): Promise<Record<string, unknown> | null>;
 
   /** Count documents matching `filter`. No opts — `count` is
    *  conceptually unbounded; use `find` with a `limit` to cap a row
@@ -221,11 +220,11 @@ interface ZeroshipCollection {
   count(filter: ZeroshipDbFilter): Promise<number>;
 
   /** Get distinct values for `opts.field` across rows matching
-   *  `filter`. Returns JSON array string. */
-  distinct(filter: ZeroshipDbFilter, opts: { field: string }): Promise<string>;
+   *  `filter`. Returns a flat array of scalar values. */
+  distinct(filter: ZeroshipDbFilter, opts: { field: string }): Promise<(string | number | boolean | null)[]>;
 
-  /** Run an aggregation pipeline. Returns JSON array string. */
-  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<string>;
+  /** Run an aggregation pipeline. Returns the result rows. */
+  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<Record<string, unknown>[]>;
 
   /** Open a subscription bound to this collection. */
   openSubscription(): ZeroshipSubscription;

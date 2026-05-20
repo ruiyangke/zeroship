@@ -63,27 +63,6 @@ function toResultError(e: unknown): Error {
   return out;
 }
 
-/** Parses a raw JSON string (or already-parsed value) from the native layer. */
-function parseRaw<T>(raw: string | PlainObject | null | undefined): T | null {
-  if (raw === null || raw === undefined) return null;
-  let parsed: unknown;
-  if (typeof raw === "string") {
-    if (raw === "") return null;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e: unknown) {
-      throw new Error(`failed to parse native response: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
-    }
-  } else {
-    parsed = raw;
-  }
-  // Detect native error envelope: Rust resolves with { "error": "..." } instead of rejecting
-  if (parsed && typeof parsed === "object" && "error" in parsed && typeof (parsed as PlainObject).error === "string") {
-    throw new Error((parsed as PlainObject).error as string);
-  }
-  return parsed as T;
-}
-
 /**
  * Extracts the plain field map from an update argument for validation.
  * Handles both `{ $set: { field: val } }` and bare `{ field: val }` styles.
@@ -364,9 +343,8 @@ export class Collection<S = PlainObject> {
     return this._run(async () => {
       const validated = validateDoc(row as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
-      const raw = await this._col().insert(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
-      const result = parseRaw<PlainObject>(raw);
-      return mapResultDoc(result!, this._toField) as Row<S>;
+      const result = await this._col().insert(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
   }
 
@@ -379,9 +357,8 @@ export class Collection<S = PlainObject> {
     return this._run(async () => {
       const validated = (rows as PlainObject[]).map((r) => validateDoc(r, this._schema));
       const outbound = validated.map((r) => mapDocOutbound(r, this._toColumn));
-      const raw = await this._col().insertMany(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
-      const results = parseRaw<PlainObject[]>(raw);
-      return (results ?? []).map((r) => mapResultDoc(r, this._toField)) as Row<S>[];
+      const results = await this._col().insertMany(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
+      return (results ?? []).map((r) => mapResultDoc(r as PlainObject, this._toField)) as Row<S>[];
     });
   }
 
@@ -416,11 +393,9 @@ export class Collection<S = PlainObject> {
         }
         nativeOpts.orderBy = mappedOrder;
       }
-      const raw = await this._col().findOne(mapped, nativeOpts);
-      if (raw === null) return null;
-      const result = parseRaw<PlainObject>(raw);
+      const result = await this._col().findOne(mapped, nativeOpts);
       if (result === null) return null;
-      return mapResultDoc(result, this._toField) as Row<S>;
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
   }
 
@@ -462,12 +437,11 @@ export class Collection<S = PlainObject> {
       const validated = validateDoc(row as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const conflictCols = options.conflictFields.map((f) => this._toColumn(f));
-      const raw = await this._col().upsert(
+      const result = await this._col().upsert(
         outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
         { conflictFields: conflictCols },
       );
-      const result = parseRaw<PlainObject>(raw);
-      return mapResultDoc(result!, this._toField) as Row<S>;
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
   }
 
@@ -503,15 +477,14 @@ export class Collection<S = PlainObject> {
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._col().updateOne(mappedFilter, mappedUpdate);
-      const result = parseRaw<PlainObject>(raw);
+      const result = await this._col().updateOne(mappedFilter, mappedUpdate);
       if (result === null) {
         if (casVersion !== null) {
           throw new OptimisticLockError(casVersion, this._name);
         }
         return null;
       }
-      return mapResultDoc(result, this._toField) as Row<S>;
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
   }
 
@@ -536,9 +509,7 @@ export class Collection<S = PlainObject> {
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const raw = await this._col().updateMany( mappedFilter, mappedUpdate);
-      const result = parseRaw<{ updated: number }>(raw);
-      const n = result?.updated ?? 0;
+      const n = await this._col().updateMany(mappedFilter, mappedUpdate);
       if (n === 0 && casVersion !== null) {
         throw new OptimisticLockError(casVersion, this._name);
       }
@@ -567,14 +538,12 @@ export class Collection<S = PlainObject> {
       if (this._softDelete && !hard) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._col().updateOne(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
-        const result = parseRaw<PlainObject>(raw);
-        return result === null ? null : (mapResultDoc(result, this._toField) as Row<S>);
+        const result = await this._col().updateOne(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        return result === null ? null : (mapResultDoc(result as PlainObject, this._toField) as Row<S>);
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteOne(mapped);
-      const result = parseRaw<PlainObject>(raw);
-      return result === null ? null : (mapResultDoc(result, this._toField) as Row<S>);
+      const result = await this._col().deleteOne(mapped);
+      return result === null ? null : (mapResultDoc(result as PlainObject, this._toField) as Row<S>);
     });
   }
 
@@ -593,14 +562,12 @@ export class Collection<S = PlainObject> {
       if (this._softDelete && !hard) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const raw = await this._col().updateMany(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
-        const result = parseRaw<{ updated: number }>(raw);
-        return { deletedCount: result?.updated ?? 0 };
+        const n = await this._col().updateMany(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        return { deletedCount: n };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const raw = await this._col().deleteMany(mapped);
-      const result = parseRaw<{ deleted: number }>(raw);
-      return { deletedCount: result?.deleted ?? 0 };
+      const n = await this._col().deleteMany(mapped);
+      return { deletedCount: n };
     });
   }
 
@@ -627,8 +594,7 @@ export class Collection<S = PlainObject> {
       }
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const column = this._toColumn(field);
-      const raw = await this._col().distinct(mapped, { field: column });
-      const result = parseRaw<(string | number | boolean | null)[]>(raw);
+      const result = await this._col().distinct(mapped, { field: column });
       return result ?? [];
     });
   }
@@ -657,9 +623,8 @@ export class Collection<S = PlainObject> {
         effectivePipeline as unknown as PlainObject[],
         this._toColumn,
       ) as ZeroshipDbAggregateStage[];
-      const raw = await this._col().aggregate(translated);
-      const results = parseRaw<PlainObject[]>(raw);
-      return (results ?? []).map((d) => mapResultDoc(d, this._toField));
+      const results = await this._col().aggregate(translated);
+      return (results ?? []).map((d) => mapResultDoc(d as PlainObject, this._toField));
     });
   }
 

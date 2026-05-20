@@ -10,7 +10,7 @@ type NativeFn = (
   collection: string,
   filter: ZeroshipDbFilter,
   opts: ZeroshipDbFindOpts
-) => Promise<string>;
+) => Promise<Record<string, unknown>[]>;
 
 /**
  * Chainable query object returned by `Collection.find()`.
@@ -157,14 +157,9 @@ export class Query<S = PlainObject, P = Row<S>> {
     }
 
     try {
-      const raw = await this._native(this._collection, filter, opts);
-      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-      // Detect native error envelope (fallback — OpResult::Failed handles this in production)
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.error === "string") {
-        throw new Error(parsed.error);
-      }
-      const rows: PlainObject[] = Array.isArray(parsed) ? parsed : [];
-      return ok(rows.map(d => mapResultDoc(d, this._toField)) as P[]);
+      const rows = await this._native(this._collection, filter, opts);
+      const list: PlainObject[] = Array.isArray(rows) ? rows : [];
+      return ok(list.map(d => mapResultDoc(d, this._toField)) as P[]);
     } catch (e: unknown) {
       return err(new Error(`find query failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e }));
     }
