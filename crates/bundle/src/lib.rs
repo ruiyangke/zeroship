@@ -17,7 +17,7 @@ pub use limits::{
     MAX_BLOBS_PER_DEPLOY, MAX_BLOB_BYTES, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES,
     MAX_MANIFEST_BYTES,
 };
-pub use manifest::{Manifest, ManifestMetadata, WorkerCode};
+pub use manifest::{HandlerEntry, Manifest, ManifestExports, ManifestMetadata, WorkerCode};
 pub use rule::{
     Action, AuthLevel, CacheCtl, Cors, HttpMethod, Match, ProcedureKind, RateLimit,
     RateLimitPer, RedirectAction, ResourceEntry, Rule, StaticAction, WorkerMode,

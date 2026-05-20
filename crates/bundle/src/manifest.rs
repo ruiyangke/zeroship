@@ -100,6 +100,17 @@ pub struct Manifest {
     /// Informational; not load-bearing on the hot path.
     #[serde(default)]
     pub metadata: ManifestMetadata,
+
+    /// Build-time export discovery. Stage 1 only writes this; the
+    /// runtime ignores it. Stage 2 will read `exports.schema` from the
+    /// V8 bootstrap to resolve the DB schema module without requiring
+    /// the user to call `createDb(...)`.
+    ///
+    /// Additive on the wire: an old manifest without `exports`
+    /// deserializes unchanged, and a fresh build with no schema /
+    /// handlers omits the field entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exports: Option<ManifestExports>,
 }
 
 impl Default for Manifest {
@@ -117,8 +128,53 @@ impl Default for Manifest {
             asset_version: 0,
             sourcemaps: HashMap::new(),
             metadata: ManifestMetadata::default(),
+            exports: None,
         }
     }
+}
+
+/// Build-time export discovery — populated by the build adapter
+/// (`@zeroship/vite-plugin`) so the runtime can locate user modules
+/// (DB schema, handler files) without depending on the user calling
+/// `createDb(...)` or registering handlers imperatively.
+///
+/// Stage 1: the build writes `schema`; the runtime ignores it. Stage 2
+/// wires the read in the V8 bootstrap. Stage 3 adds file-based
+/// handler discovery (the `handlers` Vec).
+///
+/// Wire shape is intentionally permissive — both fields are optional
+/// and serialize to nothing when empty, so a manifest with
+/// `exports: ManifestExports::default()` round-trips identically to
+/// a manifest with no `exports` field at all.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ManifestExports {
+    /// Path (relative to the bundle root) of the module whose default
+    /// export (or `default.schema`) is the DB schema map. `None` means
+    /// "the bootstrap should look at the entry module's `default.schema`",
+    /// or "no DB schema in this app". Stage 2 wires the read; Stage 1
+    /// only writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+
+    /// Reserved for Stage 2+ (file-based handler discovery). Optional;
+    /// empty Vec serializes via `skip_serializing_if` so old manifests
+    /// still round-trip identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handlers: Vec<HandlerEntry>,
+}
+
+/// One discovered handler module — Stage 2+ file-based discovery.
+/// Stage 1 only ships the type so manifests that opt in early (e.g.
+/// tests) can be parsed by older readers without an unknown-field
+/// error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandlerEntry {
+    /// Path relative to the bundle root, e.g. `"src/api/query/listTodos.ts"`.
+    pub path: String,
+    /// Capability bucket: `"query"` | `"mutation"` | `"action"`.
+    pub capability: String,
+    /// Exported handler name, e.g. `"listTodos"`.
+    pub name: String,
 }
 
 /// Informational metadata about how the manifest was produced.
@@ -175,6 +231,7 @@ impl Manifest {
                 )),
                 built_at: "1970-01-01T00:00:00Z".to_string(),
             },
+            exports: None,
         }
     }
 
