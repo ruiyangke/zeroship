@@ -38,70 +38,6 @@ fn get_string_arg(
     Some(val.to_rust_string_lossy(scope))
 }
 
-/// Extract a required string argument, or set an error on rv and return None.
-fn require_string_arg(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: &v8::FunctionCallbackArguments,
-    index: i32,
-    name: &str,
-) -> Option<String> {
-    match get_string_arg(scope, args, index) {
-        Some(s) if !s.is_empty() => Some(s),
-        _ => {
-            let msg = v8::String::new(scope, &format!("db: missing required argument '{name}'"))
-                .unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            None
-        }
-    }
-}
-
-/// Parse a V8 value as a JSON object argument, defaulting to `{}` if absent.
-/// Accepts both JS objects (serialized via JSON.stringify) and JSON strings.
-fn parse_json_arg(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: &v8::FunctionCallbackArguments,
-    index: i32,
-) -> Option<Value> {
-    if args.length() <= index {
-        return Some(Value::Object(serde_json::Map::new()));
-    }
-    let val = args.get(index);
-    if val.is_null_or_undefined() {
-        return Some(Value::Object(serde_json::Map::new()));
-    }
-
-    // If it's a JS object/array, use V8's JSON.stringify to serialize it
-    let raw = if val.is_object() || val.is_array() {
-        match v8::json::stringify(scope, val) {
-            Some(s) => s.to_rust_string_lossy(scope),
-            None => {
-                let msg = v8::String::new(scope, "db: failed to serialize argument to JSON").unwrap();
-                let exc = v8::Exception::type_error(scope, msg);
-                scope.throw_exception(exc);
-                return None;
-            }
-        }
-    } else {
-        // String or primitive — use as-is
-        val.to_rust_string_lossy(scope)
-    };
-
-    if raw.is_empty() {
-        return Some(Value::Object(serde_json::Map::new()));
-    }
-    match serde_json::from_str(&raw) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            let msg = v8::String::new(scope, &format!("db: invalid JSON: {e}")).unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            None
-        }
-    }
-}
-
 /// Parse an optional integer argument.
 fn get_i64_arg(
     scope: &mut v8::PinScope<'_, '_>,
@@ -1231,48 +1167,38 @@ pub(crate) fn dispatch_count<'s>(
 /// Creates the table and any missing columns. Idempotent — safe to call
 /// on every cold start. Skips DDL if the model was already registered
 /// for this app on this thread.
-pub fn register_model(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
+pub fn register_model_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    schema: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
 
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-    let Some(schema) = parse_json_arg(scope, &args, 1) else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
-
-    // Fast path: already registered on this thread — skip DDL
-    if crate::is_model_registered(&app_id, &collection) {
+    // Fast path: already registered on this thread — skip DDL.
+    if crate::is_model_registered(app_id, collection) {
         let resolver = v8::PromiseResolver::new(scope).unwrap();
         let promise = resolver.get_promise(scope);
         let undefined = v8::undefined(scope);
         resolver.resolve(scope, undefined.into());
-        rv.set(promise.into());
-        return;
+        return promise;
     }
 
     let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let app_id_owned = app_id.to_string();
+    let collection_owned = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_register_model(&app_id, &collection, &schema).await {
+        match exec_register_model(&app_id_owned, &collection_owned, &schema).await {
             Ok(()) => {
-                crate::mark_model_registered(&app_id, &collection);
+                crate::mark_model_registered(&app_id_owned, &collection_owned);
                 OpResult::Completed { op_id, value: "null".to_string(), request_id }
             }
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
 
-    rv.set(promise.into());
+    promise
 }
 
 /// Execute DDL for registerModel. Implements the four-phase orchestrator
@@ -1861,17 +1787,11 @@ async fn create_index_with_recovery_audited(
 /// [`crate::TX_TOKEN`] and resolves the promise with the wrapper; on
 /// failure the wrapper is left with a token that never matches
 /// TX_TOKEN, so its `Drop` is a no-op when V8 eventually collects it.
-pub fn begin_transaction(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let isolation_level = get_string_arg(scope, &args, 0);
+pub fn begin_transaction_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    isolation_level: Option<String>,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
 
     // Allocate the ownership token + mint the wrapper synchronously.
     // We need a scope to allocate the V8 object; the spawned future
@@ -1882,25 +1802,24 @@ pub fn begin_transaction(
     let tx_obj = match crate::v8_classes::transaction::mint_transaction(scope, token) {
         Ok(obj) => obj,
         Err(e) => {
+            let resolver = v8::PromiseResolver::new(scope).unwrap();
+            let promise = resolver.get_promise(scope);
             let msg = v8::String::new(scope, &e.message).unwrap();
             let exc = v8::Exception::error(scope, msg);
-            scope.throw_exception(exc);
-            return;
+            resolver.reject(scope, exc);
+            return promise;
         }
     };
 
     let tx_obj_as_value: v8::Local<v8::Value> = tx_obj.into();
     let tx_global: v8::Global<v8::Value> = v8::Global::new(scope, tx_obj_as_value);
 
-    // Use the JsValue resolution path so we can hand back a real JS
-    // object (not a JSON string).
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let resolver_global = v8::Global::new(scope, resolver);
     let request_id = state.borrow().executing_request_id;
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        use zeroship_runtime::state::{OpError, ResolveValue};
         match exec_begin(isolation_level.as_deref()).await {
             Ok(()) => {
                 // Stamp ownership now that TX_CONN holds the client —
@@ -1927,7 +1846,7 @@ pub fn begin_transaction(
         }
     }));
 
-    rv.set(promise.into());
+    promise
 }
 
 /// Allowed isolation levels (uppercased for validation).
@@ -2350,56 +2269,12 @@ pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, String> {
 /// slot. Use `.pollJson()` to drain events (returns
 /// `Promise<string|null>`) and `.close()` for idempotent explicit
 /// teardown.
-pub fn open_subscription(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-
-    let Some(collection) = require_string_arg(scope, &args, 0, "collection") else {
-        return;
-    };
-
-    let app_id = get_app_id(&state);
-    match crate::v8_classes::subscription::mint_subscription(scope, &app_id, &collection) {
-        Ok(obj) => rv.set(obj.into()),
-        Err(e) => {
-            let msg = v8::String::new(scope, &e.message).unwrap();
-            let exc = v8::Exception::error(scope, msg);
-            scope.throw_exception(exc);
-        }
-    }
-}
-
-
-/// `zeroship.db.replicationSetup()` → Promise<SetupOutcome JSON>
-///
-/// Idempotently provisions the per-app publication + logical
-/// replication slot. Returns the slot/publication names and current
-/// `confirmed_flush_lsn`. Operator-level surface — apps don't call
-/// this; the deploy orchestrator or the control plane does.
-pub fn replication_setup(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    // Options bag: `{ appId?: string }`. The optional `appId` override
-    // is the operator path (called by the control plane for any app);
-    // omitting it defaults to the current isolate's app context.
-    let opts = parse_json_arg(scope, &args, 0).unwrap_or(Value::Object(serde_json::Map::new()));
-    let app_id = opts
-        .get("appId")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| get_app_id(&state));
+/// `db.replication.setup(opts?)` dispatch — see [`Db::replication`].
+pub fn replication_setup_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: String,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2416,19 +2291,14 @@ pub fn replication_setup(
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
-    rv.set(promise.into());
+    promise
 }
 
-/// `zeroship.db.replicationWatchdog()` → Promise<SlotHealth[] JSON>
-pub fn replication_watchdog(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
+/// `db.replication.watchdog()` dispatch — see [`Db::replication`].
+pub fn replication_watchdog_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2445,27 +2315,16 @@ pub fn replication_watchdog(
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
-    rv.set(promise.into());
+    promise
 }
 
-/// `zeroship.db.replicationDropAbandoned(opts?)` → Promise<string[] JSON>
-///
-/// Options: `{ inactiveSeconds?: number }` — threshold for "abandoned"
-/// (default 3600s = 1h). Returns the names of dropped slots.
-pub fn replication_drop_abandoned(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    let opts = parse_json_arg(scope, &args, 0).unwrap_or(Value::Object(serde_json::Map::new()));
-    let inactive_seconds = opts
-        .get("inactiveSeconds")
-        .and_then(Value::as_i64)
-        .unwrap_or(3600);
+/// `db.replication.dropAbandoned(opts?)` dispatch — see
+/// [`Db::replication`].
+pub fn replication_drop_abandoned_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    inactive_seconds: i64,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2482,7 +2341,7 @@ pub fn replication_drop_abandoned(
             Err(e) => OpResult::Failed { op_id, error: e, request_id },
         }
     }));
-    rv.set(promise.into());
+    promise
 }
 
 // ---------------------------------------------------------------------------
@@ -2529,19 +2388,11 @@ thread_local! {
 ///
 /// Subsequent calls short-circuit and resolve with the cached outcome
 /// envelope plus `"alreadyRunning": true`.
-pub fn start_replication_consumer(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    // Optional app_id override (matches replication_setup's signature
-    // so the operator-facing flow is symmetrical). Default = current
-    // app context.
-    let app_id = get_string_arg(scope, &args, 0).unwrap_or_else(|| get_app_id(&state));
+pub fn start_replication_consumer_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: String,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
     let (op_id, request_id, promise) = setup_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -2621,7 +2472,7 @@ pub fn start_replication_consumer(
             request_id,
         }
     }));
-    rv.set(promise.into());
+    promise
 }
 
 /// **Test-only**: probe whether the auto-spawn registry holds an entry

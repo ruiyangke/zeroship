@@ -340,20 +340,44 @@ interface ZeroshipMigrations {
 // ---------------------------------------------------------------------------
 
 /**
+ * Operator-facing replication namespace, surfaced as
+ * `env.db.replication`. Apps don't call these — the deploy
+ * orchestrator / control plane does.
+ */
+interface ZeroshipReplication {
+  /**
+   * Idempotently provision the per-app Postgres publication +
+   * logical replication slot. Returns a JSON `SetupOutcome`
+   * (`{publication, slot, created, confirmedFlushLsn}`). Requires
+   * `wal_level=logical` on the server.
+   */
+  setup(opts?: { appId?: string }): Promise<string>;
+
+  /**
+   * Run the C1 watchdog query against `pg_replication_slots`.
+   * Returns a JSON array of slot health records `[{slot, active,
+   * restartLsn, confirmedFlushLsn, lagBytes, walStatus}]`.
+   */
+  watchdog(): Promise<string>;
+
+  /**
+   * Drop replication slots that have been inactive for at least
+   * `opts.inactiveSeconds` (default 3600). Returns the names of
+   * dropped slots as a JSON array. Apps whose slot was reaped see
+   * a `resync` event on next subscriber attach.
+   */
+  dropAbandoned(opts?: { inactiveSeconds?: number }): Promise<string>;
+}
+
+/**
  * The `zeroship.db` namespace surfaced as `env.db` on every isolate.
- * Owns the lifecycle of the pooled connection and mints typed wrappers
- * for collections, transactions, migration runs, and subscriptions.
- *
- * The flat per-collection CRUD methods from v1 were removed in 2026-05
- * — call `.collection(name)` first and use the returned wrapper.
+ * Every operation lives on the Db v8_class instance — schema
+ * registration, collection mint, transaction open, subscription open,
+ * the migrations / replication sub-namespaces.
  */
 interface ZeroshipDb {
-  // --- Schema ---
-
   /** Register a model — creates table and columns if not exist. */
   registerModel(collection: string, schema: ZeroshipDbSchema): Promise<void>;
-
-  // --- Collection wrapper mint ---
 
   /**
    * Mint (or return the cached) Collection wrapper for `name`. Identity
@@ -363,16 +387,16 @@ interface ZeroshipDb {
    */
   collection(name: string): ZeroshipCollection;
 
-  // --- Transactions ---
-
   /**
-   * Begin a transaction. Returns a Transaction wrapper whose
+   * Begin a transaction. `opts.isolationLevel` accepts
+   * `"readCommitted"` / `"repeatableRead"` / `"serializable"` (and the
+   * matching SQL strings). Returns a Transaction wrapper whose
    * `.commit()` / `.rollback()` are explicit methods. The wrapper's
    * Drop auto-rollbacks via connection close if neither is called.
    */
-  beginTransaction(isolationLevel?: string): Promise<ZeroshipTransaction>;
-
-  // --- Migration runs (B1) ---
+  beginTransaction(opts?: {
+    isolationLevel?: "readCommitted" | "repeatableRead" | "serializable";
+  }): Promise<ZeroshipTransaction>;
 
   /**
    * Mint (or return the cached) Migrations namespace wrapper. Identity
@@ -388,8 +412,6 @@ interface ZeroshipDb {
    */
   migrations: ZeroshipMigrations;
 
-  // --- Reactive subscriptions (C1 / P8a) ---
-
   /**
    * Open a subscription on `collection`. Returns a Subscription wrapper.
    * Synchronous — calling it does not allocate any Postgres state; the
@@ -402,29 +424,16 @@ interface ZeroshipDb {
    */
   openSubscription(collection: string): ZeroshipSubscription;
 
-  // --- Replication operator surface ---
+  /**
+   * Auto-spawn the supervised WAL consumer for this app. Idempotent.
+   * `opts.appId` overrides the current app context for the operator
+   * path. Resolves once the publication + slot are durable.
+   */
+  startReplicationConsumer(opts?: string): Promise<string>;
 
   /**
-   * Operator-only: idempotently provision the per-app
-   * Postgres publication + logical replication slot. Returns a
-   * JSON `SetupOutcome` (`{publication, slot, created, confirmedFlushLsn}`).
-   *
-   * Requires `wal_level=logical` on the server.
+   * Operator-facing replication ops. Identity-cached: repeated reads
+   * of `env.db.replication` return the same JS object.
    */
-  replicationSetup(opts?: { appId?: string }): Promise<string>;
-
-  /**
-   * Operator-only: run the C1 watchdog query against
-   * `pg_replication_slots`. Returns a JSON array of slot health
-   * records `[{slot, active, restartLsn, confirmedFlushLsn, lagBytes, walStatus}]`.
-   */
-  replicationWatchdog(): Promise<string>;
-
-  /**
-   * Operator-only: drop replication slots that have been
-   * inactive for at least `opts.inactiveSeconds` (default 3600).
-   * Returns the names of dropped slots as a JSON array. Apps whose
-   * slot was reaped see a `resync` event on next subscriber attach.
-   */
-  replicationDropAbandoned(opts?: { inactiveSeconds?: number }): Promise<string>;
+  replication: ZeroshipReplication;
 }

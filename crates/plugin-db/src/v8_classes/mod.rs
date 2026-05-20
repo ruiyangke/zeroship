@@ -31,5 +31,6 @@ pub mod collection;
 pub mod db;
 pub mod migration;
 pub mod migrations;
+pub mod replication;
 pub mod subscription;
 pub mod transaction;

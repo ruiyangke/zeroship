@@ -1,26 +1,23 @@
-//! Database plugin — backs `env.db` with a typed `#[v8_class]` surface
-//! plus a few Db-scoped entry points.
+//! Database plugin — backs `env.db` with a typed `#[v8_class]` surface.
 //!
-//! The `env.db` namespace is the `Db` v8_class instance (see
-//! [`v8_classes::db`]); per-collection CRUD lives on the `Collection`
-//! wrapper minted by `env.db.collection(name)`. Transactions,
-//! migration runs, and reactive subscriptions are separate wrappers
-//! (`Transaction` / `Migration` / `Subscription`), each with a `Drop`
-//! finalizer that releases its backing resource on GC.
+//! `env.db` is the `Db` v8_class instance (see [`v8_classes::db`]).
+//! Every operation lives on the wrapper: `registerModel`,
+//! `collection(name)` (mints a [`v8_classes::collection::Collection`]),
+//! `beginTransaction(opts?)` (mints a [`v8_classes::transaction::Transaction`]),
+//! `openSubscription(name)` (mints a [`v8_classes::subscription::Subscription`]),
+//! `startReplicationConsumer(opts?)`. Two nested namespaces hang off
+//! the Db wrapper as cached `#[v8_getter]`s:
 //!
-//! The flat callbacks registered on `env.db` are intentionally
-//! short — entry points that mint wrappers, plus DB-scoped ops:
+//! - `db.migrations` — the [`v8_classes::migrations::Migrations`]
+//!   namespace (`.start(spec)` mints a `Migration` wrapper;
+//!   `.status / .cancel / .reset({name, collection})` operate on the
+//!   audit row by coordinates).
+//! - `db.replication` — the [`v8_classes::replication::Replication`]
+//!   operator namespace (`.setup`, `.watchdog`, `.dropAbandoned`).
 //!
-//! - `registerModel(collection, schema)` — DDL orchestrator (A2/A3)
-//! - `collection(name)` — returns a `Collection` v8_class instance
-//! - `beginTransaction(level?)` — mints a `Transaction` wrapper
-//! - `migrations` (v8_getter) — returns the `Migrations` v8_class
-//!   namespace exposing `.start(spec)` (mints a `Migration` wrapper) and
-//!   `.status / .cancel / .reset({name, collection})` to observe an
-//!   existing migration by coordinates without taking the advisory lock
-//! - `openSubscription(collection)` — returns a `Subscription` wrapper
-//! - `replicationSetup / Watchdog / DropAbandoned` — operator surface
-//! - `startReplicationConsumer` — auto-spawn the supervised WAL consumer
+//! Each wrapper carries a `v8::Weak` guaranteed finalizer that
+//! releases its backing resource on GC (broker handle, transaction
+//! connection, migration advisory lock).
 //!
 //! Each app gets its own PostgreSQL schema (`"app_id".*`) for data
 //! isolation. The pool is created lazily on first use (one per worker
@@ -196,45 +193,13 @@ impl NativePlugin for DbPlugin {
                 DB_POOL.with(|p| *p.borrow_mut() = None);
             }
         });
-        // Per-collection CRUD lives on the Collection v8_class instance
-        // returned by `env.db.collection(name)` — see `v8_classes::collection`.
-        // The Db-level entry points below mint those wrappers (and the
-        // Transaction / Migration / Subscription wrappers) plus the few
-        // genuinely Db-scoped ops (schema registration, replication).
-        r.add("registerModel", callbacks::register_model);
-        // Transaction entry point. Returns a Transaction v8_class
-        // instance whose `.commit()` / `.rollback()` / `.collection(n)`
-        // are explicit methods; Drop auto-rollbacks via connection
-        // close.
-        r.add("beginTransaction", callbacks::begin_transaction);
-        // Tx wrapping deferral from T1 — install the auto-tx globals
-        // (`__zsBeginAutoTx` / `__zsEndAutoTx`) used by the synthetic
-        // SSR entry to wrap `query()` and `mutation()` handlers with a
-        // READ ONLY / READ COMMITTED tx envelope. The capability gate
-        // (B3 runtime layer) is the primary enforcement; this is the
-        // Postgres-level defense-in-depth around it.
+        // Every JS-visible entry point lives on the Db v8_class
+        // wrapper (see `v8_classes::db`); the registrar only installs
+        // the auto-tx globals — `query()` / `mutation()` defense in
+        // depth at the Postgres level around the B3 capability gate.
         r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
             callbacks::install_auto_tx_globals(scope);
         });
-        // B1 — `@zeroship/migrations`. The `Migrations` namespace
-        // (`env.db.migrations`) exposes `.start(spec)` /
-        // `.status(spec)` / `.cancel(spec)` / `.reset(spec)` —
-        // see `v8_classes::migrations`. `.start` mints a `Migration`
-        // wrapper whose `.fetchBatch()` / `.commitBatch()` drive
-        // the run. Status / cancel / reset on the namespace operate
-        // by `(name, collection)` coordinates without touching the
-        // advisory lock — safe to call from any worker.
-        // C1 / P8a — reactive queries. `openSubscription` mints a
-        // Subscription v8_class wrapper whose `.pollJson()` / `.close()`
-        // are methods; Weak finalizer closes the broker handle on GC.
-        r.add("openSubscription", callbacks::open_subscription);
-        r.add("replicationSetup", callbacks::replication_setup);
-        r.add("replicationWatchdog", callbacks::replication_watchdog);
-        r.add("replicationDropAbandoned", callbacks::replication_drop_abandoned);
-        // P8a.2 finish-up — auto-spawn the supervised consumer. Apps
-        // opt in once at module init: `await env.db.startReplicationConsumer()`.
-        // Idempotent — second call short-circuits.
-        r.add("startReplicationConsumer", callbacks::start_replication_consumer);
     }
 }
 

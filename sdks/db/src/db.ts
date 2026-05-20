@@ -392,7 +392,7 @@ export function createDb<const T extends Record<string, SchemaInput>>(
       // The wrapper's Drop auto-rollbacks if a thrown handler skips the
       // explicit teardown.
       const nativeAny = native as unknown as {
-        beginTransaction?: (level?: string) => Promise<{
+        beginTransaction?: (opts?: { isolationLevel?: string }) => Promise<{
           commit(): Promise<void>;
           rollback(): Promise<void>;
         }>;
@@ -403,7 +403,9 @@ export function createDb<const T extends Record<string, SchemaInput>>(
           "runtime is missing the Transaction v8_class surface.",
         ));
       }
-      const tx = await nativeAny.beginTransaction(options?.isolationLevel);
+      const tx = await nativeAny.beginTransaction(
+        options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
+      );
 
       try {
         const result = await fn(txCollections);
