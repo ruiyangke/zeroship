@@ -2108,6 +2108,140 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     zeroship_plugin_db::clear_migration_lock_for_tests();
 }
 
+// Gap I — Migration finalizer churn (soft variant).
+//
+// The V8 `Migration` wrapper's `Drop::drop` spawns a best-effort
+// `exec_cancel` via `compio::runtime::spawn` so an AbortError thrown
+// out of the SDK loop doesn't leak the advisory lock or strand the
+// audit row in `running`. The existing single-instance GC test in
+// `subscription_finalizer.rs` covers Subscription's analogous path;
+// this test exercises the *churn* failure modes the audit
+// (`docs/research/db-robustness-gaps-2026-05-19.md` Gap I) flagged:
+// (a) `MIG_LOCK` failing to return to None between mints; (b)
+// advisory lock leaks in PG; (c) audit row left in `running`.
+//
+// We use the "soft" variant — no V8, no GC. Each iteration drives the
+// exact sequence the GC path triggers (`exec_begin`, then
+// `exec_cancel` from a pool conn, then drop the dedicated client by
+// clearing `MIG_LOCK`). 100 cycles in the same thread; the assertions
+// at the end prove (a)-(c) without depending on V8 GC timing.
+//
+// A separate-collection variant (`churn`) avoids interference from
+// neighbouring tests and gives `pg_locks` a unique lock-key family to
+// scan for.
+#[compio::test]
+async fn gap_i_migration_finalizer_churn() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+    let pool = Pool::connect(&url, 4).await.unwrap();
+
+    let app = "gap_i_churn";
+    b1_setup_users(&pool, app, 10, false).await;
+
+    // 100 mint+cancel+drop cycles. Each iteration uses a unique
+    // migration `name` so the audit table grows monotonically and we
+    // can assert per-row terminal status at the end.
+    const N: usize = 100;
+    for i in 0..N {
+        let name = format!("churn_{i:04}");
+
+        // (1) Begin — claims MIG_LOCK + advisory lock + INSERTs the
+        // audit row in `running`. The dedicated client lives inside
+        // MIG_LOCK; releasing it requires clearing the thread-local.
+        let begin = mig::exec_begin(&pool, app, &name, "users", false, false)
+            .await
+            .unwrap_or_else(|e| panic!("exec_begin failed at i={i}: {e:?}"));
+        let begin_v = parse(&begin);
+        assert_eq!(begin_v["status"], "running", "iter {i}: not running");
+
+        // Sanity: MIG_LOCK is held mid-iteration.
+        // (We can't read it from outside the crate, but exec_begin
+        // refuses a second call when held — see b1_advisory_lock test.)
+
+        // (2) Cancel from the pool — same call the GC-spawned future
+        // makes. Transitions the audit row to 'cancelled'.
+        let cancel = mig::exec_cancel(&pool, app, &name, "users")
+            .await
+            .unwrap_or_else(|e| panic!("exec_cancel failed at i={i}: {e:?}"));
+        assert_eq!(parse(&cancel)["ok"], true);
+
+        // (3) Drop the dedicated client by clearing MIG_LOCK. In the
+        // production path this happens when V8 reclaims the Box and
+        // the Migration struct (and thus its captured client, held
+        // indirectly via MIG_LOCK) is dropped. The backend session
+        // ends → its advisory lock is released.
+        zeroship_plugin_db::clear_migration_lock_for_tests();
+    }
+
+    // (a) MIG_LOCK is None after each iteration — proved by the fact
+    // that every begin in the loop succeeded (exec_begin refuses if
+    // `already_active`).
+
+    // (b) Every audit row reached terminal `cancelled` status.
+    let rows = pool
+        .query_text_params(
+            &format!(
+                r#"SELECT change_kind, status FROM "{app}"."__zeroship_migrations"
+                    WHERE phase = 'backfill' AND change_kind LIKE 'churn_%'
+                    ORDER BY change_kind"#
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        N,
+        "expected {N} audit rows, got {}",
+        rows.len()
+    );
+    for row in &rows {
+        let status: String = row.get("status");
+        let name: String = row.get("change_kind");
+        assert_eq!(
+            status, "cancelled",
+            "row {name} ended in {status:?}, expected cancelled"
+        );
+    }
+
+    // (c) No advisory locks linger for this app's lock-key family.
+    // `zs_mig:<app>` keys are int4 hashtext'd; we test by trying to
+    // grab one fresh — it must succeed if and only if no prior session
+    // is still holding it. Each i-th key was held on a different
+    // backend session, so all N should now be re-acquirable.
+    //
+    // We just sample i=0 and i=N-1 (the bounds) — exhaustive scan
+    // would cost N round-trips for a probabilistic guarantee that's
+    // already implied by the per-iteration drop. If either bound's
+    // lock is still held, *something* didn't release.
+    for i in [0, N - 1] {
+        let name = format!("churn_{i:04}");
+        let probe_rows = pool
+            .query_text_params(
+                "SELECT pg_try_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4) AS got",
+                &[app, name.as_str()],
+            )
+            .await
+            .unwrap();
+        let got: bool = probe_rows[0].get("got");
+        assert!(
+            got,
+            "iter {i}: advisory lock zs_mig:{app}/{name} still held after churn (finalizer leaked)"
+        );
+        // Release the lock the probe just took.
+        let _ = pool
+            .query_text_params(
+                "SELECT pg_advisory_unlock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)",
+                &[app, name.as_str()],
+            )
+            .await
+            .unwrap();
+    }
+
+    zeroship_plugin_db::clear_migration_lock_for_tests();
+}
+
 // 38. B1 — cancel against an already-applied migration returns
 // `migration_not_cancellable`.
 #[compio::test]

@@ -129,13 +129,42 @@ function validateArrayPushOps(
  * D1 — set of `${collection}:${sortedFilterKeys}` shapes already warned
  * about. Module-scope so a single warning fires per shape across all
  * Collection instances in the same isolate. Reset between tests by
- * accessing `__zeroshipDbWarnedShapesForTest()`.
+ * accessing `__zeroshipDbResetIndexWarnings()`.
+ *
+ * Bounded LRU: a `Map<string, true>` whose insertion-order iteration is
+ * guaranteed by the JS spec. On overflow we evict the oldest entry — an
+ * AI-generated app that synthesises new filter shapes (metric names,
+ * dynamic identifiers) over a long-lived dev server would otherwise leak
+ * one entry per shape forever (Gap P). 1024 is generous for any real
+ * app and bounds the memory hard.
  */
-const _warnedShapes: Set<string> = new Set();
+const MAX_WARNED_SHAPES = 1024;
+const _warnedShapes: Map<string, true> = new Map();
+
+/**
+ * D1 — record a fired warning for `key`. Returns `true` iff this is the
+ * first time we've seen the shape (caller should fire the warning).
+ * Evicts the oldest entry once `MAX_WARNED_SHAPES` is hit.
+ */
+function _noteWarnedShape(key: string): boolean {
+  if (_warnedShapes.has(key)) return false;
+  if (_warnedShapes.size >= MAX_WARNED_SHAPES) {
+    // Evict oldest insertion (Map keys() iterates in insertion order).
+    const oldest = _warnedShapes.keys().next().value;
+    if (oldest !== undefined) _warnedShapes.delete(oldest);
+  }
+  _warnedShapes.set(key, true);
+  return true;
+}
 
 /** @internal — test-only reset hook. Not part of the public API. */
 export function __zeroshipDbResetIndexWarnings(): void {
   _warnedShapes.clear();
+}
+
+/** @internal — test-only size accessor. Not part of the public API. */
+export function __zeroshipDbWarnedShapesSize(): number {
+  return _warnedShapes.size;
 }
 
 /**
@@ -177,8 +206,7 @@ function _maybeWarnUnindexedFilter(
   if (_filterCoveredByIndex(keys, schema, declaredIndexes)) return;
 
   const shapeKey = `${collection}:${[...keys].sort().join(",")}`;
-  if (_warnedShapes.has(shapeKey)) return;
-  _warnedShapes.add(shapeKey);
+  if (!_noteWarnedShape(shapeKey)) return;
 
   const declaredNames = declaredIndexes.map((i) => i.name);
   const declaredHint = declaredNames.length > 0
