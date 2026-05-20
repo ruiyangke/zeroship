@@ -49,6 +49,7 @@ import { env } from "zeroship";
 import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
+import { createLive, type LiveOptions, type LiveQuery } from "./live.js";
 import { type NormalizedSchema, normalizeSchema, validateRefTargets } from "./schema.js";
 import { type PlainObject, type Result, type Row, type RowInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
 
@@ -177,6 +178,23 @@ export type Db<T extends Record<string, SchemaInput>> = {
   [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string>
 } & {
   transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  /**
+   * Reactive query layer. Runs `queryFn`, yields the initial result,
+   * then re-runs and yields a fresh result on every change to any
+   * table the `queryFn` reads.
+   *
+   * v1 is coarse-grained: every change to a watched table fires a
+   * rerun (no row-level filter narrowing). The tables are auto-detected
+   * by observing which `Collection.find/findOne/get/...` methods the
+   * `queryFn` calls during its first execution. Pass `{ tables: [...] }`
+   * to bypass auto-detection (e.g. when the queryFn doesn't go through
+   * a Collection).
+   *
+   * Throws `code = "live_in_transaction"` if called inside
+   * `db.transaction(tx => ...)`. Returns an AsyncIterableIterator with
+   * an explicit `close()` method for teardown.
+   */
+  live: <R>(queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown }, options?: LiveOptions) => LiveQuery<R>;
 };
 
 // ---------------------------------------------------------------------------
@@ -487,8 +505,15 @@ export function createDb<const T extends Record<string, SchemaInput>>(
       createTxCollection(col as Collection<unknown>);
   }
 
-  const db = {
+  const db: Record<string, unknown> = {
     ...collections,
+
+    live<R>(
+      queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown },
+      liveOptions?: LiveOptions,
+    ): LiveQuery<R> {
+      return createLive<R>(db, queryFn, liveOptions);
+    },
 
     async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
       // BEGIN — the native runtime returns a Transaction wrapper

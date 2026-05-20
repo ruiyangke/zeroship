@@ -513,6 +513,52 @@ Calling `openSubscription` is synchronous — it merely registers a slot
 in the per-isolate broker. The wrapper's GC finalizer releases the slot
 as a safety net; explicit `sub.close()` is preferred.
 
+## Live queries (`db.live`)
+
+`db.live(queryFn)` wraps the raw subscription stream into a
+query-shaped reactive primitive: it runs the `queryFn` once, yields the
+result, subscribes to the relevant table(s), and yields a fresh result
+array whenever a watched table changes.
+
+```ts
+const live = db.live(() => db.todos.find({ userId: "x" }));
+
+for await (const todos of live) {
+  // Initial result, then a fresh array on every relevant change.
+}
+
+// Explicit teardown:
+live.close();
+```
+
+The `queryFn` may return either a `Query` builder (chainable, thenable —
+the `Result<T[]>` is unwrapped automatically) or a raw `Promise<T[]>`.
+
+**Coarse-grained.** v1 subscribes per-table, not per-row: every
+insert/update/delete on a watched table fires a rerun, even when the
+row doesn't match the queryFn's filter. The auto-detected table set is
+the union of all collections the `queryFn` touched during its first
+execution. Read-set narrowing (Convex-style per-document tracking) is
+future work.
+
+**Explicit `tables` escape.** If `queryFn` returns a raw `Promise<T[]>`
+that never goes through a `Collection` method (e.g. it transforms data
+fetched elsewhere), table auto-detection finds nothing. Pass
+`{ tables: [...] }` to wire the subscriptions manually:
+
+```ts
+db.live(async () => transform(await fetch(...)), { tables: ["todos"] });
+```
+
+**Inside a transaction.** Live queries outlive any single request, so
+calling `db.live` inside the callback to `db.transaction(tx => ...)`
+throws synchronously with `code = "live_in_transaction"`. Open the
+live query before (or after) the tx.
+
+**Cleanup.** `close()` is idempotent and cancels every underlying
+subscription. The iterator's `return()` (invoked by `for await ...
+break` or an early `throw`) also calls `close()` automatically.
+
 ## Errors
 
 Errors carry a `.code` property where applicable:

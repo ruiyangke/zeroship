@@ -15,6 +15,7 @@ import {
 } from "./utils.js";
 import { Query } from "./query.js";
 import { IdLoader } from "./loader.js";
+import { trackCollectionAccess } from "./live.js";
 import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, type NamedIndexSpec, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
@@ -474,6 +475,7 @@ export class Collection<S = PlainObject, N extends string = string> {
     idOrFilter: number | Id<N> | Filter<S>,
     opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> } = {},
   ): Promise<Result<Row<S> | null>> {
+    trackCollectionAccess(this._name);
     // DataLoader path: a bare numeric id with no projection / ordering
     // and no active tx. Coalesces concurrent `get(id)` calls in one
     // microtask into a single `WHERE id IN (...)` fetch.
@@ -563,6 +565,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * scan). Cost is bounded by the cost of producing one matching row.
    */
   async exists(filter: Filter<S>): Promise<Result<boolean>> {
+    trackCollectionAccess(this._name);
     const { data, error } = await this.find(filter).limit(1);
     if (error) return err(error);
     return ok((data?.length ?? 0) > 0);
@@ -573,6 +576,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * and `.select()` before being awaited.
    */
   find(filter: Filter<S> = {} as Filter<S>): Query<S, Row<S>> {
+    trackCollectionAccess(this._name);
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
     return new Query<S, Row<S>>(
@@ -819,6 +823,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * no filter is provided.
    */
   async count(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
+    trackCollectionAccess(this._name);
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const n = await this._col().count(mapped);
@@ -831,6 +836,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * Defaults to all documents when no filter is provided.
    */
   async distinct(field: string & keyof Row<S>, filter: Filter<S> = {} as Filter<S>): Promise<Result<(string | number | boolean | null)[]>> {
+    trackCollectionAccess(this._name);
     return this._run(async () => {
       if (!this._knownFields.has(field)) {
         throw new ValidationError({ [field]: { path: field, message: `unknown field: ${field}` } });
@@ -847,6 +853,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * `$group`, `$match`, and accumulator expressions are translated to the native format.
    */
   async aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<Result<PlainObject[]>> {
+    trackCollectionAccess(this._name);
     return this._run(async () => {
       let effectivePipeline: ZeroshipDbAggregateStage[] = pipeline;
       if (this._softDelete) {
