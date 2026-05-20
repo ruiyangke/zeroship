@@ -798,20 +798,130 @@ export interface SchemaOptions {
 }
 
 /**
+ * Named multi-column index declaration produced by
+ * `schema(...).index(name, fields)`. The SDK passes these through to
+ * the native side alongside the schema; the orchestrator materialises
+ * them as `CREATE INDEX CONCURRENTLY IF NOT EXISTS` statements and the
+ * runtime warning path uses them to decide whether a filter is covered.
+ *
+ * `fields` order is significant — multi-column indexes only cover
+ * filters whose keys form a prefix of the column list.
+ */
+export interface NamedIndexSpec {
+  name: string;
+  fields: string[];
+  unique?: boolean;
+}
+
+/**
  * Wraps field definitions with per-collection options.
  * Use `schema({ ... }).softDelete()` to enable soft delete for a specific collection.
  */
 export class SchemaBuilder<S> {
   readonly fields: S;
   private _options: SchemaOptions;
+  private _indexes: NamedIndexSpec[];
 
   constructor(fields: S) {
     this.fields = fields;
     this._options = { softDelete: false, strictness: "strict", versioning: false };
+    this._indexes = [];
   }
 
   /** Returns the collection options. */
   get options(): Readonly<SchemaOptions> { return this._options; }
+
+  /** Returns the declared named indexes in declaration order. */
+  get indexes(): readonly NamedIndexSpec[] { return this._indexes; }
+
+  /**
+   * Declare a named, multi-column index. Order matters — filters whose
+   * keys form a prefix of `fields` are considered covered by the index.
+   * The SDK passes the declaration to the native side, which materialises
+   * a `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<table>__<name>"` per
+   * declared index. Auto-generated columns (`id`, `createdAt`, `updatedAt`,
+   * `deletedAt`, `version`) are also accepted alongside user fields.
+   *
+   * Throws `Error` with `code = "schema_invalid"` at definition time if:
+   *  - `name` is empty or already declared on this schema, or
+   *  - `fields` is empty / contains a key absent from the schema.
+   */
+  index(name: string, fields: readonly string[]): this {
+    this._addIndex(name, fields, false);
+    return this;
+  }
+
+  /**
+   * Same as {@link index} but materialises a `UNIQUE` index — enforces a
+   * cross-column uniqueness constraint at the database layer. Useful for
+   * compound natural keys (e.g. `["orgId", "slug"]`).
+   */
+  uniqueIndex(name: string, fields: readonly string[]): this {
+    this._addIndex(name, fields, true);
+    return this;
+  }
+
+  private _addIndex(name: string, fields: readonly string[], unique: boolean): void {
+    if (typeof name !== "string" || name.length === 0) {
+      throw Object.assign(
+        new Error("schema.index(name, fields): name must be a non-empty string"),
+        { code: "schema_invalid" },
+      );
+    }
+    if (!Array.isArray(fields) || fields.length === 0) {
+      throw Object.assign(
+        new Error(`schema.index("${name}", fields): fields must be a non-empty array`),
+        { code: "schema_invalid" },
+      );
+    }
+    for (const existing of this._indexes) {
+      if (existing.name === name) {
+        throw Object.assign(
+          new Error(`schema.index("${name}", ...): index name already declared on this schema`),
+          { code: "schema_invalid" },
+        );
+      }
+    }
+    const known = this._knownFieldNames();
+    for (const f of fields) {
+      if (typeof f !== "string" || f.length === 0) {
+        throw Object.assign(
+          new Error(`schema.index("${name}", ...): every field must be a non-empty string`),
+          { code: "schema_invalid" },
+        );
+      }
+      if (!known.has(f)) {
+        throw Object.assign(
+          new Error(
+            `schema.index("${name}", [..."${f}"...]): field "${f}" is not declared on this schema`,
+          ),
+          { code: "schema_invalid" },
+        );
+      }
+    }
+    const spec: NamedIndexSpec = { name, fields: [...fields] };
+    if (unique) spec.unique = true;
+    this._indexes.push(spec);
+  }
+
+  /**
+   * The set of field names this schema accepts in `.index(...)`. Includes
+   * user-declared fields plus the auto-generated columns the collection
+   * always carries (`id`, `createdAt`, `updatedAt`); soft-delete /
+   * versioning columns are accepted opportunistically when the matching
+   * option is enabled so a `.softDelete().index("by_active", ["deletedAt"])`
+   * declaration validates.
+   */
+  private _knownFieldNames(): Set<string> {
+    const out = new Set<string>(["id", "createdAt", "updatedAt"]);
+    if (this._options.softDelete) out.add("deletedAt");
+    if (this._options.versioning) out.add("version");
+    const f = this.fields;
+    if (f !== null && typeof f === "object") {
+      for (const k of Object.keys(f as Record<string, unknown>)) out.add(k);
+    }
+    return out;
+  }
 
   /** Enable soft delete — deleteOne/deleteMany set `deletedAt` instead of removing rows. */
   softDelete(): this {

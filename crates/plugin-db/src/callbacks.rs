@@ -1322,6 +1322,7 @@ pub fn register_model_dispatch<'s>(
     app_id: &str,
     collection: &str,
     schema: Value,
+    indexes: Value,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
@@ -1339,7 +1340,7 @@ pub fn register_model_dispatch<'s>(
     let collection_owned = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_register_model(&app_id_owned, &collection_owned, &schema).await {
+        match exec_register_model(&app_id_owned, &collection_owned, &schema, &indexes).await {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
                 OpResult::Completed { op_id, value: "null".to_string(), request_id }
@@ -1379,6 +1380,7 @@ async fn exec_register_model(
     app_id: &str,
     collection: &str,
     schema: &Value,
+    indexes: &Value,
 ) -> Result<(), String> {
     // Lazy pool init
     let has_pool = DB_POOL.with(|p| p.borrow().is_some());
@@ -1394,7 +1396,7 @@ async fn exec_register_model(
 
     let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
 
-    exec_register_model_with_pool(&pool, app_id, collection, schema, &deploy_id).await
+    exec_register_model_with_pool(&pool, app_id, collection, schema, indexes, &deploy_id).await
 }
 
 /// Pool-driven variant of `exec_register_model`. Public so integration
@@ -1407,6 +1409,7 @@ pub async fn exec_register_model_with_pool(
     app_id: &str,
     collection: &str,
     schema: &Value,
+    indexes: &Value,
     deploy_id: &str,
 ) -> Result<(), String> {
     // Strictness — proposal A2 line 122. Read from schema._meta.strictness
@@ -1460,8 +1463,11 @@ pub async fn exec_register_model_with_pool(
 
     let schema_version = crate::audit::next_schema_version(pool, app_id).await?;
 
-    let declared_indexes = query::build_create_indexes(app_id, collection, schema)
+    let mut declared_indexes = query::build_create_indexes(app_id, collection, schema)
         .map_err(|e| format!("db: {e}"))?;
+    let named_indexes = query::build_named_indexes(app_id, collection, indexes)
+        .map_err(|e| format!("db: {e}"))?;
+    declared_indexes.extend(named_indexes);
 
     // -------------------------------------------------------------------
     // Diff phase: introspect pg_catalog, classify changes.

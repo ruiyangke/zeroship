@@ -130,6 +130,70 @@ const db = createDb({
 - `schema({...}).strictness("strict" | "lenient" | "off")` — deploy-time
   data-validation policy.
 
+### Named indexes
+
+Declare named, multi-column indexes the way Convex does — they document
+the queries you intend to run and the SDK warns you when a filter walks
+the table without hitting one.
+
+```ts
+const db = createDb({
+  todos: schema({
+    userId: t.ref("users"),
+    done:   t.boolean().default(false),
+    email:  t.string(),
+  })
+    .index("by_email",       ["email"])
+    .index("by_user_done",   ["userId", "done"]),
+});
+```
+
+Each declaration becomes a CONCURRENTLY-built Postgres index named
+`"<collection>__<name>"` (e.g. `"todos__by_user_done"`). Field order
+matters — a multi-column index covers any **leftmost prefix** of its
+fields, matching Postgres B-tree semantics:
+
+| Filter                       | Matches `by_user_done`? |
+|------------------------------|-------------------------|
+| `{ userId, done }`           | yes (full match)        |
+| `{ userId }`                 | yes (prefix)            |
+| `{ done }`                   | no (skips `userId`)     |
+
+`schema(...).uniqueIndex(name, fields)` is the same builder but emits a
+`UNIQUE` index — useful for compound natural keys like `["orgId", "slug"]`.
+
+**Validation at definition time.** `.index(name, fields)` throws with
+`code = "schema_invalid"` if `name` is empty or already declared on the
+schema, or if `fields` is empty or references a field absent from the
+schema. The auto-generated columns (`id`, `createdAt`, `updatedAt`,
+`deletedAt` under soft-delete, `version` under versioning) are accepted.
+
+**Runtime warning.** Outside `NODE_ENV=production`, calling
+`find()` / `get()` / `deleteMany()` with a filter whose keys don't form
+a prefix of any declared index emits a one-time `console.warn` naming
+the available indexes:
+
+```
+[@zeroship/db] unindexed query on "todos" — filter keys [done] match
+no declared index. Declared indexes: by_email, by_user_done. Add
+.index("by_X", ["done"]) to the schema, or filter by a prefix of an
+existing index.
+```
+
+Per-field `.unique()` / `.index()` on `TypeBuilder` still works for
+single-column cases — those desugar to one-column indexes and the
+warning recognises them.
+
+**Future work.** Changing the field list of a previously declared index
+(e.g. `["userId"]` → `["userId", "done"]`) is currently a no-op: the
+orchestrator's `CREATE INDEX … IF NOT EXISTS` keeps the old definition.
+To swap an index in place today, drop it manually and redeploy.
+Multi-column `uniqueIndex` constraints are emitted but the deploy-time
+data-validation policy doesn't yet pre-check existing data for
+duplicates on a non-empty table — adding a `uniqueIndex` against a
+populated collection will succeed or fail at index-build time
+depending on the data.
+
 ## Branded ids
 
 `t.ref("users")` produces `Id<"users">` — a branded `number`. Two ref types

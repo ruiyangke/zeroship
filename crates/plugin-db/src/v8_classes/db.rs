@@ -131,9 +131,12 @@ impl Db {
         }
     }
 
-    /// `db.registerModel(collection, schema)` — DDL orchestrator
-    /// entry. Idempotent: returns a resolved promise on second call
-    /// for the same (app_id, collection).
+    /// `db.registerModel(collection, schema, indexes?)` — DDL
+    /// orchestrator entry. Idempotent: returns a resolved promise on
+    /// second call for the same (app_id, collection). `indexes` is the
+    /// array of named multi-column indexes declared on the schema via
+    /// `schema(...).index(name, fields)`; each materialises as
+    /// `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<collection>__<name>"`.
     #[v8_method]
     #[v8_name = "registerModel"]
     fn register_model<'s>(
@@ -141,6 +144,7 @@ impl Db {
         scope: &mut v8::PinScope<'s, '_>,
         collection: String,
         schema: v8::Local<v8::Value>,
+        indexes: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         if collection.is_empty() {
             return Err(OpError::type_error(
@@ -148,7 +152,19 @@ impl Db {
             ));
         }
         let schema_v = callbacks::read_json_arg(scope, Some(schema));
-        Ok(callbacks::register_model_dispatch(scope, &self.app_id, &collection, schema_v).into())
+        let indexes_v = if indexes.is_null_or_undefined() {
+            serde_json::Value::Array(Vec::new())
+        } else {
+            callbacks::read_json_arg(scope, Some(indexes))
+        };
+        Ok(callbacks::register_model_dispatch(
+            scope,
+            &self.app_id,
+            &collection,
+            schema_v,
+            indexes_v,
+        )
+        .into())
     }
 
     /// `db.beginTransaction(opts?)` — open a transaction.

@@ -382,6 +382,7 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     const fields = isBuilder ? rawSchema.fields : rawSchema;
     const softDelete = isBuilder ? rawSchema.options.softDelete : false;
     const versioning = isBuilder ? rawSchema.options.versioning : false;
+    const declaredIndexes = isBuilder ? rawSchema.indexes : [];
     (collections as Record<string, Collection<SchemaInput>>)[name] =
       model(
         name,
@@ -393,6 +394,7 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         softDelete,
         versioning,
         /* skipRegister */ true,
+        declaredIndexes,
       );
   }
 
@@ -428,6 +430,13 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     for (const [key, def] of Object.entries(normalized)) {
       dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
     }
+    const declaredIndexes =
+      rawSchema instanceof SchemaBuilder ? rawSchema.indexes : [];
+    const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
+      name: idx.name,
+      fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
+      ...(idx.unique ? { unique: true } : {}),
+    }));
     // Sequencing in JS removes the parent-before-child race, but the
     // chain MUST surface registerModel failures: a broken DDL for table
     // X means every CRUD call against X is doomed, and silently
@@ -437,11 +446,15 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     // rejected chain short-circuits the remaining registrations; the
     // promise the Collection stores via `_setReady` then rejects on
     // first CRUD and `_run` converts that to `result.error`.
-    chain = chain.then(() =>
-      native.registerModel
-        ? (native.registerModel(name, dbSchema) as Promise<void>)
-        : Promise.resolve(),
-    );
+    chain = chain.then(() => {
+      if (!native.registerModel) return Promise.resolve();
+      const registerAny = native.registerModel as unknown as (
+        collection: string,
+        schema: ZeroshipDbSchema,
+        indexes?: ZeroshipDbNamedIndex[],
+      ) => Promise<void>;
+      return registerAny(name, dbSchema, wireIndexes);
+    });
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
 

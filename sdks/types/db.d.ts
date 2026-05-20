@@ -167,6 +167,19 @@ interface ZeroshipDbFieldDef {
 /** Normalized schema — field name → definition. */
 type ZeroshipDbSchema = Record<string, ZeroshipDbFieldDef>;
 
+/**
+ * Named multi-column index declaration carried alongside the schema in
+ * the `registerModel` wire format. The orchestrator materialises each
+ * entry as `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<table>__<name>"`.
+ * `fields` carries column names (already mapped through the naming
+ * strategy by the SDK), in declared order.
+ */
+interface ZeroshipDbNamedIndex {
+  name: string;
+  fields: string[];
+  unique?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Wrapper v8_classes — the v2 native surface.
 // ---------------------------------------------------------------------------
@@ -427,8 +440,18 @@ interface ZeroshipReplication {
  * the migrations / replication sub-namespaces.
  */
 interface ZeroshipDb {
-  /** Register a model — creates table and columns if not exist. */
-  registerModel(collection: string, schema: ZeroshipDbSchema): Promise<void>;
+  /**
+   * Register a model — creates table and columns if not exist. The
+   * optional third argument carries named multi-column indexes
+   * declared via `schema(...).index(name, fields)`; each materialises
+   * as a CONCURRENTLY-built Postgres index named
+   * `"<collection>__<name>"`.
+   */
+  registerModel(
+    collection: string,
+    schema: ZeroshipDbSchema,
+    indexes?: ZeroshipDbNamedIndex[],
+  ): Promise<void>;
 
   /**
    * Mint (or return the cached) Collection wrapper for `name`. Identity

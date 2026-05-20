@@ -22,6 +22,10 @@ pub enum QueryError {
     InvalidFilter(String),
     /// Collection name is invalid.
     InvalidCollection(String),
+    /// Malformed identifier in a structured input (e.g. named index name or
+    /// field reference). Carries a path-keyed message so the SDK can surface
+    /// it back to the user without losing the offending input.
+    InvalidIdent(String),
 }
 
 impl std::fmt::Display for QueryError {
@@ -29,6 +33,7 @@ impl std::fmt::Display for QueryError {
         match self {
             Self::InvalidFilter(msg) => write!(f, "invalid filter: {msg}"),
             Self::InvalidCollection(msg) => write!(f, "invalid collection: {msg}"),
+            Self::InvalidIdent(msg) => write!(f, "invalid identifier: {msg}"),
         }
     }
 }
@@ -451,6 +456,123 @@ pub fn build_create_indexes(
     }
 
     Ok(out)
+}
+
+/// Build the named multi-column index DDL declared via
+/// `schema(...).index(name, fields)` on the SDK side.
+///
+/// The wire format is `[{name, fields, unique?}]`. Each entry becomes a
+/// `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS "<collection>__<name>"
+/// ON "<schema>"."<collection>" (col1, col2, …)`. Collision with the
+/// per-field auto-named indexes from `build_create_indexes` is avoided
+/// by the `<collection>__` prefix (auto-named indexes use the
+/// `<collection>_<col>_{idx,key}` shape — no double underscore).
+///
+/// Validation is intentionally light: the SDK already verified that
+/// every field exists on the schema and that names are unique within
+/// the schema. Here we re-check the wire-format shape so a hand-rolled
+/// caller can't slip a malformed entry past the orchestrator.
+pub fn build_named_indexes(
+    app_id: &str,
+    collection: &str,
+    indexes: &serde_json::Value,
+) -> Result<Vec<IndexSpec>, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let mut out = Vec::new();
+    let Some(arr) = indexes.as_array() else {
+        return Ok(out);
+    };
+    if arr.is_empty() {
+        return Ok(out);
+    }
+
+    let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+
+    for (i, entry) in arr.iter().enumerate() {
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| QueryError::InvalidIdent(format!("indexes[{i}].name is required")))?;
+        if name.is_empty() {
+            return Err(QueryError::InvalidIdent(format!(
+                "indexes[{i}].name must be non-empty"
+            )));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(QueryError::InvalidIdent(format!(
+                "indexes[{i}].name {name:?} must match [A-Za-z0-9_]+"
+            )));
+        }
+        let fields_v = entry
+            .get("fields")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                QueryError::InvalidIdent(format!("indexes[{i}].fields must be a non-empty array"))
+            })?;
+        if fields_v.is_empty() {
+            return Err(QueryError::InvalidIdent(format!(
+                "indexes[{i}].fields must be non-empty"
+            )));
+        }
+        let unique = entry
+            .get("unique")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let mut columns: Vec<String> = Vec::with_capacity(fields_v.len());
+        let mut quoted: Vec<String> = Vec::with_capacity(fields_v.len());
+        for (j, fv) in fields_v.iter().enumerate() {
+            let col = fv.as_str().ok_or_else(|| {
+                QueryError::InvalidIdent(format!(
+                    "indexes[{i}].fields[{j}] must be a string"
+                ))
+            })?;
+            if col.is_empty() {
+                return Err(QueryError::InvalidIdent(format!(
+                    "indexes[{i}].fields[{j}] must be non-empty"
+                )));
+            }
+            columns.push(col.to_string());
+            quoted.push(quote_ident(col));
+        }
+
+        let pg_name = named_index_name(collection, name);
+        let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
+        let sql = format!(
+            "CREATE {kind} CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
+            quote_ident(&pg_name),
+            table_qualified,
+            quoted.join(", "),
+        );
+        out.push(IndexSpec { name: pg_name, columns, unique, sql });
+    }
+
+    Ok(out)
+}
+
+/// Construct the Postgres identifier for a named multi-column index.
+///
+/// Uses a double-underscore separator (`<collection>__<name>`) to avoid
+/// collision with the single-underscore auto-named per-field indexes
+/// produced by `index_name`. NAMEDATALEN-safe via the same sha256 base32
+/// fingerprint tail used by `index_name`.
+pub fn named_index_name(collection: &str, name: &str) -> String {
+    let full = format!("{collection}__{name}");
+    if full.len() <= 60 {
+        return full;
+    }
+    let hash = short_hash_base32(&full);
+    let prefix_budget = 60usize.saturating_sub(9);
+    let mut prefix: String = full.chars().take(prefix_budget).collect();
+    if prefix.ends_with('_') {
+        prefix.pop();
+    }
+    format!("{prefix}_{hash}")
 }
 
 /// Build a deterministic Postgres index name from a table name and columns.

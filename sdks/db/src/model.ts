@@ -5,7 +5,7 @@
 import { env } from "zeroship";
 import { normalizeSchema } from "./schema.js";
 import { Collection, NativeDb } from "./collection.js";
-import { NamingStrategy, naming } from "./types.js";
+import { NamingStrategy, naming, type NamedIndexSpec } from "./types.js";
 
 /**
  * Resolve the native database driver off the runtime's composite `env`.
@@ -53,6 +53,10 @@ export function model<S extends Record<string, unknown>>(
    *  calls itself in dependency order. Standalone `model()` callers
    *  leave it false and get the eager fire-and-store behaviour. */
   skipRegister: boolean = false,
+  /** @internal — named multi-column indexes declared via
+   *  `schema(...).index(name, fields)`. The SDK maps each field through
+   *  the naming strategy before passing to the native side. */
+  declaredIndexes: readonly NamedIndexSpec[] = [],
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error("model name must be a non-empty string");
@@ -89,14 +93,31 @@ export function model<S extends Record<string, unknown>>(
     dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
   }
 
+  const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
+    name: idx.name,
+    fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
+    ...(idx.unique ? { unique: true } : {}),
+  }));
+
   let registrationPromise: Promise<void> | null = null;
   if (!skipRegister && native.registerModel) {
     try {
-      registrationPromise = native.registerModel(name, dbSchema) as Promise<void>;
+      const registerAny = native.registerModel as unknown as (
+        collection: string,
+        schema: ZeroshipDbSchema,
+        indexes?: ZeroshipDbNamedIndex[],
+      ) => Promise<void>;
+      registrationPromise = registerAny(name, dbSchema, wireIndexes) as Promise<void>;
     } catch {
       // Ignore in non-runtime environments (tests, SSR)
     }
   }
 
-  return new Collection<S>(name, normalized, native, { naming: namingStrategy, ready: registrationPromise, softDelete, versioning });
+  return new Collection<S>(name, normalized, native, {
+    naming: namingStrategy,
+    ready: registrationPromise,
+    softDelete,
+    versioning,
+    indexes: declaredIndexes,
+  });
 }

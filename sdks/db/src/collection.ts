@@ -15,7 +15,7 @@ import {
 } from "./utils.js";
 import { Query } from "./query.js";
 import { IdLoader } from "./loader.js";
-import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, naming, ok, err } from "./types.js";
+import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, type NamedIndexSpec, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
@@ -139,21 +139,19 @@ export function __zeroshipDbResetIndexWarnings(): void {
 
 /**
  * D1 — emit a one-time `console.warn` if `filter` would do a sequential
- * scan because no key in it has an `index: true` / `unique: true` marker
- * in the normalized schema. Only fires when `process.env.NODE_ENV !==
- * "production"`. Deduplicates by `${collection}:${sortedKeys}` so noisy
- * code paths don't spam.
- *
- * The heuristic is intentionally simple: every top-level key in the
- * filter that maps to a schema field is checked; if none of them is
- * indexed and at least one is a single-field equality, we warn. False
- * positives are acceptable; weighting by selectivity is a future
- * refinement.
+ * scan because no declared index covers its keys. Coverage rule: an
+ * index `{name, fields: [f1, f2, ...]}` covers the filter when the
+ * filter's key set is a non-empty prefix of `fields` (Postgres can use
+ * a multi-column B-tree for any leftmost-prefix subset). Single-field
+ * `.unique()` / `.index()` markers are still recognised — they desugar
+ * to a single-column index. Only fires when `process.env.NODE_ENV !==
+ * "production"`. Deduplicates by `${collection}:${sortedKeys}`.
  */
 function _maybeWarnUnindexedFilter(
   collection: string,
   schema: NormalizedSchema,
   filter: PlainObject,
+  declaredIndexes: readonly NamedIndexSpec[],
 ): void {
   // Avoid the work in production AND test. NODE_ENV is set to "test" by
   // most JS test runners (vitest/jest set it automatically; node:test
@@ -161,7 +159,11 @@ function _maybeWarnUnindexedFilter(
   // Skipping in test keeps mock-based suites quiet without disabling the
   // warning where it matters (dev: NODE_ENV unset or "development").
   const nodeEnv = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env?.NODE_ENV;
-  if (nodeEnv === "production" || nodeEnv === "test") return;
+  if (nodeEnv === "production") return;
+  // In tests we honour an explicit opt-in so the named-indexes suite can
+  // observe the warning without forcing every other suite to deal with it.
+  const opt = (globalThis as { __zeroshipDbWarnIndexInTest?: boolean }).__zeroshipDbWarnIndexInTest;
+  if (nodeEnv === "test" && opt !== true) return;
 
   if (filter === null || typeof filter !== "object") return;
   const keys = Object.keys(filter).filter(
@@ -171,30 +173,67 @@ function _maybeWarnUnindexedFilter(
   // `id` is always the primary key — never warn on it.
   if (keys.length === 1 && keys[0] === "id") return;
 
-  let anyIndexed = false;
-  for (const k of keys) {
-    const def = schema[k];
-    if (def && (def.index === true || def.unique === true)) {
-      anyIndexed = true;
-      break;
-    }
-  }
-  if (anyIndexed) return;
+  if (_filterCoveredByIndex(keys, schema, declaredIndexes)) return;
 
   const shapeKey = `${collection}:${[...keys].sort().join(",")}`;
   if (_warnedShapes.has(shapeKey)) return;
   _warnedShapes.add(shapeKey);
 
-  const hint = keys
-    .map((k) => `t.<type>().index() on ${collection}.${k}`)
-    .join(" or ");
+  const declaredNames = declaredIndexes.map((i) => i.name);
+  const declaredHint = declaredNames.length > 0
+    ? `Declared indexes: ${declaredNames.join(", ")}.`
+    : "No indexes declared on this collection.";
   // `console.warn` is the standard channel here — matches Convex's
   // ESLint rule shape. We do not throw: this is a nudge, not a hard error.
   console.warn(
     `[@zeroship/db] unindexed query on "${collection}" — ` +
-    `filter keys [${keys.join(", ")}] have no index. ` +
-    `Consider adding ${hint}.`,
+    `filter keys [${keys.join(", ")}] match no declared index. ` +
+    `${declaredHint} ` +
+    `Add .index("by_X", [${keys.map((k) => JSON.stringify(k)).join(", ")}]) ` +
+    `to the schema, or filter by a prefix of an existing index.`,
   );
+}
+
+/**
+ * True iff the filter keys (in any order) form a non-empty prefix of
+ * some declared index, OR every key carries a single-field index marker
+ * (`def.index === true` / `def.unique === true`). The schema-level
+ * markers are kept as the single-column path so `t.string().unique()`
+ * still suppresses the warning without requiring a `.index(...)`
+ * declaration.
+ */
+function _filterCoveredByIndex(
+  keys: string[],
+  schema: NormalizedSchema,
+  declaredIndexes: readonly NamedIndexSpec[],
+): boolean {
+  // Single-field path: any key with `.index()` / `.unique()` is enough.
+  for (const k of keys) {
+    const def = schema[k];
+    if (def && (def.index === true || def.unique === true)) {
+      // The single-field marker covers a filter that uses ONLY that one
+      // key, or compound filters where every other key is also indexed.
+      // The simplest correct rule: at least one indexed key suffices to
+      // trigger an index scan; Postgres can filter the rest. So we
+      // accept coverage as soon as one key is marked.
+      return true;
+    }
+  }
+  // Multi-column path: keys form a prefix of some declared index.
+  const keySet = new Set(keys);
+  for (const idx of declaredIndexes) {
+    if (idx.fields.length === 0) continue;
+    if (keySet.size > idx.fields.length) continue;
+    let covers = true;
+    for (let i = 0; i < keySet.size; i++) {
+      if (!keySet.has(idx.fields[i])) {
+        covers = false;
+        break;
+      }
+    }
+    if (covers) return true;
+  }
+  return false;
 }
 
 /**
@@ -217,6 +256,12 @@ export class Collection<S = PlainObject, N extends string = string> {
   private _ready: Promise<void> | null;
   private _softDelete: boolean;
   private _versioning: boolean;
+  /**
+   * Named multi-column indexes declared via `schema(...).index(name, fields)`.
+   * Field names are already mapped to column names so the runtime warning
+   * compares them against filters that have also been column-mapped.
+   */
+  private _indexes: readonly NamedIndexSpec[];
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
   private _idLoader: IdLoader<Row<S>> | null;
   /**
@@ -244,7 +289,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    */
   declare readonly RowInput: RowInput<S>;
 
-  constructor(name: string, schema: NormalizedSchema, native: NativeDb, options?: { naming?: NamingStrategy; ready?: Promise<void> | null; softDelete?: boolean; versioning?: boolean }) {
+  constructor(name: string, schema: NormalizedSchema, native: NativeDb, options?: { naming?: NamingStrategy; ready?: Promise<void> | null; softDelete?: boolean; versioning?: boolean; indexes?: readonly NamedIndexSpec[] }) {
     this._name = name;
     this._schema = schema;
     this._native = native;
@@ -274,6 +319,16 @@ export class Collection<S = PlainObject, N extends string = string> {
     this._knownFields = new Set(Object.keys(fieldToCol));
     this._toColumn = (field) => fieldToCol[field] ?? field;
     this._toField = (column) => colToField[column] ?? column;
+
+    // The warning path compares declared indexes against unmapped JS
+    // field names (matching `_schema` keys + the filter's user-visible
+    // shape). Wire-format column mapping happens once at registerModel
+    // time in `model()`, not here.
+    this._indexes = (options?.indexes ?? []).map((idx) => ({
+      name: idx.name,
+      fields: [...idx.fields],
+      ...(idx.unique ? { unique: true } : {}),
+    }));
   }
 
   /** Await table registration (DDL) before first operation. */
@@ -434,7 +489,7 @@ export class Collection<S = PlainObject, N extends string = string> {
       ? ({ id: idOrFilter } as Filter<S>)
       : idOrFilter);
     if (typeof idOrFilter !== "number") {
-      _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
+      _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     }
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
@@ -518,7 +573,7 @@ export class Collection<S = PlainObject, N extends string = string> {
    * and `.select()` before being awaited.
    */
   find(filter: Filter<S> = {} as Filter<S>): Query<S, Row<S>> {
-    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
     return new Query<S, Row<S>>(
       this._name,
@@ -737,7 +792,7 @@ export class Collection<S = PlainObject, N extends string = string> {
     filter: Filter<S>,
     opts: { hard?: boolean } = {},
   ): Promise<Result<{ deletedCount: number }>> {
-    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
+    _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     return this._run(async () => {
       const hard = opts.hard === true;
       const casVersion = this._extractCasVersion(filter as PlainObject);
