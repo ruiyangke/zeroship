@@ -204,6 +204,20 @@ check "getUserPair returned Bob's row" \
   bash -c "echo '$PAIR' | grep -q '\"id\":${BOB_ID}'"
 
 # ---------------------------------------------------------------------------
+# Check 5d: listTodosWithUser — find({}, { with: { userId: true } }) eager-
+# loads referenced users in one batched roundtrip. Each row's userId field
+# must carry the full user row (id + email + name) instead of the bare FK.
+# ---------------------------------------------------------------------------
+
+echo "[check 5d] listTodosWithUser — relation-aware reads eager-load via with"
+
+LWU=$(rpc listTodosWithUser "{\"userId\":${ALICE_ID}}")
+check "listTodosWithUser returned a row carrying joined user data" \
+  bash -c "echo '$LWU' | grep -qE '\"userId\":\\{[^}]*\"email\":'"
+check "joined user row carries Alice's email" \
+  bash -c "echo '$LWU' | grep -q \"${ALICE_EMAIL}\""
+
+# ---------------------------------------------------------------------------
 # Check 6: Migration audit row (A3)
 # ---------------------------------------------------------------------------
 

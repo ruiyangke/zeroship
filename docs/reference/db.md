@@ -290,6 +290,82 @@ const { data: exists } = await db.users.exists({ email: "alice@example.com" });
 const { data: roles } = await db.users.distinct("role");
 ```
 
+### Relations — `with: { fk: true }`
+
+`find()` / `get()` accept an optional `with: { <fkField>: true }` option
+that eager-loads referenced rows in a single batched roundtrip per
+relation. No more N+1.
+
+```ts
+// Before — N+1: one users.get(id) per todo
+const { data: todos } = await db.todos.find({});
+for (const t of todos!) {
+  const { data: u } = await db.users.get(t.userId);
+  // ...
+}
+
+// After — exactly two roundtrips total, regardless of the page size
+const { data: todos } = await db.todos.find({}, { with: { userId: true } });
+// each todo: { id, projectId, title, userId: { id, email, name } | null }
+```
+
+The same option is available on `get(id)` and as a chainable `.with(...)`
+method on the lazy `Query` returned by `find()`:
+
+```ts
+const { data: todo }  = await db.todos.get(id, { with: { userId: true } });
+const { data: rows }  = await db.todos.find({}).with({ userId: true });
+const { data: page }  = await db.todos
+  .find({})
+  .sort({ id: 1 })
+  .with({ userId: true })
+  .paginate({ cursor: null, numItems: 20 });
+```
+
+Multiple relations are allowed in one call — each fires its own single
+batched fetch:
+
+```ts
+const { data } = await db.todos.find({}, {
+  with: { userId: true, projectId: true },
+});
+// data[0].userId    → { id, email, name } | null
+// data[0].projectId → { id, name }        | null
+```
+
+#### Rules
+
+- The `with` key MUST be a `t.ref(...)` field declared on the parent
+  schema. `with: { id: true }`, `with: { title: true }`, or any
+  unknown key rejects with `"... is not a t.ref field on \"<table>\""`.
+- The joined row REPLACES the FK number at the same key. To keep
+  both the FK and the joined row, declare the relation on a separate
+  field name (e.g. `user: t.ref("users")` instead of `userId`) — the
+  joined row lands at `user`, and its `.id` is the original FK.
+- `null` FK values stay null after the join. FK values that point to a
+  deleted / missing target row also resolve to null.
+- FK ids are deduplicated before the wire call: `N` todos with the same
+  `userId` produce one `WHERE id IN (?)` with one entry.
+
+#### v1 limitations (future work)
+
+- **Type plumbing.** The joined field's TS type is `PlainObject | null`,
+  not `Row<TargetSchema> | null`. The target's schema is known at the
+  type layer (`refTarget: "users"`) but threading the parent db's
+  schema map through every Collection's generic would require a larger
+  refactor; v1 ships with the looser type so the runtime can land
+  immediately. Cast at the call site if you need narrowed access:
+  `const u = row.userId as Row<typeof db.users> | null`.
+- **No projection narrowing.** Drizzle / Prisma support
+  `with: { user: { columns: ["email"] } }` to project the joined row.
+  v1 always fetches every column of the target.
+- **No relation-level filters.** Drizzle's
+  `with: { posts: { where: ... } }` narrows the join. v1 has no
+  equivalent — use a top-level filter on the parent instead.
+- **Single-level only.** Nested relations
+  (`with: { userId: { with: { teamId: true } } }`) are not supported in
+  v1. Compose two finds in JS, or wait for v2.
+
 ### Update
 
 ```ts

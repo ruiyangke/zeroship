@@ -51,7 +51,7 @@ import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
 import { createLive, type LiveOptions, type LiveQuery } from "./live.js";
 import { type NormalizedSchema, normalizeSchema, validateRefTargets } from "./schema.js";
-import { type PlainObject, type Result, type Row, type RowInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
+import { type PlainObject, type Result, type Row, type RowInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, type WithSpec, type WithRelations, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
 
 /**
  * Topologically sort schema names so parents precede children. A child
@@ -121,11 +121,16 @@ export type TxCollection<S = PlainObject> = {
     idOrFilter: number | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<Pick<Row<S>, K> | null>;
+  get<W extends WithSpec>(
+    idOrFilter: number | Filter<S>,
+    opts: { with: W; orderBy?: Record<string, 1 | -1> },
+  ): Promise<(Row<S> & WithRelations<W>) | null>;
   get(
     idOrFilter: number | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
+  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<W>>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>>;
   upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
   update(idOrFilter: number | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
@@ -145,6 +150,7 @@ export type TxQuery<S = PlainObject, P = Row<S>> = {
   select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>>;
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P>;
   after(id: number): TxQuery<S, P>;
+  with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<W>>;
   then<TResult1 = P[], TResult2 = never>(
     resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
     reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
@@ -252,10 +258,14 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async exists(filter: Filter<S>) {
       return unwrap(await collection.exists(filter));
     },
-    find(filter: Filter<S> = {} as Filter<S>): TxQuery<S, Row<S>> {
-      const query = collection.find(filter);
+    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): TxQuery<S, Row<S>> => {
+      const query = (opts?.with !== undefined
+        ? (collection as unknown as {
+            find(f: Filter<S>, o: { with: WithSpec }): Query<S, Row<S>>;
+          }).find(filter, { with: opts.with })
+        : collection.find(filter));
       return createTxQuery<S>(query);
-    },
+    }) as TxCollection<S>["find"],
     async upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }) {
       return unwrap(await collection.upsert(row, options));
     },
@@ -306,6 +316,10 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
     // the underlying Query — the cast is local to the call site.
     select: selectImpl as TxQuery<S, Row<S>>["select"],
     after(id: number) { query.after(id); return wrapped; },
+    with: ((spec: WithSpec) => {
+      (query as unknown as { with(s: WithSpec): unknown }).with(spec);
+      return wrapped;
+    }) as TxQuery<S, Row<S>>["with"],
     then<TResult1 = Row<S>[], TResult2 = never>(
       resolve?: ((value: Row<S>[]) => TResult1 | PromiseLike<TResult1>) | null,
       reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
@@ -495,6 +509,17 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
   const prev = g.__zeroshipPlatformReady ?? Promise.resolve();
   g.__zeroshipPlatformReady = prev.then(() => chain);
+
+  // Plant the sibling-collection lookup on every Collection so the
+  // `with: { fk: true }` option can resolve `refTarget` → target
+  // Collection at query time without a per-call closure.
+  const resolveCollection = (n: string): Collection<unknown> | undefined =>
+    (collections as Record<string, Collection<unknown>>)[n];
+  for (const col of Object.values(collections)) {
+    (col as unknown as {
+      _setResolveCollection(fn: (name: string) => Collection<unknown> | undefined): void;
+    })._setResolveCollection(resolveCollection);
+  }
 
   // Pre-cache TxCollection wrappers — stateless, reusable across transactions.
   // Mirror the outer `Db<T>`'s `UnwrapSchema<T[K]>` normalisation so

@@ -16,7 +16,7 @@ import {
 import { Query } from "./query.js";
 import { IdLoader } from "./loader.js";
 import { trackCollectionAccess } from "./live.js";
-import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, type NamedIndexSpec, naming, ok, err } from "./types.js";
+import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, type NamedIndexSpec, type WithSpec, type WithRelations, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
@@ -266,6 +266,14 @@ export class Collection<S = PlainObject, N extends string = string> {
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
   private _idLoader: IdLoader<Row<S>> | null;
   /**
+   * Sibling-collection lookup, planted by `createDb` so `with: { fk: true }`
+   * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
+   * batched `find({id: {$in: ids}})` against. `model()` callers without a
+   * parent db leave this null; `with` then errors at call time with a
+   * clear message instead of silently degrading to N+1.
+   */
+  private _resolveCollection: ((name: string) => Collection<unknown> | undefined) | null;
+  /**
    * Active-transaction depth. `db.transaction()` wraps `tx.x.*` calls
    * with an increment/decrement so the loader is bypassed while a tx is
    * live on this collection — see `_callWithTx` in db.ts. Mixing a
@@ -300,6 +308,7 @@ export class Collection<S = PlainObject, N extends string = string> {
     this._versioning = options?.versioning ?? false;
     this._idLoader = null;
     this._txDepth = 0;
+    this._resolveCollection = null;
 
     // Build field↔column lookup maps once at init — O(1) at query time
     const strategy = options?.naming ?? naming.asIs;
@@ -368,6 +377,100 @@ export class Collection<S = PlainObject, N extends string = string> {
    *  registration starts. */
   _setReady(p: Promise<void> | null): void {
     this._ready = p;
+  }
+
+  /** @internal — planted by `createDb` so the `with: { fk: true }` option
+   *  can resolve sibling collections by table name. */
+  _setResolveCollection(
+    fn: (name: string) => Collection<unknown> | undefined,
+  ): void {
+    this._resolveCollection = fn;
+  }
+
+  /**
+   * @internal — eager-load referenced rows for each `with` key onto every
+   *  parent row. Mutates the rows in place. Used by both the `get` and
+   *  `find` paths so the relation-loading logic lives in one place.
+   *
+   *  Per `with` key:
+   *    1. Walk the schema; the key must be a `t.ref(...)` field.
+   *    2. Resolve the target Collection via the planted `_resolveCollection`.
+   *    3. Dedupe foreign ids across the parent rows.
+   *    4. Fire ONE `find({id: {$in: [...]}})` against the target.
+   *    5. Build an id→row map; the joined row replaces the FK number at
+   *       the same key (null for null FK or missing target row).
+   *
+   *  v1 limitation: the joined row overwrites the FK number at the same
+   *  key. To keep both, declare the FK on a separate field — e.g.
+   *  `user: t.ref("users")` instead of `userId: t.ref("users")` — and the
+   *  number lives on the joined row as `user.id`.
+   */
+  async _loadRelations(
+    rows: PlainObject[],
+    withSpec: WithSpec,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    for (const [field, spec] of Object.entries(withSpec)) {
+      if (spec !== true) {
+        throw new Error(
+          `find/get: with: { ${field}: ${JSON.stringify(spec)} } — only \`true\` is supported in v1`,
+        );
+      }
+      const fieldDef = this._schema[field];
+      if (!fieldDef || fieldDef.type !== "ref") {
+        throw new Error(
+          `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${this._name}"`,
+        );
+      }
+      const targetName = fieldDef.refTarget;
+      if (typeof targetName !== "string" || targetName.length === 0) {
+        throw new Error(
+          `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
+        );
+      }
+      const resolve = this._resolveCollection;
+      if (resolve === null) {
+        throw new Error(
+          `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
+          `so sibling collections cannot be resolved. Use createDb({...}) to enable relation loading.`,
+        );
+      }
+      const targetCol = resolve(targetName);
+      if (!targetCol) {
+        throw new Error(
+          `find/get: with: { ${field}: true } — target collection "${targetName}" is not declared on this db`,
+        );
+      }
+      const ids: number[] = [];
+      const seen = new Set<number>();
+      for (const r of rows) {
+        const v = r[field];
+        if (typeof v === "number" && !seen.has(v)) {
+          seen.add(v);
+          ids.push(v);
+        }
+      }
+      if (ids.length === 0) {
+        // No non-null FK values across the page — every row's relation is null.
+        for (const r of rows) r[field] = null;
+        continue;
+      }
+      const { data: targetRows, error } = await targetCol.find({ id: { $in: ids } } as Filter<unknown>);
+      if (error) throw error;
+      const byId = new Map<number, PlainObject>();
+      for (const tr of (targetRows ?? []) as PlainObject[]) {
+        const tid = tr.id;
+        if (typeof tid === "number") byId.set(tid, tr);
+      }
+      for (const r of rows) {
+        const v = r[field];
+        if (typeof v !== "number") {
+          r[field] = null;
+        } else {
+          r[field] = byId.get(v) ?? null;
+        }
+      }
+    }
   }
 
   /** Wraps an operation in ensureReady + try/catch → Result. Eliminates boilerplate per method. */
@@ -467,22 +570,27 @@ export class Collection<S = PlainObject, N extends string = string> {
     idOrFilter: number | Id<N> | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<Pick<Row<S>, K> | null>>;
+  async get<W extends WithSpec>(
+    idOrFilter: number | Id<N> | Filter<S>,
+    opts: { with: W; orderBy?: Record<string, 1 | -1> },
+  ): Promise<Result<(Row<S> & WithRelations<W>) | null>>;
   async get(
     idOrFilter: number | Id<N> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Result<Row<S> | null>>;
   async get(
     idOrFilter: number | Id<N> | Filter<S>,
-    opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> } = {},
+    opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1>; with?: WithSpec } = {},
   ): Promise<Result<Row<S> | null>> {
     trackCollectionAccess(this._name);
-    // DataLoader path: a bare numeric id with no projection / ordering
-    // and no active tx. Coalesces concurrent `get(id)` calls in one
-    // microtask into a single `WHERE id IN (...)` fetch.
+    // DataLoader path: a bare numeric id with no projection / ordering /
+    // relation-loading and no active tx. Coalesces concurrent `get(id)`
+    // calls in one microtask into a single `WHERE id IN (...)` fetch.
     if (
       typeof idOrFilter === "number" &&
       opts.select === undefined &&
       opts.orderBy === undefined &&
+      opts.with === undefined &&
       this._txDepth === 0
     ) {
       return this._run(() => this._loadById(idOrFilter));
@@ -508,7 +616,11 @@ export class Collection<S = PlainObject, N extends string = string> {
       }
       const result = await this._col().findOne(mapped, nativeOpts);
       if (result === null) return null;
-      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
+      const row = mapResultDoc(result as PlainObject, this._toField);
+      if (opts.with !== undefined) {
+        await this._loadRelations([row], opts.with);
+      }
+      return row as Row<S>;
     });
   }
 
@@ -555,22 +667,34 @@ export class Collection<S = PlainObject, N extends string = string> {
 
   /**
    * Returns a lazy Query that can be chained with `.sort()`, `.limit()`, `.skip()`,
-   * and `.select()` before being awaited.
+   * `.select()`, and `.with()` before being awaited.
+   *
+   * Pass `opts.with` to eager-load referenced rows via the per-collection
+   * DataLoader pattern — one batched `find({id: {$in: [...]}})` per relation,
+   * not per parent row. Equivalent to `.with(opts.with)` on the returned Query.
    */
-  find(filter: Filter<S> = {} as Filter<S>): Query<S, Row<S>> {
+  find<W extends WithSpec>(
+    filter: Filter<S>,
+    opts: { with: W },
+  ): Query<S, Row<S> & WithRelations<W>>;
+  find(filter?: Filter<S>): Query<S, Row<S>>;
+  find(filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): Query<S, Row<S>> {
     trackCollectionAccess(this._name);
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-    return new Query<S, Row<S>>(
+    const q = new Query<S, Row<S>>(
       this._name,
       mapped,
-      async (_col, f, opts) => {
+      async (_col, f, fopts) => {
         await this.ensureReady();
-        return this._col().find(f, opts);
+        return this._col().find(f, fopts);
       },
       this._toField,
       this._toColumn,
+      (rows, spec) => this._loadRelations(rows, spec),
     );
+    if (opts?.with !== undefined) q.with(opts.with);
+    return q;
   }
 
   /**

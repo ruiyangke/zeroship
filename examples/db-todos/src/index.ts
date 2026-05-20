@@ -121,6 +121,20 @@ export const getUserPair = query(
   },
 );
 
+// Smoke for relation-aware reads: `find({}, { with: { userId: true } })`
+// must attach the joined user row at each todo's `userId` field in a
+// single batched roundtrip across all rows.
+export const listTodosWithUser = query(
+  async ({ userId }: { userId: UserId }) => {
+    const { data, error } = await db.todos.find(
+      { userId, archived: false },
+      { with: { userId: true } },
+    );
+    if (error) throw error;
+    return data ?? [];
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Mutations — read+write; auto-wrapped in BEGIN ISOLATION LEVEL SERIALIZABLE
 // ---------------------------------------------------------------------------

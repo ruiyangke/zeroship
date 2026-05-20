@@ -248,6 +248,27 @@ export type InferId<C> =
   C extends import("./collection.js").Collection<any, infer N extends string> ? Id<N> :
   never;
 
+/**
+ * Spec accepted by `find()` / `get()`'s `with: { ... }` option. Each key
+ * must be a `t.ref(...)` field on the parent schema; the value is `true`
+ * (eager-load the full target row). Future shapes — column narrowing,
+ * relation-level filters — slot in as `{ columns: K[] } | { where: Filter }`.
+ */
+export type WithSpec = Record<string, true>;
+
+/**
+ * v1 type-level shape for joined rows. Each key in `W` becomes a field
+ * on the row carrying the target's plain object (or `null`). The
+ * target's full `Row<T>` shape is not plumbed through here: that would
+ * require threading the parent db's schema map into every Collection's
+ * generic, which is a larger refactor. Users who want stricter typing
+ * can cast (`row.user as Row<UsersSchema>`), or wait for the v2 type
+ * plumbing tracked in `docs/reference/db.md` Relations section.
+ */
+export type WithRelations<W extends WithSpec> = {
+  [K in keyof W]: PlainObject | null;
+};
+
 /** Wraps a successful value in Result. */
 export function ok<T>(data: T): Result<T> {
   return { data, error: null };

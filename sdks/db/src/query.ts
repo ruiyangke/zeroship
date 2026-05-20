@@ -4,7 +4,7 @@
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils.js";
-import { PlainObject, Result, Row, ok, err } from "./types.js";
+import { PlainObject, Result, Row, type WithSpec, type WithRelations, ok, err } from "./types.js";
 
 type NativeFn = (
   collection: string,
@@ -93,12 +93,14 @@ export class Query<S = PlainObject, P = Row<S>> {
   private _toField: (s: string) => string;
   private _toColumn: (s: string) => string;
   private _native: NativeFn;
+  private _loadRelations: ((rows: PlainObject[], spec: WithSpec) => Promise<void>) | null;
 
   private _sort: Record<string, number> | undefined;
   private _limit: number | undefined;
   private _skip: number | undefined;
   private _select: string[] | undefined;
   private _afterId: number | undefined;
+  private _with: WithSpec | undefined;
 
   /** @internal */
   constructor(
@@ -107,12 +109,14 @@ export class Query<S = PlainObject, P = Row<S>> {
     native: NativeFn,
     toField?: (s: string) => string,
     toColumn?: (s: string) => string,
+    loadRelations?: (rows: PlainObject[], spec: WithSpec) => Promise<void>,
   ) {
     this._collection = collection;
     this._filter = filter;
     this._native = native;
     this._toField = toField ?? (s => s);
     this._toColumn = toColumn ?? (s => s);
+    this._loadRelations = loadRelations ?? null;
   }
 
   /**
@@ -156,6 +160,23 @@ export class Query<S = PlainObject, P = Row<S>> {
   after(id: number): this {
     this._afterId = id;
     return this;
+  }
+
+  /**
+   * Eager-load referenced rows for each key in `spec`. Each key must be a
+   * `t.ref(...)` field on the parent schema; the joined row replaces the
+   * FK number at that key (or null when the FK is null / target row is missing).
+   *
+   * Exactly one batched `find({id: {$in: [...]}})` fires per relation across
+   * the entire page — no N+1. Type-level narrowing: `.with({user: true})`
+   * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
+   * `data[i].user` typechecks without a cast.
+   */
+  with<W extends WithSpec>(spec: W): Query<S, P & WithRelations<W>>;
+  with(spec: WithSpec): Query<S, any>;
+  with(spec: WithSpec): Query<S, any> {
+    this._with = { ...(this._with ?? {}), ...spec };
+    return this as unknown as Query<S, any>;
   }
 
   /**
@@ -254,6 +275,10 @@ export class Query<S = PlainObject, P = Row<S>> {
       const kept = isDone ? rows : rows.slice(0, numItems);
       const page = kept.map((d) => mapResultDoc(d, this._toField)) as P[];
 
+      // Cursor is computed BEFORE relation loading so the orderBy value
+      // captured from the last row is the raw column — not an overwritten
+      // joined object. `with` keys are FK fields and would be replaced
+      // in place by `_loadRelations`.
       let continueCursor = cursor ?? "";
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
@@ -261,6 +286,10 @@ export class Query<S = PlainObject, P = Row<S>> {
         const lastValue = last[orderKey];
         const lastId = typeof last.id === "number" ? last.id : Number(last.id);
         continueCursor = encodeCursor({ orderBy, lastValue, lastId });
+      }
+
+      if (this._with !== undefined && this._loadRelations !== null && page.length > 0) {
+        await this._loadRelations(page as unknown as PlainObject[], this._with);
       }
 
       return ok({ page, continueCursor, isDone });
@@ -353,7 +382,11 @@ export class Query<S = PlainObject, P = Row<S>> {
     try {
       const rows = await this._native(this._collection, filter, opts);
       const list: PlainObject[] = Array.isArray(rows) ? rows : [];
-      return ok(list.map(d => mapResultDoc(d, this._toField)) as P[]);
+      const mapped = list.map(d => mapResultDoc(d, this._toField)) as P[];
+      if (this._with !== undefined && this._loadRelations !== null && mapped.length > 0) {
+        await this._loadRelations(mapped as unknown as PlainObject[], this._with);
+      }
+      return ok(mapped);
     } catch (e: unknown) {
       // Rethrow the original Error so any structured `.code` set by the
       // native layer survives. The previous wrapper recreated an Error
