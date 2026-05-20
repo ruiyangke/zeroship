@@ -188,6 +188,11 @@ fn dispatch_by_spec<'s>(
         OpResult::JsValue { resolver: resolver_global, value, request_id }
     }));
 
+    let notify = state.borrow().pump_notify_tx.clone();
+    if let Some(mut tx) = notify {
+        let _ = tx.try_send(());
+    }
+
     promise
 }
 

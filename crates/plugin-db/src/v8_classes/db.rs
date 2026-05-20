@@ -119,19 +119,16 @@ impl Db {
                 "db.collection: name must be a non-empty string",
             ));
         }
-        // Fast path: existing entry in the cache.
-        if let Some(existing) = self.collection_cache.borrow().get(&name) {
-            return Ok(v8::Local::new(scope, existing));
+        use std::collections::hash_map::Entry;
+        let mut cache = self.collection_cache.borrow_mut();
+        match cache.entry(name) {
+            Entry::Occupied(o) => Ok(v8::Local::new(scope, o.get())),
+            Entry::Vacant(v) => {
+                let obj = mint_collection(scope, v.key().clone(), self.app_id.clone())?;
+                v.insert(v8::Global::new(scope, obj));
+                Ok(obj)
+            }
         }
-
-        // Slow path: mint a new Collection and stash a Global in the
-        // cache so the next call hits the fast path.
-        let obj = mint_collection(scope, name.clone(), self.app_id.clone())?;
-        let global = v8::Global::new(scope, obj);
-        self.collection_cache
-            .borrow_mut()
-            .insert(name, global);
-        Ok(obj)
     }
 
     /// `db.registerModel(collection, schema)` — DDL orchestrator
@@ -170,6 +167,12 @@ impl Db {
         let isolation = if opts.is_null_or_undefined() {
             None
         } else {
+            if !opts.is_object() {
+                let got = js_type_name(opts);
+                return Err(OpError::type_error(format!(
+                    "beginTransaction: opts must be an object, got {got}"
+                )));
+            }
             let parsed = callbacks::v8_value_to_serde_json(scope, opts);
             let raw = parsed
                 .as_object()
@@ -264,6 +267,20 @@ impl Db {
         *self.migrations_obj.borrow_mut() = Some(global);
         Ok(obj)
     }
+}
+
+/// Cheap JS-side type label for error messages. Matches the labels
+/// `typeof` would surface so users can correlate with what they
+/// passed.
+fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
+    if v.is_string() { "string" }
+    else if v.is_number() { "number" }
+    else if v.is_boolean() { "boolean" }
+    else if v.is_function() { "function" }
+    else if v.is_array() { "array" }
+    else if v.is_null() { "null" }
+    else if v.is_undefined() { "undefined" }
+    else { "value" }
 }
 
 /// Normalise a JS-supplied isolation-level identifier into the SQL

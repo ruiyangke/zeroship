@@ -204,11 +204,26 @@ impl Collection {
             .get("conflictFields")
             .cloned()
             .unwrap_or(Value::Null);
-        let conflict_arr = conflict_v
-            .as_array()
-            .ok_or_else(|| OpError::type_error("upsert: opts.conflictFields required"))?;
+        let conflict_arr = match conflict_v.as_array() {
+            Some(arr) => arr,
+            None => {
+                let detail = match &conflict_v {
+                    Value::Null => "missing".to_string(),
+                    Value::String(_) => "string".to_string(),
+                    Value::Number(_) => "number".to_string(),
+                    Value::Bool(_) => "boolean".to_string(),
+                    Value::Object(_) => "object".to_string(),
+                    Value::Array(_) => unreachable!(),
+                };
+                return Err(OpError::type_error(format!(
+                    "upsert: opts.conflictFields must be an array of strings (got {detail})"
+                )));
+            }
+        };
         if conflict_arr.is_empty() {
-            return Err(OpError::type_error("upsert: opts.conflictFields required"));
+            return Err(OpError::type_error(
+                "upsert: opts.conflictFields must be a non-empty array of strings",
+            ));
         }
         Ok(callbacks::dispatch_upsert(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
     }
