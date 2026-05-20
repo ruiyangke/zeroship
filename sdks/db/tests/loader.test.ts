@@ -326,6 +326,65 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     );
   });
 
+  test("tx-race: get(id) queued pre-tx that flushes mid-tx is rejected", async () => {
+    // Models the residual race left after `d218e54c`'s drain-before-begin:
+    // a `get(id)` enqueues an entry, then `db.transaction(...)` runs.
+    // `beginTransaction` resolves AFTER `_txDepth` is bumped, so by the
+    // time the loader's microtask fires, `_txDepth > 0` and TX_CONN is
+    // live in Rust. The loader detects the snapshot/current mismatch
+    // and rejects with a clear error instead of routing the batched
+    // find onto the tx connection.
+    const { IdLoader } = await import("../src/loader.js");
+    let currentDepth = 0;
+    let flushCalls = 0;
+    const loader = new IdLoader<{ id: number; v: string }>(
+      async (ids) => {
+        flushCalls += 1;
+        const m = new Map<number, { id: number; v: string }>();
+        for (const i of ids) m.set(i, { id: i, v: `row-${i}` });
+        return m;
+      },
+      () => currentDepth,
+    );
+    // Enqueue at depth 0 (caller is outside any tx).
+    const p = loader.load(42, 0);
+    // Before the microtask fires, a tx opens on the owning collection.
+    currentDepth = 1;
+    let caught: unknown = null;
+    try { await p; } catch (e) { caught = e; }
+    assert.ok(caught instanceof Error, "expected the loader to reject");
+    assert.match(
+      (caught as Error).message,
+      /transaction opened before flush/,
+      `wrong error: ${(caught as Error).message}`,
+    );
+    assert.equal(flushCalls, 0, "flush must not run when every entry is rejected");
+  });
+
+  test("tx-race: snapshot==current (both 0 or both > 0) resolves normally", async () => {
+    const { IdLoader } = await import("../src/loader.js");
+    let currentDepth = 0;
+    const loader = new IdLoader<{ id: number; v: string }>(
+      async (ids) => {
+        const m = new Map<number, { id: number; v: string }>();
+        for (const i of ids) m.set(i, { id: i, v: `row-${i}` });
+        return m;
+      },
+      () => currentDepth,
+    );
+    // Both enqueue-time and flush-time depth are 0 — normal path.
+    const r0 = await loader.load(1, 0);
+    assert.equal(r0?.v, "row-1");
+    // Entries enqueued inside a tx that flush inside the same tx are
+    // honoured — the caller asked for tx routing and that's what they
+    // get. (This branch is unusual in practice because Collection.get
+    // bypasses the loader when _txDepth > 0, but the loader stays
+    // correct under direct use.)
+    currentDepth = 1;
+    const r1 = await loader.load(2, 1);
+    assert.equal(r1?.v, "row-2");
+  });
+
   test("repeated id in one microtask is deduped before the wire call", async () => {
     const { native, calls } = makeMockNative({
       7: { id: 7, email: "x@y.com", name: "Same" },

@@ -616,14 +616,20 @@ export class Collection<S = PlainObject, N extends string = string> {
     // DataLoader path: a bare numeric id with no projection / ordering /
     // relation-loading and no active tx. Coalesces concurrent `get(id)`
     // calls in one microtask into a single `WHERE id IN (...)` fetch.
+    //
+    // Snapshot `_txDepth` BEFORE any await so the loader can detect a
+    // tx opening between this call and the next-microtask flush — the
+    // loader rejects entries whose snapshot was 0 but find current
+    // depth > 0 at flush time. See `loader.ts`.
+    const txDepthAtCall = this._txDepth;
     if (
       typeof idOrFilter === "number" &&
       opts.select === undefined &&
       opts.orderBy === undefined &&
       opts.with === undefined &&
-      this._txDepth === 0
+      txDepthAtCall === 0
     ) {
-      return this._run(() => this._loadById(idOrFilter));
+      return this._run(() => this._loadById(idOrFilter, txDepthAtCall));
     }
     const filter = (typeof idOrFilter === "number"
       ? ({ id: idOrFilter } as Filter<S>)
@@ -657,28 +663,33 @@ export class Collection<S = PlainObject, N extends string = string> {
   /** Lazily build the per-collection IdLoader and route the request
    *  through it. The flush callback fires `find({id: {$in: ids}})` via
    *  the native Collection wrapper — this picks up `TX_CONN` routing
-   *  in Rust for free, but the caller has already filtered out
-   *  tx-active calls so we should never run inside one. */
-  private async _loadById(id: number): Promise<Row<S> | null> {
+   *  in Rust for free. Entries whose enqueue-time snapshot was 0 but
+   *  encounter `_txDepth > 0` at flush time are rejected by the loader
+   *  (see `loader.ts`) so a non-tx batched read never leaks into a tx
+   *  opened mid-batch. */
+  private async _loadById(id: number, txDepthAtCall: number): Promise<Row<S> | null> {
     await this.ensureReady();
     if (this._idLoader === null) {
-      this._idLoader = new IdLoader<Row<S>>(async (ids) => {
-        const filter: ZeroshipDbFilter = this._mergeFilter(
-          mapFilterOutbound(
-            { id: { $in: ids } } as unknown as ZeroshipDbFilter,
-            this._toColumn,
-          ),
-        );
-        const rows = (await this._col().find(filter, {})) ?? [];
-        const map = new Map<number, Row<S>>();
-        for (const r of rows) {
-          const mapped = mapResultDoc(r as PlainObject, this._toField) as Row<S>;
-          map.set(mapped.id, mapped);
-        }
-        return map;
-      });
+      this._idLoader = new IdLoader<Row<S>>(
+        async (ids) => {
+          const filter: ZeroshipDbFilter = this._mergeFilter(
+            mapFilterOutbound(
+              { id: { $in: ids } } as unknown as ZeroshipDbFilter,
+              this._toColumn,
+            ),
+          );
+          const rows = (await this._col().find(filter, {})) ?? [];
+          const map = new Map<number, Row<S>>();
+          for (const r of rows) {
+            const mapped = mapResultDoc(r as PlainObject, this._toField) as Row<S>;
+            map.set(mapped.id, mapped);
+          }
+          return map;
+        },
+        () => this._txDepth,
+      );
     }
-    return this._idLoader.load(id);
+    return this._idLoader.load(id, txDepthAtCall);
   }
 
   /**
