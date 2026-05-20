@@ -2690,6 +2690,150 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
 }
 
 // ---------------------------------------------------------------------------
+// Gap B — emit deferred until COMMIT
+//
+// Robustness audit (`docs/research/db-robustness-gaps-2026-05-19.md`):
+// mutations inside a `db.transaction` block must NOT publish their
+// broker events until the outer COMMIT lands. Pre-fix, every
+// successful INSERT/UPDATE/DELETE inside a tx fired `emit_local`
+// immediately, so a subscriber could observe rows the surrounding
+// ROLLBACK would un-do — classic dual-write anomaly.
+// ---------------------------------------------------------------------------
+
+/// Helper: build a minimal ChangeEvent for the queue-mechanics tests.
+fn gapb_ev(app: &str, collection: &str, pk: i64) -> zeroship_plugin_db::broker::ChangeEvent {
+    zeroship_plugin_db::broker::ChangeEvent {
+        app_id: app.to_string(),
+        collection: collection.to_string(),
+        op: zeroship_plugin_db::broker::ChangeOp::Insert,
+        pk: Some(pk),
+        changed_columns: vec![],
+        new_tuple: std::collections::HashMap::new(),
+        old_tuple: None,
+    }
+}
+
+#[compio::test]
+async fn gap_b_commit_drains_pending_emits_to_broker() {
+    // Subscribe BEFORE pushing events, mid-"transaction" push two,
+    // then drain — the broker should receive both.
+    zeroship_plugin_db::broker::drop_app(None);
+    let app = "gap_b_commit";
+    let sub = zeroship_plugin_db::broker::subscribe(app, "users");
+
+    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
+    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 2));
+    // Pre-drain: subscriber must observe nothing (events still queued).
+    assert!(sub.pop().is_none(), "events must not leak before commit");
+
+    zeroship_plugin_db::drain_pending_emits_for_tests();
+
+    let mut pks: Vec<i64> = Vec::new();
+    while let Some(zeroship_plugin_db::broker::SubscriptionMessage::Change(ev)) = sub.pop() {
+        pks.push(ev.pk.unwrap());
+    }
+    assert_eq!(pks, vec![1, 2]);
+
+    sub.close();
+    zeroship_plugin_db::broker::drop_app(None);
+}
+
+#[compio::test]
+async fn gap_b_rollback_clears_pending_emits_silently() {
+    // Push events, then `clear` (rollback path). The broker must
+    // never see them.
+    zeroship_plugin_db::broker::drop_app(None);
+    let app = "gap_b_rollback";
+    let sub = zeroship_plugin_db::broker::subscribe(app, "users");
+
+    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
+    zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 43));
+    zeroship_plugin_db::clear_pending_emits_for_tests();
+
+    assert!(
+        sub.pop().is_none(),
+        "rollback must NOT publish any broker event"
+    );
+
+    sub.close();
+    zeroship_plugin_db::broker::drop_app(None);
+}
+
+#[compio::test]
+async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
+    // End-to-end: real Postgres tx, real `exec_mutation_with_emit`
+    // call. Pre-commit the broker stays empty; post-drain it sees
+    // the insert.
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    let pool = Pool::connect(&url, 2).await.unwrap();
+
+    let app = "gap_b_e2e";
+    // Fresh schema with one collection table.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{app}"."users" (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                name TEXT NOT NULL
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    zeroship_plugin_db::broker::drop_app(None);
+    let sub = zeroship_plugin_db::broker::subscribe(app, "users");
+
+    // Install a real Client into TX_CONN with BEGIN issued; matches
+    // production exec_begin's effect on the queue/drain machinery.
+    zeroship_plugin_db::install_tx_marker_for_tests(&url).await;
+
+    // Insert via the production helper.
+    let bq = zeroship_plugin_db::query::build_insert(
+        app,
+        "users",
+        &serde_json::json!({ "name": "alice" }),
+    )
+    .expect("build_insert");
+    let _ = zeroship_plugin_db::callbacks::exec_mutation_with_emit_for_tests(
+        bq,
+        app,
+        "users",
+        zeroship_plugin_db::broker::ChangeOp::Insert,
+    )
+    .await
+    .expect("insert");
+
+    // Mid-transaction: subscriber must see nothing.
+    assert!(
+        sub.pop().is_none(),
+        "pre-commit broker must be empty (Gap B)"
+    );
+
+    // Simulate commit: drain pending emits.
+    zeroship_plugin_db::drain_pending_emits_for_tests();
+    zeroship_plugin_db::uninstall_tx_marker_for_tests();
+
+    let got = sub.pop();
+    match got {
+        Some(zeroship_plugin_db::broker::SubscriptionMessage::Change(ev)) => {
+            assert_eq!(ev.collection, "users");
+        }
+        other => panic!("expected Change event after commit, got: {other:?}"),
+    }
+
+    sub.close();
+    zeroship_plugin_db::broker::drop_app(None);
+}
+
+// ---------------------------------------------------------------------------
 // P8a.2 — cross-worker WAL propagation
 // ---------------------------------------------------------------------------
 //

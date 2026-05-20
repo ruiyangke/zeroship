@@ -122,6 +122,9 @@ impl Drop for Transaction {
         let client: Option<Client> = crate::TX_CONN.with(|c| c.borrow_mut().take());
         crate::TX_TOKEN.with(|t| t.set(0));
         drop(client);
+        // GC-driven implicit rollback — drop any queued broker events
+        // so subscribers never observe the now-aborted writes.
+        crate::callbacks::clear_pending_emits();
     }
 }
 
@@ -241,6 +244,16 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
         .map_err(|e| OpError::error(format!("tx: {cmd} failed: {e}")));
     // Client dropped here either way.
     drop(client);
+
+    // Settle the deferred broker queue (Gap B). On a successful COMMIT
+    // fire every event we'd have published mid-tx; on ROLLBACK or
+    // COMMIT failure drop the queue so subscribers never see writes
+    // Postgres just undid.
+    if cmd == "COMMIT" && result.is_ok() {
+        crate::callbacks::drain_pending_emits_on_commit();
+    } else {
+        crate::callbacks::clear_pending_emits();
+    }
 
     result.map(|_| ())
 }

@@ -427,9 +427,82 @@ async fn exec_mutation_with_emit(
             }
             _ => (Vec::new(), std::collections::HashMap::new()),
         };
-        crate::wal_consumer::emit_local(app_id, collection, op, pk, columns, tuple);
+        queue_or_emit(app_id, collection, op, pk, columns, tuple);
     }
     Ok(json)
+}
+
+/// If a transaction is active on this thread, queue the event in
+/// [`crate::PENDING_EMITS`] for the settle path to drain on COMMIT.
+/// Otherwise (autocommit), fire it immediately. Closes Gap B —
+/// subscribers no longer observe pre-commit state.
+fn queue_or_emit(
+    app_id: &str,
+    collection: &str,
+    op: crate::broker::ChangeOp,
+    pk: Option<i64>,
+    changed_columns: Vec<String>,
+    new_tuple: std::collections::HashMap<String, String>,
+) {
+    let in_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    if !in_tx {
+        crate::wal_consumer::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
+        return;
+    }
+    let ev = crate::broker::ChangeEvent {
+        app_id: app_id.to_string(),
+        collection: collection.to_string(),
+        op,
+        pk,
+        changed_columns,
+        new_tuple,
+        old_tuple: None,
+    };
+    crate::PENDING_EMITS.with(|p| {
+        let mut slot = p.borrow_mut();
+        slot.get_or_insert_with(Vec::new).push(ev);
+    });
+}
+
+/// Drain [`crate::PENDING_EMITS`] and fire every queued event through
+/// the broker. Called by the transaction settle path on COMMIT.
+pub(crate) fn drain_pending_emits_on_commit() {
+    let queued: Vec<crate::broker::ChangeEvent> = crate::PENDING_EMITS
+        .with(|p| p.borrow_mut().take().unwrap_or_default());
+    for ev in queued {
+        crate::wal_consumer::emit_local(
+            &ev.app_id,
+            &ev.collection,
+            ev.op,
+            ev.pk,
+            ev.changed_columns,
+            ev.new_tuple,
+        );
+    }
+}
+
+/// Clear [`crate::PENDING_EMITS`] without firing any events. Called by
+/// the transaction settle path on ROLLBACK (and by `exec_begin` to
+/// drop any stale residue from an interrupted prior run).
+pub(crate) fn clear_pending_emits() {
+    crate::PENDING_EMITS.with(|p| *p.borrow_mut() = None);
+}
+
+/// **Test-only**: end-to-end wrapper around [`exec_mutation_with_emit`]
+/// so integration tests can drive the queue/drain machinery against a
+/// real Postgres connection without spinning up a V8 isolate.
+///
+/// The caller is responsible for setting `TX_CONN` (via
+/// [`crate::install_tx_marker_for_tests`]) when the test wants the
+/// queueing path to fire.
+#[doc(hidden)]
+pub async fn exec_mutation_with_emit_for_tests(
+    bq: crate::query::BuiltQuery,
+    app_id: &str,
+    collection: &str,
+    op: crate::broker::ChangeOp,
+) -> Result<String, String> {
+    exec_mutation_with_emit(bq, app_id, collection, op).await
 }
 
 /// Convert rows to a JSON array string.
@@ -1978,6 +2051,10 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("db: BEGIN failed: {e}"))?;
 
     crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(client); });
+    // Defensive: any residue from a prior tx that didn't drain cleanly
+    // (shouldn't happen — every settle path clears) must NOT leak into
+    // the new tx's drain. Drop without firing.
+    clear_pending_emits();
     Ok(())
 }
 
@@ -2307,6 +2384,7 @@ async fn exec_auto_begin(
 
     crate::TX_CONN.with(|tx| { tx.borrow_mut().replace(client); });
     crate::AUTO_TX_OWNED.with(|f| f.set(true));
+    clear_pending_emits();
     Ok(1)
 }
 
@@ -2338,6 +2416,16 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), String> {
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
     let result = client.execute(cmd, &[]).await;
     drop(client); // explicit — terminates the spawned connection task.
+
+    // Settle the deferred broker queue. On a successful COMMIT, fire
+    // every event we'd have published mid-tx; on ROLLBACK (or COMMIT
+    // failure) drop them silently so subscribers never see writes
+    // Postgres just undid.
+    if success && result.is_ok() {
+        drain_pending_emits_on_commit();
+    } else {
+        clear_pending_emits();
+    }
 
     result
         .map(|_| ())

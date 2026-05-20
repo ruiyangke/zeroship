@@ -97,6 +97,23 @@ thread_local! {
     /// ~584 years to wrap, so non-uniqueness within a worker lifetime
     /// is a non-issue).
     static TX_TOKEN_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Broker events queued during an active transaction.
+    ///
+    /// While [`TX_CONN`] is `Some`, every successful CRUD mutation
+    /// pushes its `ChangeEvent` here instead of calling
+    /// [`crate::wal_consumer::emit_local`] directly. The transaction
+    /// settle path (`Transaction::end` for user-driven tx;
+    /// `exec_auto_end` for the auto-tx wrapper) drains the queue and
+    /// either fires every event through `emit_local` on COMMIT or
+    /// clears it on ROLLBACK. This closes the "emit-before-commit"
+    /// dual-write window where a subscriber could `find()` rows that
+    /// don't yet exist on disk (or that a ROLLBACK is about to undo).
+    ///
+    /// `None` outside a transaction; non-empty `Some(Vec<_>)` only
+    /// while a tx is active. Drained atomically by `Vec::take`.
+    pub(crate) static PENDING_EMITS: RefCell<Option<Vec<crate::broker::ChangeEvent>>> =
+        const { RefCell::new(None) };
 }
 
 /// Allocate a fresh non-zero TX_TOKEN value. Called by
@@ -216,6 +233,67 @@ pub fn set_db_url_for_tests(url: &str) {
 #[doc(hidden)]
 pub fn clear_migration_lock_for_tests() {
     migrations::release_active_lock();
+}
+
+/// **Test-only**: install a real Postgres client into `TX_CONN` so
+/// the Gap B integration tests can drive the deferred-broker-emit
+/// queue/drain machinery without standing up a V8 isolate. Returns
+/// the connection-task handle so the caller can detach it.
+///
+/// Asynchronous because it has to open a fresh Postgres connection
+/// (the same shape the production `exec_begin` does). Pair with
+/// [`uninstall_tx_marker_for_tests`] to release the slot.
+#[doc(hidden)]
+pub async fn install_tx_marker_for_tests(url: &str) {
+    let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
+        .await
+        .expect("install_tx_marker_for_tests: connect failed");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+    // Issue a real BEGIN so the dummy connection behaves like a real
+    // tx — not strictly required (the queueing path keys off
+    // TX_CONN.is_some()), but matches the production state machine
+    // more honestly.
+    let _ = client.execute("BEGIN", &[]).await;
+    TX_CONN.with(|tx| *tx.borrow_mut() = Some(client));
+}
+
+/// **Test-only**: drop the `TX_CONN` slot (rolls back the dummy tx
+/// server-side via connection close). Mirrors
+/// [`install_tx_marker_for_tests`].
+#[doc(hidden)]
+pub fn uninstall_tx_marker_for_tests() {
+    let client = TX_CONN.with(|tx| tx.borrow_mut().take());
+    drop(client);
+}
+
+/// **Test-only**: push a `ChangeEvent` onto the pending-emits queue
+/// (the same path `exec_mutation_with_emit` takes when inside a tx).
+/// Used by the Gap B test to assert the drain/clear behavior without
+/// running real SQL.
+#[doc(hidden)]
+pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
+    PENDING_EMITS.with(|p| {
+        let mut slot = p.borrow_mut();
+        slot.get_or_insert_with(Vec::new).push(ev);
+    });
+}
+
+/// **Test-only**: drain the pending-emits queue (fire all events
+/// through `emit_local`). Exposed so the Gap B tests can drive the
+/// transaction settle path's commit branch without standing up V8.
+#[doc(hidden)]
+pub fn drain_pending_emits_for_tests() {
+    callbacks::drain_pending_emits_on_commit();
+}
+
+/// **Test-only**: clear the pending-emits queue without firing
+/// (rollback branch).
+#[doc(hidden)]
+pub fn clear_pending_emits_for_tests() {
+    callbacks::clear_pending_emits();
 }
 
 /// Initialize the connection pool asynchronously.
