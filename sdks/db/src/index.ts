@@ -4,6 +4,8 @@
 export { createDb } from "./db.js";
 export { t, naming, schema } from "./types.js";
 export { ValidationError, OptimisticLockError } from "./errors.js";
+export { withRetry, isOptimisticLockError } from "./with-retry.js";
+export type { WithRetryOptions } from "./with-retry.js";
 
 // C1 / P8a — reactive queries (in-process broker)
 export { subscribe } from "./subscribe.js";

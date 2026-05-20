@@ -261,6 +261,41 @@ const { data, error } = await db.products.update(
 // error instanceof OptimisticLockError when stored version != 5
 ```
 
+#### Retrying CAS updates with `withRetry`
+
+The OCC pattern (read → compute → update with `{ version }` → retry on
+`OptimisticLockError`) is wrapped by `withRetry`:
+
+```ts
+import { withRetry, isOptimisticLockError } from "@zeroship/db";
+
+const updated = await withRetry(async () => {
+  const { data: cur } = await db.products.get(id);
+  if (!cur) throw new Error("not found");
+  const { data, error } = await db.products.update(
+    { id, version: cur.version },
+    { stock: { $dec: 1 } },
+  );
+  if (error) throw error;
+  return data;
+});
+```
+
+Defaults: `max: 3`, retries only `OptimisticLockError`, no backoff. Pass
+your own predicate to retry on additional coded errors:
+
+```ts
+await withRetry(fn, {
+  max: 5,
+  on: (e) => isOptimisticLockError(e) ||
+             (e as { code?: string }).code === "serialization_failure",
+  backoff: (attempt) => attempt * 10, // 10ms, 20ms, ...
+});
+```
+
+`withRetry` does not swallow errors — the final attempt's throw bubbles
+up to the caller.
+
 ### Delete
 
 ```ts
