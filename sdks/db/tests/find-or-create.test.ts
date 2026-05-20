@@ -120,6 +120,57 @@ describe("findOrCreate", () => {
     assert.match(error.message, /not declared .unique\(\)/);
   });
 
+  test("explicit conflictFields:[] is treated as auto-infer; multi-key filter rejects with a clear conflictFields message", async () => {
+    // Gap M from the robustness audit — the SDK collapses an explicit
+    // empty array onto the auto-infer branch (`length === 0` short-circuit
+    // in collection.ts:555). With a 2-key filter the inference cannot
+    // disambiguate which column ON CONFLICT should target, so the SDK's
+    // TypeError fires before reaching native's defensive reject.
+    const { native } = makeMockNative([{ row: { id: 1 }, created: true }]);
+    const Users = model(
+      "users",
+      {
+        email: t.string().required().unique(),
+        name: t.string().required(),
+      },
+      native,
+    );
+    const { data, error } = await Users.findOrCreate(
+      { email: "a@b.com", name: "Alice" },
+      { email: "a@b.com", name: "Alice" },
+      { conflictFields: [] as never },
+    );
+    assert.equal(data, null);
+    assert.ok(error);
+    assert.match(error.message, /conflictFields/);
+  });
+
+  test("empty create object with required fields rejects naming the missing field", async () => {
+    // Gap EE — `validateDoc` runs over the merged `{ ...create, ...filter }`
+    // payload. With a single-key filter and `create: {}`, every other
+    // required field has no value; the ValidationError message must name
+    // the missing field so the AI builder can self-correct.
+    const { native } = makeMockNative([{ row: { id: 1 }, created: true }]);
+    const Users = model(
+      "users",
+      {
+        email: t.string().required().unique(),
+        name: t.string().required(),
+        age: t.number().required(),
+      },
+      native,
+    );
+    const { data, error } = await Users.findOrCreate(
+      { email: "a@b.com" },
+      {} as unknown as { email: string; name: string; age: number },
+    );
+    assert.equal(data, null);
+    assert.ok(error);
+    // Should name at least one missing required field.
+    assert.match(error.message, /name|age/);
+    assert.match(error.message, /required/);
+  });
+
   test("explicit conflictFields override the auto-inference", async () => {
     const { native, calls } = makeMockNative([
       { row: { id: 1, email: "a@b.com", name: "Alice" }, created: true },

@@ -14,6 +14,7 @@ import { t } from "../src/types.js";
 import { normalizeSchema, expandUnionToFlatColumns } from "../src/schema.js";
 import { validateDoc } from "../src/validate.js";
 import { ValidationError } from "../src/errors.js";
+import { model } from "../src/model.js";
 
 // ---------------------------------------------------------------------------
 // t.literal() — primitive literal field
@@ -281,6 +282,53 @@ describe("C2 — validation dispatch on discriminator", () => {
       s,
     );
     assert.equal(out.message, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Partial-update validation (`checkPartial` via Collection.update)
+// ---------------------------------------------------------------------------
+
+describe("C2 — partial update against a flat-expanded union", () => {
+  function makeMockNative() {
+    const native = {
+      registerModel: () => Promise.resolve(),
+      collection(_name: string) {
+        return {
+          async updateOne(_f: Record<string, unknown>, _u: Record<string, unknown>) {
+            return { id: 1, kind: "login", userId: 1, ip: "x" };
+          },
+        };
+      },
+    };
+    return native as unknown as ZeroshipDb;
+  }
+
+  test("update({id}, {kind: 'invalidLiteral'}) rejects with ValidationError on the enum guard", async () => {
+    // The flat expansion turns the discriminator into a `string` column
+    // with `enum: ["login", "error"]`. `checkPartial` exercises the
+    // enum branch — invalid literals must reject.
+    const Events = model(
+      "events",
+      t.union(
+        t.object({
+          kind: t.literal("login"),
+          userId: t.number().required(),
+          ip: t.string().required(),
+        }),
+        t.object({
+          kind: t.literal("error"),
+          message: t.string().required(),
+        }),
+      ) as unknown as Record<string, unknown>,
+      makeMockNative(),
+    );
+    const { data, error } = await Events.update({ id: 1 }, { kind: "invalidLiteral" });
+    assert.equal(data, null);
+    assert.ok(error);
+    assert.ok(error instanceof ValidationError);
+    assert.ok("kind" in (error as ValidationError).errors);
+    assert.match(error.message, /kind.*login.*error/);
   });
 });
 
