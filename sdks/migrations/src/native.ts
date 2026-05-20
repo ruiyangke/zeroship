@@ -64,7 +64,7 @@ export interface NativeMigration {
   status(): Promise<NativeStatus>;
   cancel(): Promise<void>;
   reset(): Promise<void>;
-  fetchBatch(cursor: number, batchSize: number): Promise<string>;
+  fetchBatch(cursor: number, batchSize: number): Promise<Record<string, unknown>[]>;
   commitBatch(spec: NativeCommitSpec): Promise<void>;
 }
 
@@ -119,32 +119,6 @@ export async function getNativeMigrations(): Promise<NativeMigrations> {
     "@zeroship/migrations: env.db.migrations namespace not available — " +
       "runtime is missing the Migrations v8_class surface.",
   );
-}
-
-/**
- * Parse a JSON string returned by the native layer. Native ops resolve
- * with `{ error: "..." }` instead of rejecting on structured failures
- * (matches @zeroship/db's pattern).
- */
-export function parseNative<T>(raw: string): T {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(`@zeroship/migrations: failed to parse native response: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  if (parsed && typeof parsed === "object" && "error" in parsed) {
-    const errVal = (parsed as { error: unknown }).error;
-    if (typeof errVal === "string") throw new Error(errVal);
-    if (errVal && typeof errVal === "object" && "code" in errVal) {
-      const code = String((errVal as { code: unknown }).code);
-      const msg = "message" in errVal ? String((errVal as { message: unknown }).message) : code;
-      const e = new Error(msg) as Error & { code: string };
-      e.code = code;
-      throw e;
-    }
-  }
-  return parsed as T;
 }
 
 /**

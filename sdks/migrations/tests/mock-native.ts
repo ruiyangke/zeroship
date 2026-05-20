@@ -65,10 +65,6 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
     state.calls.push({ method, args });
   }
 
-  function envelope(payload: unknown): string {
-    return JSON.stringify(payload);
-  }
-
   function rejectWith(code: string, message: string): Promise<never> {
     // Native side resolves with `{ error: { code, message } }` for
     // structured errors. We emulate by rejecting with the JSON string —
@@ -124,7 +120,7 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
           .filter((r) => r.id > cursor)
           .sort((a, b) => a.id - b.id)
           .slice(0, batchSize);
-        return envelope({ rows: slice });
+        return slice;
       },
       async commitBatch(spec) {
         record("commitBatch", [spec]);

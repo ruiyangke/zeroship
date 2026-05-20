@@ -24,7 +24,7 @@
  */
 
 import type { NativeMigration, NativeMigrations } from "./native.js";
-import { getNativeMigrations, parseNative, toNativeError } from "./native.js";
+import { getNativeMigrations, toNativeError } from "./native.js";
 import type {
   Migration,
   MigrationStatus,
@@ -33,10 +33,6 @@ import type {
   RunOptions,
   RunResult,
 } from "./types.js";
-
-interface FetchResponse {
-  rows: PlainObject[];
-}
 
 /**
  * Run a migration to completion (or to a terminal failure). Always
@@ -100,10 +96,9 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
 
   // Main loop.
   for (;;) {
-    let fetched: FetchResponse;
+    let rows: PlainObject[];
     try {
-      const raw = await m.fetchBatch(cursor, migration.batchSize);
-      fetched = parseNative<FetchResponse>(raw);
+      rows = (await m.fetchBatch(cursor, migration.batchSize)) as PlainObject[];
     } catch (e) {
       const err = toNativeError(e);
       if (err.code === "migration_cancelled" || err.message.includes("migration_cancelled")) {
@@ -117,7 +112,6 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
       return { data: null, error: err };
     }
 
-    const rows = fetched.rows ?? [];
     if (rows.length === 0) {
       const terminal: MigrationStatus = deadLetter.length > 0
         ? "applied_with_dead_letter"

@@ -413,7 +413,7 @@ pub async fn exec_fetch_batch(
 
     let rows = rows_result.map_err(|e| format!("db: migration fetch failed: {e}"))?;
     let row_jsons: Vec<Value> = rows.iter().map(crate::callbacks::row_to_json).collect();
-    Ok(serde_json::json!({ "rows": row_jsons }).to_string())
+    Ok(Value::Array(row_jsons).to_string())
 }
 
 /// Commit (or roll back) one batch worth of updates.

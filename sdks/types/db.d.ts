@@ -293,13 +293,13 @@ interface ZeroshipMigration {
   reset(): Promise<void>;
 
   /**
-   * Fetch the next batch of rows after `cursor`. Returns a JSON string
-   * `{ rows: [...] }`. Each row is a plain object keyed by column name.
+   * Fetch the next batch of rows after `cursor`. Resolves with the
+   * row array; each row is a plain object keyed by column name.
    *
    * `cursor` / `batchSize` must be finite, integer-valued numbers in
    * the `i64` range; out-of-range values reject with a `RangeError`.
    */
-  fetchBatch(cursor: number, batchSize: number): Promise<string>;
+  fetchBatch(cursor: number, batchSize: number): Promise<Record<string, unknown>[]>;
 
   /**
    * Commit one batch of per-row updates. The spec is walked from V8

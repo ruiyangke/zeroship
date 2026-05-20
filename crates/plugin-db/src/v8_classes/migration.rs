@@ -205,12 +205,12 @@ impl Migration {
     }
 
     /// `migration.fetchBatch(cursor, batchSize)` — read the next batch
-    /// of rows after `cursor`. Resolves with `{ rows: [...] }` JSON.
+    /// of rows after `cursor`. Resolves with the row array directly.
     /// Delegates to `exec_fetch_batch` (which itself checks the
     /// `MIG_LOCK` thread-local for ownership / cancellation).
     #[v8_async_method]
     #[v8_name = "fetchBatch"]
-    async fn fetch_batch(&self, cursor: f64, batch_size: f64) -> Result<String, OpError> {
+    async fn fetch_batch(&self, cursor: f64, batch_size: f64) -> Result<JsonValue, OpError> {
         let owner = self
             .inner
             .borrow()
@@ -221,6 +221,7 @@ impl Migration {
         let batch_size_i = checked_int(batch_size, "batchSize")?;
         crate::migrations::exec_fetch_batch(&owner.app_id, cursor_i, batch_size_i)
             .await
+            .map(JsonValue)
             .map_err(OpError::error)
     }
 
