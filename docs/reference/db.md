@@ -193,8 +193,25 @@ const { data: admins } = await db.users
   .limit(20)
   .skip(40);
 
-// Cursor pagination
+// Cursor pagination — id-only seek (legacy helper)
 const { data: next } = await db.users.find({}).sort({ id: 1 }).after(lastId);
+
+// Cursor pagination — full envelope (recommended)
+// Pass cursor: null for the first page; pass back continueCursor to advance.
+// isDone flips true when the underlying store returns fewer than numItems+1
+// rows. The cursor is opaque base64-JSON and bound to the orderBy used.
+const { data: p1 } = await db.users
+  .find({})
+  .sort({ createdAt: -1 })
+  .paginate({ cursor: null, numItems: 20 });
+// p1 = { page, continueCursor, isDone }
+
+if (!p1!.isDone) {
+  const { data: p2 } = await db.users
+    .find({})
+    .sort({ createdAt: -1 })
+    .paginate({ cursor: p1!.continueCursor, numItems: 20 });
+}
 
 // Projection
 const { data: emails } = await db.users.find({}).select(["email"]);

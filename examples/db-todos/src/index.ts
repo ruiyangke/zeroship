@@ -69,6 +69,29 @@ export const listTodos = query(
   },
 );
 
+// Paginated variant — returns { page, continueCursor, isDone }. Pass back
+// the previous result's continueCursor to advance; pass null for the first
+// page. The orderBy is bound to the cursor, so callers must pass the same
+// sort across calls.
+export const listTodosPage = query(
+  async ({
+    userId,
+    cursor,
+    numItems,
+  }: {
+    userId: UserId;
+    cursor: string | null;
+    numItems: number;
+  }) => {
+    const { data, error } = await db.todos
+      .find({ userId })
+      .sort({ id: 1 })
+      .paginate({ cursor, numItems });
+    if (error) throw error;
+    return data;
+  },
+);
+
 export const getTodo = query(
   async ({ id }: { id: TodoId }) => {
     const { data, error } = await db.todos.get(id);

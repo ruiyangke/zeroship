@@ -149,6 +149,46 @@ check "shareToWebhook returned a 2xx status" \
   bash -c "echo '$SHARE_RES' | grep -qiE '\"ok\":true|\"status\":2[0-9][0-9]'"
 
 # ---------------------------------------------------------------------------
+# Check 5b: Query.paginate — round-trip continueCursor through 2-3 pages
+# ---------------------------------------------------------------------------
+
+echo "[check 5b] listTodosPage — paginate({cursor,numItems}) round-trip"
+
+# Seed 5 extra todos so we have at least 6 rows for Alice (counting the
+# earlier 'buy milk' + 'share me' creates). With numItems=2 that's at
+# least 3 pages: page1, page2, page3 (isDone).
+for i in 1 2 3 4 5; do
+  rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"task-$i\",\"priority\":\"low\"}" > /dev/null
+done
+
+P1=$(rpc listTodosPage "{\"userId\":${ALICE_ID},\"cursor\":null,\"numItems\":2}")
+check "page 1 returned an envelope with page/continueCursor/isDone" \
+  bash -c "echo '$P1' | grep -q '\"page\":' && echo '$P1' | grep -q '\"continueCursor\":' && echo '$P1' | grep -q '\"isDone\":'"
+
+C1=$(echo "$P1" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
+DONE1=$(echo "$P1" | grep -oE '"isDone":(true|false)' | head -1 | cut -d: -f2)
+
+check "page 1 not done (more rows available)" bash -c "[ \"$DONE1\" = \"false\" ]"
+check "page 1 has non-empty continueCursor" bash -c "[ -n \"$C1\" ]"
+
+P2=$(rpc listTodosPage "{\"userId\":${ALICE_ID},\"cursor\":\"${C1}\",\"numItems\":2}")
+C2=$(echo "$P2" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
+
+check "page 2 advances past page 1 (different cursor)" bash -c "[ \"$C1\" != \"$C2\" ]"
+
+# Final page — keep advancing until isDone=true (max 5 hops to bound the smoke).
+HOPS=0
+CURRENT="$C2"
+DONE_FINAL="false"
+while [ "$HOPS" -lt 5 ] && [ "$DONE_FINAL" = "false" ]; do
+  PN=$(rpc listTodosPage "{\"userId\":${ALICE_ID},\"cursor\":\"${CURRENT}\",\"numItems\":2}")
+  DONE_FINAL=$(echo "$PN" | grep -oE '"isDone":(true|false)' | head -1 | cut -d: -f2)
+  CURRENT=$(echo "$PN" | grep -oE '"continueCursor":"[^"]*"' | head -1 | sed 's/.*"continueCursor":"//;s/"$//')
+  HOPS=$((HOPS + 1))
+done
+check "pagination terminates with isDone=true within 5 hops" bash -c "[ \"$DONE_FINAL\" = \"true\" ]"
+
+# ---------------------------------------------------------------------------
 # Check 6: Migration audit row (A3)
 # ---------------------------------------------------------------------------
 

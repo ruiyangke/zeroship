@@ -13,6 +13,75 @@ type NativeFn = (
 ) => Promise<Record<string, unknown>[]>;
 
 /**
+ * Decoded shape of the opaque `continueCursor` string returned by
+ * `Query.paginate()`. The cursor carries the orderBy in JS-field space
+ * (matching `Query._sort`) plus the last row's orderBy value and id —
+ * enough to seek past the previous page on the next call.
+ */
+type CursorState = {
+  orderBy: Record<string, 1 | -1>;
+  lastValue: unknown;
+  lastId: number;
+};
+
+/** Page envelope returned by `Query.paginate()`. Matches Convex's shape so
+ *  a future `useZShipPaginatedQuery` hook can adopt it without translation. */
+export type PaginationResult<R> = {
+  page: R[];
+  continueCursor: string;
+  isDone: boolean;
+};
+
+/** Base64-encode a CursorState using `btoa` so the cursor is a plain
+ *  opaque string callers can round-trip through query params / URLs. */
+function encodeCursor(state: CursorState): string {
+  return btoa(JSON.stringify(state));
+}
+
+/** Decode and shape-check a base64-JSON cursor string. Throws a plain
+ *  `Error("paginate: invalid cursor")` on any malformed input — the
+ *  paginate caller catches this and returns it as `Result.error`. */
+function decodeCursor(cursor: string): CursorState {
+  let decoded: string;
+  try {
+    decoded = atob(cursor);
+  } catch {
+    throw new Error("paginate: invalid cursor");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    throw new Error("paginate: invalid cursor");
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    typeof (parsed as CursorState).orderBy !== "object" ||
+    (parsed as CursorState).orderBy === null ||
+    typeof (parsed as CursorState).lastId !== "number"
+  ) {
+    throw new Error("paginate: invalid cursor");
+  }
+  return parsed as CursorState;
+}
+
+/** Compare two `{ field: 1 | -1 }` orderBy objects key-set and direction.
+ *  Cursors are bound to the orderBy that produced them — different sort
+ *  means the seek predicate is meaningless. */
+function sameOrderBy(a: Record<string, 1 | -1>, b: Record<string, 1 | -1>): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return false;
+    if (a[ka[i]] !== b[ka[i]]) return false;
+  }
+  return true;
+}
+
+/**
  * Chainable query object returned by `Collection.find()`.
  * The generic parameter `S` is the raw schema shape; `P` is the projected document shape.
  * When `.select()` is called with typed field names, `P` narrows to `Pick<Row<S>, K>`.
@@ -118,6 +187,131 @@ export class Query<S = PlainObject, P = Row<S>> {
         .map(([k]) => k);
     }
     return this as unknown as Query<S, any>;
+  }
+
+  /**
+   * Cursor-paginate the query. Pass `cursor: null` (or omit) for the first
+   * page; pass back `continueCursor` from the previous result to advance.
+   * `isDone` is `true` once the underlying store returns fewer than
+   * `numItems + 1` rows — the page can be rendered as the final page.
+   *
+   * The seek predicate is built from the Query's current `.sort(...)`
+   * (defaulting to `{ id: 1 }`) so paginate gracefully degenerates to
+   * id-only ordering. Cursors are opaque base64-JSON and bound to the
+   * orderBy they were produced under — passing a cursor from a query
+   * with a different sort rejects with `paginate: cursor orderBy mismatch`.
+   */
+  async paginate(opts: {
+    cursor?: string | null;
+    numItems: number;
+  }): Promise<Result<PaginationResult<P>>> {
+    const { cursor, numItems } = opts;
+    if (!Number.isInteger(numItems) || numItems <= 0) {
+      return err(new TypeError("paginate: numItems must be a positive integer"));
+    }
+
+    const orderBy: Record<string, 1 | -1> =
+      this._sort !== undefined && Object.keys(this._sort).length > 0
+        ? (this._sort as Record<string, 1 | -1>)
+        : { id: 1 };
+
+    let cursorState: CursorState | null = null;
+    if (cursor !== null && cursor !== undefined) {
+      try {
+        cursorState = decodeCursor(cursor);
+      } catch (e) {
+        return err(e instanceof Error ? e : new Error(String(e)));
+      }
+      if (!sameOrderBy(cursorState.orderBy, orderBy)) {
+        return err(new Error("paginate: cursor orderBy mismatch"));
+      }
+    }
+
+    // Build the page-window query: apply orderBy + limit(numItems+1) so
+    // we can detect isDone by whether the +1 row materialised. The cursor
+    // predicate is OR-merged into the existing filter at the column layer.
+    const opts2: ZeroshipDbFindOpts = {
+      orderBy: this._mapOrderByToColumns(orderBy),
+      limit: numItems + 1,
+    };
+    if (this._select !== undefined) {
+      opts2.select = this._select.map((f) => this._toColumn(f));
+    }
+
+    let filter: ZeroshipDbFilter = this._filter;
+    if (cursorState !== null) {
+      const seek = this._buildSeekFilter(orderBy, cursorState);
+      const hasKeys = Object.keys(filter).length > 0;
+      filter = hasKeys
+        ? ({ $and: [filter, seek] } as ZeroshipDbFilter)
+        : seek;
+    }
+
+    try {
+      const raw = await this._native(this._collection, filter, opts2);
+      const rows: PlainObject[] = Array.isArray(raw) ? raw : [];
+      const isDone = rows.length <= numItems;
+      const kept = isDone ? rows : rows.slice(0, numItems);
+      const page = kept.map((d) => mapResultDoc(d, this._toField)) as P[];
+
+      let continueCursor = cursor ?? "";
+      if (!isDone && kept.length > 0) {
+        const last = page[page.length - 1] as PlainObject;
+        const orderKey = Object.keys(orderBy)[0];
+        const lastValue = last[orderKey];
+        const lastId = typeof last.id === "number" ? last.id : Number(last.id);
+        continueCursor = encodeCursor({ orderBy, lastValue, lastId });
+      }
+
+      return ok({ page, continueCursor, isDone });
+    } catch (e: unknown) {
+      return err(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  /** @internal — translate a JS-space orderBy object to native column space. */
+  private _mapOrderByToColumns(orderBy: Record<string, 1 | -1>): Record<string, 1 | -1> {
+    const out: Record<string, 1 | -1> = {};
+    for (const [k, v] of Object.entries(orderBy)) {
+      out[this._toColumn(k)] = v;
+    }
+    return out;
+  }
+
+  /** @internal — build the seek-after predicate for `paginate`. For an
+   *  ascending sort on `F` the predicate is `F > lastValue OR (F = lastValue
+   *  AND id > lastId)`; descending flips the comparators. When the orderBy
+   *  is id-only the compound clause collapses to a single inequality. */
+  private _buildSeekFilter(
+    orderBy: Record<string, 1 | -1>,
+    state: CursorState,
+  ): ZeroshipDbFilter {
+    const keys = Object.keys(orderBy);
+    const first = keys[0];
+    const dir = orderBy[first];
+    const lastIdCol = this._toColumn("id");
+
+    if (first === "id") {
+      return {
+        [lastIdCol]: (dir === 1 ? { $gt: state.lastId } : { $lt: state.lastId }) as ZeroshipDbFilterValue,
+      } as ZeroshipDbFilter;
+    }
+
+    const firstCol = this._toColumn(first);
+    const lastValue = state.lastValue as ZeroshipScalar;
+    const strictCmp = (dir === 1 ? { $gt: lastValue } : { $lt: lastValue }) as ZeroshipDbFilterValue;
+    const idCmp = (dir === 1 ? { $gt: state.lastId } : { $lt: state.lastId }) as ZeroshipDbFilterValue;
+    return {
+      $or: [
+        { [firstCol]: strictCmp } as ZeroshipDbFilter,
+        {
+          $and: [
+            { [firstCol]: lastValue as ZeroshipDbFilterValue } as ZeroshipDbFilter,
+            { [lastIdCol]: idCmp } as ZeroshipDbFilter,
+          ],
+        } as ZeroshipDbFilter,
+      ],
+    } as ZeroshipDbFilter;
   }
 
   /**
