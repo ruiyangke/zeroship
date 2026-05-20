@@ -116,9 +116,13 @@ type SchemaInput =
 export type TxCollection<S = PlainObject> = {
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
+  get<K extends string & keyof Row<S>>(
+    idOrFilter: number | Filter<S>,
+    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
+  ): Promise<Pick<Row<S>, K> | null>;
   get(
     idOrFilter: number | Filter<S>,
-    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+    opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>>;
@@ -202,6 +206,23 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
  */
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
 
+  // The TxCollection.get signature is two overloads (with/without
+  // select); the runtime impl is a single function that delegates to
+  // the underlying Collection — the overload-aware return type comes
+  // from the TxCollection type, not the impl signature.
+  async function getImpl(
+    idOrFilter: number | Filter<S>,
+    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+  ): Promise<unknown> {
+    const colAny = collection as unknown as {
+      get(
+        idOrFilter: number | Filter<S>,
+        opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
+      ): Promise<Result<Row<S> | null>>;
+    };
+    return unwrap(await colAny.get(idOrFilter, opts));
+  }
+
   const tx: TxCollection<S> = {
     async insert(row: RowInput<S>) {
       return unwrap(await collection.insert(row));
@@ -209,12 +230,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async insertMany(rows: RowInput<S>[]) {
       return unwrap(await collection.insertMany(rows));
     },
-    async get(
-      idOrFilter: number | Filter<S>,
-      opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
-    ) {
-      return unwrap(await collection.get(idOrFilter, opts));
-    },
+    get: getImpl as TxCollection<S>["get"],
     async exists(filter: Filter<S>) {
       return unwrap(await collection.exists(filter));
     },

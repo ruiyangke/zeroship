@@ -388,8 +388,19 @@ export class Collection<S = PlainObject, N extends string = string> {
    * decides which one is returned; without an orderBy the choice is
    * undefined. Returns `null` if no row matches.
    *
-   * `opts.select` projects to a subset of columns.
+   * `opts.select` projects to a subset of columns; when the array is
+   * typed (`["email", "id"] as const` or a `K[]` literal) the return
+   * type narrows to `Pick<Row<S>, K> | null` so projected calls don't
+   * have to widen back to `Row<S>`.
    */
+  async get<K extends string & keyof Row<S>>(
+    idOrFilter: number | Id<N> | Filter<S>,
+    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
+  ): Promise<Result<Pick<Row<S>, K> | null>>;
+  async get(
+    idOrFilter: number | Id<N> | Filter<S>,
+    opts?: { orderBy?: Record<string, 1 | -1> },
+  ): Promise<Result<Row<S> | null>>;
   async get(
     idOrFilter: number | Id<N> | Filter<S>,
     opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> } = {},
