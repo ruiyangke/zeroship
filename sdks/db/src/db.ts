@@ -428,13 +428,20 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     for (const [key, def] of Object.entries(normalized)) {
       dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
     }
-    chain = chain
-      .catch(() => undefined)
-      .then(() =>
-        native.registerModel
-          ? (native.registerModel(name, dbSchema) as Promise<void>)
-          : Promise.resolve(),
-      );
+    // Sequencing in JS removes the parent-before-child race, but the
+    // chain MUST surface registerModel failures: a broken DDL for table
+    // X means every CRUD call against X is doomed, and silently
+    // skipping past the rejection (`.catch(() => undefined)`) just
+    // pushes the failure into a confusing later-stage Postgres error.
+    // Each iteration's `then(...)` runs only on fulfilment, so a
+    // rejected chain short-circuits the remaining registrations; the
+    // promise the Collection stores via `_setReady` then rejects on
+    // first CRUD and `_run` converts that to `result.error`.
+    chain = chain.then(() =>
+      native.registerModel
+        ? (native.registerModel(name, dbSchema) as Promise<void>)
+        : Promise.resolve(),
+    );
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
 
@@ -449,21 +456,28 @@ export function createDb<const T extends Record<string, SchemaInput>>(
   // (dev bootstrap). Both read this exact name; renaming it would
   // also need a coordinated rename there. The sigil is intentionally
   // namespaced (`__zeroship*`) to avoid colliding with user globals.
+  //
+  // The chain is published as-is — if registerModel rejects, the
+  // dispatch shim's `await` rejects too, which is the correct signal
+  // (the platform isn't actually ready and serving a request against
+  // a broken DDL is worse than failing fast).
   const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
   const prev = g.__zeroshipPlatformReady ?? Promise.resolve();
-  g.__zeroshipPlatformReady = prev.then(() => chain).catch(() => undefined);
+  g.__zeroshipPlatformReady = prev.then(() => chain);
 
-  // Pre-cache TxCollection wrappers — stateless, reusable across transactions
-  const txCollections = {} as { [K in keyof T]: TxCollection<T[K]> };
+  // Pre-cache TxCollection wrappers — stateless, reusable across transactions.
+  // Mirror the outer `Db<T>`'s `UnwrapSchema<T[K]>` normalisation so
+  // `tx.x.insert(...)` infers identically to `db.x.insert(...)`.
+  const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> };
   for (const [name, col] of Object.entries(collections)) {
-    (txCollections as Record<string, TxCollection<SchemaInput>>)[name] =
-      createTxCollection(col as Collection<SchemaInput>);
+    (txCollections as Record<string, TxCollection<unknown>>)[name] =
+      createTxCollection(col as Collection<unknown>);
   }
 
   const db = {
     ...collections,
 
-    async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<T[K]> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
+    async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
       // BEGIN — the native runtime returns a Transaction wrapper
       // (v8_class) whose .commit() / .rollback() are explicit methods.
       // The wrapper's Drop auto-rollbacks if a thrown handler skips the
@@ -484,19 +498,42 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
       );
 
+      // Two failure modes carry different post-conditions:
+      //
+      // 1. The transaction body threw — nothing was committed; we
+      //    rollback and surface the body's error. Side-effects already
+      //    flushed inside the tx (writes against TX_CONN) are reverted
+      //    on rollback.
+      //
+      // 2. The body completed but `tx.commit()` itself threw — the
+      //    SQL `COMMIT` was attempted, and depending on where it
+      //    failed (network drop after server-side commit, deadlock at
+      //    commit, prepared-tx ambiguity, ...) the database state is
+      //    indeterminate. Callers cannot safely treat this as "rolled
+      //    back". Tag the error with `.code = "commit_failed_indeterminate"`
+      //    so a higher layer can decide whether to retry, prompt the
+      //    user, or fail the request.
+      let bodyResult: R;
       try {
-        const result = await fn(txCollections);
-        await tx.commit();
-        return ok(result);
-      } catch (e) {
-        try {
-          await tx.rollback();
-        } catch {
-          // Ignore rollback errors — wrapper's Drop also rolls back via
-          // connection close as a safety net.
-        }
-        return err(e instanceof Error ? e : new Error(String(e)));
+        bodyResult = await fn(txCollections);
+      } catch (bodyErr) {
+        try { await tx.rollback(); } catch { /* Drop covers it */ }
+        return err(bodyErr instanceof Error ? bodyErr : new Error(String(bodyErr)));
       }
+      try {
+        await tx.commit();
+      } catch (commitErr) {
+        try { await tx.rollback(); } catch { /* commit-half may make rollback a no-op */ }
+        const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
+        const wrapped = Object.assign(
+          new Error(`commit failed — transaction state indeterminate: ${msg}`, {
+            cause: commitErr instanceof Error ? commitErr : undefined,
+          }),
+          { code: "commit_failed_indeterminate" as const },
+        );
+        return err(wrapped);
+      }
+      return ok(bodyResult);
     },
   };
 
