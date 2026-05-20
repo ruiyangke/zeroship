@@ -108,6 +108,19 @@ export const todoCount = query(
   },
 );
 
+// Smoke for the per-collection DataLoader: two `db.users.get(id)` calls
+// inside one `Promise.all([...])` MUST coalesce into a single underlying
+// `WHERE id IN (...)` fetch. Returning both rows verifies the loader
+// stitches results back to the right callers.
+export const getUserPair = query(
+  async ({ aId, bId }: { aId: UserId; bId: UserId }) => {
+    const [a, b] = await Promise.all([db.users.get(aId), db.users.get(bId)]);
+    if (a.error) throw a.error;
+    if (b.error) throw b.error;
+    return { a: a.data, b: b.data };
+  },
+);
+
 // ---------------------------------------------------------------------------
 // Mutations — read+write; auto-wrapped in BEGIN ISOLATION LEVEL SERIALIZABLE
 // ---------------------------------------------------------------------------

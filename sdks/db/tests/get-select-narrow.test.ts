@@ -19,6 +19,13 @@ function makeMockNative(row: AnyRec | null) {
         async findOne(_filter: AnyRec, _opts: AnyRec) {
           return row;
         },
+        // The DataLoader path (numeric id, no select, no orderBy, no tx)
+        // dispatches through `find({id: {$in: [...]}})`; existing
+        // get-select-narrow tests that use this mock still expect the
+        // single-row result to come back, so we mirror it here.
+        async find(_filter: AnyRec, _opts: AnyRec) {
+          return row === null ? [] : [row];
+        },
       };
     },
   };

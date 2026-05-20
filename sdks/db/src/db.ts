@@ -498,6 +498,23 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
       );
 
+      // Bypass the per-collection IdLoader for the duration of the
+      // tx body — batched reads route through `TX_CONN` correctly,
+      // but mixing a tx-active load with a non-tx load already
+      // queued in the same microtask would blur the connection
+      // boundary. Each Collection's `_txDepth` counter is bumped
+      // here and decremented in the `finally` below.
+      const collectionList = Object.values(collections).map(
+        (c) => c as unknown as {
+          _txDepth: number;
+          _idLoader: { _drain(): Promise<void> } | null;
+        },
+      );
+      for (const c of collectionList) {
+        if (c._idLoader !== null) void c._idLoader._drain();
+        c._txDepth += 1;
+      }
+
       // Two failure modes carry different post-conditions:
       //
       // 1. The transaction body threw — nothing was committed; we
@@ -518,12 +535,14 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         bodyResult = await fn(txCollections);
       } catch (bodyErr) {
         try { await tx.rollback(); } catch { /* Drop covers it */ }
+        for (const c of collectionList) c._txDepth -= 1;
         return err(bodyErr instanceof Error ? bodyErr : new Error(String(bodyErr)));
       }
       try {
         await tx.commit();
       } catch (commitErr) {
         try { await tx.rollback(); } catch { /* commit-half may make rollback a no-op */ }
+        for (const c of collectionList) c._txDepth -= 1;
         const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
         const wrapped = Object.assign(
           new Error(`commit failed — transaction state indeterminate: ${msg}`, {
@@ -533,6 +552,7 @@ export function createDb<const T extends Record<string, SchemaInput>>(
         );
         return err(wrapped);
       }
+      for (const c of collectionList) c._txDepth -= 1;
       return ok(bodyResult);
     },
   };

@@ -189,6 +189,21 @@ done
 check "pagination terminates with isDone=true within 5 hops" bash -c "[ \"$DONE_FINAL\" = \"true\" ]"
 
 # ---------------------------------------------------------------------------
+# Check 5c: DataLoader batching — Promise.all([db.users.get(a), db.users.get(b)])
+# coalesces into one underlying find. We can't directly observe native call
+# counts from outside the runtime, so we verify both rows come back correctly
+# (the loader's stitch step is what we'd actually break in a regression).
+# ---------------------------------------------------------------------------
+
+echo "[check 5c] getUserPair — DataLoader batches concurrent db.users.get(id)"
+
+PAIR=$(rpc getUserPair "{\"aId\":${ALICE_ID},\"bId\":${BOB_ID}}")
+check "getUserPair returned Alice's row" \
+  bash -c "echo '$PAIR' | grep -q '\"id\":${ALICE_ID}'"
+check "getUserPair returned Bob's row" \
+  bash -c "echo '$PAIR' | grep -q '\"id\":${BOB_ID}'"
+
+# ---------------------------------------------------------------------------
 # Check 6: Migration audit row (A3)
 # ---------------------------------------------------------------------------
 

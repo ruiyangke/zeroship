@@ -14,6 +14,7 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
+import { IdLoader } from "./loader.js";
 import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
@@ -216,6 +217,16 @@ export class Collection<S = PlainObject, N extends string = string> {
   private _ready: Promise<void> | null;
   private _softDelete: boolean;
   private _versioning: boolean;
+  /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
+  private _idLoader: IdLoader<Row<S>> | null;
+  /**
+   * Active-transaction depth. `db.transaction()` wraps `tx.x.*` calls
+   * with an increment/decrement so the loader is bypassed while a tx is
+   * live on this collection — see `_callWithTx` in db.ts. Mixing a
+   * batched read with `TX_CONN`-routed reads in the same microtask
+   * would otherwise blur the connection-routing boundary.
+   */
+  private _txDepth: number;
 
   /**
    * Type-only handle for `Id<TableName>` — write `typeof db.users.Id` to
@@ -241,6 +252,8 @@ export class Collection<S = PlainObject, N extends string = string> {
     this._ready = options?.ready ?? null;
     this._softDelete = options?.softDelete ?? false;
     this._versioning = options?.versioning ?? false;
+    this._idLoader = null;
+    this._txDepth = 0;
 
     // Build field↔column lookup maps once at init — O(1) at query time
     const strategy = options?.naming ?? naming.asIs;
@@ -406,6 +419,17 @@ export class Collection<S = PlainObject, N extends string = string> {
     idOrFilter: number | Id<N> | Filter<S>,
     opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> } = {},
   ): Promise<Result<Row<S> | null>> {
+    // DataLoader path: a bare numeric id with no projection / ordering
+    // and no active tx. Coalesces concurrent `get(id)` calls in one
+    // microtask into a single `WHERE id IN (...)` fetch.
+    if (
+      typeof idOrFilter === "number" &&
+      opts.select === undefined &&
+      opts.orderBy === undefined &&
+      this._txDepth === 0
+    ) {
+      return this._run(() => this._loadById(idOrFilter));
+    }
     const filter = (typeof idOrFilter === "number"
       ? ({ id: idOrFilter } as Filter<S>)
       : idOrFilter);
@@ -429,6 +453,51 @@ export class Collection<S = PlainObject, N extends string = string> {
       if (result === null) return null;
       return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
+  }
+
+  /** Lazily build the per-collection IdLoader and route the request
+   *  through it. The flush callback fires `find({id: {$in: ids}})` via
+   *  the native Collection wrapper — this picks up `TX_CONN` routing
+   *  in Rust for free, but the caller has already filtered out
+   *  tx-active calls so we should never run inside one. */
+  private async _loadById(id: number): Promise<Row<S> | null> {
+    await this.ensureReady();
+    if (this._idLoader === null) {
+      this._idLoader = new IdLoader<Row<S>>(async (ids) => {
+        const filter: ZeroshipDbFilter = this._mergeFilter(
+          mapFilterOutbound(
+            { id: { $in: ids } } as unknown as ZeroshipDbFilter,
+            this._toColumn,
+          ),
+        );
+        const rows = (await this._col().find(filter, {})) ?? [];
+        const map = new Map<number, Row<S>>();
+        for (const r of rows) {
+          const mapped = mapResultDoc(r as PlainObject, this._toField) as Row<S>;
+          map.set(mapped.id, mapped);
+        }
+        return map;
+      });
+    }
+    return this._idLoader.load(id);
+  }
+
+  /** @internal — tx wrapper hook. Increments `_txDepth` so the loader
+   *  is bypassed for the duration of the callback. Any pending batch
+   *  is drained synchronously into a microtask so a tx-active read
+   *  never lands in a non-tx batch. */
+  async _withTxBypass<T>(fn: () => Promise<T>): Promise<T> {
+    if (this._idLoader !== null) {
+      // Fire-and-forget — pending non-tx loads continue against the
+      // non-tx connection; the tx call follows on its own dispatch.
+      void this._idLoader._drain();
+    }
+    this._txDepth += 1;
+    try {
+      return await fn();
+    } finally {
+      this._txDepth -= 1;
+    }
   }
 
   /**
