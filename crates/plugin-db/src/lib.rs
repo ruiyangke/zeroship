@@ -14,10 +14,10 @@
 //! - `registerModel(collection, schema)` — DDL orchestrator (A2/A3)
 //! - `collection(name)` — returns a `Collection` v8_class instance
 //! - `beginTransaction(level?)` — mints a `Transaction` wrapper
-//! - `migrationStart(spec)` — mints a `Migration` wrapper
-//! - `migrationStatus / migrationCancel / migrationReset` — observe
-//!   an existing migration by `(name, collection)` without taking the
-//!   advisory lock
+//! - `migrations` (v8_getter) — returns the `Migrations` v8_class
+//!   namespace exposing `.start(spec)` (mints a `Migration` wrapper) and
+//!   `.status / .cancel / .reset({name, collection})` to observe an
+//!   existing migration by coordinates without taking the advisory lock
 //! - `openSubscription(collection)` — returns a `Subscription` wrapper
 //! - `replicationSetup / Watchdog / DropAbandoned` — operator surface
 //! - `startReplicationConsumer` — auto-spawn the supervised WAL consumer
@@ -216,18 +216,14 @@ impl NativePlugin for DbPlugin {
         r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
             callbacks::install_auto_tx_globals(scope);
         });
-        // B1 — @zeroship/migrations. `migrationStart` mints a Migration
-        // v8_class runner; `.fetchBatch()` / `.commitBatch()` /
-        // `.status()` / `.cancel()` / `.reset()` are methods on the
-        // wrapper. The flat `migrationStatus` / `migrationCancel` /
-        // `migrationReset` standalone callbacks coexist as the
-        // observe-by-name path (status reads from any worker without
-        // acquiring the advisory lock; the Migration wrapper's
-        // `.status()` is for the owning worker).
-        r.add("migrationStart", callbacks::migration_start);
-        r.add("migrationStatus", callbacks::migration_status);
-        r.add("migrationCancel", callbacks::migration_cancel);
-        r.add("migrationReset", callbacks::migration_reset);
+        // B1 — `@zeroship/migrations`. The `Migrations` namespace
+        // (`env.db.migrations`) exposes `.start(spec)` /
+        // `.status(spec)` / `.cancel(spec)` / `.reset(spec)` —
+        // see `v8_classes::migrations`. `.start` mints a `Migration`
+        // wrapper whose `.fetchBatch()` / `.commitBatch()` drive
+        // the run. Status / cancel / reset on the namespace operate
+        // by `(name, collection)` coordinates without touching the
+        // advisory lock — safe to call from any worker.
         // C1 / P8a — reactive queries. `openSubscription` mints a
         // Subscription v8_class wrapper whose `.pollJson()` / `.close()`
         // are methods; Weak finalizer closes the broker handle on GC.

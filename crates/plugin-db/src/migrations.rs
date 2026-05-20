@@ -10,14 +10,15 @@
 //!   ([`crate::v8_classes::migration::Migration`]):
 //!   `.fetchBatch(cursor, batchSize)`, `.commitBatch(updates, …)`,
 //!   `.status()`, `.cancel()`, `.reset()`. The wrapper is minted by
-//!   `env.db.migrationStart(spec)` and owns the dedicated client
+//!   `env.db.migrations.start(spec)` and owns the dedicated client
 //!   that holds the advisory lock for the run.
 //!
-//! - **By-name observation callbacks** on `env.db`:
-//!   `migrationStatus(name, collection)`, `migrationCancel(...)`,
-//!   `migrationReset(...)`. These read the audit row directly and
-//!   never touch the advisory lock, so they're safe to call from
-//!   any worker without colliding with an in-flight run.
+//! - **By-name observation methods** on `env.db.migrations` (the
+//!   `Migrations` v8_class namespace): `.status({name, collection})`,
+//!   `.cancel({name, collection})`, `.reset({name, collection})`. These
+//!   read the audit row directly and never touch the advisory lock, so
+//!   they're safe to call from any worker without colliding with an
+//!   in-flight run.
 //!
 //! Public functions in this module (`exec_begin`, `exec_fetch_batch`,
 //! `exec_commit_batch`, `exec_status`, `exec_cancel`, `exec_reset`)

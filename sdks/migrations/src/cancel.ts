@@ -3,7 +3,7 @@
  * lifecycle controls.
  *
  * Cancel transitions a `pending` or `running` run to `cancelled`; the
- * next `migrationFetchBatch` call observes the state change and
+ * next `fetchBatch` call observes the state change and
  * surfaces `migration_cancelled` to the running worker.
  *
  * Reset clears persisted state so an operator can re-run from scratch
@@ -24,7 +24,7 @@ export async function cancelMigration<Row extends PlainObject, Update extends Pl
 ): Promise<Result<{ ok: boolean }>> {
   const native = nativeOverride ?? (await getNativeMigrations());
   try {
-    const raw = await native.migrationCancel(migration.name, migration.collection);
+    const raw = await native.cancel({ name: migration.name, collection: migration.collection });
     const parsed = parseNative<OkResponse>(raw);
     return { data: { ok: !!parsed.ok }, error: null };
   } catch (e) {
@@ -38,7 +38,7 @@ export async function resetMigration<Row extends PlainObject, Update extends Pla
 ): Promise<Result<{ ok: boolean }>> {
   const native = nativeOverride ?? (await getNativeMigrations());
   try {
-    const raw = await native.migrationReset(migration.name, migration.collection);
+    const raw = await native.reset({ name: migration.name, collection: migration.collection });
     const parsed = parseNative<OkResponse>(raw);
     return { data: { ok: !!parsed.ok }, error: null };
   } catch (e) {

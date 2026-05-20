@@ -1,7 +1,7 @@
 /**
  * `migrations.run` — orchestrate a backfill end-to-end.
  *
- * Surface: the SDK calls `env.db.migrationStart(spec)` to mint a
+ * Surface: the SDK calls `env.db.migrations.start(spec)` to mint a
  * Migration v8_class wrapper, then drives the loop:
  *
  *   1. `m.fetchBatch(cursor, batchSize)` → `{ rows }`.
@@ -57,7 +57,7 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
 
   let m: NativeMigration;
   try {
-    m = await native.migrationStart({
+    m = await native.start({
       name: migration.name,
       collection: migration.collection,
       dryRun,

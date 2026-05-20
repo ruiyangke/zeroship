@@ -55,14 +55,14 @@ describe("migrations.run — happy path", () => {
       migrateOne: () => ({ role: "user" }),
     });
     await migrations.run(m, {}, native);
-    const fetchCalls = state.calls.filter((c) => c.method === "migrationFetchBatch").length;
+    const fetchCalls = state.calls.filter((c) => c.method === "fetchBatch").length;
     // 50/25 = 2 productive fetches + 1 empty fetch that triggers terminal commit
     assert.equal(fetchCalls, 3);
     // commitBatch: 2 mid-run commits + 1 terminal commit
-    const commitCalls = state.calls.filter((c) => c.method === "migrationCommitBatch").length;
+    const commitCalls = state.calls.filter((c) => c.method === "commitBatch").length;
     assert.equal(commitCalls, 3);
     // Last commit must have isDone=true.
-    const last = state.calls.filter((c) => c.method === "migrationCommitBatch").pop()!;
+    const last = state.calls.filter((c) => c.method === "commitBatch").pop()!;
     assert.equal(last.args[4], true, "last commit must be isDone=true");
     assert.equal(last.args[5], "applied", "terminal status applied");
   });
@@ -82,7 +82,7 @@ describe("migrations.run — dryRun", () => {
     assert.equal(data?.status, "applied");
     assert.equal(state.rows.every((r) => r.role === null), true, "dry-run must not mutate");
     // begin was called with dryRun=true
-    const begin = state.calls.find((c) => c.method === "migrationBegin")!;
+    const begin = state.calls.find((c) => c.method === "start")!;
     assert.equal(begin.args[2], true);
   });
 });
@@ -155,13 +155,19 @@ describe("migrations.run — cancellation", () => {
     // Cancel after the first batch is committed by sneaking in via the
     // commit hook — we cancel between batches by flipping the state.
     let batchCount = 0;
-    const wrapped = {
+    const wrapped: typeof native = {
       ...native,
-      async migrationCommitBatch(...args: Parameters<typeof native.migrationCommitBatch>) {
-        const result = await native.migrationCommitBatch(...args);
-        batchCount++;
-        if (batchCount === 1) state.cancelled = true;
-        return result;
+      async start(spec) {
+        const inner = await native.start(spec);
+        return {
+          ...inner,
+          async commitBatch(...args: Parameters<typeof inner.commitBatch>) {
+            const result = await inner.commitBatch(...args);
+            batchCount++;
+            if (batchCount === 1) state.cancelled = true;
+            return result;
+          },
+        };
       },
     };
     const { data, error } = await migrations.run(m, {}, wrapped);
@@ -197,7 +203,7 @@ describe("migrations.run — resume", () => {
     // processed reflects total = pre-existing 10 + 10 new = 20.
     assert.equal(data?.processed, 20);
     // First fetch must have used cursor=10.
-    const firstFetch = state.calls.find((c) => c.method === "migrationFetchBatch")!;
+    const firstFetch = state.calls.find((c) => c.method === "fetchBatch")!;
     assert.equal(firstFetch.args[0], 10);
   });
 });
@@ -222,10 +228,10 @@ describe("migrations.run — reset", () => {
     });
     const { error } = await migrations.run(m, { reset: true }, native);
     assert.equal(error, null);
-    const beginCall = state.calls.find((c) => c.method === "migrationBegin")!;
+    const beginCall = state.calls.find((c) => c.method === "start")!;
     assert.equal(beginCall.args[3], true, "reset arg propagated");
     // First fetch should have used cursor=0 (reset cleared it).
-    const firstFetch = state.calls.find((c) => c.method === "migrationFetchBatch")!;
+    const firstFetch = state.calls.find((c) => c.method === "fetchBatch")!;
     assert.equal(firstFetch.args[0], 0);
   });
 });

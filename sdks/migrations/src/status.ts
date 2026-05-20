@@ -1,12 +1,12 @@
 /**
  * `migrations.status` — read the persisted state of a migration.
  *
- * Calls the standalone `env.db.migrationStatus(name, collection)`
- * primitive — separate from the Migration v8_class wrapper because
- * status reads must be safe to call from any worker, including ones
- * that don't own the run. The Migration wrapper's `.status()` method
- * delegates to the same underlying SQL but requires the caller to
- * hold the wrapper's `MIG_LOCK`.
+ * Calls `env.db.migrations.status({name, collection})` — separate from
+ * the Migration v8_class wrapper because status reads must be safe to
+ * call from any worker, including ones that don't own the run. The
+ * Migration wrapper's `.status()` method delegates to the same
+ * underlying SQL but requires the caller to hold the wrapper's
+ * `MIG_LOCK`.
  */
 
 import type { NativeMigrations } from "./native.js";
@@ -35,7 +35,7 @@ export async function statusOf<Row extends PlainObject, Update extends PlainObje
 ): Promise<Result<MigrationStatusSnapshot>> {
   const native = nativeOverride ?? (await getNativeMigrations());
   try {
-    const raw = await native.migrationStatus(migration.name, migration.collection);
+    const raw = await native.status({ name: migration.name, collection: migration.collection });
     const parsed = parseNative<NativeStatus>(raw);
     return {
       data: {

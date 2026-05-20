@@ -175,7 +175,7 @@ export const runMigration = action(
 );
 
 // `action` (not `query`): `migrations.status` calls
-// `env.db.migrationStatus(name, collection)` which uses its own
+// `env.db.migrations.status({name, collection})` which uses its own
 // pooled connection. Under pglite-socket's per-tx serializer, a
 // read-only auto-tx would still pin the user-side connection and
 // stall the pool query. Status reads aren't tx-scoped reads anyway.

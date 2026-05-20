@@ -2,8 +2,9 @@
 //!
 //! `DbPlugin::build_instance` returns a `Db` instance from this
 //! module; the `NativeRegistrar` then attaches the Db-scoped entry
-//! points (`registerModel`, `beginTransaction`, `migrationStart`,
-//! `openSubscription`, the `replication*` ops) on top.
+//! points (`registerModel`, `beginTransaction`, `openSubscription`,
+//! the `replication*` ops) on top. `Migrations` is reached via the
+//! `migrations` getter on this class, not via flat callbacks.
 //!
 //! ## What this class adds
 //!
@@ -33,7 +34,7 @@ use std::collections::HashMap;
 use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_method};
+use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use crate::v8_classes::collection::mint_collection;
 
@@ -59,6 +60,10 @@ pub struct Db {
     /// calls return the same Global so identity holds:
     /// `env.db.collection("users") === env.db.collection("users")`.
     pub(crate) collection_cache: RefCell<HashMap<String, v8::Global<v8::Object>>>,
+    /// Cache of the `Migrations` namespace wrapper minted on first
+    /// access of `env.db.migrations`. Stable identity so
+    /// `env.db.migrations === env.db.migrations` holds.
+    pub(crate) migrations_obj: RefCell<Option<v8::Global<v8::Object>>>,
 }
 
 impl std::fmt::Debug for Db {
@@ -86,6 +91,7 @@ impl Db {
         Db {
             app_id: RefCell::new(String::new()),
             collection_cache: RefCell::new(HashMap::new()),
+            migrations_obj: RefCell::new(None),
         }
     }
 
@@ -125,6 +131,32 @@ impl Db {
             .insert(name, global);
         Ok(obj)
     }
+
+    /// `db.migrations` — returns the [`super::migrations::Migrations`]
+    /// namespace wrapper. Cached on first access: subsequent reads of
+    /// `env.db.migrations` return the same JS object.
+    ///
+    /// Exposed as a `#[v8_getter]` (not `#[v8_method]`) so callers
+    /// access it as a property — `env.db.migrations.start(spec)` — and
+    /// JS identity holds across reads (`env.db.migrations ===
+    /// env.db.migrations`). The Db instance owns the cached Global, so
+    /// we don't need WebIDL `[SameObject]` macro support; manual
+    /// caching on `migrations_obj` is sufficient and lets us pass the
+    /// owned `app_id` into `mint_migrations`.
+    #[v8_getter]
+    fn migrations<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        if let Some(existing) = self.migrations_obj.borrow().as_ref() {
+            return Ok(v8::Local::new(scope, existing));
+        }
+        let app_id = self.app_id.borrow().clone();
+        let obj = super::migrations::mint_migrations(scope, &app_id)?;
+        let global = v8::Global::new(scope, obj);
+        *self.migrations_obj.borrow_mut() = Some(global);
+        Ok(obj)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +168,7 @@ impl Db {
 /// Called from `DbPlugin::build_instance` once per V8 isolate during
 /// `build_env_object`. The returned object becomes the `env.db`
 /// namespace value; the runtime then layers the Db-scoped entry
-/// points (registerModel, beginTransaction, migrationStart, …) on
+/// points (registerModel, beginTransaction, openSubscription, …) on
 /// top via the `NativeRegistrar` returned by `DbPlugin::register`.
 pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -154,6 +186,7 @@ pub fn mint_db<'s>(
     let state = Db {
         app_id: RefCell::new(app_id.to_string()),
         collection_cache: RefCell::new(HashMap::new()),
+        migrations_obj: RefCell::new(None),
     };
     let boxed: Box<Db> = Box::new(state);
     let raw = Box::into_raw(boxed);

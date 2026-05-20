@@ -13,7 +13,7 @@
 
 /**
  * Native Migration v8_class wrapper — minted by
- * `env.db.migrationStart(spec)` and used through this SDK's run loop.
+ * `env.db.migrations.start(spec)` and used through this SDK's run loop.
  * Each method delegates to a `#[v8_async_method]` on the Rust-side
  * `Migration` struct (`crates/plugin-db/src/v8_classes/migration.rs`).
  *
@@ -38,30 +38,29 @@ export interface NativeMigration {
 }
 
 /**
- * Native surface used by `@zeroship/migrations`. The SDK splits two
+ * Native `Migrations` namespace surfaced as `env.db.migrations`. Two
  * concerns:
  *
- * - **Running** a migration: `migrationStart(spec)` mints a Migration
- *   wrapper; the SDK's loop drives `fetchBatch` / `commitBatch` on
- *   it; Drop auto-cancels if abandoned.
+ * - **Running** a migration: `start(spec)` mints a Migration wrapper;
+ *   the SDK's loop drives `fetchBatch` / `commitBatch` on it; Drop
+ *   auto-cancels if abandoned.
  *
  * - **Observing / controlling** an already-persisted migration row
- *   (status / cancel / reset by name+collection): the standalone
- *   `migrationStatus(...)` / `migrationCancel(...)` / `migrationReset(...)`
- *   Db methods. These read the audit table directly and don't
- *   acquire the advisory lock — calling them while another worker
- *   has an active run is safe.
+ *   by coordinates: `status(spec)` / `cancel(spec)` / `reset(spec)`,
+ *   each taking `{ name, collection }`. These read the audit table
+ *   directly and don't acquire the advisory lock — safe to call
+ *   while another worker has an active run.
  */
 export interface NativeMigrations {
-  migrationStart(spec: {
+  start(spec: {
     name: string;
     collection: string;
     dryRun?: boolean;
     reset?: boolean;
   }): Promise<NativeMigration>;
-  migrationStatus(name: string, collection: string): Promise<string>;
-  migrationCancel(name: string, collection: string): Promise<string>;
-  migrationReset(name: string, collection: string): Promise<string>;
+  status(spec: { name: string; collection: string }): Promise<string>;
+  cancel(spec: { name: string; collection: string }): Promise<string>;
+  reset(spec: { name: string; collection: string }): Promise<string>;
 }
 
 import { env } from "zeroship";
@@ -78,15 +77,16 @@ import { env } from "zeroship";
 let cachedNative: NativeMigrations | null = null;
 export async function getNativeMigrations(): Promise<NativeMigrations> {
   if (cachedNative) return cachedNative;
-  const db = (env as { db?: NativeMigrations } | undefined)?.db;
-  if (db && typeof db.migrationStart === "function"
-      && typeof db.migrationStatus === "function") {
-    cachedNative = db;
-    return db;
+  const dbAny = (env as { db?: { migrations?: NativeMigrations } } | undefined)?.db;
+  const migrations = dbAny?.migrations;
+  if (migrations && typeof migrations.start === "function"
+      && typeof migrations.status === "function") {
+    cachedNative = migrations;
+    return migrations;
   }
   throw new Error(
-    "@zeroship/migrations: env.db migration surface not available — " +
-      "runtime is missing migrationStart / migrationStatus.",
+    "@zeroship/migrations: env.db.migrations namespace not available — " +
+      "runtime is missing the Migrations v8_class surface.",
   );
 }
 

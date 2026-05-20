@@ -11,7 +11,7 @@
 //!
 //! ## JS surface
 //!
-//! - `await env.db.migrationStart(spec)` — mints a `Migration` instance
+//! - `await env.db.migrations.start(spec)` — mints a `Migration` instance
 //!   once the advisory lock + audit row are claimed by this isolate.
 //! - `m.fetchBatch(cursor, batchSize)` — read the next batch
 //! - `m.commitBatch(updates, deadLetterPks, nextCursor, processed,
@@ -21,9 +21,9 @@
 //! - `m.reset()` — `Promise<string>` (JSON `{"ok":true}`)
 //!
 //! Methods delegate to `crate::migrations::exec_*` so all SQL lives in
-//! one place. The standalone `migrationStatus` / `migrationCancel` /
-//! `migrationReset` callbacks on `env.db` cover the observe-by-name
-//! path (no advisory lock).
+//! one place. The sibling `env.db.migrations.status` /
+//! `env.db.migrations.cancel` / `env.db.migrations.reset` methods cover
+//! the observe-by-name path (no advisory lock).
 
 #![allow(unsafe_code)]
 
@@ -142,8 +142,8 @@ impl Migration {
     }
 
     /// `migration.status()` — read the current audit-row state. Resolves
-    /// with the same JSON shape the flat `migrationStatus` callback
-    /// returns (delegates to `exec_status`).
+    /// with the same JSON shape `env.db.migrations.status({name,
+    /// collection})` returns (delegates to `exec_status`).
     #[v8_async_method]
     async fn status(&self) -> Result<String, OpError> {
         let owner = self
@@ -159,9 +159,9 @@ impl Migration {
     }
 
     /// `migration.cancel()` — transition the audit row to `cancelled`.
-    /// After this resolves, the next `migrationFetchBatch` on the owner
-    /// thread will observe the cancellation and abort. Idempotent at
-    /// the wrapper level (subsequent calls error with "not active").
+    /// After this resolves, the next `fetchBatch()` on the owner thread
+    /// will observe the cancellation and abort. Idempotent at the
+    /// wrapper level (subsequent calls error with "not active").
     #[v8_async_method]
     async fn cancel(&self) -> Result<String, OpError> {
         // `take()` so the finalizer becomes a no-op once the user has
@@ -179,9 +179,9 @@ impl Migration {
     }
 
     /// `migration.reset()` — clear the audit row's cursor / processed /
-    /// dead-letter-pks / status back to `pending`. Same effect as the
-    /// flat `migrationReset` callback. Marks the wrapper inactive so
-    /// the finalizer no longer auto-cancels.
+    /// dead-letter-pks / status back to `pending`. Same effect as
+    /// `env.db.migrations.reset({name, collection})`. Marks the wrapper
+    /// inactive so the finalizer no longer auto-cancels.
     #[v8_async_method]
     async fn reset(&self) -> Result<String, OpError> {
         let owner = self
@@ -342,31 +342,20 @@ fn mint_migration<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// migration_start_callback — `env.db.migrationStart(spec)` entry point
+// migration_start_with_spec — body of `env.db.migrations.start(spec)`
 // ---------------------------------------------------------------------------
 
-/// V8 callback for `zeroship.db.migrationStart(spec)`.
+/// Synchronously parses `spec`, mints the (inactive) `Migration`
+/// wrapper, and returns the user-facing Promise; resolution /
+/// rejection happens inside the spawned `exec_begin` op. Called from
+/// `Migrations::start` (the `#[v8_method]` in
+/// [`super::migrations`]).
 ///
-/// Mints a `Migration` wrapper, returns a Promise that resolves to it
-/// once the underlying `exec_begin` has acquired the advisory lock and
-/// written the audit row. Future-API counterpart to the flat
-/// `migrationBegin` / `migrationFetchBatch` / `migrationCommitBatch`
-/// callbacks the current `@zeroship/migrations` SDK uses.
-///
-/// `spec` is a JS object: `{ name, collection, batchSize?, dryRun? }`.
-/// `batchSize` is accepted for forward-compat with the future SDK
-/// shape; this callback itself doesn't use it (it belongs to
-/// `migrationFetchBatch`).
-///
-/// Registered in `lib.rs` under the name `migrationStart`; the
-/// callbacks.rs side is a thin shim so the `unsafe` activation hop
-/// after the await stays in this module (which opts in to
-/// `#![allow(unsafe_code)]`).
-pub fn migration_start_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
+/// `spec` is a JS object: `{ name, collection, dryRun?, reset? }`.
+pub fn migration_start_with_spec<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    spec_val: v8::Local<v8::Value>,
+) -> v8::Local<'s, v8::Promise> {
     use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
     let state: SharedState = scope
@@ -378,16 +367,21 @@ pub fn migration_start_callback(
     // The spec arrives as a JS object; serialise via JSON to a serde
     // Value so we can pull `name` / `collection` / `dryRun` / `reset`
     // out by key without bespoke `v8::Object::get` plumbing per field.
-    let spec_val = args.get(0);
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let early_promise = resolver.get_promise(scope);
     if spec_val.is_null_or_undefined() {
-        throw_type_error(scope, "db: migrationStart: spec must be an object");
-        return;
+        let m = v8::String::new(scope, "db: migrations.start: spec must be an object").unwrap();
+        let exc = v8::Exception::type_error(scope, m);
+        resolver.reject(scope, exc);
+        return early_promise;
     }
     let spec = match parse_spec(scope, spec_val) {
         Ok(s) => s,
         Err(msg) => {
-            throw_type_error(scope, &msg);
-            return;
+            let m = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            resolver.reject(scope, exc);
+            return early_promise;
         }
     };
 
@@ -398,16 +392,17 @@ pub fn migration_start_callback(
     let (migration_obj, raw_addr) = match mint_migration(scope) {
         Ok(pair) => pair,
         Err(e) => {
-            throw_error(scope, &e.message);
-            return;
+            let m = v8::String::new(scope, &e.message).unwrap();
+            let exc = v8::Exception::error(scope, m);
+            resolver.reject(scope, exc);
+            return early_promise;
         }
     };
     // Upcast Object -> Value so we can hand it to `ResolveValue::JsGlobal`.
     let migration_val: v8::Local<v8::Value> = migration_obj.into();
     let migration_global: v8::Global<v8::Value> = v8::Global::new(scope, migration_val);
 
-    // ---- 3. Allocate the user-facing Promise ---------------------------
-    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    // ---- 3. Use the user-facing Promise ---------------------------
     let promise = resolver.get_promise(scope);
     let resolver_global = v8::Global::new(scope, resolver);
 
@@ -479,7 +474,7 @@ pub fn migration_start_callback(
     if let Some(mut tx) = notify {
         let _ = tx.try_send(());
     }
-    rv.set(promise.into());
+    promise
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +496,7 @@ fn parse_spec(
     spec: v8::Local<v8::Value>,
 ) -> Result<SpecParts, String> {
     if !spec.is_object() {
-        return Err("db: migrationStart: spec must be an object".into());
+        return Err("db: migrations.start: spec must be an object".into());
     }
     // Walk the V8 object directly into a serde_json::Value (no
     // JSON.stringify / JSON.parse boundary). Same walker the
@@ -510,19 +505,19 @@ fn parse_spec(
     let parsed = crate::callbacks::v8_value_to_serde_json(scope, spec);
     let obj = parsed
         .as_object()
-        .ok_or_else(|| "db: migrationStart: spec must be an object".to_string())?;
+        .ok_or_else(|| "db: migrations.start: spec must be an object".to_string())?;
     let name = obj
         .get("name")
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "db: migrationStart: spec.name must be a non-empty string".to_string())?
+        .ok_or_else(|| "db: migrations.start: spec.name must be a non-empty string".to_string())?
         .to_string();
     let collection = obj
         .get("collection")
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            "db: migrationStart: spec.collection must be a non-empty string".to_string()
+            "db: migrations.start: spec.collection must be a non-empty string".to_string()
         })?
         .to_string();
     let dry_run = obj
@@ -541,14 +536,3 @@ fn parse_spec(
     })
 }
 
-fn throw_type_error(scope: &mut v8::PinScope<'_, '_>, msg: &str) {
-    let m = v8::String::new(scope, msg).unwrap();
-    let exc = v8::Exception::type_error(scope, m);
-    scope.throw_exception(exc);
-}
-
-fn throw_error(scope: &mut v8::PinScope<'_, '_>, msg: &str) {
-    let m = v8::String::new(scope, msg).unwrap();
-    let exc = v8::Exception::error(scope, m);
-    scope.throw_exception(exc);
-}

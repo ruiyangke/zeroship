@@ -234,16 +234,16 @@ interface ZeroshipTransaction {
 }
 
 /**
- * A live migration-run wrapper minted by `env.db.migrationStart(spec)`.
+ * A live migration-run wrapper minted by `env.db.migrations.start(spec)`.
  * Holds the (app_id, name, collection) triple plus the session-scoped
  * Postgres advisory lock that fences concurrent runs. The wrapper's
  * Weak finalizer auto-cancels if the wrapper is GC'd without an
  * explicit terminal `commitBatch(isDone=true, ...)`.
  *
  * `status` / `cancel` / `reset` here operate on this exact run; the
- * standalone `migrationStatus(name, collection)` / `migrationCancel` /
- * `migrationReset` methods on `ZeroshipDb` operate by name+collection
- * and don't hold the advisory lock.
+ * `env.db.migrations.status({name, collection})` /
+ * `.cancel({name, collection})` / `.reset({name, collection})` methods
+ * operate by name+collection and don't hold the advisory lock.
  */
 interface ZeroshipMigration {
   status(): Promise<string>;
@@ -294,6 +294,25 @@ interface ZeroshipSubscription {
   close(): void;
 }
 
+/**
+ * The `Migrations` namespace surfaced as `env.db.migrations`. Two
+ * concerns:
+ * - **Running** a migration: `start(spec)` mints a Migration wrapper.
+ * - **Observing / controlling** an already-persisted migration row by
+ *   coordinates: `status(spec)` / `cancel(spec)` / `reset(spec)`.
+ */
+interface ZeroshipMigrations {
+  start(spec: {
+    name: string;
+    collection: string;
+    dryRun?: boolean;
+    reset?: boolean;
+  }): Promise<ZeroshipMigration>;
+  status(spec: { name: string; collection: string }): Promise<string>;
+  cancel(spec: { name: string; collection: string }): Promise<string>;
+  reset(spec: { name: string; collection: string }): Promise<string>;
+}
+
 // ---------------------------------------------------------------------------
 // Db entry point — env.db
 // ---------------------------------------------------------------------------
@@ -334,35 +353,18 @@ interface ZeroshipDb {
   // --- Migration runs (B1) ---
 
   /**
-   * Start a data-backfill migration run. Acquires a session-scoped
-   * Postgres advisory lock keyed by (app_id, name); subsequent calls
-   * from other workers fail with `migration_already_running`.
+   * Mint (or return the cached) Migrations namespace wrapper. Identity
+   * is cached on the Db wrapper so repeated reads of `env.db.migrations`
+   * return the same JS object.
    *
-   * Returns a Migration wrapper that drives `fetchBatch` / `commitBatch`.
-   * The wrapper's Weak finalizer auto-cancels if it's GC'd without an
-   * explicit terminal commitBatch.
+   * - `.start(spec)` acquires a Postgres advisory lock and returns a
+   *   live Migration wrapper that drives `fetchBatch` / `commitBatch`.
+   * - `.status(spec)` / `.cancel(spec)` / `.reset(spec)` operate on a
+   *   migration row by `{name, collection}` and don't acquire the
+   *   advisory lock — safe to call while another worker has an active
+   *   run.
    */
-  migrationStart(spec: {
-    name: string;
-    collection: string;
-    dryRun?: boolean;
-    reset?: boolean;
-  }): Promise<ZeroshipMigration>;
-
-  /** Read the current audit-row state for a (collection, name) pair. */
-  migrationStatus(name: string, collection: string): Promise<string>;
-
-  /**
-   * Cancel a `pending` or `running` migration. Subsequent
-   * `fetchBatch` calls on the live wrapper return `migration_cancelled`.
-   */
-  migrationCancel(name: string, collection: string): Promise<string>;
-
-  /**
-   * Reset a migration's persisted state (status → pending, cursor → 0,
-   * dead_letter_pks → null). Used after a `cancelled` or `failed` run.
-   */
-  migrationReset(name: string, collection: string): Promise<string>;
+  migrations: ZeroshipMigrations;
 
   // --- Reactive subscriptions (C1 / P8a) ---
 
