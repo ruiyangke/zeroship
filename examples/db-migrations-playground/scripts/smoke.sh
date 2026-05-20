@@ -5,7 +5,7 @@
 # status → cancel/reset → audit-log inspection.
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3000}"
+URL="${ZS_URL:-http://localhost:3001}"
 RPC="${URL}/_zs/v1"
 FAILED=0
 

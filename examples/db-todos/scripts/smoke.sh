@@ -6,7 +6,7 @@
 # feature it verifies; failures print the unexpected response body.
 #
 # Usage:
-#   bash scripts/smoke.sh                # uses http://localhost:3000
+#   bash scripts/smoke.sh                # uses http://localhost:3001
 #   ZS_URL=http://... bash scripts/smoke.sh
 #
 # Prereqs: `npm run dev` already running in another shell; Postgres
@@ -14,7 +14,7 @@
 # via `zeroship serve` or vite-plugin's dev bootstrap).
 set -euo pipefail
 
-URL="${ZS_URL:-http://localhost:3000}"
+URL="${ZS_URL:-http://localhost:3001}"
 RPC="${URL}/_zs/v1"
 FAILED=0
 
