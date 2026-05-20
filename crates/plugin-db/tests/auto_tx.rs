@@ -94,6 +94,12 @@ fn reset_schema(url: &str) {
 /// stringified inner value, not a nested object. Parse once to peel
 /// off the outer envelope, parse again to read `count`.
 fn extract_count(body: &serde_json::Value) -> i64 {
+    // Collection.count() now returns a bare number; the SuperJSON
+    // envelope is `{"json": <n>}`. Older shapes wrapped in `{count: n}`
+    // — keep a fallback for any handler that still returns an object.
+    if let Some(n) = body.get("json").and_then(|v| v.as_i64()) {
+        return n;
+    }
     let inner = body.get("json").and_then(|v| v.as_str()).unwrap_or("{}");
     let parsed: serde_json::Value =
         serde_json::from_str(inner).unwrap_or(serde_json::Value::Null);
@@ -297,13 +303,13 @@ setup.config = { kind: "action" };
 function readOnlyProbe(_input, _ctx) {
     // env.db.find runs through TX_CONN which has READ ONLY set.
     // We probe via a count() on the notes collection — should succeed.
-    return env.db.count("notes", {});
+    return env.db.collection("notes").count({});
 }
 readOnlyProbe.config = { kind: "query" };
 
 // Query that tries to write — capability gate refuses BEFORE PG sees it.
 function tryWrite(_input, _ctx) {
-    return env.db.insert("notes", { title: "fromQuery" });
+    return env.db.collection("notes").insert({ title: "fromQuery" });
 }
 tryWrite.config = { kind: "query" };
 
@@ -356,7 +362,7 @@ function setup(_input, _ctx) {
 setup.config = { kind: "action" };
 
 function addNote(_input, _ctx) {
-    return env.db.insert("notes", { title: "committed" });
+    return env.db.collection("notes").insert({ title: "committed" });
 }
 addNote.config = { kind: "mutation" };
 
@@ -390,7 +396,7 @@ function setup(_input, _ctx) {
 setup.config = { kind: "action" };
 
 async function addThenThrow(_input, _ctx) {
-    await env.db.insert("notes", { title: "rolledBack" });
+    await env.db.collection("notes").insert({ title: "rolledBack" });
     throw new Error("rollback please");
 }
 addThenThrow.config = { kind: "mutation" };
@@ -434,7 +440,7 @@ function setup(_input, _ctx) {
 setup.config = { kind: "action" };
 
 async function actionInsert(_input, _ctx) {
-    await env.db.insert("notes", { title: "fromAction" });
+    await env.db.collection("notes").insert({ title: "fromAction" });
     return { ok: true };
 }
 actionInsert.config = { kind: "action" };
@@ -476,12 +482,12 @@ function setup(_input, _ctx) {
 setup.config = { kind: "action" };
 
 function add(_input, _ctx) {
-    return env.db.insert("notes", { title: "visible" });
+    return env.db.collection("notes").insert({ title: "visible" });
 }
 add.config = { kind: "mutation" };
 
 function getCount(_input, _ctx) {
-    return env.db.count("notes", {});
+    return env.db.collection("notes").count({});
 }
 getCount.config = { kind: "query" };
 
@@ -536,7 +542,7 @@ async function bypassedQuery(_input, _ctx) {
     const token = await globalThis.__zsBeginAutoTx("query");
     try {
         // PG MUST refuse with SQLSTATE 25006 here.
-        await env.db.insert("notes", { title: "shouldFail" });
+        await env.db.collection("notes").insert({ title: "shouldFail" });
         // End the tx so we don't leak the connection.
         await globalThis.__zsEndAutoTx(token, true);
         return { result: "wrong-path-no-error" };
@@ -610,7 +616,7 @@ setup.config = { kind: "action" };
 async function probeMutationKind(_input, _ctx) {
     const token = await globalThis.__zsBeginAutoTx("mutation");
     try {
-        await env.db.insert("notes", { title: "writeable" });
+        await env.db.collection("notes").insert({ title: "writeable" });
         await globalThis.__zsEndAutoTx(token, true);
         return { result: "ok" };
     } catch (e) {
@@ -689,8 +695,8 @@ async function insertThenFail(_input, _ctx) {
     // Two inserts before the throw — both must roll back as a unit.
     // If there were no tx envelope, BOTH would autocommit and the
     // count would be 2 after the throw. With auto-tx, the count is 0.
-    await env.db.insert("notes", { title: "atomic-1" });
-    await env.db.insert("notes", { title: "atomic-2" });
+    await env.db.collection("notes").insert({ title: "atomic-1" });
+    await env.db.collection("notes").insert({ title: "atomic-2" });
     throw new Error("intentional rollback");
 }
 insertThenFail.config = { kind: "mutation" };

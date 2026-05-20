@@ -135,7 +135,7 @@ fn b3_runtime_query_refuses_db_write_insert() {
     let user_code = r#"
 import { env } from "zeroship";
 function getStuff(_input, _ctx) {
-    return env.db.insert("notes", { title: "shouldFail" });
+    return env.db.collection("notes").insert({ title: "shouldFail" });
 }
 getStuff.config = { kind: "query" };
 const _procedures = { getStuff };
@@ -162,13 +162,13 @@ const _procedures = { getStuff };
 #[test]
 fn b3_runtime_query_refuses_every_db_write_op() {
     let ops = [
-        ("insert", r#"env.db.insert("n", { t: "x" })"#, "ctx.db.insert"),
-        ("updateOne", r#"env.db.updateOne("n", { id: 1 }, { t: "x" })"#, "ctx.db.updateOne"),
-        ("deleteOne", r#"env.db.deleteOne("n", { id: 1 })"#, "ctx.db.deleteOne"),
-        ("insertMany", r#"env.db.insertMany("n", [{ t: "x" }])"#, "ctx.db.insertMany"),
-        ("updateMany", r#"env.db.updateMany("n", { t: "x" }, { t: "y" })"#, "ctx.db.updateMany"),
-        ("deleteMany", r#"env.db.deleteMany("n", { t: "x" })"#, "ctx.db.deleteMany"),
-        ("upsert", r#"env.db.upsert("n", { id: 1, t: "x" }, ["id"])"#, "ctx.db.upsert"),
+        ("insert", r#"env.db.collection("n").insert({ t: "x" })"#, "ctx.db.insert"),
+        ("updateOne", r#"env.db.collection("n").updateOne({ id: 1 }, { t: "x" })"#, "ctx.db.updateOne"),
+        ("deleteOne", r#"env.db.collection("n").deleteOne({ id: 1 })"#, "ctx.db.deleteOne"),
+        ("insertMany", r#"env.db.collection("n").insertMany([{ t: "x" }])"#, "ctx.db.insertMany"),
+        ("updateMany", r#"env.db.collection("n").updateMany({ t: "x" }, { t: "y" })"#, "ctx.db.updateMany"),
+        ("deleteMany", r#"env.db.collection("n").deleteMany({ t: "x" })"#, "ctx.db.deleteMany"),
+        ("upsert", r#"env.db.collection("n").upsert({ id: 1, t: "x" }, { conflictFields: ["id"] })"#, "ctx.db.upsert"),
     ];
     for (label, expr, expected_violated) in ops {
         let user_code = format!(
@@ -232,7 +232,7 @@ function doAction(_input, _ctx) {
     // fired, the promise is already rejected at this point. We surface
     // the synchronous shape by chaining .catch() and returning the
     // captured error fields. The test asserts code !== capability_violation.
-    const p = env.db.insert("notes", { title: "shouldReachDb" });
+    const p = env.db.collection("notes").insert({ title: "shouldReachDb" });
     return Promise.race([
         p.then(() => ({ outcome: "resolved" }), (e) => ({
             outcome: "rejected",
