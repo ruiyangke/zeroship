@@ -1,491 +1,444 @@
 # @zeroship/db — Database SDK
 
-## Overview
+`@zeroship/db` is the database SDK for zeroship apps. You declare a typed
+schema once with `createDb({ ... })`, get a fully-typed `db` object back,
+and call CRUD methods on its collections. Behind the scenes the SDK calls
+into the native `env.db` v8_class surface (registered by the Rust runtime);
+no raw SQL is exposed to user code.
 
-`@zeroship/db` provides a Mongoose-inspired API backed by real Postgres columns. Creators define models with familiar schema syntax, get built-in validation, query chaining, and a `{ data, error }` return pattern. No raw SQL is exposed — the SDK calls `zeroship.db.*` native primitives, which build parameterized SQL internally.
-
-Based on Mongoose conventions (for LLM compatibility) with key improvements:
-- `{ data, error }` returns instead of throwing — explicit, no try/catch needed
-- `id` not `_id` — Postgres convention, no MongoDB legacy
-- Per-field update operators — `{ views: { $inc: 1 } }` reads naturally
-- `createdAt`/`updatedAt` as Unix ms numbers — JS-native
-- Real JOINs backed by Postgres — not N+1 populate
-
-```javascript
-import { createDb } from "@zeroship/db";
-
-const db = createDb({
-  users: {
-    name:  { type: String, required: true },
-    email: { type: String, required: true, unique: true },
-    role:  { type: String, enum: ["user", "admin"], default: "user" },
-  },
-});
-
-const { data: user, error } = await db.users.insert({ name: "Alice", email: "alice@example.com" });
-const { data: admins } = await db.users.find({ role: "admin" }).sort({ name: 1 }).limit(10);
-```
-
-## Architecture
-
-```
-Creator code
-  │  import { createDb } from "@zeroship/db"
-  ▼
-@zeroship/db (JS/TS, npm package)         ← SDK layer: validation, chaining, { data, error }
-  createDb(), t, naming, Collection, Query
-  │
-  │  calls zeroship.db.* with per-field operator format
-  ▼
-zeroship.db.* (Rust, frozen global)       ← native layer: security boundary, SQL generation
-  zeroship.db.find(collection, filter, opts)
-  zeroship.db.insert(collection, doc)
-  zeroship.db.update(collection, filter, patch)
-  │
-  │  validates → parameterized SQL → executes
-  ▼
-zeroship-pg → Postgres
-```
-
-The SDK is a standard npm package; vite/rollup bundles it into the deploy's worker code. The native `zeroship.db.*` global is registered by Rust, frozen, and enforces schema isolation + parameterized queries.
-
-### Native primitives (`zeroship.db.*`)
-
-Low-level "syscalls" the SDK calls. SDK authors may use these directly.
-
-```typescript
-zeroship.db.find(collection, filter, opts)          → Promise<string>
-zeroship.db.get(collection, filter)             → Promise<string | null>
-zeroship.db.insert(collection, doc)                 → Promise<string>
-zeroship.db.insertMany(collection, docs)            → Promise<string>
-zeroship.db.update(collection, filter, patch)   → Promise<string>
-zeroship.db.updateMany(collection, filter, update)  → Promise<string>
-zeroship.db.delete(collection, filter)           → Promise<string>
-zeroship.db.deleteMany(collection, filter)          → Promise<string>
-zeroship.db.count(collection, filter)               → Promise<string>
-zeroship.db.aggregate(collection, pipeline)         → Promise<string>
-zeroship.db.distinct(collection, field, filter)     → Promise<string>
-```
-
-The native layer uses per-field operator format: `{ views: { $inc: 1 } }`. The SDK translates Mongoose top-level format (`{ $inc: { views: 1 } }`) before calling native.
-
-## Security Model
-
-No raw SQL is exposed. All queries are parameterized.
-
-```
-Apps CAN:                              Apps CANNOT:
-  CRUD (insert, find, update, delete)    Raw SQL
-  Aggregate (group, sum, avg)            Access other app's schema
-  Full-text search ($search)             DDL (CREATE, ALTER, DROP)
-  Pagination                             System tables (pg_catalog)
-```
-
-## Schema Definition
-
-Two styles, both produce the same internal representation.
-
-### Mongoose style (recommended for LLM compatibility)
-
-```javascript
-import { createDb } from "@zeroship/db";
-
-const db = createDb({
-  users: {
-    name:     { type: String, required: true, minlength: 1, maxlength: 100 },
-    email:    { type: String, required: true, unique: true, match: /^[^@]+@[^@]+$/ },
-    age:      { type: Number, min: 0, max: 150 },
-    role:     { type: String, enum: ["user", "admin", "moderator"], default: "user" },
-    bio:      { type: String },
-    settings: { type: Object },
-    tags:     { type: [String] },
-  },
-});
-
-// Shorthand also works (bare constructors)
-const db2 = createDb({
-  simple: {
-    name: String,
-    count: Number,
-    active: Boolean,
-    tags: [String],
-  },
-});
-```
-
-### Builder style (alternative)
-
-```javascript
+```ts
 import { createDb, t } from "@zeroship/db";
 
 const db = createDb({
   users: {
-    name:     t.string().required().min(1).max(100),
-    email:    t.string().required().unique().pattern(/^[^@]+@[^@]+$/),
-    age:      t.number().min(0).max(150),
-    role:     t.string().enum("user", "admin", "moderator").default("user"),
-    bio:      t.string(),
-    settings: t.json(),
-    tags:     t.array(t.string()),
+    name:  t.string().required().max(100),
+    email: t.string().required().unique(),
+    role:  t.string().enum("user", "admin").default("user"),
   },
+});
+
+const { data: alice, error } = await db.users.insert({
+  name: "Alice", email: "alice@example.com",
+});
+if (error) throw error;
+
+const { data: admins } = await db.users
+  .find({ role: "admin" })
+  .sort({ name: 1 })
+  .limit(10);
+```
+
+## Two return contracts
+
+The same Collection class is used in two contexts. The contract differs:
+
+| Context                       | Return shape                              | On failure              |
+|-------------------------------|-------------------------------------------|-------------------------|
+| `db.users.insert(...)` (top)  | `Promise<Result<T>>` — `{ data, error }`  | `error` is non-null     |
+| Inside `db.transaction(tx)`   | `Promise<T>` — bare value (no envelope)   | throws                  |
+
+```ts
+// Top-level — explicit error handling
+const { data, error } = await db.users.insert({ name: "Alice" });
+if (error) return error;
+
+// Inside a transaction — throws, no Result envelope
+const result = await db.transaction(async (tx) => {
+  const u = await tx.users.insert({ name: "Alice" });   // bare Row<S>
+  await tx.todos.insert({ userId: u.id, title: "..." });
+  return u;
+});
+// `result` itself is a Result<R>: `{ data: u, error: null }` or `{ data: null, error }`.
+```
+
+The `tx.<table>` wrapper is a JS-side throw-style adapter around the
+outer Collection. Routing the CRUD call to the transaction connection
+happens in Rust via a `TX_CONN` thread-local; the JS adapter only flips
+the surface from Result to throw.
+
+## Schema builders
+
+Use the `t.*` factories. Every builder is chainable.
+
+### Field types
+
+| Builder                | TS type                       | Postgres        |
+|------------------------|-------------------------------|-----------------|
+| `t.string()`           | `string`                      | TEXT            |
+| `t.number()`           | `number`                      | NUMERIC         |
+| `t.boolean()`          | `boolean`                     | BOOLEAN         |
+| `t.timestamp()`        | `number` (Unix ms)            | TIMESTAMPTZ     |
+| `t.calendarDate()`     | `string` (`YYYY-MM-DD`)       | DATE            |
+| `t.json()`             | `Record<string, unknown>`     | JSONB           |
+| `t.array(t.string())`  | `string[]`                    | JSONB           |
+| `t.ref("users")`       | `Id<"users">` (branded num)   | INTEGER + FK    |
+| `t.object({ ... })`    | nested inferred object        | JSONB           |
+| `t.literal("login")`   | `"login"`                     | underlying type |
+| `t.union(v1, v2, ...)` | discriminated union           | flat columns    |
+
+`t.date()` is **not** in the surface — use `t.timestamp()` for a TIMESTAMPTZ
+(Unix-ms numbers at the JS layer) or `t.calendarDate()` for a Postgres DATE
+(`YYYY-MM-DD` strings).
+
+### Refinements
+
+All chainable on any field:
+
+| Method                | Effect                                                       |
+|-----------------------|--------------------------------------------------------------|
+| `.required()`         | Marks the key non-optional in `RowInput<S>` and `Row<S>`.    |
+| `.unique()`           | Adds a `UNIQUE` index.                                       |
+| `.index()`            | Adds a non-unique index.                                     |
+| `.default(value\|fn)` | Default applied on insert when key is absent.                |
+| `.min(n)`             | Number minimum / string minimum length.                      |
+| `.max(n)`             | Number maximum / string maximum length.                      |
+| `.enum(...values)`    | Restricts the value to a fixed set.                          |
+| `.pattern(/regex/)`   | Regex constraint on string values.                           |
+
+### Auto-generated columns
+
+You never declare these; every collection has them:
+
+- `id: number` — `BIGINT PRIMARY KEY`, auto-assigned on insert.
+- `createdAt: number` — Unix-ms set on insert.
+- `updatedAt: number` — Unix-ms set on every update.
+
+When `softDelete: true` is enabled (see below), a fourth column is added:
+
+- `deletedAt: number | null` — Unix-ms when soft-deleted; default null.
+
+### Per-collection options via `schema()`
+
+```ts
+import { createDb, schema, t } from "@zeroship/db";
+
+const db = createDb({
+  todos: schema({
+    title: t.string().required(),
+    done:  t.boolean().default(false),
+  }).softDelete().withVersioning(),
 });
 ```
 
-### Type mapping
+- `schema({...}).softDelete()` — `delete()` / `deleteMany()` set `deletedAt`
+  instead of removing the row. Reads filter `deletedAt IS NULL` automatically.
+  Pass `{ hard: true }` to bypass.
+- `schema({...}).withVersioning()` — adds a `version` column. `update()`
+  with `{ version: N }` in the filter is a CAS guard: on mismatch the call
+  rejects with `OptimisticLockError`; on success `version` is incremented
+  atomically.
+- `schema({...}).strictness("strict" | "lenient" | "off")` — deploy-time
+  data-validation policy.
 
-| JS Constructor | Builder | Postgres |
-|---|---|---|
-| `String` | `t.string()` | TEXT |
-| `Number` | `t.number()` | NUMERIC |
-| `Boolean` | `t.boolean()` | BOOLEAN |
-| `Date` | `t.timestamp()` | TIMESTAMPTZ |
-| `Object` | `t.json()` | JSONB |
-| `[String]` | `t.array(t.string())` | JSONB |
+## Branded ids
 
-### Validators
+`t.ref("users")` produces `Id<"users">` — a branded `number`. Two ref types
+backed by different tables are mutually incompatible at compile time:
 
-| Validator | Mongoose syntax | Builder syntax | Applies to |
-|---|---|---|---|
-| required | `required: true` | `.required()` | all |
-| default | `default: value` | `.default(value)` | all |
-| unique | `unique: true` | `.unique()` | all |
-| min | `min: 0` | `.min(0)` | Number |
-| max | `max: 150` | `.max(150)` | Number |
-| minlength | `minlength: 1` | `.min(1)` | String (length) |
-| maxlength | `maxlength: 100` | `.max(100)` | String (length) |
-| match | `match: /regex/` | `.pattern(/regex/)` | String |
-| enum | `enum: ["a", "b"]` | `.enum("a", "b")` | String |
-| index | `index: true` | `.index()` | all |
-
-### Auto-generated fields
-
-Not declared by creator. Added by the database automatically:
-
-- `id` — `SERIAL PRIMARY KEY` or `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
-- `createdAt` — mapped from `created_at TIMESTAMPTZ DEFAULT NOW()` — returned as Unix ms number
-- `updatedAt` — mapped from `updated_at TIMESTAMPTZ DEFAULT NOW()` — returned as Unix ms number
-
-## Return Pattern
-
-Every SDK method returns `{ data, error }` — never throws.
-
-```javascript
-// Success
-const { data, error } = await users.insert({ name: "Alice", email: "a@b.com" });
-// data = { id: 1, name: "Alice", email: "a@b.com", role: "user", createdAt: 1713000000000, updatedAt: 1713000000000 }
-// error = null
-
-// Failure
-const { data, error } = await users.insert({ name: "" });
-// data = null
-// error = { name: "ValidationError", errors: { name: { message: "required", path: "name" } } }
-
-// Duplicate key
-const { data, error } = await users.insert({ name: "Alice", email: "existing@b.com" });
-// data = null
-// error = { code: 11000, message: "duplicate key error: email" }
+```ts
+const userId: Id<"users"> = ...;
+const todoId: Id<"todos"> = ...;
+db.todos.get(userId);  // ✗ compile error
+db.todos.get(todoId);  // ✓
 ```
 
-No try/catch needed. Errors are values, not exceptions.
+Each collection exposes its own `Id` and `RowInput` type:
 
-## Complete API Reference
+```ts
+type UserId = typeof db.users.Id;          // = Id<"users">
+type UserInsert = typeof db.users.RowInput; // = RowInput<usersSchema>
+
+function addUser(input: UserInsert): Promise<UserId | undefined> { ... }
+```
+
+The accessors are type-only — at runtime they return `null`.
+
+## Collection CRUD
+
+Every method returns `Result<T>` outside a transaction. Inside `db.transaction`
+the matching `tx.<table>` method returns `T` and throws.
 
 ### Create
 
-```javascript
-// Insert one
-const { data } = await users.insert({ name: "Alice", email: "alice@example.com" });
-// → { id: 1, name: "Alice", email: "alice@example.com", role: "user", createdAt: ..., updatedAt: ... }
+```ts
+// Single row
+const { data: user } = await db.users.insert({ name: "Alice" });
 
-// Insert (alias for create)
-const { data } = await users.insert({ name: "Alice", email: "alice@example.com" });
-
-// Insert many
-const { data } = await users.insertMany([
-  { name: "Bob", email: "bob@example.com" },
-  { name: "Carol", email: "carol@example.com" },
+// Many rows
+const { data: users } = await db.users.insertMany([
+  { name: "Bob" },
+  { name: "Carol" },
 ]);
-// → [{ id: 2, ... }, { id: 3, ... }]
+
+// Upsert — insert, or update on conflict
+const { data: user } = await db.users.upsert(
+  { email: "alice@example.com", name: "Alice" },
+  { conflictFields: ["email"] },
+);
 ```
 
 ### Read
 
-```javascript
-// Find one — returns document or null
-const { data } = await users.get({ email: "alice@example.com" });
-// → { id, name, email, ... } or null
+```ts
+// Single row by id (number is a shorthand for `{ id }`)
+const { data: user } = await db.users.get(1);
 
-// Find by ID (shorthand)
-const { data } = await users.get(1);
+// Single row by filter
+const { data: user } = await db.users.get({ email: "alice@example.com" });
 
-// Find many — returns Query (thenable), supports chaining
-const { data } = await users
+// Multiple rows — Query is thenable
+const { data: admins } = await db.users
   .find({ role: "admin" })
-  .select("name email")           // projection: only these fields
-  .sort({ name: 1 })              // 1 = ASC, -1 = DESC
-  .limit(20)                       // max results
-  .skip(40);                       // offset
-// → [{ name, email }, ...]
+  .sort({ name: 1 })          // 1 = ASC, -1 = DESC
+  .limit(20)
+  .skip(40);
+
+// Cursor pagination
+const { data: next } = await db.users.find({}).sort({ id: 1 }).after(lastId);
+
+// Projection
+const { data: emails } = await db.users.find({}).select(["email"]);
 
 // Count
-const { data: count } = await users.count({ role: "admin" });
-// → 5
+const { data: n } = await db.users.count({ role: "admin" });
 
-// Distinct values
-const { data: roles } = await users.distinct("role");
-// → ["user", "admin", "moderator"]
+// Existence
+const { data: exists } = await db.users.exists({ email: "alice@example.com" });
 
-// Exists
-const { data: exists } = await users.exists({ email: "alice@example.com" });
-// → true
+// Distinct
+const { data: roles } = await db.users.distinct("role");
 ```
 
 ### Update
 
-```javascript
-// Update one — returns the updated document (or null if nothing matched).
-// First arg is an id (shorthand for `{ id }`) or a filter object.
-const { data: user } = await users.update(1, { name: "Alice Smith", role: "admin" });
-if (user === null) throw new Error("not found");
+```ts
+// By id, full row patch
+const { data: u } = await db.users.update(1, { name: "Alice Smith" });
+if (!u) throw new Error("not found");
 
-// Update many — returns { matchedCount, modifiedCount }
-const { data } = await users.updateMany({ role: "user" }, { role: "member" });
-// → { matchedCount: 342, modifiedCount: 342 }
+// By filter (returns the first match, or null)
+const { data: u } = await db.users.update({ email: "alice@..." }, { role: "admin" });
 
-// Per-field atomic operators
-const { data } = await products.update(1, {
+// Atomic operators — per-field
+await db.products.update(1, {
   stock: { $dec: 1 },
-  sold:  { $inc: 1 },
+  views: { $inc: 1 },
   tags:  { $push: "sale" },
 });
 
-// MongoDB-style top-level operators are also accepted (translated by the SDK)
-const { data } = await products.update(1, {
-  $inc: { views: 1 },
-  $push: { tags: "popular" },
-});
+// MongoDB top-level shape (SDK translates)
+await db.products.update(1, { $inc: { views: 1 } });
 
-// Optimistic-lock (compound filter — match-and-update atomically)
-const { data: stocked } = await products.update(
-  { id: 1, stock: { $gte: 1 } },
-  { stock: { $dec: 1 } }
+// Update many — returns counts
+const { data: counts } = await db.users.updateMany(
+  { role: "user" },
+  { role: "member" },
 );
-if (stocked === null) throw new Error("Out of stock");
+// counts = { matchedCount: N, modifiedCount: N }
+
+// CAS via versioning (when withVersioning() is on)
+const { data, error } = await db.products.update(
+  { id: 1, version: 5 },
+  { stock: { $dec: 1 } },
+);
+// error instanceof OptimisticLockError when stored version != 5
 ```
 
 ### Delete
 
-```javascript
-// Delete one — returns the deleted document (or null if nothing matched).
-const { data: deleted } = await users.delete(1);
-if (deleted === null) throw new Error("not found");
+```ts
+// By id — returns the deleted row (or null)
+const { data } = await db.users.delete(1);
 
-// Delete many — returns { deletedCount }
-const { data } = await sessions.deleteMany({ expiresAt: { $lt: Date.now() } });
-// → { deletedCount: 42 }
+// By filter
+const { data } = await db.users.delete({ email: "spam@..." });
 
-// Soft-delete collections — `delete` flips `deletedAt`; pass `{ hard: true }`
-// to bypass the soft semantics and permanently remove the row.
-await users.delete(1, { hard: true });
+// Many — returns counts
+const { data } = await db.sessions.deleteMany({ expiresAt: { $lt: Date.now() } });
+// { deletedCount: N }
+
+// Soft delete: with `softDelete()` on the schema, delete sets deletedAt
+// Pass { hard: true } to permanently remove the row.
+await db.users.delete(1, { hard: true });
 ```
 
 ### Aggregate
 
-```javascript
-const { data } = await products.aggregate([
-  { $match: { status: "active" } },
-  { $group: { by: "category", count: { $count: true }, avgPrice: { $avg: "price" } } },
-  { $having: { count: { $gt: 5 } } },
-  { $sort: { count: -1 } },
-  { $limit: 10 },
-]);
-// → [{ category: "food", count: 42, avgPrice: 5.5 }]
-
-// Mongoose-style aggregate also works (SDK translates)
-const { data } = await products.aggregate([
-  { $match: { status: "active" } },
-  { $group: { _id: "$category", count: { $sum: 1 }, avgPrice: { $avg: "$price" } } },
-  { $sort: { count: -1 } },
+```ts
+const { data } = await db.orders.aggregate([
+  { $match: { status: "paid" } },
+  { $group: { by: "country", count: { $count: true }, total: { $sum: "amount" } } },
+  { $having: { count: { $gt: 10 } } },
+  { $sort:  { total: -1 } },
+  { $limit: 20 },
 ]);
 ```
 
-### Aggregation operators
+Supported accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`.
 
-```javascript
-{ $count: true }                 // COUNT(*)
-{ $sum: "field" }                // SUM(field)
-{ $avg: "field" }                // AVG(field)
-{ $min: "field" }                // MIN(field)
-{ $max: "field" }                // MAX(field)
+## Filter operators
+
+- Comparison: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
+- Inclusion: `$in`, `$nin`
+- String: `$like`, `$ilike`, `$search` (full-text)
+- Null shape: `field: null`, `{ $ne: null }`, `{ $exists: true }`
+- Logical: `$and`, `$or`, `$not` (each takes an array of sub-filters,
+  except `$not` which takes one)
+
+```ts
+{ role: "admin", age: { $gte: 18 } }   // implicit AND
+{ $or: [{ role: "admin" }, { role: "moderator" }] }
+{ name: { $ilike: "%alice%" } }
 ```
 
-## Filter Operators
+## Update operators
 
-```javascript
-// Comparison
-{ field: value }                    // WHERE field = value (implicit eq)
-{ field: { $gt: n } }              // WHERE field > n
-{ field: { $gte: n } }             // WHERE field >= n
-{ field: { $lt: n } }              // WHERE field < n
-{ field: { $lte: n } }             // WHERE field <= n
-{ field: { $ne: value } }          // WHERE field != value
+Per-field (preferred): `$set`, `$inc`, `$dec`, `$mul`, `$push`, `$pull`,
+`$addToSet`. A bare value is treated as `$set`. MongoDB top-level shape
+(`{ $set: { ... } }`, `{ $inc: { ... } }`, etc.) is also accepted; the
+SDK translates before dispatch.
 
-// Inclusion
-{ field: { $in: [1, 2, 3] } }      // WHERE field IN (1, 2, 3)
-{ field: { $nin: [1, 2] } }        // WHERE field NOT IN (1, 2)
+## Transactions
 
-// Pattern
-{ field: { $like: "%pattern%" } }   // WHERE field LIKE '%pattern%'
-{ field: { $ilike: "%pattern%" } }  // WHERE field ILIKE '%pattern%' (case insensitive)
-
-// Full-text search
-{ field: { $search: "chocolate cake" } }
-
-// Null
-{ field: null }                     // WHERE field IS NULL
-{ field: { $ne: null } }           // WHERE field IS NOT NULL
-
-// Logical
-{ $and: [f1, f2] }                 // AND
-{ $or: [f1, f2] }                  // OR
-{ $not: filter }                   // NOT
-
-// Implicit AND
-{ role: "admin", age: { $gte: 18 } }
-// → WHERE role = 'admin' AND age >= 18
+```ts
+const { data, error } = await db.transaction(async (tx) => {
+  const u = await tx.users.insert({ name: "Alice" });
+  await tx.todos.insert({ userId: u.id, title: "buy milk" });
+  return u.id;
+}, { isolationLevel: "serializable" });
 ```
 
-## Update Operators
+- The callback receives a `tx` object that mirrors `db`. Methods on
+  `tx.<table>` return the raw value (`Row<S>`, `number`, …) and throw on
+  error — there is no Result envelope.
+- The transaction is rolled back automatically when the callback throws
+  or when the runtime drops the wrapper without commit/rollback.
+- `isolationLevel` accepts `"readCommitted"` (default), `"repeatableRead"`,
+  or `"serializable"`.
+- Outside the callback the result is again a `Result<R>` — the surrounding
+  `transaction()` call doesn't throw.
 
-Per-field format (native):
+The procedure wrappers `query()`, `mutation()`, and `action()` from
+`@zeroship/server` auto-open a tx around each request:
+- `query()` runs the body in a `READ ONLY` tx.
+- `mutation()` runs it in a `SERIALIZABLE` tx.
+- `action()` runs it without a tx (actions are long-lived and may call
+  `fetch()`); use `runMutation`/`runQuery` from inside an action to write.
 
-```javascript
-{ field: value }                    // field = value (implicit set)
-{ field: { $set: value } }         // field = value (explicit set)
-{ field: { $inc: n } }             // field = field + n
-{ field: { $dec: n } }             // field = field - n
-{ field: { $mul: n } }             // field = field * n
-{ field: { $push: value } }        // JSONB array append
-{ field: { $pull: value } }        // JSONB array remove
-{ field: { $addToSet: value } }    // JSONB array append if not present
+Inside such a wrapper, all `db.<table>.*` calls are routed to the active
+tx connection via the Rust `TX_CONN` thread-local — so the `Result`-shape
+surface keeps working without changing the calling convention.
+
+## Migrations (`@zeroship/migrations`)
+
+Schema changes are immediate — `createDb` calls `registerModel` which
+adds tables and columns idempotently on cold start. **Data backfills**
+are the asynchronous part: a separate orchestrator iterates rows in
+batches with resume, dry-run, cancel, and a dead-letter queue.
+
+```ts
+import { defineMigration, migrations } from "@zeroship/migrations";
+
+export const backfillRole = defineMigration({
+  name: "users.backfill_role",
+  collection: "users",
+  batchSize: 200,
+  migrateOne: async (row) => {
+    if (row.role == null) return { role: "user" };
+    return undefined;                     // skip — already migrated
+    // return null;                       // dead-letter this row
+  },
+});
+
+// Run it
+const { data } = await migrations.run(backfillRole);
+// data.status: "applied" | "applied_with_dead_letter" | "failed" | "cancelled"
+// data.processed, data.cursor, data.deadLetters
+
+// Dry-run — every UPDATE rolls back; audit state is not advanced
+await migrations.run(backfillRole, { dryRun: true });
+
+// Reset from a cancelled/failed run
+await migrations.run(backfillRole, { reset: true });
+
+// Inspect / cancel by name
+const { data: status } = await migrations.status(backfillRole);
+if (status?.status === "running") await migrations.cancel(backfillRole);
 ```
 
-Mongoose top-level format (also accepted, SDK translates):
+`migrateOne` semantics:
+- return an object → patch the row
+- return `undefined` → skip, no change
+- return `null` → dead-letter the row (audited, not patched)
 
-```javascript
-{ $set: { name: "Bob" } }
-{ $inc: { views: 1 } }
-{ $push: { tags: "new" } }
+Errors have a `.code` string property:
+
+| Code                         | When                                                        |
+|------------------------------|-------------------------------------------------------------|
+| `migration_already_running`  | Another worker holds the advisory lock.                     |
+| `migration_cancelled`        | The audit row was cancelled before this run completed.      |
+| `migration_not_active`       | The Migration wrapper has been finalised/cancelled/reset.   |
+| `migration_not_cancellable`  | Audit row is already in a terminal state.                   |
+| `no_active_migration`        | Internal — `commitBatch`/`fetchBatch` outside of a run.     |
+
+## Reactive subscriptions
+
+```ts
+import { env } from "zeroship";
+
+const sub = env.db.openSubscription("messages");
+for await (const ev of sub) {
+  // ev.kind === "change" | "resync" | "closed"
+  if (ev.kind === "change") console.log(ev.op, ev.pk, ev.columns);
+}
 ```
 
-## Per-App Isolation
+Calling `openSubscription` is synchronous — it merely registers a slot
+in the per-isolate broker. The wrapper's GC finalizer releases the slot
+as a safety net; explicit `sub.close()` is preferred.
 
-Each app gets its own Postgres schema (UUID-based):
+## Errors
+
+Errors carry a `.code` property where applicable:
+
+| `error.code`                | When                                                |
+|-----------------------------|-----------------------------------------------------|
+| `ValidationError`           | Input fails schema validation.                      |
+| `11000`                     | Duplicate unique-key violation.                     |
+| `OptimisticLockError`       | `update` with a CAS version that didn't match.     |
+| `migration_*` (see above)   | Migration lifecycle errors.                         |
+
+Use the property directly — never substring-match on `error.message`.
+
+```ts
+const { data, error } = await db.users.update({ id, version: 5 }, { name });
+if (error?.name === "OptimisticLockError") {
+  // refetch and retry
+}
+```
+
+## Native surface (advanced)
+
+The SDK calls into a small native surface registered as `env.db` by the
+Rust DbPlugin. App code rarely needs it; SDK packages and special
+ops use it directly.
+
+- `env.db.collection(name)` → `Collection` wrapper
+- `env.db.beginTransaction({ isolationLevel? })` → `Transaction` wrapper
+- `env.db.openSubscription(name)` → `Subscription` wrapper
+- `env.db.migrations.{start,status,cancel,reset}` → Migration ops
+- `env.db.registerModel(name, schema)` → idempotent DDL
+
+Type contracts live in `sdks/types/db.d.ts`. The runtime implementation
+lives in `crates/plugin-db/`.
+
+## Per-app isolation
+
+Every app gets its own Postgres schema (UUID-based):
 
 ```sql
-SELECT * FROM "app-uuid"."users" WHERE ...
+SELECT * FROM "<app-uuid>"."users" WHERE ...
 ```
 
-The `app_id` is injected by the Rust runtime from `env_vars`, not from user code. `globalThis.zeroship` is frozen — creators cannot override the schema.
-
-## Validation
-
-Runs in the SDK (JS) before every `create()`, `insertMany()`, `updateOne()`, `updateMany()`.
-
-```javascript
-// Fails validation — returns error, doesn't hit database
-const { error } = await users.insert({ name: "" });
-// error = { name: "ValidationError", errors: { name: { message: "name is required", path: "name" } } }
-
-// Type mismatch
-const { error } = await users.insert({ name: "Alice", age: "thirty" });
-// error = { name: "ValidationError", errors: { age: { message: "age must be a number", path: "age" } } }
-
-// On update: only validates provided fields (partial)
-const { error } = await users.update({ id: 1 }, { age: -1 });
-// error = { name: "ValidationError", errors: { age: { message: "age must be at least 0", path: "age" } } }
-```
-
-## Error Codes
-
-| Code | When |
-|---|---|
-| `ValidationError` | Input fails schema validation |
-| `11000` | Duplicate on unique field (Mongoose-compatible code) |
-| DB error message | Other Postgres errors |
-
-## Connection Architecture
-
-```
-Worker thread:
-  ntex handler → V8 isolate → @zeroship/db → zeroship.db.find()
-    → Rust native callback
-    → validate collection + filter + operators
-    → build parameterized SQL (text-format params)
-    → query_text_params via Rc<Pool> (per-thread)
-    → zeroship-pg → Postgres → rows → JSON → V8
-
-Per-thread: 8 idle connections, shared across all isolates
-32 threads × 8 connections = 256 max per worker
-```
-
-## Implementation
-
-```
-SDK (sdks/db/):
-  src/index.ts        — export { model, t }
-  src/model.ts        — model(name, schema) → Collection
-  src/collection.ts   — Collection class with { data, error } methods
-  src/query.ts        — Query thenable (sort/limit/skip/select)
-  src/schema.ts       — normalizeSchema() for both styles
-  src/types.ts        — t builder + TypeBuilder + FieldDef
-  src/validate.ts     — validateDoc(), validatePartial()
-  src/errors.ts       — ValidationError, mapNativeError()
-  src/utils.ts        — field mapping, aggregate translation
-
-Native (crates/plugin-db/):
-  src/lib.rs          — DbPlugin (NativePlugin trait)
-  src/callbacks.rs    — V8 callbacks for zeroship.db.*
-  src/query.rs        — filter/update/aggregate JSON → parameterized SQL
-
-214 SDK tests (unit + robustness)
-89 native tests (69 unit + 20 integration)
-```
-
-## What's Implemented
-
-- 11 native primitives (find, findOne, insert, insertMany, updateOne, updateMany, deleteOne, deleteMany, count, distinct, aggregate)
-- Full filter operators ($eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $like, $ilike, $search, $and, $or, $not)
-- Full update operators ($set, $inc, $dec, $mul, $push, $pull, $addToSet)
-- Aggregation pipeline ($match, $group, $having, $sort, $limit) with $count, $sum, $avg, $min, $max
-- Schema definition (both Mongoose and builder styles)
-- Validation (required, type, min/max, enum, pattern)
-- Query chaining (.find().sort().limit().skip().select())
-- Field mapping (id↔_id equivalent, camelCase↔snake_case for auto fields)
-- E2E tested through full platform pipeline
-
-## What's Implemented
-
-- `{ data, error }` return pattern on all Collection methods
-- `createDb()` with typed collections and `const T` inference
-- `findById(id)`, `exists(filter)`, `countDocuments(filter)`
-- Transactions: `db.transaction(async (tx) => { ... })` with TxCollection (throws on error)
-- Auto-migration: `registerModel` creates schemas/tables/columns on cold start
-- TypeBuilder API: `t.string().required().min(3)` with full generic inference
-- Naming strategy: `naming.snakeCase` (default), `naming.asIs`, or custom
-- Typed filters (`Filter<S>`), typed updates (`UpdateExpression<S>`), typed rows (`Row<S>`)
-- Aggregate pipeline translation: `$group`, `$match`, `$having`, `$sort`, `$limit`
-- Accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`
-
-## What's Deferred
-
-- `findOneAndUpdate` / `findOneAndDelete` — atomic read-modify-return
-- Populate / lookup (JOINs)
-- Soft delete (`deletedAt` field + automatic filtering)
-- Cursor pagination (`{ after: lastId }` → `WHERE id > $1 LIMIT $2`)
-- Upsert (`INSERT ... ON CONFLICT DO UPDATE`)
-- Type-safe `select()` return type narrowing
-- Transaction isolation levels (`SERIALIZABLE`, `REPEATABLE READ`)
-- Realtime subscriptions
-- `OpResult::Failed` in Rust runtime (proper promise rejection instead of error envelope)
-- `$first` sort-order threading into `array_agg ORDER BY`
+The `app_id` is injected by the runtime from `env_vars`; user code can
+neither read nor override it. `env.db` is frozen.
