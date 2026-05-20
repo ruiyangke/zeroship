@@ -139,18 +139,14 @@ pub(crate) fn get_app_id_pub(state: &SharedState) -> String {
 /// callback has already set a rejected promise on `rv` and the caller
 /// must return immediately.
 ///
-/// The error envelope matches the `capability_violation` shape (`code`,
-/// `wrapper`, `violated`, `remediation`) so the dispatch path can
-/// render a structured 500 instead of a generic exception.
-///
 /// Refuse a write op from inside a `query()` handler. Returns
 /// `Some(rejected_promise)` to the caller (which returns it as the JS
-/// value); `None` when the write is allowed. The FunctionCallback-shape
-/// variant of this gate (`fn(scope, &mut rv, op) -> bool`) used to live
-/// alongside this one for the flat callbacks (find/insert/etc.); those
-/// callbacks were deleted in the v2-only consolidation, so this is the
-/// only entry now.
-pub(crate) fn refuse_if_query_capability_returning<'s>(
+/// value); `None` when the write is allowed.
+///
+/// The error envelope matches the `capability_violation` shape
+/// (`code`, `wrapper`, `violated`, `remediation`) so the dispatch
+/// path can render a structured 500 instead of a generic exception.
+pub(crate) fn refuse_if_query_capability<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     op: &str,
 ) -> Option<v8::Local<'s, v8::Promise>> {
@@ -492,12 +488,6 @@ fn rows_to_json(rows: &[compio_postgres::Row]) -> String {
     Value::Array(arr).to_string()
 }
 
-/// Public re-export of [`row_to_json`] for cross-module use (B1).
-#[doc(hidden)]
-pub fn row_to_json_pub(row: &compio_postgres::Row) -> Value {
-    row_to_json(row)
-}
-
 /// Convert a single Row to a JSON object.
 ///
 /// Uses column OIDs to determine the appropriate JSON type:
@@ -508,7 +498,7 @@ pub fn row_to_json_pub(row: &compio_postgres::Row) -> Value {
 /// - UUID → string
 /// - JSONB/JSON → parsed JSON value
 /// - Everything else → string (via text representation)
-fn row_to_json(row: &compio_postgres::Row) -> Value {
+pub(crate) fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
     for col in row.columns() {
         let key = col.name().to_string();
@@ -627,15 +617,13 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Callback: findOne(collection, filterJson, optsJson)
+// Shared `findOne` dispatch
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `findOne` — used by both the flat callback
-/// (`pub fn find_one`) and the `Collection.findOne` v8_method on the
-/// hot path. Both arrive with an already-decoded `serde_json::Value`
-/// filter (the flat path via `parse_json_arg`'s JSON round trip, the
-/// v8_class path via the direct V8→serde walker in
-/// [`v8_value_to_serde_json`]).
+/// Shared dispatch for `findOne`, called by `Collection::find_one`
+/// (the `#[v8_method]`). Filter arrives already decoded into
+/// `serde_json::Value` via [`v8_value_to_serde_json`] — no JSON
+/// round-trip on the hot path.
 ///
 /// Resolves the Promise with a JSON STRING (the SDK side calls
 /// `JSON.parse` on the result); on error rejects with the message.
@@ -727,9 +715,8 @@ pub(crate) fn dispatch_find<'s>(
 // ---------------------------------------------------------------------------
 
 /// Shared dispatch for `insert`. The capability gate is the caller's
-/// responsibility — both `pub fn insert` (the flat callback) and
-/// `Collection.insert` check it before reaching here and return the
-/// rejected promise directly if violated.
+/// responsibility — `Collection::insert` calls
+/// [`refuse_if_query_capability`] before reaching here.
 pub(crate) fn dispatch_insert<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
@@ -1792,8 +1779,8 @@ async fn create_index_with_recovery_audited(
 /// the connection-leak footgun the pre-wrapper API had.
 ///
 /// All subsequent CRUD ops use the transaction connection until
-/// commit/rollback (whether issued through the wrapper or through the
-/// legacy flat `commitTransaction` / `rollbackTransaction` callbacks).
+/// the wrapper's `.commit()` or `.rollback()` runs (or the wrapper's
+/// `Drop` finalizer auto-rollbacks on GC).
 ///
 /// The Transaction wrapper is minted *synchronously* before the BEGIN
 /// future runs (we need a V8 scope to allocate it). On BEGIN success
@@ -1828,24 +1815,6 @@ pub fn begin_transaction(
             return;
         }
     };
-
-    // Layer the flat CRUD callbacks onto the wrapper so a
-    // `tx.collection("x").find(...)` forwarder can find `find` on the
-    // parent. Reads the callbacks straight off `env.db` (the receiver).
-    let env_db_local: v8::Local<v8::Object> = match args.this().try_into() {
-        Ok(o) => o,
-        Err(_) => {
-            let msg = v8::String::new(
-                scope,
-                "beginTransaction: receiver is not an object",
-            )
-            .unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return;
-        }
-    };
-    crate::v8_classes::transaction::install_flat_callbacks_on(scope, tx_obj, env_db_local);
 
     let tx_obj_as_value: v8::Local<v8::Value> = tx_obj.into();
     let tx_global: v8::Global<v8::Value> = v8::Global::new(scope, tx_obj_as_value);
@@ -2253,7 +2222,11 @@ pub fn install_auto_tx_globals(scope: &mut v8::PinScope<'_, '_>) {
 // `exec_*` function. See `migrations.rs` for the semantics.
 // ===========================================================================
 
-async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, String> {
+/// Lazy pool accessor shared by every async helper that needs the
+/// pooled connection. First call kicks off `init_pool_async` (Postgres
+/// connect + warm-up); subsequent calls clone the `Rc<Pool>` out of
+/// the per-thread cell.
+pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, String> {
     let has_pool = DB_POOL.with(|p| p.borrow().is_some());
     if !has_pool {
         crate::init_pool_async().await.map_err(|e| format!("db: lazy init failed: {e}"))?;
@@ -2328,22 +2301,19 @@ pub fn migration_cancel(
 
 /// `zeroship.db.migrationStart(spec)` → Promise<Migration>
 ///
-/// Future-API counterpart to the flat `migrationBegin` /
-/// `migrationFetchBatch` / `migrationCommitBatch` / `migrationCancel` /
-/// `migrationStatus` / `migrationReset` callbacks the current
-/// `@zeroship/migrations` SDK uses. Acquires the advisory lock + writes
-/// the audit row (delegates to the same `migrations::exec_begin`), then
-/// returns a `Migration` v8_class instance whose `.status()` / `.cancel()`
-/// / `.reset()` methods delegate back to the same `exec_*` helpers.
+/// Acquires the advisory lock + writes the audit row (delegates to
+/// `migrations::exec_begin`), then returns a `Migration` v8_class
+/// instance whose `.fetchBatch()` / `.commitBatch()` / `.status()` /
+/// `.cancel()` / `.reset()` methods delegate back to the same
+/// `migrations::exec_*` helpers — so all SQL lives in one place.
 ///
-/// The wrapper's GC finalizer spawns a best-effort `exec_cancel` if user
-/// code drops every reference without reaching a terminal state — closes
-/// the handle-leak parallel to [`subscribe`] (whose `Subscription`
-/// wrapper auto-closes the broker handle on GC).
+/// The wrapper's GC finalizer spawns a best-effort `exec_cancel` if
+/// user code drops every reference without reaching a terminal state
+/// — parallel to [`open_subscription`]'s broker auto-close.
 ///
-/// `spec` is a JS object: `{ name, collection, batchSize?, dryRun? }`.
-/// `batchSize` is accepted for forward-compat (the SDK passes it for
-/// `migrationFetchBatch`); the callback itself doesn't use it.
+/// `spec` is a JS object: `{ name, collection, batchSize?, dryRun?,
+/// reset? }`. `batchSize` is the SDK's hint for `.fetchBatch()`; the
+/// start callback itself doesn't use it.
 pub fn migration_start(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -2391,54 +2361,27 @@ pub fn migration_reset(
 //
 // JS surface (defined in sdks/db/src/subscribe.ts):
 //
-//   const sub = env.db.subscribe(collection)          // → handle id (number)
-//   const msg = await env.db.subscribePoll(handle)    // → JSON event
-//   env.db.subscribeClose(handle)                     // synchronous
+//   const sub = env.db.openSubscription(collection)   // → Subscription wrapper
+//   const msg = await sub.pollJson()                  // → JSON event | null
+//   sub.close()                                       // synchronous, idempotent
 //   await env.db.replicationSetup()                   // → JSON setup outcome
 //   await env.db.replicationWatchdog()                // → JSON [{slot,...}]
 //   await env.db.replicationDropAbandoned(seconds)    // → JSON [dropped slot names]
 //
-// The (handle, poll, close) split keeps each native call short-lived,
-// matching the existing promise-completion model. The AsyncIterable
-// shim in JS wraps the three primitives into a `for await ... of`
-// loop.
+// The Subscription wrapper is a `#[v8_class]` instance — its Weak
+// finalizer closes the broker entry on GC, so callers that drop the
+// wrapper without `.close()` still release the slot.
 // ===========================================================================
-
-// Per-isolate subscription registry. Maps handle → Subscription so
-// `subscribePoll(handle)` and `subscribeClose(handle)` can locate
-// the broker entry without keeping a JS-side reference that would
-// pin a V8 external.
-//
-// Handle numeric ids are monotonic — `next_handle_id` never recycles.
-// Subscriptions are auto-removed when the iterator drains the
-// `Closed` message (in `subscribe_poll`).
-thread_local! {
-    static SUBSCRIPTIONS: std::cell::RefCell<std::collections::HashMap<u32, crate::broker::Subscription>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-    static NEXT_HANDLE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
-}
-
-
 
 /// `zeroship.db.openSubscription(collection)` → `Subscription` wrapper
 ///
-/// Stage 3 of the runtime-macros DB refactor — replaces the handle-id
-/// triple (`subscribe` / `subscribePoll` / `subscribeClose`) with a
-/// native `Subscription` v8_class instance whose Weak finalizer closes
-/// the broker entry on GC. Closes the P8a handle-leak: callers that
-/// drop the wrapper without explicit `.close()` still release the
-/// broker slot when V8 reclaims the wrapper.
-///
-/// Synchronous: subscribes on the thread-local broker, mints the
-/// wrapper, returns it directly. Use `.pollJson()` to drain events
-/// (returns a Promise<string|null>) and `.close()` for idempotent
-/// explicit teardown.
-///
-/// The legacy three-callback API is kept alongside this for back-compat
-/// with `sdks/db/src/subscribe.ts`'s current implementation; future SDK
-/// work routes `subscribe()` through this primitive and lets the GC
-/// finalizer handle the leak path. Existing tests continue to use the
-/// handle-id surface unchanged.
+/// Synchronous: subscribes on the thread-local broker, mints a
+/// `Subscription` v8_class instance, returns it directly. The
+/// wrapper's Weak finalizer closes the broker entry on GC, so callers
+/// that drop the JS reference without `.close()` still release the
+/// slot. Use `.pollJson()` to drain events (returns
+/// `Promise<string|null>`) and `.close()` for idempotent explicit
+/// teardown.
 pub fn open_subscription(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,

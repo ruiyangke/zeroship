@@ -234,11 +234,12 @@ impl Subscription {
         })))
     }
 
-    /// Attach a read-set to this subscription. Called by Stage 4
-    /// (useQuery) after the initial query handler runs and captures
-    /// its predicate fingerprint. Subscriptions opened directly via
-    /// `db.subscribe(collection)` (no useQuery) leave this `None`, and
-    /// the broker falls back to coarse-grained delivery.
+    /// Attach a read-set to this subscription. Called after the
+    /// initial query handler runs and captures its predicate
+    /// fingerprint (the useQuery wiring on the SDK side). Subscriptions
+    /// opened directly via `db.subscribe(collection)` (no read-set
+    /// capture) leave this `None`, and the broker falls back to
+    /// coarse-grained delivery.
     ///
     /// The read-set is set once at registration time; today there's no
     /// API to mutate it. If a query handler is re-run and its
@@ -585,7 +586,7 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// WS push-frame format (Stage 3)
+// WS push-frame format
 // ---------------------------------------------------------------------------
 //
 // Mirrors the shape spelled out in the P8b task contract:
@@ -1004,7 +1005,7 @@ mod tests {
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Change(_))));
     }
 
-    // ---------- P8b Stage 3: WS push frames ----------
+    // ---------- WS push frames ----------
 
     #[test]
     fn b8b_ws_frame_change_shape() {

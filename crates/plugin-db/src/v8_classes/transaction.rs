@@ -1,20 +1,11 @@
 //! `Transaction` — native V8 wrapper for an open DB transaction.
 //!
 //! Returned by `env.db.beginTransaction(isolationLevel?)`. The wrapper
-//! owns the lifecycle of the per-isolate [`crate::TX_CONN`] thread-local
-//! for as long as the transaction is active; `.commit()` / `.rollback()`
-//! drain TX_CONN and run the matching SQL, and a `v8::Weak` guaranteed
-//! finalizer reclaims the wrapper's `Box<Transaction>` on GC.
-//!
-//! ## Why a v8_class
-//!
-//! Before this wrapper landed, a user who `await`-ed
-//! `env.db.beginTransaction()` and then dropped the result without
-//! calling `commitTransaction()` / `rollbackTransaction()` leaked the
-//! Postgres connection until isolate teardown — the TX_CONN
-//! thread-local pinned the [`compio_postgres::Client`] indefinitely.
-//! The wrapper's Weak finalizer fixes that: when V8 collects the
-//! wrapper, the finalizer drops the `Box<Transaction>`, our `Drop` impl
+//! owns the per-isolate [`crate::TX_CONN`] for the lifetime of the
+//! transaction; `.commit()` / `.rollback()` drain TX_CONN and run the
+//! matching SQL, and a `v8::Weak` guaranteed finalizer reclaims the
+//! wrapper's `Box<Transaction>` on GC. If user code drops the wrapper
+//! without explicit `.commit()` / `.rollback()`, the `Drop` impl
 //! takes the still-active `Client` out of TX_CONN, and Postgres
 //! observes the connection close and auto-rollbacks server-side.
 //!
@@ -22,34 +13,27 @@
 //!
 //! ```ts
 //! const tx = await env.db.beginTransaction("read committed");
-//! await tx.collection("todos").create({ ... });
-//! await tx.commit();                 // explicit
+//! await tx.collection("todos").insert({ ... });
+//! await tx.commit();              // explicit
 //! // (or) await tx.rollback();
 //! // (or) tx goes out of scope    → GC finalizer rollbacks
 //! ```
 //!
 //! `.collection(name)` returns a [`super::collection::Collection`]
-//! v8_class instance bound to a *fake-Db parent that this Transaction
-//! impersonates* — Collection's forwarders read methods like `findOne`
-//! / `insert` off the parent object and call them with `[name,
-//! ...args]`. The Transaction wrapper carries the 27 flat callbacks as
-//! own properties (mirrored from the real Db at mint time), so each
-//! forwarded call reads the underlying Db callback through this
-//! wrapper and dispatches it. Because TX_CONN is set while the
-//! transaction is active, every CRUD callback routes through the
-//! transaction connection via `run_sql` automatically.
+//! v8_class instance bound to this Transaction. Because TX_CONN is
+//! set while the transaction is active, every CRUD method on that
+//! Collection (which calls `callbacks::dispatch_*` → `run_sql`)
+//! automatically routes through the transaction connection.
 //!
-//! ## Coexistence with the legacy flat API
+//! ## Ownership token
 //!
-//! The flat callbacks `commitTransaction` / `rollbackTransaction` stay
-//! registered for back-compat with the current `@zeroship/db` SDK,
-//! which still does `await native.commitTransaction()` after the user
-//! handler runs. To keep both surfaces correct under the same TX_CONN
-//! slot, we track ownership with [`TX_TOKEN`]: every begin (wrapper or
-//! flat) bumps the token, and any commit/rollback (wrapper or flat or
-//! GC) checks `self.token == TX_TOKEN` before acting. After the legacy
-//! `commitTransaction` consumes TX_CONN, the wrapper's own
-//! `commit`/`rollback`/finalizer sees the mismatch and short-circuits.
+//! TX_CONN is a single per-isolate slot; an explicit `.commit()` and
+//! the wrapper's `Drop` finalizer can race (commit succeeds, GC
+//! finalizer wakes up afterwards). To make the race safe, every
+//! successful BEGIN bumps [`TX_TOKEN`] and stamps the same value
+//! onto the wrapper. Commit / rollback / Drop all check
+//! `self.token == TX_TOKEN` before touching the connection — once
+//! one path settles the tx and clears TX_TOKEN, the others no-op.
 
 #![allow(unsafe_code)]
 
@@ -76,8 +60,9 @@ use crate::v8_classes::collection::mint_collection;
 pub struct Transaction {
     /// Ownership token stamped into [`crate::TX_TOKEN`] at successful
     /// BEGIN. Commit / rollback / GC compare to the current TX_TOKEN
-    /// before taking action — if the legacy flat callback already
-    /// consumed TX_CONN, our token won't match and we no-op.
+    /// before taking action — once one path settles the tx and clears
+    /// TX_TOKEN, the others see the mismatch and no-op (so an
+    /// explicit `.commit()` followed by GC doesn't run COMMIT twice).
     pub(crate) token: Cell<u64>,
     /// True once the wrapper has been committed or rolled back. Further
     /// `.commit()` / `.rollback()` calls reject; `.collection()` /
@@ -217,10 +202,10 @@ impl Transaction {
 /// connection, then clear [`crate::TX_CONN`] / [`crate::TX_TOKEN`] and
 /// mark the wrapper settled.
 ///
-/// Defensive against races with the legacy flat callbacks: if our
-/// `token` doesn't match the current TX_TOKEN by the time we run, the
-/// transaction has already been settled by someone else — we reject
-/// with a clear "already settled" message.
+/// Token check: if our `token` no longer matches the live `TX_TOKEN`
+/// the transaction has already been settled (typically by an explicit
+/// `.commit()` followed by GC running our finalizer). We reject with
+/// a clear "already settled" message so the call surface is honest.
 async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     let token = this.token.get();
     if token == 0 || this.settled.get() {
@@ -236,10 +221,10 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
         ));
     }
 
-    // Take the Client out — same drain pattern as the legacy
-    // `exec_end`. We hold it through the cmd execution and drop it at
-    // the end of this scope; that lets the spawned Connection task
-    // observe the closed sender and tear the conn down cleanly.
+    // Take the Client out. We hold it through the cmd execution and
+    // drop it at the end of this scope; that lets the spawned
+    // Connection task observe the closed sender and tear the conn
+    // down cleanly.
     let client_opt = crate::TX_CONN.with(|c| c.borrow_mut().take());
     let Some(client) = client_opt else {
         // Belt and suspenders: TX_CONN was already cleared. Mark
@@ -251,9 +236,10 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
         ));
     };
 
-    // Clear ownership BEFORE awaiting so a concurrent finalizer (or a
-    // legacy flat callback firing in parallel — unlikely but cheap to
-    // defend) can observe "settled" and no-op.
+    // Clear ownership BEFORE awaiting so a concurrent finalizer (the
+    // wrapper getting GC'd while the await is in flight) observes
+    // "settled" and no-ops instead of running ROLLBACK on a connection
+    // we already have in hand.
     crate::TX_TOKEN.with(|t| t.set(0));
     this.settled.set(true);
 
@@ -271,18 +257,17 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
 // mint_transaction — build the wrapper at begin-time
 // ---------------------------------------------------------------------------
 
-/// Mint a Transaction v8_class instance and stamp `token` into both
-/// the wrapper state and [`crate::TX_TOKEN`].
+/// Mint a Transaction v8_class instance and stamp `token` into the
+/// wrapper state. The matching `TX_TOKEN` write happens in
+/// [`crate::callbacks::begin_transaction`] only after the async BEGIN
+/// succeeds — so a failed BEGIN leaves the wrapper with a token that
+/// never matches, and its `Drop` is a no-op when V8 eventually
+/// collects it.
 ///
 /// Caller invariant: TX_CONN has just been set by a successful BEGIN
 /// and no other Transaction wrapper is alive for the same TX_CONN —
-/// this is enforced by the "nested transactions not supported" check
-/// in [`crate::callbacks::begin_transaction`]'s async path.
-///
-/// The caller must layer the 27 flat callbacks (`findOne`, `insert`,
-/// …) as own properties on the returned object — otherwise
-/// `tx.collection("x").find(...)` has nothing to dispatch to. This is
-/// done by [`install_flat_callbacks_on`].
+/// enforced by the "nested transactions not supported" check in
+/// [`crate::callbacks::begin_transaction`]'s async path.
 pub fn mint_transaction<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     token: u64,
@@ -329,34 +314,4 @@ pub fn mint_transaction<'s>(
     std::mem::forget(weak);
 
     Ok(obj)
-}
-
-/// Copy the parent Db's flat CRUD callbacks onto a freshly minted
-/// Transaction wrapper as own properties.
-///
-/// The Transaction's `.collection(name)` returns a Collection whose
-/// CRUD forwarders read methods like `findOne`, `insert` off the
-/// parent object (the Transaction wrapper here) and call them with
-/// `[name, ...args]`. So the wrapper must carry those callbacks as
-/// own properties — same shape the real `env.db` instance does via
-/// `NativeRegistrar`.
-///
-/// We mirror the subset that participate in TX_CONN-driven dispatch
-/// (the CRUD ops + `aggregate` / `count` / `distinct`). Subscription
-/// ops are deliberately excluded — the broker isn't transactional.
-pub fn install_flat_callbacks_on(
-    scope: &mut v8::PinScope<'_, '_>,
-    tx_obj: v8::Local<v8::Object>,
-    env_db: v8::Local<v8::Object>,
-) {
-    const METHODS: &[&str] = &[
-        "findOne", "find", "insert", "insertMany", "updateOne", "updateMany",
-        "deleteOne", "deleteMany", "upsert", "count", "distinct", "aggregate",
-    ];
-    for m in METHODS {
-        let key = v8::String::new(scope, m).unwrap();
-        if let Some(v) = env_db.get(scope, key.into()) {
-            tx_obj.set(scope, key.into(), v);
-        }
-    }
 }

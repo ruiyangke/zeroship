@@ -44,7 +44,7 @@ pub struct BuiltQuery {
 }
 
 /// Validate a collection name: alphanumeric + underscores only.
-fn validate_collection(name: &str) -> Result<(), QueryError> {
+pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
             "collection name cannot be empty".to_string(),
@@ -82,22 +82,8 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
 
 /// Quote an identifier (table or column name) with double-quotes.
 /// Escapes any embedded double-quotes by doubling them.
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-/// Public re-export for cross-module use (B1 migrations). Same as the
-/// private [`quote_ident`] — kept private at the SQL-build site so
-/// query.rs internals stay encapsulated.
-#[doc(hidden)]
-pub fn quote_ident_pub(name: &str) -> String {
-    quote_ident(name)
-}
-
-/// Public re-export of [`validate_collection`] for B1 migrations.
-#[doc(hidden)]
-pub fn validate_collection_pub(name: &str) -> Result<(), QueryError> {
-    validate_collection(name)
 }
 
 // ---------------------------------------------------------------------------

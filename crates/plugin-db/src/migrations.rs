@@ -2,33 +2,35 @@
 //! `@zeroship/migrations` component (`docs/proposals/zeroship-db.md`
 //! section B1).
 //!
-//! ## Surface (registered on `zeroship.db.*` by `lib.rs`)
+//! ## Surface
 //!
-//! - `migrationBegin(name, collection, dryRun, reset)` →
-//!   `{ auditId, cursor, processed, status, deadLetterPks }`
-//! - `migrationFetchBatch(cursor, batchSize)` → `{ rows: [...] }`
-//! - `migrationCommitBatch(updates, deadLetterPks, nextCursor, processed,
-//!    isDone, terminalStatus, error)` → `{ committed: bool }`
-//! - `migrationStatus(name, collection)` → audit-row JSON
-//! - `migrationCancel(name, collection)` → `{ ok: bool }` or error
-//! - `migrationReset(name, collection)` → `{ ok: true }`
-//! - `migrationRelease()` — internal; releases lock on a panic path
+//! Two layers:
+//!
+//! - **Per-run methods on the `Migration` wrapper**
+//!   ([`crate::v8_classes::migration::Migration`]):
+//!   `.fetchBatch(cursor, batchSize)`, `.commitBatch(updates, …)`,
+//!   `.status()`, `.cancel()`, `.reset()`. The wrapper is minted by
+//!   `env.db.migrationStart(spec)` and owns the dedicated client
+//!   that holds the advisory lock for the run.
+//!
+//! - **By-name observation callbacks** on `env.db`:
+//!   `migrationStatus(name, collection)`, `migrationCancel(...)`,
+//!   `migrationReset(...)`. These read the audit row directly and
+//!   never touch the advisory lock, so they're safe to call from
+//!   any worker without colliding with an in-flight run.
+//!
+//! Public functions in this module (`exec_begin`, `exec_fetch_batch`,
+//! `exec_commit_batch`, `exec_status`, `exec_cancel`, `exec_reset`)
+//! are the underlying SQL executors driven by both layers.
 //!
 //! ## Architectural split
 //!
-//! The proposal called for a single `runMigrationBatch(...)` primitive
-//! that loops in Rust and invokes the user's JS `migrateOne` per row.
-//! Doing so requires Rust → JS callbacks mid-batch, which the current
-//! plugin callback surface does not expose.
-//!
-//! Instead the SDK keeps the loop in JavaScript: it calls
-//! `migrationFetchBatch` to read rows, runs `migrateOne` per row in JS
-//! (so per-row try/catch and dead-letter accumulation live in the SDK),
-//! and posts results back via `migrationCommitBatch`. The native side
+//! The SDK keeps the per-row loop in JavaScript: it calls
+//! `.fetchBatch()` to read rows, runs `migrateOne` per row (so
+//! per-row try/catch and dead-letter accumulation live in the SDK),
+//! and posts results back via `.commitBatch()`. The native side
 //! owns: advisory-lock lifetime, audit-row state machine, SQL
-//! execution, cursor monotonicity, dry-run rollback. This matches the
-//! proposal's "SDK orchestrates: loop calling the batch primitive" line
-//! verbatim.
+//! execution, cursor monotonicity, dry-run rollback.
 //!
 //! ## Lock lifetime
 //!
@@ -44,7 +46,7 @@ use compio_postgres::{Client, Pool};
 use serde_json::Value;
 
 use crate::audit::{ActorKind, ChangeClass, TerminalStatus};
-use crate::query::{quote_ident_pub as quote_ident, validate_collection_pub as validate_collection};
+use crate::query::{quote_ident, validate_collection};
 
 thread_local! {
     /// Active migration owner state. `Some` after a successful
@@ -409,7 +411,7 @@ pub async fn exec_fetch_batch(
     return_lock_client(client);
 
     let rows = rows_result.map_err(|e| format!("db: migration fetch failed: {e}"))?;
-    let row_jsons: Vec<Value> = rows.iter().map(crate::callbacks::row_to_json_pub).collect();
+    let row_jsons: Vec<Value> = rows.iter().map(crate::callbacks::row_to_json).collect();
     Ok(serde_json::json!({ "rows": row_jsons }).to_string())
 }
 
@@ -497,7 +499,7 @@ pub async fn exec_commit_batch(
             params.push(crate::query::value_to_param_pub(val));
             assignments.push(format!(
                 "{} = ${}",
-                crate::query::quote_ident_pub(col),
+                crate::query::quote_ident(col),
                 params.len()
             ));
         }
@@ -505,8 +507,8 @@ pub async fn exec_commit_batch(
             continue;
         }
 
-        let schema = crate::query::quote_ident_pub(app_id);
-        let table = crate::query::quote_ident_pub(&collection);
+        let schema = crate::query::quote_ident(app_id);
+        let table = crate::query::quote_ident(&collection);
         let sql = format!(
             "UPDATE {schema}.{table} SET {} WHERE id = $1::bigint",
             assignments.join(", ")

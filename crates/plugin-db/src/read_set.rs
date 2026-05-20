@@ -41,11 +41,12 @@
 //! ## What this module does NOT do
 //!
 //! - It doesn't open a subscription. The capture buffer is a passive
-//!   thread-local; some higher layer (Stage 4 useQuery) snapshots it
-//!   into a [`Subscription`] when the handler returns.
+//!   thread-local; the layer that opens subscriptions
+//!   (`@zeroship/db`'s reactive-query helper) snapshots it into a
+//!   [`Subscription`] when the handler returns.
 //! - It doesn't talk to V8. All the V8-facing surface lives in
-//!   `callbacks.rs` (Stage 1 site of capture) and the broker's existing
-//!   v8_class wrapper.
+//!   `callbacks.rs` (capture sites: dispatch_find / dispatch_find_one /
+//!   dispatch_count) and the broker's v8_class wrapper.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -289,8 +290,7 @@ pub fn normalise_filter(filter: &Value) -> Option<Predicate> {
 //
 // The capture buffer is keyed by the active procedure kind: capture is
 // enabled only when an [`Active`] scope guard is in scope (set up by
-// the runtime's query-dispatch entry path; see Stage 4 follow-up). For
-// P8b we expose the raw API so:
+// the runtime's query-dispatch entry path). The API is split so:
 //
 // 1. find / findOne / count / aggregate callbacks can call
 //    [`record_if_active`] without checking themselves.

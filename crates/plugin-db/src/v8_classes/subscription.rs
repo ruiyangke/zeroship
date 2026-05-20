@@ -1,27 +1,22 @@
 //! `Subscription` — native V8 wrapper around a `broker::Subscription`.
 //!
-//! Closes the P8a handle-leak: the pre-refactor handle-id-based design
-//! (see `callbacks::subscribe` / `subscribePoll` / `subscribeClose`)
-//! relied on the JS-side AsyncIterable's `.return()` to call
-//! `subscribeClose(handle)`. If user code dropped the AsyncIterable
-//! without calling `.return()` (e.g. assigned to `null` then GC'd, or
-//! the holding scope exited without a `for await`), the broker entry
-//! stayed alive forever.
-//!
-//! This wrapper owns the `broker::Subscription` directly in its V8
+//! The wrapper owns the `broker::Subscription` directly in its V8
 //! internal field 0. A `v8::Weak::with_guaranteed_finalizer` registered
 //! at construction calls `broker_sub.close()` when V8 collects the
-//! wrapper — closing the broker handle automatically on drop.
+//! wrapper, so callers that drop the JS handle without `.close()` still
+//! release the broker slot.
 //!
 //! ## JS surface
 //!
-//! Today the wrapper exposes a single `pollJson()` method returning a
-//! `Promise<string|null>` that resolves with the next event's JSON, or
-//! `null` if the subscription has been closed and drained. The SDK
-//! layer (`sdks/db/src/subscribe.ts` — a follow-up PR) wraps this into
-//! the public `AsyncIterable<SubscriptionEvent>` shape. The macro's
-//! `#[v8_async_iterable]` attribute can later alias `[Symbol.asyncIterator]`
-//! to a generated `values()` once the SDK side migrates.
+//! - `pollJson()` → `Promise<string | null>` — resolves with the next
+//!   event's JSON envelope, or `null` once the subscription has been
+//!   closed and drained.
+//! - `close()` — idempotent synchronous teardown; subsequent polls
+//!   resolve `null`.
+//!
+//! The SDK layer (`sdks/db/src/subscribe.ts`) wraps this into the
+//! public `AsyncIterable<SubscriptionEvent>` shape consumed by user
+//! `for await ... of` loops.
 //!
 //! `close()` is exposed as an idempotent synchronous method for
 //! callers that want explicit teardown. Identical effect to dropping

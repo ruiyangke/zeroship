@@ -1,38 +1,29 @@
 //! `Migration` — native V8 wrapper for an in-flight backfill migration.
 //!
-//! Closes the handle-leak parallel to [`super::subscription::Subscription`]:
-//! today the flat `migrationBegin` / `migrationFetchBatch` /
-//! `migrationCommitBatch` / `migrationCancel` callbacks rely on the SDK
-//! (`sdks/migrations/src/native.ts`) to call `migrationCancel` (or drive
-//! the loop to a terminal status) on every code path — including thrown
-//! errors mid-batch and the runtime tearing down a request. If user
-//! code starts a migration and then drops every reference to it without
-//! reaching a terminal state (e.g. an exception escapes the migrate
-//! loop, the SDK's `finally` never fires), the audit row stays
-//! `running`, the advisory lock leaks until the owning isolate exits,
-//! and no other worker can pick the migration up.
-//!
-//! This wrapper owns the `(app_id, name, collection)` triple in its V8
+//! The wrapper owns the `(app_id, name, collection)` triple in its V8
 //! internal field 0. A `v8::Weak::with_guaranteed_finalizer` registered
 //! at construction spawns a best-effort `exec_cancel` (which transitions
 //! the audit row to `cancelled` and lets the next worker take over) when
-//! V8 collects the wrapper without `cancel()` / `reset()` having run.
+//! V8 collects the wrapper without `cancel()` / `reset()` / a terminal
+//! `commitBatch(isDone=true)` having run — so a thrown error escaping
+//! the SDK's batch loop doesn't leak the advisory lock or strand the
+//! audit row in `running`.
 //!
 //! ## JS surface
 //!
-//! - `await env.db.migrationStart(spec)` (future: `env.db.migrations.start(spec)`)
-//!   — returns a `Migration` instance once the advisory lock + audit
-//!   row are claimed by this isolate.
-//! - `migration.status()` → `Promise<string>` (JSON status object)
-//! - `migration.cancel()` → `Promise<string>` (JSON `{"ok":true}`)
-//! - `migration.reset()` → `Promise<string>` (JSON `{"ok":true}`)
+//! - `await env.db.migrationStart(spec)` — mints a `Migration` instance
+//!   once the advisory lock + audit row are claimed by this isolate.
+//! - `m.fetchBatch(cursor, batchSize)` — read the next batch
+//! - `m.commitBatch(updates, deadLetterPks, nextCursor, processed,
+//!    isDone, terminalStatus, errorMessage)` — commit one batch
+//! - `m.status()` — `Promise<string>` (JSON status object)
+//! - `m.cancel()` — `Promise<string>` (JSON `{"ok":true}`)
+//! - `m.reset()` — `Promise<string>` (JSON `{"ok":true}`)
 //!
-//! All three methods delegate to the same `exec_status` / `exec_cancel`
-//! / `exec_reset` the flat callbacks use — no SQL duplication.
-//!
-//! The pre-refactor flat callbacks stay registered for back-compat with
-//! the current `@zeroship/migrations` SDK; this v8_class is the
-//! future-API path.
+//! Methods delegate to `crate::migrations::exec_*` so all SQL lives in
+//! one place. The standalone `migrationStatus` / `migrationCancel` /
+//! `migrationReset` callbacks on `env.db` cover the observe-by-name
+//! path (no advisory lock).
 
 #![allow(unsafe_code)]
 
@@ -277,19 +268,11 @@ impl Migration {
     }
 }
 
-/// Lazy pool accessor shared by every async method on `Migration`.
-/// Mirrors `callbacks::ensure_pool` but lives here so this module
-/// doesn't reach into `callbacks::` private helpers.
+/// Lazy pool accessor — wraps [`crate::callbacks::ensure_pool`] with
+/// an `OpError` boundary so the `Migration` v8_async_methods return
+/// the V8-aware error type the macro expects.
 async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, OpError> {
-    let has_pool = crate::DB_POOL.with(|p| p.borrow().is_some());
-    if !has_pool {
-        crate::init_pool_async()
-            .await
-            .map_err(|e| OpError::error(format!("db: lazy init failed: {e}")))?;
-    }
-    crate::DB_POOL
-        .with(|p| p.borrow().as_ref().map(Rc::clone))
-        .ok_or_else(|| OpError::error("db: pool not initialized"))
+    crate::callbacks::ensure_pool().await.map_err(OpError::error)
 }
 
 // ---------------------------------------------------------------------------

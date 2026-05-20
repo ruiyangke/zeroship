@@ -49,7 +49,7 @@
 
 use compio_postgres::Pool;
 
-use crate::callbacks::row_to_json_pub;
+use crate::callbacks::row_to_json;
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
@@ -495,7 +495,7 @@ pub async fn slot_status(
         )
         .await
         .map_err(|e| format!("replication: slot_status: {e}"))?;
-    Ok(rows.first().map(row_to_json_pub))
+    Ok(rows.first().map(row_to_json))
 }
 
 // ---------------------------------------------------------------------------

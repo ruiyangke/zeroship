@@ -1,49 +1,23 @@
 //! `Collection` — native V8 wrapper for a single named collection.
 //!
-//! Stage 2 of the db plugin nativization. A `Collection` instance is
-//! returned by [`super::db::Db::collection`]; each CRUD method on it
-//! decodes its V8 arguments directly into a `serde_json::Value` and
-//! calls the shared `dispatch_*` helper in [`crate::callbacks`].
-//!
-//! ## Why this is no longer a thin dispatch wrapper
-//!
-//! The original Stage 2 design forwarded each method through a JS-level
-//! call back into `env.db.<name>(collection, ...)`, which round-tripped
-//! every argument through `JSON.stringify` → `serde_json::from_str`.
-//! That boundary turned out to be measurable on the CRUD hot path —
-//! every `find` / `insert` paid a parse cost proportional to the
-//! filter / document size.
-//!
-//! The current implementation:
-//!   1. Reads `v8::Local<v8::Value>` args directly off the call site
-//!   2. Walks each into `serde_json::Value` via
-//!      [`crate::callbacks::v8_value_to_serde_json`] (one parse, in
-//!      native code)
-//!   3. Calls the same `dispatch_*` helper the flat callback uses
-//!   4. Returns the resulting `Promise<string>` (same wire shape as
-//!      before — the SDK still calls `JSON.parse` on the resolved
-//!      value)
-//!
-//! The flat callbacks on `env.db` (`find`, `findOne`, …) stay
-//! registered for back-compat (the SDK and any third-party callers
-//! routing through `env.db.find(name, …)` keep working) and now also
-//! delegate to the same `dispatch_*` helpers, so SQL/query logic lives
-//! in exactly one place.
+//! A `Collection` instance is returned by [`super::db::Db::collection`].
+//! Each CRUD method on it decodes its V8 arguments directly into a
+//! `serde_json::Value` (via [`crate::callbacks::v8_value_to_serde_json`])
+//! and calls the shared `dispatch_*` helper in [`crate::callbacks`] —
+//! no JSON.stringify / parse round-trip on the CRUD hot path.
 //!
 //! ## State
 //!
 //! - `name`: the collection name passed to `Db::collection(name)`.
 //! - `db_obj`: a strong `v8::Global<v8::Object>` reference to the
-//!   parent Db wrapper. The cycle this introduces (Db cache →
-//!   Collection → Db) does NOT prevent GC: when JS code drops its
-//!   reference to `env.db`, the Db wrapper's only remaining root is
-//!   the runtime's environment object, and once that lets go, both
-//!   wrappers are collected together. (See the README in
-//!   `crates/runtime-macros` for the Weak-finalizer semantics.)
-//!   The reference itself is unused by the native CRUD methods (they
-//!   no longer dispatch through JS) but is kept so that
-//!   `openSubscription` / `subscribe` — still forwarded through the
-//!   parent Db's callbacks — can find the same-named flat callback.
+//!   parent Db wrapper. The CRUD v8_methods don't read it (they call
+//!   `callbacks::dispatch_*` directly); it's kept so
+//!   `openSubscription` — the one method still routed via the parent —
+//!   can locate the same-named callback on `env.db`. The reference
+//!   cycle (Db cache → Collection → Db) doesn't prevent GC: once JS
+//!   drops `env.db`, the only remaining root is the runtime env
+//!   object; releasing that frees both wrappers together. (See the
+//!   `crates/runtime-macros` README for Weak-finalizer semantics.)
 
 #![allow(unsafe_code)]
 
@@ -233,7 +207,7 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) =
-            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.insert")
+            callbacks::refuse_if_query_capability(scope, "ctx.db.insert")
         {
             return p.into();
         }
@@ -252,7 +226,7 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) =
-            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.insertMany")
+            callbacks::refuse_if_query_capability(scope, "ctx.db.insertMany")
         {
             return p.into();
         }
@@ -272,7 +246,7 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) =
-            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.updateOne")
+            callbacks::refuse_if_query_capability(scope, "ctx.db.updateOne")
         {
             return p.into();
         }
@@ -293,7 +267,7 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) =
-            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.updateMany")
+            callbacks::refuse_if_query_capability(scope, "ctx.db.updateMany")
         {
             return p.into();
         }
@@ -313,7 +287,7 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) =
-            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.deleteOne")
+            callbacks::refuse_if_query_capability(scope, "ctx.db.deleteOne")
         {
             return p.into();
         }
@@ -332,7 +306,7 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
         if let Some(p) =
-            callbacks::refuse_if_query_capability_returning(scope, "ctx.db.deleteMany")
+            callbacks::refuse_if_query_capability(scope, "ctx.db.deleteMany")
         {
             return p.into();
         }
@@ -350,7 +324,7 @@ impl Collection {
         conflict_fields: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
-        if let Some(p) = callbacks::refuse_if_query_capability_returning(scope, "ctx.db.upsert")
+        if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.upsert")
         {
             return p.into();
         }

@@ -1,15 +1,30 @@
-//! Database plugin — `zeroship.db.*` native primitives.
+//! Database plugin — backs `env.db` with a typed `#[v8_class]` surface
+//! plus a few Db-scoped entry points.
 //!
-//! Provides MongoDB-style CRUD operations backed by PostgreSQL:
-//! - `zeroship.db.findOne(collection, filterJson)` → Promise
-//! - `zeroship.db.find(collection, filterJson, optsJson)` → Promise
-//! - `zeroship.db.insert(collection, docJson)` → Promise
-//! - `zeroship.db.updateOne(collection, filterJson, updateJson)` → Promise
-//! - `zeroship.db.deleteOne(collection, filterJson)` → Promise
-//! - `zeroship.db.count(collection, filterJson)` → Promise
+//! The `env.db` namespace is the `Db` v8_class instance (see
+//! [`v8_classes::db`]); per-collection CRUD lives on the `Collection`
+//! wrapper minted by `env.db.collection(name)`. Transactions,
+//! migration runs, and reactive subscriptions are separate wrappers
+//! (`Transaction` / `Migration` / `Subscription`), each with a `Drop`
+//! finalizer that releases its backing resource on GC.
 //!
-//! Each app gets its own PostgreSQL schema (`"app_id".*`) for data isolation.
-//! The pool is created lazily on first use (one per worker thread).
+//! The flat callbacks registered on `env.db` are intentionally
+//! short — entry points that mint wrappers, plus DB-scoped ops:
+//!
+//! - `registerModel(collection, schema)` — DDL orchestrator (A2/A3)
+//! - `collection(name)` — returns a `Collection` v8_class instance
+//! - `beginTransaction(level?)` — mints a `Transaction` wrapper
+//! - `migrationStart(spec)` — mints a `Migration` wrapper
+//! - `migrationStatus / migrationCancel / migrationReset` — observe
+//!   an existing migration by `(name, collection)` without taking the
+//!   advisory lock
+//! - `openSubscription(collection)` — returns a `Subscription` wrapper
+//! - `replicationSetup / Watchdog / DropAbandoned` — operator surface
+//! - `startReplicationConsumer` — auto-spawn the supervised WAL consumer
+//!
+//! Each app gets its own PostgreSQL schema (`"app_id".*`) for data
+//! isolation. The pool is created lazily on first use (one per worker
+//! thread).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -69,15 +84,15 @@ thread_local! {
     /// Ownership token for the active transaction connection.
     ///
     /// Stamped non-zero by `begin_transaction` on success and cleared
-    /// to zero by any path that drains [`TX_CONN`] (the legacy
-    /// `commitTransaction` / `rollbackTransaction` flat callbacks, the
-    /// `Transaction` v8_class's `.commit()` / `.rollback()` methods, or
-    /// its Weak-finalizer-driven `Drop`).
+    /// to zero by any path that drains [`TX_CONN`] (the `Transaction`
+    /// v8_class's `.commit()` / `.rollback()` methods, or its
+    /// Weak-finalizer-driven `Drop`).
     ///
     /// Each `Transaction` wrapper carries the token it was minted with;
     /// commit / rollback / GC all compare against the live TX_TOKEN
-    /// before acting, so the wrapper never re-rolls a transaction that
-    /// the legacy SDK already committed via the flat callbacks.
+    /// before acting, so the wrapper never double-acts on a transaction
+    /// another path already settled (e.g. an explicit `.commit()`
+    /// followed by the finalizer running on GC).
     pub(crate) static TX_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 
     /// Monotonic counter feeding [`TX_TOKEN`]. Incremented inside
@@ -147,13 +162,11 @@ impl NativePlugin for DbPlugin {
         "database"
     }
 
-    /// Stage 2 — mint a `Db` v8_class instance as the namespace value
-    /// for `env.db`. The runtime then overlays the 27 flat callbacks
-    /// (registered via [`Self::register`]) on top, so existing user
-    /// code accessing `zeroship.db.find(...)` continues to work
-    /// unchanged. The v8_class additionally exposes `.collection(name)`
-    /// which returns a `Collection` v8_class wrapper whose CRUD
-    /// methods forward back to the flat callbacks.
+    /// Mint a `Db` v8_class instance as the namespace value for
+    /// `env.db`. The runtime then attaches the Db-scoped entry points
+    /// registered via [`Self::register`] on top. The `.collection(name)`
+    /// `#[v8_method]` on the instance returns a `Collection` v8_class
+    /// wrapper whose CRUD methods call `callbacks::dispatch_*` directly.
     fn build_instance<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
