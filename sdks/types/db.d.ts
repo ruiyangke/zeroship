@@ -224,15 +224,23 @@ interface ZeroshipCollection {
 }
 
 /**
- * A live transaction wrapper minted by `env.db.beginTransaction(level?)`.
- * Subsequent CRUD ops issued on Collection wrappers in the same isolate
- * tick run on the transaction's connection. The wrapper's Drop
- * auto-rollbacks if neither `.commit()` nor `.rollback()` is called.
+ * A live transaction wrapper minted by `env.db.beginTransaction(opts?)`.
+ * The wrapper's Drop auto-rollbacks if neither `.commit()` nor
+ * `.rollback()` is called.
+ *
+ * Collections obtained via `tx.collection(name)` are tx-scoped (every
+ * CRUD op routes through the transaction connection) and distinct
+ * from `db.collection(name)`.
  */
 interface ZeroshipTransaction {
-  /** Commit the transaction. Idempotent if already settled. */
+  /** Mint a tx-scoped Collection wrapper. Identity is cached per
+   *  name on this transaction. */
+  collection(name: string): ZeroshipCollection;
+  /** Commit the transaction. Idempotent — resolves void on a
+   *  second call instead of rejecting. */
   commit(): Promise<void>;
-  /** Rollback the transaction. Idempotent if already settled. */
+  /** Rollback the transaction. Idempotent — resolves void on a
+   *  second call instead of rejecting. */
   rollback(): Promise<void>;
 }
 

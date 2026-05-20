@@ -64,9 +64,9 @@ pub struct Transaction {
     /// TX_TOKEN, the others see the mismatch and no-op (so an
     /// explicit `.commit()` followed by GC doesn't run COMMIT twice).
     pub(crate) token: Cell<u64>,
-    /// True once the wrapper has been committed or rolled back. Further
-    /// `.commit()` / `.rollback()` calls reject; `.collection()` /
-    /// CRUD forwarders reject as well.
+    /// True once the wrapper has been committed or rolled back.
+    /// Further `.commit()` / `.rollback()` calls resolve void; new
+    /// `.collection()` calls reject (the tx connection is gone).
     pub(crate) settled: Cell<bool>,
     /// Cache of `(collection_name -> Collection JS wrapper)`. Same shape
     /// as `Db::collection_cache` so identity holds across calls:
@@ -176,18 +176,16 @@ impl Transaction {
 
     /// `tx.commit(): Promise<void>` — run COMMIT against the
     /// transaction connection, clear [`crate::TX_CONN`], and mark this
-    /// wrapper settled.
-    ///
-    /// If the underlying transaction has already been settled (via this
-    /// method, `.rollback()`, or the legacy `commitTransaction`
-    /// callback), this rejects with "transaction already settled".
+    /// wrapper settled. Idempotent: a second `commit()` / `rollback()`
+    /// resolves void instead of rejecting, and the GC finalizer no-
+    /// ops once a settle path has run.
     #[v8_async_method]
     async fn commit(&self) -> Result<(), OpError> {
         end(self, "COMMIT").await
     }
 
     /// `tx.rollback(): Promise<void>` — symmetric to [`Self::commit`]
-    /// but issues ROLLBACK instead.
+    /// but issues ROLLBACK instead. Idempotent.
     #[v8_async_method]
     async fn rollback(&self) -> Result<(), OpError> {
         end(self, "ROLLBACK").await
@@ -202,23 +200,20 @@ impl Transaction {
 /// connection, then clear [`crate::TX_CONN`] / [`crate::TX_TOKEN`] and
 /// mark the wrapper settled.
 ///
-/// Token check: if our `token` no longer matches the live `TX_TOKEN`
-/// the transaction has already been settled (typically by an explicit
-/// `.commit()` followed by GC running our finalizer). We reject with
-/// a clear "already settled" message so the call surface is honest.
+/// Idempotent: if our `token` is zero, the wrapper is already settled,
+/// or `TX_TOKEN` has been claimed by another path (Drop finalizer,
+/// concurrent commit), `end` returns `Ok(())` without re-running the
+/// SQL. Postgres errors during the live commit path are surfaced
+/// verbatim.
 async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     let token = this.token.get();
     if token == 0 || this.settled.get() {
-        return Err(OpError::error(
-            "tx: transaction already committed or rolled back",
-        ));
+        return Ok(());
     }
     let current = crate::TX_TOKEN.with(Cell::get);
     if current != token {
         this.settled.set(true);
-        return Err(OpError::error(
-            "tx: transaction already committed or rolled back",
-        ));
+        return Ok(());
     }
 
     // Take the Client out. We hold it through the cmd execution and
@@ -227,13 +222,11 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     // down cleanly.
     let client_opt = crate::TX_CONN.with(|c| c.borrow_mut().take());
     let Some(client) = client_opt else {
-        // Belt and suspenders: TX_CONN was already cleared. Mark
-        // settled and surface the same error shape.
+        // TX_CONN already cleared by another path — treat as already
+        // settled rather than a fresh failure.
         this.settled.set(true);
         crate::TX_TOKEN.with(|t| t.set(0));
-        return Err(OpError::error(
-            "tx: no active transaction connection",
-        ));
+        return Ok(());
     };
 
     // Clear ownership BEFORE awaiting so a concurrent finalizer (the
