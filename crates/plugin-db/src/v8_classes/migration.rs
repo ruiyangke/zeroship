@@ -110,21 +110,24 @@ impl Drop for Migration {
         let Some(pool) = pool_opt else {
             return;
         };
-        compio::runtime::spawn(async move {
-            // Errors are swallowed: this is GC-time best-effort and
-            // there is no user-visible promise to reject. `exec_cancel`
-            // returns `migration_not_cancellable` if the row already
-            // reached a terminal status — fine, the user explicitly
-            // drove it there.
-            let _ = crate::migrations::exec_cancel(
-                &pool,
-                &owner.app_id,
-                &owner.name,
-                &owner.collection,
-            )
-            .await;
-        })
-        .detach();
+        // `compio::runtime::spawn` panics if the runtime is mid-
+        // shutdown (e.g. isolate teardown triggered this finalizer
+        // pass). A Rust panic from a V8 finalizer crosses an
+        // `extern "C"` boundary and aborts the worker; this is
+        // best-effort cleanup so we swallow the panic and let the
+        // advisory lock release with the dying connection.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compio::runtime::spawn(async move {
+                let _ = crate::migrations::exec_cancel(
+                    &pool,
+                    &owner.app_id,
+                    &owner.name,
+                    &owner.collection,
+                )
+                .await;
+            })
+            .detach();
+        }));
     }
 }
 
@@ -260,8 +263,13 @@ fn checked_int(value: f64, field: &str) -> Result<i64, OpError> {
             "db: commitBatch: {field} must be a finite integer (got {value})"
         )));
     }
+    // `i64::MAX as f64` rounds UP to 9223372036854775808.0 (= 2^63, one
+    // past i64::MAX), so a value of exactly 2^63 would pass a `>` test
+    // and then saturate to i64::MAX under `as i64`. Use `>=` against
+    // 2^63 to reject it instead. `i64::MIN` (-2^63) is exactly
+    // representable, so `<` against it is the right bound below.
     #[allow(clippy::cast_precision_loss)]
-    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+    if value < i64::MIN as f64 || value >= 9_223_372_036_854_775_808.0_f64 {
         return Err(OpError::range_error(format!(
             "db: commitBatch: {field} out of i64 range (got {value})"
         )));
@@ -753,3 +761,67 @@ fn parse_spec(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::checked_int;
+
+    #[test]
+    fn checked_int_accepts_i64_max() {
+        // `i64::MAX` is NOT exactly representable as f64 — the nearest
+        // f64 below is the value JS would actually produce, and it
+        // converts back to a positive i64 strictly less than i64::MAX.
+        let ok = checked_int(9_223_372_036_854_775_000.0, "x").unwrap();
+        assert!(ok > 0 && ok <= i64::MAX);
+    }
+
+    #[test]
+    fn checked_int_rejects_2pow63() {
+        // 2^63 == 9223372036854775808.0 is one past i64::MAX. Pre-fix
+        // this slipped through `> i64::MAX as f64` (since the cast
+        // rounds UP to the same value) and saturated under `as i64`.
+        let v = 9_223_372_036_854_775_808.0_f64;
+        let err = checked_int(v, "x").unwrap_err();
+        assert!(err.message.contains("out of i64 range"), "msg: {}", err.message);
+    }
+
+    #[test]
+    fn checked_int_accepts_i64_min() {
+        let ok = checked_int(i64::MIN as f64, "x").unwrap();
+        assert_eq!(ok, i64::MIN);
+    }
+
+    #[test]
+    fn checked_int_rejects_below_min() {
+        // One ULP below i64::MIN (i.e. more negative).
+        let v = (i64::MIN as f64) * 2.0;
+        let err = checked_int(v, "x").unwrap_err();
+        assert!(err.message.contains("out of i64 range"));
+    }
+
+    #[test]
+    fn checked_int_rejects_nan() {
+        let err = checked_int(f64::NAN, "x").unwrap_err();
+        assert!(err.message.contains("finite integer"));
+    }
+
+    #[test]
+    fn checked_int_rejects_infinity() {
+        let err = checked_int(f64::INFINITY, "x").unwrap_err();
+        assert!(err.message.contains("finite integer"));
+        let err = checked_int(f64::NEG_INFINITY, "x").unwrap_err();
+        assert!(err.message.contains("finite integer"));
+    }
+
+    #[test]
+    fn checked_int_rejects_fractional() {
+        let err = checked_int(1.5, "x").unwrap_err();
+        assert!(err.message.contains("finite integer"));
+    }
+
+    #[test]
+    fn checked_int_accepts_zero_and_small() {
+        assert_eq!(checked_int(0.0, "x").unwrap(), 0);
+        assert_eq!(checked_int(1.0, "x").unwrap(), 1);
+        assert_eq!(checked_int(-1.0, "x").unwrap(), -1);
+    }
+}
