@@ -14,6 +14,7 @@ import {
   computeManifestExtras,
   type DiscoveredProcedure,
 } from "./manifest.js";
+import { resolveSchemaPath } from "./resolve-schema.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 
@@ -234,6 +235,13 @@ export function buildPlugin(
     serverEntry?: string;
     /** "static" → skip the SSR sub-build entirely. */
     mode?: "full" | "static";
+    /**
+     * Optional path to the DB schema module. Resolved by
+     * `resolveSchemaPath` against the project root; the result is
+     * baked into `manifest.exports.schema` for the runtime to read
+     * in Stage 2.
+     */
+    schema?: string;
   } = {}
 ): Plugin {
   const { serverFunctionMap } = state;
@@ -485,6 +493,23 @@ export function buildPlugin(
           mode: viteMode,
         });
 
+        // Stage 1: resolve the user's DB schema module by convention
+        // (or via the explicit `schema` plugin option) and bake the
+        // bundle-relative path into `manifest.exports.schema`. The
+        // runtime ignores this field in Stage 1; Stage 2 wires the
+        // read.
+        const schemaResolution = resolveSchemaPath(root, options.schema);
+        let exportsSchemaRel: string | undefined;
+        if (schemaResolution.path != null) {
+          // Bundle-relative posix path so the runtime can resolve it
+          // against the bundle root regardless of host OS.
+          const rel = relative(root, schemaResolution.path).split(/[\\/]/).join("/");
+          exportsSchemaRel = rel;
+          console.log(
+            `[zeroship] schema resolved via ${schemaResolution.source}: ${rel}`,
+          );
+        }
+
         await emitZship({
           root,
           distDir: clientOutDir,
@@ -494,6 +519,9 @@ export function buildPlugin(
             resources: extras.resources,
             transformer: extras.transformer,
           },
+          exports: exportsSchemaRel != null
+            ? { schema: exportsSchemaRel }
+            : undefined,
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);

@@ -32,6 +32,19 @@ export interface ZeroshipOptions {
   /** Port for the zeroship dev server (default: 3001) */
   devServerPort?: number;
   /**
+   * DB schema module path (Stage 1 of schema auto-discovery).
+   *
+   * Override the convention chain (`src/schema.ts` → `src/schema/index.ts`
+   * → entry fallback) with an explicit path relative to the project
+   * root, or an absolute path. The build resolves this to an absolute
+   * path, then records its bundle-relative form in
+   * `manifest.exports.schema`. Stage 2 wires the read in the runtime
+   * bootstrap; Stage 1 only writes the field.
+   *
+   * Leave unset for the convention chain (recommended).
+   */
+  schema?: string;
+  /**
    * Build mode.
    *
    * - `"full"` (default): client + SSR builds; emits `worker` in the manifest.
@@ -88,6 +101,7 @@ export function zeroship(options: ZeroshipOptions = {}): Plugin[] {
     buildPlugin(state, {
       serverEntry: options.serverEntry,
       mode: options.mode ?? "full",
+      schema: options.schema,
     }),
   ];
 }
