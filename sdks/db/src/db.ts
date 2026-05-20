@@ -466,12 +466,12 @@ export function createDb<const T extends Record<string, SchemaInput>>(
     // first CRUD and `_run` converts that to `result.error`.
     chain = chain.then(() => {
       if (!native.registerModel) return Promise.resolve();
-      const registerAny = native.registerModel as unknown as (
+      return (native.registerModel as unknown as (
+        this: typeof native,
         collection: string,
         schema: ZeroshipDbSchema,
         indexes?: ZeroshipDbNamedIndex[],
-      ) => Promise<void>;
-      return registerAny(name, dbSchema, wireIndexes);
+      ) => Promise<void>).call(native, name, dbSchema, wireIndexes);
     });
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
