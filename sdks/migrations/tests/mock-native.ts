@@ -126,22 +126,12 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
           .slice(0, batchSize);
         return envelope({ rows: slice });
       },
-      async commitBatch(updatesJson, deadLetterPksJson, nextCursor, processedTotal, isDone, terminalStatus, errorMessage) {
-        record("commitBatch", [
-          updatesJson,
-          deadLetterPksJson,
-          nextCursor,
-          processedTotal,
-          isDone,
-          terminalStatus,
-          errorMessage,
-        ]);
+      async commitBatch(spec) {
+        record("commitBatch", [spec]);
         if (!state.active) {
-          return rejectWith("no_active_migration", "start not called");
+          await rejectWith("no_active_migration", "start not called");
         }
-        const updates: Array<{ id: number; set: Record<string, unknown> }> =
-          JSON.parse(updatesJson);
-        const dlp: number[] = JSON.parse(deadLetterPksJson);
+        const { updates, deadLetterPks, nextCursor, processedTotal, isDone, terminalStatus, errorMessage } = spec;
 
         if (!state.dryRun) {
           for (const upd of updates) {
@@ -150,7 +140,7 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
           }
           state.audit.cursor = nextCursor;
           state.audit.processed = processedTotal;
-          state.audit.deadLetterPks = [...dlp];
+          state.audit.deadLetterPks = [...deadLetterPks];
         }
 
         if (isDone) {
@@ -159,11 +149,10 @@ export function createMockNative(opts: MockOpts): { native: NativeMigrations; st
             // dry-run leaves persisted state untouched.
             state.audit.status = state.audit.status === "running" ? "pending" : state.audit.status;
           } else {
-            state.audit.status = terminalStatus || "applied";
+            state.audit.status = terminalStatus ?? "applied";
             if (errorMessage) state.audit.error = errorMessage;
           }
         }
-        return envelope({ committed: !state.dryRun, done: isDone });
       },
     };
   }

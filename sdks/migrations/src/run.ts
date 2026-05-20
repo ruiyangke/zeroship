@@ -80,16 +80,15 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     error: string,
   ): Promise<RunResult> {
     try {
-      const raw = await m.commitBatch(
-        JSON.stringify([]),
-        JSON.stringify(deadLetter),
-        cursor,
-        processed,
-        true,
-        terminal,
-        error,
-      );
-      parseNative<unknown>(raw);
+      await m.commitBatch({
+        updates: [],
+        deadLetterPks: deadLetter,
+        nextCursor: cursor,
+        processedTotal: processed,
+        isDone: true,
+        terminalStatus: terminal,
+        errorMessage: error,
+      });
     } catch (e) {
       // Suppress — the audit row was already touched and the loop is
       // unwinding. Re-throwing would lose the terminal status the
@@ -173,16 +172,13 @@ export async function runMigration<Row extends PlainObject, Update extends Plain
     processed += rows.length;
 
     try {
-      const raw = await m.commitBatch(
-        JSON.stringify(updates),
-        JSON.stringify(deadLetter),
+      await m.commitBatch({
+        updates,
+        deadLetterPks: deadLetter,
         nextCursor,
-        processed,
-        false,
-        "",
-        "",
-      );
-      parseNative<unknown>(raw);
+        processedTotal: processed,
+        isDone: false,
+      });
     } catch (e) {
       return { data: null, error: toNativeError(e) };
     }

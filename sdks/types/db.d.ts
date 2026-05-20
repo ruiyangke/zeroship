@@ -272,25 +272,28 @@ interface ZeroshipMigration {
   /**
    * Fetch the next batch of rows after `cursor`. Returns a JSON string
    * `{ rows: [...] }`. Each row is a plain object keyed by column name.
+   *
+   * `cursor` / `batchSize` must be finite, integer-valued numbers in
+   * the `i64` range; out-of-range values reject with a `RangeError`.
    */
   fetchBatch(cursor: number, batchSize: number): Promise<string>;
 
   /**
-   * Commit one batch of per-row updates. `updatesJson` is a JSON array
-   * of `{ id: number, set: { col: value, ... } }`. `deadLetterPksJson`
-   * is a JSON array of row primary keys the SDK is skipping. If
-   * `isDone=true`, drives the audit row to `terminalStatus` and
-   * releases the advisory lock.
+   * Commit one batch of per-row updates. The spec is walked from V8
+   * directly — no `JSON.stringify` on the SDK side. If `isDone=true`,
+   * drives the audit row to `terminalStatus` and releases the
+   * advisory lock. Resolves void; rejects with the underlying
+   * Postgres error on failure.
    */
-  commitBatch(
-    updatesJson: string,
-    deadLetterPksJson: string,
-    nextCursor: number,
-    processedTotal: number,
-    isDone: boolean,
-    terminalStatus: string,
-    errorMessage: string,
-  ): Promise<string>;
+  commitBatch(spec: {
+    updates: { id: number; set: Record<string, unknown> }[];
+    deadLetterPks: number[];
+    nextCursor: number;
+    processedTotal: number;
+    isDone: boolean;
+    terminalStatus?: string;
+    errorMessage?: string;
+  }): Promise<void>;
 }
 
 /**

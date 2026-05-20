@@ -211,63 +211,31 @@ impl Migration {
             .as_ref()
             .cloned()
             .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
-        crate::migrations::exec_fetch_batch(&owner.app_id, cursor as i64, batch_size as i64)
+        let cursor_i = checked_int(cursor, "cursor")?;
+        let batch_size_i = checked_int(batch_size, "batchSize")?;
+        crate::migrations::exec_fetch_batch(&owner.app_id, cursor_i, batch_size_i)
             .await
             .map_err(OpError::error)
     }
 
-    /// `migration.commitBatch(updatesJson, deadLetterPksJson, nextCursor,
-    /// processedTotal, isDone, terminalStatus, errorMessage)` — apply
-    /// one batch of per-row updates, advance the cursor, optionally
-    /// finalise the run. JSON-stringified args match the
-    /// `migrationCommitBatch` flat-callback shape exactly so the SDK
-    /// loop can swap to the wrapper without restructuring its
-    /// per-batch encoding. On `isDone=true`, clears the wrapper's
-    /// inner state so subsequent calls + the finalizer no-op.
-    #[v8_async_method]
+    /// `migration.commitBatch(spec)` — apply one batch of per-row
+    /// updates, advance the cursor, optionally finalise the run.
+    ///
+    /// `spec` is `{ updates: Array<{id, set}>, deadLetterPks: number[],
+    /// nextCursor: number, processedTotal: number, isDone: boolean,
+    /// terminalStatus?: string, errorMessage?: string }` — walked
+    /// directly from V8 so the SDK loop never JSON-stringifies the per-
+    /// row payload. Resolves void on success; rejects with the Postgres
+    /// error on failure. On `isDone=true`, clears the wrapper's inner
+    /// state so subsequent calls + the finalizer no-op.
+    #[v8_method]
     #[v8_name = "commitBatch"]
-    async fn commit_batch(
+    fn commit_batch<'s>(
         &self,
-        updates_json: String,
-        dead_letter_pks_json: String,
-        next_cursor: f64,
-        processed_total: f64,
-        is_done: bool,
-        terminal_status: String,
-        error_message: String,
-    ) -> Result<String, OpError> {
-        let owner = self
-            .inner
-            .borrow()
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
-        let updates: serde_json::Value = serde_json::from_str(&updates_json)
-            .map_err(|e| OpError::error(format!("db: commitBatch: invalid updates JSON: {e}")))?;
-        let dead_letter_pks: serde_json::Value = serde_json::from_str(&dead_letter_pks_json)
-            .map_err(|e| OpError::error(format!("db: commitBatch: invalid deadLetterPks JSON: {e}")))?;
-        let terminal_status_opt = if terminal_status.is_empty() { None } else { Some(terminal_status.as_str()) };
-        let error_message_opt = if error_message.is_empty() { None } else { Some(error_message.as_str()) };
-        let _ = ensure_pool().await?; // ensures DB_POOL.with(...) works inside exec_commit_batch
-        let result = crate::migrations::exec_commit_batch(
-            &owner.app_id,
-            &updates,
-            &dead_letter_pks,
-            next_cursor as i64,
-            processed_total as i64,
-            is_done,
-            terminal_status_opt,
-            error_message_opt,
-        )
-        .await
-        .map_err(OpError::error)?;
-        if is_done {
-            // Migration reached a terminal status — clear the active
-            // marker so the finalizer doesn't try to cancel an
-            // already-settled run.
-            *self.inner.borrow_mut() = None;
-        }
-        Ok(result)
+        scope: &mut v8::PinScope<'s, '_>,
+        spec_val: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        commit_batch_with_spec(scope, self, spec_val).into()
     }
 }
 
@@ -276,6 +244,220 @@ impl Migration {
 /// the V8-aware error type the macro expects.
 async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, OpError> {
     crate::callbacks::ensure_pool().await.map_err(OpError::error)
+}
+
+/// Coerce a JS number to a finite, integer-valued `i64`. Used by
+/// `fetchBatch` / `commitBatch` for `cursor` / `nextCursor` /
+/// `processedTotal` / `batchSize` where silent `as i64` truncation
+/// would corrupt huge migration runs.
+fn checked_int(value: f64, field: &str) -> Result<i64, OpError> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(OpError::type_error(format!(
+            "db: commitBatch: {field} must be a finite integer (got {value})"
+        )));
+    }
+    #[allow(clippy::cast_precision_loss)]
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(OpError::range_error(format!(
+            "db: commitBatch: {field} out of i64 range (got {value})"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(value as i64)
+}
+
+// ---------------------------------------------------------------------------
+// commit_batch_with_spec — body of `Migration.commitBatch(spec)`
+// ---------------------------------------------------------------------------
+
+/// Parsed shape of the `spec` object handed to `commitBatch`.
+struct CommitSpec {
+    updates: serde_json::Value,
+    dead_letter_pks: serde_json::Value,
+    next_cursor: i64,
+    processed_total: i64,
+    is_done: bool,
+    terminal_status: Option<String>,
+    error_message: Option<String>,
+}
+
+/// Synchronously parse the spec, mint a Promise, and spawn the
+/// `exec_commit_batch` future. Resolves with `undefined`; rejects on
+/// Postgres error.
+fn commit_batch_with_spec<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    this: &Migration,
+    spec_val: v8::Local<v8::Value>,
+) -> v8::Local<'s, v8::Promise> {
+    use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
+
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let resolver = v8::PromiseResolver::new(scope).unwrap();
+    let promise = resolver.get_promise(scope);
+
+    let owner = match this.inner.borrow().as_ref().cloned() {
+        Some(o) => o,
+        None => {
+            let m = v8::String::new(
+                scope,
+                "Migration: not active (already cancelled or finalised)",
+            )
+            .unwrap();
+            let exc = v8::Exception::error(scope, m);
+            resolver.reject(scope, exc);
+            return promise;
+        }
+    };
+
+    let spec = match parse_commit_spec(scope, spec_val) {
+        Ok(s) => s,
+        Err(msg) => {
+            let m = v8::String::new(scope, &msg).unwrap();
+            let exc = v8::Exception::type_error(scope, m);
+            resolver.reject(scope, exc);
+            return promise;
+        }
+    };
+
+    let resolver_global = v8::Global::new(scope, resolver);
+    let request_id = state.borrow().executing_request_id;
+    let is_done = spec.is_done;
+
+    // Capture a raw pointer to `this` so the future can flip
+    // `inner = None` on isDone. The Migration wrapper is reachable via
+    // the JS-side caller; the macro-invoked callback path already holds
+    // the wrapper alive for the duration of the call, and we don't
+    // await before the pointer use.
+    let this_ptr: *const Migration = this;
+    let this_addr = this_ptr as usize;
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let pool_check = ensure_pool().await;
+        if let Err(e) = pool_check {
+            return OpResult::JsValue {
+                resolver: resolver_global,
+                value: ResolveValue::RejectError(e),
+                request_id,
+            };
+        }
+        let terminal_status_opt = spec.terminal_status.as_deref();
+        let error_message_opt = spec.error_message.as_deref();
+        let result = crate::migrations::exec_commit_batch(
+            &owner.app_id,
+            &spec.updates,
+            &spec.dead_letter_pks,
+            spec.next_cursor,
+            spec.processed_total,
+            is_done,
+            terminal_status_opt,
+            error_message_opt,
+        )
+        .await;
+        match result {
+            Ok(_) => {
+                if is_done {
+                    // SAFETY: the V8 callback that invoked
+                    // `commitBatch` keeps `this` alive for the lifetime
+                    // of this future via the JS-side promise — the user
+                    // can't drop the wrapper while still awaiting the
+                    // returned promise. Clearing `inner` is a RefCell
+                    // mutation, no aliasing risk.
+                    let inst: &Migration = unsafe { &*(this_addr as *const Migration) };
+                    *inst.inner.borrow_mut() = None;
+                }
+                OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::Undefined,
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver: resolver_global,
+                value: ResolveValue::RejectError(OpError::error(e)),
+                request_id,
+            },
+        }
+    }));
+
+    let notify = state.borrow().pump_notify_tx.clone();
+    if let Some(mut tx) = notify {
+        let _ = tx.try_send(());
+    }
+
+    promise
+}
+
+fn parse_commit_spec(
+    scope: &mut v8::PinScope<'_, '_>,
+    spec_val: v8::Local<v8::Value>,
+) -> Result<CommitSpec, String> {
+    if !spec_val.is_object() {
+        return Err("db: commitBatch: spec must be an object".into());
+    }
+    let parsed = crate::callbacks::v8_value_to_serde_json(scope, spec_val);
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| "db: commitBatch: spec must be an object".to_string())?;
+
+    let updates = obj
+        .get("updates")
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    if !updates.is_array() {
+        return Err("db: commitBatch: spec.updates must be an array".into());
+    }
+
+    let dead_letter_pks = obj
+        .get("deadLetterPks")
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    if !dead_letter_pks.is_array() {
+        return Err("db: commitBatch: spec.deadLetterPks must be an array".into());
+    }
+
+    let next_cursor_n = obj
+        .get("nextCursor")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "db: commitBatch: spec.nextCursor must be a number".to_string())?;
+    let next_cursor = checked_int(next_cursor_n, "nextCursor")
+        .map_err(|e| e.message)?;
+
+    let processed_total_n = obj
+        .get("processedTotal")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "db: commitBatch: spec.processedTotal must be a number".to_string())?;
+    let processed_total = checked_int(processed_total_n, "processedTotal")
+        .map_err(|e| e.message)?;
+
+    let is_done = obj
+        .get("isDone")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let terminal_status = obj
+        .get("terminalStatus")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let error_message = obj
+        .get("errorMessage")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    Ok(CommitSpec {
+        updates,
+        dead_letter_pks,
+        next_cursor,
+        processed_total,
+        is_done,
+        terminal_status,
+        error_message,
+    })
 }
 
 // ---------------------------------------------------------------------------

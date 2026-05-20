@@ -63,8 +63,9 @@ describe("migrations.run — happy path", () => {
     assert.equal(commitCalls, 3);
     // Last commit must have isDone=true.
     const last = state.calls.filter((c) => c.method === "commitBatch").pop()!;
-    assert.equal(last.args[4], true, "last commit must be isDone=true");
-    assert.equal(last.args[5], "applied", "terminal status applied");
+    const lastSpec = last.args[0] as { isDone: boolean; terminalStatus?: string };
+    assert.equal(lastSpec.isDone, true, "last commit must be isDone=true");
+    assert.equal(lastSpec.terminalStatus, "applied", "terminal status applied");
   });
 });
 

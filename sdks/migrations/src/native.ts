@@ -36,20 +36,36 @@ export interface NativeStatus {
   error: string | null;
 }
 
+/**
+ * Per-row update payload inside the `updates` array of a
+ * `commitBatch` spec. `id` is the row primary key; `set` is the field
+ * map to write.
+ */
+export interface NativeCommitUpdate {
+  id: number;
+  set: Record<string, unknown>;
+}
+
+/**
+ * Spec object handed to `commitBatch`. Walked directly from V8 on
+ * the native side — no JSON.stringify on the SDK hot path.
+ */
+export interface NativeCommitSpec {
+  updates: NativeCommitUpdate[];
+  deadLetterPks: number[];
+  nextCursor: number;
+  processedTotal: number;
+  isDone: boolean;
+  terminalStatus?: string;
+  errorMessage?: string;
+}
+
 export interface NativeMigration {
   status(): Promise<NativeStatus>;
   cancel(): Promise<void>;
   reset(): Promise<void>;
   fetchBatch(cursor: number, batchSize: number): Promise<string>;
-  commitBatch(
-    updatesJson: string,
-    deadLetterPksJson: string,
-    nextCursor: number,
-    processedTotal: number,
-    isDone: boolean,
-    terminalStatus: string,
-    errorMessage: string,
-  ): Promise<string>;
+  commitBatch(spec: NativeCommitSpec): Promise<void>;
 }
 
 /**
