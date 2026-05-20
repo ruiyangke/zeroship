@@ -193,18 +193,16 @@ export function validateRefTargets(
     field: string,
     target: string,
   ): never => {
-    throw new Error(
-      JSON.stringify({
-        code: "ref_target_not_found",
-        collection,
-        field,
-        target,
-        message:
-          `t.ref("${target}") on ${collection}.${field} — ` +
-          `target collection "${target}" is not declared in createDb(). ` +
-          `Add "${target}" to the schema map, or fix the typo.`,
-      }),
-    );
+    const message =
+      `t.ref("${target}") on ${collection}.${field} — ` +
+      `target collection "${target}" is not declared in createDb(). ` +
+      `Add "${target}" to the schema map, or fix the typo.`;
+    throw Object.assign(new Error(message), {
+      code: "ref_target_not_found",
+      collection,
+      field,
+      target,
+    });
   };
 
   for (const [collectionName, rawSchema] of Object.entries(schemas)) {

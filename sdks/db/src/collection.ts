@@ -32,10 +32,11 @@ function toResultError(e: unknown): Error {
   let out: Error;
   if (e instanceof ValidationError) out = e;
   else if (e instanceof OptimisticLockError) out = e;
-  else {
-    const msg = e instanceof Error ? e.message : String(e);
-    out = mapNativeError(msg);
-  }
+  // Pass the whole value through mapNativeError — when the native side
+  // already threw an Error with a `.code` (e.g. "migration_already_running"),
+  // mapNativeError returns it untouched so the structured code reaches the
+  // caller via `result.error.code`.
+  else out = mapNativeError(e);
   // Errors serialize to `{}` by default (message/name are
   // non-enumerable). Attach `toJSON` so the RPC wire
   // (`JSON.stringify({ data, error })`) preserves message + code

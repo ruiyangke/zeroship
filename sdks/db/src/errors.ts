@@ -47,16 +47,33 @@ export class OptimisticLockError extends Error {
 
 /**
  * @internal
- * Translates a raw native driver error message into a typed JS Error.
- * Unique/duplicate constraint violations are given `code: 11000` (MongoDB
- * convention) so callers can branch on error type without string matching.
+ * Translates a caught value (native driver error or rejected promise) into a
+ * typed JS Error.
+ *
+ * Preservation contract — the native side throws Error objects whose `.code`
+ * is a structured string (e.g. `"migration_already_running"`,
+ * `"unique_violation"`). Earlier code reconstructed a new Error from the
+ * message alone, dropping `.code` along the way; this passes the original
+ * Error through unchanged whenever it already carries a string `.code`.
+ *
+ * Back-compat fallback — for bare strings or Errors with no `.code`, the
+ * legacy substring match on "unique"/"duplicate" still tags MongoDB code
+ * 11000 so existing callers branching on numeric code keep working.
  */
-export function mapNativeError(msg: string): Error {
+export function mapNativeError(e: unknown): Error {
+  // Already a coded Error from the native layer — pass through. Subtypes
+  // we own (ValidationError, OptimisticLockError) also flow through this
+  // branch because they carry `.code` as a string-or-number field.
+  if (e instanceof Error && typeof (e as { code?: unknown }).code === "string") {
+    return e;
+  }
+  const msg = e instanceof Error ? e.message : String(e);
   const lower = msg.toLowerCase();
   if (lower.includes("unique") || lower.includes("duplicate")) {
-    const err = new Error(msg, { cause: msg }) as Error & { code: number };
+    const err = new Error(msg, { cause: e instanceof Error ? e : undefined }) as Error & { code: number };
     err.code = 11000;
     return err;
   }
-  return new Error(msg, { cause: msg });
+  if (e instanceof Error) return e;
+  return new Error(msg);
 }

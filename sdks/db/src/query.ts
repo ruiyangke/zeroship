@@ -161,7 +161,10 @@ export class Query<S = PlainObject, P = Row<S>> {
       const list: PlainObject[] = Array.isArray(rows) ? rows : [];
       return ok(list.map(d => mapResultDoc(d, this._toField)) as P[]);
     } catch (e: unknown) {
-      return err(new Error(`find query failed: ${e instanceof Error ? e.message : String(e)}`, { cause: e }));
+      // Rethrow the original Error so any structured `.code` set by the
+      // native layer survives. The previous wrapper recreated an Error
+      // from only the message string, dropping `.code` along the way.
+      return err(e instanceof Error ? e : new Error(String(e)));
     }
   }
 }

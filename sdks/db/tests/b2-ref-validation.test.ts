@@ -36,12 +36,11 @@ describe("B2 validateRefTargets — runtime ref check", () => {
       });
       assert.fail("validateRefTargets should have thrown");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      const parsed = JSON.parse(msg);
-      assert.equal(parsed.code, "ref_target_not_found");
-      assert.equal(parsed.collection, "posts");
-      assert.equal(parsed.field, "authorId");
-      assert.equal(parsed.target, "nonexistent");
+      const err = e as Error & { code?: string; collection?: string; field?: string; target?: string };
+      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.collection, "posts");
+      assert.equal(err.field, "authorId");
+      assert.equal(err.target, "nonexistent");
     }
   });
 
@@ -85,9 +84,9 @@ describe("B2 validateRefTargets — runtime ref check", () => {
       });
       assert.fail("validateRefTargets should have thrown");
     } catch (e) {
-      const parsed = JSON.parse(e instanceof Error ? e.message : String(e));
-      assert.equal(parsed.code, "ref_target_not_found");
-      assert.equal(parsed.target, "ghosts");
+      const err = e as Error & { code?: string; target?: string };
+      assert.equal(err.code, "ref_target_not_found");
+      assert.equal(err.target, "ghosts");
     }
   });
 
