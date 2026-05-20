@@ -414,6 +414,44 @@ export function checkPartial(doc: Doc, schema: NormalizedSchema): void {
     if (!def) continue;
     if (value === undefined || value === null) continue;
     checkField(key, value, def, errors);
+
+    // Gap J — `checkPartial` has no row context, so a patch that
+    // changes a flat-expanded union discriminator must also carry
+    // every variant-required field for the new variant. Otherwise
+    // `{kind: "signup"}` would leave the row claiming kind=signup
+    // with whatever the previous variant stored under `name` (most
+    // likely NULL).
+    if (
+      def.discriminator === "__discriminator__" &&
+      def.variants !== undefined &&
+      errors[key] === undefined
+    ) {
+      const matched = def.variants.find(
+        (v) => v[key]?.type === "literal" && v[key]?.literalValue === value,
+      );
+      if (matched !== undefined) {
+        const missing: string[] = [];
+        for (const [vKey, vDef] of Object.entries(matched)) {
+          if (vDef.type === "literal") continue;
+          if (vDef.required !== true) continue;
+          if (vDef.default !== undefined) continue;
+          const patchVal = doc[vKey];
+          if (patchVal === undefined || patchVal === null) {
+            missing.push(vKey);
+          }
+        }
+        if (missing.length > 0) {
+          const variantLabel = JSON.stringify(value);
+          for (const m of missing) {
+            errors[m] = {
+              path: m,
+              message:
+                `update: changing ${key} to ${variantLabel} requires also setting: ${missing.join(", ")}`,
+            };
+          }
+        }
+      }
+    }
   }
   if (Object.keys(errors).length > 0) {
     throw new ValidationError(errors);

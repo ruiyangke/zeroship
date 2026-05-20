@@ -12,7 +12,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../src/types.js";
 import { normalizeSchema, expandUnionToFlatColumns } from "../src/schema.js";
-import { validateDoc } from "../src/validate.js";
+import { validateDoc, checkPartial } from "../src/validate.js";
 import { ValidationError } from "../src/errors.js";
 import { model } from "../src/model.js";
 
@@ -329,6 +329,91 @@ describe("C2 — partial update against a flat-expanded union", () => {
     assert.ok(error instanceof ValidationError);
     assert.ok("kind" in (error as ValidationError).errors);
     assert.match(error.message, /kind.*login.*error/);
+  });
+
+  // Gap J — patching a valid discriminator value without re-stating
+  // the new variant's required fields used to silently succeed and
+  // leave the row in an inconsistent state.
+  test("c2_union_gap_j_discriminator_only_patch_rejects_missing_variant_required", () => {
+    const s = normalizeSchema(
+      t.union(
+        t.object({
+          kind: t.literal("login"),
+          userId: t.number().required(),
+        }),
+        t.object({
+          kind: t.literal("signup"),
+          name: t.string().required(),
+        }),
+      ),
+    );
+    assert.throws(
+      () => checkPartial({ kind: "signup" }, s),
+      (e: unknown) => {
+        assert.ok(e instanceof ValidationError);
+        assert.ok("name" in e.errors, `expected name error, got ${JSON.stringify(e.errors)}`);
+        assert.match(e.errors.name.message, /changing kind to "signup".*name/);
+        return true;
+      },
+    );
+  });
+
+  test("c2_union_gap_j_discriminator_with_variant_fields_passes", () => {
+    const s = normalizeSchema(
+      t.union(
+        t.object({
+          kind: t.literal("login"),
+          userId: t.number().required(),
+        }),
+        t.object({
+          kind: t.literal("signup"),
+          name: t.string().required(),
+        }),
+      ),
+    );
+    assert.doesNotThrow(() =>
+      checkPartial({ kind: "signup", name: "Ada" }, s),
+    );
+  });
+
+  test("c2_union_gap_j_non_discriminator_patch_unaffected", () => {
+    // A patch that doesn't touch the discriminator must not invoke
+    // the Gap J variant-required check.
+    const s = normalizeSchema(
+      t.union(
+        t.object({
+          kind: t.literal("login"),
+          userId: t.number().required(),
+        }),
+        t.object({
+          kind: t.literal("signup"),
+          name: t.string().required(),
+        }),
+      ),
+    );
+    assert.doesNotThrow(() => checkPartial({ userId: 42 }, s));
+  });
+
+  test("c2_union_gap_j_multiple_missing_listed_in_message", () => {
+    const s = normalizeSchema(
+      t.union(
+        t.object({ kind: t.literal("a"), x: t.string().required() }),
+        t.object({
+          kind: t.literal("b"),
+          y: t.string().required(),
+          z: t.number().required(),
+        }),
+      ),
+    );
+    try {
+      checkPartial({ kind: "b" }, s);
+      assert.fail("should have thrown");
+    } catch (e) {
+      assert.ok(e instanceof ValidationError);
+      assert.ok("y" in e.errors);
+      assert.ok("z" in e.errors);
+      assert.match(e.errors.y.message, /y.*z|z.*y/);
+    }
   });
 });
 
