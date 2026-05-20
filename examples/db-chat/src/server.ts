@@ -16,7 +16,7 @@
 // The client (src/App.tsx) uses @zeroship/react's useQuery against
 // the `listMessages` proc and auto-rerenders on broker events.
 
-import { createDb, t, schema, type Id } from "@zeroship/db";
+import { createDb, t, schema } from "@zeroship/db";
 import { query, mutation, action, runQuery, runMutation } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
@@ -44,9 +44,9 @@ export const db = createDb({
   }),
 });
 
-type UserId    = Id<"users">;
-type ChannelId = Id<"channels">;
-type MessageId = Id<"messages">;
+type UserId    = typeof db.users.Id;
+type ChannelId = typeof db.channels.Id;
+type MessageId = typeof db.messages.Id;
 
 // ---------------------------------------------------------------------------
 // Queries — read-only. listMessages records its read-set ({channelId}) so

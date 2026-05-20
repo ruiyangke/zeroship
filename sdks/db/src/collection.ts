@@ -14,7 +14,7 @@ import {
   translateAggregatePipeline,
 } from "./utils.js";
 import { Query } from "./query.js";
-import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type NamingStrategy, naming, ok, err } from "./types.js";
+import { PlainObject, Result, Row, RowInput, UpdateExpression, Filter, type Id, type NamingStrategy, naming, ok, err } from "./types.js";
 
 /** The native driver interface from @zeroship/types. */
 export type NativeDb = ZeroshipDb;
@@ -198,9 +198,12 @@ function _maybeWarnUnindexedFilter(
 /**
  * Represents a named collection and exposes the full CRUD + aggregate API.
  * The generic parameter `S` is the raw schema shape from which document and input
- * types are derived. Use `model()` or `createDb()` — do not construct directly.
+ * types are derived. `N` carries the table name as a string-literal so the
+ * `Id` accessor below produces `Id<N>` rather than `Id<string>`.
+ *
+ * Use `model()` or `createDb()` — do not construct directly.
  */
-export class Collection<S = PlainObject> {
+export class Collection<S = PlainObject, N extends string = string> {
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
@@ -212,6 +215,22 @@ export class Collection<S = PlainObject> {
   private _ready: Promise<void> | null;
   private _softDelete: boolean;
   private _versioning: boolean;
+
+  /**
+   * Type-only handle for `Id<TableName>` — write `typeof db.users.Id` to
+   * get a branded `Id<"users">` without rebuilding the name through
+   * generic argument inference. At runtime these are non-enumerable
+   * `null` properties; the brand exists purely at the type layer (see
+   * `Id<T>` in `./types.ts`).
+   */
+  declare readonly Id: Id<N>;
+
+  /**
+   * Type-only handle for `RowInput<S>` — write `typeof db.users.RowInput`
+   * to receive the insert-shaped type without `Parameters<...>` plumbing.
+   * Mirrors `Id` above; runtime value is `null`.
+   */
+  declare readonly RowInput: RowInput<S>;
 
   constructor(name: string, schema: NormalizedSchema, native: NativeDb, options?: { naming?: NamingStrategy; ready?: Promise<void> | null; softDelete?: boolean; versioning?: boolean }) {
     this._name = name;
@@ -363,15 +382,16 @@ export class Collection<S = PlainObject> {
   }
 
   /**
-   * Fetch a single row. The first argument is either an `id` (shorthand
-   * for `{ id }`) or a full filter. When the filter matches multiple
-   * rows, `opts.orderBy` decides which one is returned; without an
-   * orderBy the choice is undefined. Returns `null` if no row matches.
+   * Fetch a single row. The first argument is either an `id` (a bare
+   * `number` or `Id<N>` — branded ids stay narrowed) or a full filter
+   * object. When the filter matches multiple rows, `opts.orderBy`
+   * decides which one is returned; without an orderBy the choice is
+   * undefined. Returns `null` if no row matches.
    *
    * `opts.select` projects to a subset of columns.
    */
   async get(
-    idOrFilter: number | Filter<S>,
+    idOrFilter: number | Id<N> | Filter<S>,
     opts: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> } = {},
   ): Promise<Result<Row<S> | null>> {
     const filter = (typeof idOrFilter === "number"

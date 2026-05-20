@@ -16,7 +16,7 @@
 // Wire conventions match the existing examples (hono-demo etc.):
 //   exports become RPC procedures at /_zs/v1/<name>.
 
-import { createDb, t, schema, type Id } from "@zeroship/db";
+import { createDb, t, schema } from "@zeroship/db";
 import { query, mutation, action, runQuery } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
@@ -44,11 +44,11 @@ export const db = createDb({
   }),
 });
 
-// Brand types flow from t.ref(): Id<"users"> and Id<"todos"> are
-// incompatible — passing a post id where a user id is expected is a
-// type error.
-type UserId = Id<"users">;
-type TodoId = Id<"todos">;
+// Brand types flow from t.ref(): `typeof db.users.Id` is `Id<"users">`
+// and `typeof db.todos.Id` is `Id<"todos">` — passing a post id where
+// a user id is expected is a compile-time error.
+type UserId = typeof db.users.Id;
+type TodoId = typeof db.todos.Id;
 
 // ---------------------------------------------------------------------------
 // Queries — read-only; auto-wrapped in BEGIN TRANSACTION READ ONLY (T1)

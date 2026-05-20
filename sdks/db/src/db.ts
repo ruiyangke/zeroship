@@ -1,26 +1,48 @@
 /**
  * createDb — the primary entry point for @zeroship/db.
  *
- * Declares all models upfront, returns a fully-typed db object
- * with collections and transaction support.
+ * Declares all models upfront, returns a fully-typed db object with
+ * collections and transaction support. Every Collection method returns
+ * `Result<T> = { data, error }` outside a transaction; inside
+ * `db.transaction(tx => ...)` the `tx.<table>` adapter returns the
+ * bare value and throws on error.
  *
  * Usage:
- *   import { createDb } from "@zeroship/db"
+ *   import { createDb, t } from "@zeroship/db";
  *
  *   const db = createDb({
- *     employees: { name: { type: String, required: true }, email: String },
- *     departments: { name: String, headcount: { type: Number, default: 0 } },
+ *     users: {
+ *       email: t.string().required().unique(),
+ *       name:  t.string().required().max(100),
+ *     },
+ *     todos: {
+ *       userId: t.ref("users").required(),
+ *       title:  t.string().required().min(1).max(200),
+ *       done:   t.boolean().default(false),
+ *     },
  *   });
  *
  *   // CRUD — { data, error }
- *   const { data } = await db.employees.insert({ name: "Alice" });
+ *   const { data: user } = await db.users.insert({
+ *     email: "alice@example.com",
+ *     name:  "Alice",
+ *   });
  *
  *   // Transaction — tx mirrors db, throws on error
  *   const { data, error } = await db.transaction(async (tx) => {
- *     const emp = await tx.employees.insert({ name: "Alice" });
- *     await tx.departments.update(1, { headcount: { $inc: 1 } });
- *     return emp;
+ *     const u = await tx.users.insert({ email: "...", name: "..." });
+ *     await tx.todos.insert({ userId: u.id, title: "buy milk" });
+ *     return u;
  *   });
+ *
+ *   // Each collection exposes typed `Id` and `RowInput` accessors:
+ *   //   typeof db.users.Id        // Id<"users">
+ *   //   typeof db.users.RowInput  // RowInput<usersSchema>
+ *
+ * Returns Result vs throws (worth knowing):
+ * - `db.x.*` outside a transaction → `Promise<Result<T>>`.
+ * - `tx.x.*` inside `db.transaction(tx => ...)` → `Promise<T>`, throws on error.
+ * - `db.transaction(fn)` itself → `Promise<Result<R>>` — never throws.
  */
 
 import { env } from "zeroship";
@@ -148,7 +170,7 @@ type UnwrapSchema<T> =
 
 /** The db object returned by createDb — collections are fully typed per schema */
 export type Db<T extends Record<string, SchemaInput>> = {
-  [K in keyof T]: Collection<UnwrapSchema<T[K]>>
+  [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string>
 } & {
   transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
 };

@@ -110,7 +110,7 @@ export const seedEvents = mutation(
     // `severity: null` to exercise the backfill migration. The schema
     // types severity as `string | undefined`; null is rejected by the
     // typed API but allowed by the underlying column.
-    type Row = Parameters<typeof col.insertMany>[0][number];
+    type Row = typeof col.RowInput;
     const rows: Row[] = [];
     for (let i = 0; i < count; i++) {
       rows.push({
