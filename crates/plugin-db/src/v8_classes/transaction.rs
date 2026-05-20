@@ -126,18 +126,13 @@ impl Drop for Transaction {
 #[v8_class]
 #[allow(dead_code)]
 impl Transaction {
-    /// Placeholder constructor for the macro. Real instances come from
-    /// [`mint_transaction`] via `env.db.beginTransaction(...)`. Calling
-    /// `new Transaction()` from JS produces a wrapper whose `token` is
-    /// 0; every method short-circuits ("already settled") because no
-    /// BEGIN ever ran for this instance.
+    /// `new Transaction()` from JS rejects — real instances come from
+    /// [`mint_transaction`] via `env.db.beginTransaction(...)`, which
+    /// stamps the ownership token onto the wrapper only after a
+    /// successful BEGIN.
     #[v8_constructor]
-    fn new() -> Transaction {
-        Transaction {
-            token: Cell::new(0),
-            settled: Cell::new(false),
-            collection_cache: RefCell::new(std::collections::HashMap::new()),
-        }
+    fn new() -> Result<Transaction, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
     }
 
     /// `tx.collection(name)` — returns a [`super::collection::Collection`]

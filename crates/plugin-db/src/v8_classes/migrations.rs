@@ -57,10 +57,8 @@ impl std::fmt::Debug for Migrations {
 #[allow(dead_code)]
 impl Migrations {
     #[v8_constructor]
-    fn new() -> Migrations {
-        Migrations {
-            app_id: RefCell::new(String::new()),
-        }
+    fn new() -> Result<Migrations, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
     }
 
     /// `env.db.migrations.start(spec)` → Promise<Migration>

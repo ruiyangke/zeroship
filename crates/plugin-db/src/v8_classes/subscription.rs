@@ -72,17 +72,13 @@ impl Drop for Subscription {
 #[v8_class]
 #[allow(dead_code)] // Methods invoked via V8 callbacks; Rust can't trace through extern.
 impl Subscription {
-    /// Construct an empty placeholder. Real instances are minted via
-    /// [`mint_subscription`] — the macro requires a constructor for
-    /// install codegen, so this exists to satisfy that contract.
-    /// Calling `new Subscription()` from JS produces a wrapper whose
-    /// `inner` is `None`; every method returns the "closed/drained"
-    /// answer because there is no broker entry.
+    /// `new Subscription()` from JS rejects — real instances come from
+    /// [`mint_subscription`] via `db.openSubscription(name)` /
+    /// `collection.openSubscription()`, which registers the broker
+    /// entry as part of minting.
     #[v8_constructor]
-    fn new() -> Subscription {
-        Subscription {
-            inner: RefCell::new(None),
-        }
+    fn new() -> Result<Subscription, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
     }
 
     /// Poll for the next event. Resolves with the typed event object
