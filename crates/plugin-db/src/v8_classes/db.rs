@@ -111,7 +111,6 @@ impl Db {
     fn collection<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        wrapper: v8::Local<v8::Object>,
         name: String,
     ) -> Result<v8::Local<'s, v8::Object>, OpError> {
         if name.is_empty() {
@@ -126,8 +125,8 @@ impl Db {
 
         // Slow path: mint a new Collection and stash a Global in the
         // cache so the next call hits the fast path.
-        let db_global = v8::Global::new(scope, wrapper);
-        let obj = mint_collection(scope, name.clone(), db_global)?;
+        let app_id = self.app_id.borrow().clone();
+        let obj = mint_collection(scope, name.clone(), app_id)?;
         let global = v8::Global::new(scope, obj);
         self.collection_cache
             .borrow_mut()

@@ -101,12 +101,6 @@ fn db_collection_caches_by_name() {
         p1_proto.strict_equals(coll_proto),
         "Collection instance does not have Collection.prototype as [[Prototype]]"
     );
-
-    // And the `name` getter returns the expected string.
-    let name_key = v8::String::new(scope, "name").unwrap();
-    let name_v = p1_obj.get(scope, name_key.into()).unwrap();
-    let name_str = name_v.to_rust_string_lossy(scope);
-    assert_eq!(name_str, "posts");
 }
 
 #[test]

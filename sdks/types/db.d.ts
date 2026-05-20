@@ -207,20 +207,28 @@ interface ZeroshipCollection {
   deleteMany(filter: ZeroshipDbFilter): Promise<string>;
 
   /** Upsert a document (insert or update on conflict). Returns the row.
-   *  `opts.conflictFields` names the ON CONFLICT target columns. */
+   *  `opts.conflictFields` names the ON CONFLICT target columns — must
+   *  be a non-empty array of column names; missing / empty rejects
+   *  with `TypeError`. */
   upsert(
     doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
     opts: { conflictFields: string[] },
   ): Promise<Record<string, unknown>>;
 
-  /** Count documents matching `filter`. */
+  /** Count documents matching `filter`. No opts — `count` is
+   *  conceptually unbounded; use `find` with a `limit` to cap a row
+   *  scan. */
   count(filter: ZeroshipDbFilter): Promise<number>;
 
-  /** Get distinct values for a field. Returns JSON array string. */
-  distinct(field: string, filter: ZeroshipDbFilter): Promise<string>;
+  /** Get distinct values for `opts.field` across rows matching
+   *  `filter`. Returns JSON array string. */
+  distinct(filter: ZeroshipDbFilter, opts: { field: string }): Promise<string>;
 
   /** Run an aggregation pipeline. Returns JSON array string. */
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<string>;
+
+  /** Open a subscription bound to this collection. */
+  openSubscription(): ZeroshipSubscription;
 }
 
 /**

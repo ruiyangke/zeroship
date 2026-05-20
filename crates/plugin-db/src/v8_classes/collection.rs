@@ -5,19 +5,6 @@
 //! `serde_json::Value` (via [`crate::callbacks::v8_value_to_serde_json`])
 //! and calls the shared `dispatch_*` helper in [`crate::callbacks`] —
 //! no JSON.stringify / parse round-trip on the CRUD hot path.
-//!
-//! ## State
-//!
-//! - `name`: the collection name passed to `Db::collection(name)`.
-//! - `db_obj`: a strong `v8::Global<v8::Object>` reference to the
-//!   parent Db wrapper. The CRUD v8_methods don't read it (they call
-//!   `callbacks::dispatch_*` directly); it's kept so
-//!   `openSubscription` — the one method still routed via the parent —
-//!   can locate the same-named callback on `env.db`. The reference
-//!   cycle (Db cache → Collection → Db) doesn't prevent GC: once JS
-//!   drops `env.db`, the only remaining root is the runtime env
-//!   object; releasing that frees both wrappers together. (See the
-//!   `crates/runtime-macros` README for Weak-finalizer semantics.)
 
 #![allow(unsafe_code)]
 
@@ -38,101 +25,17 @@ pub struct Collection {
     /// The collection name (e.g. `"users"`). Used as the first argument
     /// to every dispatch helper.
     pub(crate) name: RefCell<String>,
-    /// The parent Db wrapper. Retained so the subscription methods
-    /// (which still forward through JS) can find the matching callback
-    /// on the parent Db.
-    pub(crate) db_obj: RefCell<Option<v8::Global<v8::Object>>>,
+    /// The app_id captured at mint time so CRUD callbacks don't have
+    /// to read the runtime slot for every dispatch.
+    pub(crate) app_id: RefCell<String>,
 }
 
 impl std::fmt::Debug for Collection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Collection")
             .field("name", &self.name.borrow())
-            .field("db_obj", &self.db_obj.borrow().is_some())
+            .field("app_id", &self.app_id.borrow())
             .finish()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Forwarding helper (still used by `subscribe` / `openSubscription`)
-// ---------------------------------------------------------------------------
-
-/// Forward a Collection method to the same-named callback on the
-/// parent Db wrapper, with the collection name prepended to the
-/// arg list.
-///
-/// Now only used by the subscription methods — every CRUD method has
-/// been converted to a direct native dispatch.
-///
-/// Returns the result of the underlying call directly. On any failure
-/// (missing parent, missing method, non-callable, or the underlying
-/// call throwing) the V8 scope's pending-exception state is set and
-/// we return `v8::undefined`. V8's callback dispatcher checks the
-/// pending exception after the callback returns and propagates it to
-/// JS regardless of `rv.set` — so returning `undefined` here is safe.
-fn forward<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    instance: &Collection,
-    method: &str,
-    extra_args: &[v8::Local<v8::Value>],
-) -> v8::Local<'s, v8::Value> {
-    let db_global_opt = instance.db_obj.borrow().as_ref().cloned();
-    let Some(db_global) = db_global_opt else {
-        let msg = v8::String::new(
-            scope,
-            "Collection: parent Db wrapper is no longer reachable",
-        )
-        .unwrap();
-        let exc = v8::Exception::type_error(scope, msg);
-        scope.throw_exception(exc);
-        return v8::undefined(scope).into();
-    };
-    let db_local: v8::Local<v8::Object> = v8::Local::new(scope, &db_global);
-    let method_key = v8::String::new(scope, method).unwrap();
-    let method_val = match db_local.get(scope, method_key.into()) {
-        Some(v) => v,
-        None => {
-            let msg = v8::String::new(
-                scope,
-                &format!("Collection.{method}: missing on parent Db"),
-            )
-            .unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return v8::undefined(scope).into();
-        }
-    };
-    let method_fn: v8::Local<v8::Function> = match method_val.try_into() {
-        Ok(f) => f,
-        Err(_) => {
-            let msg = v8::String::new(
-                scope,
-                &format!("Collection.{method}: parent Db.{method} is not a function"),
-            )
-            .unwrap();
-            let exc = v8::Exception::type_error(scope, msg);
-            scope.throw_exception(exc);
-            return v8::undefined(scope).into();
-        }
-    };
-
-    // Build [name, ...extra_args]. Two-deep alloc is acceptable; this
-    // is the per-CRUD-call shape and we already pay one promise alloc
-    // per call inside the underlying callback.
-    let name = instance.name.borrow().clone();
-    let name_v = v8::String::new(scope, &name).unwrap();
-    let mut call_args: Vec<v8::Local<v8::Value>> = Vec::with_capacity(1 + extra_args.len());
-    call_args.push(name_v.into());
-    call_args.extend(extra_args.iter().copied());
-
-    // `Function::call` returns None when the call threw; the exception
-    // is already on the isolate, so we just need to return *something*.
-    // v8::undefined() is the natural sentinel — the rv.set the macro
-    // emits is overridden by V8's pending-exception propagation on the
-    // way out of the callback.
-    match method_fn.call(scope, db_local.into(), &call_args) {
-        Some(v) => v,
-        None => v8::undefined(scope).into(),
     }
 }
 
@@ -143,33 +46,13 @@ fn forward<'s>(
 #[v8_class]
 #[allow(dead_code)]
 impl Collection {
-    /// Placeholder constructor for the macro. Real instances come from
-    /// [`mint_collection`] via `Db::collection(name)`. A direct
-    /// `new Collection()` from JS produces a wrapper with no parent
-    /// Db, so every method throws.
+    /// `new Collection()` from JS rejects — real instances come from
+    /// [`mint_collection`] via `Db::collection(name)`, which stamps
+    /// `name` + `app_id` onto the wrapper.
     #[v8_constructor]
-    fn new() -> Collection {
-        Collection {
-            name: RefCell::new(String::new()),
-            db_obj: RefCell::new(None),
-        }
+    fn new() -> Result<Collection, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
     }
-
-    /// `collection.name` — the collection's name. Useful for debugging
-    /// + for SDK callers that want to read it without storing it
-    /// alongside the wrapper.
-    #[v8_getter]
-    fn name(&self) -> String {
-        self.name.borrow().clone()
-    }
-
-    // --- CRUD methods ---
-    //
-    // Each method walks its V8 args directly into `serde_json::Value`
-    // (no JSON.stringify / JSON.parse round trip) and calls into the
-    // shared `dispatch_*` helper in `crate::callbacks`. The flat
-    // callbacks on `env.db` (still registered for SDK back-compat)
-    // call the same helpers.
 
     /// `collection.findOne(filter, opts?)` — fetch the first matching row.
     ///
@@ -186,8 +69,7 @@ impl Collection {
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
         callbacks::dispatch_find_one(scope, &app_id, &collection, filter_v, opts_v).into()
@@ -201,8 +83,7 @@ impl Collection {
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
         callbacks::dispatch_find(scope, &app_id, &collection, filter_v, opts_v).into()
@@ -220,8 +101,7 @@ impl Collection {
         {
             return p.into();
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let doc_v = callbacks::read_json_arg(scope, Some(doc));
         callbacks::dispatch_insert(scope, &app_id, &collection, doc_v).into()
     }
@@ -239,8 +119,7 @@ impl Collection {
         {
             return p.into();
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let docs_v = callbacks::read_json_arg(scope, Some(docs));
         callbacks::dispatch_insert_many(scope, &app_id, &collection, docs_v).into()
     }
@@ -259,8 +138,7 @@ impl Collection {
         {
             return p.into();
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let update_v = callbacks::read_json_arg(scope, Some(update));
         callbacks::dispatch_update_one(scope, &app_id, &collection, filter_v, update_v).into()
@@ -280,8 +158,7 @@ impl Collection {
         {
             return p.into();
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         let update_v = callbacks::read_json_arg(scope, Some(update));
         callbacks::dispatch_update_many(scope, &app_id, &collection, filter_v, update_v).into()
@@ -300,8 +177,7 @@ impl Collection {
         {
             return p.into();
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         callbacks::dispatch_delete_one(scope, &app_id, &collection, filter_v).into()
     }
@@ -319,8 +195,7 @@ impl Collection {
         {
             return p.into();
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         callbacks::dispatch_delete_many(scope, &app_id, &collection, filter_v).into()
     }
@@ -328,31 +203,33 @@ impl Collection {
     /// `collection.upsert(doc, opts)` — insert or update on conflict.
     ///
     /// `opts.conflictFields` (string[]) names the ON CONFLICT target
-    /// columns. Other opts keys are reserved for future use.
+    /// columns; rejects with `TypeError` when missing or empty.
     #[v8_method]
     fn upsert<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         doc: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
-    ) -> v8::Local<'s, v8::Value> {
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let collection = self.name.borrow().clone();
         if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.upsert")
         {
-            return p.into();
+            return Ok(p.into());
         }
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let doc_v = callbacks::read_json_arg(scope, Some(doc));
         let opts_v = callbacks::read_json_arg(scope, Some(opts));
-        // Extract `opts.conflictFields` — a JSON array of column names.
-        // Missing / wrong-shape produces an empty array, which causes
-        // `build_upsert` to reject with a clear error message.
         let conflict_v = opts_v
             .get("conflictFields")
             .cloned()
-            .unwrap_or(Value::Array(Vec::new()));
-        callbacks::dispatch_upsert(scope, &app_id, &collection, doc_v, conflict_v).into()
+            .unwrap_or(Value::Null);
+        let conflict_arr = conflict_v
+            .as_array()
+            .ok_or_else(|| OpError::type_error("upsert: opts.conflictFields required"))?;
+        if conflict_arr.is_empty() {
+            return Err(OpError::type_error("upsert: opts.conflictFields required"));
+        }
+        Ok(callbacks::dispatch_upsert(scope, &app_id, &collection, doc_v, conflict_v).into())
     }
 
     #[v8_method]
@@ -362,24 +239,34 @@ impl Collection {
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
         callbacks::dispatch_count(scope, &app_id, &collection, filter_v).into()
     }
 
+    /// `collection.distinct(filter, opts)` — return the unique values
+    /// of `opts.field` across rows matching `filter`. Filter-first to
+    /// match the rest of the read surface.
     #[v8_method]
     fn distinct<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        field: String,
         filter: v8::Local<v8::Value>,
-    ) -> v8::Local<'s, v8::Value> {
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         let collection = self.name.borrow().clone();
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_distinct(scope, &app_id, &collection, &field, filter_v).into()
+        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let field = opts_v
+            .get("field")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| OpError::type_error(
+                "distinct: opts.field must be a non-empty string",
+            ))?
+            .to_string();
+        Ok(callbacks::dispatch_distinct(scope, &app_id, &collection, &field, filter_v).into())
     }
 
     #[v8_method]
@@ -389,26 +276,25 @@ impl Collection {
         pipeline: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let collection = self.name.borrow().clone();
-        let state = callbacks::runtime_state(scope);
-        let app_id = callbacks::app_id_for(&state);
+        let app_id = self.app_id.borrow().clone();
         let pipeline_v = callbacks::read_json_arg(scope, Some(pipeline));
         callbacks::dispatch_aggregate(scope, &app_id, &collection, pipeline_v).into()
     }
 
-    /// `collection.openSubscription()` — convenience forwarder to the
-    /// parent Db's `openSubscription(name)` entry point. Returns the
-    /// Subscription v8_class wrapper whose Weak finalizer closes the
-    /// broker handle on GC. The handle-id `subscribe`/`subscribePoll`/
-    /// `subscribeClose` flat callbacks were removed when plugin-db
-    /// consolidated to the v2 surface.
+    /// `collection.openSubscription()` — returns a
+    /// [`super::subscription::Subscription`] wrapper bound to this
+    /// collection. Synchronous mint; broker entry released by the
+    /// wrapper's Weak finalizer (or `.close()`).
     #[v8_method]
     #[v8_name = "openSubscription"]
     fn open_subscription<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        rest: Vec<v8::Local<v8::Value>>,
-    ) -> v8::Local<'s, v8::Value> {
-        forward(scope, self, "openSubscription", &rest)
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let app_id = self.app_id.borrow().clone();
+        let name = self.name.borrow().clone();
+        let obj = super::subscription::mint_subscription(scope, &app_id, &name)?;
+        Ok(obj.into())
     }
 }
 
@@ -416,17 +302,17 @@ impl Collection {
 // mint_collection — build a Collection wrapper for a given Db parent
 // ---------------------------------------------------------------------------
 
-/// Mint a `Collection` v8_class instance bound to `db_global` with
-/// the given collection `name`.
+/// Mint a `Collection` v8_class instance bound to the given
+/// `(app_id, name)` pair.
 ///
-/// Called from `Db::collection(name)` on cache miss. Caller is
-/// responsible for stashing the returned wrapper in `Db`'s
+/// Called from `Db::collection(name)` and `Transaction::collection(name)`
+/// on cache miss. Callers stash the returned wrapper in their own
 /// `collection_cache` so subsequent `.collection(name)` calls return
 /// the same JS object.
 pub fn mint_collection<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: String,
-    db_global: v8::Global<v8::Object>,
+    app_id: String,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let class_tmpl = Collection::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -445,7 +331,7 @@ pub fn mint_collection<'s>(
 
     let state = Collection {
         name: RefCell::new(name),
-        db_obj: RefCell::new(Some(db_global)),
+        app_id: RefCell::new(app_id),
     };
     let boxed: Box<Collection> = Box::new(state);
     let raw = Box::into_raw(boxed);

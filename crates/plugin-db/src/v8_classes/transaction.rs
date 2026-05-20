@@ -151,7 +151,6 @@ impl Transaction {
     fn collection<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
-        wrapper: v8::Local<v8::Object>,
         name: String,
     ) -> Result<v8::Local<'s, v8::Object>, OpError> {
         if name.is_empty() {
@@ -167,8 +166,8 @@ impl Transaction {
         if let Some(existing) = self.collection_cache.borrow().get(&name) {
             return Ok(v8::Local::new(scope, existing));
         }
-        let parent_global = v8::Global::new(scope, wrapper);
-        let obj = mint_collection(scope, name.clone(), parent_global)?;
+        let app_id = crate::callbacks::app_id_for(&crate::callbacks::runtime_state(scope));
+        let obj = mint_collection(scope, name.clone(), app_id)?;
         let global = v8::Global::new(scope, obj);
         self.collection_cache.borrow_mut().insert(name, global);
         Ok(obj)

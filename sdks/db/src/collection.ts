@@ -627,7 +627,7 @@ export class Collection<S = PlainObject> {
       }
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const column = this._toColumn(field);
-      const raw = await this._col().distinct( column, mapped);
+      const raw = await this._col().distinct(mapped, { field: column });
       const result = parseRaw<(string | number | boolean | null)[]>(raw);
       return result ?? [];
     });
