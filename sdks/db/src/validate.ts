@@ -10,6 +10,20 @@ import { ValidationError, FieldError } from "./errors.js";
 type Doc = PlainObject;
 
 /**
+ * Strict ISO 8601 date-or-datetime check. `Date.parse("2026")` returns
+ * a real timestamp (year-only), which is almost never what the schema
+ * meant; require at least a `YYYY-MM-DD` prefix before delegating to
+ * `Date.parse` so values like `"2026"`, `"abc"`, or empty strings are
+ * rejected. The optional time component (`T...`) is accepted because
+ * `t.date()` is used for full timestamps; calendar-date-only fields
+ * use `t.calendarDate()` which enforces the stricter shape above.
+ */
+function isParseableDateString(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}(?:[T ].*)?$/.test(s)) return false;
+  return !isNaN(Date.parse(s));
+}
+
+/**
  * D3 — strict `YYYY-MM-DD` validator. Confirms the value is a 10-char
  * date string AND a real calendar date (no Feb 31, no month 13).
  * Returns false on any deviation.
@@ -104,10 +118,10 @@ function checkField(
       return;
     }
   } else if (type === "date") {
-    if (!(value instanceof Date) && (typeof value !== "string" || isNaN(Date.parse(value)))) {
+    if (!(value instanceof Date) && (typeof value !== "string" || !isParseableDateString(value))) {
       errors[key] = {
         path: key,
-        message: `${key} must be a Date or date string`,
+        message: `${key} must be a Date or ISO 8601 date string`,
       };
       return;
     }
@@ -231,7 +245,7 @@ function checkField(
         if (itemType === "string") ok = typeof elem === "string";
         else if (itemType === "number") ok = typeof elem === "number";
         else if (itemType === "boolean") ok = typeof elem === "boolean";
-        else if (itemType === "date") ok = elem instanceof Date || (typeof elem === "string" && !isNaN(Date.parse(elem)));
+        else if (itemType === "date") ok = elem instanceof Date || (typeof elem === "string" && isParseableDateString(elem));
         if (!ok) {
           errors[key] = {
             path: key,

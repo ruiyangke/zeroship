@@ -143,9 +143,11 @@ type FilterValue<T> =
    NonNullable<T> extends boolean ? ComparisonOps<NonNullable<T>> :
    ComparisonOps<NonNullable<T>>);
 
-/** Typed filter for a document — each field accepts its value type or operators. */
+/** Typed filter for a document — each field accepts its value type or operators.
+ *  Field values use `NonNullable<Row<S>[K]>` so `undefined` is rejected at the
+ *  type layer; pass `null` to match SQL NULL explicitly. */
 export type Filter<S> = {
-  [K in keyof Row<S>]?: FilterValue<Row<S>[K]>
+  [K in keyof Row<S>]?: FilterValue<NonNullable<Row<S>[K]>>
 } & {
   $and?: Filter<S>[];
   $or?: Filter<S>[];

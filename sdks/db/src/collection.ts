@@ -105,13 +105,13 @@ function validateArrayPushOps(
       if (!def || def.type !== "array" || !def.items) continue;
       const itemType = def.items;
 
-      let ok = true;
-      if (itemType === "string") ok = typeof val === "string";
-      else if (itemType === "number") ok = typeof val === "number";
-      else if (itemType === "boolean") ok = typeof val === "boolean";
-      else if (itemType === "date") ok = val instanceof Date || typeof val === "string";
+      let valid = true;
+      if (itemType === "string") valid = typeof val === "string";
+      else if (itemType === "number") valid = typeof val === "number";
+      else if (itemType === "boolean") valid = typeof val === "boolean";
+      else if (itemType === "date") valid = val instanceof Date || typeof val === "string";
 
-      if (!ok) {
+      if (!valid) {
         throw new ValidationError({
           [field]: {
             path: field,
@@ -168,7 +168,7 @@ function _maybeWarnUnindexedFilter(
   );
   if (keys.length === 0) return;
   // `id` is always the primary key — never warn on it.
-  if (keys.length === 1 && (keys[0] === "id" || keys[0] === "_id")) return;
+  if (keys.length === 1 && keys[0] === "id") return;
 
   let anyIndexed = false;
   for (const k of keys) {
@@ -631,15 +631,31 @@ export class Collection<S = PlainObject, N extends string = string> {
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
       const hard = opts.hard === true;
+      // Both branches honor CAS — versioning + `{ version: N }` in the
+      // filter must reject a concurrent writer's lost update, soft or
+      // hard. The patch on the soft-delete branch bumps version too.
+      const casVersion = this._extractCasVersion(filter as PlainObject);
       if (this._softDelete && !hard) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const result = await this._col().updateOne(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
-        return result === null ? null : (mapResultDoc(result as PlainObject, this._toField) as Row<S>);
+        const patch = this._augmentUpdateWithVersion(
+          { [col]: Date.now() } as PlainObject,
+          casVersion,
+        );
+        const result = await this._col().updateOne(mapped, patch as ZeroshipDbUpdate);
+        if (result === null) {
+          if (casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
+          return null;
+        }
+        return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const result = await this._col().deleteOne(mapped);
-      return result === null ? null : (mapResultDoc(result as PlainObject, this._toField) as Row<S>);
+      if (result === null) {
+        if (casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
+        return null;
+      }
+      return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
   }
 
@@ -655,14 +671,21 @@ export class Collection<S = PlainObject, N extends string = string> {
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject);
     return this._run(async () => {
       const hard = opts.hard === true;
+      const casVersion = this._extractCasVersion(filter as PlainObject);
       if (this._softDelete && !hard) {
         const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
         const col = this._toColumn("deletedAt");
-        const n = await this._col().updateMany(mapped, { [col]: Date.now() as ZeroshipDbUpdateValue });
+        const patch = this._augmentUpdateWithVersion(
+          { [col]: Date.now() } as PlainObject,
+          casVersion,
+        );
+        const n = await this._col().updateMany(mapped, patch as ZeroshipDbUpdate);
+        if (n === 0 && casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
         return { deletedCount: n };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const n = await this._col().deleteMany(mapped);
+      if (n === 0 && casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
       return { deletedCount: n };
     });
   }

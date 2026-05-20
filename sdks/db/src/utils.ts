@@ -91,6 +91,16 @@ function stripDollar(val: string): string {
 /** Aggregate expression — object, string ref, or scalar. */
 type AggregateExpr = PlainObject | string | number | boolean | null;
 
+/** Accumulator op names recognised by `translateAccumulator`. Used to
+ *  detect unknown `$op` names that would silently pass through. */
+const KNOWN_ACCUMULATOR_OPS = new Set([
+  "$sum", "$avg", "$min", "$max", "$first", "$count",
+]);
+
+/** Shapes already warned about — dedupe by sorted accumulator key set so
+ *  a noisy pipeline doesn't spam the log. */
+const _warnedAccShapes = new Set<string>();
+
 /** @internal Translate an accumulator expression */
 function translateAccumulator(acc: AggregateExpr): AggregateExpr {
   if (typeof acc !== "object" || acc === null) return acc;
@@ -103,6 +113,22 @@ function translateAccumulator(acc: AggregateExpr): AggregateExpr {
   if ("$max" in obj && typeof obj.$max === "string") return { $max: stripDollar(obj.$max as string) };
   if ("$first" in obj && typeof obj.$first === "string") return { $first: stripDollar(obj.$first as string) };
 
+  // Surface unknown `$op`s once per shape — silent pass-through means the
+  // operator never reaches Postgres and the user gets a confusingly empty
+  // result rather than a hint that the op was unrecognised.
+  const opKeys = Object.keys(obj).filter((k) => k.startsWith("$"));
+  const unknown = opKeys.filter((k) => !KNOWN_ACCUMULATOR_OPS.has(k));
+  if (unknown.length > 0) {
+    const shapeKey = unknown.slice().sort().join(",");
+    if (!_warnedAccShapes.has(shapeKey)) {
+      _warnedAccShapes.add(shapeKey);
+      console.warn(
+        `[@zeroship/db] aggregate accumulator ${unknown.join(", ")} ` +
+        `is not recognised and will be passed through unchanged — ` +
+        `it likely will not reach Postgres. Supported: ${Array.from(KNOWN_ACCUMULATOR_OPS).join(", ")}.`,
+      );
+    }
+  }
   return acc;
 }
 
