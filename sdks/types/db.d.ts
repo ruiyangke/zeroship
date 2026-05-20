@@ -280,6 +280,14 @@ interface ZeroshipMigrationStatus {
   error: string | null;
 }
 
+/**
+ * Lifecycle: `start(spec)` mints the wrapper in the `active` state.
+ * `commitBatch(isDone=true, ...)` / `cancel()` / `reset()` all drive
+ * it to the `settled` state — subsequent `commitBatch` / `cancel` /
+ * `reset` calls reject because the wrapper no longer holds the
+ * advisory lock; `status()` continues to work (the audit row is
+ * still observable by `(name, collection)` coordinates).
+ */
 interface ZeroshipMigration {
   status(): Promise<ZeroshipMigrationStatus>;
   cancel(): Promise<void>;
@@ -312,23 +320,32 @@ interface ZeroshipMigration {
   }): Promise<void>;
 }
 
+/** One event emitted by `ZeroshipSubscription.next()`. */
+type ZeroshipSubscriptionEvent =
+  | {
+      kind: "change";
+      op: "insert" | "update" | "delete";
+      collection: string;
+      pk: number | null;
+      columns: string[];
+    }
+  | { kind: "resync" }
+  | { kind: "closed" };
+
 /**
  * A live subscription wrapper minted by `env.db.openSubscription(name)`.
  * Synchronous to mint — calling it does not allocate any Postgres state;
  * the wrapper merely registers a slot in the per-isolate broker routing
  * table. The wrapper's GC finalizer is the safety-net release.
  *
- * `pollJson` resolves with one of:
- *
- * - `{"kind":"change", "op":"insert"|"update"|"delete",
- *    "collection":..., "pk": number|null, "columns": string[]}`
- * - `{"kind":"resync"}` — bounded queue overflowed; the client should
- *   re-fetch and discard cached results
- * - `{"kind":"closed"}` — subscription was closed; iterator terminates
- * - `null` — handle no longer exists (already closed and reaped)
+ * `next` (async) resolves with the next event or `null` once the
+ * wrapper is closed and drained. `close` is synchronous by design —
+ * a local state flip on the broker entry with no I/O — even though
+ * `next` (which awaits the broker) is async.
  */
 interface ZeroshipSubscription {
-  pollJson(): Promise<string | null>;
+  next(): Promise<ZeroshipSubscriptionEvent | null>;
+  /** Idempotent synchronous teardown — see comment above. */
   close(): void;
 }
 

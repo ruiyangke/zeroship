@@ -9,9 +9,9 @@
  * deferred.
  *
  * The native surface is the Subscription v8_class (returned from
- * `env.db.openSubscription(collection)`) with `.pollJson()` →
- * Promise<string|null> and `.close()`. This module wraps it into an
- * `AsyncIterable` so callers can write:
+ * `env.db.openSubscription(collection)`) with `.next()` →
+ * Promise<SubscriptionEvent | null> and `.close()`. This module
+ * wraps it into an `AsyncIterable` so callers can write:
  *
  * ```ts
  * for await (const ev of db.subscribe("messages")) {
@@ -70,7 +70,7 @@ export interface Subscription extends AsyncIterable<SubscriptionEvent> {
 
 /** Minimal interface of the native Subscription v8_class wrapper. */
 interface NativeSubscription {
-  pollJson(): Promise<string | null>;
+  next(): Promise<SubscriptionEvent | null>;
   close(): void;
 }
 
@@ -122,25 +122,14 @@ export function subscribe(collection: string): Subscription {
       if (closed) {
         return { value: undefined, done: true };
       }
-      const raw = await sub.pollJson();
-      if (raw === null) {
+      const parsed = await sub.next();
+      if (parsed === null) {
         // Wrapper is closed — equivalent to a closed event we missed.
         closed = true;
         return { value: undefined, done: true };
       }
-      let parsed: SubscriptionEvent;
-      try {
-        parsed = JSON.parse(raw) as SubscriptionEvent;
-      } catch (e) {
-        // Should not happen — defensive.
-        closed = true;
-        throw new Error(
-          `@zeroship/db/subscribe: malformed event JSON from native: ${String(e)}`,
-        );
-      }
       if (parsed.kind === "closed") {
         closed = true;
-        return { value: parsed, done: false };
       }
       return { value: parsed, done: false };
     },

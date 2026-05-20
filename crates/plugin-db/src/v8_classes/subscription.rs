@@ -8,29 +8,27 @@
 //!
 //! ## JS surface
 //!
-//! - `pollJson()` → `Promise<string | null>` — resolves with the next
-//!   event's JSON envelope, or `null` once the subscription has been
-//!   closed and drained.
-//! - `close()` — idempotent synchronous teardown; subsequent polls
-//!   resolve `null`.
+//! - `next()` → `Promise<SubscriptionEvent | null>` — resolves with
+//!   the next event as a typed object (`change` / `resync` /
+//!   `closed`) or `null` once the subscription has been closed and
+//!   drained.
+//! - `close()` — idempotent **synchronous** teardown; subsequent
+//!   polls resolve `null`. The asymmetry vs `next()` (which is
+//!   async) is intentional: closing is a local state flip on the
+//!   broker entry and has no I/O.
 //!
 //! The SDK layer (`sdks/db/src/subscribe.ts`) wraps this into the
 //! public `AsyncIterable<SubscriptionEvent>` shape consumed by user
 //! `for await ... of` loops.
-//!
-//! `close()` is exposed as an idempotent synchronous method for
-//! callers that want explicit teardown. Identical effect to dropping
-//! the wrapper — both call `broker::Subscription::close()` — except
-//! `close()` runs synchronously instead of waiting for GC.
 
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
 
-use zeroship_runtime::state::OpError;
+use zeroship_runtime::state::{JsonValue, OpError};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
-use zeroship_runtime_macros::{v8_constructor, v8_method};
+use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};
 
 use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessage};
 
@@ -87,34 +85,28 @@ impl Subscription {
         }
     }
 
-    /// Poll for the next event. Resolves with the JSON-serialised
-    /// [`SubscriptionMessage`] (matching the wire format
-    /// `broker::message_to_json` produces) or `null` once the
-    /// subscription has been closed and drained.
+    /// Poll for the next event. Resolves with the typed event object
+    /// (`{kind:"change",...}` / `{kind:"resync"}` / `{kind:"closed"}`)
+    /// or real JS `null` once the subscription has been closed and
+    /// drained.
     ///
     /// The polling loop uses `poll_fn` to register the broker's Waker
     /// — when an event is pushed (or the broker closes the entry) the
     /// runtime's spawned-op pump wakes the future and resolves the
-    /// promise.
-    ///
-    /// Once a `{"kind":"closed"}` event is observed, the wrapper drops
-    /// its inner broker reference; subsequent polls resolve with `null`
-    /// without re-entering the broker.
-    #[zeroship_runtime_macros::v8_async_method]
-    async fn poll_json(&self) -> Result<String, OpError> {
+    /// promise. Once a `{"kind":"closed"}` event is observed, the
+    /// wrapper drops its inner broker reference; subsequent polls
+    /// resolve `null` without re-entering the broker.
+    #[v8_async_method]
+    async fn next(&self) -> Result<JsonValue, OpError> {
         // Snapshot the broker subscription Rc so `.await` doesn't hold
         // a `RefCell` borrow. `BrokerSubscription` is `Clone` (it wraps
         // `Rc<RefCell<Inner>>`) so this is a refcount-only clone.
         let sub_opt: Option<BrokerSubscription> = self.inner.borrow().as_ref().cloned();
         let sub = match sub_opt {
             Some(s) => s,
-            None => return Ok("null".into()),
+            None => return Ok(JsonValue("null".into())),
         };
 
-        // Polling loop — drain via poll_fn so the broker's
-        // `wake_by_ref` re-schedules us. Mirrors the existing
-        // `callbacks::subscribe_poll` shape so behaviour is identical
-        // between the handle-id API and this wrapper.
         let msg = std::future::poll_fn(|cx| {
             if let Some(m) = sub.pop() {
                 return std::task::Poll::Ready(m);
@@ -131,13 +123,11 @@ impl Subscription {
         })
         .await;
 
-        // On `Closed`, release the broker handle — future polls
-        // observe `null` without re-entering the broker.
         if matches!(msg, SubscriptionMessage::Closed) {
             self.inner.borrow_mut().take();
         }
 
-        Ok(broker::message_to_json(&msg))
+        Ok(JsonValue(broker::message_to_json(&msg)))
     }
 
     /// Idempotent synchronous close. Equivalent to dropping the

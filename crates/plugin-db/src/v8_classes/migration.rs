@@ -53,6 +53,12 @@ pub struct Migration {
     /// after an explicit teardown. Mirrors the `Option`-take pattern
     /// `Subscription` uses for its `BrokerSubscription`.
     inner: RefCell<Option<MigrationOwner>>,
+    /// Coordinates remembered from `mint_migration` so `status()`
+    /// remains readable after `cancel()` / `reset()` / a terminal
+    /// `commitBatch(isDone=true)` has cleared `inner`. The audit row
+    /// outlives the wrapper's active phase; `status()` reads it by
+    /// `(name, collection)` without the advisory lock.
+    coords: RefCell<Option<MigrationOwner>>,
 }
 
 /// The identifying triple captured at `mint_migration` time.
@@ -129,29 +135,29 @@ impl Drop for Migration {
 #[v8_class]
 #[allow(dead_code)] // Methods invoked via V8 callbacks; Rust can't trace through extern.
 impl Migration {
-    /// Construct an empty placeholder. Real instances are minted via
-    /// [`mint_migration`] — the macro requires a constructor for install
-    /// codegen, so this exists to satisfy that contract. Calling
-    /// `new Migration()` from JS produces a wrapper whose `inner` is
-    /// `None`; every method returns the "not active" error.
+    /// `new Migration()` from JS rejects — real instances are minted
+    /// via [`mint_migration`] from `env.db.migrations.start(spec)`,
+    /// which stamps the `(app_id, name, collection)` triple onto the
+    /// wrapper.
     #[v8_constructor]
-    fn new() -> Migration {
-        Migration {
-            inner: RefCell::new(None),
-        }
+    fn new() -> Result<Migration, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
     }
 
     /// `migration.status()` — read the current audit-row state.
     /// Resolves with the typed status object (mirrors the SDK's
-    /// `NativeStatus` interface).
+    /// `NativeStatus` interface). Safe to call after `cancel()` /
+    /// `reset()` / a terminal `commitBatch(isDone=true)` — the
+    /// wrapper retains the `(name, collection)` coordinates so the
+    /// audit row remains observable.
     #[v8_async_method]
     async fn status(&self) -> Result<JsonValue, OpError> {
         let owner = self
-            .inner
+            .coords
             .borrow()
             .as_ref()
             .cloned()
-            .ok_or_else(|| OpError::error("Migration: not active (already cancelled or finalised)"))?;
+            .ok_or_else(|| OpError::error("Migration: not initialised"))?;
         let pool = ensure_pool().await?;
         crate::migrations::exec_status(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await
@@ -503,6 +509,7 @@ fn mint_migration<'s>(
 
     let state = Migration {
         inner: RefCell::new(None),
+        coords: RefCell::new(None),
     };
     let boxed: Box<Migration> = Box::new(state);
     let raw = Box::into_raw(boxed);
@@ -629,11 +636,13 @@ pub fn migration_start_with_spec<'s>(
                 // interior mutation).
                 let migration: &Migration =
                     unsafe { &*(raw_addr as *const Migration) };
-                *migration.inner.borrow_mut() = Some(MigrationOwner {
+                let owner = MigrationOwner {
                     app_id,
                     name,
                     collection,
-                });
+                };
+                *migration.inner.borrow_mut() = Some(owner.clone());
+                *migration.coords.borrow_mut() = Some(owner);
                 OpResult::JsValue {
                     resolver: resolver_global,
                     value: ResolveValue::JsGlobal(migration_global),
