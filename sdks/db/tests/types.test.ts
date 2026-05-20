@@ -21,8 +21,8 @@ describe("t type builder", () => {
     assert.equal(tb.toFieldDef().type, "boolean");
   });
 
-  test("t.date() creates date TypeBuilder", () => {
-    const tb = t.date();
+  test("t.timestamp() creates date-typed TypeBuilder (TIMESTAMPTZ)", () => {
+    const tb = t.timestamp();
     assert.ok(tb instanceof TypeBuilder);
     assert.equal(tb.toFieldDef().type, "date");
   });

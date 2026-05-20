@@ -6,8 +6,7 @@
  * expansion that hands off to the Rust DDL emitter.
  *
  * Postgres-side DDL coverage lives in
- * `crates/plugin-db/src/query.rs` golden tests. TypeScript discriminated
- * narrowing is exercised in `tests/typecheck.ts`.
+ * `crates/plugin-db/src/query.rs` golden tests.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

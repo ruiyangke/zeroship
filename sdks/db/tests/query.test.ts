@@ -7,13 +7,15 @@ type PlainObject = Record<string, unknown>;
 
 function makeMockNative(rows: PlainObject[]) {
   const calls: { collection: string; filter: PlainObject; opts: PlainObject }[] = [];
+  // NativeFn now returns rows directly (Record<string, unknown>[]),
+  // not a JSON string — Query._exec consumes the array.
   const fn = async (
     collection: string,
     filter: PlainObject,
     opts: PlainObject
-  ): Promise<string> => {
+  ): Promise<PlainObject[]> => {
     calls.push({ collection, filter, opts });
-    return JSON.stringify(rows);
+    return rows;
   };
   return { fn, calls };
 }
