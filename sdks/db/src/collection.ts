@@ -300,7 +300,7 @@ export class Collection<
   private _name: string;
   private _schema: NormalizedSchema;
   private _native: NativeDb;
-  /** Lazily resolved Collection v8_class instance — see `_col()`. */
+  /** Lazily resolved Collection v8_class instance — see `_nativeCollection()`. */
   private _nativeCol: NativeCollection | null;
   private _knownFields: Set<string>;
   private _toColumn: (field: string) => string;
@@ -408,7 +408,7 @@ export class Collection<
    * twice with the same `name` returns the same JS object (identity is
    * cached on the Db wrapper).
    */
-  private _col(): NativeCollection {
+  private _nativeCollection(): NativeCollection {
     if (this._nativeCol) return this._nativeCol;
     const dbAny = this._native as unknown as { collection?: (n: string) => NativeCollection };
     if (typeof dbAny.collection !== "function") {
@@ -652,7 +652,7 @@ export class Collection<
     return this._run(async () => {
       const validated = validateDoc(row as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
-      const result = await this._col().insert(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
+      const result = await this._nativeCollection().insert(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>);
       return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
     });
   }
@@ -666,7 +666,7 @@ export class Collection<
     return this._run(async () => {
       const validated = (rows as PlainObject[]).map((r) => validateDoc(r, this._schema));
       const outbound = validated.map((r) => mapDocOutbound(r, this._toColumn));
-      const results = await this._col().insertMany(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
+      const results = await this._nativeCollection().insertMany(outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>[]);
       return (results ?? []).map((r) => mapResultDoc(r as PlainObject, this._toField)) as Row<S>[];
     });
   }
@@ -737,7 +737,7 @@ export class Collection<
         }
         nativeOpts.orderBy = mappedOrder;
       }
-      const result = await this._col().findOne(mapped, nativeOpts);
+      const result = await this._nativeCollection().findOne(mapped, nativeOpts);
       if (result === null) return null;
       const row = mapResultDoc(result as PlainObject, this._toField);
       if (opts.with !== undefined) {
@@ -765,7 +765,7 @@ export class Collection<
               this._toColumn,
             ),
           );
-          const rows = (await this._col().find(filter, {})) ?? [];
+          const rows = (await this._nativeCollection().find(filter, {})) ?? [];
           const map = new Map<number, Row<S>>();
           for (const r of rows) {
             const mapped = mapResultDoc(r as PlainObject, this._toField) as Row<S>;
@@ -815,7 +815,7 @@ export class Collection<
       mapped,
       async (_col, f, fopts) => {
         await this.ensureReady();
-        return this._col().find(f, fopts);
+        return this._nativeCollection().find(f, fopts);
       },
       this._toField,
       this._toColumn,
@@ -873,7 +873,7 @@ export class Collection<
       const validated = validateDoc(merged, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const conflictCols = conflictFields.map((f) => this._toColumn(f as string));
-      const colAny = this._col() as unknown as {
+      const colAny = this._nativeCollection() as unknown as {
         findOrCreate(
           doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
           opts: { conflictFields: string[] },
@@ -900,7 +900,7 @@ export class Collection<
       const validated = validateDoc(row as PlainObject, this._schema);
       const outbound = mapDocOutbound(validated, this._toColumn);
       const conflictCols = options.conflictFields.map((f) => this._toColumn(f));
-      const result = await this._col().upsert(
+      const result = await this._nativeCollection().upsert(
         outbound as Record<string, ZeroshipScalar | ZeroshipScalar[]>,
         { conflictFields: conflictCols },
       );
@@ -940,7 +940,7 @@ export class Collection<
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const result = await this._col().updateOne(mappedFilter, mappedUpdate);
+      const result = await this._nativeCollection().updateOne(mappedFilter, mappedUpdate);
       if (result === null) {
         if (casVersion !== null) {
           throw new OptimisticLockError(casVersion, this._name);
@@ -973,7 +973,7 @@ export class Collection<
       const augmentedUpdate = this._augmentUpdateWithVersion(updateObj, casVersion);
       const mappedFilter = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
       const mappedUpdate = mapUpdateOutbound(augmentedUpdate, this._toColumn);
-      const n = await this._col().updateMany(mappedFilter, mappedUpdate);
+      const n = await this._nativeCollection().updateMany(mappedFilter, mappedUpdate);
       if (n === 0 && casVersion !== null) {
         throw new OptimisticLockError(casVersion, this._name);
       }
@@ -1010,7 +1010,7 @@ export class Collection<
           { [col]: Date.now() } as PlainObject,
           casVersion,
         );
-        const result = await this._col().updateOne(mapped, patch as ZeroshipDbUpdate);
+        const result = await this._nativeCollection().updateOne(mapped, patch as ZeroshipDbUpdate);
         if (result === null) {
           if (casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
           return null;
@@ -1018,7 +1018,7 @@ export class Collection<
         return mapResultDoc(result as PlainObject, this._toField) as Row<S>;
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const result = await this._col().deleteOne(mapped);
+      const result = await this._nativeCollection().deleteOne(mapped);
       if (result === null) {
         if (casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
         return null;
@@ -1047,12 +1047,12 @@ export class Collection<
           { [col]: Date.now() } as PlainObject,
           casVersion,
         );
-        const n = await this._col().updateMany(mapped, patch as ZeroshipDbUpdate);
+        const n = await this._nativeCollection().updateMany(mapped, patch as ZeroshipDbUpdate);
         if (n === 0 && casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
         return { deletedCount: n };
       }
       const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn);
-      const n = await this._col().deleteMany(mapped);
+      const n = await this._nativeCollection().deleteMany(mapped);
       if (n === 0 && casVersion !== null) throw new OptimisticLockError(casVersion, this._name);
       return { deletedCount: n };
     });
@@ -1066,7 +1066,7 @@ export class Collection<
     trackCollectionAccess(this._name);
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
-      const n = await this._col().count(mapped);
+      const n = await this._nativeCollection().count(mapped);
       return typeof n === "number" ? n : 0;
     });
   }
@@ -1083,7 +1083,7 @@ export class Collection<
       }
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const column = this._toColumn(field);
-      const result = await this._col().distinct(mapped, { field: column });
+      const result = await this._nativeCollection().distinct(mapped, { field: column });
       return result ?? [];
     });
   }
@@ -1113,7 +1113,7 @@ export class Collection<
         effectivePipeline as unknown as PlainObject[],
         this._toColumn,
       ) as ZeroshipDbAggregateStage[];
-      const results = await this._col().aggregate(translated);
+      const results = await this._nativeCollection().aggregate(translated);
       return (results ?? []).map((d) => mapResultDoc(d as PlainObject, this._toField));
     });
   }
