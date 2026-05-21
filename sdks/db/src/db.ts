@@ -115,6 +115,41 @@ type SchemaInput =
   | TypeBuilder<unknown, any>;
 
 /**
+ * Schema-shape validator (R3 IMPORTANT-5). When a user writes
+ * `{ name: "string" }` instead of `{ name: t.string() }`, the bare
+ * value is structurally compatible with `Record<string, unknown>` so
+ * the constraint passes silently, leaving the runtime path
+ * (`normalizeSchema`) as the only feedback channel.
+ *
+ * `ValidateSchemaShape<T>` walks each collection's field map: if any
+ * field value is not a `TypeBuilder` (or a `SchemaBuilder` / top-level
+ * `TypeBuilder` for the whole collection), it returns a string-literal
+ * error type that surfaces in the assignability message — TS quotes
+ * the literal, so users see exactly which field is the offender and
+ * what to do.
+ *
+ * If the shape is valid the validator returns `T` unchanged, preserving
+ * inference for the rest of the type machinery.
+ */
+type IsValidSchemaField<F> = F extends TypeBuilder<unknown, boolean> ? true : false;
+
+type ValidateSchemaShape<T> = {
+  [K in keyof T]:
+    T[K] extends SchemaBuilder<Record<string, unknown>>
+      ? T[K]
+      : T[K] extends TypeBuilder<unknown, boolean>
+        ? T[K]
+        : T[K] extends Record<string, unknown>
+          ? {
+              [F in keyof T[K]]:
+                IsValidSchemaField<T[K][F]> extends true
+                  ? T[K][F]
+                  : `Field "${F & string}" on "${K & string}" must be a t.* builder (e.g. t.string(), t.number(), t.ref("users")) — got a bare value.`;
+            }
+          : `Schema "${K & string}" must be a field map of t.* builders, a schema(...) builder, or a top-level t.union(...).`;
+};
+
+/**
  * A typed collection inside a transaction — same API as Collection but throws
  * on error instead of returning Result. Generic over schema shape S.
  *
@@ -447,7 +482,7 @@ let _installInFlight = false;
  * through `env.db.<collection>` once the install has settled.
  */
 export function _installSchema<const T extends Record<string, SchemaInput>>(
-  schemas: T,
+  schemas: ValidateSchemaShape<T>,
   options?: InstallSchemaOptions,
 ): Db<T> {
   // Re-entrancy guard. `_installSchema` is documented as single-threaded
@@ -467,7 +502,7 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   }
   _installInFlight = true;
   try {
-    return _installSchemaInner(schemas, options);
+    return _installSchemaInner(schemas as unknown as T, options);
   } catch (e) {
     // Publish a rejected platform-ready promise so a consumer that
     // awaits `__zeroshipPlatformReady` (the auto-tx dispatcher) sees
