@@ -4,7 +4,7 @@
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
 import { NormalizedSchema } from "./schema.js";
-import { validateDoc, checkPartial, isValidCalendarDate, isJsonSerializable } from "./validate.js";
+import { validateDoc, checkPartial, isValidCalendarDate, isJsonSerializable, isParseableDateString } from "./validate.js";
 import { mapNativeError, ValidationError, OptimisticLockError } from "./errors.js";
 import {
   mapResultDoc,
@@ -118,7 +118,7 @@ export function validateArrayPushOps(
       if (itemType === "string") valid = typeof val === "string";
       else if (itemType === "number") valid = typeof val === "number";
       else if (itemType === "boolean") valid = typeof val === "boolean";
-      else if (itemType === "date") valid = val instanceof Date || typeof val === "string";
+      else if (itemType === "date") valid = val instanceof Date || (typeof val === "string" && isParseableDateString(val));
       else if (itemType === "calendarDate") valid = typeof val === "string" && isValidCalendarDate(val);
       else if (itemType === "json") valid = isJsonSerializable(val);
 
