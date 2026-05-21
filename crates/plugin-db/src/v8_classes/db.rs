@@ -17,7 +17,7 @@
 //! Per-collection CRUD lives on the `Collection` wrapper, not here —
 //! every `find` / `insert` / `update` / `delete` etc. is a
 //! `#[v8_method]` on `Collection` that calls into the
-//! `callbacks::dispatch_*` helpers.
+//! `crate::crud::dispatch_*` helpers.
 //!
 //! ## Why a v8_class
 //!
@@ -36,7 +36,10 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::callbacks;
+use crate::orchestrator::register_model::register_model_dispatch;
+use crate::orchestrator::transaction::begin_transaction_dispatch;
+use crate::replication_ops::start_replication_consumer_dispatch;
+use crate::v8_bridge::{read_json_arg, v8_value_to_serde_json};
 use crate::v8_classes::collection::mint_collection;
 
 // ---------------------------------------------------------------------------
@@ -151,13 +154,13 @@ impl Db {
                 "db.registerModel: collection must be a non-empty string",
             ));
         }
-        let schema_v = callbacks::read_json_arg(scope, Some(schema));
+        let schema_v = read_json_arg(scope, Some(schema));
         let indexes_v = if indexes.is_null_or_undefined() {
             serde_json::Value::Array(Vec::new())
         } else {
-            callbacks::read_json_arg(scope, Some(indexes))
+            read_json_arg(scope, Some(indexes))
         };
-        Ok(callbacks::register_model_dispatch(
+        Ok(register_model_dispatch(
             scope,
             &self.app_id,
             &collection,
@@ -189,7 +192,7 @@ impl Db {
                     "beginTransaction: opts must be an object, got {got}"
                 )));
             }
-            let parsed = callbacks::v8_value_to_serde_json(scope, opts);
+            let parsed = v8_value_to_serde_json(scope, opts);
             let raw = parsed
                 .as_object()
                 .and_then(|o| o.get("isolationLevel"))
@@ -200,7 +203,7 @@ impl Db {
                 None => None,
             }
         };
-        Ok(callbacks::begin_transaction_dispatch(scope, isolation, self.app_id.clone()).into())
+        Ok(begin_transaction_dispatch(scope, isolation, self.app_id.clone()).into())
     }
 
     /// `db.openSubscription(collection)` — mint a [`super::subscription::Subscription`]
@@ -239,7 +242,7 @@ impl Db {
             None
         };
         let app_id = app_id_override.unwrap_or_else(|| self.app_id.clone());
-        callbacks::start_replication_consumer_dispatch(scope, app_id).into()
+        start_replication_consumer_dispatch(scope, app_id).into()
     }
 
     /// `db.replication` — returns the [`super::replication::Replication`]

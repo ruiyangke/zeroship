@@ -22,7 +22,7 @@
 //! `.collection(name)` returns a [`super::collection::Collection`]
 //! v8_class instance bound to this Transaction. Because TX_CONN is
 //! set while the transaction is active, every CRUD method on that
-//! Collection (which calls `callbacks::dispatch_*` → `run_sql`)
+//! Collection (which calls `crate::crud::dispatch_*` → `run_sql`)
 //! automatically routes through the transaction connection.
 //!
 //! ## Ownership token
@@ -124,7 +124,7 @@ impl Drop for Transaction {
         drop(client);
         // GC-driven implicit rollback — drop any queued broker events
         // so subscribers never observe the now-aborted writes.
-        crate::callbacks::clear_pending_emits();
+        crate::exec::clear_pending_emits();
     }
 }
 
@@ -252,9 +252,9 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     // COMMIT failure drop the queue so subscribers never see writes
     // Postgres just undid.
     if cmd == "COMMIT" && result.is_ok() {
-        crate::callbacks::drain_pending_emits_on_commit();
+        crate::exec::drain_pending_emits_on_commit();
     } else {
-        crate::callbacks::clear_pending_emits();
+        crate::exec::clear_pending_emits();
     }
 
     result.map(|_| ())
@@ -266,7 +266,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
 
 /// Mint a Transaction v8_class instance and stamp `token` into the
 /// wrapper state. The matching `TX_TOKEN` write happens in
-/// [`crate::callbacks::begin_transaction`] only after the async BEGIN
+/// [`crate::orchestrator::transaction::begin_transaction_dispatch`] only after the async BEGIN
 /// succeeds — so a failed BEGIN leaves the wrapper with a token that
 /// never matches, and its `Drop` is a no-op when V8 eventually
 /// collects it.
@@ -274,7 +274,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
 /// Caller invariant: TX_CONN has just been set by a successful BEGIN
 /// and no other Transaction wrapper is alive for the same TX_CONN —
 /// enforced by the "nested transactions not supported" check in
-/// [`crate::callbacks::begin_transaction`]'s async path.
+/// [`crate::orchestrator::transaction::begin_transaction_dispatch`]'s async path.
 pub fn mint_transaction<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     token: u64,

@@ -45,7 +45,7 @@
 //!   (`@zeroship/db`'s reactive-query helper) snapshots it into a
 //!   [`Subscription`] when the handler returns.
 //! - It doesn't talk to V8. All the V8-facing surface lives in
-//!   `callbacks.rs` (capture sites: dispatch_find / dispatch_find_one /
+//!   `crud.rs` (capture sites: dispatch_find / dispatch_find_one /
 //!   dispatch_count) and the broker's v8_class wrapper.
 
 use std::cell::RefCell;

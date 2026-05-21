@@ -32,7 +32,6 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 pub mod audit;
 pub mod auth;
 pub mod broker;
-pub mod callbacks;
 pub mod crud;
 pub mod diff;
 pub mod error;
@@ -123,8 +122,8 @@ thread_local! {
 }
 
 /// Allocate a fresh non-zero TX_TOKEN value. Called by
-/// `callbacks::begin_transaction` right before stamping the token onto
-/// the freshly-minted `Transaction` wrapper.
+/// `orchestrator::transaction::begin_transaction_dispatch` right before
+/// stamping the token onto the freshly-minted `Transaction` wrapper.
 pub(crate) fn next_tx_token() -> u64 {
     TX_TOKEN_COUNTER.with(|c| {
         let n = c.get().wrapping_add(1);
@@ -148,7 +147,7 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
 // The synchronous `ensure_pool(scope)` helper that used to live here
 // has been removed — every callback dispatches through
 // `init_pool_async()` + `DB_POOL.with(...)` directly (or the
-// `callbacks::ensure_pool` async helper that wraps the same).
+// `exec::ensure_pool` async helper that wraps the same).
 
 // ---------------------------------------------------------------------------
 // DbPlugin
@@ -186,7 +185,7 @@ impl NativePlugin for DbPlugin {
     /// `env.db`. The runtime then attaches the Db-scoped entry points
     /// registered via [`Self::register`] on top. The `.collection(name)`
     /// `#[v8_method]` on the instance returns a `Collection` v8_class
-    /// wrapper whose CRUD methods call `callbacks::dispatch_*` directly.
+    /// wrapper whose CRUD methods call `crud::dispatch_*` directly.
     fn build_instance<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -221,7 +220,7 @@ impl NativePlugin for DbPlugin {
         // the auto-tx globals — `query()` / `mutation()` defense in
         // depth at the Postgres level around the B3 capability gate.
         r.add_setup("install_auto_tx_globals", |scope, _ns_obj| {
-            callbacks::install_auto_tx_globals(scope);
+            orchestrator::auto_tx::install_auto_tx_globals(scope);
         });
     }
 }
@@ -292,14 +291,14 @@ pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
 /// transaction settle path's commit branch without standing up V8.
 #[doc(hidden)]
 pub fn drain_pending_emits_for_tests() {
-    callbacks::drain_pending_emits_on_commit();
+    exec::drain_pending_emits_on_commit();
 }
 
 /// **Test-only**: clear the pending-emits queue without firing
 /// (rollback branch).
 #[doc(hidden)]
 pub fn clear_pending_emits_for_tests() {
-    callbacks::clear_pending_emits();
+    exec::clear_pending_emits();
 }
 
 /// Initialize the connection pool asynchronously.

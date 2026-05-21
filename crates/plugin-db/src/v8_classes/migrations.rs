@@ -26,7 +26,8 @@ use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method};
 
-use crate::callbacks;
+use crate::exec::ensure_pool;
+use crate::v8_bridge::v8_value_to_serde_json;
 
 // ---------------------------------------------------------------------------
 // Migrations state
@@ -157,7 +158,7 @@ fn dispatch_by_spec<'s>(
     let request_id = state.borrow().executing_request_id;
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let pool = match callbacks::ensure_pool().await {
+        let pool = match ensure_pool().await {
             Ok(p) => p,
             Err(e) => {
                 return OpResult::JsValue {
@@ -203,7 +204,7 @@ fn parse_name_and_collection(
     if !spec.is_object() {
         return Err("migrations: spec must be an object".into());
     }
-    let parsed = callbacks::v8_value_to_serde_json(scope, spec);
+    let parsed = v8_value_to_serde_json(scope, spec);
     let obj = parsed
         .as_object()
         .ok_or_else(|| "migrations: spec must be an object".to_string())?;

@@ -12,7 +12,10 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 
-use crate::callbacks;
+use crate::replication_ops::{
+    replication_drop_abandoned_dispatch, replication_setup_dispatch, replication_watchdog_dispatch,
+};
+use crate::v8_bridge::read_json_arg;
 
 pub struct Replication {
     /// app_id stamped at mint time from the parent Db wrapper. Never
@@ -45,13 +48,13 @@ impl Replication {
         scope: &mut v8::PinScope<'s, '_>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let opts_v = read_json_arg(scope, Some(opts));
         let app_id = opts_v
             .get("appId")
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| self.app_id.clone());
-        callbacks::replication_setup_dispatch(scope, app_id).into()
+        replication_setup_dispatch(scope, app_id).into()
     }
 
     /// `db.replication.watchdog()` → `Promise<SlotHealth[] JSON>`.
@@ -60,7 +63,7 @@ impl Replication {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> v8::Local<'s, v8::Value> {
-        callbacks::replication_watchdog_dispatch(scope).into()
+        replication_watchdog_dispatch(scope).into()
     }
 
     /// `db.replication.dropAbandoned(opts?)` → `Promise<string[] JSON>`.
@@ -73,12 +76,12 @@ impl Replication {
         scope: &mut v8::PinScope<'s, '_>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let opts_v = read_json_arg(scope, Some(opts));
         let inactive_seconds = opts_v
             .get("inactiveSeconds")
             .and_then(Value::as_i64)
             .unwrap_or(3600);
-        callbacks::replication_drop_abandoned_dispatch(scope, inactive_seconds).into()
+        replication_drop_abandoned_dispatch(scope, inactive_seconds).into()
     }
 }
 

@@ -15,7 +15,7 @@
 //!   4. Asserts `broker::live_subscription_count() == 0`.
 //!
 //! Before this PR the handle-id-based registry (`SUBSCRIPTIONS` in
-//! `callbacks.rs`) had no way to detect that the JS-side AsyncIterable
+//! the legacy `callbacks.rs`) had no way to detect that the JS-side AsyncIterable
 //! had been dropped without `.return()`, so this would have stayed
 //! at 1 indefinitely.
 

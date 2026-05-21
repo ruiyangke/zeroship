@@ -252,14 +252,14 @@ impl Migration {
     }
 }
 
-/// Lazy pool accessor — wraps [`crate::callbacks::ensure_pool`] with
+/// Lazy pool accessor — wraps [`crate::exec::ensure_pool`] with
 /// an `OpError` boundary so the `Migration` v8_async_methods return
 /// the V8-aware error type the macro expects. The typed `DbError` from
 /// `exec::ensure_pool` is stamped onto `OpError::coded(...)` via
 /// `to_op_error()`, so the JS exception carries `.code` (typically
 /// `not_configured`).
 async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, OpError> {
-    crate::callbacks::ensure_pool()
+    crate::exec::ensure_pool()
         .await
         .map_err(crate::error::DbError::to_op_error)
 }
@@ -446,7 +446,7 @@ fn parse_commit_spec(
     if !spec_val.is_object() {
         return Err("db: commitBatch: spec must be an object".into());
     }
-    let parsed = crate::callbacks::v8_value_to_serde_json(scope, spec_val);
+    let parsed = crate::v8_bridge::v8_value_to_serde_json(scope, spec_val);
     let obj = parsed
         .as_object()
         .ok_or_else(|| "db: commitBatch: spec must be an object".to_string())?;
@@ -641,7 +641,7 @@ pub fn migration_start_with_spec<'s>(
     let resolver_global = v8::Global::new(scope, resolver);
 
     let request_id = state.borrow().executing_request_id;
-    let app_id = crate::callbacks::get_app_id_pub(&state);
+    let app_id = crate::v8_bridge::get_app_id_pub(&state);
 
     // ---- 4. Spawn the async exec_begin op ------------------------------
     let SpecParts { name, collection, dry_run, reset } = spec;
@@ -738,7 +738,7 @@ fn parse_spec(
     // JSON.stringify / JSON.parse boundary). Same walker the
     // Collection CRUD methods use — keeps the migration entry point
     // consistent with the rest of the native surface.
-    let parsed = crate::callbacks::v8_value_to_serde_json(scope, spec);
+    let parsed = crate::v8_bridge::v8_value_to_serde_json(scope, spec);
     let obj = parsed
         .as_object()
         .ok_or_else(|| "db: migrations.start: spec must be an object".to_string())?;

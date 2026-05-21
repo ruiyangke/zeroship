@@ -17,9 +17,12 @@
 //!   `query()` / `mutation()` handlers in a per-kind isolation
 //!   envelope; commits or rolls back at the end of the handler.
 //!
-//! Each submodule is `pub(crate)` so [`crate::callbacks`] can
-//! re-export the public symbols at the legacy path.
+//! Each submodule is `pub(crate)` to scope visibility; the v8_class
+//! layer (`v8_classes/*.rs`) imports the dispatchers directly. There
+//! is no longer an aggregating re-export — `crate::callbacks` was
+//! deleted in Stage 8b once each consumer moved to its canonical
+//! import.
 
-pub(crate) mod auto_tx;
-pub(crate) mod register_model;
-pub(crate) mod transaction;
+pub mod auto_tx;
+pub mod register_model;
+pub mod transaction;

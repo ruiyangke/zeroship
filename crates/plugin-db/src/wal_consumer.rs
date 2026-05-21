@@ -49,7 +49,7 @@
 //!   apps call `db.replicationConsumerStart()` to enable cross-worker
 //!   propagation. Spawning automatically on isolate boot is one
 //!   `r.add("replicationConsumerStart", …)` + a callback away in
-//!   `callbacks.rs`; left out so the first ship of this code doesn't
+//!   `replication_ops.rs`; left out so the first ship of this code doesn't
 //!   change the boot path for apps that have never enabled C1.
 //! - **Reconnection / fault-tolerance** — the consumer's `run` loop
 //!   returns on first I/O error. A supervising task (`watchdog.rs` in

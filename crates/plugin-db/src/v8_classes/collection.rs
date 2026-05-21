@@ -2,9 +2,9 @@
 //!
 //! A `Collection` instance is returned by [`super::db::Db::collection`].
 //! Each CRUD method on it decodes its V8 arguments directly into a
-//! `serde_json::Value` (via [`crate::callbacks::v8_value_to_serde_json`])
-//! and calls the shared `dispatch_*` helper in [`crate::callbacks`] —
-//! no JSON.stringify / parse round-trip on the CRUD hot path.
+//! `serde_json::Value` (via [`crate::v8_bridge::v8_value_to_serde_json`])
+//! and calls the shared `dispatch_*` helper in [`crate::crud`] — no
+//! JSON.stringify / parse round-trip on the CRUD hot path.
 
 #![allow(unsafe_code)]
 
@@ -13,7 +13,13 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
-use crate::callbacks;
+use crate::crud::{
+    dispatch_aggregate, dispatch_count, dispatch_delete_many, dispatch_delete_one,
+    dispatch_distinct, dispatch_find, dispatch_find_one, dispatch_find_or_create,
+    dispatch_insert, dispatch_insert_many, dispatch_update_many, dispatch_update_one,
+    dispatch_upsert,
+};
+use crate::v8_bridge::{read_json_arg, refuse_if_query_capability};
 
 // ---------------------------------------------------------------------------
 // Collection state
@@ -67,9 +73,9 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
-        callbacks::dispatch_find_one(scope, &self.app_id, &self.name, filter_v, opts_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        let opts_v = read_json_arg(scope, Some(opts));
+        dispatch_find_one(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
     #[v8_method]
@@ -79,9 +85,9 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
-        callbacks::dispatch_find(scope, &self.app_id, &self.name, filter_v, opts_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        let opts_v = read_json_arg(scope, Some(opts));
+        dispatch_find(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
     #[v8_method]
@@ -91,12 +97,12 @@ impl Collection {
         doc: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         if let Some(p) =
-            callbacks::refuse_if_query_capability(scope, "ctx.db.insert")
+            refuse_if_query_capability(scope, "ctx.db.insert")
         {
             return p.into();
         }
-        let doc_v = callbacks::read_json_arg(scope, Some(doc));
-        callbacks::dispatch_insert(scope, &self.app_id, &self.name, doc_v).into()
+        let doc_v = read_json_arg(scope, Some(doc));
+        dispatch_insert(scope, &self.app_id, &self.name, doc_v).into()
     }
 
     #[v8_method]
@@ -107,12 +113,12 @@ impl Collection {
         docs: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         if let Some(p) =
-            callbacks::refuse_if_query_capability(scope, "ctx.db.insertMany")
+            refuse_if_query_capability(scope, "ctx.db.insertMany")
         {
             return p.into();
         }
-        let docs_v = callbacks::read_json_arg(scope, Some(docs));
-        callbacks::dispatch_insert_many(scope, &self.app_id, &self.name, docs_v).into()
+        let docs_v = read_json_arg(scope, Some(docs));
+        dispatch_insert_many(scope, &self.app_id, &self.name, docs_v).into()
     }
 
     #[v8_method]
@@ -124,13 +130,13 @@ impl Collection {
         update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         if let Some(p) =
-            callbacks::refuse_if_query_capability(scope, "ctx.db.updateOne")
+            refuse_if_query_capability(scope, "ctx.db.updateOne")
         {
             return p.into();
         }
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        let update_v = callbacks::read_json_arg(scope, Some(update));
-        callbacks::dispatch_update_one(scope, &self.app_id, &self.name, filter_v, update_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        let update_v = read_json_arg(scope, Some(update));
+        dispatch_update_one(scope, &self.app_id, &self.name, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -142,13 +148,13 @@ impl Collection {
         update: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         if let Some(p) =
-            callbacks::refuse_if_query_capability(scope, "ctx.db.updateMany")
+            refuse_if_query_capability(scope, "ctx.db.updateMany")
         {
             return p.into();
         }
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        let update_v = callbacks::read_json_arg(scope, Some(update));
-        callbacks::dispatch_update_many(scope, &self.app_id, &self.name, filter_v, update_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        let update_v = read_json_arg(scope, Some(update));
+        dispatch_update_many(scope, &self.app_id, &self.name, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -159,12 +165,12 @@ impl Collection {
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         if let Some(p) =
-            callbacks::refuse_if_query_capability(scope, "ctx.db.deleteOne")
+            refuse_if_query_capability(scope, "ctx.db.deleteOne")
         {
             return p.into();
         }
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_delete_one(scope, &self.app_id, &self.name, filter_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_delete_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
     #[v8_method]
@@ -175,12 +181,12 @@ impl Collection {
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         if let Some(p) =
-            callbacks::refuse_if_query_capability(scope, "ctx.db.deleteMany")
+            refuse_if_query_capability(scope, "ctx.db.deleteMany")
         {
             return p.into();
         }
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
     /// `collection.upsert(doc, opts)` — insert or update on conflict.
@@ -194,12 +200,12 @@ impl Collection {
         doc: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.upsert")
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.upsert")
         {
             return Ok(p.into());
         }
-        let doc_v = callbacks::read_json_arg(scope, Some(doc));
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let doc_v = read_json_arg(scope, Some(doc));
+        let opts_v = read_json_arg(scope, Some(opts));
         let conflict_v = opts_v
             .get("conflictFields")
             .cloned()
@@ -225,7 +231,7 @@ impl Collection {
                 "upsert: opts.conflictFields must be a non-empty array of strings",
             ));
         }
-        Ok(callbacks::dispatch_upsert(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
+        Ok(dispatch_upsert(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
     }
 
     /// `collection.findOrCreate(doc, opts)` — return the existing row
@@ -242,11 +248,11 @@ impl Collection {
         doc: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        if let Some(p) = callbacks::refuse_if_query_capability(scope, "ctx.db.findOrCreate") {
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.findOrCreate") {
             return Ok(p.into());
         }
-        let doc_v = callbacks::read_json_arg(scope, Some(doc));
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let doc_v = read_json_arg(scope, Some(doc));
+        let opts_v = read_json_arg(scope, Some(opts));
         let conflict_v = opts_v
             .get("conflictFields")
             .cloned()
@@ -272,7 +278,7 @@ impl Collection {
                 "findOrCreate: opts.conflictFields must be a non-empty array of strings",
             ));
         }
-        Ok(callbacks::dispatch_find_or_create(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
+        Ok(dispatch_find_or_create(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
     }
 
     #[v8_method]
@@ -281,8 +287,8 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         filter: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        callbacks::dispatch_count(scope, &self.app_id, &self.name, filter_v).into()
+        let filter_v = read_json_arg(scope, Some(filter));
+        dispatch_count(scope, &self.app_id, &self.name, filter_v).into()
     }
 
     /// `collection.distinct(filter, opts)` — return the unique values
@@ -295,8 +301,8 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let filter_v = callbacks::read_json_arg(scope, Some(filter));
-        let opts_v = callbacks::read_json_arg(scope, Some(opts));
+        let filter_v = read_json_arg(scope, Some(filter));
+        let opts_v = read_json_arg(scope, Some(opts));
         let field = opts_v
             .get("field")
             .and_then(Value::as_str)
@@ -305,7 +311,7 @@ impl Collection {
                 "distinct: opts.field must be a non-empty string",
             ))?
             .to_string();
-        Ok(callbacks::dispatch_distinct(scope, &self.app_id, &self.name, &field, filter_v).into())
+        Ok(dispatch_distinct(scope, &self.app_id, &self.name, &field, filter_v).into())
     }
 
     #[v8_method]
@@ -314,8 +320,8 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         pipeline: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let pipeline_v = callbacks::read_json_arg(scope, Some(pipeline));
-        callbacks::dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v).into()
+        let pipeline_v = read_json_arg(scope, Some(pipeline));
+        dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v).into()
     }
 
     /// `collection.openSubscription()` — returns a

@@ -7,8 +7,8 @@
 //!   returning a `Collection` v8_class wrapper.
 //! - [`collection`] — per-collection CRUD. Each method walks its
 //!   `v8::Local<Value>` args directly into a `serde_json::Value` via
-//!   `callbacks::v8_value_to_serde_json` (no JSON.stringify/parse) and
-//!   calls a shared `callbacks::dispatch_*` helper.
+//!   `v8_bridge::v8_value_to_serde_json` (no JSON.stringify/parse) and
+//!   calls a shared `crud::dispatch_*` helper.
 //! - [`transaction`] — `env.db.beginTransaction(isolationLevel?)`
 //!   resolves with a `Transaction` instance whose Weak finalizer
 //!   auto-rollbacks if user code drops the handle without explicit

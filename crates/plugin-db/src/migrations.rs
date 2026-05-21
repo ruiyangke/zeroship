@@ -183,7 +183,8 @@ pub(crate) fn err_not_active() -> OpError {
     )
 }
 
-/// Open a dedicated client. Mirrors `exec_begin` in `callbacks.rs`.
+/// Open a dedicated client. Mirrors `exec_begin` in
+/// `orchestrator::transaction`.
 async fn open_dedicated_client() -> Result<Client, String> {
     let url = crate::DB_URL
         .with(|u| u.borrow().clone())
@@ -532,7 +533,7 @@ pub async fn exec_fetch_batch(
     return_lock_client(client);
 
     let rows = rows_result.map_err(|e| coded_sql("migration fetch", e))?;
-    let row_jsons: Vec<Value> = rows.iter().map(crate::callbacks::row_to_json).collect();
+    let row_jsons: Vec<Value> = rows.iter().map(crate::v8_bridge::row_to_json).collect();
     Ok(Value::Array(row_jsons).to_string())
 }
 

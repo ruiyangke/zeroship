@@ -1017,7 +1017,7 @@ async fn a2_first_deploy_writes_audit_rows() {
         "name": {"type": "string"},
     });
 
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool,
         app,
         "users",
@@ -1079,7 +1079,7 @@ async fn a2_destructive_drop_column_refused_strict() {
         "name": {"type": "string"},
         "legacy_score": {"type": "number"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &v1, &serde_json::json!([]), "deploy_v1",)
     .await
     .unwrap();
@@ -1088,7 +1088,7 @@ async fn a2_destructive_drop_column_refused_strict() {
     let v2 = json!({
         "name": {"type": "string"},
     });
-    let err = zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &v2, &serde_json::json!([]), "deploy_v2",)
     .await
     .expect_err("strict deploy should refuse drop_column");
@@ -1155,7 +1155,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         "name": {"type": "string"},
         "legacy_score": {"type": "number"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &v1, &serde_json::json!([]), "off_v1",)
     .await
     .unwrap();
@@ -1165,7 +1165,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         "_meta": {"strictness": "off"},
         "name": {"type": "string"},
     });
-    let result = zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    let result = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &v2, &serde_json::json!([]), "off_v2",)
     .await;
     assert!(result.is_ok(), "strictness=off should not refuse: {result:?}");
@@ -1198,7 +1198,7 @@ async fn a2_additive_add_column_applied() {
         .unwrap();
 
     let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "items", &v1, &serde_json::json!([]), "add_v1",)
     .await
     .unwrap();
@@ -1208,7 +1208,7 @@ async fn a2_additive_add_column_applied() {
         "name": {"type": "string"},
         "description": {"type": "string"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "items", &v2, &serde_json::json!([]), "add_v2",)
     .await
     .unwrap();
@@ -1259,7 +1259,7 @@ async fn a2_not_null_on_non_empty_refused() {
 
     // v1: schema with 'name' field.
     let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "people", &v1, &serde_json::json!([]), "nn_v1",)
     .await
     .unwrap();
@@ -1281,7 +1281,7 @@ async fn a2_not_null_on_non_empty_refused() {
         "name": {"type": "string"},
         "ssn": {"type": "string", "required": true},
     });
-    let err = zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "people", &v2, &serde_json::json!([]), "nn_v2",)
     .await
     .expect_err("NOT NULL add on non-empty table should be refused");
@@ -1336,7 +1336,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     // and `compio::runtime::spawn` schedules on the same thread). The
     // sequential variant is sufficient to verify the lock-acquire /
     // release / re-diff path without needing a second OS thread.
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool,
         "a2_concurrent",
         "races",
@@ -1346,7 +1346,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     .await
     .expect("first deploy under lock");
 
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool,
         "a2_concurrent",
         "races",
@@ -1408,7 +1408,7 @@ async fn a2_required_with_default_is_compatible() {
         .unwrap();
 
     let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "things", &v1, &serde_json::json!([]), "rd_v1",)
     .await
     .unwrap();
@@ -1424,7 +1424,7 @@ async fn a2_required_with_default_is_compatible() {
         "name": {"type": "string"},
         "status": {"type": "string", "required": true, "default": "active"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "things", &v2, &serde_json::json!([]), "rd_v2",)
     .await
     .unwrap_or_else(|e| panic!("required-with-default should be compatible: {e}"));
@@ -2364,7 +2364,7 @@ async fn b2_setup_users_posts(pool: &Pool, app: &str) {
         .unwrap();
     // Users first so the FK target exists when posts is created.
     let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         pool,
         app,
         "users",
@@ -2377,7 +2377,7 @@ async fn b2_setup_users_posts(pool: &Pool, app: &str) {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "ref", "refTarget": "users"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         pool,
         app,
         "posts",
@@ -2505,7 +2505,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         .unwrap();
 
     let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "users", &users_schema, &serde_json::json!([]), "b2_cas_v1",)
     .await
     .unwrap();
@@ -2514,7 +2514,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &posts_schema, &serde_json::json!([]), "b2_cas_v1",)
     .await
     .unwrap();
@@ -2696,7 +2696,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
 
     // V1 — users + posts with a bare number column.
     let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "users", &users_schema, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
@@ -2704,7 +2704,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "number"},
     });
-    zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
@@ -2739,7 +2739,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "title": {"type": "string", "required": true},
         "authorId": {"type": "ref", "refTarget": "users"},
     });
-    let res = zeroship_plugin_db::callbacks::exec_register_model_with_pool(
+    let res = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
         &pool, app, "posts", &posts_schema_v2, &serde_json::json!([]), "v2",)
     .await;
     assert!(
@@ -3102,7 +3102,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         &serde_json::json!({ "name": "alice" }),
     )
     .expect("build_insert");
-    let _ = zeroship_plugin_db::callbacks::exec_mutation_with_emit_for_tests(
+    let _ = zeroship_plugin_db::exec::exec_mutation_with_emit_for_tests(
         bq,
         app,
         "users",
@@ -4234,7 +4234,7 @@ fn p8a2_per_app_emit_suppression_integration() {
 /// here is the registry contract.
 #[compio::test]
 async fn p8a2_auto_spawn_is_idempotent_via_registry() {
-    use zeroship_plugin_db::callbacks::{
+    use zeroship_plugin_db::replication_ops::{
         clear_consumer_registry_for_tests, is_consumer_registered_for_tests,
     };
 
@@ -4286,7 +4286,7 @@ async fn p8a2_auto_spawn_via_callback_short_circuits() {
 
     let app = "p8a2_auto_app";
     c1_cleanup(&pool, app).await;
-    zeroship_plugin_db::callbacks::clear_consumer_registry_for_tests();
+    zeroship_plugin_db::replication_ops::clear_consumer_registry_for_tests();
 
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await

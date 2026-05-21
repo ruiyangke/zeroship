@@ -49,7 +49,7 @@
 
 use compio_postgres::Pool;
 
-use crate::callbacks::row_to_json;
+use crate::v8_bridge::row_to_json;
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
