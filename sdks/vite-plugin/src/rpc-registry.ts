@@ -359,6 +359,21 @@ function _zsRpc(name, input, ctx) {
 // (data integrity wins). CURRENT_KIND is popped exactly once on every
 // exit path (begin throw, handler throw, commit throw, success).
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
+  // Cold-start race: in the auto-discovery path \`__zeroshipPlatformReady\`
+  // is set inside \`_installSchema\`, which runs inside the IIFE in this
+  // synthetic entry. If the first request lands before the IIFE's dynamic
+  // \`import("@zeroship/db")\` resolves, the platform-ready handle is still
+  // undefined and the await below is a no-op — letting an auto-tx open
+  // against an unregistered schema. Awaiting \`__zsSchemaInit\` first pins
+  // the happens-before edge.
+  const init = globalThis.__zsSchemaInit;
+  if (init && typeof init.then === "function") {
+    try { await init; } catch { /* surfaced via handler */ }
+  }
+  const ready = globalThis.__zeroshipPlatformReady;
+  if (ready && typeof ready.then === "function") {
+    try { await ready; } catch { /* user-facing errors surface via the handler */ }
+  }
   // Begin returns 0 for unwrapped/no-op cases (kind doesn't match, or
   // a user-driven db.transaction is already open). End on 0 is a noop.
   // Second arg to bt is the per-mutation isolation override; default
@@ -751,6 +766,17 @@ function _zsRpc(name, input, ctx) {
 }
 
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
+  // Cold-start race: in the auto-discovery path \`__zeroshipPlatformReady\`
+  // is set inside \`__registerSchemas\`, which runs inside the IIFE in this
+  // synthetic entry. If the first request lands before the IIFE's dynamic
+  // \`import("@zeroship/db/internal")\` resolves, the platform-ready handle
+  // is still undefined and the await below is a no-op — letting an auto-tx
+  // open against an unregistered schema. Awaiting \`__zsSchemaInit\` first
+  // pins the happens-before edge.
+  const init = globalThis.__zsSchemaInit;
+  if (init && typeof init.then === "function") {
+    try { await init; } catch { /* surfaced via handler */ }
+  }
   // Await platform-readiness BEFORE the auto-tx BEGIN — see
   // dev-bootstrap/index.ts and sdks/db/src/db.ts for the rationale
   // (pglite-socket serializes per-connection-in-tx). No-op on the

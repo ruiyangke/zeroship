@@ -358,8 +358,19 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   // native side when empty). See rpc-registry.ts for the rationale.
   const isolation = (cfg && typeof (cfg as any).isolation === "string")
     ? (cfg as any).isolation : "";
+  // Cold-start race: under auto-discovery `__zeroshipPlatformReady` is
+  // set inside `_installSchema`, which runs inside `maybeRegisterSchema`
+  // above. If the first request lands before the dynamic
+  // `runner.import("@zeroship/db")` resolves, the platform-ready handle
+  // is still undefined and the await below is a no-op — letting an
+  // auto-tx open against an unregistered schema. Awaiting
+  // `__zsSchemaInit` first pins the happens-before edge.
+  const initSchema = (globalThis as any).__zsSchemaInit;
+  if (initSchema && typeof initSchema.then === "function") {
+    try { await initSchema; } catch { /* surfaced via handler */ }
+  }
   // Await any platform-readiness promises BEFORE opening the auto-tx.
-  // `@zeroship/db`'s `createDb` publishes its registerModel chain on
+  // `@zeroship/db`'s `_installSchema` publishes its registerModel chain on
   // `globalThis.__zeroshipPlatformReady`; under pglite-socket's
   // per-connection-in-tx serialization, opening an auto-tx while
   // registerModel still holds `pg_advisory_lock` deadlocks the

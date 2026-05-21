@@ -209,6 +209,53 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
     );
   });
 
+  test("generated _zsRpcWithAutoTx awaits __zsSchemaInit BEFORE __zeroshipPlatformReady", () => {
+    // Cold-start race regression: in the auto-discovery path
+    // `__zeroshipPlatformReady` is set INSIDE `_installSchema`, which itself
+    // runs inside the IIFE that publishes `__zsSchemaInit`. If the first
+    // request lands before that IIFE's dynamic import resolves,
+    // `__zeroshipPlatformReady` is still undefined and the await is a no-op
+    // — letting auto-tx open against an unregistered schema. The fix is to
+    // await `__zsSchemaInit` first. Verify the ordering in both the
+    // namespace-walk (runtime) entry AND the Phase-2 binding-fed entry.
+    for (const spec of [undefined, "/proj/src/schema.ts"] as const) {
+      const code = buildServerEntrySource({
+        userEntryRel: "/proj/src/server.ts",
+        schemaImportSpec: spec,
+      });
+      const initIdx = code.indexOf("globalThis.__zsSchemaInit;");
+      const readyIdx = code.indexOf("globalThis.__zeroshipPlatformReady;");
+      assert.ok(initIdx > 0, "expected `globalThis.__zsSchemaInit;` read");
+      assert.ok(readyIdx > 0, "expected `globalThis.__zeroshipPlatformReady;` read");
+      assert.ok(
+        initIdx < readyIdx,
+        `__zsSchemaInit must be awaited BEFORE __zeroshipPlatformReady (init=${initIdx}, ready=${readyIdx}, spec=${spec})`,
+      );
+    }
+
+    // The Phase-2 (binding-fed) emission must also order the two awaits.
+    const phase2 = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+      bindings: new Map([
+        [
+          "/proj/src/server.ts::ping",
+          {
+            wireId: "ping",
+            sourceFile: "/proj/src/server.ts",
+            exportName: "ping",
+            kind: "query",
+            marker: "file",
+            chain: ["/proj/src/server.ts"],
+          },
+        ],
+      ]),
+    });
+    const initIdx2 = phase2.indexOf("globalThis.__zsSchemaInit;");
+    const readyIdx2 = phase2.indexOf("globalThis.__zeroshipPlatformReady;");
+    assert.ok(initIdx2 > 0 && readyIdx2 > 0 && initIdx2 < readyIdx2,
+      "Phase 2 entry must await __zsSchemaInit before __zeroshipPlatformReady");
+  });
+
   test("split-file path in binding-fed (Phase 2) emission emits the schema import + block", () => {
     // Imported lazily to avoid pulling ServerBinding's type machinery
     // into this lightweight test file's hot path.
