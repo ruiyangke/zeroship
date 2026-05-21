@@ -1,0 +1,270 @@
+//! SQL execution helpers — the only consumer of `compio_postgres::Pool`
+//! on the CRUD hot path.
+//!
+//! Every CRUD dispatch helper (in `crate::callbacks` / future `crate::crud`)
+//! lowers its `BuiltQuery` through one of:
+//!
+//! - [`exec_query`] — read path, returns rows as a JSON array string.
+//! - [`exec_count`] — read path that extracts a single `count` column.
+//! - [`exec_mutation`] — write path, returns RETURNING rows as JSON.
+//! - [`exec_mutation_with_emit`] — write path + broker emit (or queue
+//!   when inside a transaction).
+//!
+//! All four route through [`run_sql`], which transparently uses
+//! [`crate::TX_CONN`] when an explicit `Transaction` / auto-tx is
+//! active and the pool otherwise.
+//!
+//! The transaction-emit deferral (Gap B closure) lives here:
+//! [`queue_or_emit`] decides between immediate emit and TX-pending
+//! queueing; [`drain_pending_emits_on_commit`] fires the queue on
+//! COMMIT; [`clear_pending_emits`] discards it on ROLLBACK.
+
+use std::rc::Rc;
+
+use serde_json::Value;
+
+use crate::query::BuiltQuery;
+use crate::v8_bridge::{fmt_db_err, rows_to_json};
+use crate::DB_POOL;
+
+/// Execute SQL with text params — uses TX connection if active, otherwise pool.
+pub(crate) async fn run_sql(
+    sql: &str,
+    params: &[&str],
+) -> Result<Vec<compio_postgres::Row>, String> {
+    // Check if there's an active transaction
+    let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    if has_tx {
+        // Use transaction connection
+        let client = crate::TX_CONN
+            .with(|tx| tx.borrow_mut().take())
+            .ok_or_else(|| "db: transaction connection lost".to_string())?;
+        let result = client.query_text_params(sql, params).await;
+        // Put it back
+        crate::TX_CONN.with(|tx| {
+            tx.borrow_mut().replace(client);
+        });
+        return result.map_err(|e| fmt_db_err(&e));
+    }
+
+    // No transaction — use pool
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async()
+            .await
+            .map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+    let pool = DB_POOL.with(|p| p.borrow().as_ref().map(Rc::clone));
+    let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
+    pool.query_text_params(sql, params)
+        .await
+        .map_err(|e| fmt_db_err(&e))
+}
+
+/// Execute a built query via pool (or TX conn) and return JSON string result.
+pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let rows = run_sql(&bq.sql, &param_refs)
+        .await
+        .map_err(|e| format!("db query error: {e}"))?;
+    Ok(rows_to_json(&rows))
+}
+
+/// Execute a built query expecting a count result.
+///
+/// Returns the raw integer; callers wrap into the appropriate
+/// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
+/// `number`).
+pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, String> {
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let rows = run_sql(&bq.sql, &param_refs)
+        .await
+        .map_err(|e| format!("db query error: {e}"))?;
+
+    Ok(rows
+        .first()
+        .map(|r| r.get::<_, i64>("count"))
+        .unwrap_or(0))
+}
+
+/// Execute an insert/update/delete query, returning the affected rows.
+pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
+    let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    let rows = run_sql(&bq.sql, &param_refs)
+        .await
+        .map_err(|e| format!("db mutation error: {e}"))?;
+
+    Ok(rows_to_json(&rows))
+}
+
+/// Execute a mutation, then emit a [`crate::wal_consumer::emit_local`]
+/// event into the in-process broker on success.
+///
+/// This is the P8a coarse-grained reactive-query bridge: every
+/// successful INSERT/UPDATE/DELETE produces one or more events on
+/// `(app_id, collection)` that wake any matching subscribers in the
+/// same isolate.
+///
+/// On error the broker is untouched — partial writes produce no
+/// events. The error message is forwarded verbatim.
+///
+/// `op` selects the [`crate::broker::ChangeOp`] tagged on the event;
+/// the caller knows whether it called `build_insert`, `build_update_one`,
+/// `build_delete_one`, etc. so we don't try to infer it from the SQL.
+///
+/// Future read-set narrowing (P8b) extends this helper to populate
+/// `changed_columns` from the SET clause and `pk` from the RETURNING
+/// row. For P8a we collect what's already in the result JSON.
+pub(crate) async fn exec_mutation_with_emit(
+    bq: BuiltQuery,
+    app_id: &str,
+    collection: &str,
+    op: crate::broker::ChangeOp,
+) -> Result<String, String> {
+    let json = exec_mutation(bq).await?;
+    // Parse the returned JSON to derive (pk per row, count of rows).
+    // The query builders all use RETURNING * (insert/update) or
+    // RETURNING id (delete) — see `query::build_*`. We pull `id` as
+    // i64 when present and treat the missing case as a non-affecting
+    // mutation (publish a single event with pk=None so subscribers
+    // can still re-fetch).
+    let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+    if rows.is_empty() {
+        // No rows affected — no broker event. UPDATE with a non-
+        // matching filter falls here; subscribers should not see a
+        // spurious change.
+        return Ok(json);
+    }
+    for row in &rows {
+        let pk = row
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .or_else(|| row.get("_id").and_then(|v| v.as_i64()));
+        // changed_columns: the keys present in the returned row,
+        // minus the system columns we never want to report. For
+        // INSERT this is "every declared column" — for UPDATE it's
+        // the post-image, which is a superset of what changed.
+        // Filtering down to "what changed" requires a before/after
+        // diff that we don't have here; P8b will compute it from the
+        // mutation's SET clause directly.
+        let (columns, tuple): (Vec<String>, std::collections::HashMap<String, String>) = match row {
+            Value::Object(m) => {
+                let cols = m
+                    .keys()
+                    .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
+                    .cloned()
+                    .collect();
+                // P8b: render the full RETURNING row into a
+                // `column → text` map for the broker's predicate
+                // evaluation. Numbers / bools are stringified to
+                // match the WAL-consumer path's text encoding so the
+                // predicate-eval rules collapse to a single
+                // comparison code path.
+                let tuple = m
+                    .iter()
+                    .map(|(k, v)| {
+                        let s = match v {
+                            Value::String(s) => s.clone(),
+                            Value::Null => "NULL".to_string(),
+                            other => other.to_string(),
+                        };
+                        (k.clone(), s)
+                    })
+                    .collect();
+                (cols, tuple)
+            }
+            _ => (Vec::new(), std::collections::HashMap::new()),
+        };
+        queue_or_emit(app_id, collection, op, pk, columns, tuple);
+    }
+    Ok(json)
+}
+
+/// If a transaction is active on this thread, queue the event in
+/// [`crate::PENDING_EMITS`] for the settle path to drain on COMMIT.
+/// Otherwise (autocommit), fire it immediately. Closes Gap B —
+/// subscribers no longer observe pre-commit state.
+fn queue_or_emit(
+    app_id: &str,
+    collection: &str,
+    op: crate::broker::ChangeOp,
+    pk: Option<i64>,
+    changed_columns: Vec<String>,
+    new_tuple: std::collections::HashMap<String, String>,
+) {
+    let in_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    if !in_tx {
+        crate::wal_consumer::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
+        return;
+    }
+    let ev = crate::broker::ChangeEvent {
+        app_id: app_id.to_string(),
+        collection: collection.to_string(),
+        op,
+        pk,
+        changed_columns,
+        new_tuple,
+        old_tuple: None,
+    };
+    crate::PENDING_EMITS.with(|p| {
+        let mut slot = p.borrow_mut();
+        slot.get_or_insert_with(Vec::new).push(ev);
+    });
+}
+
+/// Drain [`crate::PENDING_EMITS`] and fire every queued event through
+/// the broker. Called by the transaction settle path on COMMIT.
+pub(crate) fn drain_pending_emits_on_commit() {
+    let queued: Vec<crate::broker::ChangeEvent> = crate::PENDING_EMITS
+        .with(|p| p.borrow_mut().take().unwrap_or_default());
+    for ev in queued {
+        crate::wal_consumer::emit_local(
+            &ev.app_id,
+            &ev.collection,
+            ev.op,
+            ev.pk,
+            ev.changed_columns,
+            ev.new_tuple,
+        );
+    }
+}
+
+/// Clear [`crate::PENDING_EMITS`] without firing any events. Called by
+/// the transaction settle path on ROLLBACK (and by `exec_begin` to
+/// drop any stale residue from an interrupted prior run).
+pub(crate) fn clear_pending_emits() {
+    crate::PENDING_EMITS.with(|p| *p.borrow_mut() = None);
+}
+
+/// Lazy pool accessor shared by every async helper that needs the
+/// pooled connection. First call kicks off `init_pool_async` (Postgres
+/// connect + warm-up); subsequent calls clone the `Rc<Pool>` out of
+/// the per-thread cell.
+pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, String> {
+    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    if !has_pool {
+        crate::init_pool_async()
+            .await
+            .map_err(|e| format!("db: lazy init failed: {e}"))?;
+    }
+    DB_POOL
+        .with(|p| p.borrow().as_ref().map(Rc::clone))
+        .ok_or_else(|| "db: pool not initialized".to_string())
+}
+
+/// **Test-only**: end-to-end wrapper around [`exec_mutation_with_emit`]
+/// so integration tests can drive the queue/drain machinery against a
+/// real Postgres connection without spinning up a V8 isolate.
+///
+/// The caller is responsible for setting `TX_CONN` (via
+/// [`crate::install_tx_marker_for_tests`]) when the test wants the
+/// queueing path to fire.
+#[doc(hidden)]
+pub async fn exec_mutation_with_emit_for_tests(
+    bq: crate::query::BuiltQuery,
+    app_id: &str,
+    collection: &str,
+    op: crate::broker::ChangeOp,
+) -> Result<String, String> {
+    exec_mutation_with_emit(bq, app_id, collection, op).await
+}

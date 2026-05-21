@@ -34,6 +34,7 @@ pub mod auth;
 pub mod broker;
 pub mod callbacks;
 pub mod diff;
+pub mod exec;
 pub mod migrations;
 pub mod query;
 pub mod read_set;
