@@ -1,0 +1,204 @@
+/**
+ * Dev-mode entry — consolidates the dispatch + schema-install
+ * coordination the Vite plugin's `dev-bootstrap` used to inline.
+ *
+ * The caller supplies a `loadUserModule()` thunk that re-imports the
+ * user module per request (HMR may have invalidated cached
+ * evaluations) and the `envDb` getter (so the dev entry doesn't
+ * hard-code the runtime's `__zs_env()` indirection). This module owns:
+ *
+ *   1. Lazy schema install via `installSchema(schema, env.db)` on first
+ *      request. Going top-level-await on the user import would block
+ *      dev startup on potentially-failing user code; lazy is the right
+ *      tradeoff for dev. The auto-tx dispatcher's defense-in-depth
+ *      await on the module-local `_schemaReady` survives both prod
+ *      (eager) and dev (lazy) paths.
+ *   2. Per-call normalization via `normalizeUserModule(mod, registry)`
+ *      so HMR replacements land naturally — the registry captures the
+ *      transform's `__register` side-effects and merges last
+ *      (last-write-wins).
+ *   3. Function-shape `default.rpc` for HMR. Dev's namespace may
+ *      change per request; the dict-shape captured at module-init
+ *      would go stale on every edit. The dispatcher (`__zsDispatch`)
+ *      consumes the dict each call.
+ *   4. WinterCG `default.fetch` via `createFetchHandler(...)` — routes
+ *      `/_zs/v1/<id>` through the dispatcher; falls through to user's
+ *      own `default.fetch` for non-RPC paths.
+ *
+ * The Vite plugin's `dev-bootstrap/index.ts` (post-Stage-7) is a thin
+ * shell: it constructs the ModuleRunner + registry, calls `devEntry`,
+ * and re-exports the result as `default`.
+ *
+ * NOTE: this module imports `./dispatcher.js` for its side effect so
+ * the same `__zsDispatch` function the runtime splices in production
+ * is installed on the dev isolate too. Single implementation; no
+ * drift.
+ */
+
+import "./dispatcher.js";
+import { installSchema } from "./install-schema.js";
+import { createFetchHandler } from "./fetch-handler.js";
+import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";
+
+declare const globalThis: {
+  __zsDispatch?: (
+    rpc: Record<string, unknown>,
+    name: string,
+    input: unknown,
+    ctx: unknown,
+  ) => Promise<unknown>;
+  [key: string]: unknown;
+};
+
+export interface DevEntryOptions {
+  /**
+   * Loader for the user module. Called per request in dev so HMR
+   * invalidations land naturally. Returns the module namespace
+   * (i.e. the result of `runner.import(ENTRY)`).
+   */
+  loadUserModule: () => Promise<unknown>;
+  /**
+   * Resolve the live `env.db` handle. The dev-bootstrap previously
+   * reached into `globalThis.__zs_env()`; this is a parameter so the
+   * dev path doesn't hard-code a global. Returns `undefined` when the
+   * DbPlugin isn't registered (skip-schema-install path).
+   */
+  getEnvDb: () => unknown;
+  /**
+   * Optional registry that the transform populates via
+   * `globalThis.__register(wireId, fn)`. When provided, the
+   * normalizer merges its entries last (last-write-wins for HMR).
+   */
+  registry?: Map<string, (input: unknown, ctx: unknown) => unknown>;
+  /**
+   * Logger for dev-only diagnostics. Defaults to `console.log` /
+   * `console.error`. Pass a no-op pair to silence the dev path.
+   */
+  logger?: { log: (msg: string) => void; error: (msg: string) => void };
+}
+
+export interface DevEntry {
+  fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response>;
+  rpc: (name: string, input: unknown, ctx: unknown) => Promise<unknown>;
+  /**
+   * Test/runtime hook: reset the lazy schema-install latch. Called by
+   * the dev-bootstrap when Vite's dep optimizer regenerated pre-
+   * bundled files (schema must be re-registered against the fresh
+   * runner because the new runtime instance carries a separate
+   * `@zeroship/bootstrap` copy — see `instanceof` rationale below).
+   */
+  resetSchemaInstalled: () => void;
+}
+
+/**
+ * Build the dev-mode `default` export. Returns the same `{ fetch, rpc }`
+ * shape the runtime expects from a user module; the Vite plugin's
+ * dev-bootstrap re-exports this verbatim.
+ *
+ * Per the ZS standard (`docs/reference/zs-standard.md`), `default.rpc`
+ * is function-shape here — dev's namespace may change per request so
+ * the dict is freshly resolved on every call. Production uses dict-
+ * shape because the bundle is frozen.
+ */
+export function devEntry(options: DevEntryOptions): DevEntry {
+  const log = options.logger?.log ?? ((m) => console.log(m));
+  const logError = options.logger?.error ?? ((m) => console.error(m));
+
+  // Module-local handle on the most recent install's `ready` promise.
+  // Stage 6 of the @zeroship/db refactor replaced the cross-module
+  // `globalThis.__zeroshipPlatformReady` with a per-isolate (per-
+  // module-load) variable. The auto-tx dispatch path captures it via
+  // closure below; HMR re-runs of `maybeRegisterSchema` overwrite the
+  // handle in place so the second request awaits the FRESH chain.
+  let schemaReady: Promise<unknown> | undefined;
+
+  // Set once per ModuleRunner lifetime — schema auto-discovery is
+  // idempotent on the SDK side, but re-running registerModel for every
+  // RPC dispatch is wasted work. The caller resets it via
+  // `resetSchemaInstalled()` after a deps re-optimize (which forces
+  // the runner to rebuild and re-imports the SDK copy).
+  let schemaInstalled = false;
+
+  async function loadNormalized(): Promise<NormalizedUserModule> {
+    const mod = await options.loadUserModule();
+    await maybeRegisterSchema(mod);
+    return normalizeUserModule(mod, options.registry);
+  }
+
+  async function maybeRegisterSchema(mod: unknown): Promise<void> {
+    if (schemaInstalled) return;
+    const defaultExport =
+      (mod && typeof mod === "object" && (mod as { default?: unknown }).default) || null;
+    const schema =
+      (defaultExport &&
+        typeof defaultExport === "object" &&
+        (defaultExport as { schema?: unknown }).schema &&
+        typeof (defaultExport as { schema?: unknown }).schema === "object")
+        ? (defaultExport as { schema: unknown }).schema
+        : undefined;
+
+    if (!schema) {
+      schemaInstalled = true;
+      return;
+    }
+
+    try {
+      const envDb = options.getEnvDb();
+      if (!envDb) {
+        logError(
+          `[zeroship:dev] schema registration skipped: env.db not available — ` +
+            `is the DbPlugin registered on this runtime?`,
+        );
+        schemaInstalled = true;
+        return;
+      }
+      const { ready } = installSchema(schema as Parameters<typeof installSchema>[0], envDb as Parameters<typeof installSchema>[1]);
+      schemaReady = ready;
+      log(`[zeroship:dev] registered schema from default-export`);
+    } catch (e) {
+      const err = e as { message?: string };
+      logError(`[zeroship:dev] schema registration failed: ${err?.message ?? e}`);
+    } finally {
+      schemaInstalled = true;
+    }
+  }
+
+  async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<unknown> {
+    // Re-import per call so HMR invalidations land naturally. On the
+    // FIRST call this also triggers schema registration — schemaReady
+    // gets populated here.
+    const normalized = await loadNormalized();
+
+    // Await schema-readiness AFTER `loadNormalized` had a chance to
+    // populate `schemaReady`. Reading it BEFORE the import would
+    // observe `undefined` on the first call. Under pglite-socket's
+    // per-connection-in-tx serialisation, opening BEGIN while
+    // registerModel still holds `pg_advisory_lock` deadlocks — gate
+    // here. No-op on the warm path.
+    if (schemaReady && typeof schemaReady.then === "function") {
+      try { await schemaReady; } catch { /* surfaces via the handler */ }
+    }
+
+    const dispatch = globalThis.__zsDispatch;
+    if (typeof dispatch !== "function") {
+      // Should never happen — `import "./dispatcher.js"` above
+      // installs `__zsDispatch` at module-init.
+      throw Object.assign(new Error("__zsDispatch is not installed"), {
+        status: 500,
+        code: "INTERNAL",
+      });
+    }
+    return dispatch(normalized.rpc, name, input, ctx);
+  }
+
+  const fetchHandler = createFetchHandler(loadNormalized);
+
+  return {
+    fetch: fetchHandler,
+    rpc: dispatchRpc,
+    resetSchemaInstalled: () => {
+      schemaInstalled = false;
+      schemaReady = undefined;
+    },
+  };
+}
