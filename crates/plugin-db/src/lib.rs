@@ -41,6 +41,7 @@ pub mod orchestrator;
 pub mod query;
 pub mod read_set;
 pub mod replication;
+pub mod replication_ops;
 pub mod v8_bridge;
 pub mod v8_classes;
 pub mod wal_consumer;
