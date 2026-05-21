@@ -83,9 +83,12 @@ type NativeDb = {
 function getNativeDb(): NativeDb {
   const db = (env as { db?: NativeDb } | undefined)?.db;
   if (!db || typeof db.openSubscription !== "function") {
-    throw new Error(
-      "@zeroship/db/subscribe: env.db.openSubscription not available — " +
-        "runtime is missing the Subscription v8_class surface.",
+    throw Object.assign(
+      new Error(
+        "@zeroship/db/subscribe: env.db.openSubscription not available — " +
+          "runtime is missing the Subscription v8_class surface.",
+      ),
+      { code: "native_subscription_unavailable" as const },
     );
   }
   return db;
@@ -98,8 +101,11 @@ function getNativeDb(): NativeDb {
  */
 export function subscribe(collection: string): Subscription {
   if (typeof collection !== "string" || collection.length === 0) {
-    throw new TypeError(
-      "@zeroship/db/subscribe: collection must be a non-empty string",
+    throw Object.assign(
+      new TypeError(
+        "@zeroship/db/subscribe: collection must be a non-empty string",
+      ),
+      { code: "subscribe_invalid_collection" as const },
     );
   }
   const native = getNativeDb();

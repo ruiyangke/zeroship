@@ -40,18 +40,24 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
     if (def.type === "union") {
       return expandUnionToFlatColumns(def);
     }
-    throw new Error(
-      `normalizeSchema: top-level TypeBuilder must be a t.union(...) (got type "${def.type}")`,
+    throw Object.assign(
+      new Error(
+        `normalizeSchema: top-level TypeBuilder must be a t.union(...) (got type "${def.type}")`,
+      ),
+      { code: "schema_top_level_not_union" as const },
     );
   }
   const result: NormalizedSchema = {};
 
   for (const [key, rawVal] of Object.entries(input)) {
     if (!(rawVal instanceof TypeBuilder)) {
-      throw new Error(
-        `unrecognized schema field "${key}": every field must be a t.* builder ` +
-          `(e.g. t.string(), t.number(), t.ref("users")). Bare constructors and ` +
-          `Mongoose-style { type: Constructor } objects are no longer supported.`,
+      throw Object.assign(
+        new Error(
+          `unrecognized schema field "${key}": every field must be a t.* builder ` +
+            `(e.g. t.string(), t.number(), t.ref("users")). Bare constructors and ` +
+            `Mongoose-style { type: Constructor } objects are no longer supported.`,
+        ),
+        { code: "schema_field_not_typebuilder" as const },
       );
     }
     // TypeBuilder instances are structurally complete (including the
@@ -84,7 +90,10 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
  */
 export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
   if (def.type !== "union" || def.variants === undefined || def.discriminator === undefined) {
-    throw new Error("expandUnionToFlatColumns: not a union FieldDef");
+    throw Object.assign(
+      new Error("expandUnionToFlatColumns: not a union FieldDef"),
+      { code: "union_expand_not_union" as const },
+    );
   }
   const discriminator = def.discriminator;
   const variants = def.variants;
@@ -99,22 +108,31 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
   for (let i = 0; i < variants.length; i++) {
     const fd = variants[i][discriminator];
     if (fd === undefined || fd.type !== "literal" || fd.literalValue === undefined) {
-      throw new Error(
-        `expandUnionToFlatColumns: variant #${i} missing discriminator field "${discriminator}"`,
+      throw Object.assign(
+        new Error(
+          `expandUnionToFlatColumns: variant #${i} missing discriminator field "${discriminator}"`,
+        ),
+        { code: "union_variant_missing_discriminator" as const },
       );
     }
     const lit = fd.literalValue;
     const primTy = typeof lit;
     if (primTy !== "string" && primTy !== "number" && primTy !== "boolean") {
-      throw new Error(
-        `expandUnionToFlatColumns: discriminator literal of variant #${i} has unsupported type "${primTy}"`,
+      throw Object.assign(
+        new Error(
+          `expandUnionToFlatColumns: discriminator literal of variant #${i} has unsupported type "${primTy}"`,
+        ),
+        { code: "union_discriminator_unsupported_type" as const },
       );
     }
     if (discPrimType === null) {
       discPrimType = primTy as "string" | "number" | "boolean";
     } else if (discPrimType !== primTy) {
-      throw new Error(
-        `expandUnionToFlatColumns: discriminator literals across variants must share a primitive type (got "${discPrimType}" and "${primTy}")`,
+      throw Object.assign(
+        new Error(
+          `expandUnionToFlatColumns: discriminator literals across variants must share a primitive type (got "${discPrimType}" and "${primTy}")`,
+        ),
+        { code: "union_discriminator_type_mismatch" as const },
       );
     }
     discValues.push(lit);
@@ -125,8 +143,11 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
   for (const v of discValues) {
     const tag = typeof v + ":" + String(v);
     if (seen.has(tag)) {
-      throw new Error(
-        `expandUnionToFlatColumns: duplicate discriminator value ${JSON.stringify(v)}`,
+      throw Object.assign(
+        new Error(
+          `expandUnionToFlatColumns: duplicate discriminator value ${JSON.stringify(v)}`,
+        ),
+        { code: "union_duplicate_discriminator_value" as const },
       );
     }
     seen.add(tag);
@@ -160,8 +181,11 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
         result[field] = expanded;
       } else {
         if (existing.type !== fd.type) {
-          throw new Error(
-            `expandUnionToFlatColumns: field "${field}" has incompatible types across variants ("${existing.type}" vs "${fd.type}")`,
+          throw Object.assign(
+            new Error(
+              `expandUnionToFlatColumns: field "${field}" has incompatible types across variants ("${existing.type}" vs "${fd.type}")`,
+            ),
+            { code: "union_field_type_mismatch" as const },
           );
         }
         // Existing already nullable — nothing to do.

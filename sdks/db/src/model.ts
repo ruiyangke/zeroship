@@ -19,9 +19,12 @@ function getNativeDb(): NativeDb {
   if (db) {
     return db;
   }
-  throw new Error(
-    "@zeroship/db: env.db not available — " +
-    "is the DbPlugin registered on this runtime?"
+  throw Object.assign(
+    new Error(
+      "@zeroship/db: env.db not available — " +
+        "is the DbPlugin registered on this runtime?",
+    ),
+    { code: "native_db_unavailable" as const },
   );
 }
 
@@ -60,10 +63,16 @@ export function model<S extends Record<string, unknown>>(
   declaredIndexes: readonly NamedIndexSpec[] = [],
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
-    throw new Error("model name must be a non-empty string");
+    throw Object.assign(
+      new Error("model name must be a non-empty string"),
+      { code: "model_invalid_name" as const },
+    );
   }
   if (schema === null || schema === undefined || typeof schema !== "object") {
-    throw new Error("model schema must be an object");
+    throw Object.assign(
+      new Error("model schema must be an object"),
+      { code: "model_invalid_schema" as const },
+    );
   }
   // C2 — a top-level `t.union(...)` is a valid schema. `normalizeSchema`
   // detects the TypeBuilder branch internally and expands the union into

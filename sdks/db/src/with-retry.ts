@@ -64,7 +64,10 @@ export async function withRetry<T>(
 ): Promise<T> {
   const max = opts?.max ?? 3;
   if (!Number.isInteger(max) || max <= 0) {
-    throw new TypeError("withRetry: opts.max must be a positive integer");
+    throw Object.assign(
+      new TypeError("withRetry: opts.max must be a positive integer"),
+      { code: "with_retry_invalid_max" as const },
+    );
   }
   const on = opts?.on ?? isOptimisticLockError;
   const backoff = opts?.backoff ?? (() => 0);

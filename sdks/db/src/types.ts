@@ -602,7 +602,10 @@ export const t = {
    */
   ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
     if (typeof table !== "string" || table.length === 0) {
-      throw new Error("t.ref(table) requires a non-empty table name");
+      throw Object.assign(
+        new Error("t.ref(table) requires a non-empty table name"),
+        { code: "ref_empty_table" as const },
+      );
     }
     return new TypeBuilder<Id<T>>({
       type: "ref",
@@ -634,12 +637,18 @@ export const t = {
    */
   object<S extends Record<string, TypeBuilder<any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
     if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
-      throw new Error("t.object(shape) requires a record of nested type builders");
+      throw Object.assign(
+        new Error("t.object(shape) requires a record of nested type builders"),
+        { code: "object_invalid_shape" as const },
+      );
     }
     const nested: Record<string, FieldDef> = {};
     for (const [key, val] of Object.entries(shape)) {
       if (!(val instanceof TypeBuilder)) {
-        throw new Error(`t.object: nested field "${key}" must be a TypeBuilder (use t.string(), t.number(), ...)`);
+        throw Object.assign(
+          new Error(`t.object: nested field "${key}" must be a TypeBuilder (use t.string(), t.number(), ...)`),
+          { code: "object_field_not_typebuilder" as const },
+        );
       }
       nested[key] = { ...val.toFieldDef() };
     }
@@ -677,12 +686,18 @@ export const t = {
    */
   literal<L extends string | number | boolean>(value: L): TypeBuilder<L, true> {
     if (value === null || value === undefined) {
-      throw new Error("t.literal(value) requires a non-null primitive value");
+      throw Object.assign(
+        new Error("t.literal(value) requires a non-null primitive value"),
+        { code: "literal_null_value" as const },
+      );
     }
     const ty = typeof value;
     if (ty !== "string" && ty !== "number" && ty !== "boolean") {
-      throw new Error(
-        `t.literal(value): value must be string | number | boolean, got ${ty}`,
+      throw Object.assign(
+        new Error(
+          `t.literal(value): value must be string | number | boolean, got ${ty}`,
+        ),
+        { code: "literal_invalid_type" as const },
       );
     }
     // Literal values are inherently required — a literal field declares
@@ -731,22 +746,31 @@ export const t = {
    */
   union<V extends readonly TypeBuilder<any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
     if (variants.length < 2) {
-      throw new Error(
-        `t.union(...) requires at least 2 variants, got ${variants.length}`,
+      throw Object.assign(
+        new Error(
+          `t.union(...) requires at least 2 variants, got ${variants.length}`,
+        ),
+        { code: "union_too_few_variants" as const },
       );
     }
     const normalized: Record<string, FieldDef>[] = [];
     for (let i = 0; i < variants.length; i++) {
       const v = variants[i];
       if (!(v instanceof TypeBuilder)) {
-        throw new Error(
-          `t.union: variant #${i} must be a t.object(...) (got ${typeof v})`,
+        throw Object.assign(
+          new Error(
+            `t.union: variant #${i} must be a t.object(...) (got ${typeof v})`,
+          ),
+          { code: "union_variant_not_typebuilder" as const },
         );
       }
       const def = v.toFieldDef();
       if (def.type !== "object" || def.shape === undefined) {
-        throw new Error(
-          `t.union: variant #${i} must be a t.object(...) (got type "${def.type}")`,
+        throw Object.assign(
+          new Error(
+            `t.union: variant #${i} must be a t.object(...) (got type "${def.type}")`,
+          ),
+          { code: "union_variant_not_object" as const },
         );
       }
       // Variant shape clone — we treat it as a self-contained sub-schema.
@@ -782,7 +806,10 @@ export const t = {
  */
 function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
   if (variants.length === 0) {
-    throw new Error("t.union: no variants supplied");
+    throw Object.assign(
+      new Error("t.union: no variants supplied"),
+      { code: "union_no_variants" as const },
+    );
   }
   // Candidate keys = keys that are `literal` in every variant.
   const firstKeys = Object.keys(variants[0]);
@@ -799,8 +826,11 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
     if (ok) candidates.push(key);
   }
   if (candidates.length === 0) {
-    throw new Error(
-      "t.union: no discriminator field found — every variant must declare a `t.literal(...)` field with the same key (e.g. `kind: t.literal(\"login\")`)",
+    throw Object.assign(
+      new Error(
+        "t.union: no discriminator field found — every variant must declare a `t.literal(...)` field with the same key (e.g. `kind: t.literal(\"login\")`)",
+      ),
+      { code: "union_no_discriminator" as const },
     );
   }
   // For each candidate, the literal values must be mutually distinct.
@@ -815,13 +845,19 @@ function detectDiscriminator(variants: Record<string, FieldDef>[]): string {
     return true;
   });
   if (distinctCandidates.length === 0) {
-    throw new Error(
-      "t.union: discriminator candidate(s) have overlapping literal values — each variant must use a distinct literal value",
+    throw Object.assign(
+      new Error(
+        "t.union: discriminator candidate(s) have overlapping literal values — each variant must use a distinct literal value",
+      ),
+      { code: "union_discriminator_overlap" as const },
     );
   }
   if (distinctCandidates.length > 1) {
-    throw new Error(
-      `t.union: ambiguous discriminator — multiple candidate keys with distinct literals: ${distinctCandidates.join(", ")}. Use only one literal field per variant or rename one of them.`,
+    throw Object.assign(
+      new Error(
+        `t.union: ambiguous discriminator — multiple candidate keys with distinct literals: ${distinctCandidates.join(", ")}. Use only one literal field per variant or rename one of them.`,
+      ),
+      { code: "union_discriminator_ambiguous" as const },
     );
   }
   return distinctCandidates[0];

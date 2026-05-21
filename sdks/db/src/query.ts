@@ -38,21 +38,25 @@ function encodeCursor(state: CursorState): string {
   return btoa(JSON.stringify(state));
 }
 
-/** Decode and shape-check a base64-JSON cursor string. Throws a plain
- *  `Error("paginate: invalid cursor")` on any malformed input — the
+/** Decode and shape-check a base64-JSON cursor string. Throws with
+ *  `code: "paginate_invalid_cursor"` on any malformed input — the
  *  paginate caller catches this and returns it as `Result.error`. */
 function decodeCursor(cursor: string): CursorState {
+  const invalid = (): Error =>
+    Object.assign(new Error("paginate: invalid cursor"), {
+      code: "paginate_invalid_cursor" as const,
+    });
   let decoded: string;
   try {
     decoded = atob(cursor);
   } catch {
-    throw new Error("paginate: invalid cursor");
+    throw invalid();
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(decoded);
   } catch {
-    throw new Error("paginate: invalid cursor");
+    throw invalid();
   }
   if (
     parsed === null ||
@@ -62,7 +66,7 @@ function decodeCursor(cursor: string): CursorState {
     (parsed as CursorState).orderBy === null ||
     typeof (parsed as CursorState).lastId !== "number"
   ) {
-    throw new Error("paginate: invalid cursor");
+    throw invalid();
   }
   return parsed as CursorState;
 }
@@ -194,8 +198,11 @@ export class Query<
     // bare FK values they hoped to join and had no clue why. A loud
     // TypeError makes the contract explicit.
     if (this._loadRelations === null) {
-      throw new TypeError(
-        "Query.with() requires the Query to be constructed via Collection.find — direct Query construction is not supported",
+      throw Object.assign(
+        new TypeError(
+          "Query.with() requires the Query to be constructed via Collection.find — direct Query construction is not supported",
+        ),
+        { code: "query_with_no_loader" as const },
       );
     }
     this._with = { ...(this._with ?? {}), ...spec };
@@ -224,7 +231,10 @@ export class Query<
       const entries = Object.entries(s);
       const allFalsy = entries.length > 0 && entries.every(([, v]) => !v);
       if (allFalsy) {
-        throw new Error("exclusion projections (e.g. { field: 0 }) are not supported; use inclusion style: { field: 1 }");
+        throw Object.assign(
+          new Error("exclusion projections (e.g. { field: 0 }) are not supported; use inclusion style: { field: 1 }"),
+          { code: "query_exclusion_not_supported" as const },
+        );
       }
       this._select = entries
         .filter(([, v]) => v)
@@ -251,7 +261,12 @@ export class Query<
   }): Promise<Result<PaginationResult<P>>> {
     const { cursor, numItems } = opts;
     if (!Number.isInteger(numItems) || numItems <= 0) {
-      return err(new TypeError("paginate: numItems must be a positive integer"));
+      return err(
+        Object.assign(
+          new TypeError("paginate: numItems must be a positive integer"),
+          { code: "paginate_invalid_num_items" as const },
+        ),
+      );
     }
 
     const orderBy: Record<string, 1 | -1> =
@@ -267,7 +282,11 @@ export class Query<
         return err(e instanceof Error ? e : new Error(String(e)));
       }
       if (!sameOrderBy(cursorState.orderBy, orderBy)) {
-        return err(new Error("paginate: cursor orderBy mismatch"));
+        return err(
+          Object.assign(new Error("paginate: cursor orderBy mismatch"), {
+            code: "paginate_orderby_mismatch" as const,
+          }),
+        );
       }
     }
 
