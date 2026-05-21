@@ -14,7 +14,6 @@ import {
   computeManifestExtras,
   type DiscoveredProcedure,
 } from "./manifest.js";
-import { resolveSchemaPath } from "./resolve-schema.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 
@@ -285,13 +284,6 @@ export function buildPlugin(
     serverEntry?: string;
     /** "static" → skip the SSR sub-build entirely. */
     mode?: "full" | "static";
-    /**
-     * Optional path to the DB schema module. Resolved by
-     * `resolveSchemaPath` against the project root; the result is
-     * baked into `manifest.exports.schema` for the runtime to read
-     * in Stage 2.
-     */
-    schema?: string;
   } = {}
 ): Plugin {
   const { serverFunctionMap } = state;
@@ -443,12 +435,11 @@ export function buildPlugin(
       // relative specifiers don't anchor to anything sensible.
       const userEntryRel = entry.replace(/\\/g, "/");
 
-      // Stage 4: schema discovery runs in the runtime bootstrap, not
-      // the synthetic entry. We no longer pass `schemaImportSpec` to
-      // the entry generator — the generated source carries no schema
-      // references at all. `manifest.exports.schema` still gets baked
-      // in `closeBundle` below; the runtime reads it to decide whether
-      // to run discovery on the user's `default.schema` export.
+      // Stage 5c: schema discovery runs in the runtime bootstrap and
+      // reads `user.default.schema` directly off the loaded entry. The
+      // synthetic entry already re-exports `_zsUserDefault.schema` on
+      // its own `default.schema` (Stage 5b normaliser). No
+      // `manifest.exports.schema` field is written; no resolver runs.
 
       const ssrConfig = buildSsrInlineConfig({
         root,
@@ -555,22 +546,10 @@ export function buildPlugin(
           mode: viteMode,
         });
 
-        // Stage 1: resolve the user's DB schema module by convention
-        // (or via the explicit `schema` plugin option) and bake the
-        // bundle-relative path into `manifest.exports.schema`. The
-        // runtime ignores this field in Stage 1; Stage 2 wires the
-        // read.
-        const schemaResolution = resolveSchemaPath(root, options.schema);
-        let exportsSchemaRel: string | undefined;
-        if (schemaResolution.path != null) {
-          // Bundle-relative posix path so the runtime can resolve it
-          // against the bundle root regardless of host OS.
-          const rel = relative(root, schemaResolution.path).split(/[\\/]/).join("/");
-          exportsSchemaRel = rel;
-          console.log(
-            `[zeroship] schema resolved via ${schemaResolution.source}: ${rel}`,
-          );
-        }
+        // Stage 5c: schema lives on the synthetic entry's
+        // `default.schema` (passed through from the user module). The
+        // runtime reads it directly at boot — no
+        // `manifest.exports.schema` field, no resolver, no log line.
 
         await emitZship({
           root,
@@ -581,9 +560,6 @@ export function buildPlugin(
             resources: extras.resources,
             transformer: extras.transformer,
           },
-          exports: exportsSchemaRel != null
-            ? { schema: exportsSchemaRel }
-            : undefined,
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);

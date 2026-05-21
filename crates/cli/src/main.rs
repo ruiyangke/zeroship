@@ -160,16 +160,11 @@ fn cmd_serve(args: &[String]) {
 /// vite-plugin emits these; this command is a thin curl wrapper that
 /// posts the bytes to `POST /api/apps/{id}/deploy`.
 //
-// TODO(stage-2 schema-auto-discovery): this CLI currently does NOT
-// shell out to any JS bundler — `.zship` archives must be produced
-// by `@zeroship/vite-plugin` (or an equivalent build tool that wires
-// in `sdks/vite-plugin/src/resolve-schema.ts`). If we ever add a
-// `zeroship build` command that invokes the JS bundler itself, it
-// MUST call `resolveSchemaPath()` from the shared resolver so raw
-// deploys produce manifests with the same `exports.schema` field
-// the Vite plugin emits today. Don't reimplement the resolver in
-// Rust — the convention chain is JS-source-tree-shaped and belongs
-// in the JS toolchain.
+// Schema discovery (Stage 5c): the runtime reads `default.schema`
+// off the loaded entry module — no manifest-side resolver. A raw
+// `.js` deploy with `export default { schema: {...} }` is enough; no
+// JS-side resolver wiring required even if this CLI grows a
+// `zeroship build` command later.
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
         "Usage: zeroship deploy <path-to-.zship> --app=<name-or-id> [--control=http://localhost:9090] [--key=<master-key>]",

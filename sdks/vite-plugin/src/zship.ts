@@ -75,17 +75,6 @@ interface ManifestMetadata {
   built_at: string;
 }
 
-interface ManifestExports {
-  /**
-   * Path (relative to the bundle root, posix slashes) of the DB
-   * schema module. Stage 1 only writes this; the runtime ignores it.
-   * Stage 2 wires the V8 bootstrap read.
-   */
-  schema?: string;
-  /** Reserved for Stage 2+ file-based handler discovery. */
-  handlers?: Array<{ path: string; capability: string; name: string }>;
-}
-
 interface Manifest {
   /** Manifest schema version. v1 is the initial published shape. */
   version: 1;
@@ -99,8 +88,6 @@ interface Manifest {
   resources?: Record<string, Record<string, unknown>>;
   /** Wire transformer: `"superjson"` (default) or `"json"`. */
   transformer?: "superjson" | "json";
-  /** Build-time export discovery (Stage 1: schema only). */
-  exports?: ManifestExports;
 }
 
 // ── Public configuration ───────────────────────────────────────────────────
@@ -172,16 +159,6 @@ export interface ZshipOptions {
   rpcExtras?: {
     resources: Record<string, Record<string, unknown>>;
     transformer: "superjson" | "json";
-  };
-  /**
-   * Build-time export discovery (Stage 1: DB schema only). When
-   * provided, the field is written into `manifest.exports`. Omit (or
-   * pass `undefined`) to keep the manifest's `exports` field absent
-   * — additive on the wire, see `crates/bundle/src/manifest.rs`.
-   */
-  exports?: {
-    schema?: string;
-    handlers?: Array<{ path: string; capability: string; name: string }>;
   };
 }
 
@@ -413,24 +390,12 @@ export async function emitZship(
   }
   manifest.transformer = transformer;
 
-  // Stage 1: bake `manifest.exports` if the caller resolved a schema
-  // path (or pre-discovered handlers). When both inner fields are
-  // empty we drop the whole `exports` object — keeps the wire form
-  // identical to a pre-Stage-1 manifest, which matters because
-  // Rust's serde uses `skip_serializing_if = "Option::is_none"` on
-  // the corresponding field. Mirrors the round-trip invariant tested
-  // in `crates/bundle/tests/manifest_test.rs`.
-  const exportsIn = options.exports;
-  if (exportsIn) {
-    const exportsOut: ManifestExports = {};
-    if (exportsIn.schema) exportsOut.schema = exportsIn.schema;
-    if (exportsIn.handlers && exportsIn.handlers.length > 0) {
-      exportsOut.handlers = exportsIn.handlers;
-    }
-    if (Object.keys(exportsOut).length > 0) {
-      manifest.exports = exportsOut;
-    }
-  }
+  // Stage 5c: `manifest.exports.schema` is no longer written. The
+  // runtime reads `user.default.schema` off the loaded entry directly
+  // (see `crates/runtime/src/bootstrap/db_init.js`). The field stays
+  // on the Rust wire type (`crates/bundle/src/manifest.rs`) as
+  // deprecated-but-deserialisable for graceful upgrade of older
+  // archives.
 
   // 9. Validate cross-references. Catches bugs where a manifest hash
   //    doesn't have a matching tar entry (which would 400 on the server).

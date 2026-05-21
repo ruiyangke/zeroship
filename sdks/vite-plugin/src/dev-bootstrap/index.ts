@@ -8,9 +8,6 @@
  * `crates/runtime/src/bootstrap/rpc_dispatch.js`).
  *
  * Wire shape — `default`:
- *   schema   Surfaced via `maybeRegisterSchema` once per ModuleRunner
- *            lifetime (HMR / dep-reoptimize resets the runner, which
- *            resets the schema-registered flag).
  *   fetch    Async thunk that re-imports the user module through the
  *            ModuleRunner per request and dispatches to either the
  *            kernel-managed /_zs/v1/<id> path (via __zsDispatch) or the
@@ -19,6 +16,19 @@
  *            re-resolve per request because HMR may have replaced the
  *            module namespace. The runtime's Stage-5a back-compat path
  *            accepts function-shape `default.rpc` through 5d.
+ *
+ * Schema discovery (Stage 5c): the runtime's bootstrap `db_init.js`
+ * reads `user.default.schema` synchronously at boot. The dev-bootstrap
+ * itself doesn't expose `default.schema` (its own default is
+ * `{ fetch, rpc }`); the schema lives on the USER module loaded via
+ * the ModuleRunner. `maybeRegisterSchema` is the dev-only lazy bridge
+ * — it imports the user module on first request and calls
+ * `_installSchema` if the user exports `default.schema`. Going
+ * top-level-await on the user import here would block dev startup on
+ * potentially-failing imports, so the registration stays lazy. The
+ * auto-tx dispatcher's defense-in-depth await on
+ * `__zeroshipPlatformReady` survives both prod (eager) and dev (lazy)
+ * paths.
  *
  * Procedure discovery: the transform plugin appends
  * `globalThis.__register(wireId, fn)` to every server module's emitted
@@ -39,12 +49,6 @@ import {
 } from "@zeroship/db/internal";
 
 const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
-// Stage 2 — absolute path to the DB schema module, when Stage 1's
-// resolver picked a split-file convention or the user supplied
-// `schema:` to the Vite plugin. `undefined` means "no split-file
-// schema" — fall back to `_zsUser.default?.schema`.
-const SCHEMA_PATH: string | undefined =
-  (globalThis as any).process?.env?.ZEROSHIP_SCHEMA_PATH || undefined;
 
 let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
@@ -113,15 +117,15 @@ let schemaRegistered = false;
 /**
  * Schema auto-registration in dev mode.
  *
- * Resolution order:
- *   1. `ZEROSHIP_SCHEMA_PATH` env var set → import that module through
- *      the ModuleRunner, use its `default.schema ?? default`.
- *   2. Fall back to `mod.default.schema` (the standard convention).
- *   3. Nothing found → no-op.
+ * Stage 5c: the only resolution path is the entry's `default.schema`
+ * (the standard ZS shape). Production reads the same key off the
+ * synthetic entry's default; dev does it lazily on first request to
+ * avoid a top-level-await that would block dev startup on a
+ * potentially-failing user import.
  *
- * Both resolutions hand the schema to `@zeroship/db::_installSchema`
- * with `installOnEnvDb: true` so `env.db.<collection>` resolves to a
- * typed Collection wrapper before the first RPC dispatch runs.
+ * `__zsDispatch`'s auto-tx waits on `__zeroshipPlatformReady` (set by
+ * `_installSchema`) so the first RPC request lands AFTER the DDL
+ * chain has settled, even though registration is lazy here.
  */
 async function maybeRegisterSchema(mod: any): Promise<void> {
   if (schemaRegistered) return;
@@ -138,41 +142,15 @@ async function maybeRegisterSchema(mod: any): Promise<void> {
     return;
   }
 
-  // Step 1 — split-file path.
-  let schema: unknown;
-  let provenance: "split-file" | "default-export" | "none" = "none";
-  if (SCHEMA_PATH) {
-    try {
-      const schemaMod: any = await r.import(SCHEMA_PATH);
-      const candidate =
-        (schemaMod && schemaMod.default && typeof schemaMod.default === "object"
-          ? (schemaMod.default.schema ?? schemaMod.default)
-          : undefined);
-      if (candidate && typeof candidate === "object") {
-        schema = candidate;
-        provenance = "split-file";
-      }
-    } catch (e: any) {
-      console.error(
-        `[zeroship:dev] split-file schema import failed (${SCHEMA_PATH}):`,
-        e?.message ?? e,
-      );
-    }
-  }
-
-  // Step 2 — entry-default convention fallback.
-  if (!schema) {
-    const defaultExport = mod && mod.default;
-    if (
-      defaultExport &&
+  // Entry-default convention — `export default { schema, fetch, rpc }`.
+  const defaultExport = mod && mod.default;
+  const schema =
+    (defaultExport &&
       typeof defaultExport === "object" &&
       defaultExport.schema &&
-      typeof defaultExport.schema === "object"
-    ) {
-      schema = defaultExport.schema;
-      provenance = "default-export";
-    }
-  }
+      typeof defaultExport.schema === "object")
+      ? defaultExport.schema
+      : undefined;
 
   if (!schema) {
     schemaRegistered = true;
@@ -184,10 +162,10 @@ async function maybeRegisterSchema(mod: any): Promise<void> {
     const installFn = dbSdk[INSTALL_SCHEMA_NAME];
     if (typeof installFn === "function") {
       installFn(schema, { installOnEnvDb: true });
-      console.log(`[zeroship:dev] registered schema from ${provenance}`);
+      console.log(`[zeroship:dev] registered schema from default-export`);
     }
   } catch (e: any) {
-    console.error(`[zeroship:dev] ${provenance} schema registration failed:`, e?.message ?? e);
+    console.error(`[zeroship:dev] schema registration failed:`, e?.message ?? e);
   } finally {
     schemaRegistered = true;
   }
