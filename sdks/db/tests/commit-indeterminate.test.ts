@@ -14,7 +14,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "../src/types.js";
 
 type AnyRec = Record<string, unknown>;
@@ -51,7 +51,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
     });
     const native = makeDoubleFailingNative(commitErr, rollbackErr);
 
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { users: { name: t.string().required() } },
       { native },
     );
@@ -94,7 +94,7 @@ describe("db.transaction — commit_failed_indeterminate", () => {
       },
     } as unknown as ZeroshipDb;
 
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { users: { name: t.string().required() } },
       { native },
     );

@@ -7,7 +7,7 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { schema, t } from "../src/types.js";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
 
@@ -67,7 +67,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     } as unknown as ZeroshipDb;
 
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -125,7 +125,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     } as unknown as ZeroshipDb;
 
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -172,7 +172,7 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     } as unknown as ZeroshipDb;
 
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -249,7 +249,7 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
       }),
     } as unknown as ZeroshipDb;
 
-    return _installSchema(
+    return installSchemaForTest(
       {
         // `done` has a single-field `.index()` marker; `userId` does NOT.
         // Compound filter `{ userId, done }` should WARN because no
@@ -289,7 +289,7 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
         async findOne() { return null; },
       }),
     } as unknown as ZeroshipDb;
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: schema({
           // Both columns marked → compound filter is covered.
@@ -345,7 +345,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
       }),
     } as unknown as ZeroshipDb;
 
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { users: { name: t.string().required() } },
       { native },
     );
@@ -401,7 +401,7 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
       }),
     } as unknown as ZeroshipDb;
 
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { users: { name: t.string().required() } },
       { native },
     );
@@ -454,7 +454,7 @@ describe("IMPORTANT #12 — loader tx-race rejection carries error.code", () => 
 // `find().with(...)` call confirms the wiring still resolves.
 // ---------------------------------------------------------------------------
 
-describe("CRITICAL #1 — typed collections after _installSchema", () => {
+describe("CRITICAL #1 — typed collections after installSchema", () => {
   test("collection wrappers carry their name and resolve relations", async () => {
     type AnyRec = Record<string, unknown>;
     const callLog: { table: string; filter: AnyRec }[] = [];
@@ -487,7 +487,7 @@ describe("CRITICAL #1 — typed collections after _installSchema", () => {
       }),
     } as unknown as ZeroshipDb;
 
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: { email: t.string().required(), name: t.string().required() },
         todos: { userId: t.ref("users").required(), title: t.string().required() },

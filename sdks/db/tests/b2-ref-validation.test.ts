@@ -1,7 +1,7 @@
 /**
  * B2 — module-init runtime validation for `t.ref()` targets.
  *
- * Exercises `validateRefTargets`, the helper that `_installSchema` calls
+ * Exercises `validateRefTargets`, the helper that `installSchema` calls
  * to verify every `t.ref("table")` points at a collection in the same
  * schema map. Lives in its own test file (rather than `db.test.ts`)
  * because the validation logic is pure data — it does not need the

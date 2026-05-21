@@ -10,7 +10,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema as schemaWrap } from "../src/types.js";
 import { OptimisticLockError } from "../src/errors.js";
 
@@ -48,7 +48,7 @@ function makeNativeCasMissOnUpdate() {
 describe("db.transaction — OptimisticLockError surfaces via result.error", () => {
   test("tx body update with CAS miss → rollback + result.error is OptimisticLockError", async () => {
     const native = makeNativeCasMissOnUpdate();
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         widgets: schemaWrap({
           name: t.string().required(),
@@ -96,7 +96,7 @@ describe("db.transaction — OptimisticLockError surfaces via result.error", () 
         };
       },
     } as unknown as ZeroshipDb;
-    const db = _installSchema({ widgets: { name: t.string().required() } }, { native });
+    const db = installSchemaForTest({ widgets: { name: t.string().required() } }, { native });
     const result = await db.transaction(async () => {
       throw new Error("body bombed");
     });

@@ -12,7 +12,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "../src/types.js";
 
 type AnyRec = Record<string, unknown>;
@@ -84,7 +84,7 @@ describe("R4 IMPORTANT-2 — nested live tracker isolation (explicit tables)", (
   test("inner db.live({tables}) inside outer db.live() must NOT leak reads upward", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         todos: { title: t.string().required() },
         users: { name: t.string().required() },

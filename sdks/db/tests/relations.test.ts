@@ -16,7 +16,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { t, schema } from "../src/types.js";
 import { Query } from "../src/query.js";
 
@@ -114,7 +114,7 @@ function makeDb(calls?: CallLog) {
     calls.find = mock.calls.find;
     calls.findOne = mock.calls.findOne;
   }
-  const db = _installSchema(
+  const db = installSchemaForTest(
     {
       users: {
         email: t.string().required().unique(),
@@ -414,7 +414,7 @@ describe("with: parallel relation loading", () => {
       },
     };
     const mock = makeSlowMock(tables, new Set(["users", "projects"]), 50);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: { name: t.string().required() },
         projects: { name: t.string().required() },
@@ -493,7 +493,7 @@ describe("with: non-numeric FK coercion + loud failure", () => {
       },
     };
     const mock = makeMock(tables);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: { name: t.string().required() },
         todos: {
@@ -518,7 +518,7 @@ describe("with: non-numeric FK coercion + loud failure", () => {
       },
     };
     const mock = makeMock(tables);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: { name: t.string().required() },
         todos: {
@@ -616,7 +616,7 @@ describe("with: soft-delete + relations contract", () => {
         };
       },
     };
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: schema({ name: t.string().required() }).softDelete(),
         todos: {
@@ -658,7 +658,7 @@ describe("with: self-referencing FK", () => {
       },
     };
     const mock = makeMock(tables);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: {
           name: t.string().required(),

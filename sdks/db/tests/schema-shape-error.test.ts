@@ -3,11 +3,11 @@
  *
  * When a user writes `{ name: "string" }` instead of `{ name: t.string() }`
  * the type layer must produce an actionable error message. The constraint
- * `ValidateSchemaShape<T>` on `_installSchema` maps any non-`t.*` field
+ * `ValidateSchemaShape<T>` on `installSchema` maps any non-`t.*` field
  * value to a string-literal error type — TS quotes the literal, so the
  * user sees exactly which field is wrong and what to do.
  *
- * This file is a *compile-time* assertion: it imports `_installSchema`
+ * This file is a *compile-time* assertion: it imports `installSchema`
  * and the type-level validator, builds shapes the validator should
  * accept, and asserts an OK shape narrows to itself. The runtime body
  * is trivial — what matters is `tsc --noEmit` over this file under
@@ -16,7 +16,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t, schema, TypeBuilder } from "../src/types.js";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 
 const native = {
   registerModel: () => Promise.resolve(),
@@ -26,7 +26,7 @@ const native = {
 
 describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
   test("valid t.* builder fields compile and install", () => {
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { users: { name: t.string().required() } },
       { native },
     );
@@ -34,7 +34,7 @@ describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
   });
 
   test("schema(...) builder is accepted", () => {
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { users: schema({ name: t.string().required() }).softDelete() },
       { native },
     );
@@ -42,7 +42,7 @@ describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
   });
 
   test("top-level t.union(...) is accepted", () => {
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         events: t.union(
           t.object({ kind: t.literal("a"), x: t.string() }),
@@ -61,7 +61,7 @@ describe("schema-shape error clarity (R3 IMPORTANT-5)", () => {
     // file (i.e. valid shapes compile; the project's tsconfig surfaces
     // a literal-error type for invalid shapes).
     assert.throws(
-      () => _installSchema(
+      () => installSchemaForTest(
         // The validator's literal-error string fires for users who type
         // a bare value here; the runtime defends against `as any` escapes.
         { users: { name: "string" as unknown as TypeBuilder<string, true> } },

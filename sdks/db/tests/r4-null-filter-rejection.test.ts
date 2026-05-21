@@ -11,7 +11,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { t } from "../src/types.js";
 
 type AnyRec = Record<string, unknown>;
@@ -62,7 +62,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
   test("deleteMany(null) resolves to Result.error with code=invalid_filter", async () => {
     const { native, calls } = makeRecordingNative();
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -83,7 +83,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
   test("updateMany(null, patch) resolves to Result.error with code=invalid_filter", async () => {
     const { native, calls } = makeRecordingNative();
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -105,7 +105,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
     // legitimate; an accidental `deleteMany(null)` is the footgun.
     const { native, calls } = makeRecordingNative();
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -118,7 +118,7 @@ describe("R4 IMPORTANT-1 — null/non-object filter rejection", () => {
   test("deleteMany(123 as any) — non-object filter is rejected too", async () => {
     const { native, calls } = makeRecordingNative();
     installEnv(native);
-    const db = _installSchema(
+    const db = installSchemaForTest(
       { todos: { title: t.string().required() } },
       { native },
     );

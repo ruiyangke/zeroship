@@ -24,7 +24,7 @@ export default {
 
 ```ts
 interface ZeroshipApp {
-  /** Database schema. Runtime installs at boot via `_installSchema`. */
+  /** Database schema. Runtime installs at boot via `installSchema`. */
   schema?: Record<string, SchemaShape>;
 
   /** WinterCG HTTP handler. Called for any URL that isn't /_zs/v1/<id>. */
@@ -159,15 +159,16 @@ shape as raw deploys do.
 
 A record of `{ collectionName: shape }`. At boot the runtime imports the
 user entry, reads `default.schema` synchronously, and calls
-`_installSchema(schema, { installOnEnvDb: true })` from `@zeroship/db`.
-This:
+`installSchema(schema, env.db)` from `@zeroship/db`. This:
 
 1. Issues idempotent DDL (CREATE TABLE / ALTER TABLE / CREATE INDEX
    CONCURRENTLY) against the app's Postgres schema.
-2. Installs typed `Collection` wrappers as own properties on
-   `env.db.<name>`.
+2. Installs typed `Collection` wrappers (and the `transaction` / `live`
+   extension methods) as own properties on `env.db.<name>`.
+3. Returns `{ collections, ready }` — the bootstrap awaits the `ready`
+   promise so module evaluation gates on DDL settling.
 
-User code never calls `_installSchema` directly — declare schema on the
+User code never calls `installSchema` directly — declare schema on the
 entry and the platform handles registration.
 
 See `docs/reference/db.md` for the schema builder surface (`t.string()`,

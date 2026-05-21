@@ -27,11 +27,12 @@ import { query, mutation, action, runQuery } from "@zeroship/server";
 //
 // The synthetic SSR entry (prod) and dev-bootstrap (dev) read
 // `default.schema` at app boot and hand it to
-// `@zeroship/db::_installSchema`, which both registers the models AND
-// installs typed Collection wrappers as own properties on `env.db`.
-// From handlers we just write `env.db.users.find(...)` — the type
-// comes from the tsconfig `paths` entry that maps `zeroship-schema`
-// to this file.
+// `@zeroship/db::installSchema(schema, env.db)`, which both registers
+// the models AND installs typed Collection wrappers (plus the
+// `transaction` / `live` extension methods) as own properties on
+// `env.db`. From handlers we just write `env.db.users.find(...)` —
+// the type comes from the tsconfig `paths` entry that maps
+// `zeroship-schema` to this file.
 
 const dbSchema = {
   users: {

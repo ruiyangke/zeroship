@@ -8,7 +8,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { _installSchema } from "../src/db.js";
+import { installSchemaForTest } from "./_install-helper.js";
 import { model } from "../src/model.js";
 import { t } from "../src/types.js";
 
@@ -208,7 +208,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       1: { id: 1, email: "a@b.com", name: "Alice" },
       2: { id: 2, email: "b@b.com", name: "Bob" },
     });
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: {
           email: t.string().required().unique(),
@@ -273,7 +273,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
       },
     };
 
-    const db = _installSchema(
+    const db = installSchemaForTest(
       {
         users: {
           email: t.string().required().unique(),
