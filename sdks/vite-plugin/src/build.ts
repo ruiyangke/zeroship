@@ -392,6 +392,19 @@ export function buildPlugin(
       // import specifier — virtual modules have no parent path, so
       // relative specifiers don't anchor to anything sensible.
       const userEntryRel = entry.replace(/\\/g, "/");
+
+      // Stage 2 — resolve the schema module BEFORE the SSR sub-build so
+      // the synthetic entry can statically import it. closeBundle still
+      // re-runs the resolver to compute the bundle-relative path baked
+      // into `manifest.exports.schema`; we duplicate the cheap fs check
+      // here to keep the two sites independent (no shared mutable
+      // state between Vite hook invocations). When the resolver returns
+      // `path: null` (entry-fallback), we pass `undefined` so the
+      // generated entry falls back to `_zsUser.default?.schema`.
+      const schemaForBuild = resolveSchemaPath(root, options.schema);
+      const schemaImportSpecForEntry =
+        schemaForBuild.path != null ? schemaForBuild.path.replace(/\\/g, "/") : undefined;
+
       const ssrConfig = buildSsrInlineConfig({
         root,
         ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
@@ -410,7 +423,12 @@ export function buildPlugin(
           transformPlugin(DEFAULT_RPC_ENDPOINT, state),
           // Synthetic SSR entry virtual module owner. The entry's body
           // is build-time-static and order-independent.
-          rpcRegistryPlugin({ root, userEntryRel, state }),
+          rpcRegistryPlugin({
+            root,
+            userEntryRel,
+            state,
+            schemaImportSpec: schemaImportSpecForEntry,
+          }),
           // Expose `virtual:zeroship/client-manifest` so SSR code can
           // read hashed asset paths at build time. The client build's
           // `writeBundle` (this hook) finishes BEFORE we kick off the

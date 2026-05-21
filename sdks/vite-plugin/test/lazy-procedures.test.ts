@@ -205,8 +205,12 @@ describe("lazy emission — buildServerEntrySource", () => {
       /import \* as _user_TARGET_0_ from "\/proj\/src\/actions\/eager\.ts"/,
     );
     assert.match(code, /"fast":\s*_user_TARGET_0_\.fast/);
-    // No dynamic-import wrapper in the eager-only emission.
-    assert.equal(/await import\(/.test(code), false);
+    // No dynamic-import wrapper around USER procedures in the eager-only
+    // emission. The schema-registration block (Stage 2) dynamically
+    // imports `@zeroship/db/internal`; that's orthogonal to procedure
+    // dispatch and must not affect cold-start procedure parsing.
+    assert.equal(/await import\("\/proj\//.test(code), false);
+    assert.equal(/await import\("\.\//.test(code), false);
   });
 
   test("lazy binding: no static import; emits dynamic-import wrapper", () => {

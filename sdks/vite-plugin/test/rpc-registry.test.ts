@@ -126,6 +126,120 @@ describe("buildServerEntrySource — runtime _procedures population", () => {
   });
 });
 
+describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
+  test("entry-default path (no schemaImportSpec): no extra import, falls back to _zsUser.default.schema", () => {
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+    });
+    // No extra static `import * as _zsSchemaMod` line.
+    assert.equal(
+      /import \* as _zsSchemaMod from /.test(code),
+      false,
+      "no schema-side import when entry-fallback case",
+    );
+    // The fallback path keys off `_zsUser.default.schema`.
+    assert.match(code, /_zsUser\.default\.schema/);
+    // The async IIFE that calls `__registerSchemas` is present.
+    assert.match(code, /await import\("@zeroship\/db\/internal"\)/);
+    assert.match(code, /__registerSchemas/);
+    assert.match(code, /installOnEnvDb:\s*true/);
+  });
+
+  test("split-file path (schemaImportSpec set): emits extra import + reads from it first", () => {
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+      schemaImportSpec: "/proj/src/schema.ts",
+    });
+    // Extra namespace import for the schema module.
+    assert.match(
+      code,
+      /import \* as _zsSchemaMod from "\/proj\/src\/schema\.ts"/,
+    );
+    // Resolution prefers _zsSchemaMod, with _zsUser.default.schema as fallback.
+    assert.match(code, /_zsSchemaMod\.default\?\.schema/);
+    assert.match(code, /_zsUser\.default\.schema/);
+    // Calls the registration helper through the dynamic import.
+    assert.match(code, /__registerSchemas/);
+    assert.match(code, /installOnEnvDb:\s*true/);
+  });
+
+  test("generated source is syntactically valid JS for both schema paths", async () => {
+    // Both shapes must parse — a typo in the emitter would break every
+    // user's build, so we statically validate via acorn.
+    const { parse: acornParse } = await import("acorn");
+    for (const spec of [undefined, "/proj/src/schema.ts"]) {
+      const code = buildServerEntrySource({
+        userEntryRel: "/proj/src/server.ts",
+        schemaImportSpec: spec,
+      });
+      acornParse(code, {
+        ecmaVersion: 2024,
+        sourceType: "module",
+        allowImportExportEverywhere: true,
+      });
+    }
+  });
+
+  test("entry-default path assigns the IIFE to a global so rolldown can't tree-shake it", () => {
+    // Regression: when no static schema-side import is emitted, rolldown's
+    // static-folding step otherwise concludes the IIFE's side effects
+    // (`console.error`, `_zsRegFn(...)` whose return is discarded) are
+    // pure and removes the entire block. Anchoring the IIFE's promise to
+    // `globalThis.__zsSchemaInit` makes the side-effect visible across
+    // the SSR build's module boundary.
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+    });
+    assert.match(code, /globalThis\.__zsSchemaInit\s*=\s*\(async/);
+  });
+
+  test("entry-default resolution does not include a statically false guard", () => {
+    // If the emitted source contains `typeof undefined !== "undefined"`,
+    // rolldown will fold the entire short-circuit chain into the
+    // right-hand fallback AND then conclude the whole IIFE is dead. Keep
+    // the entry-default emission free of any `${schemaModRef}` references
+    // (which become the literal `undefined`).
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+    });
+    assert.equal(
+      /typeof\s+undefined\s*!==/.test(code),
+      false,
+      "no statically-false guard in the entry-default emission",
+    );
+  });
+
+  test("split-file path in binding-fed (Phase 2) emission emits the schema import + block", () => {
+    // Imported lazily to avoid pulling ServerBinding's type machinery
+    // into this lightweight test file's hot path.
+    const code = buildServerEntrySource({
+      userEntryRel: "/proj/src/server.ts",
+      schemaImportSpec: "/proj/src/schema.ts",
+      bindings: new Map([
+        [
+          "/proj/src/server.ts::ping",
+          {
+            wireId: "ping",
+            sourceFile: "/proj/src/server.ts",
+            exportName: "ping",
+            kind: "query",
+            marker: "file",
+            chain: ["/proj/src/server.ts"],
+          },
+        ],
+      ]),
+    });
+    // Phase 2 entry MUST include the same schema-registration block.
+    assert.match(
+      code,
+      /import \* as _zsSchemaMod from "\/proj\/src\/schema\.ts"/,
+    );
+    assert.match(code, /await import\("@zeroship\/db\/internal"\)/);
+    assert.match(code, /__registerSchemas/);
+    assert.match(code, /installOnEnvDb:\s*true/);
+  });
+});
+
 describe("pickEntryWireId — resolution order", () => {
   test("explicit fn.config.id wins", () => {
     assert.equal(
