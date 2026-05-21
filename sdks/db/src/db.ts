@@ -53,7 +53,8 @@ import { model } from "./model.js";
 import { Collection, type NativeDb } from "./collection.js";
 import { Query } from "./query.js";
 import { createLive, type LiveOptions, type LiveQuery } from "./live.js";
-import { type NormalizedSchema, normalizeSchema, validateRefTargets } from "./schema.js";
+import { normalizeSchema, validateRefTargets } from "./schema.js";
+import { getPlatformReady, setPlatformReady } from "./internal-globals.js";
 import { type PlainObject, type Result, type Row, type RowInput, type UpdateExpression, type Filter, type IsolationLevel, type NamingStrategy, type WithSpec, type WithRelations, SchemaBuilder, TypeBuilder, naming, ok, err } from "./types.js";
 
 /**
@@ -436,7 +437,14 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
 ): Db<T> {
   const native = options?.native ?? getNativeDb();
   const namingStrategy = options?.naming ?? naming.snakeCase;
-  const collections = {} as { [K in keyof T]: Collection<T[K]> };
+  // Carry both the name (`K & string`) AND the full schema map (`T`) on
+  // every collection so brand types (`db.users.Id` → `Id<"users">`) and
+  // joined-relation types (`find({...}, { with })`) resolve without the
+  // type-erasing cast that used to live at the return site. The internal
+  // alias keeps the per-key shape narrow; the cast on line ~469 only
+  // widens to `Collection<unknown, string, T>` for the loop that iterates
+  // a heterogeneous map.
+  const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
 
   // B2 — validate that every `t.ref("...")` target is a declared
   // collection in this same schema map. The TS `Tables<S>` constraint
@@ -456,29 +464,29 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   // `Object.create(env.db)` would lose internal-field access and
   // method calls would throw "Illegal invocation".
   for (const [name, rawSchema] of Object.entries(schemas)) {
-    // Unwrap SchemaBuilder to extract per-collection options
+    // Unwrap SchemaBuilder to extract per-collection options. A top-level
+    // `t.union(...)` (C2) is also a valid schema input — `model()` ->
+    // `normalizeSchema` recognises a TypeBuilder and expands the union
+    // into flat columns; we pass it through unchanged.
     const isBuilder = rawSchema instanceof SchemaBuilder;
-    // C2 — a top-level `t.union(...)` IS a valid schema input. `model()`
-    // calls `normalizeSchema` which now recognises the TypeBuilder and
-    // expands the union into flat columns. We pass it through unchanged.
-    const isUnion = rawSchema instanceof TypeBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
     const softDelete = isBuilder ? rawSchema.options.softDelete : false;
     const versioning = isBuilder ? rawSchema.options.versioning : false;
     const declaredIndexes = isBuilder ? rawSchema.indexes : [];
-    (collections as Record<string, Collection<SchemaInput>>)[name] =
+    (collections as Record<string, Collection<unknown, string, T>>)[name] =
       model(
         name,
-        // The TypeBuilder branch can't be cast to Record<string, unknown>
-        // safely, but `model()` -> `normalizeSchema` accepts either form.
-        (isUnion ? fields : fields) as Record<string, unknown>,
+        // `model()` -> `normalizeSchema` accepts SchemaBuilder fields,
+        // bare Mongoose-style records, and a TypeBuilder (union). The
+        // single cast keeps the heterogeneous map's loop tractable.
+        fields as Record<string, unknown>,
         native,
         namingStrategy,
         softDelete,
         versioning,
         /* skipRegister */ true,
         declaredIndexes,
-      );
+      ) as Collection<unknown, string, T>;
   }
 
   // Chain registerModel calls in topological order so parent tables
@@ -499,7 +507,7 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   const refOrder = topoSortByRefs(schemas as Record<string, unknown>);
   let chain: Promise<void> = Promise.resolve();
   for (const name of refOrder) {
-    const col = (collections as Record<string, Collection<SchemaInput>>)[name];
+    const col = (collections as Record<string, Collection<unknown, string, T>>)[name];
     if (!col) continue;
     const rawSchema = schemas[name as keyof T];
     const fields =
@@ -556,10 +564,11 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   // The chain is published as-is — if registerModel rejects, the
   // dispatch shim's `await` rejects too, which is the correct signal
   // (the platform isn't actually ready and serving a request against
-  // a broken DDL is worse than failing fast).
-  const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
-  const prev = g.__zeroshipPlatformReady ?? Promise.resolve();
-  g.__zeroshipPlatformReady = prev.then(() => chain);
+  // a broken DDL is worse than failing fast). Helpers live in
+  // `./internal-globals.ts` so the three modules that read this
+  // promise share one typed source of truth.
+  const prev = getPlatformReady() ?? Promise.resolve();
+  setPlatformReady(prev.then(() => chain));
 
   // Plant the sibling-collection lookup on every Collection so the
   // `with: { fk: true }` option can resolve `refTarget` → target
@@ -635,16 +644,27 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
           .filter((p): p is Promise<void> => p !== undefined),
       );
 
-      const tx = await nativeAny.beginTransaction(
-        options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
-      );
-
-      // Bypass the per-collection IdLoader for the duration of the
-      // tx body — every `get(id)` inside the callback dispatches
-      // directly through the tx connection. Decremented in every
-      // exit path of the body/commit logic below.
+      // Bump `_txDepth` BEFORE awaiting `beginTransaction` so any
+      // `get(id)` enqueued between drain resolution and BEGIN settling
+      // sees `_txDepth > 0` at the synchronous call boundary and
+      // bypasses the loader path. The loader's tx-race rejection
+      // catches the residual case where an entry was enqueued at
+      // snapshot 0 and a tx opened before flush — but the snapshot is
+      // taken inside `Collection.get()` AFTER the drain await, so
+      // without the synchronous bump, a `get(id)` racing this turn
+      // would still snapshot 0 and route through the loader onto the
+      // tx connection. Roll back the increment if begin itself throws.
       for (const c of collectionList) {
         c._txDepth += 1;
+      }
+      let tx: { commit(): Promise<void>; rollback(): Promise<void> };
+      try {
+        tx = await nativeAny.beginTransaction(
+          options?.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined,
+        );
+      } catch (beginErr) {
+        for (const c of collectionList) c._txDepth -= 1;
+        return err(beginErr instanceof Error ? beginErr : new Error(String(beginErr)));
       }
 
       // Two failure modes carry different post-conditions:

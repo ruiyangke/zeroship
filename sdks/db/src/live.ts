@@ -172,26 +172,36 @@ export function createLive<R>(
   // view, and any consumer that's lagging can only act on the latest
   // anyway. Matches the broker's overflow semantics (newest wins).
   type QueueItem = { kind: "value"; value: R[] } | { kind: "error"; error: Error } | { kind: "done" };
+  type PendingConsumer = {
+    resolve: (r: IteratorResult<R[]>) => void;
+    reject: (e: unknown) => void;
+  };
   const MAX_QUEUE_DEPTH = 64;
   const queue: QueueItem[] = [];
-  let pendingResolve: ((r: IteratorResult<R[]>) => void) | null = null;
-  let pendingReject: ((e: unknown) => void) | null = null;
+  // FIFO of awaiting `next()` consumers. Most users iterate single-in-
+  // flight (`for await`), so this queue is at most length 1; but the
+  // `AsyncIterableIterator` contract is that `next()` queues, and racing
+  // consumers (`Promise.race([iter.next(), timer])`,
+  // `Promise.all([iter.next(), iter.next()])`) drop into the second slot.
+  // A single-slot pending resolver silently leaks the first promise.
+  const pendingConsumers: PendingConsumer[] = [];
   let closed = false;
   const subscriptions: Subscription[] = [];
 
   function pump(item: QueueItem): void {
-    if (pendingResolve !== null) {
-      const resolve = pendingResolve;
-      const reject = pendingReject;
-      pendingResolve = null;
-      pendingReject = null;
+    if (pendingConsumers.length > 0) {
+      const { resolve, reject } = pendingConsumers.shift()!;
       if (item.kind === "value") {
         resolve({ value: item.value, done: false });
       } else if (item.kind === "done") {
         resolve({ value: undefined as unknown as R[], done: true });
+        // Done is terminal — wake every other waiter too.
+        while (pendingConsumers.length > 0) {
+          const next = pendingConsumers.shift()!;
+          next.resolve({ value: undefined as unknown as R[], done: true });
+        }
       } else {
-        if (reject) reject(item.error);
-        else resolve({ value: undefined as unknown as R[], done: true });
+        reject(item.error);
       }
       return;
     }
@@ -309,8 +319,7 @@ export function createLive<R>(
       }
       if (closed) return { value: undefined as unknown as R[], done: true };
       return new Promise<IteratorResult<R[]>>((resolve, reject) => {
-        pendingResolve = resolve;
-        pendingReject = reject;
+        pendingConsumers.push({ resolve, reject });
       });
     },
     async return(value): Promise<IteratorResult<R[]>> {

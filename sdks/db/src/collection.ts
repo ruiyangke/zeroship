@@ -224,31 +224,33 @@ function _maybeWarnUnindexedFilter(
 }
 
 /**
- * True iff the filter keys (in any order) form a non-empty prefix of
- * some declared index, OR every key carries a single-field index marker
- * (`def.index === true` / `def.unique === true`). The schema-level
- * markers are kept as the single-column path so `t.string().unique()`
- * still suppresses the warning without requiring a `.index(...)`
- * declaration.
+ * True iff the filter keys are covered by an index:
+ *
+ *   - Single-key filter: the one key carries a single-field marker
+ *     (`def.index === true` / `def.unique === true`) OR the key set
+ *     forms a non-empty leftmost prefix of some declared multi-column
+ *     index.
+ *   - Multi-key filter: the keys form a non-empty leftmost prefix of
+ *     some declared multi-column index, OR every key carries its own
+ *     single-field marker.
+ *
+ * Round-1 critique #3: the prior rule was "single-key OR (compound +
+ * any one key marked)" — which silently hid scans like
+ * `find({ userId, done })` when only `done` was `.index()`-marked,
+ * even though no compound index covered `(userId, done)`. The warning
+ * exists to nudge users toward declaring the right index; the rule
+ * above keeps the single-field shortcut for `t.string().unique()` but
+ * stops accepting "any one marked key" as compound coverage.
  */
 function _filterCoveredByIndex(
   keys: string[],
   schema: NormalizedSchema,
   declaredIndexes: readonly NamedIndexSpec[],
 ): boolean {
-  // Single-field path: any key with `.index()` / `.unique()` is enough.
-  for (const k of keys) {
-    const def = schema[k];
-    if (def && (def.index === true || def.unique === true)) {
-      // The single-field marker covers a filter that uses ONLY that one
-      // key, or compound filters where every other key is also indexed.
-      // The simplest correct rule: at least one indexed key suffices to
-      // trigger an index scan; Postgres can filter the rest. So we
-      // accept coverage as soon as one key is marked.
-      return true;
-    }
-  }
-  // Multi-column path: keys form a prefix of some declared index.
+  if (keys.length === 0) return false;
+  // Multi-column path: keys form a leftmost prefix of some declared
+  // index. Postgres can use any leftmost subset of a B-tree, so a
+  // `{userId}`-only filter still hits `by_user_done = [userId, done]`.
   const keySet = new Set(keys);
   for (const idx of declaredIndexes) {
     if (idx.fields.length === 0) continue;
@@ -262,7 +264,16 @@ function _filterCoveredByIndex(
     }
     if (covers) return true;
   }
-  return false;
+  // Single-field-marker path: either the filter is single-key on a
+  // marked column, OR every key in the filter is marked. This keeps
+  // `t.string().unique()` shortcutting without `.index(...)` calls
+  // while refusing to call a `{userId, done}` filter "covered" just
+  // because one of the two columns is marked.
+  for (const k of keys) {
+    const def = schema[k];
+    if (!def || (def.index !== true && def.unique !== true)) return false;
+  }
+  return true;
 }
 
 /**
