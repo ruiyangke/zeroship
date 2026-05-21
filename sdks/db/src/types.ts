@@ -580,9 +580,38 @@ export const t = {
   /**
    * Creates an array field definition. Pass the item type builder as the argument:
    * `t.array(t.string())` produces `{ type: "array", items: "string" }`.
+   *
+   * Only primitive item types are supported today (`string`, `number`,
+   * `boolean`, `date`, `json`, `calendarDate`). Passing `t.ref(...)`,
+   * `t.object({...})`, `t.union(...)`, `t.literal(...)` or a nested
+   * `t.array(...)` throws synchronously with code
+   * `invalid_array_item` — the previous unchecked cast silently produced
+   * malformed `FieldDef`s (e.g. dropping `refTarget` so `validateRefTargets`
+   * could not visit array items).
    */
   array<U>(items: TypeBuilder<U, any>): TypeBuilder<U[]> {
-    const itemType = items.toFieldDef().type as PrimitiveTypeName;
+    if (!(items instanceof TypeBuilder)) {
+      throw Object.assign(
+        new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
+        { code: "invalid_array_item" as const },
+      );
+    }
+    const itemDef = items.toFieldDef();
+    const PRIMITIVE_ITEM_TYPES: ReadonlySet<string> = new Set([
+      "string", "number", "boolean", "date", "json", "calendarDate",
+    ]);
+    if (!PRIMITIVE_ITEM_TYPES.has(itemDef.type)) {
+      throw Object.assign(
+        new Error(
+          `t.array(items): item type "${itemDef.type}" is not supported — ` +
+            `only primitive item types are allowed (string, number, boolean, ` +
+            `date, json, calendarDate). Storing arrays of refs/objects/unions ` +
+            `is not implemented; model it as a separate collection with a ref.`,
+        ),
+        { code: "invalid_array_item" as const },
+      );
+    }
+    const itemType = itemDef.type as PrimitiveTypeName;
     return new TypeBuilder<U[]>({ type: "array", items: itemType });
   },
   /**
