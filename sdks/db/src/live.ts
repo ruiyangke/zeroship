@@ -270,8 +270,23 @@ export function createLive<R>(
           "or pass actual table names.",
         );
       }
-      const rows = await unwrapQueryFnResult<R>(queryFn());
-      return { rows, tables: new Set(options.tables) };
+      // R4 IMPORTANT-2 — install a throwaway tracker for the duration
+      // of `queryFn()` so Collection reads inside the explicit-tables
+      // queryFn don't leak into an enclosing `db.live`'s watched set.
+      // Pre-fix, an inner `db.live(qfn, { tables })` nested inside an
+      // outer `db.live(() => ...)` would see the OUTER tracker still
+      // installed; inner's reads would push into outer's collections
+      // set, inflating outer's subscriptions and triggering spurious
+      // reruns on every mutation of an inner-only table.
+      const prev = liveTracker.current;
+      const sink = { collections: new Set<string>() };
+      liveTracker.current = sink;
+      try {
+        const rows = await unwrapQueryFnResult<R>(queryFn());
+        return { rows, tables: new Set(options.tables) };
+      } finally {
+        liveTracker.current = prev;
+      }
     }
     const prev = liveTracker.current;
     const ctx = { collections: new Set<string>() };
