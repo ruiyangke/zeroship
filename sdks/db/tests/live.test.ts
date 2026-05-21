@@ -445,6 +445,58 @@ describe("db.live — reactive query layer", () => {
     live.close();
   });
 
+  test("tables: [] subscribes to nothing (static one-shot) — R3 IMPORTANT-4", async () => {
+    // R3 IMPORTANT-4 regression. `tables: []` used to silently fall
+    // back to auto-tracking (because `length > 0` was the guard).
+    // The fix treats `tables: []` as "subscribe to nothing": the
+    // initial result yields, then the iterator stalls (no subscriptions
+    // open), waiting for an explicit `close()`.
+    const ctx = makeMockNative();
+    installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
+    const db = _installSchema(
+      { todos: { title: t.string().required() } },
+      { native: ctx.native },
+    );
+    await db.todos.insert({ title: "static" });
+
+    // Capture console.warn — we expect one warning the first time
+    // tables: [] is used in this process.
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg: string) => { warnings.push(String(msg)); };
+    try {
+      // queryFn touches db.todos — auto-tracking WOULD pick it up. With
+      // tables: [], auto-tracking is bypassed entirely.
+      const live = db.live(() => db.todos.find({}), { tables: [] });
+      const first = await live.next();
+      assert.equal(first.done, false);
+      assert.equal((first.value as AnyRec[])[0].title, "static");
+
+      // After the first result, no subscriptions must be open.
+      await new Promise((r) => setTimeout(r, 5));
+      assert.equal(
+        (ctx.subs["todos"] ?? []).length,
+        0,
+        "tables: [] must NOT open any subscriptions",
+      );
+      // No rerun on a todos change (the table is auto-tracked but
+      // we ignored it).
+      ctx.fire("todos");
+      const findsBefore = ctx.calls.find;
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(ctx.calls.find, findsBefore, "no rerun without subscriptions");
+
+      // One-time warning fired.
+      assert.ok(
+        warnings.some((w) => w.includes("tables: []")),
+        `expected an empty-tables warning, got: ${JSON.stringify(warnings)}`,
+      );
+      live.close();
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
   test("Query thenable resolves to data array (Result unwrap)", async () => {
     // The Query builder's awaited form returns Result<T[]>. db.live
     // detects that shape and yields the data (or throws on error).

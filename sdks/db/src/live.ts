@@ -67,6 +67,14 @@ export function trackCollectionAccess(name: string): void {
   }
 }
 
+/**
+ * Module-scope latch — `console.warn` once per process when a caller
+ * passes `tables: []`. The empty list is treated as "subscribe to
+ * nothing" (a one-shot static query), but it usually indicates a typo
+ * or stale state where the caller meant to provide actual table names.
+ */
+let _warnedEmptyTables = false;
+
 /** @internal — test-only handle. */
 export function __zeroshipLiveTrackerCurrentForTest(): { collections: Set<string> } | null {
   return liveTracker.current;
@@ -216,6 +224,12 @@ export function createLive<R>(
       }
       return;
     }
+    // Once closed, additional items dropped on the floor — the `next()`
+    // fast-path returns `{done: true}` directly when `closed && queue
+    // empty`, so a queued done sentinel here is dead weight. (R3
+    // IMPORTANT-2: a post-error `pump({kind:"done"})` in doClose used
+    // to land in the queue with no consumer, never delivered.)
+    if (closed) return;
     if (queue.length >= MAX_QUEUE_DEPTH) {
       // Drop the oldest VALUE entry to make room. Preserve any errors
       // or the done sentinel so close/failure signals always propagate.
@@ -232,6 +246,9 @@ export function createLive<R>(
       try { sub.close(); } catch { /* idempotent */ }
     }
     subscriptions.length = 0;
+    // Drain any pending consumers with `{done: true}`. The `pump` will
+    // no-op on the queue path because `closed` is now true; the
+    // pendingConsumer drain branch is what we want here.
     pump({ kind: "done" });
   }
 
@@ -240,7 +257,19 @@ export function createLive<R>(
   // compose. We return both the first-result promise and the table set
   // so the broker wiring can start as soon as we have the names.
   async function firstRun(): Promise<{ rows: R[]; tables: Set<string> }> {
-    if (options?.tables && options.tables.length > 0) {
+    // Explicit `tables` array is authoritative — including `[]`, which
+    // means "subscribe to nothing" (static one-shot result). A user who
+    // wants auto-tracking omits `tables` entirely, not passes `[]`.
+    // Warn once per process so an accidental empty array surfaces.
+    if (options?.tables !== undefined) {
+      if (options.tables.length === 0 && !_warnedEmptyTables) {
+        _warnedEmptyTables = true;
+        console.warn(
+          "[@zeroship/db] db.live({ tables: [] }) treated as 'subscribe to nothing' — " +
+          "the iterator will yield the initial result then stall. Omit `tables` to enable auto-tracking, " +
+          "or pass actual table names.",
+        );
+      }
       const rows = await unwrapQueryFnResult<R>(queryFn());
       return { rows, tables: new Set(options.tables) };
     }
