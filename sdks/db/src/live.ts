@@ -202,6 +202,17 @@ export function createLive<R>(
         }
       } else {
         reject(item.error);
+        // An error event is one-shot from the producer's perspective —
+        // the failing `rerun()` doesn't loop, it pushes ONE error item.
+        // If multiple consumers are waiting (`Promise.all([iter.next(),
+        // iter.next()])`), shifting + rejecting one leaves the others
+        // hanging forever. Reject every pending consumer with the same
+        // error so racing callers all observe the failure. (Matches the
+        // `done` branch's drain semantics for the failure case.)
+        while (pendingConsumers.length > 0) {
+          const next = pendingConsumers.shift()!;
+          next.reject(item.error);
+        }
       }
       return;
     }

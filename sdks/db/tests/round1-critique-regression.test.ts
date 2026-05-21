@@ -143,6 +143,76 @@ describe("CRITICAL #2 — db.live: FIFO pendingConsumers", () => {
     assert.equal(ra.done, true);
     assert.equal(rb.done, true);
   });
+
+  test("rerun error rejects EVERY pending next() (FIFO error-path drain)", async () => {
+    // Round-2 regression — the original FIFO fix only rejected the
+    // head consumer on an error event; subsequent pending consumers
+    // would leak forever. Two racing iter.next() calls must BOTH
+    // observe the failure when the producer pumps an error.
+    let runCount = 0;
+    const subs: ReturnType<typeof makeFakeSub>[] = [];
+    const native = {
+      registerModel: () => Promise.resolve(),
+      collection: () => ({
+        async find() {
+          runCount += 1;
+          // First run (initial result) succeeds; every rerun throws so
+          // pump({kind:"error", error}) fires while two consumers are
+          // pending.
+          if (runCount === 1) return [{ id: 1, title: "ok" }];
+          throw new Error("rerun failed: synthetic");
+        },
+        async findOne() { return null; },
+      }),
+      openSubscription: () => {
+        const s = makeFakeSub();
+        subs.push(s);
+        return s;
+      },
+    } as unknown as ZeroshipDb;
+
+    installEnv(native);
+    const db = _installSchema(
+      { todos: { title: t.string().required() } },
+      { native },
+    );
+
+    const live = db.live(() => db.todos.find({}));
+    // Drain the initial result.
+    const first = await live.next();
+    assert.equal(first.done, false);
+
+    // Give the subscription wiring a tick to install.
+    await new Promise((r) => setTimeout(r, 5));
+    assert.ok(subs.length > 0, "expected at least one fake subscription");
+
+    // Race two pending consumers; emit a change so rerun() fires and
+    // throws — pump({kind:"error", ...}) must reject BOTH a and b.
+    const a = live.next();
+    const b = live.next();
+    subs[0].emit({ kind: "change", op: "insert", collection: "todos", pk: 2, columns: [] });
+
+    const timer = new Promise<readonly ["timeout"]>((resolve) =>
+      setTimeout(() => resolve(["timeout"] as const), 1000),
+    );
+    const winner = await Promise.race([
+      Promise.allSettled([a, b]).then((v) => ["ok", v] as const),
+      timer,
+    ]);
+    if (winner[0] === "timeout") {
+      live.close();
+      assert.fail("pending next() leaked — second consumer never observed the error");
+    }
+    const [ra, rb] = winner[1];
+    assert.equal(ra.status, "rejected", "first consumer must observe the error");
+    assert.equal(rb.status, "rejected", "second consumer must observe the error");
+    if (ra.status === "rejected" && rb.status === "rejected") {
+      assert.match((ra.reason as Error).message, /rerun failed: synthetic/);
+      assert.match((rb.reason as Error).message, /rerun failed: synthetic/);
+    }
+
+    live.close();
+  });
 });
 
 // ---------------------------------------------------------------------------
