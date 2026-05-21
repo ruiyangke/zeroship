@@ -292,7 +292,7 @@ function _filterCoveredByIndex(
  * `Id` accessor below produces `Id<N>` rather than `Id<string>`.
  *
  * `AllSchemas` is the parent db's full schema map — threaded in by
- * `_installSchema` so a `find({...}, { with: { userId: true } })` can
+ * `installSchema` so a `find({...}, { with: { userId: true } })` can
  * resolve the joined field's type to the target collection's `Row<...>`
  * rather than the v1 fallback of `PlainObject`. Standalone `model()`
  * callers inherit the safe default and degrade to `PlainObject` per
@@ -326,7 +326,7 @@ export class Collection<
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
   private _idLoader: IdLoader<Row<S>> | null;
   /**
-   * Sibling-collection lookup, planted by `_installSchema` so `with: { fk: true }`
+   * Sibling-collection lookup, planted by `installSchema` so `with: { fk: true }`
    * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
    * batched `find({id: {$in: ids}})` against. `model()` callers without a
    * parent db leave this null; `with` then errors at call time with a
@@ -433,7 +433,7 @@ export class Collection<
     return this._nativeCol;
   }
 
-  /** @internal — used by `_installSchema` to chain registrations
+  /** @internal — used by `installSchema` to chain registrations
    *  sequentially for B2 cross-table FK ordering. Replaces the
    *  per-collection `_ready` promise set during `model()` construction
    *  with a chained one so that parent-table registration completes
@@ -442,7 +442,7 @@ export class Collection<
     this._ready = p;
   }
 
-  /** @internal — planted by `_installSchema` so the `with: { fk: true }`
+  /** @internal — planted by `installSchema` so the `with: { fk: true }`
    *  option can resolve sibling collections by table name. */
   _setResolveCollection(
     fn: (name: string) => Collection<unknown> | undefined,

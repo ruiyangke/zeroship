@@ -117,7 +117,7 @@ function _coerceIdForCursor(
  * When `.select()` is called with typed field names, `P` narrows to `Pick<Row<S>, K>`.
  *
  * `AllSchemas` is the parent db's full schema map (threaded in by
- * `_installSchema` via `Collection<S, N, AllSchemas>`). It lets `.with({ fk:
+ * `installSchema` via `Collection<S, N, AllSchemas>`). It lets `.with({ fk:
  * true })` resolve the joined field's type to the target collection's
  * `Row<...>` instead of the safe-default `PlainObject`. Direct `new
  * Query(...)` callers inherit the safe default, so the v1 behaviour is

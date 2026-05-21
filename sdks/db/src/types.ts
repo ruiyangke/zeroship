@@ -300,7 +300,7 @@ export type UnwrapSchemaForRelation<T> =
  * target name can't be matched against any declared collection — that
  * preserves the v1 behaviour for unknown targets without breaking
  * compilation. Tightens to the real `Row<TargetSchema>` whenever
- * `_installSchema`'s schema map carries the target name (the common case).
+ * `installSchema`'s schema map carries the target name (the common case).
  */
 export type ResolveTargetRow<X, AllSchemas> =
   ExtractRefTarget<X> extends infer Target
@@ -315,7 +315,7 @@ export type ResolveTargetRow<X, AllSchemas> =
  * Type-level shape for joined rows. Each key in `W` becomes a field on
  * the row carrying the target's full `Row<TargetSchema>` (or `null`).
  *
- * `AllSchemas` is the schema map that `_installSchema` was given —
+ * `AllSchemas` is the schema map that `installSchema` was given —
  * threading it through `Collection<S, N, AllSchemas>` lets us look up each key's
  * `t.ref(target)` and resolve `target` to the target collection's `Row`.
  * The default `Record<string, unknown>` keeps direct `Collection`/`Query`

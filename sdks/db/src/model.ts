@@ -52,7 +52,7 @@ export function model<S extends Record<string, unknown>>(
   namingStrategy: NamingStrategy = naming.snakeCase,
   softDelete: boolean = false,
   versioning: boolean = false,
-  /** @internal — `_installSchema` sets this so it can chain
+  /** @internal — `installSchema` sets this so it can chain
    *  `registerModel` calls itself in dependency order. Standalone
    *  `model()` callers leave it false and get the eager fire-and-store
    *  behaviour. */
@@ -109,13 +109,13 @@ export function model<S extends Record<string, unknown>>(
     ...(idx.unique ? { unique: true } : {}),
   }));
 
-  // Mirror db.ts:467-475 — call via `.call(native, ...)` so the v8_class
+  // Mirror db.ts — call via `.call(native, ...)` so the v8_class
   // brand check sees the right receiver. The unbound-fn form drops `this`
   // and triggers "Illegal invocation"; see commit e564c010 for the sibling
-  // fix in _installSchema. The narrow catch only swallows the synchronous
-  // env-resolution path (covered by `getNativeDb`); a native rejection
-  // becomes a rejected promise stored on the Collection and surfaces as
-  // `result.error` on first CRUD, which is the correct signal.
+  // fix in `installSchema`. The narrow catch only swallows the synchronous
+  // env-resolution path; a native rejection becomes a rejected promise
+  // stored on the Collection and surfaces as `result.error` on first
+  // CRUD, which is the correct signal.
   let registrationPromise: Promise<void> | null = null;
   if (!skipRegister && native.registerModel) {
     registrationPromise = (native.registerModel as unknown as (

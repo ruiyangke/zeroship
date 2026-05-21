@@ -12,7 +12,7 @@ export type { Subscription, SubscriptionEvent } from "./subscribe.js";
 export type { LiveQuery, LiveOptions } from "./live.js";
 
 // Types
-export type { Db, TxCollection, TxQuery, TransactionOptions } from "./db.js";
+export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions } from "./db.js";
 export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, Infer, InferRow, InferRowInput, InferId } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";
 
@@ -20,15 +20,7 @@ export type { NormalizedSchema } from "./schema.js";
 // and dev-bootstrap call this to register schemas declared via
 // `export default { schema }`. User code MUST NOT call this directly;
 // declare the schema once and access collections through `env.db.<name>`.
-// Kept in the main entry (single underscore prefix signals "framework
-// internal, not screaming") so the SSR build doesn't have to know about
-// any subpath export.
-export { _installSchema } from "./db.js";
-
-// Framework-internal typed-globals helpers (`getPlatformReady`,
-// `setPlatformReady`, `INSTALL_SCHEMA_NAME`, `PLATFORM_READY_NAME`)
-// are NOT re-exported on the main entry — surfacing platform-ready
-// mutators next to `t` / `schema` in autocomplete invites user code
-// to clobber the auto-tx happens-before edge. Internal consumers
-// (vite-plugin dev-bootstrap, rpc-registry) import them through the
-// `@zeroship/db/internal` subpath instead.
+// Kept in the main entry (no underscore prefix — this is the stable
+// framework-internal surface, not "hide from autocomplete") so the
+// SSR build doesn't have to know about any subpath export.
+export { installSchema } from "./db.js";
