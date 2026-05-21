@@ -16,6 +16,7 @@ import {
   ENV_DEV,
   ENV_VITE_WS,
   ENV_ENTRY,
+  ENV_SCHEMA,
   DEFAULT_DEV_PORT,
 } from "./constants.js";
 import {
@@ -23,6 +24,7 @@ import {
   createZeroshipEnvironmentOptions,
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
+import { resolveSchemaPath } from "./resolve-schema.js";
 import type { TransformState } from "./transform.js";
 import { startDevPostgres, type DevPostgres } from "./dev-db.js";
 
@@ -31,6 +33,14 @@ import { startDevPostgres, type DevPostgres } from "./dev-db.js";
 export interface DevServerOptions {
   devServerPort?: number;
   serverEntry?: string;
+  /**
+   * Optional path to the DB schema module (Stage 1 of schema
+   * auto-discovery). Forwarded to `resolveSchemaPath` so dev mirrors
+   * the production resolver — when a split-file schema is picked, the
+   * absolute path is passed to dev-bootstrap via `ZEROSHIP_SCHEMA_PATH`
+   * so it can be imported through the ModuleRunner.
+   */
+  schema?: string;
 }
 
 // ── Plugin factory ─────────────────────────────────────────────────────────
@@ -282,6 +292,25 @@ export function devServerPlugin(
             }
           }
 
+          // Stage 2 — resolve the user's DB schema module at spawn
+          // time so dev-bootstrap can statically import it. Mirrors
+          // `build.ts`'s pre-SSR resolve: split-file convention or the
+          // explicit `schema` option wins; `path: null` (entry-fallback)
+          // leaves the env var unset so dev-bootstrap reads
+          // `_zsUser.default?.schema`.
+          let schemaPath: string | undefined;
+          try {
+            const sr = resolveSchemaPath(root, options.schema);
+            if (sr.path != null) schemaPath = sr.path;
+          } catch (e) {
+            // resolveSchemaPath throws when an explicit option points at
+            // a missing file — surface as a warning, fall back to the
+            // entry-default convention rather than aborting dev.
+            console.warn(
+              `[zeroship] schema resolution failed: ${(e as Error).message}`,
+            );
+          }
+
           const childEnv: NodeJS.ProcessEnv = {
             ...process.env,
             ...dotenvVars,
@@ -289,6 +318,7 @@ export function devServerPlugin(
             [ENV_DEV]: "1",
             [ENV_VITE_WS]: `ws://localhost:${vitePort}${WS_PATH}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
+            ...(schemaPath ? { [ENV_SCHEMA]: schemaPath } : {}),
           };
 
           try {

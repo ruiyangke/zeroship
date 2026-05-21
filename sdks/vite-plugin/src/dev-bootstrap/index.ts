@@ -20,6 +20,13 @@ import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
 
 const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
+// Stage 2 — absolute path to the DB schema module, when Stage 1's
+// resolver picked a split-file convention or the user supplied
+// `schema:` to the Vite plugin. `undefined` means "no split-file
+// schema" — dev-bootstrap then falls back to `_zsUser.default?.schema`
+// (the legacy `export default { schema }` convention).
+const SCHEMA_PATH: string | undefined =
+  (globalThis as any).process?.env?.ZEROSHIP_SCHEMA_PATH || undefined;
 
 let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
@@ -76,7 +83,7 @@ async function getUserModule(): Promise<any> {
       throw err;
     }
   }
-  await maybeRegisterDefaultSchema(mod);
+  await maybeRegisterSchema(mod);
   return mod;
 }
 
@@ -89,43 +96,97 @@ async function getUserModule(): Promise<any> {
 let schemaRegistered = false;
 
 /**
- * Inspect the user module's default export; if it carries a `schema`
- * property, hand it to `@zeroship/db/internal::__registerSchemas` so
- * `env.db.<collection>` resolves to a typed Collection wrapper before
- * the first RPC dispatch runs.
+ * Stage 2 schema auto-registration in dev mode.
+ *
+ * Resolution order — mirrors the production synthetic entry exactly
+ * (see `sdks/vite-plugin/src/rpc-registry.ts::buildSchemaRegistrationBlock`):
+ *
+ *   1. `ZEROSHIP_SCHEMA_PATH` env var set → import that module through
+ *      the ModuleRunner, use its `default.schema ?? default` as the
+ *      schema source. This is Stage 1's split-file convention.
+ *   2. Fall back to `mod.default.schema` (the legacy `export default
+ *      { schema }` convention on the entry).
+ *   3. Nothing found → no-op.
+ *
+ * Both resolutions hand the schema to `@zeroship/db/internal::
+ * __registerSchemas` with `installOnEnvDb: true` so `env.db.<collection>`
+ * resolves to a typed Collection wrapper before the first RPC dispatch
+ * runs.
  *
  * Failures are caught and logged — a malformed schema shouldn't crash
  * the whole dev server; the user's `createDb(...)` escape hatch still
  * works.
  */
-async function maybeRegisterDefaultSchema(mod: any): Promise<void> {
+async function maybeRegisterSchema(mod: any): Promise<void> {
   if (schemaRegistered) return;
-  const defaultExport = mod && mod.default;
-  if (
-    !defaultExport ||
-    typeof defaultExport !== "object" ||
-    !defaultExport.schema ||
-    typeof defaultExport.schema !== "object"
-  ) {
+  // Load `@zeroship/db/internal` THROUGH the Vite ModuleRunner so the
+  // `TypeBuilder` / `SchemaBuilder` classes match the ones the user's
+  // module instantiated. Importing the SDK statically from the bundled
+  // dev-bootstrap would give us a DIFFERENT class (esbuild's bundled
+  // copy vs Vite's loaded copy), and `instanceof` checks inside
+  // `__registerSchemas` would fail with "every field must be a t.*
+  // builder" even when the user did call `t.string()`.
+  let r: ModuleRunner;
+  try {
+    r = await getRunner();
+  } catch {
     schemaRegistered = true;
     return;
   }
+
+  // Step 1 — split-file path. The env var (set by dev-server based on
+  // `resolveSchemaPath`) is the source of truth when present.
+  let schema: unknown;
+  let provenance: "split-file" | "default-export" | "none" = "none";
+  if (SCHEMA_PATH) {
+    try {
+      const schemaMod: any = await r.import(SCHEMA_PATH);
+      // Accept either `{ schema: ... }` (matches the entry-default
+      // convention) OR a raw default-exported schema object. Latter
+      // form is common when users move the schema to its own file.
+      const candidate =
+        (schemaMod && schemaMod.default && typeof schemaMod.default === "object"
+          ? (schemaMod.default.schema ?? schemaMod.default)
+          : undefined);
+      if (candidate && typeof candidate === "object") {
+        schema = candidate;
+        provenance = "split-file";
+      }
+    } catch (e: any) {
+      console.error(
+        `[zeroship:dev] split-file schema import failed (${SCHEMA_PATH}):`,
+        e?.message ?? e,
+      );
+    }
+  }
+
+  // Step 2 — entry-default convention fallback.
+  if (!schema) {
+    const defaultExport = mod && mod.default;
+    if (
+      defaultExport &&
+      typeof defaultExport === "object" &&
+      defaultExport.schema &&
+      typeof defaultExport.schema === "object"
+    ) {
+      schema = defaultExport.schema;
+      provenance = "default-export";
+    }
+  }
+
+  if (!schema) {
+    schemaRegistered = true;
+    return;
+  }
+
   try {
-    // Load `@zeroship/db/internal` THROUGH the Vite ModuleRunner so the
-    // `TypeBuilder` / `SchemaBuilder` classes match the ones the user's
-    // module instantiated. Importing the SDK statically from the bundled
-    // dev-bootstrap would give us a DIFFERENT class (esbuild's bundled
-    // copy vs Vite's loaded copy), and `instanceof` checks inside
-    // `__registerSchemas` would fail with "every field must be a t.*
-    // builder" even when the user did call `t.string()`.
-    const r = await getRunner();
     const internal: any = await r.import("@zeroship/db/internal");
     if (typeof internal.__registerSchemas === "function") {
-      internal.__registerSchemas(defaultExport.schema, { installOnEnvDb: true });
-      console.log("[zeroship:dev] registered schema from default export");
+      internal.__registerSchemas(schema, { installOnEnvDb: true });
+      console.log(`[zeroship:dev] registered schema from ${provenance}`);
     }
   } catch (e: any) {
-    console.error("[zeroship:dev] default-export schema registration failed:", e?.message ?? e);
+    console.error(`[zeroship:dev] ${provenance} schema registration failed:`, e?.message ?? e);
   } finally {
     schemaRegistered = true;
   }
