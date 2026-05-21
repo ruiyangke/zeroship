@@ -1,13 +1,14 @@
 /**
- * Synthetic SSR entry fed by a `ServerBinding` map.
+ * Synthetic SSR entry fed by a `ServerBinding` map (Phase-2 shape).
  *
  * When the plugin has run the reference-graph walk it hands the
  * generator a `Map<string, ServerBinding>`. The output emits one
- * namespace import per target file and a static `_procedures` literal
- * keyed by wireId. `docs/proposals/rpc.md` §5 requires the
- * generated code to stay structurally compatible with `__dispatchRpc`;
- * until the upstream stub ships, we keep the older inline dispatch
- * behavior with a TODO.
+ * namespace import per target file and a static `_zsRpc` dict literal
+ * keyed by wireId.
+ *
+ * After Stage 5b the dispatch dict is PURE DATA — no dispatcher helpers
+ * live in the synthetic entry. The runtime's `__zsDispatch` consumes
+ * it directly.
  */
 
 import { test, describe } from "node:test";
@@ -28,6 +29,7 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
       kind: r.kind ?? "mutation",
       marker: r.marker ?? "file",
       chain: r.chain ?? [sf],
+      ...(r.lazy ? { lazy: r.lazy } : {}),
     });
   }
   return out;
@@ -39,11 +41,10 @@ describe("buildServerEntrySource — binding-fed emission", () => {
       userEntryRel: "/proj/src/server.ts",
       bindings: new Map(),
     });
-    // Fallback shape — runtime loop over _zsUser.
-    assert.match(code, /for \(const _k of Object\.keys\(_zsUser\)\)/);
+    assert.match(code, /for \(const _zsName of Object\.keys\(_zsUser\)\)/);
   });
 
-  test("single file, two procedures: emits one namespace import + a procedures map", () => {
+  test("single file, two procedures: emits one namespace import + a procedures dict", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
@@ -51,10 +52,8 @@ describe("buildServerEntrySource — binding-fed emission", () => {
         { sourceFile: "/proj/src/actions/todos.ts", exportName: "add",  wireId: "todos.add",  kind: "mutation" },
       ]),
     });
-    // One per-target namespace import.
     const imports = code.match(/import \* as _user_TARGET_\d+_ from /g) ?? [];
     assert.equal(imports.length, 1);
-    // Map carries both wireIds.
     assert.match(code, /"todos\.list":\s*_user_TARGET_0_\.list/);
     assert.match(code, /"todos\.add":\s*_user_TARGET_0_\.add/);
   });
@@ -74,41 +73,41 @@ describe("buildServerEntrySource — binding-fed emission", () => {
     assert.match(code, /"b1":\s*_user_TARGET_1_\.b1/);
   });
 
-  test("default export shape carries fetch + rpc per docs/proposals/rpc.md §5", () => {
+  test("default export shape carries schema + fetch + dict-shape rpc", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
         { sourceFile: "/proj/src/server.ts", exportName: "ping", wireId: "ping" },
       ]),
     });
-    assert.match(code, /export default \{[\s\S]*rpc:[\s\S]*fetch:/);
+    // Dict-shape — `rpc` is the `_zsRpc` OBJECT, not a function call.
+    assert.match(code, /export default \{[\s\S]*schema:[\s\S]*fetch:[\s\S]*rpc:\s*_zsRpc/);
   });
 
-  test("TODO marker for upstream __dispatchRpc", () => {
+  test("user fetch fall-through is shaped through default.fetch", () => {
+    // The normaliser picks `user.default.fetch` first, falling back to
+    // a top-level `fetch` export. The runtime's kernel routes non-
+    // /_zs/v1/ traffic through that handler — no in-entry dispatcher.
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
         { sourceFile: "/proj/src/server.ts", exportName: "ping" },
       ]),
     });
-    // The upstream `__dispatchRpc` shim isn't yet exported by
-    // `@zeroship/server/runtime`. The synthetic entry leaves a TODO so
-    // a future upgrade is grep-able.
-    assert.match(code, /TODO\(rpc-v2\)/);
-    assert.match(code, /__dispatchRpc/);
+    assert.match(code, /typeof _zsUserDefault\.fetch === "function"/);
+    assert.match(code, /typeof _zsUser\.fetch === "function"/);
   });
 
-  test("user fetch fall-through preserved", () => {
-    // The synthetic entry's `default.fetch` should forward non-RPC
-    // requests to the user's own `default.fetch` when present, else
-    // route through `_zsFetch` (which 404s for unknown paths).
+  test("lazy bindings emit dynamic-import wrappers (Wave #188)", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
-        { sourceFile: "/proj/src/server.ts", exportName: "ping" },
+        { sourceFile: "/proj/src/lazy.ts", exportName: "slow", wireId: "slow", lazy: true },
       ]),
     });
-    assert.match(code, /_userFetch/);
-    assert.match(code, /_zs\/v1\//);
+    assert.match(
+      code,
+      /"slow":\s*async \(input, ctx\) =>\s*\(await import\("\/proj\/src\/lazy\.ts"\)\)\.slow\(input, ctx\)/,
+    );
   });
 });
