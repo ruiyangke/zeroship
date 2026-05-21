@@ -1,12 +1,12 @@
-// Embedded RPC dispatcher.
+// Embedded RPC dispatcher (`__zsDispatch`).
 //
 // Inlined into BOOTSTRAP_JS (`crates/runtime/src/core/init.rs`) so it
 // runs INSIDE the bootstrap module's top-level evaluation, BEFORE
 // `db_init.js`'s top-level await on `_installSchema` (a schema-loading
 // error must not prevent the dispatcher from being installed) AND
 // BEFORE the runtime resolves `default.rpc` off the user namespace.
-// Stage 5c: `db_init.js` reads schema from `user.default.schema`
-// directly — no manifest-injected path.
+// `db_init.js` reads schema from `user.default.schema` directly — no
+// manifest-injected path.
 //
 // Invoked by init.rs's bootstrap when `user.default.rpc` is a plain
 // object (dict-shape: `{ [wireId]: handler }`). The dispatcher owns:
@@ -15,13 +15,14 @@
 //   - auto-tx for query/mutation via __zsBeginAutoTx / __zsEndAutoTx
 //   - AsyncIterator stream framing tag (__zsOutputIsString)
 //   - dev-only output validation via fn.config.output.parse()
-// Mirrors today's _zsRpc / _zsRpcWithAutoTx / _zsRpcPost from
-// `sdks/vite-plugin/src/rpc-registry.ts` — read those for the canonical
-// behaviour reference before changing anything here.
 //
-// `__zsValidateOutput` is a future runtime-controlled flag (dev only).
-// For Stage 5a, treat any cfg.output as opt-in via that global; default-
-// off matches today's production behaviour.
+// Function-shape `default.rpc` is the documented advanced / back-compat
+// path (`docs/reference/zs-standard.md`); the bootstrap calls it
+// directly and this module never runs for that path.
+//
+// `__zsValidateOutput` is a runtime-controlled flag (dev only). Treat
+// any cfg.output as opt-in via that global; default-off matches
+// production behaviour.
 //
 // The IIFE pattern ensures idempotent install: if the bootstrap script
 // is evaluated more than once (isolate refresh), the second pass keeps

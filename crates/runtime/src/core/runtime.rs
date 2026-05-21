@@ -1610,8 +1610,9 @@ impl RuntimeInner {
                             }
                             break 'dispatch res;
                         }
-                        // AsyncIterator return → slow path's _zsRpc
-                        // wraps it in an SSE Response.
+                        // AsyncIterator return → falls through to the
+                        // slow path (default.fetch / synthetic entry),
+                        // which wraps it in an SSE Response.
                         RpcCallResult::FallThrough => {}
                     }
                     // Sync return / FallThrough: drop the guard at the

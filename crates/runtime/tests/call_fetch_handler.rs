@@ -547,14 +547,15 @@ fn zeroship_get_request_returns_request() {
 // Spec wire: /_zs/v1/<id> + superjson { json } envelope
 // ===========================================================================
 //
-// After the WinterCG-symmetric refactor, every HTTP request flows
-// through `default.fetch(request, env, ctx)`. The synthetic SSR entry
-// (emitted by @zeroship/vite-plugin in real apps; written by hand
-// here) owns the /_zs/v1/<id> wire and dispatches via `default.rpc`.
+// `/_zs/v1/<id>` traffic routes through `default.rpc`; everything else
+// hits `default.fetch(request, env, ctx)`. See
+// `docs/reference/zs-standard.md` for the full contract.
 //
-// Tests synthesize a tiny `default.{fetch, rpc}` that mirrors the
-// synthetic-entry contract — the bootstrap's WS-subscription path and
-// the kernel's HTTP path both call into this shape.
+// Tests synthesize a tiny `default.{fetch, rpc}` shim that wears
+// function-shape `default.rpc` (the advanced / back-compat path). The
+// bootstrap's WS-subscription path and the kernel's HTTP path both call
+// into this shape. The dict-shape contract is exercised by
+// `crates/runtime/tests/rpc_dispatch.rs`.
 
 const SYNTHETIC_ENTRY_PROLOG: &str = r#"
 function _zsErrResponse(status, code, message) {

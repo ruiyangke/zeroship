@@ -3,9 +3,13 @@
 //! gate).
 //!
 //! These tests dispatch through a real Runtime + real Postgres URL,
-//! using a small SSR-entry shim that mirrors the production `_zsRpc`'s
-//! auto-tx envelope: `__zsBeginAutoTx(kind)` → handler →
-//! `__zsEndAutoTx(token, success)`.
+//! using a small SSR-entry shim that mirrors the runtime's
+//! `__zsDispatch` auto-tx envelope: `__zsBeginAutoTx(kind)` → handler →
+//! `__zsEndAutoTx(token, success)`. The shim wears function-shape
+//! `default.rpc` (the advanced / back-compat path — see
+//! `docs/reference/zs-standard.md`) so the test fixture owns the
+//! envelope explicitly; dict-shape deploys get the same behaviour via
+//! the runtime dispatcher.
 //!
 //! Each test ALSO exercises the actual capability gate (B3) where
 //! relevant — the gate is the primary enforcement; auto-tx is the
@@ -126,10 +130,12 @@ fn count_notes(url: &str) -> i64 {
 // Dispatch harness.
 // ---------------------------------------------------------------------------
 
-/// SSR-entry shim that mirrors the production `_zsRpc` from
-/// `sdks/vite-plugin/src/rpc-registry.ts`, including the T1 follow-up
-/// auto-tx envelope around query() / mutation() handlers. Kept ~50
-/// lines so the test stays auditable.
+/// SSR-entry shim that mirrors the runtime's `__zsDispatch`
+/// (`crates/runtime/src/bootstrap/rpc_dispatch.js`), including the
+/// auto-tx envelope around query() / mutation() handlers. Worn as
+/// function-shape `default.rpc` to keep the shim self-contained — the
+/// shim itself is the dispatcher under test. Kept ~50 lines so the
+/// fixture stays auditable.
 const SHIM: &str = r#"
 async function _shimRpc(name, input, ctx) {
     const fn = _procedures[name];

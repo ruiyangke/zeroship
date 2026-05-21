@@ -2,10 +2,12 @@
  * Dev bootstrap — entry module for the zeroship V8 runtime in dev mode.
  * Bundled into `dist/dev-bootstrap.js` by esbuild.
  *
- * Stage 5b — the dev-bootstrap is a NORMALISER. Dispatch (input
- * validation, capability frame, auto-tx, stream framing, output
- * validation) lives in the runtime's `__zsDispatch` (Stage 5a,
- * `crates/runtime/src/bootstrap/rpc_dispatch.js`).
+ * Role (post-Stage-5e): pure NORMALISER. Dispatch (input validation,
+ * capability frame, auto-tx, stream framing, output validation) lives
+ * in the runtime's `__zsDispatch`
+ * (`crates/runtime/src/bootstrap/rpc_dispatch.js`). This module owns
+ * none of that — it only re-imports the user module per request,
+ * builds the dict-shape RPC table, and hands off to the runtime.
  *
  * Wire shape — `default`:
  *   fetch    Async thunk that re-imports the user module through the
@@ -14,11 +16,15 @@
  *            user's own `default.fetch`.
  *   rpc      Function-shape (`(name, input, ctx) => ...`). Dev needs to
  *            re-resolve per request because HMR may have replaced the
- *            module namespace. The runtime's Stage-5a back-compat path
- *            accepts function-shape `default.rpc` through 5d.
+ *            module namespace; a dict captured at module-init would go
+ *            stale on every edit. The runtime accepts both shapes as
+ *            documented in `docs/reference/zs-standard.md` (dict for
+ *            production / raw deploys; function for advanced /
+ *            back-compat — dev is the canonical function-shape
+ *            consumer).
  *
- * Schema discovery (Stage 5c): the runtime's bootstrap `db_init.js`
- * reads `user.default.schema` synchronously at boot. The dev-bootstrap
+ * Schema discovery: the runtime's bootstrap `db_init.js` reads
+ * `user.default.schema` synchronously at boot. The dev-bootstrap
  * itself doesn't expose `default.schema` (its own default is
  * `{ fetch, rpc }`); the schema lives on the USER module loaded via
  * the ModuleRunner. `maybeRegisterSchema` is the dev-only lazy bridge
@@ -227,7 +233,9 @@ function startHmrPoll(runner: ModuleRunner) {
 // ── Standard-shape normaliser ──────────────────────────────────────────────
 
 /**
- * Build a dict-shape `_zsRpc` from the freshly imported user module.
+ * Build a dict-shape RPC table from the freshly imported user module.
+ * Returns the normalised `{ schema, fetch, rpc }` the runtime expects
+ * (see `docs/reference/zs-standard.md`).
  *
  * Resolution order:
  *   1. `mod.default.rpc` (if a plain object) is the base — pass-through
@@ -289,9 +297,9 @@ function buildStandard(mod: any): { schema: unknown; fetch: any; rpc: Record<str
  * is freshly resolved on every call. Production uses dict-shape because
  * the bundle is frozen.
  *
- * Note: the runtime's Stage-5a back-compat path accepts function-shape
- * `default.rpc` through Stage 5d. After 5d this falls under the
- * advanced-user override clause documented in the design proposal.
+ * Function-shape `default.rpc` is the documented advanced / back-compat
+ * path in the ZS standard (see `docs/reference/zs-standard.md`); dev
+ * is the canonical consumer because HMR re-resolution requires it.
  */
 async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<unknown> {
   // Re-import per call so HMR invalidations land naturally. On the
@@ -483,8 +491,8 @@ function errResponse(status: number, code: string, message: string, details?: un
 
 // ── Module entry ──────────────────────────────────────────────────────────
 
-// Function-shape `default.rpc` — back-compat path the runtime keeps
-// through Stage 5d. Dev needs per-call resolution because HMR may have
-// replaced the user module's namespace between requests; production
-// emits dict-shape because the bundle is frozen.
+// Function-shape `default.rpc` — the documented advanced / back-compat
+// path in the ZS standard. Dev needs per-call resolution because HMR
+// may have replaced the user module's namespace between requests;
+// production emits dict-shape because the bundle is frozen.
 export default { fetch: dispatchFetch, rpc: dispatchRpc };

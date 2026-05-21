@@ -177,10 +177,10 @@ export const drip = stream(
 
 // ── HTTP fall-through ────────────────────────────────────────────────
 //
-// Anything not on /_zs/v1/<id> goes through default.fetch (the
-// synthetic entry's _zsFetch). For bench scenarios that hit raw HTTP
-// (e.g. /sse, /ping) we surface a default.fetch handler here so the
-// procedure-only build still answers them.
+// Anything not on /_zs/v1/<id> goes through `default.fetch`. For bench
+// scenarios that hit raw HTTP (e.g. /sse, /ping) we surface a
+// `default.fetch` handler here so the procedure-only build still
+// answers them.
 
 const PONG = '"pong"';
 

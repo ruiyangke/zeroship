@@ -69,9 +69,13 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
     (status, json)
 }
 
-/// SSR-entry shim that mirrors the production `_zsRpc`: reads
-/// `fn.config.kind`, calls `__zsEnterKind` before invocation, exits
-/// on settle.
+/// SSR-entry shim that mirrors the runtime's `__zsDispatch` capability
+/// frame logic: reads `fn.config.kind`, calls `__zsEnterKind` before
+/// invocation, exits on settle. This is a function-shape `default.rpc`
+/// (the advanced / back-compat path — see
+/// `docs/reference/zs-standard.md`) so the shim owns the frame logic
+/// directly; dict-shape deploys get the same behaviour through
+/// `__zsDispatch`.
 const SHIM: &str = r#"
 function _shimRpc(name, input, ctx) {
     const fn = _procedures[name];

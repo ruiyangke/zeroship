@@ -692,14 +692,18 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
 // envelope-wrapped on the wire by the kernel; promises get awaited;
 // async iterators fall through to the slow path's stream encoder.
 //
-// Two shapes accepted (Stage 5a of the ZS-standard refactor):
-//   - function (legacy synthetic-entry shape): used directly. The Vite
-//     plugin's current synthetic entry emits this; back-compat.
-//   - plain object (dict-shape, `{ [wireId]: handler }`): wrapped in
-//     `globalThis.__zsDispatch` so the runtime owns input validation,
-//     capability frame, auto-tx, stream framing, and dev-only output
-//     validation. This is the new contract — raw JS deploys and the
-//     future Vite plugin v2 both emit this shape.
+// Two shapes accepted (see `docs/reference/zs-standard.md`):
+//   - plain object (dict-shape, `{ [wireId]: handler }`): the canonical
+//     contract. Wrapped in `globalThis.__zsDispatch` so the runtime
+//     owns input validation, capability frame, auto-tx, stream
+//     framing, and dev-only output validation. The Vite plugin's
+//     synthetic entry and `examples/raw-rpc.js`-style raw deploys both
+//     emit this.
+//   - function (`(name, input, ctx) => ...`): documented advanced /
+//     back-compat path. Used directly without the runtime dispatcher
+//     — the function owns its own validation/auto-tx. The dev-bootstrap
+//     consumes this because HMR re-resolves the user namespace per
+//     request; raw deploys may use it for dynamic routing.
 let USER_RPC = null;
 if (user && user.default && user.default.rpc != null) {
     const _rpc = user.default.rpc;

@@ -22,9 +22,9 @@
 //!
 //! ## Plumbing
 //!
-//! The synthetic SSR entry (vite-plugin's `_zsRpc`) knows the procedure
-//! `kind` synchronously from `fn.config.kind` / `fn.__zsKind`. Around
-//! the user handler invocation it calls:
+//! The runtime's `__zsDispatch` (`crates/runtime/src/bootstrap/rpc_dispatch.js`)
+//! knows the procedure `kind` synchronously from `fn.config.kind`.
+//! Around the user handler invocation it calls:
 //!
 //!   const tok = globalThis.__zsEnterKind("query");
 //!   try { return await fn(input, ctx); }
@@ -36,10 +36,15 @@
 //! restore correctly. A bad token (mismatched / out-of-order) is a
 //! no-op — defense in depth, not a strict protocol.
 //!
+//! Function-shape `default.rpc` (the advanced / back-compat path —
+//! see `docs/reference/zs-standard.md`) is the caller's responsibility:
+//! a custom dispatcher that wants this rail must call `__zsEnterKind` /
+//! `__zsExitKind` itself.
+//!
 //! ## Why not a Rust-side guard around `call_rpc_inner`?
 //!
 //! The Rust dispatcher sees only the wire id, not the procedure kind —
-//! the kind lives in `fn.config` on the JS side. The SSR entry is the
+//! the kind lives in `fn.config` on the JS side. `__zsDispatch` is the
 //! one place that resolves id → fn and has cheap access to kind. JS
 //! invoking the marker is the right layer; this is defense-in-depth
 //! over already-typed TS, not a sandbox boundary.

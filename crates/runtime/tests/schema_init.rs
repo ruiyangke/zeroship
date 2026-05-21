@@ -19,11 +19,12 @@ use zeroship_runtime::runtime::Runtime;
 /// Build a Runtime around the given user-entry source + procedure
 /// table, dispatch a probe procedure, and return its result body.
 ///
-/// `user_src` is the user-entry JS string. The synthetic-entry stub
-/// (mirroring what the vite-plugin's `rpc-registry.ts` emits post-Stage
-/// 5b) imports the user module by namespace and exposes a `_zsRpc`
-/// dispatcher; the probe procedure returns whatever JSON shape the
-/// caller wants to assert against.
+/// `user_src` is the user-entry JS string. The shim wraps it with a
+/// hand-rolled function-shape `default.rpc` dispatcher (the documented
+/// advanced / back-compat path — see `docs/reference/zs-standard.md`).
+/// Using function-shape here keeps the test surface narrow: the
+/// runtime's `__zsDispatch` is exercised by `rpc_dispatch.rs`; here we
+/// just need a working dispatch path that surfaces the probe result.
 fn dispatch_probe(
     user_src: &str,
     procs_block: &str,
@@ -31,8 +32,10 @@ fn dispatch_probe(
 ) -> Result<String, String> {
     init_v8();
 
-    // Synthetic entry shim — namespace walk + minimal dispatcher.
-    // Mirrors the shape the vite-plugin emits after Stage 5b.
+    // Synthetic entry shim — function-shape dispatcher (the advanced /
+    // back-compat path). The Vite plugin emits dict-shape; this shim
+    // intentionally exercises the function-shape branch so a regression
+    // dropping that path would surface here.
     let src = format!(
         r#"
 {user_src}
