@@ -106,10 +106,13 @@ export class IdLoader<R extends { id: number }> {
     for (const q of batch) {
       if (q.txDepthAtEnqueue === 0 && currentTxDepth > 0) {
         q.reject(
-          new Error(
-            "DataLoader: batched read started outside a transaction but a " +
-            "transaction opened before flush. await the get() before " +
-            "db.transaction(...) to avoid this race.",
+          Object.assign(
+            new Error(
+              "DataLoader: batched read started outside a transaction but a " +
+              "transaction opened before flush. await the get() before " +
+              "db.transaction(...) to avoid this race.",
+            ),
+            { code: "loader_tx_race" as const },
           ),
         );
       } else {

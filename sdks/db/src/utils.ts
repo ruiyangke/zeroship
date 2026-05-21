@@ -37,7 +37,12 @@ export function mapDocOutbound(doc: PlainObject, toColumn: (s: string) => string
 
 /** @internal Convert JS field names in filter to column names. Recurses into $and/$or/$not. */
 export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string) => string, depth = 0): ZeroshipDbFilter {
-  if (depth > 20) throw new Error("filter nesting too deep (max 20 levels)");
+  if (depth > 20) {
+    throw Object.assign(
+      new Error("filter nesting too deep (max 20 levels)"),
+      { code: "filter_nesting_too_deep" as const },
+    );
+  }
   // Fast path: if no key needs remapping, return the original reference
   let needsMap = false;
   for (const key in filter) {
