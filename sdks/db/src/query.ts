@@ -86,6 +86,32 @@ function sameOrderBy(a: Record<string, 1 | -1>, b: Record<string, 1 | -1>): bool
 }
 
 /**
+ * R7 m3 — sentinel returns from `_coerceIdForCursor` so the caller can
+ * return a typed Result.error with the right `code`. Using sentinels
+ * (rather than throwing inside the helper) keeps the call site flat and
+ * lets the caller pick the message that mentions which field exceeded.
+ */
+const SENTINEL_PRECISION_LOSS = Symbol("paginate_cursor_precision_loss");
+const SENTINEL_INVALID_ID = Symbol("paginate_invalid_id");
+
+/** Coerce a number-like id to a plain JS number suitable for the cursor.
+ *  Mirrors the `_loadRelations` guard in `collection.ts`: bigint values
+ *  beyond 2^53 lose precision via `Number(...)` and would point the
+ *  next-page seek predicate at the wrong row. */
+function _coerceIdForCursor(
+  raw: unknown,
+): number | typeof SENTINEL_PRECISION_LOSS | typeof SENTINEL_INVALID_ID {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : SENTINEL_INVALID_ID;
+  }
+  if (typeof raw === "bigint") {
+    const n = Number(raw);
+    return BigInt(n) === raw ? n : SENTINEL_PRECISION_LOSS;
+  }
+  return SENTINEL_INVALID_ID;
+}
+
+/**
  * Chainable query object returned by `Collection.find()`.
  * The generic parameter `S` is the raw schema shape; `P` is the projected document shape.
  * When `.select()` is called with typed field names, `P` narrows to `Pick<Row<S>, K>`.
@@ -321,12 +347,57 @@ export class Query<
       // captured from the last row is the raw column — not an overwritten
       // joined object. `with` keys are FK fields and would be replaced
       // in place by `_loadRelations`.
-      let continueCursor = cursor ?? "";
+      //
+      // R7 m4 — when `isDone` is true, return `""` (the sentinel for the
+      // initial page) so callers keying on `continueCursor === ""` see
+      // terminal state. Carrying the input cursor forward would mislead
+      // those callers.
+      let continueCursor = "";
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
         const orderKey = Object.keys(orderBy)[0];
-        const lastValue = last[orderKey];
-        const lastId = typeof last.id === "number" ? last.id : Number(last.id);
+        // R7 m3 — same bigint-precision guard as `_loadRelations` in
+        // `collection.ts`. `Number(bigint)` silently rounds for values
+        // beyond 2^53; the next page's seek predicate would then point
+        // at a truncated id and either skip rows or repeat them. The
+        // same precision rule applies to `lastValue` because the cursor
+        // is base64(JSON.stringify(...)) and JSON.stringify throws on
+        // bigint.
+        const lastId = _coerceIdForCursor(last.id);
+        if (lastId === SENTINEL_PRECISION_LOSS) {
+          return err(
+            Object.assign(
+              new TypeError(
+                `paginate: row id (${String(last.id)}n) exceeds Number.MAX_SAFE_INTEGER — cursor would lose precision`,
+              ),
+              { code: "paginate_cursor_precision_loss" as const },
+            ),
+          );
+        }
+        if (lastId === SENTINEL_INVALID_ID) {
+          return err(
+            Object.assign(
+              new TypeError(`paginate: row id is not a number-like value (got ${typeof last.id})`),
+              { code: "paginate_invalid_id" as const },
+            ),
+          );
+        }
+        const rawValue = last[orderKey];
+        let lastValue: unknown = rawValue;
+        if (typeof rawValue === "bigint") {
+          const v = _coerceIdForCursor(rawValue);
+          if (v === SENTINEL_PRECISION_LOSS) {
+            return err(
+              Object.assign(
+                new TypeError(
+                  `paginate: orderBy column "${orderKey}" value (${String(rawValue)}n) exceeds Number.MAX_SAFE_INTEGER — cursor would lose precision`,
+                ),
+                { code: "paginate_cursor_precision_loss" as const },
+              ),
+            );
+          }
+          lastValue = v;
+        }
         continueCursor = encodeCursor({ orderBy, lastValue, lastId });
       }
 
