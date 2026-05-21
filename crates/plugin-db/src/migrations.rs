@@ -87,6 +87,37 @@ fn coded(code: &str, message: &str, hint: Option<&str>) -> OpError {
     OpError::coded(code, message, hint.map(str::to_string))
 }
 
+/// SQL-error helper — classify the Postgres error through `DbError`
+/// (so the resulting `OpError` carries the SQLSTATE-derived `.code` —
+/// `unique_violation`, `serialization_failure`, `transient`, …)
+/// instead of getting flattened by `format!("db: …")`. Use for the
+/// many `map_err(|e| coded_sql("...", e))`-shaped sites where the
+/// only information added is a context phrase ("migration insert
+/// failed", etc.).
+///
+/// The phrase is prepended to the message so the operator sees both
+/// the lifecycle context AND the SQLSTATE message; the `.code` stays
+/// the SQLSTATE classification.
+fn coded_sql(context: &str, e: compio_postgres::Error) -> OpError {
+    let mut db_err = crate::error::DbError::from_pg(&e);
+    // Re-wrap the message with the context phrase the original
+    // `format!("db: <ctx>: {e}")` provided.
+    match &mut db_err {
+        crate::error::DbError::UniqueViolation { message }
+        | crate::error::DbError::FkViolation { message }
+        | crate::error::DbError::NotNullViolation { message }
+        | crate::error::DbError::CheckViolation { message }
+        | crate::error::DbError::Serialization { message }
+        | crate::error::DbError::LockContention { message }
+        | crate::error::DbError::Transient { message }
+        | crate::error::DbError::Internal { message } => {
+            *message = format!("db: {context} failed: {message}");
+        }
+        _ => {}
+    }
+    db_err.to_op_error()
+}
+
 fn err_already_running() -> OpError {
     coded(
         "migration_already_running",
@@ -207,8 +238,13 @@ pub async fn exec_begin(
     dry_run: bool,
     reset: bool,
 ) -> Result<String, OpError> {
-    validate_collection(collection)
-        .map_err(|e| OpError::error(format!("db: invalid collection: {e}")))?;
+    validate_collection(collection).map_err(|e| {
+        coded(
+            "invalid_collection",
+            &format!("db: invalid collection: {e}"),
+            None,
+        )
+    })?;
     if name.is_empty() {
         return Err(coded(
             "invalid_argument",
@@ -234,19 +270,21 @@ pub async fn exec_begin(
     let empty: Vec<&str> = Vec::new();
     pool.query_text_params(&create_schema, &empty)
         .await
-        .map_err(|e| OpError::error(format!("db: create schema failed: {e}")))?;
+        .map_err(|e| coded_sql("create schema", e))?;
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
-        .map_err(OpError::error)?;
+        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
 
-    let client = open_dedicated_client().await.map_err(OpError::error)?;
+    let client = open_dedicated_client()
+        .await
+        .map_err(|m| coded("tx_connect_failed", &m, None))?;
 
     let lock_sql =
         "SELECT pg_try_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4) AS got";
     let lock_rows = client
         .query_text_params(lock_sql, &[app_id, name])
         .await
-        .map_err(|e| OpError::error(format!("db: advisory_lock query failed: {e}")))?;
+        .map_err(|e| coded_sql("advisory_lock query", e))?;
     let got: bool = lock_rows
         .first()
         .map(|r| r.try_get::<_, bool>("got").unwrap_or(false))
@@ -274,7 +312,7 @@ pub async fn exec_begin(
         client
             .query_text_params(&sql, &[collection, name])
             .await
-            .map_err(|e| OpError::error(format!("db: migration reset failed: {e}")))?;
+            .map_err(|e| coded_sql("migration reset", e))?;
     }
 
     let lookup_sql = format!(
@@ -286,7 +324,7 @@ pub async fn exec_begin(
     let existing = client
         .query_text_params(&lookup_sql, &[collection, name])
         .await
-        .map_err(|e| OpError::error(format!("db: migration lookup failed: {e}")))?;
+        .map_err(|e| coded_sql("migration lookup", e))?;
 
     let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing.first() {
         let id: i64 = row.get("id");
@@ -315,7 +353,7 @@ pub async fn exec_begin(
         client
             .query_text_params(&upd_sql, &[id_s.as_str()])
             .await
-            .map_err(|e| OpError::error(format!("db: migration set running failed: {e}")))?;
+            .map_err(|e| coded_sql("migration set running", e))?;
         (id, cursor, processed, dlp, gen)
     } else {
         let schema_version =
@@ -352,11 +390,17 @@ pub async fn exec_begin(
                 ],
             )
             .await
-            .map_err(|e| OpError::error(format!("db: migration insert failed: {e}")))?;
+            .map_err(|e| coded_sql("migration insert", e))?;
         let id: i64 = rows
             .first()
             .map(|r| r.get::<_, i64>("id"))
-            .ok_or_else(|| OpError::error("db: migration insert returned no row"))?;
+            .ok_or_else(|| {
+                coded(
+                    "internal",
+                    "db: migration insert returned no row",
+                    None,
+                )
+            })?;
         // Freshly INSERTed row — DEFAULT 0 for audit_generation.
         (id, 0i64, 0i64, Value::Array(vec![]), 0i64)
     };
@@ -458,7 +502,7 @@ pub async fn exec_fetch_batch(
         }
         Err(e) => {
             return_lock_client(client);
-            return Err(OpError::error(format!("db: status read failed: {e}")));
+            return Err(coded_sql("status read", e));
         }
     }
 
@@ -487,7 +531,7 @@ pub async fn exec_fetch_batch(
 
     return_lock_client(client);
 
-    let rows = rows_result.map_err(|e| OpError::error(format!("db: migration fetch failed: {e}")))?;
+    let rows = rows_result.map_err(|e| coded_sql("migration fetch", e))?;
     let row_jsons: Vec<Value> = rows.iter().map(crate::callbacks::row_to_json).collect();
     Ok(Value::Array(row_jsons).to_string())
 }
@@ -532,7 +576,7 @@ pub async fn exec_commit_batch(
     // BEGIN
     if let Err(e) = client.execute("BEGIN", &[]).await {
         return_lock_client(client);
-        return Err(OpError::error(format!("db: BEGIN failed: {e}")));
+        return Err(coded_sql("BEGIN", e));
     }
 
     // Gap C: lock the audit row FOR UPDATE inside the batch's own
@@ -557,7 +601,7 @@ pub async fn exec_commit_batch(
         Err(e) => {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
-            return Err(OpError::error(format!("db: audit lock failed: {e}")));
+            return Err(coded_sql("audit lock", e));
         }
     };
     if let Some(row) = status_rows.first() {
@@ -641,9 +685,7 @@ pub async fn exec_commit_batch(
         if let Err(e) = client.query_text_params(&sql, &param_refs).await {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
-            return Err(OpError::error(format!(
-                "db: migration row UPDATE failed (id={id}): {e}"
-            )));
+            return Err(coded_sql(&format!("migration row UPDATE (id={id})"), e));
         }
     }
 
@@ -651,7 +693,7 @@ pub async fn exec_commit_batch(
     let final_sql = if dry_run { "ROLLBACK" } else { "COMMIT" };
     if let Err(e) = client.execute(final_sql, &[]).await {
         return_lock_client(client);
-        return Err(OpError::error(format!("db: migration {final_sql} failed: {e}")));
+        return Err(coded_sql(&format!("migration {final_sql}"), e));
     }
 
     // Audit row update — only persist cursor/dead_letter/processed on a
@@ -675,7 +717,7 @@ pub async fn exec_commit_batch(
             .await
         {
             return_lock_client(client);
-            return Err(OpError::error(format!("db: audit row update failed: {e}")));
+            return Err(coded_sql("audit row update", e));
         }
     }
 
@@ -747,7 +789,7 @@ pub async fn exec_status(
 ) -> Result<String, OpError> {
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
-        .map_err(OpError::error)?;
+        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
     let sql = format!(
         r#"SELECT id, status, validate_cursor, dead_letter_pks, details, error
             FROM "{app_id}"."__zeroship_migrations"
@@ -757,7 +799,7 @@ pub async fn exec_status(
     let rows = pool
         .query_text_params(&sql, &[collection, name])
         .await
-        .map_err(|e| OpError::error(format!("db: migration status read failed: {e}")))?;
+        .map_err(|e| coded_sql("migration status read", e))?;
     let Some(row) = rows.first() else {
         return Ok(serde_json::json!({
             "exists": false,
@@ -809,7 +851,7 @@ pub async fn exec_cancel(
 ) -> Result<String, OpError> {
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
-        .map_err(OpError::error)?;
+        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
     // Read current status.
     let lookup_sql = format!(
         r#"SELECT id, status FROM "{app_id}"."__zeroship_migrations"
@@ -819,7 +861,7 @@ pub async fn exec_cancel(
     let rows = pool
         .query_text_params(&lookup_sql, &[collection, name])
         .await
-        .map_err(|e| OpError::error(format!("db: migration cancel lookup failed: {e}")))?;
+        .map_err(|e| coded_sql("migration cancel lookup", e))?;
     let Some(row) = rows.first() else {
         return Err(err_not_cancellable("missing"));
     };
@@ -840,7 +882,7 @@ pub async fn exec_cancel(
     let id_s = id.to_string();
     pool.query_text_params(&upd_sql, &[id_s.as_str()])
         .await
-        .map_err(|e| OpError::error(format!("db: migration cancel update failed: {e}")))?;
+        .map_err(|e| coded_sql("migration cancel update", e))?;
 
     Ok(serde_json::json!({ "ok": true }).to_string())
 }
@@ -856,7 +898,7 @@ pub async fn exec_reset(
 ) -> Result<String, OpError> {
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
-        .map_err(OpError::error)?;
+        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
     // Gap X: bump `audit_generation` so any in-flight worker holding
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor
@@ -875,7 +917,7 @@ pub async fn exec_reset(
     );
     pool.query_text_params(&upd_sql, &[collection, name])
         .await
-        .map_err(|e| OpError::error(format!("db: migration reset failed: {e}")))?;
+        .map_err(|e| coded_sql("migration reset", e))?;
     Ok(serde_json::json!({ "ok": true }).to_string())
 }
 

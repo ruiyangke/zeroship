@@ -12,8 +12,9 @@
 //! [`crate::next_tx_token`]; commit/rollback/Drop all fence on the
 //! token so no two paths settle the same transaction.
 
-use zeroship_runtime::state::{OpError, OpResult, ResolveValue};
+use zeroship_runtime::state::{OpResult, ResolveValue};
 
+use crate::error::DbError;
 use crate::exec::clear_pending_emits;
 use crate::v8_bridge::runtime_state;
 
@@ -88,7 +89,7 @@ pub fn begin_transaction_dispatch<'s>(
                 drop(tx_global);
                 OpResult::JsValue {
                     resolver: resolver_global,
-                    value: ResolveValue::RejectError(OpError::error(e)),
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }
@@ -106,13 +107,14 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
     "SERIALIZABLE",
 ];
 
-async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
+async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
     // Check: no nested transactions
     let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
     if has_tx {
-        return Err(
-            "db: transaction already active (nested transactions not supported)".to_string(),
-        );
+        return Err(DbError::validation(
+            "tx_already_active",
+            "db: transaction already active (nested transactions not supported)",
+        ));
     }
 
     // Build BEGIN statement with optional isolation level
@@ -120,8 +122,11 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
         Some(level) => {
             let upper = level.to_uppercase();
             if !VALID_ISOLATION_LEVELS.contains(&upper.as_str()) {
-                return Err(format!(
-                    "db: invalid isolation level: {level}. Must be one of: read uncommitted, read committed, repeatable read, serializable"
+                return Err(DbError::validation(
+                    "invalid_isolation_level",
+                    format!(
+                        "db: invalid isolation level: {level}. Must be one of: read uncommitted, read committed, repeatable read, serializable"
+                    ),
                 ));
             }
             format!("BEGIN ISOLATION LEVEL {upper}")
@@ -136,10 +141,12 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
     // terminates gracefully.
     let url = crate::DB_URL
         .with(|u| u.borrow().clone())
-        .ok_or_else(|| "db: not configured".to_string())?;
+        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
-        .map_err(|e| format!("db: tx connect failed: {e}"))?;
+        .map_err(|e| DbError::Transient {
+            message: format!("db: tx connect failed: {e}"),
+        })?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("db: tx connection task error: {e}");
@@ -150,7 +157,7 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), String> {
     client
         .execute(&begin_sql, &[])
         .await
-        .map_err(|e| format!("db: BEGIN failed: {e}"))?;
+        .map_err(|e| DbError::from_pg(&e))?;
 
     crate::TX_CONN.with(|tx| {
         tx.borrow_mut().replace(client);

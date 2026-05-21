@@ -160,7 +160,13 @@ impl Migration {
             .borrow()
             .as_ref()
             .cloned()
-            .ok_or_else(|| OpError::error("Migration: not initialised"))?;
+            .ok_or_else(|| {
+                crate::error::DbError::validation(
+                    "migration_not_initialised",
+                    "Migration: not initialised",
+                )
+                .to_op_error()
+            })?;
         let pool = ensure_pool().await?;
         crate::migrations::exec_status(&pool, &owner.app_id, &owner.name, &owner.collection)
             .await

@@ -163,9 +163,11 @@ impl Transaction {
             ));
         }
         if self.settled.get() {
-            return Err(OpError::error(
+            return Err(crate::error::DbError::validation(
+                "tx_settled",
                 "tx.collection: transaction already committed or rolled back",
-            ));
+            )
+            .to_op_error());
         }
         if let Some(existing) = self.collection_cache.borrow().get(&name) {
             return Ok(v8::Local::new(scope, existing));
@@ -241,7 +243,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     let result = client
         .execute(cmd, &[])
         .await
-        .map_err(|e| OpError::error(format!("tx: {cmd} failed: {e}")));
+        .map_err(|e| crate::error::DbError::from_pg(&e).to_op_error());
     // Client dropped here either way.
     drop(client);
 

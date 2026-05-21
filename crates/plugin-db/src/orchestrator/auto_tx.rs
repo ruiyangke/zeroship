@@ -39,6 +39,7 @@
 
 use zeroship_runtime::state::{OpResult, SharedState};
 
+use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::v8_bridge::{get_i64_arg, get_string_arg, setup_promise};
 
@@ -70,7 +71,7 @@ pub fn auto_begin_transaction(
             },
             Err(e) => OpResult::Failed {
                 op_id,
-                error: e,
+                error: e.into_string(),
                 request_id,
             },
         }
@@ -108,7 +109,7 @@ pub fn auto_end_transaction(
             },
             Err(e) => OpResult::Failed {
                 op_id,
-                error: e,
+                error: e.into_string(),
                 request_id,
             },
         }
@@ -154,7 +155,7 @@ fn normalize_isolation(s: Option<&str>) -> Option<&'static str> {
     }
 }
 
-async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<u32, String> {
+async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<u32, DbError> {
     // Skip if this kind isn't wrapped (action / stream / subscription /
     // unknown). Token 0 → end is a no-op.
     let Some(sql) = auto_tx_begin_sql(kind, isolation) else {
@@ -176,10 +177,12 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     // the Client in TX_CONN.
     let url = crate::DB_URL
         .with(|u| u.borrow().clone())
-        .ok_or_else(|| "db: not configured".to_string())?;
+        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
-        .map_err(|e| format!("db: auto-tx connect failed: {e}"))?;
+        .map_err(|e| DbError::Transient {
+            message: format!("db: auto-tx connect failed: {e}"),
+        })?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("db: auto-tx connection task error: {e}");
@@ -190,7 +193,7 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     client
         .execute(&sql, &[])
         .await
-        .map_err(|e| format!("db: auto-tx BEGIN failed: {e}"))?;
+        .map_err(|e| DbError::from_pg(&e))?;
 
     crate::TX_CONN.with(|tx| {
         tx.borrow_mut().replace(client);
@@ -200,7 +203,7 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     Ok(1)
 }
 
-async fn exec_auto_end(token: i64, success: bool) -> Result<(), String> {
+async fn exec_auto_end(token: i64, success: bool) -> Result<(), DbError> {
     // No-op tokens (unwrapped kinds) — nothing to commit.
     if token == 0 {
         return Ok(());
@@ -239,20 +242,10 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), String> {
         clear_pending_emits();
     }
 
-    result.map(|_| ()).map_err(|e| {
-        // Walk the source chain so deferred-FK / unique violations
-        // surface with their SQLSTATE detail. compio-postgres' Display
-        // for Error::Db writes only "db error"; the real message
-        // (`ERROR: insert or update on table "todos" violates
-        // foreign key constraint ...`) lives on the cause.
-        let mut msg = format!("db: auto-tx {cmd} failed: {e}");
-        let mut cur: &dyn std::error::Error = &e;
-        while let Some(src) = std::error::Error::source(cur) {
-            msg.push_str(&format!(" — caused by: {src}"));
-            cur = src;
-        }
-        msg
-    })
+    // `from_pg` walks the source chain so deferred-FK / unique
+    // violations surface with their SQLSTATE-classified code instead
+    // of a bare "db error".
+    result.map(|_| ()).map_err(|e| DbError::from_pg(&e))
 }
 
 /// Install `__zsBeginAutoTx` / `__zsEndAutoTx` on `globalThis`. Called
