@@ -18,7 +18,7 @@ type Doc = PlainObject;
  * `t.date()` is used for full timestamps; calendar-date-only fields
  * use `t.calendarDate()` which enforces the stricter shape above.
  */
-function isParseableDateString(s: string): boolean {
+export function isParseableDateString(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}(?:[T ].*)?$/.test(s)) return false;
   return !isNaN(Date.parse(s));
 }
@@ -31,10 +31,21 @@ function isParseableDateString(s: string): boolean {
  * inside arrays) and lose data; reject them at validation time.
  *
  * Walks plain objects and arrays so a function buried two levels deep
- * is still caught. Treats class instances the same as plain objects
- * because `JSON.stringify` does. Cycle protection uses a `WeakSet`
- * visit-marker — `JSON.stringify` would throw on a cycle anyway, and
- * surfacing the rejection here gives a useful error path.
+ * is still caught. `Date` instances are accepted because
+ * `JSON.stringify(date)` produces an ISO string that round-trips
+ * deterministically (lossily — type info is gone — but determinately).
+ *
+ * R7 — explicitly reject `Map`, `Set`, typed arrays, `ArrayBuffer`, and
+ * any other non-plain non-Array object. `JSON.stringify(new Map([...]))`
+ * silently serialises to `"{}"` because `Object.values(new Map(...))`
+ * is empty, which would falsely pass the recursive predicate. The
+ * `Object.getPrototypeOf` guard restricts plain-object recursion to
+ * `{...}` literals and `Object.create(null)` containers — class
+ * instances are rejected, matching the structured-clone wire contract.
+ *
+ * Cycle protection uses a `WeakSet` visit-marker — `JSON.stringify`
+ * would throw on a cycle anyway, and surfacing the rejection here gives
+ * a useful error path.
  */
 export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): boolean {
   if (value === null) return true;
@@ -51,6 +62,23 @@ export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): bool
     }
     return true;
   }
+  // Date is the one non-plain object JSON.stringify handles natively
+  // (produces an ISO string). Accept it.
+  if (value instanceof Date) return !isNaN(value.getTime());
+  // R7 — reject typed arrays (Uint8Array, etc.), ArrayBuffer/DataView,
+  // Map, Set, and any built-in container whose plain-object recursion
+  // would mis-read as empty.
+  if (ArrayBuffer.isView(value)) return false;
+  if (value instanceof ArrayBuffer) return false;
+  if (value instanceof Map) return false;
+  if (value instanceof Set) return false;
+  if (value instanceof RegExp) return false;
+  if (value instanceof Promise) return false;
+  // Restrict the recursion to plain objects only. Anything with a
+  // non-Object/non-null prototype is a class instance whose private
+  // state JSON.stringify cannot see.
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== null && proto !== Object.prototype) return false;
   for (const v of Object.values(value as Record<string, unknown>)) {
     if (!isJsonSerializable(v, visited)) return false;
   }
@@ -167,6 +195,20 @@ function checkField(
       errors[key] = {
         path: key,
         message: `${key} must be a YYYY-MM-DD calendar date`,
+      };
+      return;
+    }
+  } else if (type === "json") {
+    // R7 — top-level `t.json()` parity with `t.array(t.json())`. R6
+    // tightened the array-item branch via `isJsonSerializable`; without
+    // this case, a top-level json field would accept ANY value —
+    // functions, symbols, bigints, cycles — which then either drop
+    // silently at `JSON.stringify` or throw at the Postgres driver.
+    // Same predicate as the array branch keeps both sites in lockstep.
+    if (!isJsonSerializable(value)) {
+      errors[key] = {
+        path: key,
+        message: `${key} must be JSON-serialisable`,
       };
       return;
     }
