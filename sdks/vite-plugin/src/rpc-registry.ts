@@ -681,13 +681,13 @@ function _zsRpc(name, input, ctx) {
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
   // Stage 4: schema registration moved to the runtime bootstrap. By the
   // time the kernel resolves \`default.fetch\` / \`default.rpc\` off this
-  // module's namespace, \`_installSchema\` has already run (top-level
-  // await in BOOTSTRAP_JS guarantees the order). The
-  // \`__zeroshipPlatformReady\` await below stays as defense-in-depth —
-  // pglite-socket serializes per-connection-in-tx, so opening BEGIN
-  // before \`registerModel\`'s DDL connection releases its advisory lock
-  // deadlocks; the await pre-tx is the documented serialization point.
-  // No-op on the warm path once the registerModel chain has settled.
+  // module's namespace, schema install has already run (top-level await
+  // in BOOTSTRAP_JS guarantees the order). The platform-ready await
+  // below stays as defense-in-depth — pglite-socket serializes
+  // per-connection-in-tx, so opening BEGIN before registerModel's DDL
+  // connection releases its advisory lock deadlocks; the await pre-tx
+  // is the documented serialization point. No-op on the warm path once
+  // the registerModel chain has settled.
   const ready = globalThis[${JSON.stringify(PLATFORM_READY_NAME)}];
   if (ready && typeof ready.then === "function") {
     try { await ready; } catch { /* user-facing errors surface via the handler */ }
