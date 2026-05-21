@@ -35,6 +35,7 @@ pub mod broker;
 pub mod callbacks;
 pub mod crud;
 pub mod diff;
+pub mod error;
 pub mod exec;
 pub mod migrations;
 pub mod orchestrator;
