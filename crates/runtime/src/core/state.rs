@@ -539,17 +539,6 @@ pub struct RuntimeState {
     /// reference to `Runtime`, which is single-owner and guarded by a
     /// `RefCell` that can't be held across `.await`.
     pub pump_notify_tx: Option<futures::channel::mpsc::Sender<()>>,
-
-    /// Bundle-relative POSIX path to the user's DB schema module, as
-    /// declared by `manifest.exports.schema` at build time. Read by
-    /// `load_polyfills_and_modules` to set `globalThis.__zsManifestSchemaPath`,
-    /// which the bootstrap's inlined `db_init.js` checks to decide whether
-    /// to run schema auto-discovery on the user's `default.schema`
-    /// export. `None` means "no manifest-declared schema" (dev mode,
-    /// SSG-only deploys, apps without DB) — the bootstrap skips
-    /// discovery entirely and the runtime serves whatever
-    /// `default.fetch` is exported.
-    pub manifest_schema_path: Option<String>,
 }
 
 /// Convenience alias — the shared handle passed into V8 callbacks.
@@ -607,7 +596,6 @@ impl RuntimeState {
 
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,
-            manifest_schema_path: None,
         }
     }
 

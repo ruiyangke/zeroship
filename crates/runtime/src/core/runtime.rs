@@ -376,12 +376,6 @@ pub struct RuntimeBuilder {
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
     idle_gc_after_ms: Option<u64>,
-    /// Bundle-relative path of the DB schema module from
-    /// `manifest.exports.schema`. When set, the bootstrap's
-    /// `db_init.js` runs schema auto-discovery on `user.default.schema`;
-    /// when unset, the bootstrap skips discovery entirely. See
-    /// [`RuntimeState::manifest_schema_path`].
-    manifest_schema_path: Option<String>,
 }
 
 impl RuntimeBuilder {
@@ -464,18 +458,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Set the bundle-relative path of the user's DB schema module
-    /// (carried in `manifest.exports.schema`). When set, the bootstrap's
-    /// inlined `db_init.js` runs schema auto-discovery on
-    /// `user.default.schema` BEFORE the runtime resolves `default.fetch`
-    /// off the module namespace — guaranteeing the first request never
-    /// lands against an unregistered schema. `None` (the default) skips
-    /// discovery; dev runs and SSG-only deploys take this path.
-    pub fn manifest_schema_path(mut self, p: Option<String>) -> Self {
-        self.manifest_schema_path = p;
-        self
-    }
-
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -494,7 +476,6 @@ impl RuntimeBuilder {
             self.plugins,
             app_id,
             idle_gc_after,
-            self.manifest_schema_path,
         );
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
@@ -726,7 +707,6 @@ impl RuntimeInner {
         plugins: Vec<Arc<dyn NativePlugin>>,
         app_id: Option<uuid::Uuid>,
         idle_gc_after: Duration,
-        manifest_schema_path: Option<String>,
     ) -> Self {
         init_v8();
 
@@ -829,9 +809,6 @@ impl RuntimeInner {
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env_vars, None)));
-        if let Some(path) = manifest_schema_path {
-            state.borrow_mut().manifest_schema_path = Some(path);
-        }
         isolate.set_slot(state.clone());
 
         let context = {

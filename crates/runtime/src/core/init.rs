@@ -949,27 +949,11 @@ pub fn load_polyfills_and_modules(
     // class above is the sole provider; building with
     // `--no-default-features` (polyfill mode) is no longer supported.
 
-    // Inject `globalThis.__zsManifestSchemaPath` BEFORE the bootstrap
-    // module evaluates. Read by the inlined `db_init.js` snippet to
-    // decide whether to run schema auto-discovery on `user.default.schema`.
-    // The actual path string is informational at runtime — the discovery
-    // path consumes the user's bundled-in default export, not a separate
-    // module — but a present-and-non-empty value is the signal that the
-    // build saw a schema and the runtime should install it before
-    // binding `default.fetch` / `default.rpc`. Missing (None) means dev
-    // mode or no-schema deploy, and the bootstrap silently no-ops.
-    {
-        let schema_path = scope
-            .get_slot::<SharedState>()
-            .and_then(|s| s.borrow().manifest_schema_path.clone());
-        if let Some(path) = schema_path {
-            if let Some(value) = v8::String::new(scope, &path) {
-                let key = v8::String::new(scope, "__zsManifestSchemaPath").unwrap();
-                let global = scope.get_current_context().global(scope);
-                global.set(scope, key.into(), value.into());
-            }
-        }
-    }
+    // Stage 5c: schema auto-discovery no longer reads a manifest-injected
+    // path. The bootstrap's inlined `db_init.js` reads `user.default.schema`
+    // directly off the loaded entry module (see `bootstrap/db_init.js`).
+    // Raw `.js` deploys with `export default { schema: {...} }` work
+    // without any plugin-side resolver.
 
     // Wrap the user's module graph in the bootstrap entry.
     //
