@@ -393,17 +393,12 @@ export function buildPlugin(
       // relative specifiers don't anchor to anything sensible.
       const userEntryRel = entry.replace(/\\/g, "/");
 
-      // Stage 2 — resolve the schema module BEFORE the SSR sub-build so
-      // the synthetic entry can statically import it. closeBundle still
-      // re-runs the resolver to compute the bundle-relative path baked
-      // into `manifest.exports.schema`; we duplicate the cheap fs check
-      // here to keep the two sites independent (no shared mutable
-      // state between Vite hook invocations). When the resolver returns
-      // `path: null` (entry-fallback), we pass `undefined` so the
-      // generated entry falls back to `_zsUser.default?.schema`.
-      const schemaForBuild = resolveSchemaPath(root, options.schema);
-      const schemaImportSpecForEntry =
-        schemaForBuild.path != null ? schemaForBuild.path.replace(/\\/g, "/") : undefined;
+      // Stage 4: schema discovery runs in the runtime bootstrap, not
+      // the synthetic entry. We no longer pass `schemaImportSpec` to
+      // the entry generator — the generated source carries no schema
+      // references at all. `manifest.exports.schema` still gets baked
+      // in `closeBundle` below; the runtime reads it to decide whether
+      // to run discovery on the user's `default.schema` export.
 
       const ssrConfig = buildSsrInlineConfig({
         root,
@@ -427,7 +422,6 @@ export function buildPlugin(
             root,
             userEntryRel,
             state,
-            schemaImportSpec: schemaImportSpecForEntry,
           }),
           // Expose `virtual:zeroship/client-manifest` so SSR code can
           // read hashed asset paths at build time. The client build's

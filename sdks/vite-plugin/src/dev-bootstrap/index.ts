@@ -18,15 +18,13 @@
  */
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
-// Typed accessors for the two cross-module globals shared with
-// `@zeroship/db` and the production synthetic SSR entry. Importing them
-// statically (vs reading off `globalThis as any`) gives us one source
-// of truth for the names. The globals themselves are shared across
-// every copy of the SDK in the V8 isolate — `getPlatformReady()` here
-// observes what `_installSchema` (run via the ModuleRunner) wrote.
+// Typed accessors for the SDK-internal globals shared with
+// `@zeroship/db`. Importing them statically (vs reading off
+// `globalThis as any`) gives us one source of truth for the names.
+// `getPlatformReady()` here observes what `_installSchema` (run via
+// the ModuleRunner) wrote.
 import {
   getPlatformReady,
-  getSchemaInit,
   INSTALL_SCHEMA_NAME,
 } from "@zeroship/db/internal";
 
@@ -368,18 +366,7 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   // native side when empty). See rpc-registry.ts for the rationale.
   const isolation = (cfg && typeof (cfg as any).isolation === "string")
     ? (cfg as any).isolation : "";
-  // Cold-start race: under auto-discovery `__zeroshipPlatformReady` is
-  // set inside `_installSchema`, which runs inside `maybeRegisterSchema`
-  // above. If the first request lands before the dynamic
-  // `runner.import("@zeroship/db")` resolves, the platform-ready handle
-  // is still undefined and the await below is a no-op — letting an
-  // auto-tx open against an unregistered schema. Awaiting
-  // `__zsSchemaInit` first pins the happens-before edge.
-  const initSchema = getSchemaInit();
-  if (initSchema && typeof initSchema.then === "function") {
-    try { await initSchema; } catch { /* surfaced via handler */ }
-  }
-  // Await any platform-readiness promises BEFORE opening the auto-tx.
+  // Await platform-readiness BEFORE opening the auto-tx.
   // `@zeroship/db`'s `_installSchema` publishes its registerModel chain on
   // `globalThis.__zeroshipPlatformReady`; under pglite-socket's
   // per-connection-in-tx serialization, opening an auto-tx while
