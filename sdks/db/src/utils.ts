@@ -102,9 +102,41 @@ const KNOWN_ACCUMULATOR_OPS = new Set([
   "$sum", "$avg", "$min", "$max", "$first", "$count",
 ]);
 
-/** Shapes already warned about — dedupe by sorted accumulator key set so
- *  a noisy pipeline doesn't spam the log. */
-const _warnedAccShapes = new Set<string>();
+/**
+ * Shapes already warned about — dedupe by sorted accumulator key set so
+ * a noisy pipeline doesn't spam the log.
+ *
+ * Bounded LRU: a `Map<string, true>` whose insertion-order iteration is
+ * guaranteed by the JS spec. On overflow we evict the oldest entry —
+ * mirrors `_warnedShapes` in `collection.ts` (Gap P / R3 MINOR-12). An
+ * AI-generated pipeline that synthesises new accumulator names would
+ * otherwise leak one entry per shape forever.
+ */
+const MAX_WARNED_ACC_SHAPES = 1024;
+const _warnedAccShapes: Map<string, true> = new Map();
+
+/** @internal — record a fired warning for `key`. Returns `true` iff this is
+ *  the first time we've seen the shape. Evicts the oldest entry once
+ *  `MAX_WARNED_ACC_SHAPES` is hit. */
+function _noteWarnedAccShape(key: string): boolean {
+  if (_warnedAccShapes.has(key)) return false;
+  if (_warnedAccShapes.size >= MAX_WARNED_ACC_SHAPES) {
+    const oldest = _warnedAccShapes.keys().next().value;
+    if (oldest !== undefined) _warnedAccShapes.delete(oldest);
+  }
+  _warnedAccShapes.set(key, true);
+  return true;
+}
+
+/** @internal — test-only reset hook. */
+export function __zeroshipDbResetAccShapeWarnings(): void {
+  _warnedAccShapes.clear();
+}
+
+/** @internal — test-only size accessor. */
+export function __zeroshipDbWarnedAccShapesSize(): number {
+  return _warnedAccShapes.size;
+}
 
 /** @internal Translate an accumulator expression */
 function translateAccumulator(acc: AggregateExpr): AggregateExpr {
@@ -125,8 +157,7 @@ function translateAccumulator(acc: AggregateExpr): AggregateExpr {
   const unknown = opKeys.filter((k) => !KNOWN_ACCUMULATOR_OPS.has(k));
   if (unknown.length > 0) {
     const shapeKey = unknown.slice().sort().join(",");
-    if (!_warnedAccShapes.has(shapeKey)) {
-      _warnedAccShapes.add(shapeKey);
+    if (_noteWarnedAccShape(shapeKey)) {
       console.warn(
         `[@zeroship/db] aggregate accumulator ${unknown.join(", ")} ` +
         `is not recognised and will be passed through unchanged — ` +

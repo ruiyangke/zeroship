@@ -20,7 +20,7 @@ import { _installSchema } from "../src/db.js";
 import {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
-} from "../src/collection.js";
+} from "../src/test-hooks.js";
 
 const MAX_WARNED_SHAPES = 1024;
 
