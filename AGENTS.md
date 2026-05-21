@@ -17,9 +17,10 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
+| **ZS deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zs-standard.md` · `crates/runtime/src/bootstrap/rpc_dispatch.js` · `crates/runtime/src/core/init.rs` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
-| **Vite plugin / build pipeline** | `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/` |
+| **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
 | **Node.js compat** (npm packages in V8) | `docs/reference/node-compat.md` · `crates/runtime/src/core/init.rs` |
 | **Benchmarks** | `crates/runtime/benches/` · `docs/reference/zerobench.md` · `docs/benchmarks/` |
 | **Local dev setup** | `docs/runbooks/local-dev.md` |
@@ -172,7 +173,8 @@ Default to npm package. Native primitives are forever.
 Stable contracts, live in `docs/reference/`:
 
 - `api-design-guidelines.md` — 10 principles for AI-friendly APIs
-- `db.md` — `@zeroship/db`: `export default { schema }` convention, CRUD, aggregation, naming strategy
+- `zs-standard.md` — the deploy contract: `default = { schema?, fetch?, rpc? }`, dispatch, raw-JS deploys
+- `db.md` — `@zeroship/db`: `default.schema` discovery, CRUD, aggregation, naming strategy
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)
