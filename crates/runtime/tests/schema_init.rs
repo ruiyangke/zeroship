@@ -244,20 +244,16 @@ export default {
 };
 "#;
 
-    // Stub @zeroship/db as a bundle module so the bootstrap's
-    // `await import("@zeroship/db")` resolves. The stub also plants
+    // Stage 7: the bootstrap dynamically imports
+    // `@zeroship/bootstrap/install-schema` (the framework-internal
+    // package that owns installSchema post-refactor). Stub it as a
+    // bundle module so the dynamic import resolves. The stub plants
     // `__zsBeginAutoTx` synchronously at import-time so the init
-    // script's gate is open.
-    //
-    // Stage 6: the bootstrap reads the live env.db off the runtime's
-    // `__zs_env()` callback and passes it as the second positional
-    // arg. The stub captures the schema keys it was handed; under
-    // this test setup the DbPlugin isn't registered so `env.db` is
-    // undefined — verifying installSchema was CALLED (with the right
-    // schema) is the assertion that matters here. The bootstrap-side
-    // env-handle plumbing is exercised by the real `db_init.js`
-    // against a real DbPlugin in production runs.
-    let stub_db = r#"
+    // script's gate is open. The stub captures the schema keys it
+    // was handed; under this test setup the DbPlugin isn't registered
+    // so `env.db` is undefined — verifying installSchema was CALLED
+    // (with the right schema) is the assertion that matters here.
+    let stub_bootstrap = r#"
 globalThis.__zsBeginAutoTx = function () { return 0; };
 globalThis.__zsEndAutoTx   = function () {};
 export function installSchema(schema, _env) {
@@ -271,17 +267,17 @@ export function installSchema(schema, _env) {
     // Pre-seed `__zsBeginAutoTx` in a tiny pre-init module that the
     // user-entry imports for its side effect, so the bootstrap's
     // discovery-gate sees the plant BEFORE the dynamic-import resolves.
-    // The pre-init module also imports the stub @zeroship/db so the
-    // bundle eagerly compiles it (lazy dynamic import then hits the
-    // registry path).
+    // The pre-init module also imports the stub bootstrap package so
+    // the bundle eagerly compiles it (lazy dynamic import then hits
+    // the registry path).
     let pre_init = r#"
-import "@zeroship/db";
+import "@zeroship/bootstrap/install-schema";
 "#;
 
     let user_with_preinit = format!("{pre_init}\n{user_src}");
     let modules = vec![
         ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
-        ModuleEntry { specifier: "@zeroship/db".into(), source: stub_db.into() },
+        ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
     ];
 
     let runtime = Runtime::builder()

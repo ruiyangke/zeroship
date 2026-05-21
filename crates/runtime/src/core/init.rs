@@ -256,10 +256,23 @@ export {
 /// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
 /// Schema auto-discovery init script. Spliced into [`BOOTSTRAP_JS`]
 /// immediately after the `import * as user from "./__user__.js"` line so
-/// the top-level `await import("@zeroship/db")` runs inside the bootstrap
-/// module's evaluation — before the runtime resolves `default.fetch` /
-/// `default.rpc` off the namespace. See `db_init.js` for the rationale.
-pub(crate) const DB_INIT_JS: &str = include_str!("../bootstrap/db_init.js");
+/// the top-level `await import("@zeroship/bootstrap/install-schema")`
+/// runs inside the bootstrap module's evaluation — before the runtime
+/// resolves `default.fetch` / `default.rpc` off the namespace.
+///
+/// Source of truth: `sdks/bootstrap/src/runtime-entry.ts` — compiled by
+/// the bootstrap package's `pnpm build` (which strips the `export {};`
+/// module marker so the file is splice-safe). Stage 7 of the refactor
+/// moved this out of `crates/runtime/src/bootstrap/db_init.js` so dev
+/// and prod share a single implementation.
+///
+/// Build ordering: `pnpm -F @zeroship/bootstrap build` MUST run before
+/// `cargo build -p zeroship-runtime`. The workspace's root `pnpm build`
+/// runs the bootstrap package in topological order via the
+/// @zeroship/db → @zeroship/bootstrap dependency edge.
+pub(crate) const DB_INIT_JS: &str = include_str!(
+    "../../../../sdks/bootstrap/dist/runtime-entry.js"
+);
 
 /// Embedded RPC dispatcher. Installs `globalThis.__zsDispatch` — the
 /// runtime-owned dispatch entry point used when `user.default.rpc` is a
@@ -267,9 +280,17 @@ pub(crate) const DB_INIT_JS: &str = include_str!("../bootstrap/db_init.js");
 /// is idempotent: a second evaluation (isolate refresh) is a no-op so
 /// the live function keeps serving in-flight requests.
 ///
+/// Source of truth: `sdks/bootstrap/src/dispatcher.ts`. The dev path
+/// imports the same module for its side effect (see
+/// `sdks/bootstrap/src/dev-entry.ts`), so production (`include_str!`
+/// of `dist/dispatcher.js`) and dev (ESM import via the Vite plugin's
+/// dev-bootstrap) wire up the SAME `__zsDispatch` function.
+///
 /// Spliced into [`BOOTSTRAP_JS`] BEFORE [`DB_INIT_JS`] so a schema-load
-/// failure can't prevent dispatcher install. See `rpc_dispatch.js`.
-pub(crate) const RPC_DISPATCH_JS: &str = include_str!("../bootstrap/rpc_dispatch.js");
+/// failure can't prevent dispatcher install.
+pub(crate) const RPC_DISPATCH_JS: &str = include_str!(
+    "../../../../sdks/bootstrap/dist/dispatcher.js"
+);
 
 /// Runtime-injected bootstrap module source. Built once at first use by
 /// splicing [`RPC_DISPATCH_JS`] and [`DB_INIT_JS`] into the otherwise-
@@ -280,14 +301,14 @@ pub(crate) const RPC_DISPATCH_JS: &str = include_str!("../bootstrap/rpc_dispatch
 /// else) so the init scripts run AFTER `user` is bound but BEFORE the
 /// `default.fetch` / `default.rpc` resolution. Order matters:
 ///   1. [`RPC_DISPATCH_JS`] runs FIRST — installs `__zsDispatch` before
-///      `db_init.js`'s top-level await can throw and abort module
+///      the runtime-entry's top-level await can throw and abort module
 ///      evaluation. Dispatcher install must survive a schema failure
 ///      so the worker can still surface the error via the RPC wire.
 ///   2. [`DB_INIT_JS`] runs next — its top-level await on
-///      `import("@zeroship/db")` resolves through V8's microtask
-///      checkpoint, `installSchema(schema, env.db)` plants typed
-///      Collection wrappers on env.db, and the returned `ready`
-///      promise is awaited so module evaluation gates on DDL
+///      `import("@zeroship/bootstrap/install-schema")` resolves through
+///      V8's microtask checkpoint, `installSchema(schema, env.db)`
+///      plants typed Collection wrappers on env.db, and the returned
+///      `ready` promise is awaited so module evaluation gates on DDL
 ///      settling.
 /// By the time the kernel reads `default.fetch` / `default.rpc` off the
 /// user namespace, `__zsDispatch` is installed AND the schema is live
