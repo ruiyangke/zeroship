@@ -1,0 +1,55 @@
+{
+  "name": "@zeroship/bootstrap",
+  "version": "0.1.0",
+  "description": "Framework-internal coordination package for zeroship — schema install, RPC dispatch, dev/prod entry shims. User code MUST NOT import this; Vite plugin and runtime crate are the consumers.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./install-schema": {
+      "types": "./dist/install-schema.d.ts",
+      "import": "./dist/install-schema.js"
+    },
+    "./dispatcher": {
+      "types": "./dist/dispatcher.d.ts",
+      "import": "./dist/dispatcher.js"
+    },
+    "./normalize": {
+      "types": "./dist/normalize.d.ts",
+      "import": "./dist/normalize.js"
+    },
+    "./fetch-handler": {
+      "types": "./dist/fetch-handler.d.ts",
+      "import": "./dist/fetch-handler.js"
+    },
+    "./runtime-entry": {
+      "types": "./dist/runtime-entry.d.ts",
+      "import": "./dist/runtime-entry.js"
+    },
+    "./dev": {
+      "types": "./dist/dev-entry.d.ts",
+      "import": "./dist/dev-entry.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc && node scripts/post-build.mjs",
+    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@zeroship/db": "workspace:*",
+    "@zeroship/types": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "zeroship": "workspace:*"
+  }
+}

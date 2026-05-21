@@ -637,6 +637,25 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  sdks/bootstrap:
+    dependencies:
+      '@zeroship/db':
+        specifier: workspace:*
+        version: link:../db
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../types
+    devDependencies:
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      zeroship:
+        specifier: workspace:*
+        version: link:../..
+
   sdks/create-zeroship-app: {}
 
   sdks/db:
