@@ -37,6 +37,7 @@ pub mod crud;
 pub mod diff;
 pub mod exec;
 pub mod migrations;
+pub mod orchestrator;
 pub mod query;
 pub mod read_set;
 pub mod replication;
