@@ -1,11 +1,12 @@
 # @zeroship/db — Database SDK
 
 `@zeroship/db` is the database SDK for zeroship apps. You declare a typed
-schema once via the `export default { schema }` convention; the platform
-installs typed Collection wrappers on `env.db` at app boot, and your
-handlers call CRUD methods on `env.db.<name>` directly. Behind the scenes
-the SDK calls into the native `env.db` v8_class surface (registered by
-the Rust runtime); no raw SQL is exposed to user code.
+schema once on `default.schema` of your entry module (the
+[ZS standard deploy contract](./zs-standard.md)); the platform reads it
+at boot, installs typed Collection wrappers on `env.db`, and your handlers
+call CRUD methods on `env.db.<name>` directly. Behind the scenes the SDK
+calls into the native `env.db` v8_class surface (registered by the Rust
+runtime); no raw SQL is exposed to user code.
 
 ```ts
 // src/index.ts — your app's entry module
@@ -13,8 +14,9 @@ import { t } from "@zeroship/db";
 import { env } from "zeroship";
 import { mutation, query } from "@zeroship/server";
 
-// Declare your schema once. The platform reads `default.schema` at boot
-// and installs typed Collection wrappers as own properties on env.db.
+// Declare your schema once on `default.schema`. The runtime reads it
+// at boot and installs typed Collection wrappers as own properties on
+// `env.db`.
 export default {
   schema: {
     users: {
@@ -67,7 +69,8 @@ so `env.db.users.find(...)` typechecks against the declared fields.
 
 ### Split-file schemas
 
-For larger apps, lift the schema into its own module:
+For larger apps, lift the schema into its own module and re-export it
+from the entry's `default.schema`:
 
 ```ts
 // src/schema.ts
@@ -78,16 +81,19 @@ export default {
 };
 ```
 
-Point the Vite plugin at it:
-
 ```ts
-// vite.config.ts
-import { zeroship } from "@zeroship/vite-plugin";
-export default { plugins: [zeroship({ schema: "./src/schema.ts" })] };
+// src/index.ts — entry module
+import schema from "./schema.ts";
+export default { schema };
 ```
 
-The plugin records the resolved path in the deploy manifest; the
-synthetic SSR entry (prod) and dev-bootstrap (dev) both honour it.
+The runtime's bootstrap (`crates/runtime/src/bootstrap/db_init.js`)
+reads `default.schema` directly off the loaded entry. There is no
+manifest-injected schema path — Stage 5c of the ZS-standard refactor
+dropped that and the SDK now has exactly one discovery surface: the
+entry's default export. See
+[`docs/reference/zs-standard.md`](./zs-standard.md) for the broader
+contract.
 
 ## Two return contracts
 
