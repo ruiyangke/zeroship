@@ -17,7 +17,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
-import { createDb } from "../src/db.js";
+import { _installSchema } from "../src/db.js";
 import { t } from "../src/types.js";
 
 type AnyRec = Record<string, unknown>;
@@ -129,7 +129,7 @@ describe("db.live — reactive query layer", () => {
   test("initial query result is yielded on first next()", async () => {
     const { native } = makeMockNative();
     installEnv(native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native },
     );
@@ -147,7 +147,7 @@ describe("db.live — reactive query layer", () => {
   test("an event on a watched table triggers a rerun", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -170,7 +170,7 @@ describe("db.live — reactive query layer", () => {
   test("an event on an unrelated table does NOT trigger a rerun", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       {
         todos: { title: t.string().required() },
         users: { name: t.string().required() },
@@ -199,7 +199,7 @@ describe("db.live — reactive query layer", () => {
   test("live.close() terminates the iterator with {done: true}", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -216,7 +216,7 @@ describe("db.live — reactive query layer", () => {
   test("for await ... break triggers close()", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -237,7 +237,7 @@ describe("db.live — reactive query layer", () => {
   test("multiple parallel db.live calls don't interfere", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       {
         todos: { title: t.string().required() },
         users: { name: t.string().required() },
@@ -264,7 +264,7 @@ describe("db.live — reactive query layer", () => {
   test("calling db.live inside db.transaction rejects synchronously", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -286,7 +286,7 @@ describe("db.live — reactive query layer", () => {
   test("explicit { tables } bypasses auto-detection", async () => {
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -310,7 +310,7 @@ describe("db.live — reactive query layer", () => {
     // drops the oldest value to make room for the newest.
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -367,7 +367,7 @@ describe("db.live — reactive query layer", () => {
     // preserves the rows verbatim.
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );
@@ -395,7 +395,7 @@ describe("db.live — reactive query layer", () => {
     // `users` even though the queryFn never names it.
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       {
         users: { name: t.string().required() },
         todos: { userId: t.ref("users"), title: t.string().required() },
@@ -450,7 +450,7 @@ describe("db.live — reactive query layer", () => {
     // detects that shape and yields the data (or throws on error).
     const ctx = makeMockNative();
     installEnv(ctx.native as unknown as { openSubscription: (n: string) => FakeSub });
-    const db = createDb(
+    const db = _installSchema(
       { todos: { title: t.string().required() } },
       { native: ctx.native },
     );

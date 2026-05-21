@@ -316,7 +316,7 @@ importers:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
 
-  examples/db-v2-chat:
+  examples/db-chat:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
@@ -350,7 +350,7 @@ importers:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
 
-  examples/db-v2-migrations-playground:
+  examples/db-migrations-playground:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
@@ -372,7 +372,7 @@ importers:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
 
-  examples/db-v2-todos:
+  examples/db-todos:
     dependencies:
       '@zeroship/db':
         specifier: workspace:*
@@ -387,12 +387,18 @@ importers:
         specifier: workspace:*
         version: link:../../sdks/vite-plugin
     devDependencies:
+      '@zeroship/types':
+        specifier: workspace:*
+        version: link:../../sdks/types
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
       vite:
         specifier: 'catalog:'
         version: 8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4)
+      zeroship:
+        specifier: workspace:*
+        version: link:../..
 
   examples/hono-demo:
     dependencies:

@@ -145,8 +145,8 @@ function isResultEnvelope(v: unknown): v is { data: unknown; error: unknown } {
 /**
  * Build a `LiveQuery<R>` from a `queryFn` and the parent `db` object.
  * Exported via `db.live` (see `db.ts`). `db` is the object returned
- * by `createDb` — used to (a) verify we're not inside a tx and (b)
- * call `subscribe(name)` for every detected table.
+ * by `_installSchema` — used to (a) verify we're not inside a tx and
+ * (b) call `subscribe(name)` for every detected table.
  */
 export function createLive<R>(
   db: Record<string, unknown>,

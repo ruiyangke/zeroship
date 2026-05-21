@@ -1,7 +1,8 @@
 /**
  * Core type definitions and the `t` type-builder API for @zeroship/db.
  * Use `t.string()`, `t.number()`, etc. to declare schema fields with
- * optional constraints, then pass the result to `createDb({ ... })`.
+ * optional constraints, then export the schema map via
+ * `export default { schema: { ... } }`.
  */
 
 /** Generic plain object type used throughout the SDK. */
@@ -44,7 +45,7 @@ export type OptionalKeys<S> = Exclude<keyof S, RequiredKeys<S>>;
  * True iff every value in S is a `TypeBuilder` (i.e. the input is a
  * schema dictionary, not an already-inferred shape). Used to
  * distinguish a schema dict from an already-inferred shape — the
- * latter appears as the top-level S when `createDb({ events: t.union(...) })`
+ * latter appears as the top-level S when `{ events: t.union(...) }`
  * unwraps a TypeBuilder whose `_type` brand is the user-facing union
  * (no TypeBuilders left in the value positions).
  */
@@ -299,7 +300,7 @@ export type UnwrapSchemaForRelation<T> =
  * target name can't be matched against any declared collection — that
  * preserves the v1 behaviour for unknown targets without breaking
  * compilation. Tightens to the real `Row<TargetSchema>` whenever
- * `createDb`'s schema map carries the target name (the common case).
+ * `_installSchema`'s schema map carries the target name (the common case).
  */
 export type ResolveTargetRow<X, AllSchemas> =
   ExtractRefTarget<X> extends infer Target
@@ -314,8 +315,8 @@ export type ResolveTargetRow<X, AllSchemas> =
  * Type-level shape for joined rows. Each key in `W` becomes a field on
  * the row carrying the target's full `Row<TargetSchema>` (or `null`).
  *
- * `AllSchemas` is the schema map that `createDb` was given — threading
- * it through `Collection<S, N, AllSchemas>` lets us look up each key's
+ * `AllSchemas` is the schema map that `_installSchema` was given —
+ * threading it through `Collection<S, N, AllSchemas>` lets us look up each key's
  * `t.ref(target)` and resolve `target` to the target collection's `Row`.
  * The default `Record<string, unknown>` keeps direct `Collection`/`Query`
  * users (e.g. `model("users", ...)`) compiling — they degrade to

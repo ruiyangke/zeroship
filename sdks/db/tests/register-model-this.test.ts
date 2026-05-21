@@ -1,7 +1,7 @@
 /**
  * Pin the v8_class `this`-binding contract for `native.registerModel`.
  *
- * Both `createDb` (sdks/db/src/db.ts) and `model()` (sdks/db/src/model.ts)
+ * Both `_installSchema` (sdks/db/src/db.ts) and `model()` (sdks/db/src/model.ts)
  * dispatch `native.registerModel(name, schema, indexes)`. The native side
  * is a v8_class method whose internal brand check throws
  * "Illegal invocation" if the receiver isn't the original instance —
@@ -19,7 +19,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createDb } from "../src/db.js";
+import { _installSchema } from "../src/db.js";
 import { model } from "../src/model.js";
 import { t } from "../src/types.js";
 
@@ -53,9 +53,9 @@ function makeBrandedNative() {
 }
 
 describe("registerModel — `this` binding preserved", () => {
-  test("createDb dispatches registerModel with correct receiver", async () => {
+  test("_installSchema dispatches registerModel with correct receiver", async () => {
     const { native, calls } = makeBrandedNative();
-    const db = createDb(
+    const db = _installSchema(
       { users: { name: t.string().required() } },
       { native },
     );

@@ -16,7 +16,7 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { schema, t } from "../src/types.js";
-import { createDb } from "../src/db.js";
+import { _installSchema } from "../src/db.js";
 import {
   __zeroshipDbResetIndexWarnings,
   __zeroshipDbWarnedShapesSize,
@@ -74,7 +74,7 @@ describe("Gap P — _warnedShapes is bounded at MAX_WARNED_SHAPES", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
 
-    const db = createDb(
+    const db = _installSchema(
       {
         big: schema(fields).index("by_special", ["f_special"]),
       },
@@ -136,7 +136,7 @@ describe("Gap P — _warnedShapes is bounded at MAX_WARNED_SHAPES", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
 
-    const db = createDb(
+    const db = _installSchema(
       {
         big: schema(fields), // no declared indexes -> every filter warns
       },

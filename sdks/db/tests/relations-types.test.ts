@@ -18,7 +18,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createDb } from "../src/db.js";
+import { _installSchema } from "../src/db.js";
 import { t } from "../src/types.js";
 
 type AnyRec = Record<string, unknown>;
@@ -38,7 +38,7 @@ const native = {
   },
 } as unknown as ZeroshipDb;
 
-const db = createDb(
+const db = _installSchema(
   {
     users: {
       email: t.string().required().unique(),

@@ -1,12 +1,13 @@
 /**
- * `__registerSchemas` — the internal helper behind both `createDb()` and
- * the dev-bootstrap default-export discovery path. This test pins the
- * two behaviours that distinguish it from a bare `createDb`:
+ * `_installSchema` — the framework-internal helper that the synthetic
+ * SSR entry and dev-bootstrap call to register schemas declared via
+ * `export default { schema }`. This test pins the two behaviours that
+ * matter independently of the surrounding wiring:
  *
  * 1. `installOnEnvDb: true` mutates the supplied `native` handle so
  *    `native.<collection>` resolves to the typed SDK Collection wrapper.
  *    `Object.defineProperty` is the mechanism (`configurable: true`),
- *    so a second `__registerSchemas` call with overlapping names
+ *    so a second `_installSchema` call with overlapping names
  *    re-installs without throwing.
  *
  * 2. A schema name colliding with the native v8_class method surface
@@ -16,7 +17,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { __registerSchemas } from "../src/db.js";
+import { _installSchema } from "../src/db.js";
 import { t } from "../src/types.js";
 
 /**
@@ -42,10 +43,10 @@ function makeMockNative() {
   } as unknown as ZeroshipDb;
 }
 
-describe("__registerSchemas", () => {
+describe("_installSchema", () => {
   test("installOnEnvDb mutates the native handle with typed Collection wrappers", () => {
     const native = makeMockNative();
-    __registerSchemas(
+    _installSchema(
       {
         users: { name: t.string().required() },
         todos: { title: t.string().required() },
@@ -61,9 +62,9 @@ describe("__registerSchemas", () => {
     assert.equal(typeof (handle.todos as { update?: unknown }).update, "function");
   });
 
-  test("default createDb path does NOT mutate env.db", () => {
+  test("without installOnEnvDb (test path) does NOT mutate env.db", () => {
     const native = makeMockNative();
-    __registerSchemas(
+    _installSchema(
       { posts: { title: t.string().required() } },
       { native /* installOnEnvDb omitted */ },
     );
@@ -73,14 +74,14 @@ describe("__registerSchemas", () => {
 
   test("re-entrant: a second call redefines the same name without throwing", () => {
     const native = makeMockNative();
-    __registerSchemas(
+    _installSchema(
       { users: { name: t.string().required() } },
       { native, installOnEnvDb: true },
     );
     const first = (native as unknown as { users: unknown }).users;
     // Second call with the same name — must not throw on the
     // `Object.defineProperty` because the descriptor is `configurable: true`.
-    __registerSchemas(
+    _installSchema(
       { users: { name: t.string().required(), email: t.string() } },
       { native, installOnEnvDb: true },
     );
@@ -100,7 +101,7 @@ describe("__registerSchemas", () => {
       "replication",
     ]) {
       assert.throws(
-        () => __registerSchemas(
+        () => _installSchema(
           { [reserved]: { name: t.string().required() } },
           { native, installOnEnvDb: true },
         ),

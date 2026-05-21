@@ -1,7 +1,8 @@
 /**
- * Schema normalization: converts a `createDb({ … })` field map of
- * `TypeBuilder` instances (or a top-level `t.union(...)`) into the
- * canonical `NormalizedSchema` shape consumed by the rest of the SDK.
+ * Schema normalization: converts an `export default { schema: { … } }`
+ * field map of `TypeBuilder` instances (or a top-level `t.union(...)`)
+ * into the canonical `NormalizedSchema` shape consumed by the rest of
+ * the SDK.
  */
 import { TypeBuilder, SchemaBuilder, FieldDef, PlainObject } from "./types.js";
 
@@ -14,7 +15,7 @@ type SchemaInput = Record<string, TypeBuilder<any, any>>;
 
 /**
  * C2 — collection-level discriminated union. When the value of a key
- * in `createDb({...})` is `t.union(...)` directly, the collection is a
+ * in the schema map is `t.union(...)` directly, the collection is a
  * discriminated union: every row is one of the declared variants. The
  * SDK expands this into flat columns per the proposal (§C2) — see
  * `normalizeSchema` / `expandUnionToFlatColumns`.
@@ -181,8 +182,8 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
  * as a safety net for `t.ref("x" as any)` escapes that bypass the
  * compile-time `Tables<S>` constraint. Cross-app refs are also blocked:
  * the TS literal type for `table` always refers to a key inside the
- * same `createDb({...})` literal, so a cross-app reference would have
- * to be smuggled in via `as any`, which this check catches.
+ * same schema-map literal, so a cross-app reference would have to be
+ * smuggled in via `as any`, which this check catches.
  */
 export function validateRefTargets(
   schemas: Record<string, unknown>,
@@ -195,7 +196,7 @@ export function validateRefTargets(
   ): never => {
     const message =
       `t.ref("${target}") on ${collection}.${field} — ` +
-      `target collection "${target}" is not declared in createDb(). ` +
+      `target collection "${target}" is not declared in the schema map. ` +
       `Add "${target}" to the schema map, or fix the typo.`;
     throw Object.assign(new Error(message), {
       code: "ref_target_not_found",

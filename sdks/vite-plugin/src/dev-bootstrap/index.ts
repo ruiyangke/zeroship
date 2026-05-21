@@ -88,7 +88,7 @@ async function getUserModule(): Promise<any> {
 }
 
 // Set once per ModuleRunner lifetime — auto-discovery is idempotent
-// (`__registerSchemas` is re-entrant, but re-running registerModel for
+// (`_installSchema` is re-entrant, but re-running registerModel for
 // every RPC dispatch is wasted work). HMR / dep-reoptimize cycles
 // reset the flag in lockstep with the runner reset above; a fresh
 // runner means a fresh import means re-evaluating the user module's
@@ -96,35 +96,33 @@ async function getUserModule(): Promise<any> {
 let schemaRegistered = false;
 
 /**
- * Stage 2 schema auto-registration in dev mode.
+ * Schema auto-registration in dev mode.
  *
  * Resolution order — mirrors the production synthetic entry exactly
  * (see `sdks/vite-plugin/src/rpc-registry.ts::buildSchemaRegistrationBlock`):
  *
  *   1. `ZEROSHIP_SCHEMA_PATH` env var set → import that module through
  *      the ModuleRunner, use its `default.schema ?? default` as the
- *      schema source. This is Stage 1's split-file convention.
- *   2. Fall back to `mod.default.schema` (the legacy `export default
+ *      schema source. This is the split-file convention.
+ *   2. Fall back to `mod.default.schema` (the `export default
  *      { schema }` convention on the entry).
  *   3. Nothing found → no-op.
  *
- * Both resolutions hand the schema to `@zeroship/db/internal::
- * __registerSchemas` with `installOnEnvDb: true` so `env.db.<collection>`
- * resolves to a typed Collection wrapper before the first RPC dispatch
- * runs.
+ * Both resolutions hand the schema to `@zeroship/db::_installSchema`
+ * with `installOnEnvDb: true` so `env.db.<collection>` resolves to a
+ * typed Collection wrapper before the first RPC dispatch runs.
  *
  * Failures are caught and logged — a malformed schema shouldn't crash
- * the whole dev server; the user's `createDb(...)` escape hatch still
- * works.
+ * the whole dev server.
  */
 async function maybeRegisterSchema(mod: any): Promise<void> {
   if (schemaRegistered) return;
-  // Load `@zeroship/db/internal` THROUGH the Vite ModuleRunner so the
+  // Load `@zeroship/db` THROUGH the Vite ModuleRunner so the
   // `TypeBuilder` / `SchemaBuilder` classes match the ones the user's
   // module instantiated. Importing the SDK statically from the bundled
   // dev-bootstrap would give us a DIFFERENT class (esbuild's bundled
   // copy vs Vite's loaded copy), and `instanceof` checks inside
-  // `__registerSchemas` would fail with "every field must be a t.*
+  // `_installSchema` would fail with "every field must be a t.*
   // builder" even when the user did call `t.string()`.
   let r: ModuleRunner;
   try {
@@ -180,9 +178,9 @@ async function maybeRegisterSchema(mod: any): Promise<void> {
   }
 
   try {
-    const internal: any = await r.import("@zeroship/db/internal");
-    if (typeof internal.__registerSchemas === "function") {
-      internal.__registerSchemas(schema, { installOnEnvDb: true });
+    const dbSdk: any = await r.import("@zeroship/db");
+    if (typeof dbSdk._installSchema === "function") {
+      dbSdk._installSchema(schema, { installOnEnvDb: true });
       console.log(`[zeroship:dev] registered schema from ${provenance}`);
     }
   } catch (e: any) {

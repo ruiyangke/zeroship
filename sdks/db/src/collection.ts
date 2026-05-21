@@ -272,12 +272,14 @@ function _filterCoveredByIndex(
  * `Id` accessor below produces `Id<N>` rather than `Id<string>`.
  *
  * `AllSchemas` is the parent db's full schema map — threaded in by
- * `createDb` so a `find({...}, { with: { userId: true } })` can resolve
- * the joined field's type to the target collection's `Row<...>` rather
- * than the v1 fallback of `PlainObject`. Standalone `model()` callers
- * inherit the safe default and degrade to `PlainObject` per relation.
+ * `_installSchema` so a `find({...}, { with: { userId: true } })` can
+ * resolve the joined field's type to the target collection's `Row<...>`
+ * rather than the v1 fallback of `PlainObject`. Standalone `model()`
+ * callers inherit the safe default and degrade to `PlainObject` per
+ * relation.
  *
- * Use `model()` or `createDb()` — do not construct directly.
+ * Use `model()` or declare the schema via `export default { schema }`
+ * and access through `env.db.<name>` — do not construct directly.
  */
 export class Collection<
   S = PlainObject,
@@ -304,7 +306,7 @@ export class Collection<
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
   private _idLoader: IdLoader<Row<S>> | null;
   /**
-   * Sibling-collection lookup, planted by `createDb` so `with: { fk: true }`
+   * Sibling-collection lookup, planted by `_installSchema` so `with: { fk: true }`
    * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
    * batched `find({id: {$in: ids}})` against. `model()` callers without a
    * parent db leave this null; `with` then errors at call time with a
@@ -408,17 +410,17 @@ export class Collection<
     return this._nativeCol;
   }
 
-  /** @internal — used by `createDb` to chain registrations sequentially
-   *  for B2 cross-table FK ordering. Replaces the per-collection `_ready`
-   *  promise set during `model()` construction with a chained one so
-   *  that parent-table registration completes before child-table
-   *  registration starts. */
+  /** @internal — used by `_installSchema` to chain registrations
+   *  sequentially for B2 cross-table FK ordering. Replaces the
+   *  per-collection `_ready` promise set during `model()` construction
+   *  with a chained one so that parent-table registration completes
+   *  before child-table registration starts. */
   _setReady(p: Promise<void> | null): void {
     this._ready = p;
   }
 
-  /** @internal — planted by `createDb` so the `with: { fk: true }` option
-   *  can resolve sibling collections by table name. */
+  /** @internal — planted by `_installSchema` so the `with: { fk: true }`
+   *  option can resolve sibling collections by table name. */
   _setResolveCollection(
     fn: (name: string) => Collection<unknown> | undefined,
   ): void {
@@ -475,7 +477,7 @@ export class Collection<
         if (resolve === null) {
           throw new Error(
             `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
-            `so sibling collections cannot be resolved. Use createDb({...}) to enable relation loading.`,
+            `so sibling collections cannot be resolved. Declare the schema via "export default { schema }" to enable relation loading.`,
           );
         }
         const targetCol = resolve(targetName);

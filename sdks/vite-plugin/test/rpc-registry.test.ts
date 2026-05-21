@@ -139,9 +139,9 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
     );
     // The fallback path keys off `_zsUser.default.schema`.
     assert.match(code, /_zsUser\.default\.schema/);
-    // The async IIFE that calls `__registerSchemas` is present.
-    assert.match(code, /await import\("@zeroship\/db\/internal"\)/);
-    assert.match(code, /__registerSchemas/);
+    // The async IIFE that calls `_installSchema` is present.
+    assert.match(code, /await import\("@zeroship\/db"\)/);
+    assert.match(code, /_installSchema/);
     assert.match(code, /installOnEnvDb:\s*true/);
   });
 
@@ -159,7 +159,7 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
     assert.match(code, /_zsSchemaMod\.default\?\.schema/);
     assert.match(code, /_zsUser\.default\.schema/);
     // Calls the registration helper through the dynamic import.
-    assert.match(code, /__registerSchemas/);
+    assert.match(code, /_installSchema/);
     assert.match(code, /installOnEnvDb:\s*true/);
   });
 
@@ -281,8 +281,8 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
       code,
       /import \* as _zsSchemaMod from "\/proj\/src\/schema\.ts"/,
     );
-    assert.match(code, /await import\("@zeroship\/db\/internal"\)/);
-    assert.match(code, /__registerSchemas/);
+    assert.match(code, /await import\("@zeroship\/db"\)/);
+    assert.match(code, /_installSchema/);
     assert.match(code, /installOnEnvDb:\s*true/);
   });
 });

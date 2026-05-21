@@ -75,15 +75,14 @@ export function pickEntryWireId(p: {
  * The runtime resolution order matches the Stage 1 manifest contract:
  * an explicit split-file schema wins; otherwise `_zsUser.default.schema`
  * is the convention fallback. Either source feeds
- * `@zeroship/db/internal::__registerSchemas` with `installOnEnvDb: true`
- * so handlers can write `env.db.<name>` without ever calling
- * `createDb`.
+ * `@zeroship/db::_installSchema` with `installOnEnvDb: true` so handlers
+ * can write `env.db.<name>` without any factory call.
  *
- * The static `import { __registerSchemas } from "@zeroship/db/internal"`
- * resolves via Vite SSR's workspace dep resolution (`@zeroship/db`'s
- * `package.json` already declares the `./internal` subpath export).
  * Wrapped in try/catch so a malformed schema doesn't take the whole
- * worker down — the user's `createDb(...)` escape hatch still works.
+ * worker down. The IIFE's promise is anchored to
+ * `globalThis.__zsSchemaInit` so rolldown's static-folding step cannot
+ * tree-shake the side effect, and so the auto-tx dispatcher can await
+ * it for the cold-start race fix.
  */
 function buildSchemaRegistrationBlock(schemaModRef: string): string {
   // Resolve the schema source. Split-file (manifest.exports.schema)
@@ -99,8 +98,8 @@ function buildSchemaRegistrationBlock(schemaModRef: string): string {
   // user-module path is unreachable. We split the two emission paths
   // explicitly so rolldown's reachability analysis stays honest.
   //
-  // `@zeroship/db/internal` is loaded via a DYNAMIC `import()` (not a
-  // static `import` declaration) for two reasons:
+  // `@zeroship/db` is loaded via a DYNAMIC `import()` (not a static
+  // `import` declaration) for two reasons:
   //
   //   1. Bundle-time independence — the synthetic entry never has to
   //      assume the workspace dep is resolvable from its own location.
@@ -117,12 +116,13 @@ function buildSchemaRegistrationBlock(schemaModRef: string): string {
   //      \`default.{fetch,rpc}\` lookup. The IIFE returns immediately;
   //      the registration runs in parallel and publishes its readiness
   //      via \`globalThis.__zeroshipPlatformReady\` (already chained
-  //      inside \`__registerSchemas\`). The first auto-tx dispatch
-  //      awaits that promise in \`_zsRpcWithAutoTx\`, so the race is
-  //      benign.
+  //      inside \`_installSchema\`). The auto-tx dispatcher awaits both
+  //      \`__zsSchemaInit\` (this IIFE's promise) AND
+  //      \`__zeroshipPlatformReady\` before opening BEGIN.
   //
-  // Wrapped in a try/catch so a malformed schema doesn't take the whole
-  // worker down — the user's \`createDb(...)\` escape hatch still works.
+  // Wrapped in a try/catch so a malformed schema doesn't take the
+  // whole worker down — handler dispatch still runs against the
+  // unregistered env.db.
   const resolution = schemaModRef === "undefined"
     ? `(_zsUser && _zsUser.default && typeof _zsUser.default === "object" ? _zsUser.default.schema : undefined)`
     : `(${schemaModRef} && (${schemaModRef}.default?.schema ?? ${schemaModRef}.default))
@@ -132,8 +132,8 @@ const _zsSchema = (${resolution});
 if (_zsSchema && typeof _zsSchema === "object") {
   globalThis.__zsSchemaInit = (async () => {
     try {
-      const _zsDbInternal = await import("@zeroship/db/internal");
-      const _zsRegFn = _zsDbInternal && _zsDbInternal.__registerSchemas;
+      const _zsDb = await import("@zeroship/db");
+      const _zsRegFn = _zsDb && _zsDb._installSchema;
       if (typeof _zsRegFn === "function") {
         _zsRegFn(_zsSchema, { installOnEnvDb: true });
       }
@@ -173,7 +173,7 @@ export function buildServerEntrySource(opts: {
    * Optional module specifier for the user's DB schema module. When set,
    * the synthetic entry emits an additional static `import * as
    * _zsSchemaMod from "<spec>"` and uses that module's default export as
-   * the schema source for `__registerSchemas`. When unset, registration
+   * the schema source for `_installSchema`. When unset, registration
    * falls back to `_zsUser.default?.schema` (the `export default {
    * schema, ... }` convention).
    *
@@ -767,12 +767,12 @@ function _zsRpc(name, input, ctx) {
 
 async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
   // Cold-start race: in the auto-discovery path \`__zeroshipPlatformReady\`
-  // is set inside \`__registerSchemas\`, which runs inside the IIFE in this
+  // is set inside \`_installSchema\`, which runs inside the IIFE in this
   // synthetic entry. If the first request lands before the IIFE's dynamic
-  // \`import("@zeroship/db/internal")\` resolves, the platform-ready handle
-  // is still undefined and the await below is a no-op — letting an auto-tx
-  // open against an unregistered schema. Awaiting \`__zsSchemaInit\` first
-  // pins the happens-before edge.
+  // \`import("@zeroship/db")\` resolves, the platform-ready handle is still
+  // undefined and the await below is a no-op — letting an auto-tx open
+  // against an unregistered schema. Awaiting \`__zsSchemaInit\` first pins
+  // the happens-before edge.
   const init = globalThis.__zsSchemaInit;
   if (init && typeof init.then === "function") {
     try { await init; } catch { /* surfaced via handler */ }
@@ -999,7 +999,7 @@ export function rpcRegistryPlugin(opts: {
    * Module specifier for the user's DB schema module (Stage 2 of the
    * schema auto-discovery refactor). When set, the synthetic entry
    * statically imports this module and uses its default export as the
-   * schema source for `__registerSchemas`. When unset (entry-fallback
+   * schema source for `_installSchema`. When unset (entry-fallback
    * case from `resolveSchemaPath`), the entry falls back to
    * `_zsUser.default?.schema`.
    */

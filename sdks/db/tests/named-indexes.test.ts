@@ -14,7 +14,7 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { schema, t } from "../src/types.js";
-import { createDb } from "../src/db.js";
+import { _installSchema } from "../src/db.js";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
 
 // ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
 // Runtime: registerModel wire format carries the indexes
 // ---------------------------------------------------------------------------
 
-describe("createDb — passes named indexes through to native registerModel", () => {
+describe("_installSchema — passes named indexes through to native registerModel", () => {
   test("emits an indexes argument with mapped column names per declaration", async () => {
     const calls: { collection: string; schema: ZeroshipDbSchema; indexes: ZeroshipDbNamedIndex[] }[] = [];
     const native = {
@@ -139,7 +139,7 @@ describe("createDb — passes named indexes through to native registerModel", ()
       },
     } as unknown as ZeroshipDb;
 
-    createDb(
+    _installSchema(
       {
         users: schema({
           email: t.string().required(),
@@ -200,7 +200,7 @@ describe("Collection — unindexed-query warning honours declared indexes", () =
       },
     } as unknown as ZeroshipDb;
 
-    return createDb(
+    return _installSchema(
       {
         todos: schema({
           userId: t.number(),
