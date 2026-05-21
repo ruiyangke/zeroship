@@ -47,6 +47,7 @@
     "@electric-sql/pglite": "^0.4.4",
     "@electric-sql/pglite-socket": "^0.1.4",
     "@rollup/plugin-inject": "^5.0.5",
+    "@zeroship/bootstrap": "workspace:*",
     "magic-string": "^0.30.21",
     "mime": "^3.0.0",
     "tar": "^7.5.13",
