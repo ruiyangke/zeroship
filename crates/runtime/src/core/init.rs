@@ -5,6 +5,7 @@
 //! - `setup_globals()` — console, timers, fetch, URL, KV, crypto, env, streams
 //! - Result types (`RequestResult`, `HttpResult`)
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::state::SharedState;
@@ -253,9 +254,45 @@ export {
 /// the URL matches /_zs/v1/<id>; symmetric to `default.fetch`),
 /// `fetchFast` is the optional zeroship-extension HTTP fast path for
 /// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
-pub(crate) const BOOTSTRAP_JS: &str = r##"
+/// Schema auto-discovery init script. Spliced into [`BOOTSTRAP_JS`]
+/// immediately after the `import * as user from "./__user__.js"` line so
+/// the top-level `await import("@zeroship/db")` runs inside the bootstrap
+/// module's evaluation — before the runtime resolves `default.fetch` /
+/// `default.rpc` off the namespace. See `db_init.js` for the rationale.
+pub(crate) const DB_INIT_JS: &str = include_str!("../bootstrap/db_init.js");
+
+/// Runtime-injected bootstrap module source. Built once at first use by
+/// splicing [`DB_INIT_JS`] into the otherwise-static bootstrap template.
+///
+/// The template is split into prefix (`BOOTSTRAP_PREFIX_JS` — just the
+/// `import * as user` line) and main (`BOOTSTRAP_MAIN_JS` — everything
+/// else) so the init script runs AFTER `user` is bound but BEFORE the
+/// `default.fetch` / `default.rpc` resolution. Order matters: top-level
+/// await on `import("@zeroship/db")` resolves through V8's microtask
+/// checkpoint, and `_installSchema` synchronously publishes
+/// `__zeroshipPlatformReady`, so by the time the kernel reads
+/// `default.fetch` off the namespace the platform-ready promise is
+/// already set.
+pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
+    let mut s = String::with_capacity(
+        BOOTSTRAP_PREFIX_JS.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len() + 2,
+    );
+    s.push_str(BOOTSTRAP_PREFIX_JS);
+    s.push_str(DB_INIT_JS);
+    s.push_str(BOOTSTRAP_MAIN_JS);
+    s
+});
+
+/// Bootstrap prefix — pulled out so [`DB_INIT_JS`] can be spliced in
+/// between this and [`BOOTSTRAP_MAIN_JS`]. The `import * as user` MUST
+/// stay here so the init script's `user.default.schema` read sees the
+/// bound namespace.
+const BOOTSTRAP_PREFIX_JS: &str = r##"
 import * as user from "./__user__.js";
 
+"##;
+
+const BOOTSTRAP_MAIN_JS: &str = r##"
 // Vercel AI-SDK Data Stream Protocol encoder.
 //
 // Each line is `<typeId>:<json>\n`. TypeIds we emit:
@@ -857,6 +894,28 @@ pub fn load_polyfills_and_modules(
     // class above is the sole provider; building with
     // `--no-default-features` (polyfill mode) is no longer supported.
 
+    // Inject `globalThis.__zsManifestSchemaPath` BEFORE the bootstrap
+    // module evaluates. Read by the inlined `db_init.js` snippet to
+    // decide whether to run schema auto-discovery on `user.default.schema`.
+    // The actual path string is informational at runtime — the discovery
+    // path consumes the user's bundled-in default export, not a separate
+    // module — but a present-and-non-empty value is the signal that the
+    // build saw a schema and the runtime should install it before
+    // binding `default.fetch` / `default.rpc`. Missing (None) means dev
+    // mode or no-schema deploy, and the bootstrap silently no-ops.
+    {
+        let schema_path = scope
+            .get_slot::<SharedState>()
+            .and_then(|s| s.borrow().manifest_schema_path.clone());
+        if let Some(path) = schema_path {
+            if let Some(value) = v8::String::new(scope, &path) {
+                let key = v8::String::new(scope, "__zsManifestSchemaPath").unwrap();
+                let global = scope.get_current_context().global(scope);
+                global.set(scope, key.into(), value.into());
+            }
+        }
+    }
+
     // Wrap the user's module graph in the bootstrap entry.
     //
     // Layout after wrapping:
@@ -913,7 +972,7 @@ fn wrap_with_bootstrap(
     // entry 0: bootstrap becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
         specifier: "index.js".into(),
-        source: BOOTSTRAP_JS.into(),
+        source: BOOTSTRAP_JS.clone(),
     });
 
     // entry 1: user's original entry, renamed to "__user__.js". Its own
