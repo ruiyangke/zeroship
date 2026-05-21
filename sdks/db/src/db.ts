@@ -372,9 +372,12 @@ function getNativeDb(): NativeDb {
   if (db) {
     return db;
   }
-  throw new Error(
-    "@zeroship/db: env.db not available — " +
-    "is the DbPlugin registered on this runtime?"
+  throw Object.assign(
+    new Error(
+      "@zeroship/db: env.db not available — " +
+        "is the DbPlugin registered on this runtime?",
+    ),
+    { code: "native_db_unavailable" as const },
   );
 }
 
@@ -561,14 +564,21 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   // also need a coordinated rename there. The sigil is intentionally
   // namespaced (`__zeroship*`) to avoid colliding with user globals.
   //
-  // The chain is published as-is — if registerModel rejects, the
-  // dispatch shim's `await` rejects too, which is the correct signal
-  // (the platform isn't actually ready and serving a request against
-  // a broken DDL is worse than failing fast). Helpers live in
-  // `./internal-globals.ts` so the three modules that read this
-  // promise share one typed source of truth.
+  // The chain is published with `prev.catch(() => undefined).then(...)`
+  // so a prior install's rejection (a registerModel failure from an
+  // earlier `_installSchema` call) DOES NOT short-circuit this round's
+  // chain — otherwise the dispatch shim would silently await a stale
+  // failure and the new install's DDL would never get a happens-before
+  // edge to BEGIN. The new chain's own rejection still propagates: if
+  // THIS round's registerModel rejects, the published promise rejects
+  // (catch on `chain` is intentionally absent), which the auto-tx
+  // wrapper's `try { await ready; } catch {}` surfaces via the
+  // handler's own error path.
+  //
+  // Helpers live in `./internal-globals.ts` so the three modules that
+  // read this promise share one typed source of truth.
   const prev = getPlatformReady() ?? Promise.resolve();
-  setPlatformReady(prev.then(() => chain));
+  setPlatformReady(prev.catch(() => undefined).then(() => chain));
 
   // Plant the sibling-collection lookup on every Collection so the
   // `with: { fk: true }` option can resolve `refTarget` → target
@@ -615,10 +625,15 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
         }>;
       };
       if (typeof nativeAny.beginTransaction !== "function") {
-        return err(new Error(
-          "@zeroship/db: env.db.beginTransaction not available — " +
-          "runtime is missing the Transaction v8_class surface.",
-        ));
+        return err(
+          Object.assign(
+            new Error(
+              "@zeroship/db: env.db.beginTransaction not available — " +
+                "runtime is missing the Transaction v8_class surface.",
+            ),
+            { code: "native_transaction_unavailable" as const },
+          ),
+        );
       }
       // DRAIN BEFORE BEGIN — pending non-tx batched reads must complete
       // against the non-tx connection. `beginTransaction` plants TX_CONN
@@ -638,11 +653,30 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
           _idLoader: { _drain(): Promise<void> } | null;
         },
       );
-      await Promise.all(
-        collectionList
-          .map((c) => c._idLoader?._drain())
-          .filter((p): p is Promise<void> => p !== undefined),
-      );
+      // `_installSchema`'s `transaction` is documented to return
+      // `Promise<Result<R>>` — it must NEVER throw, even on a drain
+      // rejection that fires before any begin/body/commit. Wrap the
+      // drain await in a try/catch so a drained-batch failure surfaces
+      // as `err(drainErr)` instead of leaking a rejected promise up to
+      // the caller's `const { data, error } = ...` destructure.
+      try {
+        await Promise.all(
+          collectionList
+            .map((c) => c._idLoader?._drain())
+            .filter((p): p is Promise<void> => p !== undefined),
+        );
+      } catch (drainErr) {
+        const wrapped = Object.assign(
+          new Error(
+            `pre-transaction drain failed: ${
+              drainErr instanceof Error ? drainErr.message : String(drainErr)
+            }`,
+            { cause: drainErr instanceof Error ? drainErr : undefined },
+          ),
+          { code: "tx_drain_failed" as const },
+        );
+        return err(wrapped);
+      }
 
       // Bump `_txDepth` BEFORE awaiting `beginTransaction` so any
       // `get(id)` enqueued between drain resolution and BEGIN settling
@@ -664,7 +698,17 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
         );
       } catch (beginErr) {
         for (const c of collectionList) c._txDepth -= 1;
-        return err(beginErr instanceof Error ? beginErr : new Error(String(beginErr)));
+        // Preserve a native `.code` if the underlying runtime stamped
+        // one (e.g. pglite connection errors); otherwise stamp
+        // `begin_failed` so callers branching on `error.code` can
+        // distinguish a begin failure from a body/commit failure.
+        const baseErr =
+          beginErr instanceof Error ? beginErr : new Error(String(beginErr));
+        const finalErr =
+          typeof (baseErr as Error & { code?: unknown }).code === "string"
+            ? baseErr
+            : Object.assign(baseErr, { code: "begin_failed" as const });
+        return err(finalErr);
       }
 
       // Two failure modes carry different post-conditions:
@@ -727,13 +771,47 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   // Reserved names that overlap the native v8_class method surface
   // throw — silently shadowing `env.db.collection` (the native mint)
   // or `env.db.beginTransaction` is worse than failing fast at boot.
+  //
+  // Re-install hygiene: snapshot the previously-installed collection
+  // names on a hidden sigil (`__zeroshipDbInstalledNames`) and DELETE
+  // any old name that the new schema map doesn't redeclare before
+  // defining this round's properties. Without this, a first install
+  // `{users, todos}` followed by a second install `{posts}` would
+  // leave stale `env.db.users` / `env.db.todos` pointing at the OLD
+  // (HMR-detached) collections — silently mixing schemas at request
+  // time.
   if (options?.installOnEnvDb) {
-    const target = native as unknown as Record<string, unknown>;
+    const target = native as unknown as Record<string, unknown> & {
+      __zeroshipDbInstalledNames?: string[];
+    };
+    const newNames = Object.keys(collections);
+    const newNameSet = new Set(newNames);
+    const prevNames = Array.isArray(target.__zeroshipDbInstalledNames)
+      ? target.__zeroshipDbInstalledNames
+      : [];
+    // Drop every previously-installed own-property whose key is NOT
+    // redefined in this install. Overlapping names fall through to the
+    // `defineProperty` below (which re-binds to the new Collection
+    // because the descriptor was `configurable: true`).
+    for (const stale of prevNames) {
+      if (newNameSet.has(stale)) continue;
+      if (RESERVED_ENV_DB_NAMES.has(stale)) continue;
+      try {
+        delete target[stale];
+      } catch {
+        // Native v8_class may refuse the delete on a sealed prototype;
+        // best-effort cleanup, the writable:false defineProperty below
+        // for overlapping names still wins for active collections.
+      }
+    }
     for (const [name, col] of Object.entries(collections)) {
       if (RESERVED_ENV_DB_NAMES.has(name)) {
-        throw new Error(
-          `@zeroship/db: schema name "${name}" collides with a native env.db method — ` +
-          `rename the collection. Reserved: ${[...RESERVED_ENV_DB_NAMES].join(", ")}.`,
+        throw Object.assign(
+          new Error(
+            `@zeroship/db: schema name "${name}" collides with a native env.db method — ` +
+              `rename the collection. Reserved: ${[...RESERVED_ENV_DB_NAMES].join(", ")}.`,
+          ),
+          { code: "reserved_env_db_name" as const },
         );
       }
       Object.defineProperty(target, name, {
@@ -743,6 +821,15 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
         writable: false,
       });
     }
+    // Stash the new key set on a hidden, non-enumerable sigil so the
+    // next re-install can scrub anything we own that this install
+    // dropped. `configurable: true` so a third install can replace it.
+    Object.defineProperty(target, "__zeroshipDbInstalledNames", {
+      value: newNames,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
   }
 
   return db as Db<T>;
