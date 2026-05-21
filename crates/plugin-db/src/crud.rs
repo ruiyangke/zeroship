@@ -24,7 +24,7 @@
 //! ops trust their callers.
 
 use serde_json::Value;
-use zeroship_runtime::state::{OpError, OpResult, ResolveValue};
+use zeroship_runtime::state::{OpResult, ResolveValue};
 
 use crate::exec::{exec_count, exec_mutation_with_emit, exec_query};
 use crate::query;
@@ -64,7 +64,7 @@ pub(crate) fn dispatch_find_one<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -85,7 +85,7 @@ pub(crate) fn dispatch_find_one<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -120,7 +120,7 @@ pub(crate) fn dispatch_find<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -137,7 +137,7 @@ pub(crate) fn dispatch_find<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -168,7 +168,7 @@ pub(crate) fn dispatch_insert<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -198,7 +198,7 @@ pub(crate) fn dispatch_insert<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -224,7 +224,7 @@ pub(crate) fn dispatch_insert_many<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -250,7 +250,7 @@ pub(crate) fn dispatch_insert_many<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -281,7 +281,7 @@ pub(crate) fn dispatch_update_one<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -311,7 +311,7 @@ pub(crate) fn dispatch_update_one<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -338,7 +338,7 @@ pub(crate) fn dispatch_update_many<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -369,7 +369,7 @@ pub(crate) fn dispatch_update_many<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -399,7 +399,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -429,7 +429,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -455,7 +455,7 @@ pub(crate) fn dispatch_delete_many<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -486,7 +486,7 @@ pub(crate) fn dispatch_delete_many<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -531,7 +531,7 @@ pub(crate) fn dispatch_aggregate<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -548,7 +548,7 @@ pub(crate) fn dispatch_aggregate<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -575,7 +575,7 @@ pub(crate) fn dispatch_distinct<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -607,7 +607,7 @@ pub(crate) fn dispatch_distinct<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -637,7 +637,7 @@ pub(crate) fn dispatch_count<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -655,7 +655,7 @@ pub(crate) fn dispatch_count<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -687,7 +687,7 @@ pub(crate) fn dispatch_upsert<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -721,7 +721,7 @@ pub(crate) fn dispatch_upsert<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -754,7 +754,7 @@ pub(crate) fn dispatch_find_or_create<'s>(
             state.borrow_mut().spawned_ops.push(Box::pin(async move {
                 OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(OpError::error(e.to_string())),
+                    value: ResolveValue::RejectError(crate::error::DbError::from(e).to_op_error()),
                     request_id,
                 }
             }));
@@ -795,7 +795,7 @@ pub(crate) fn dispatch_find_or_create<'s>(
             }
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(OpError::error(e)),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }

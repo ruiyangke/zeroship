@@ -1,8 +1,8 @@
 //! SQL execution helpers — the only consumer of `compio_postgres::Pool`
 //! on the CRUD hot path.
 //!
-//! Every CRUD dispatch helper (in `crate::callbacks` / future `crate::crud`)
-//! lowers its `BuiltQuery` through one of:
+//! Every CRUD dispatch helper (in `crate::crud`) lowers its
+//! `BuiltQuery` through one of:
 //!
 //! - [`exec_query`] — read path, returns rows as a JSON array string.
 //! - [`exec_count`] — read path that extracts a single `count` column.
@@ -14,6 +14,14 @@
 //! [`crate::TX_CONN`] when an explicit `Transaction` / auto-tx is
 //! active and the pool otherwise.
 //!
+//! ## Error rail
+//!
+//! Every fallible helper here returns [`crate::error::DbError`] — the
+//! `dispatch_*` layer in `crate::crud` calls
+//! [`crate::error::DbError::to_op_error`] at the V8 boundary so each
+//! throw carries `.code` for the SDK to branch on (replaces the
+//! pre-stage-8b `Result<_, String>` rail).
+//!
 //! The transaction-emit deferral (Gap B closure) lives here:
 //! [`queue_or_emit`] decides between immediate emit and TX-pending
 //! queueing; [`drain_pending_emits_on_commit`] fires the queue on
@@ -23,28 +31,29 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
+use crate::error::DbError;
 use crate::query::BuiltQuery;
-use crate::v8_bridge::{fmt_db_err, rows_to_json};
+use crate::v8_bridge::rows_to_json;
 use crate::DB_POOL;
 
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 pub(crate) async fn run_sql(
     sql: &str,
     params: &[&str],
-) -> Result<Vec<compio_postgres::Row>, String> {
+) -> Result<Vec<compio_postgres::Row>, DbError> {
     // Check if there's an active transaction
     let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
     if has_tx {
         // Use transaction connection
         let client = crate::TX_CONN
             .with(|tx| tx.borrow_mut().take())
-            .ok_or_else(|| "db: transaction connection lost".to_string())?;
+            .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
         let result = client.query_text_params(sql, params).await;
         // Put it back
         crate::TX_CONN.with(|tx| {
             tx.borrow_mut().replace(client);
         });
-        return result.map_err(|e| fmt_db_err(&e));
+        return result.map_err(|e| DbError::from_pg(&e));
     }
 
     // No transaction — use pool
@@ -52,21 +61,21 @@ pub(crate) async fn run_sql(
     if !has_pool {
         crate::init_pool_async()
             .await
-            .map_err(|e| format!("db: lazy init failed: {e}"))?;
+            .map_err(|e| DbError::config("not_configured", format!("db: lazy init failed: {e}")))?;
     }
     let pool = DB_POOL.with(|p| p.borrow().as_ref().map(Rc::clone));
-    let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
+    let pool = pool.ok_or_else(|| {
+        DbError::config("not_configured", "db: pool not initialized".to_string())
+    })?;
     pool.query_text_params(sql, params)
         .await
-        .map_err(|e| fmt_db_err(&e))
+        .map_err(|e| DbError::from_pg(&e))
 }
 
 /// Execute a built query via pool (or TX conn) and return JSON string result.
-pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
+pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<String, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = run_sql(&bq.sql, &param_refs)
-        .await
-        .map_err(|e| format!("db query error: {e}"))?;
+    let rows = run_sql(&bq.sql, &param_refs).await?;
     Ok(rows_to_json(&rows))
 }
 
@@ -75,11 +84,9 @@ pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<String, String> {
 /// Returns the raw integer; callers wrap into the appropriate
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
-pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, String> {
+pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = run_sql(&bq.sql, &param_refs)
-        .await
-        .map_err(|e| format!("db query error: {e}"))?;
+    let rows = run_sql(&bq.sql, &param_refs).await?;
 
     Ok(rows
         .first()
@@ -88,12 +95,9 @@ pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, String> {
 }
 
 /// Execute an insert/update/delete query, returning the affected rows.
-pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<String, String> {
+pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<String, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    let rows = run_sql(&bq.sql, &param_refs)
-        .await
-        .map_err(|e| format!("db mutation error: {e}"))?;
-
+    let rows = run_sql(&bq.sql, &param_refs).await?;
     Ok(rows_to_json(&rows))
 }
 
@@ -120,7 +124,7 @@ pub(crate) async fn exec_mutation_with_emit(
     app_id: &str,
     collection: &str,
     op: crate::broker::ChangeOp,
-) -> Result<String, String> {
+) -> Result<String, DbError> {
     let json = exec_mutation(bq).await?;
     // Parse the returned JSON to derive (pk per row, count of rows).
     // The query builders all use RETURNING * (insert/update) or
@@ -240,16 +244,18 @@ pub(crate) fn clear_pending_emits() {
 /// pooled connection. First call kicks off `init_pool_async` (Postgres
 /// connect + warm-up); subsequent calls clone the `Rc<Pool>` out of
 /// the per-thread cell.
-pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, String> {
+pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> {
     let has_pool = DB_POOL.with(|p| p.borrow().is_some());
     if !has_pool {
         crate::init_pool_async()
             .await
-            .map_err(|e| format!("db: lazy init failed: {e}"))?;
+            .map_err(|e| DbError::config("not_configured", format!("db: lazy init failed: {e}")))?;
     }
     DB_POOL
         .with(|p| p.borrow().as_ref().map(Rc::clone))
-        .ok_or_else(|| "db: pool not initialized".to_string())
+        .ok_or_else(|| {
+            DbError::config("not_configured", "db: pool not initialized".to_string())
+        })
 }
 
 /// **Test-only**: end-to-end wrapper around [`exec_mutation_with_emit`]
@@ -266,5 +272,7 @@ pub async fn exec_mutation_with_emit_for_tests(
     collection: &str,
     op: crate::broker::ChangeOp,
 ) -> Result<String, String> {
-    exec_mutation_with_emit(bq, app_id, collection, op).await
+    exec_mutation_with_emit(bq, app_id, collection, op)
+        .await
+        .map_err(DbError::into_string)
 }

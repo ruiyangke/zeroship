@@ -162,7 +162,7 @@ fn dispatch_by_spec<'s>(
             Err(e) => {
                 return OpResult::JsValue {
                     resolver: resolver_global,
-                    value: ResolveValue::RejectError(OpError::error(e)),
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 };
             }

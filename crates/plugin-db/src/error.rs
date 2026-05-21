@@ -288,6 +288,27 @@ impl DbError {
     }
 }
 
+// Builder-side QueryError → DbError so the dispatch helpers can
+// `?`-flow query-construction failures through the same `to_op_error()`
+// boundary. Builder errors are user-input refusals (bad filter, bad
+// collection name, bad identifier) — modelled as `ValidationFailed`
+// with a static code the SDK can branch on.
+impl From<crate::query::QueryError> for DbError {
+    fn from(e: crate::query::QueryError) -> Self {
+        use crate::query::QueryError;
+        let (code, msg) = match e {
+            QueryError::InvalidFilter(m) => ("invalid_filter", m),
+            QueryError::InvalidCollection(m) => ("invalid_collection", m),
+            QueryError::InvalidIdent(m) => ("invalid_identifier", m),
+        };
+        DbError::ValidationFailed {
+            code,
+            message: msg,
+            hint: None,
+        }
+    }
+}
+
 /// Walk the `std::error::Error::source` chain so the JS console sees the
 /// underlying Postgres `DbError` body, not the bare wrapper kind. Mirrors
 /// the old `fmt_db_err` from `v8_bridge` so the message shape is

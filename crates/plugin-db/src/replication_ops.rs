@@ -47,7 +47,7 @@ pub fn replication_setup_dispatch<'s>(
             Err(e) => {
                 return OpResult::Failed {
                     op_id,
-                    error: e,
+                    error: e.into_string(),
                     request_id,
                 }
             }
@@ -81,7 +81,7 @@ pub fn replication_watchdog_dispatch<'s>(
             Err(e) => {
                 return OpResult::Failed {
                     op_id,
-                    error: e,
+                    error: e.into_string(),
                     request_id,
                 }
             }
@@ -116,7 +116,7 @@ pub fn replication_drop_abandoned_dispatch<'s>(
             Err(e) => {
                 return OpResult::Failed {
                     op_id,
-                    error: e,
+                    error: e.into_string(),
                     request_id,
                 }
             }
@@ -187,7 +187,7 @@ pub fn start_replication_consumer_dispatch<'s>(
             Err(e) => {
                 return OpResult::Failed {
                     op_id,
-                    error: e,
+                    error: e.into_string(),
                     request_id,
                 }
             }

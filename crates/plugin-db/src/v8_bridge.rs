@@ -21,7 +21,10 @@
 //! - **Row decoding**: [`row_to_json`], [`column_to_json`],
 //!   [`rows_to_json`] — Postgres OID → JSON conversion, used by every
 //!   exec path. [`fmt_db_err`] walks the source chain so DbError
-//!   messages reach JS instead of bare wrapper kinds.
+//!   messages reach JS instead of bare wrapper kinds; this is a thin
+//!   shim over [`crate::error::DbError::from_pg`] that returns the
+//!   flattened message string for callers still on the `Result<_,
+//!   String>` rail.
 
 use serde_json::Value;
 use zeroship_runtime::state::SharedState;
@@ -307,17 +310,18 @@ pub(crate) fn setup_js_promise<'s>(
 // Postgres row decoding
 // ---------------------------------------------------------------------------
 
-/// Format a compio_postgres::Error with its full source chain — surfaces
-/// the underlying Postgres DbError message instead of the bare wrapper
-/// kinds ("db error", "unexpected message from server").
+/// Format a `compio_postgres::Error` as a flat string with its full
+/// source chain — surfaces the underlying Postgres `DbError` message
+/// instead of the bare wrapper kinds ("db error", "unexpected message
+/// from server").
+///
+/// Equivalent to `crate::error::DbError::from_pg(e).into_string()` —
+/// retained as the legacy entry point for callers still on the
+/// `Result<_, String>` rail. New code should prefer
+/// [`crate::error::DbError::from_pg`] directly so the SQLSTATE
+/// classification reaches the V8 boundary intact.
 pub(crate) fn fmt_db_err(e: &compio_postgres::Error) -> String {
-    let mut msg = format!("db: {e}");
-    let mut cur: &dyn std::error::Error = e;
-    while let Some(src) = std::error::Error::source(cur) {
-        msg.push_str(&format!(" — caused by: {src}"));
-        cur = src;
-    }
-    msg
+    crate::error::DbError::from_pg(e).into_string()
 }
 
 /// Convert rows to a JSON array string.

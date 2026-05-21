@@ -248,9 +248,14 @@ impl Migration {
 
 /// Lazy pool accessor — wraps [`crate::callbacks::ensure_pool`] with
 /// an `OpError` boundary so the `Migration` v8_async_methods return
-/// the V8-aware error type the macro expects.
+/// the V8-aware error type the macro expects. The typed `DbError` from
+/// `exec::ensure_pool` is stamped onto `OpError::coded(...)` via
+/// `to_op_error()`, so the JS exception carries `.code` (typically
+/// `not_configured`).
 async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, OpError> {
-    crate::callbacks::ensure_pool().await.map_err(OpError::error)
+    crate::callbacks::ensure_pool()
+        .await
+        .map_err(crate::error::DbError::to_op_error)
 }
 
 /// Coerce a JS number to a finite, integer-valued `i64`. Used by
