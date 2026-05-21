@@ -29,12 +29,12 @@
  * `{ fetch, rpc }`); the schema lives on the USER module loaded via
  * the ModuleRunner. `maybeRegisterSchema` is the dev-only lazy bridge
  * — it imports the user module on first request and calls
- * `_installSchema` if the user exports `default.schema`. Going
- * top-level-await on the user import here would block dev startup on
- * potentially-failing imports, so the registration stays lazy. The
- * auto-tx dispatcher's defense-in-depth await on
- * `__zeroshipPlatformReady` survives both prod (eager) and dev (lazy)
- * paths.
+ * `installSchema(schema, env.db)` if the user exports
+ * `default.schema`. Going top-level-await on the user import here
+ * would block dev startup on potentially-failing imports, so the
+ * registration stays lazy. The auto-tx dispatcher's defense-in-depth
+ * await on the module-local `_schemaReady` survives both prod (eager)
+ * and dev (lazy) paths.
  *
  * Procedure discovery: the transform plugin appends
  * `globalThis.__register(wireId, fn)` to every server module's emitted
@@ -46,18 +46,20 @@
  */
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
-// Typed accessors for the SDK-internal globals shared with
-// `@zeroship/db`. Importing them statically gives us one source of truth
-// for the names.
-import {
-  getPlatformReady,
-  INSTALL_SCHEMA_NAME,
-} from "@zeroship/db/internal";
 
 const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
 
 let runner: ModuleRunner | null = null;
 let runnerPromise: Promise<ModuleRunner> | null = null;
+
+// Module-local handle on the most recent install's `ready` promise.
+// Stage 6 of the @zeroship/db refactor replaces the cross-module
+// `globalThis.__zeroshipPlatformReady` with a per-isolate (per-module-
+// load) variable. The auto-tx dispatch path captures it via closure
+// below; HMR re-runs of `maybeRegisterSchema` overwrite the handle
+// in place so the second request awaits the FRESH chain, not the
+// stale one from before the schema edit.
+let _schemaReady: Promise<unknown> | undefined;
 
 // Registry of server functions. Populated by `__register(name, fn)` calls
 // that the transform appends to server modules. Importing the user
@@ -129,9 +131,9 @@ let schemaRegistered = false;
  * avoid a top-level-await that would block dev startup on a
  * potentially-failing user import.
  *
- * `__zsDispatch`'s auto-tx waits on `__zeroshipPlatformReady` (set by
- * `_installSchema`) so the first RPC request lands AFTER the DDL
- * chain has settled, even though registration is lazy here.
+ * `dispatchRpc`'s defense-in-depth await on the module-local
+ * `_schemaReady` makes the first RPC request land AFTER the DDL chain
+ * has settled, even though registration is lazy here.
  */
 async function maybeRegisterSchema(mod: any): Promise<void> {
   if (schemaRegistered) return;
@@ -139,7 +141,7 @@ async function maybeRegisterSchema(mod: any): Promise<void> {
   // classes match the ones the user's module instantiated. Importing
   // the SDK from the bundled dev-bootstrap would give us a DIFFERENT
   // class (esbuild's bundled copy vs Vite's loaded copy), breaking
-  // `instanceof` checks inside `_installSchema`.
+  // `instanceof` checks inside `installSchema`.
   let r: ModuleRunner;
   try {
     r = await getRunner();
@@ -165,11 +167,29 @@ async function maybeRegisterSchema(mod: any): Promise<void> {
 
   try {
     const dbSdk: any = await r.import("@zeroship/db");
-    const installFn = dbSdk[INSTALL_SCHEMA_NAME];
-    if (typeof installFn === "function") {
-      installFn(schema, { installOnEnvDb: true });
-      console.log(`[zeroship:dev] registered schema from default-export`);
+    const { installSchema } = dbSdk;
+    if (typeof installSchema !== "function") {
+      schemaRegistered = true;
+      return;
     }
+    // Resolve the live env.db through the runtime's __zs_env() global,
+    // which mirrors what production does in `db_init.js`. Falling back
+    // to the SDK's own `env.db` lookup (via the `zeroship` virtual
+    // module) would be a second import path; keeping the source of
+    // truth on the bootstrap side matches the runtime's behaviour.
+    const envObj = (globalThis as any).__zs_env?.();
+    const envDb = envObj && envObj.db;
+    if (!envDb) {
+      console.error(
+        `[zeroship:dev] schema registration skipped: env.db not available — ` +
+          `is the DbPlugin registered on this runtime?`,
+      );
+      schemaRegistered = true;
+      return;
+    }
+    const { ready } = installSchema(schema, envDb);
+    _schemaReady = ready;
+    console.log(`[zeroship:dev] registered schema from default-export`);
   } catch (e: any) {
     console.error(`[zeroship:dev] schema registration failed:`, e?.message ?? e);
   } finally {
@@ -305,21 +325,20 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   // Re-import per call so HMR invalidations land naturally. On the
   // FIRST call this also triggers schema registration via
   // `maybeRegisterSchema(mod)` inside `getUserModule` — that's where
-  // `__zeroshipPlatformReady` first gets published.
+  // `_schemaReady` first gets populated.
   const mod = await getUserModule();
   const { rpc } = buildStandard(mod);
 
-  // Await platform-readiness AFTER the schema install has had a chance
-  // to publish `globalThis.__zeroshipPlatformReady`. Reading it BEFORE
-  // the import would observe `undefined` on the first call (schema
-  // hasn't registered yet) and skip the wait, racing the auto-tx
-  // dispatcher against an in-flight DDL chain. Under pglite-socket's
-  // per-connection-in-tx serialisation, opening BEGIN while
-  // registerModel still holds `pg_advisory_lock` deadlocks — so we
-  // gate here. No-op on the warm path (the chain has settled).
-  const ready = getPlatformReady();
-  if (ready && typeof ready.then === "function") {
-    try { await ready; } catch { /* surfaces via the handler */ }
+  // Await schema-readiness AFTER `getUserModule` has had a chance to
+  // populate `_schemaReady`. Reading it BEFORE the import would
+  // observe `undefined` on the first call (schema hasn't registered
+  // yet) and skip the wait, racing the auto-tx dispatcher against an
+  // in-flight DDL chain. Under pglite-socket's per-connection-in-tx
+  // serialisation, opening BEGIN while registerModel still holds
+  // `pg_advisory_lock` deadlocks — so we gate here. No-op on the warm
+  // path (the chain has settled).
+  if (_schemaReady && typeof _schemaReady.then === "function") {
+    try { await _schemaReady; } catch { /* surfaces via the handler */ }
   }
 
   const dispatch = (globalThis as any).__zsDispatch;

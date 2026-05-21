@@ -202,7 +202,8 @@ describe("buildServerEntrySource — forbidden helpers (Stage 5b cleanup)", () =
     "_zsRegister",
     "__zsRegister",
     "_rpc-registry",
-    "_installSchema",
+    "_installSchema",               // Stage-6 legacy (also forbid the new name)
+    "installSchema",
     "__zsSchemaInit",
     "_zsSchemaMod",
     "@zeroship/db",                 // No SDK imports in the entry
