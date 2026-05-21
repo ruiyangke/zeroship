@@ -417,6 +417,18 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
 ]);
 
 /**
+ * Re-entrancy guard for `_installSchema`. HMR storms (multiple
+ * concurrent reloads racing through `getRunner().then(...)`) can
+ * interleave two installs that both read `__zeroshipDbInstalledNames`
+ * before either writes back, leaving stale own-properties bound to
+ * orphaned Collection wrappers. The dev-bootstrap's `schemaRegistered`
+ * latch is the real serializer; this guard makes a programming-error
+ * concurrent call surface as `install_in_flight` instead of corrupting
+ * `env.db` silently.
+ */
+let _installInFlight = false;
+
+/**
  * Framework-internal helper that backs the `export default { schema }`
  * convention. Walks the schema map, runs `registerModel` in topological
  * order so parent tables (referenced via `t.ref(...)`) are created
@@ -435,6 +447,53 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
  * through `env.db.<collection>` once the install has settled.
  */
 export function _installSchema<const T extends Record<string, SchemaInput>>(
+  schemas: T,
+  options?: InstallSchemaOptions,
+): Db<T> {
+  // Re-entrancy guard. `_installSchema` is documented as single-threaded
+  // (the dev-bootstrap's `schemaRegistered` latch enforces this for HMR
+  // reloads). If a caller violates the contract we throw a typed error
+  // rather than risk a stale `__zeroshipDbInstalledNames` overwrite
+  // orphaning Collection wrappers on `env.db`.
+  if (_installInFlight) {
+    throw Object.assign(
+      new Error(
+        "@zeroship/db: _installSchema called while a previous install is in flight — " +
+          "this helper must run from a single-threaded scope (the dev-bootstrap and " +
+          "production synthetic SSR entry both serialize).",
+      ),
+      { code: "install_in_flight" as const },
+    );
+  }
+  _installInFlight = true;
+  try {
+    return _installSchemaInner(schemas, options);
+  } catch (e) {
+    // Publish a rejected platform-ready promise so a consumer that
+    // awaits `__zeroshipPlatformReady` (the auto-tx dispatcher) sees
+    // the install failure instead of awaiting a stale prior value.
+    // `prev.catch(() => undefined).then(() => Promise.reject(...))`
+    // mirrors the success path's chaining so a previous install's
+    // rejection still doesn't shadow this round.
+    //
+    // Attach a no-op `.catch` to the published promise to silence the
+    // unhandled-rejection warning when nothing awaits it (e.g. in
+    // tests that probe the synchronous throw). The handler is added
+    // to a sibling chain so an actual awaiter still sees the
+    // rejection on the original promise — `.catch` on a Promise does
+    // not mutate the original; it returns a new resolved one.
+    const prev = getPlatformReady() ?? Promise.resolve();
+    const reason = e instanceof Error ? e : new Error(String(e));
+    const published = prev.catch(() => undefined).then(() => Promise.reject(reason));
+    published.catch(() => undefined);
+    setPlatformReady(published);
+    throw e;
+  } finally {
+    _installInFlight = false;
+  }
+}
+
+function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   schemas: T,
   options?: InstallSchemaOptions,
 ): Db<T> {
@@ -500,8 +559,9 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
   // inline-FK CREATE TABLE. Sequencing in JS removes the race
   // entirely.
   //
-  // We also publish the chain on `globalThis.__zeroshipPlatformReady`
-  // so the SSR dispatch shim can await it BEFORE opening the
+  // The chain is later published on `globalThis.__zeroshipPlatformReady`
+  // (at the end of this function, AFTER the env.db install block) so
+  // the SSR dispatch shim can await it BEFORE opening the
   // request-scope auto-tx. pglite-socket's TCP proxy serializes
   // pglite queries per-connection-in-tx, so opening an auto-tx
   // connection while the orchestrator's registerModel connection
@@ -551,34 +611,6 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
     });
     (col as unknown as { _setReady(p: Promise<void> | null): void })._setReady(chain);
   }
-
-  // Publish a "platform ready" promise the SSR dispatch shim awaits
-  // before opening the auto-tx. Multiple `_installSchema` calls in the
-  // same isolate (rare but possible if a user composes two app bundles)
-  // are sequenced through one promise so the shim only needs to
-  // `await` a single handle.
-  //
-  // Consumers: `sdks/vite-plugin/src/rpc-registry.ts` (production
-  // dispatch shim) and `sdks/vite-plugin/src/dev-bootstrap/index.ts`
-  // (dev bootstrap). Both read this exact name; renaming it would
-  // also need a coordinated rename there. The sigil is intentionally
-  // namespaced (`__zeroship*`) to avoid colliding with user globals.
-  //
-  // The chain is published with `prev.catch(() => undefined).then(...)`
-  // so a prior install's rejection (a registerModel failure from an
-  // earlier `_installSchema` call) DOES NOT short-circuit this round's
-  // chain — otherwise the dispatch shim would silently await a stale
-  // failure and the new install's DDL would never get a happens-before
-  // edge to BEGIN. The new chain's own rejection still propagates: if
-  // THIS round's registerModel rejects, the published promise rejects
-  // (catch on `chain` is intentionally absent), which the auto-tx
-  // wrapper's `try { await ready; } catch {}` surfaces via the
-  // handler's own error path.
-  //
-  // Helpers live in `./internal-globals.ts` so the three modules that
-  // read this promise share one typed source of truth.
-  const prev = getPlatformReady() ?? Promise.resolve();
-  setPlatformReady(prev.catch(() => undefined).then(() => chain));
 
   // Plant the sibling-collection lookup on every Collection so the
   // `with: { fk: true }` option can resolve `refTarget` → target
@@ -831,6 +863,30 @@ export function _installSchema<const T extends Record<string, SchemaInput>>(
       writable: true,
     });
   }
+
+  // Publish "platform ready" only AFTER both the registerModel chain
+  // is wired AND the env.db own-property install (if requested) has
+  // completed. The auto-tx dispatch shim awaits this promise before
+  // opening the request-scope auto-tx; publishing earlier would let it
+  // dispatch against an `env.db` that lacks the just-installed
+  // collections when a synchronous failure (reserved-name collision,
+  // any throw after the registerModel chain was built) lands between
+  // the publish and the install.
+  //
+  // Consumers: `sdks/vite-plugin/src/rpc-registry.ts` (production
+  // dispatch shim) and `sdks/vite-plugin/src/dev-bootstrap/index.ts`
+  // (dev bootstrap). Both read this exact name; renaming it needs a
+  // coordinated rename via `PLATFORM_READY_NAME` in
+  // `./internal-globals.ts`.
+  //
+  // Multiple `_installSchema` calls in the same isolate (HMR reloads,
+  // multi-bundle composition) chain through the previous value: a
+  // prior install's rejection is swallowed via
+  // `prev.catch(() => undefined)` so the dispatcher doesn't reject on
+  // a stale failure, but the new chain's own rejection still
+  // propagates so this round's registerModel failures surface.
+  const prev = getPlatformReady() ?? Promise.resolve();
+  setPlatformReady(prev.catch(() => undefined).then(() => chain));
 
   return db as Db<T>;
 }

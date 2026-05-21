@@ -110,4 +110,91 @@ describe("_installSchema", () => {
       );
     }
   });
+
+  test("__zeroshipPlatformReady reflects a synchronous install failure", async () => {
+    // R3 IMPORTANT-1 regression. A reserved-name collision throws
+    // synchronously from `_installSchema` AFTER (in the prior layout)
+    // the platform-ready chain had already been published. The auto-tx
+    // dispatcher would then await that stale chain — which resolved on
+    // registerModel success — and dispatch against an `env.db` whose
+    // collections were never bound. The fix publishes platform-ready
+    // only on success, and stamps a rejected promise on synchronous
+    // throw so awaiters see the failure.
+    const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
+    delete g.__zeroshipPlatformReady;
+    const native = makeMockNative();
+    assert.throws(
+      () => _installSchema(
+        { collection: { name: t.string().required() } },
+        { native, installOnEnvDb: true },
+      ),
+      /collides with a native env.db method/,
+    );
+    // The published handle must exist and must reject — the auto-tx
+    // dispatcher's `try { await ready } catch {}` then surfaces the
+    // failure instead of awaiting a (stale) resolved promise.
+    const ready = g.__zeroshipPlatformReady;
+    assert.ok(ready instanceof Promise, "platform-ready must be published on failure");
+    let caught: unknown = null;
+    try { await ready; } catch (e) { caught = e; }
+    assert.ok(caught instanceof Error, "published handle must reject with the install error");
+    assert.match((caught as Error).message, /collides with a native env\.db method/);
+    delete g.__zeroshipPlatformReady;
+  });
+
+  test("__zeroshipPlatformReady is NOT published until install completes", async () => {
+    // The publish must happen AFTER env.db own-properties are bound,
+    // not before the install block. Verify that on a successful
+    // install, `globalThis.__zeroshipPlatformReady` is set AND
+    // `env.db.<name>` is bound at the same observation point.
+    const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
+    delete g.__zeroshipPlatformReady;
+    const native = makeMockNative();
+    _installSchema(
+      { items: { name: t.string().required() } },
+      { native, installOnEnvDb: true },
+    );
+    const handle = native as unknown as Record<string, unknown>;
+    assert.ok(handle.items, "env.db.items must be bound by the time the publish lands");
+    assert.ok(g.__zeroshipPlatformReady instanceof Promise, "platform-ready must be published on success");
+    await g.__zeroshipPlatformReady;
+    delete g.__zeroshipPlatformReady;
+  });
+
+  test("re-entrant install throws install_in_flight", () => {
+    // R3 IMPORTANT-3 regression. The install path is synchronous, so
+    // the guard only fires on true re-entry within one stack frame —
+    // e.g. a getter on the schema map that recursively calls back
+    // into `_installSchema`. HMR storms in practice are serialised by
+    // the dev-bootstrap's `schemaRegistered` latch; this guard exists
+    // for the case where that latch is bypassed.
+    const g = globalThis as { __zeroshipPlatformReady?: Promise<unknown> };
+    delete g.__zeroshipPlatformReady;
+    const innerNative = makeMockNative();
+    let caught: unknown = null;
+    // A schema map whose first key is read via a getter that synchronously
+    // re-enters `_installSchema`. The outer install begins, reads
+    // `Object.entries(schemas)` (which fires the getter), and the
+    // inner call must throw `install_in_flight`.
+    const reentrantSchema = {
+      get first(): { name: ReturnType<typeof t.string> } {
+        try {
+          _installSchema(
+            { other: { name: t.string().required() } },
+            { native: innerNative, installOnEnvDb: true },
+          );
+        } catch (e) {
+          caught = e;
+        }
+        return { name: t.string().required() };
+      },
+    } as { first: { name: ReturnType<typeof t.string> } };
+    _installSchema(
+      reentrantSchema,
+      { native: makeMockNative(), installOnEnvDb: true },
+    );
+    assert.ok(caught instanceof Error, "re-entrant call must throw");
+    assert.equal((caught as { code?: string }).code, "install_in_flight");
+    delete g.__zeroshipPlatformReady;
+  });
 });
