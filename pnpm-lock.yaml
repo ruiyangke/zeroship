@@ -664,6 +664,9 @@ importers:
         specifier: workspace:*
         version: link:../types
     devDependencies:
+      '@zeroship/bootstrap':
+        specifier: workspace:*
+        version: link:../bootstrap
       tsx:
         specifier: 'catalog:'
         version: 4.21.0

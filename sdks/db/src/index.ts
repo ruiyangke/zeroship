@@ -11,16 +11,13 @@ export { subscribe } from "./subscribe.js";
 export type { Subscription, SubscriptionEvent } from "./subscribe.js";
 export type { LiveQuery, LiveOptions } from "./live.js";
 
-// Types
-export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions } from "./db.js";
+// Types — `Db`, `TxCollection`, `TxQuery`, `Collections`, `DbExtensions`,
+// `TransactionOptions`, `SchemaInput` are user-facing (the shape of
+// `env.db` users see in autocomplete; the parameter type of
+// `db.transaction(tx => ...)`; etc). Stage 7 moved the runtime helpers
+// (installSchema, model, normalizeSchema, ...) into @zeroship/bootstrap;
+// the public type surface stayed here so user code keeps importing from
+// @zeroship/db.
+export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput } from "./db.js";
 export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, Infer, InferRow, InferRowInput, InferId } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";
-
-// Framework-internal — the synthetic SSR entry (`@zeroship/vite-plugin`)
-// and dev-bootstrap call this to register schemas declared via
-// `export default { schema }`. User code MUST NOT call this directly;
-// declare the schema once and access collections through `env.db.<name>`.
-// Kept in the main entry (no underscore prefix — this is the stable
-// framework-internal surface, not "hide from autocomplete") so the
-// SSR build doesn't have to know about any subpath export.
-export { installSchema } from "./db.js";

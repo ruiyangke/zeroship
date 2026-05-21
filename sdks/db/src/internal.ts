@@ -36,3 +36,27 @@ export type {
   FieldDef,
 } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";
+
+// Test-only hooks — exposed here (subpath, not public ./) so tests
+// reaching into Collection's warning state hit the SAME module
+// instance as the runtime CRUD path. Without the subpath, tests
+// importing from `../src/test-hooks.js` would compile through tsx
+// and observe a separate set of warning maps.
+export {
+  __zeroshipDbResetIndexWarnings,
+  __zeroshipDbWarnedShapesSize,
+} from "./collection.js";
+export {
+  __zeroshipDbResetAccShapeWarnings,
+  __zeroshipDbWarnedAccShapesSize,
+} from "./utils.js";
+
+// Internal validation entry points — used by the c2-union tests which
+// exercise the validator against synthetic schemas without going
+// through Collection.{insert,update}. Same module-identity logic as
+// the warning hooks above.
+export { validateDoc, checkPartial } from "./validate.js";
+
+// Aggregate-pipeline translator — used by warned-acc-shapes-cap to
+// drive the dedup state the matching internal getter inspects.
+export { translateAggregatePipeline } from "./utils.js";

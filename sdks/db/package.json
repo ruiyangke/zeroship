@@ -33,6 +33,7 @@
     "@zeroship/types": "workspace:*"
   },
   "devDependencies": {
+    "@zeroship/bootstrap": "workspace:*",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "zeroship": "workspace:*"
