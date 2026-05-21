@@ -4,19 +4,14 @@
 // runs INSIDE the bootstrap module's top-level evaluation — before the
 // runtime resolves `default.fetch` / `default.rpc` off the namespace.
 //
-// Stage 4 of the schema auto-discovery refactor moves the IIFE that
-// used to live in the synthetic SSR entry (vite-plugin's
-// `rpc-registry.ts::buildSchemaRegistrationBlock`) into the runtime.
-// The vite-plugin no longer emits any schema-side glue; the manifest's
-// `exports.schema` field is still produced as a presence hint that the
-// runtime reads to decide whether to run discovery at all.
-//
-// Discovery resolves the schema from `user.default.schema` — the
-// `export default { schema, fetch }` convention. In production this is
-// rolled into the worker entry bundle by Vite; in dev the
-// dev-bootstrap calls `_installSchema` itself via its own
-// ModuleRunner-driven path, so this script is a no-op there (the
-// manifest path is undefined in dev).
+// Stage 5c of the ZS-standard refactor removes the
+// `manifest.exports.schema` reliance. Schema is read directly off the
+// loaded entry's `default.schema`. The Vite plugin's synthetic entry
+// re-exports `_zsUserDefault.schema` on the bootstrap-visible
+// `user.default.schema`; raw `.js` deploys with `export default
+// { schema: {...} }` work without any tooling. No manifest field, no
+// dynamic-import indirection — the schema lives on the module the
+// bootstrap already imported as `user`.
 //
 // Top-level-await pattern: V8's module evaluation runs the dynamic
 // `import("@zeroship/db")` synchronously through the microtask
@@ -28,22 +23,19 @@
 // entry can await that promise without racing.
 //
 // Guards:
-//   - `__zsManifestSchemaPath` undefined → no manifest-declared schema
-//     (dev mode, SSG-only deploys, apps without DB). Skip entirely.
 //   - `__zsBeginAutoTx` undefined → no DbPlugin registered on this
 //     runtime. `_installSchema` would throw "env.db not available";
 //     skip silently to support dev runs without DATABASE_URL.
-//   - `user.default.schema` not a plain object → skip; the SDK's
-//     own `_installSchema` would reject the input anyway.
+//   - `user.default.schema` not a plain object → skip; covers
+//     RPC-only / fetch-only apps and the dev-bootstrap (whose own
+//     `default` carries `{ fetch, rpc }` only — schema installs lazily
+//     on first request via `maybeRegisterSchema`).
 //
 // Errors thrown by `_installSchema` (validation, naming collisions)
 // re-raise — module evaluation rejects, the runtime surfaces it as an
 // init failure, and the worker refuses to serve until the bundle is
 // re-deployed.
-if (
-  typeof globalThis.__zsManifestSchemaPath === "string" &&
-  typeof globalThis.__zsBeginAutoTx === "function"
-) {
+if (typeof globalThis.__zsBeginAutoTx === "function") {
   const schema = (user && user.default && typeof user.default === "object")
     ? user.default.schema
     : undefined;

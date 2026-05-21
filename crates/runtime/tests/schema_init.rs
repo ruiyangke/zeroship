@@ -1,44 +1,38 @@
-//! Stage 4 schema auto-discovery — runtime-side init.
+//! Stage 5c schema auto-discovery — runtime-side init.
 //!
 //! Covers:
-//!   - The bootstrap's inlined `db_init.js` reads
-//!     `globalThis.__zsManifestSchemaPath` (injected from Rust off
-//!     `manifest.exports.schema`) before deciding whether to run
-//!     discovery.
+//!   - The bootstrap's inlined `db_init.js` reads `user.default.schema`
+//!     directly off the loaded entry module — no manifest-injected path.
 //!   - When no DbPlugin is registered (`__zsBeginAutoTx` is undefined)
 //!     the init script silently no-ops — required so dev runs without
 //!     `DATABASE_URL` still boot.
 //!   - When the runtime ships a `_installSchema`-shaped global and a
 //!     plant for `__zsBeginAutoTx`, the init script's discovery path
 //!     fires and consumes `user.default.schema`.
-//!   - The synthetic-entry's post-Stage 4 ergonomics: the worker can
-//!     bind `default.fetch` and serve requests even when the schema
-//!     init is a no-op.
+//!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
 mod common;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
 
-/// Build a Runtime with the schema-path hint set, evaluate a probe
-/// procedure, and return its result body.
+/// Build a Runtime around the given user-entry source + procedure
+/// table, dispatch a probe procedure, and return its result body.
 ///
 /// `user_src` is the user-entry JS string. The synthetic-entry stub
 /// (mirroring what the vite-plugin's `rpc-registry.ts` emits post-Stage
-/// 4) imports the user module by namespace and exposes a `_zsRpc`
+/// 5b) imports the user module by namespace and exposes a `_zsRpc`
 /// dispatcher; the probe procedure returns whatever JSON shape the
 /// caller wants to assert against.
-fn dispatch_with_schema_path(
+fn dispatch_probe(
     user_src: &str,
     procs_block: &str,
-    schema_path: Option<&str>,
     method: &str,
 ) -> Result<String, String> {
     init_v8();
 
-    // Synthetic entry shim — mirrors the cleaned-up Stage 4 shape.
-    // No `_installSchema`, no `__zsSchemaInit`, no `_zsSchemaMod`. Just
-    // procedure dispatch with the user-namespace walk.
+    // Synthetic entry shim — namespace walk + minimal dispatcher.
+    // Mirrors the shape the vite-plugin emits after Stage 5b.
     let src = format!(
         r#"
 {user_src}
@@ -89,11 +83,7 @@ export default {{ fetch: _zsFetch, rpc: _zsRpc }};
         source: src,
     }];
 
-    let mut builder = Runtime::builder().modules(modules);
-    if let Some(p) = schema_path {
-        builder = builder.manifest_schema_path(Some(p.to_string()));
-    }
-    let runtime = builder.build();
+    let runtime = Runtime::builder().modules(modules).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let url = format!("http://localhost/_zs/v1/{method}");
@@ -118,46 +108,7 @@ export default {{ fetch: _zsFetch, rpc: _zsRpc }};
 }
 
 #[test]
-fn manifest_schema_path_exposed_as_global() {
-    // When the runtime is built with `manifest_schema_path(Some(...))`,
-    // the bootstrap's pre-evaluation injection sets
-    // `globalThis.__zsManifestSchemaPath` to the same string. User code
-    // (and the inlined `db_init.js`) can read it.
-    let body = dispatch_with_schema_path(
-        r#"
-        export function readSchemaPath() {
-            return globalThis.__zsManifestSchemaPath ?? null;
-        }
-        "#,
-        "{ readSchemaPath }",
-        Some("src/schema.ts"),
-        "readSchemaPath",
-    )
-    .unwrap();
-    assert!(body.contains(r#""json":"src/schema.ts""#), "got: {body}");
-}
-
-#[test]
-fn manifest_schema_path_unset_defaults_to_undefined() {
-    // No manifest_schema_path → no global is set → user code sees
-    // undefined. The bootstrap's discovery short-circuits on the same
-    // condition.
-    let body = dispatch_with_schema_path(
-        r#"
-        export function readSchemaPath() {
-            return typeof globalThis.__zsManifestSchemaPath;
-        }
-        "#,
-        "{ readSchemaPath }",
-        None,
-        "readSchemaPath",
-    )
-    .unwrap();
-    assert!(body.contains(r#""json":"undefined""#), "got: {body}");
-}
-
-#[test]
-fn init_script_no_ops_when_no_db_plugin() {
+fn init_script_no_ops_without_db_plugin() {
     // The init script guards on `__zsBeginAutoTx` (the DbPlugin's
     // begin-auto-tx native). When the plugin isn't loaded — the
     // configuration this test runs under — the script must NOT attempt
@@ -169,19 +120,11 @@ fn init_script_no_ops_when_no_db_plugin() {
     // probe's value. A regression where the dynamic import threw and
     // tore down evaluation would surface here as a dispatch-side
     // error, not the happy `"json":"ok"`.
-    //
-    // The user module here only has named exports — the synthetic-entry
-    // shim emitted by `dispatch_with_schema_path` adds its own
-    // `default = { fetch, rpc }`. The init script's `user.default.schema`
-    // read returns undefined under this shape (no user-default), so
-    // discovery short-circuits on the schema check before even getting
-    // to the `__zsBeginAutoTx` gate. Either short-circuit is fine.
-    let body = dispatch_with_schema_path(
+    let body = dispatch_probe(
         r#"
         export function probe() { return "ok"; }
         "#,
         "{ probe }",
-        Some("src/schema.ts"),
         "probe",
     )
     .unwrap();
@@ -189,16 +132,81 @@ fn init_script_no_ops_when_no_db_plugin() {
 }
 
 #[test]
+fn init_script_no_ops_when_default_schema_missing() {
+    // Even with `__zsBeginAutoTx` planted (DbPlugin present), absence of
+    // `user.default.schema` short-circuits the init script before the
+    // dynamic-import. The test's synthetic-entry shim emits its own
+    // `default = { fetch, rpc }` (no `schema:` key), so the gate at
+    // `typeof user.default.schema === "object"` falls through and the
+    // bootstrap finishes evaluation cleanly without trying to import
+    // `@zeroship/db`.
+    init_v8();
+    let user_src = r#"
+function readGate() { return globalThis.__zsCapturedSchema ?? null; }
+const _procedures = { readGate };
+async function _zsFetch(request) {
+    const url = new URL(request.url);
+    const id = decodeURIComponent(url.pathname.slice("/_zs/v1/".length));
+    const fn = _procedures[id];
+    const result = await fn(undefined);
+    return new Response(JSON.stringify({ json: result === undefined ? null : result }), {
+        status: 200, headers: { "content-type": "application/json" },
+    });
+}
+export default {
+    fetch: _zsFetch,
+    rpc: (name, input) => _procedures[name](input),
+    // No schema key — discovery should short-circuit.
+};
+"#;
+    // Plant `__zsBeginAutoTx` synchronously via a pre-init module that
+    // the bootstrap imports as a side effect. The init script will
+    // see the gate open, but then find no `default.schema` and skip.
+    let preinit = r#"
+globalThis.__zsBeginAutoTx = function () { return 0; };
+globalThis.__zsEndAutoTx = function () {};
+"#;
+    let user_with_preinit = format!("{preinit}\n{user_src}");
+    let modules = vec![
+        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
+    ];
+    let runtime = Runtime::builder().modules(modules).build();
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        "http://localhost/_zs/v1/readGate",
+        &[("content-type".into(), "application/json".into())],
+        "",
+        &env,
+        ctx,
+    );
+    let body = match outcome {
+        FetchOutcome::Response { status, body, .. } => {
+            assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
+            body
+        }
+        _ => panic!("expected sync Response"),
+    };
+    // The init script must not have called `_installSchema` — no
+    // `__zsCapturedSchema` exists because the user has no schema. The
+    // probe returns `null` (JSON-encoded).
+    assert!(body.contains(r#""json":null"#), "expected null, got: {body}");
+}
+
+#[test]
 fn init_script_runs_install_schema_when_db_plugin_present() {
-    // Drive the init script's positive path by planting a stub
-    // `__zsBeginAutoTx` (the gate it checks) AND shimming `@zeroship/db`
-    // via a bundle module so the dynamic `await import("@zeroship/db")`
-    // resolves locally. The stub `_installSchema` captures the schema
-    // value it was handed, which we read back through a probe handler.
+    // Drive the init script's positive path: the user module exports
+    // `default.schema`, we plant `__zsBeginAutoTx` and a stub
+    // `@zeroship/db` so the dynamic-import resolves. The stub
+    // `_installSchema` captures the schema value it was handed; we
+    // read it back through a probe handler.
     //
-    // This is the end-to-end pre-condition for production: when the
-    // DbPlugin is registered, the runtime calls `_installSchema` on
-    // the user's `default.schema` BEFORE any request is served.
+    // End-to-end pre-condition for production: when the DbPlugin is
+    // registered AND the entry exports `default.schema`, the runtime
+    // calls `_installSchema` on the entry's `default.schema` BEFORE
+    // any request is served. The path no longer goes through a
+    // manifest-injected hint — the schema lives on `user.default`.
     init_v8();
 
     let user_src = r#"
@@ -225,9 +233,8 @@ async function _zsFetch(request) {
 export default {
     fetch: _zsFetch,
     rpc: (name, input) => _procedures[name](input),
-    // Drive the init script's positive path: present a schema object
-    // on default so the bootstrap's read of `user.default.schema`
-    // returns it.
+    // Stage 5c — the runtime reads schema right off this key. No
+    // manifest plumbing involved.
     schema: { todos: { id: { type: "id" } } },
 };
 "#;
@@ -265,7 +272,6 @@ import "@zeroship/db";
 
     let runtime = Runtime::builder()
         .modules(modules)
-        .manifest_schema_path(Some("src/schema.ts".into()))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -301,14 +307,13 @@ fn bootstrap_module_lacks_legacy_schema_init_symbols() {
     // chained inside `_installSchema`. Verify the legacy global stays
     // undefined throughout the bootstrap's evaluation. If a regression
     // re-introduces an IIFE that publishes it, this test will catch it.
-    let body = dispatch_with_schema_path(
+    let body = dispatch_probe(
         r#"
         export function readInit() {
             return typeof globalThis.__zsSchemaInit;
         }
         "#,
         "{ readInit }",
-        Some("src/schema.ts"),
         "readInit",
     )
     .unwrap();
@@ -323,4 +328,25 @@ fn bootstrap_module_lacks_legacy_schema_init_symbols() {
     )
     .unwrap();
     assert!(r.json.contains("pong"), "got: {}", r.json);
+}
+
+#[test]
+fn manifest_schema_path_global_no_longer_set() {
+    // Stage 5c removed the `__zsManifestSchemaPath` injection from
+    // init.rs. Verify the global stays undefined: user code (and the
+    // legacy `db_init.js` gate before it was rewritten) saw it set
+    // when the build passed `manifest_schema_path`. Now nobody sets
+    // it. A regression that re-adds the injection would surface
+    // here as a string typeof.
+    let body = dispatch_probe(
+        r#"
+        export function readSchemaPath() {
+            return typeof globalThis.__zsManifestSchemaPath;
+        }
+        "#,
+        "{ readSchemaPath }",
+        "readSchemaPath",
+    )
+    .unwrap();
+    assert!(body.contains(r#""json":"undefined""#), "got: {body}");
 }
