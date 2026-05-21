@@ -2,7 +2,7 @@
 //
 // Inlined into BOOTSTRAP_JS (`crates/runtime/src/core/init.rs`) so it
 // runs INSIDE the bootstrap module's top-level evaluation, BEFORE
-// `db_init.js`'s top-level await on `_installSchema` (a schema-loading
+// `db_init.js`'s top-level await on `installSchema` (a schema-loading
 // error must not prevent the dispatcher from being installed) AND
 // BEFORE the runtime resolves `default.rpc` off the user namespace.
 // `db_init.js` reads schema from `user.default.schema` directly — no

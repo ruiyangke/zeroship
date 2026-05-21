@@ -6,9 +6,10 @@
 //!   - When no DbPlugin is registered (`__zsBeginAutoTx` is undefined)
 //!     the init script silently no-ops — required so dev runs without
 //!     `DATABASE_URL` still boot.
-//!   - When the runtime ships a `_installSchema`-shaped global and a
+//!   - When the runtime ships an `installSchema`-shaped global and a
 //!     plant for `__zsBeginAutoTx`, the init script's discovery path
-//!     fires and consumes `user.default.schema`.
+//!     fires and consumes `user.default.schema`, calling
+//!     `installSchema(schema, env)` with the live `env.db` handle.
 //!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
 mod common;
@@ -191,7 +192,7 @@ globalThis.__zsEndAutoTx = function () {};
         }
         _ => panic!("expected sync Response"),
     };
-    // The init script must not have called `_installSchema` — no
+    // The init script must not have called `installSchema` — no
     // `__zsCapturedSchema` exists because the user has no schema. The
     // probe returns `null` (JSON-encoded).
     assert!(body.contains(r#""json":null"#), "expected null, got: {body}");
@@ -202,14 +203,15 @@ fn init_script_runs_install_schema_when_db_plugin_present() {
     // Drive the init script's positive path: the user module exports
     // `default.schema`, we plant `__zsBeginAutoTx` and a stub
     // `@zeroship/db` so the dynamic-import resolves. The stub
-    // `_installSchema` captures the schema value it was handed; we
+    // `installSchema` captures the schema value it was handed; we
     // read it back through a probe handler.
     //
     // End-to-end pre-condition for production: when the DbPlugin is
     // registered AND the entry exports `default.schema`, the runtime
-    // calls `_installSchema` on the entry's `default.schema` BEFORE
-    // any request is served. The path no longer goes through a
-    // manifest-injected hint — the schema lives on `user.default`.
+    // calls `installSchema(schema, env.db)` on the entry's
+    // `default.schema` BEFORE any request is served. The path no
+    // longer goes through a manifest-injected hint — the schema lives
+    // on `user.default`.
     init_v8();
 
     let user_src = r#"
@@ -246,14 +248,23 @@ export default {
     // `await import("@zeroship/db")` resolves. The stub also plants
     // `__zsBeginAutoTx` synchronously at import-time so the init
     // script's gate is open.
+    //
+    // Stage 6: the bootstrap reads the live env.db off the runtime's
+    // `__zs_env()` callback and passes it as the second positional
+    // arg. The stub captures the schema keys it was handed; under
+    // this test setup the DbPlugin isn't registered so `env.db` is
+    // undefined — verifying installSchema was CALLED (with the right
+    // schema) is the assertion that matters here. The bootstrap-side
+    // env-handle plumbing is exercised by the real `db_init.js`
+    // against a real DbPlugin in production runs.
     let stub_db = r#"
 globalThis.__zsBeginAutoTx = function () { return 0; };
 globalThis.__zsEndAutoTx   = function () {};
-export function _installSchema(schema, options) {
+export function installSchema(schema, _env) {
     globalThis.__zsCapturedSchema = JSON.stringify({
         keys: Object.keys(schema),
-        installOnEnvDb: !!(options && options.installOnEnvDb),
     });
+    return { collections: {}, ready: Promise.resolve() };
 }
 "#;
 
@@ -294,20 +305,18 @@ import "@zeroship/db";
         _ => panic!("expected sync Response"),
     };
     // The probe returns whatever `__zsCapturedSchema` is. If discovery
-    // ran, it's a JSON string with `keys: ["todos"]` and
-    // `installOnEnvDb: true`. If it didn't run, the probe returns null.
+    // ran, it's a JSON string with `keys: ["todos"]`. If it didn't run,
+    // the probe returns null.
     assert!(body.contains(r#"\"keys\":[\"todos\"]"#),
         "expected captured schema with 'todos' key, got: {body}");
-    assert!(body.contains(r#"\"installOnEnvDb\":true"#),
-        "expected installOnEnvDb: true, got: {body}");
 }
 
 #[test]
 fn bootstrap_module_lacks_legacy_schema_init_symbols() {
     // Stage 4 cleanup: the synthetic SSR entry no longer publishes
     // `__zsSchemaInit`. The runtime bootstrap doesn't either — its
-    // discovery is a top-level await against `__zeroshipPlatformReady`
-    // chained inside `_installSchema`. Verify the legacy global stays
+    // discovery is a top-level await against the `ready` promise
+    // returned by `installSchema`. Verify the legacy global stays
     // undefined throughout the bootstrap's evaluation. If a regression
     // re-introduces an IIFE that publishes it, this test will catch it.
     let body = dispatch_probe(

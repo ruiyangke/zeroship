@@ -285,11 +285,13 @@ pub(crate) const RPC_DISPATCH_JS: &str = include_str!("../bootstrap/rpc_dispatch
 ///      so the worker can still surface the error via the RPC wire.
 ///   2. [`DB_INIT_JS`] runs next — its top-level await on
 ///      `import("@zeroship/db")` resolves through V8's microtask
-///      checkpoint and `_installSchema` synchronously publishes
-///      `__zeroshipPlatformReady`.
+///      checkpoint, `installSchema(schema, env.db)` plants typed
+///      Collection wrappers on env.db, and the returned `ready`
+///      promise is awaited so module evaluation gates on DDL
+///      settling.
 /// By the time the kernel reads `default.fetch` / `default.rpc` off the
-/// user namespace, both `__zsDispatch` and the platform-ready promise
-/// are set.
+/// user namespace, `__zsDispatch` is installed AND the schema is live
+/// on `env.db`.
 pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
     let mut s = String::with_capacity(
         BOOTSTRAP_PREFIX_JS.len()
