@@ -43,6 +43,31 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string
       { code: "filter_nesting_too_deep" as const },
     );
   }
+  // R4 IMPORTANT-1 — null/non-object filter rejection at the boundary.
+  // `for (const key in null)` is a zero-iteration no-op (does NOT throw),
+  // so a `null` filter used to slip through `needsMap === false`, return
+  // verbatim, and reach `_nativeCollection().deleteMany(null)` — where
+  // the native side's behaviour on `null` defaults to "matches every
+  // row." This is a destructive-by-accident path that the TS types reject
+  // but a JSON-RPC caller or an `as any` escape can trip. Reject hard
+  // here so every mutating method that funnels through this helper
+  // (`deleteMany`, `updateMany`, `delete`, `update`, `find`, ...) gets
+  // the guard for free. Inside `_run` the throw becomes `Result.error`
+  // with `code = "invalid_filter"`; outside (`find`, which returns a
+  // Query synchronously) it propagates to the caller — consistent with
+  // every other synchronous schema-violation throw in `Collection`.
+  if (filter === null || typeof filter !== "object" || Array.isArray(filter)) {
+    throw Object.assign(
+      new TypeError(
+        `@zeroship/db: filter must be a plain object — got ${
+          filter === null ? "null" : Array.isArray(filter) ? "array" : typeof filter
+        }. ` +
+        `An accidental null filter on deleteMany/updateMany would match every row; ` +
+        `pass {} explicitly if you intend to operate on all rows.`,
+      ),
+      { code: "invalid_filter" as const },
+    );
+  }
   // Fast path: if no key needs remapping, return the original reference
   let needsMap = false;
   for (const key in filter) {

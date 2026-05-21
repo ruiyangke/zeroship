@@ -786,11 +786,20 @@ export class Collection<
    * on an index scan once a single row matches (vs. a full `COUNT(*)`
    * scan). Cost is bounded by the cost of producing one matching row.
    */
-  async exists(filter: Filter<S>): Promise<Result<boolean>> {
+  async exists(filter: Filter<S> = {} as Filter<S>): Promise<Result<boolean>> {
     trackCollectionAccess(this._name);
-    const { data, error } = await this.find(filter).limit(1);
-    if (error) return err(error);
-    return ok((data?.length ?? 0) > 0);
+    // Synchronous throws from `this.find(filter)` (e.g. R4 IMPORTANT-1
+    // null-filter rejection inside `mapFilterOutbound`) must surface as
+    // `Result.error`, not an uncaught throw — `exists` callers expect
+    // the same Result-envelope contract as every other Collection
+    // read method.
+    try {
+      const { data, error } = await this.find(filter).limit(1);
+      if (error) return err(error);
+      return ok((data?.length ?? 0) > 0);
+    } catch (e) {
+      return err(toResultError(e));
+    }
   }
 
   /**
@@ -961,7 +970,7 @@ export class Collection<
    * single field is cleaner.
    */
   async updateMany(
-    filter: Filter<S>,
+    filter: Filter<S> = {} as Filter<S>,
     update: UpdateExpression<S>
   ): Promise<Result<{ count: number }>> {
     return this._run(async () => {
@@ -1033,7 +1042,7 @@ export class Collection<
    * sets `deletedAt` on each row; pass `{ hard: true }` to bypass.
    */
   async deleteMany(
-    filter: Filter<S>,
+    filter: Filter<S> = {} as Filter<S>,
     opts: { hard?: boolean } = {},
   ): Promise<Result<{ deletedCount: number }>> {
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
