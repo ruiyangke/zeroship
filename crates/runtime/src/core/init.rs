@@ -261,23 +261,45 @@ export {
 /// `default.rpc` off the namespace. See `db_init.js` for the rationale.
 pub(crate) const DB_INIT_JS: &str = include_str!("../bootstrap/db_init.js");
 
+/// Embedded RPC dispatcher. Installs `globalThis.__zsDispatch` — the
+/// runtime-owned dispatch entry point used when `user.default.rpc` is a
+/// dict-shape object (Stage 5a of the ZS-standard refactor). The IIFE
+/// is idempotent: a second evaluation (isolate refresh) is a no-op so
+/// the live function keeps serving in-flight requests.
+///
+/// Spliced into [`BOOTSTRAP_JS`] BEFORE [`DB_INIT_JS`] so a schema-load
+/// failure can't prevent dispatcher install. See `rpc_dispatch.js`.
+pub(crate) const RPC_DISPATCH_JS: &str = include_str!("../bootstrap/rpc_dispatch.js");
+
 /// Runtime-injected bootstrap module source. Built once at first use by
-/// splicing [`DB_INIT_JS`] into the otherwise-static bootstrap template.
+/// splicing [`RPC_DISPATCH_JS`] and [`DB_INIT_JS`] into the otherwise-
+/// static bootstrap template.
 ///
 /// The template is split into prefix (`BOOTSTRAP_PREFIX_JS` — just the
 /// `import * as user` line) and main (`BOOTSTRAP_MAIN_JS` — everything
-/// else) so the init script runs AFTER `user` is bound but BEFORE the
-/// `default.fetch` / `default.rpc` resolution. Order matters: top-level
-/// await on `import("@zeroship/db")` resolves through V8's microtask
-/// checkpoint, and `_installSchema` synchronously publishes
-/// `__zeroshipPlatformReady`, so by the time the kernel reads
-/// `default.fetch` off the namespace the platform-ready promise is
-/// already set.
+/// else) so the init scripts run AFTER `user` is bound but BEFORE the
+/// `default.fetch` / `default.rpc` resolution. Order matters:
+///   1. [`RPC_DISPATCH_JS`] runs FIRST — installs `__zsDispatch` before
+///      `db_init.js`'s top-level await can throw and abort module
+///      evaluation. Dispatcher install must survive a schema failure
+///      so the worker can still surface the error via the RPC wire.
+///   2. [`DB_INIT_JS`] runs next — its top-level await on
+///      `import("@zeroship/db")` resolves through V8's microtask
+///      checkpoint and `_installSchema` synchronously publishes
+///      `__zeroshipPlatformReady`.
+/// By the time the kernel reads `default.fetch` / `default.rpc` off the
+/// user namespace, both `__zsDispatch` and the platform-ready promise
+/// are set.
 pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
     let mut s = String::with_capacity(
-        BOOTSTRAP_PREFIX_JS.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len() + 2,
+        BOOTSTRAP_PREFIX_JS.len()
+            + RPC_DISPATCH_JS.len()
+            + DB_INIT_JS.len()
+            + BOOTSTRAP_MAIN_JS.len()
+            + 4,
     );
     s.push_str(BOOTSTRAP_PREFIX_JS);
+    s.push_str(RPC_DISPATCH_JS);
     s.push_str(DB_INIT_JS);
     s.push_str(BOOTSTRAP_MAIN_JS);
     s
@@ -485,13 +507,29 @@ async function _zsRunSubscriptionGen(gen, ws) {
 // async generators; the handler returns the iterator directly.
 async function dispatchSubscription(methodName, input, ws) {
     try {
-        if (!user.default || typeof user.default.rpc !== "function") {
+        if (!user.default) {
             throw Object.assign(
                 new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
                 { code: "INTERNAL" },
             );
         }
-        const gen = await user.default.rpc(methodName, input);
+        // Stage 5a: accept function-shape (legacy) OR dict-shape
+        // `default.rpc`. Dict-shape rides through `__zsDispatch`, which
+        // returns the handler's value unchanged — so an AsyncIterator
+        // handler still surfaces as an iterator for `_zsRunSubscriptionGen`.
+        let rpcInvoker;
+        if (typeof user.default.rpc === "function") {
+            rpcInvoker = user.default.rpc;
+        } else if (user.default.rpc != null && typeof user.default.rpc === "object") {
+            const rpcDict = user.default.rpc;
+            rpcInvoker = (name, input) => globalThis.__zsDispatch(rpcDict, name, input);
+        } else {
+            throw Object.assign(
+                new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
+                { code: "INTERNAL" },
+            );
+        }
+        const gen = await rpcInvoker(methodName, input);
         if (gen == null || typeof gen !== "object"
             || typeof gen[Symbol.asyncIterator] !== "function"
             || typeof gen.next !== "function") {
@@ -653,9 +691,26 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
 // to fetch — independent kernel entry point. Returned values get
 // envelope-wrapped on the wire by the kernel; promises get awaited;
 // async iterators fall through to the slow path's stream encoder.
-const USER_RPC = (user && user.default && typeof user.default.rpc === "function")
-    ? user.default.rpc
-    : null;
+//
+// Two shapes accepted (Stage 5a of the ZS-standard refactor):
+//   - function (legacy synthetic-entry shape): used directly. The Vite
+//     plugin's current synthetic entry emits this; back-compat.
+//   - plain object (dict-shape, `{ [wireId]: handler }`): wrapped in
+//     `globalThis.__zsDispatch` so the runtime owns input validation,
+//     capability frame, auto-tx, stream framing, and dev-only output
+//     validation. This is the new contract — raw JS deploys and the
+//     future Vite plugin v2 both emit this shape.
+let USER_RPC = null;
+if (user && user.default && user.default.rpc != null) {
+    const _rpc = user.default.rpc;
+    if (typeof _rpc === "function") {
+        USER_RPC = _rpc;
+    } else if (typeof _rpc === "object") {
+        USER_RPC = function dispatchRpc(name, input, ctx) {
+            return globalThis.__zsDispatch(_rpc, name, input, ctx);
+        };
+    }
+}
 
 const FALLBACK_ZS_V1_TAG = "/_zs/v1/";
 
