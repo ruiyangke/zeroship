@@ -101,14 +101,19 @@ pub struct Manifest {
     #[serde(default)]
     pub metadata: ManifestMetadata,
 
-    /// Build-time export discovery. Stage 1 only writes this; the
-    /// runtime ignores it. Stage 2 reads `exports.schema` from the V8
-    /// bootstrap to resolve the DB schema module exported via
-    /// `export default { schema }` without any factory call.
+    /// Build-time export discovery.
+    ///
+    /// **Deprecated as of Stage 5c (ZS-standard refactor).** The runtime
+    /// no longer reads any field here — schema discovery now reads
+    /// `default.schema` directly off the loaded entry module
+    /// (`crates/runtime/src/bootstrap/db_init.js`). The Vite plugin no
+    /// longer writes the field. Kept on the wire so older archives
+    /// (with `exports.schema` set) still deserialize cleanly during
+    /// upgrade; a future stage removes the field entirely.
     ///
     /// Additive on the wire: an old manifest without `exports`
-    /// deserializes unchanged, and a fresh build with no schema /
-    /// handlers omits the field entirely.
+    /// deserializes unchanged, and a fresh build omits the field
+    /// entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<ManifestExports>,
 }
@@ -133,30 +138,27 @@ impl Default for Manifest {
     }
 }
 
-/// Build-time export discovery — populated by the build adapter
-/// (`@zeroship/vite-plugin`) so the runtime can locate user modules
-/// (DB schema, handler files) without any imperative registration
-/// step in user code.
+/// Build-time export discovery — **deprecated as of Stage 5c.**
 ///
-/// Stage 1: the build writes `schema`; the runtime ignores it. Stage 2
-/// wires the read in the V8 bootstrap. Stage 3 adds file-based
-/// handler discovery (the `handlers` Vec).
+/// The runtime no longer reads any field here. Schema discovery now
+/// reads `default.schema` directly off the loaded entry module
+/// (`crates/runtime/src/bootstrap/db_init.js`). The Vite plugin no
+/// longer writes this struct. The type is retained on the wire so
+/// older `.zship` archives that included it still deserialize
+/// cleanly during graceful upgrade; a future stage removes it.
 ///
-/// Wire shape is intentionally permissive — both fields are optional
-/// and serialize to nothing when empty, so a manifest with
-/// `exports: ManifestExports::default()` round-trips identically to
-/// a manifest with no `exports` field at all.
+/// Wire shape stays permissive — both fields are optional and
+/// serialize to nothing when empty.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ManifestExports {
-    /// Path (relative to the bundle root) of the module whose default
-    /// export (or `default.schema`) is the DB schema map. `None` means
-    /// "the bootstrap should look at the entry module's `default.schema`",
-    /// or "no DB schema in this app". Stage 2 wires the read; Stage 1
-    /// only writes it.
+    /// **Deprecated as of Stage 5c — runtime reads `default.schema`
+    /// off the entry.** Kept for graceful upgrade of older archives;
+    /// future stage removes. Historically: bundle-relative POSIX
+    /// path of the module whose default export held the DB schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 
-    /// Reserved for Stage 2+ (file-based handler discovery). Optional;
+    /// Reserved for future file-based handler discovery. Optional;
     /// empty Vec serializes via `skip_serializing_if` so old manifests
     /// still round-trip identically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
