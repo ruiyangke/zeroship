@@ -18,6 +18,17 @@
  */
 import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
+// Typed accessors for the two cross-module globals shared with
+// `@zeroship/db` and the production synthetic SSR entry. Importing them
+// statically (vs reading off `globalThis as any`) gives us one source
+// of truth for the names. The globals themselves are shared across
+// every copy of the SDK in the V8 isolate — `getPlatformReady()` here
+// observes what `_installSchema` (run via the ModuleRunner) wrote.
+import {
+  getPlatformReady,
+  getSchemaInit,
+  INSTALL_SCHEMA_NAME,
+} from "@zeroship/db";
 
 const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
 // Stage 2 — absolute path to the DB schema module, when Stage 1's
@@ -179,8 +190,9 @@ async function maybeRegisterSchema(mod: any): Promise<void> {
 
   try {
     const dbSdk: any = await r.import("@zeroship/db");
-    if (typeof dbSdk._installSchema === "function") {
-      dbSdk._installSchema(schema, { installOnEnvDb: true });
+    const installFn = dbSdk[INSTALL_SCHEMA_NAME];
+    if (typeof installFn === "function") {
+      installFn(schema, { installOnEnvDb: true });
       console.log(`[zeroship:dev] registered schema from ${provenance}`);
     }
   } catch (e: any) {
@@ -363,7 +375,7 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   // is still undefined and the await below is a no-op — letting an
   // auto-tx open against an unregistered schema. Awaiting
   // `__zsSchemaInit` first pins the happens-before edge.
-  const initSchema = (globalThis as any).__zsSchemaInit;
+  const initSchema = getSchemaInit();
   if (initSchema && typeof initSchema.then === "function") {
     try { await initSchema; } catch { /* surfaced via handler */ }
   }
@@ -374,7 +386,7 @@ async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<
   // registerModel still holds `pg_advisory_lock` deadlocks the
   // socket. Awaiting here keeps the two windows disjoint. The await
   // is a no-op on the warm path (chain already settled).
-  const ready = (globalThis as any).__zeroshipPlatformReady;
+  const ready = getPlatformReady();
   if (ready && typeof ready.then === "function") {
     try { await ready; } catch { /* user-facing errors surface via the handler */ }
   }

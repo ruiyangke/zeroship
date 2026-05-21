@@ -16,8 +16,9 @@ export type { Db, TxCollection, TxQuery, TransactionOptions } from "./db.js";
 export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, Infer, InferRow, InferRowInput, InferId } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";
 
-// B2 — runtime helper for cross-table ref validation. Exported for
-// tests; production paths invoke it from `_installSchema` at module-init time.
+// B2 — runtime helper for cross-table ref validation. `_installSchema`
+// calls this at module-init time; the export is also used by tests that
+// validate schemas directly without going through the install path.
 export { validateRefTargets } from "./schema.js";
 
 // Framework-internal — the synthetic SSR entry (`@zeroship/vite-plugin`)
@@ -28,3 +29,14 @@ export { validateRefTargets } from "./schema.js";
 // internal, not screaming") so the SSR build doesn't have to know about
 // any subpath export.
 export { _installSchema } from "./db.js";
+
+// Framework-internal — typed accessors for the two cross-module globals
+// (`__zeroshipPlatformReady`, `__zsSchemaInit`) and the install-symbol
+// sentinel (`INSTALL_SCHEMA_NAME`). Re-exported so the vite-plugin
+// dev-bootstrap can consume them without `(globalThis as any).…` casts.
+export {
+  getPlatformReady,
+  setPlatformReady,
+  getSchemaInit,
+  INSTALL_SCHEMA_NAME,
+} from "./internal-globals.js";
