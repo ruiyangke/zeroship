@@ -4,7 +4,7 @@
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
 import { NormalizedSchema } from "./schema.js";
-import { validateDoc, checkPartial } from "./validate.js";
+import { validateDoc, checkPartial, isValidCalendarDate, isJsonSerializable } from "./validate.js";
 import { mapNativeError, ValidationError, OptimisticLockError } from "./errors.js";
 import {
   mapResultDoc,
@@ -93,8 +93,11 @@ function extractUpdateFields(update: PlainObject): PlainObject {
  * Validates $push / $addToSet values against the schema's array item type.
  * Throws ValidationError if any pushed value does not match the declared items type.
  * Numeric operators ($inc, $dec, $mul) are skipped — they are inherently numeric.
+ *
+ * Exported for in-process regression tests (see `r5-array-item-validation.test.ts`).
+ * Production callers go through the collection update path.
  */
-function validateArrayPushOps(
+export function validateArrayPushOps(
   update: PlainObject,
   schema: NormalizedSchema
 ): void {
@@ -107,11 +110,17 @@ function validateArrayPushOps(
       if (!def || def.type !== "array" || !def.items) continue;
       const itemType = def.items;
 
+      // R6 — keep this branch list in sync with the array-item branch in
+      // `validate.ts` (`checkField`'s `type === "array"` block) and with
+      // `PRIMITIVE_ITEM_TYPES` in `types.ts`. Adding a new primitive item
+      // type means a case in all three places.
       let valid = true;
       if (itemType === "string") valid = typeof val === "string";
       else if (itemType === "number") valid = typeof val === "number";
       else if (itemType === "boolean") valid = typeof val === "boolean";
       else if (itemType === "date") valid = val instanceof Date || typeof val === "string";
+      else if (itemType === "calendarDate") valid = typeof val === "string" && isValidCalendarDate(val);
+      else if (itemType === "json") valid = isJsonSerializable(val);
 
       if (!valid) {
         throw new ValidationError({

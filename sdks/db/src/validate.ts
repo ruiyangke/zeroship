@@ -24,11 +24,45 @@ function isParseableDateString(s: string): boolean {
 }
 
 /**
+ * R6 — structured-clone-safe predicate for `json` items. `t.json()`
+ * stores arbitrary JSON, but the value still has to round-trip through
+ * `JSON.stringify` / Postgres JSONB at the wire boundary. Functions and
+ * symbols silently turn into `undefined` (skipped object props, `null`
+ * inside arrays) and lose data; reject them at validation time.
+ *
+ * Walks plain objects and arrays so a function buried two levels deep
+ * is still caught. Treats class instances the same as plain objects
+ * because `JSON.stringify` does. Cycle protection uses a `WeakSet`
+ * visit-marker — `JSON.stringify` would throw on a cycle anyway, and
+ * surfacing the rejection here gives a useful error path.
+ */
+export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): boolean {
+  if (value === null) return true;
+  const tag = typeof value;
+  if (tag === "string" || tag === "number" || tag === "boolean") return true;
+  if (tag === "function" || tag === "symbol" || tag === "undefined" || tag === "bigint") return false;
+  if (tag !== "object") return false;
+  const visited = seen ?? new WeakSet<object>();
+  if (visited.has(value as object)) return false; // cycle
+  visited.add(value as object);
+  if (Array.isArray(value)) {
+    for (const elem of value) {
+      if (!isJsonSerializable(elem, visited)) return false;
+    }
+    return true;
+  }
+  for (const v of Object.values(value as Record<string, unknown>)) {
+    if (!isJsonSerializable(v, visited)) return false;
+  }
+  return true;
+}
+
+/**
  * D3 — strict `YYYY-MM-DD` validator. Confirms the value is a 10-char
  * date string AND a real calendar date (no Feb 31, no month 13).
  * Returns false on any deviation.
  */
-function isValidCalendarDate(s: string): boolean {
+export function isValidCalendarDate(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const [y, m, d] = s.split("-").map(Number);
   if (m < 1 || m > 12) return false;
@@ -237,6 +271,10 @@ function checkField(
       return;
     }
     // Validate each array element against the declared item type.
+    // R6 — keep this branch list in sync with `PRIMITIVE_ITEM_TYPES` in
+    // types.ts and `validateArrayPushOps` in collection.ts. Adding a new
+    // primitive item type means a case here, a case there, and a case in
+    // `t.array()`'s allow-list.
     if (def.items !== undefined) {
       const itemType = def.items;
       for (let i = 0; i < value.length; i++) {
@@ -246,6 +284,8 @@ function checkField(
         else if (itemType === "number") ok = typeof elem === "number";
         else if (itemType === "boolean") ok = typeof elem === "boolean";
         else if (itemType === "date") ok = elem instanceof Date || (typeof elem === "string" && isParseableDateString(elem));
+        else if (itemType === "calendarDate") ok = typeof elem === "string" && isValidCalendarDate(elem);
+        else if (itemType === "json") ok = isJsonSerializable(elem);
         if (!ok) {
           errors[key] = {
             path: key,
