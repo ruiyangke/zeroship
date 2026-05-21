@@ -16,11 +16,6 @@ export type { Db, TxCollection, TxQuery, TransactionOptions } from "./db.js";
 export type { FieldDef, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpdateExpression, Filter, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, FkAction, RefOptions, Infer, InferRow, InferRowInput, InferId } from "./types.js";
 export type { NormalizedSchema } from "./schema.js";
 
-// B2 — runtime helper for cross-table ref validation. `_installSchema`
-// calls this at module-init time; the export is also used by tests that
-// validate schemas directly without going through the install path.
-export { validateRefTargets } from "./schema.js";
-
 // Framework-internal — the synthetic SSR entry (`@zeroship/vite-plugin`)
 // and dev-bootstrap call this to register schemas declared via
 // `export default { schema }`. User code MUST NOT call this directly;
