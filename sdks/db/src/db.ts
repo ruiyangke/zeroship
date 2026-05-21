@@ -683,8 +683,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     async transaction<R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions): Promise<Result<R>> {
       // BEGIN — the native runtime returns a Transaction wrapper
       // (v8_class) whose .commit() / .rollback() are explicit methods.
-      // The wrapper's Drop auto-rollbacks if a thrown handler skips the
-      // explicit teardown.
+      // The JS body below ALWAYS calls one of them (rollback on body
+      // throw or commit failure, commit on success); the native Drop
+      // auto-rollback exists only as defence-in-depth if the JS layer
+      // is killed mid-call (e.g. isolate shutdown).
       const nativeAny = native as unknown as {
         beginTransaction?: (opts?: { isolationLevel?: string }) => Promise<{
           commit(): Promise<void>;
@@ -797,7 +799,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       try {
         bodyResult = await fn(txCollections);
       } catch (bodyErr) {
-        try { await tx.rollback(); } catch { /* Drop covers it */ }
+        // Explicit rollback is the primary teardown; the rollback
+        // call may throw if the connection already dropped, in which
+        // case the native Drop will catch up.
+        try { await tx.rollback(); } catch { /* rollback failure tolerated */ }
         for (const c of collectionList) c._txDepth -= 1;
         return err(bodyErr instanceof Error ? bodyErr : new Error(String(bodyErr)));
       }
