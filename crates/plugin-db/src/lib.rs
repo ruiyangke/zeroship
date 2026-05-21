@@ -33,6 +33,7 @@ pub mod audit;
 pub mod auth;
 pub mod broker;
 pub mod callbacks;
+pub mod crud;
 pub mod diff;
 pub mod exec;
 pub mod migrations;
