@@ -17,7 +17,8 @@ This file is the AI-agent landing page. Read the **task router** below first.
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (creator + end-user, OAuth, JWT) | `docs/reference/auth.md` · `crates/control/src/auth_*.rs` · `crates/gateway/src/auth.rs` |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
-| **ZS deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zs-standard.md` · `crates/runtime/src/bootstrap/rpc_dispatch.js` · `crates/runtime/src/core/init.rs` |
+| **ZS deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zs-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
+| **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
 | **Vite plugin / build pipeline** (synthetic entry is a thin normaliser; runtime owns dispatch) | `docs/reference/vite-plugin.md` · `docs/reference/vite-environment-api.md` · `sdks/vite-plugin/src/rpc-registry.ts` |
@@ -155,6 +156,19 @@ import { kv } from "@zeroship/kv";
 
 SDK packages call `zeroship.*` primitives internally. Validation, query building, error mapping, TypeScript types all live in JS. They evolve independently of the Rust runtime.
 
+### Framework-internal: `@zeroship/bootstrap`
+
+`@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
+
+- `installSchema(schema, env.db)` — orchestrator behind `export default { schema }`
+- `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / auto-tx / stream framing)
+- `normalizeUserModule` — namespace → `{ schema, fetch, rpc }` shape
+- `createFetchHandler` — WinterCG fetch wrapper routing `/_zs/v1/<id>` through the dispatcher
+- `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
+- `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
+
+**User code MUST NOT import `@zeroship/bootstrap`.** It carries no back-compat guarantee; the runtime crate and Vite plugin are the only stable consumers. See `sdks/bootstrap/README.md`.
+
 ### When to add a native primitive vs. an npm package
 
 | Needs Rust (new primitive) | Pure JS (npm package) |
@@ -189,7 +203,12 @@ Stable contracts, live in `docs/reference/`:
 ## Development
 
 ```bash
-# Build (workspace)
+# Build (workspace) — build the SDKs FIRST. The runtime crate
+# include_str!s `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`,
+# so `pnpm build` must run before `cargo build -p zeroship-runtime`.
+# Root `pnpm build` respects the dependency graph (bootstrap → db);
+# cargo then sees the freshly emitted dist files.
+pnpm build
 cargo build --release
 
 # Run single-tenant (dev)

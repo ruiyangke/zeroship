@@ -159,7 +159,9 @@ shape as raw deploys do.
 
 A record of `{ collectionName: shape }`. At boot the runtime imports the
 user entry, reads `default.schema` synchronously, and calls
-`installSchema(schema, env.db)` from `@zeroship/db`. This:
+`installSchema(schema, env.db)` from `@zeroship/bootstrap` (the
+framework-internal coordination package — Stage 7 of the refactor moved
+this out of `@zeroship/db`). This:
 
 1. Issues idempotent DDL (CREATE TABLE / ALTER TABLE / CREATE INDEX
    CONCURRENTLY) against the app's Postgres schema.
@@ -169,7 +171,9 @@ user entry, reads `default.schema` synchronously, and calls
    promise so module evaluation gates on DDL settling.
 
 User code never calls `installSchema` directly — declare schema on the
-entry and the platform handles registration.
+entry and the platform handles registration. `@zeroship/bootstrap` is
+not part of the user-facing surface; it lives at the same SDK layer as
+the runtime crate's `include_str!`d dispatcher.
 
 See `docs/reference/db.md` for the schema builder surface (`t.string()`,
 `t.ref(...)`, `schema().withVersioning()`, named indexes, etc.).
