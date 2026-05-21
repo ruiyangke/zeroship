@@ -230,6 +230,39 @@ export function validateRefTargets(
     });
   };
 
+  /**
+   * R4 MINOR-3 — walk a single `FieldDef` and report any ref whose
+   * target is not in `declaredCollections`. Recurses through:
+   *   - `t.object({...}).shape` — nested-object sub-schemas, possibly
+   *     many levels deep.
+   *   - `t.union(...).variants` — top-level OR nested unions; each
+   *     variant is itself a `Record<string, FieldDef>` we walk like
+   *     a sub-schema.
+   * `path` accumulates a dotted JS-style locator (e.g. `meta.audit.by`)
+   * so the diagnostic points at the exact site rather than the parent.
+   */
+  const walkFieldDef = (
+    collectionName: string,
+    path: string,
+    fd: FieldDef,
+  ): void => {
+    if (fd.type === "ref" && fd.refTarget !== undefined && !declaredCollections.has(fd.refTarget)) {
+      reportMissing(collectionName, path, fd.refTarget);
+    }
+    if (fd.type === "object" && fd.shape !== undefined) {
+      for (const [sub, subDef] of Object.entries(fd.shape)) {
+        walkFieldDef(collectionName, `${path}.${sub}`, subDef);
+      }
+    }
+    if (fd.type === "union" && fd.variants !== undefined) {
+      for (const variant of fd.variants) {
+        for (const [sub, subDef] of Object.entries(variant)) {
+          walkFieldDef(collectionName, `${path}.${sub}`, subDef);
+        }
+      }
+    }
+  };
+
   for (const [collectionName, rawSchema] of Object.entries(schemas)) {
     // C2 — a top-level `t.union(...)` walks the variants for refs.
     if (rawSchema instanceof TypeBuilder) {
@@ -237,9 +270,7 @@ export function validateRefTargets(
       if (fd.type === "union" && fd.variants !== undefined) {
         for (const variant of fd.variants) {
           for (const [field, vDef] of Object.entries(variant)) {
-            if (vDef.type === "ref" && vDef.refTarget !== undefined && !declaredCollections.has(vDef.refTarget)) {
-              reportMissing(collectionName, field, vDef.refTarget);
-            }
+            walkFieldDef(collectionName, field, vDef);
           }
         }
       }
@@ -251,21 +282,15 @@ export function validateRefTargets(
         : rawSchema;
     if (fields === null || typeof fields !== "object") continue;
     for (const [field, def] of Object.entries(fields as PlainObject)) {
-      let refTarget: string | undefined;
       if (def instanceof TypeBuilder) {
-        const fd = def.toFieldDef();
-        if (fd.type === "ref") refTarget = fd.refTarget;
+        walkFieldDef(collectionName, field, def.toFieldDef());
       } else if (
         def !== null &&
         typeof def === "object" &&
-        "type" in (def as PlainObject) &&
-        (def as PlainObject).type === "ref"
+        "type" in (def as PlainObject)
       ) {
         // Raw FieldDef literal (rare path — `as any` escape).
-        refTarget = (def as { refTarget?: string }).refTarget;
-      }
-      if (refTarget !== undefined && !declaredCollections.has(refTarget)) {
-        reportMissing(collectionName, field, refTarget);
+        walkFieldDef(collectionName, field, def as unknown as FieldDef);
       }
     }
   }
