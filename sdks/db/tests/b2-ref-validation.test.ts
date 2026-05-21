@@ -12,8 +12,14 @@ import assert from "node:assert/strict";
 // Import directly from the schema / types modules so the test bundle
 // does not transitively pull in `db.ts`, which imports `env` from the
 // runtime-supplied "zeroship" module (unavailable in node test env).
-import { validateRefTargets } from "../src/schema.js";
-import { t, schema as schemaWrap } from "../src/types.js";
+import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
+// Import t and schema through the package entry (the compiled dist)
+// so the `TypeBuilder` instance identity matches the one bootstrap's
+// dist imports via `@zeroship/db/internal`. Importing from `../src/`
+// would compile through tsx at runtime and produce a separate
+// `TypeBuilder` class — `instanceof` checks inside `validateRefTargets`
+// would then return false for objects this test constructs.
+import { t, schema as schemaWrap } from "@zeroship/db";
 
 describe("B2 validateRefTargets — runtime ref check", () => {
   test("accepts a ref pointing at a declared collection", () => {

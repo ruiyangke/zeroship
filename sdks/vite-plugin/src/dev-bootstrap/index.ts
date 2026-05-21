@@ -82,6 +82,19 @@ const entry = devEntry({
     return envObj?.db;
   },
   registry,
+  // Load `installSchema` THROUGH the ModuleRunner so the `TypeBuilder`
+  // class identity matches the one the user's `t.*` builders use.
+  // Without this, the esbuild-bundled `installSchema` carries its own
+  // bundled copy of `TypeBuilder` from @zeroship/db — and `instanceof`
+  // checks inside validateRefTargets / normalizeSchema then return
+  // `false` for builders the user constructed.
+  async getInstallSchema() {
+    const r = await getRunner();
+    const mod = await r.import("@zeroship/bootstrap/install-schema") as {
+      installSchema: Parameters<typeof devEntry>[0]["getInstallSchema"] extends (() => Promise<infer T>) | undefined ? T : never;
+    };
+    return mod.installSchema;
+  },
 });
 
 // Kick off connection immediately + start HMR poll.

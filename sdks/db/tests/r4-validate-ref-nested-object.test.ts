@@ -9,8 +9,8 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { validateRefTargets } from "../src/schema.js";
-import { t } from "../src/types.js";
+import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
+import { t } from "@zeroship/db";
 
 describe("R4 MINOR-3 — validateRefTargets recursion into t.object()", () => {
   test("rejects t.ref('ghost') nested inside t.object({...})", () => {

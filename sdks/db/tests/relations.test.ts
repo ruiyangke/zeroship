@@ -17,7 +17,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t, schema } from "../src/types.js";
+import { t, schema } from "@zeroship/db";
 import { Query } from "../src/query.js";
 
 type AnyRec = Record<string, unknown>;

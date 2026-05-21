@@ -1,28 +1,18 @@
 /**
- * Test-only adapter for the Stage-6 `installSchema` shape.
+ * Test-only adapter for the Stage-7 `installSchema` shape.
  *
- * Stage 6 of the @zeroship/db refactor replaced the legacy
- * `_installSchema(schemas, { native, ... })` return-shape (`Db<T>` =
- * collections + `transaction` + `live`) with
- * `installSchema(schemas, env) → { collections, ready }`. The
- * `transaction` / `live` extension methods are now planted on the
- * supplied `env` (the native handle) instead of being on the return
- * value — which is the right shape for production (`env.db.users.find`,
- * `env.db.transaction(...)`) but inconvenient for the tens of test
- * call sites that captured `const db = _installSchema(...)` and then
- * called `db.transaction(...)`.
+ * Stage 7 of the refactor moved `installSchema` into `@zeroship/bootstrap`
+ * (the framework-internal coordination package). Tests in `@zeroship/db`
+ * call it for setup convenience — they're testing Collection/Query
+ * user-facing behaviour and need a Db<T>-shaped object to run their
+ * assertions against.
  *
- * This helper bridges the test surface back: it calls `installSchema`,
- * then assembles a `Db<T>`-shaped object by composing `collections`
- * with the `transaction` / `live` methods the install just planted on
- * the supplied mock env. The composition stays minimal — no new
- * behaviour, no extra runtime cost — so the test assertions still
- * exercise the same code paths as production. Production callers
- * should NOT use this helper; read collections off `env.db` and call
- * `env.db.transaction(...)` directly.
+ * The reverse direction (db → bootstrap as a dev-only dep) is fine —
+ * the production graph (bootstrap → db) stays acyclic; the
+ * devDependency edge only exists at test time.
  */
-import { installSchema } from "../src/db.js";
-import type { Db, InstallSchemaOptions } from "../src/db.js";
+import { installSchema, type InstallSchemaOptions } from "@zeroship/bootstrap/install-schema";
+import type { Db } from "../src/db.js";
 import type { NativeDb } from "../src/collection.js";
 
 export function installSchemaForTest<
@@ -31,15 +21,12 @@ export function installSchemaForTest<
   schemas: T,
   opts: { native: NativeDb; naming?: InstallSchemaOptions["naming"] },
 ): Db<T> {
-  // Cast schemas through `any` — the ValidateSchemaShape constraint on
-  // `installSchema` is type-only and the test fixtures pass conforming
-  // shapes; tightening the generic here would force every test to
-  // re-state the constraint.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = installSchema(schemas as any, opts.native, opts.naming ? { naming: opts.naming } : undefined);
+  installSchema(schemas as any, opts.native, opts.naming ? { naming: opts.naming } : undefined);
   // After install, the native handle carries the per-collection wrappers
   // and the `transaction` / `live` extensions as own properties. Return
   // it as the `Db<T>` shape so existing call sites
   // (`db.users.find(...)`, `db.transaction(tx => ...)`) keep working.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return opts.native as unknown as Db<T>;
 }

@@ -10,11 +10,17 @@
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { translateAggregatePipeline } from "../src/utils.js";
+// Pull translateAggregatePipeline and the warning getters from the
+// same module instance (compiled dist via @zeroship/db/internal) so
+// the LRU state the warning getter inspects is the SAME one the
+// translator writes to. Importing `translateAggregatePipeline` from
+// `../src/utils.js` would compile through tsx and produce a separate
+// `_warnedAccShapes` Set.
 import {
+  translateAggregatePipeline,
   __zeroshipDbResetAccShapeWarnings,
   __zeroshipDbWarnedAccShapesSize,
-} from "../src/test-hooks.js";
+} from "@zeroship/db/internal";
 
 const MAX_WARNED_ACC_SHAPES = 1024;
 

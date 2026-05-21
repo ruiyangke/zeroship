@@ -5,7 +5,7 @@ import {
   mapFilterOutbound,
   translateAggregatePipeline,
 } from "../src/utils.js";
-import { naming } from "../src/types.js";
+import { naming } from "@zeroship/db";
 
 const { toColumn, toField } = naming.snakeCase;
 

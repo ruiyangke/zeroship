@@ -11,8 +11,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t, schema as schemaWrap } from "../src/types.js";
-import { OptimisticLockError } from "../src/errors.js";
+import { t, schema as schemaWrap } from "@zeroship/db";
+import { OptimisticLockError } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 

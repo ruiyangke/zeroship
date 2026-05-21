@@ -6,8 +6,8 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../src/model.js";
-import { t, type Row } from "../src/types.js";
+import { model } from "@zeroship/bootstrap/install-schema";
+import { t, type Row } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 

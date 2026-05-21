@@ -10,11 +10,18 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "../src/types.js";
-import { normalizeSchema, expandUnionToFlatColumns } from "../src/schema.js";
-import { validateDoc, checkPartial } from "../src/validate.js";
-import { ValidationError } from "../src/errors.js";
-import { model } from "../src/model.js";
+import { t } from "@zeroship/db";
+import { normalizeSchema, expandUnionToFlatColumns } from "@zeroship/bootstrap/install-schema";
+// Import validation helpers via the internal subpath so the
+// `ValidationError` instances they throw come from the same module
+// instance as the public `ValidationError` we instanceof-check against.
+import { validateDoc, checkPartial } from "@zeroship/db/internal";
+// Public export — matches the ValidationError instances that
+// Collection's CRUD path throws (which goes through compiled dist).
+// Importing from `../src/errors.js` would compile a separate class
+// via tsx and `instanceof` checks would return false.
+import { ValidationError } from "@zeroship/db";
+import { model } from "@zeroship/bootstrap/install-schema";
 
 // ---------------------------------------------------------------------------
 // t.literal() — primitive literal field

@@ -8,7 +8,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
-import { schema, t } from "../src/types.js";
+import { schema, t } from "@zeroship/db";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
 
 /** Wire `env.db.openSubscription` to a mock so the `subscribe.ts`

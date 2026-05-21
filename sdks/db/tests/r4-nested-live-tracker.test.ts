@@ -13,7 +13,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { env } from "zeroship";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t } from "../src/types.js";
+import { t } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 type SubEvent =

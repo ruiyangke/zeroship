@@ -9,8 +9,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { model } from "../src/model.js";
-import { t } from "../src/types.js";
+import { model } from "@zeroship/bootstrap/install-schema";
+import { t } from "@zeroship/db";
 
 type AnyRec = Record<string, unknown>;
 

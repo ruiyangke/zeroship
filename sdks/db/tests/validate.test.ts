@@ -2,8 +2,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { validateDoc, checkPartial } from "../src/validate.js";
 import { ValidationError } from "../src/errors.js";
-import { normalizeSchema } from "../src/schema.js";
-import { t } from "../src/types.js";
+import { normalizeSchema } from "@zeroship/bootstrap/install-schema";
+import { t } from "@zeroship/db";
 
 describe("validateDoc", () => {
   test("passes a valid doc", () => {

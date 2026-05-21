@@ -13,7 +13,7 @@
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { schema, t } from "../src/types.js";
+import { schema, t } from "@zeroship/db";
 import { installSchemaForTest } from "./_install-helper.js";
 import { __zeroshipDbResetIndexWarnings } from "../src/collection.js";
 

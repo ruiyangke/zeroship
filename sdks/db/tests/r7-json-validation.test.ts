@@ -14,9 +14,9 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "../src/types.js";
+import { t } from "@zeroship/db";
 import { validateDoc, isJsonSerializable } from "../src/validate.js";
-import { normalizeSchema } from "../src/schema.js";
+import { normalizeSchema } from "@zeroship/bootstrap/install-schema";
 import { ValidationError } from "../src/errors.js";
 
 describe("R7 M1 — top-level t.json() validates the value", () => {

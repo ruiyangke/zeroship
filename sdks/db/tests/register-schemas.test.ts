@@ -26,8 +26,8 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { installSchema } from "../src/db.js";
-import { t } from "../src/types.js";
+import { installSchema } from "@zeroship/bootstrap/install-schema";
+import { t } from "@zeroship/db";
 
 /**
  * Build a permissive mock `native` whose `registerModel` resolves

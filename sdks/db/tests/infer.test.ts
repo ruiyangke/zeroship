@@ -5,9 +5,9 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { model } from "../src/model.js";
-import { t } from "../src/types.js";
-import type { Infer, InferId, InferRow, InferRowInput } from "../src/types.js";
+import { model } from "@zeroship/bootstrap/install-schema";
+import { t } from "@zeroship/db";
+import type { Infer, InferId, InferRow, InferRowInput } from "@zeroship/db";
 
 const native = {
   registerModel: () => Promise.resolve(),

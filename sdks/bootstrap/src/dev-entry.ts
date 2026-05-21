@@ -36,9 +36,11 @@
  */
 
 import "./dispatcher.js";
-import { installSchema } from "./install-schema.js";
+import { installSchema as bundledInstallSchema } from "./install-schema.js";
 import { createFetchHandler } from "./fetch-handler.js";
 import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";
+
+type InstallSchema = typeof bundledInstallSchema;
 
 declare const globalThis: {
   __zsDispatch?: (
@@ -70,6 +72,23 @@ export interface DevEntryOptions {
    * normalizer merges its entries last (last-write-wins for HMR).
    */
   registry?: Map<string, (input: unknown, ctx: unknown) => unknown>;
+  /**
+   * Optional `installSchema` loader. In dev mode the caller MUST
+   * provide this so the dev path loads `installSchema` through the
+   * same module-loader (e.g. Vite's ModuleRunner) that loads the
+   * user's `t.*` builders. Without this, the dev path uses the
+   * `@zeroship/bootstrap`-bundled `installSchema` which carries its
+   * OWN `TypeBuilder` class — `instanceof TypeBuilder` checks inside
+   * `validateRefTargets` / `normalizeSchema` then return `false`
+   * for builders the user code constructed, and the schema install
+   * silently produces empty Collection wrappers.
+   *
+   * Production callers (the runtime crate's bootstrap module) don't
+   * use this entry — they invoke `installSchema` from a dynamic
+   * import that goes through the bundle resolver, so identity is
+   * preserved automatically.
+   */
+  getInstallSchema?: () => Promise<InstallSchema>;
   /**
    * Logger for dev-only diagnostics. Defaults to `console.log` /
    * `console.error`. Pass a no-op pair to silence the dev path.
@@ -152,6 +171,16 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         schemaInstalled = true;
         return;
       }
+      // Use the caller-supplied loader when available so the install
+      // path runs through the SAME module-loader (Vite's ModuleRunner
+      // in dev) that loaded the user's `t.*` builders. Identity-
+      // matched TypeBuilder is required for `instanceof` checks in
+      // validateRefTargets / normalizeSchema to recognise user-side
+      // type builders. Falls back to the bundled `installSchema` when
+      // no loader is provided (e.g. unit tests).
+      const installSchema = options.getInstallSchema
+        ? await options.getInstallSchema()
+        : bundledInstallSchema;
       const { ready } = installSchema(schema as Parameters<typeof installSchema>[0], envDb as Parameters<typeof installSchema>[1]);
       schemaReady = ready;
       log(`[zeroship:dev] registered schema from default-export`);
