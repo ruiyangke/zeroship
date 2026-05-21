@@ -185,12 +185,18 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
     // static-folding step otherwise concludes the IIFE's side effects
     // (`console.error`, `_zsRegFn(...)` whose return is discarded) are
     // pure and removes the entire block. Anchoring the IIFE's promise to
-    // `globalThis.__zsSchemaInit` makes the side-effect visible across
-    // the SSR build's module boundary.
+    // `globalThis.__zsSchemaInit` (either dot or bracket-indexed
+    // — both are equivalent for rolldown's side-effect tracking) makes
+    // the side-effect visible across the SSR build's module boundary.
+    // The sentinel string lives in the SDK's `internal-globals` so a
+    // rename surfaces at TS compile time on both ends.
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
     });
-    assert.match(code, /globalThis\.__zsSchemaInit\s*=\s*\(async/);
+    assert.match(
+      code,
+      /globalThis(?:\.__zsSchemaInit|\["__zsSchemaInit"\])\s*=\s*\(async/,
+    );
   });
 
   test("entry-default resolution does not include a statically false guard", () => {
@@ -218,17 +224,25 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
     // — letting auto-tx open against an unregistered schema. The fix is to
     // await `__zsSchemaInit` first. Verify the ordering in both the
     // namespace-walk (runtime) entry AND the Phase-2 binding-fed entry.
+    // Match either `globalThis.__zsSchemaInit` (dot) or
+    // `globalThis["__zsSchemaInit"]` (bracket) — the generator switched
+    // to bracket-indexed reads to interpolate the SDK's typed sentinel
+    // names instead of stale string literals.
+    const initRe = /globalThis(?:\.__zsSchemaInit|\["__zsSchemaInit"\]);/;
+    const readyRe = /globalThis(?:\.__zeroshipPlatformReady|\["__zeroshipPlatformReady"\]);/;
     for (const spec of [undefined, "/proj/src/schema.ts"] as const) {
       const code = buildServerEntrySource({
         userEntryRel: "/proj/src/server.ts",
         schemaImportSpec: spec,
       });
-      const initIdx = code.indexOf("globalThis.__zsSchemaInit;");
-      const readyIdx = code.indexOf("globalThis.__zeroshipPlatformReady;");
-      assert.ok(initIdx > 0, "expected `globalThis.__zsSchemaInit;` read");
-      assert.ok(readyIdx > 0, "expected `globalThis.__zeroshipPlatformReady;` read");
+      const initMatch = code.match(initRe);
+      const readyMatch = code.match(readyRe);
+      assert.ok(initMatch, "expected `globalThis.__zsSchemaInit;` read");
+      assert.ok(readyMatch, "expected `globalThis.__zeroshipPlatformReady;` read");
+      const initIdx = initMatch.index ?? -1;
+      const readyIdx = readyMatch.index ?? -1;
       assert.ok(
-        initIdx < readyIdx,
+        initIdx > 0 && readyIdx > 0 && initIdx < readyIdx,
         `__zsSchemaInit must be awaited BEFORE __zeroshipPlatformReady (init=${initIdx}, ready=${readyIdx}, spec=${spec})`,
       );
     }
@@ -250,8 +264,10 @@ describe("buildServerEntrySource — Stage 2 schema auto-registration", () => {
         ],
       ]),
     });
-    const initIdx2 = phase2.indexOf("globalThis.__zsSchemaInit;");
-    const readyIdx2 = phase2.indexOf("globalThis.__zeroshipPlatformReady;");
+    const initMatch2 = phase2.match(initRe);
+    const readyMatch2 = phase2.match(readyRe);
+    const initIdx2 = initMatch2?.index ?? -1;
+    const readyIdx2 = readyMatch2?.index ?? -1;
     assert.ok(initIdx2 > 0 && readyIdx2 > 0 && initIdx2 < readyIdx2,
       "Phase 2 entry must await __zsSchemaInit before __zeroshipPlatformReady");
   });

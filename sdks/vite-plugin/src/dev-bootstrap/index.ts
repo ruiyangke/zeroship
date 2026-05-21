@@ -28,7 +28,7 @@ import {
   getPlatformReady,
   getSchemaInit,
   INSTALL_SCHEMA_NAME,
-} from "@zeroship/db";
+} from "@zeroship/db/internal";
 
 const ENTRY = (globalThis as any).process?.env?.ZEROSHIP_ENTRY;
 // Stage 2 — absolute path to the DB schema module, when Stage 1's

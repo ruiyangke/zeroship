@@ -40,6 +40,18 @@
  */
 export const INSTALL_SCHEMA_NAME = "_installSchema";
 
+/**
+ * Global-property names for the two SDK-internal globals. Consumers that
+ * must reference the runtime symbol by string (the rolldown-emitted
+ * synthetic SSR entry source — see `sdks/vite-plugin/src/rpc-registry.ts`)
+ * interpolate these via `JSON.stringify(...)` so a rename surfaces at TS
+ * compile time on both ends — dev-bootstrap reads through `getPlatformReady`
+ * / `getSchemaInit` (typed); the generated worker source reads through
+ * `globalThis[<sentinel>]` (stringly, but the string lives here).
+ */
+export const PLATFORM_READY_NAME = "__zeroshipPlatformReady";
+export const SCHEMA_INIT_NAME = "__zsSchemaInit";
+
 /** @internal — typed handle on the two SDK-internal globals. */
 declare global {
   // eslint-disable-next-line no-var
@@ -61,4 +73,12 @@ export function setPlatformReady(p: Promise<unknown>): void {
 /** Read the schema-init IIFE handle. Set by the synthetic SSR entry. */
 export function getSchemaInit(): Promise<unknown> | undefined {
   return globalThis.__zsSchemaInit;
+}
+
+/** Replace the schema-init handle. Provided for symmetry with
+ *  `setPlatformReady` and for in-process test harnesses that want to
+ *  publish a schema-init handle without going through the synthetic
+ *  entry's stringified IIFE. */
+export function setSchemaInit(p: Promise<unknown>): void {
+  globalThis.__zsSchemaInit = p;
 }

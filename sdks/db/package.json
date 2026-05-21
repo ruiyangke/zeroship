@@ -18,6 +18,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./internal": {
+      "types": "./dist/internal-globals.d.ts",
+      "import": "./dist/internal-globals.js",
+      "default": "./dist/internal-globals.js"
     }
   },
   "scripts": {

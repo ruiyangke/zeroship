@@ -41,11 +41,18 @@
 import type { Plugin } from "vite";
 import type { TransformState } from "./transform.js";
 import type { ServerBinding } from "./server-graph.js";
-// Single source of truth for the install-schema export name. The
-// generated synthetic entry references the symbol by string (dynamic
-// `import("@zeroship/db")` then `dbSdk[INSTALL_SCHEMA_NAME]`), so a
-// future rename on the SDK side surfaces here at TS compile time.
-import { INSTALL_SCHEMA_NAME } from "@zeroship/db";
+// Single source of truth for the install-schema export name AND for
+// the two SDK-internal global-property names. The generated synthetic
+// entry references all three by string (dynamic `import("@zeroship/db")`
+// then `dbSdk[INSTALL_SCHEMA_NAME]`; `globalThis[PLATFORM_READY_NAME]`
+// / `globalThis[SCHEMA_INIT_NAME]` in the auto-tx wrapper), so a future
+// rename on the SDK side surfaces here at TS compile time instead of
+// silently breaking the production path via a stale string literal.
+import {
+  INSTALL_SCHEMA_NAME,
+  PLATFORM_READY_NAME,
+  SCHEMA_INIT_NAME,
+} from "@zeroship/db/internal";
 
 // ── Public IDs ─────────────────────────────────────────────────────────────
 
@@ -132,14 +139,17 @@ function buildSchemaRegistrationBlock(schemaModRef: string): string {
     ? `(_zsUser && _zsUser.default && typeof _zsUser.default === "object" ? _zsUser.default.schema : undefined)`
     : `(${schemaModRef} && (${schemaModRef}.default?.schema ?? ${schemaModRef}.default))
   ?? (_zsUser && _zsUser.default && typeof _zsUser.default === "object" ? _zsUser.default.schema : undefined)`;
-  // Reference the install-schema symbol by the SDK's exported sentinel
-  // so a rename surfaces at TS compile-time here, not at runtime via the
-  // `typeof _zsRegFn === "function"` guard's silent fall-through.
+  // Reference the install-schema symbol AND the two global-property
+  // names by the SDK's exported sentinels so renames surface at TS
+  // compile-time here, not at runtime via the `typeof _zsRegFn ===
+  // "function"` guard's silent fall-through or a stale string literal
+  // in the generated worker source.
   const installName = JSON.stringify(INSTALL_SCHEMA_NAME);
+  const schemaInitName = JSON.stringify(SCHEMA_INIT_NAME);
   return `
 const _zsSchema = (${resolution});
 if (_zsSchema && typeof _zsSchema === "object") {
-  globalThis.__zsSchemaInit = (async () => {
+  globalThis[${schemaInitName}] = (async () => {
     try {
       const _zsDb = await import("@zeroship/db");
       const _zsRegFn = _zsDb && _zsDb[${installName}];
@@ -375,11 +385,11 @@ async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
   // undefined and the await below is a no-op — letting an auto-tx open
   // against an unregistered schema. Awaiting \`__zsSchemaInit\` first pins
   // the happens-before edge.
-  const init = globalThis.__zsSchemaInit;
+  const init = globalThis[${JSON.stringify(SCHEMA_INIT_NAME)}];
   if (init && typeof init.then === "function") {
     try { await init; } catch { /* surfaced via handler */ }
   }
-  const ready = globalThis.__zeroshipPlatformReady;
+  const ready = globalThis[${JSON.stringify(PLATFORM_READY_NAME)}];
   if (ready && typeof ready.then === "function") {
     try { await ready; } catch { /* user-facing errors surface via the handler */ }
   }
@@ -782,7 +792,7 @@ async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
   // undefined and the await below is a no-op — letting an auto-tx open
   // against an unregistered schema. Awaiting \`__zsSchemaInit\` first pins
   // the happens-before edge.
-  const init = globalThis.__zsSchemaInit;
+  const init = globalThis[${JSON.stringify(SCHEMA_INIT_NAME)}];
   if (init && typeof init.then === "function") {
     try { await init; } catch { /* surfaced via handler */ }
   }
@@ -790,7 +800,7 @@ async function _zsRpcWithAutoTx(fn, input, ctx, cfg, _kind, tok, xk, bt, et) {
   // dev-bootstrap/index.ts and sdks/db/src/db.ts for the rationale
   // (pglite-socket serializes per-connection-in-tx). No-op on the
   // warm path once registerModel has settled.
-  const ready = globalThis.__zeroshipPlatformReady;
+  const ready = globalThis[${JSON.stringify(PLATFORM_READY_NAME)}];
   if (ready && typeof ready.then === "function") {
     try { await ready; } catch { /* user-facing errors surface via the handler */ }
   }
