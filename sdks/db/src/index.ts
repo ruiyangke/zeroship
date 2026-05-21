@@ -26,8 +26,7 @@ export type { NormalizedSchema } from "./schema.js";
 export { _installSchema } from "./db.js";
 
 // Framework-internal typed-globals helpers (`getPlatformReady`,
-// `setPlatformReady`, `getSchemaInit`, `setSchemaInit`,
-// `INSTALL_SCHEMA_NAME`, `PLATFORM_READY_NAME`, `SCHEMA_INIT_NAME`)
+// `setPlatformReady`, `INSTALL_SCHEMA_NAME`, `PLATFORM_READY_NAME`)
 // are NOT re-exported on the main entry — surfacing platform-ready
 // mutators next to `t` / `schema` in autocomplete invites user code
 // to clobber the auto-tx happens-before edge. Internal consumers
