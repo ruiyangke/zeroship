@@ -98,6 +98,12 @@ export function buildServerEntrySource(opts: {
 //            runtime's \`__zsDispatch\` (Stage 5a). The plugin only
 //            normalises — capability/auto-tx/Zod live in the runtime.
 
+// Side-effect import: forces the bundler to include the framework-
+// internal bootstrap package so the runtime can dynamically resolve
+// it at module-eval time. The synthetic entry never CALLS anything
+// from the package; this import exists purely for bundle inclusion.
+import "@zeroship/bootstrap";
+
 import * as _zsUser from ${userImport};
 
 const _zsUserDefault = (_zsUser && _zsUser.default && typeof _zsUser.default === "object")
@@ -201,6 +207,13 @@ function buildPhase2Entry(
 // User code never reaches this module; the resolveId hook keeps it
 // behind a \\0-prefix. Dispatch lives in the runtime's \`__zsDispatch\`
 // (Stage 5a) — this file is pure normalisation.
+
+// Side-effect import: forces the bundler to include @zeroship/bootstrap
+// so the runtime-entry's \`await import("@zeroship/bootstrap/install-schema")\`
+// resolves against a bundle-resident module. The synthetic entry never
+// CALLS anything from the package; this import exists purely for bundle
+// inclusion.
+import "@zeroship/bootstrap";
 
 import * as _zsUser from ${userImport};
 ${importLines}

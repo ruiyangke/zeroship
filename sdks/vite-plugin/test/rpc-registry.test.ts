@@ -325,15 +325,23 @@ describe("buildServerEntrySource — Phase-2 (binding-fed) shape", () => {
 });
 
 describe("buildServerEntrySource — dict-shape end-to-end", () => {
+  // The synthetic entry side-effect-imports `@zeroship/bootstrap` for
+  // bundle inclusion (the runtime's dynamic-import target). Resolving
+  // that bare specifier requires node_modules to be visible from the
+  // evaluation directory — `os.tmpdir()` is outside the workspace and
+  // can't reach the workspace's pnpm store. Materialise the entry
+  // inside a workspace-local scratch dir so the package resolves via
+  // the standard upward node_modules walk.
+  const workspaceTmpRoot = new URL("./.tmp/", import.meta.url).pathname;
   test("namespace-walk entry: ESM-evaluable normaliser yields a dict", async () => {
     // Materialise the synthetic entry against a stub user module and
     // import it. The default export must carry a dict-shape `rpc`.
-    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
     const { pathToFileURL } = await import("node:url");
 
-    const dir = await mkdtemp(join(tmpdir(), "zsrpc-dict-"));
+    await mkdir(workspaceTmpRoot, { recursive: true });
+    const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-dict-"));
     try {
       const userPath = join(dir, "user.mjs");
       await writeFile(
@@ -374,12 +382,12 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
   });
 
   test("named-export procedure wins over user dict-shape default.rpc on key conflict", async () => {
-    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
     const { pathToFileURL } = await import("node:url");
 
-    const dir = await mkdtemp(join(tmpdir(), "zsrpc-merge-"));
+    await mkdir(workspaceTmpRoot, { recursive: true });
+    const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-merge-"));
     try {
       const userPath = join(dir, "user.mjs");
       await writeFile(
@@ -407,12 +415,12 @@ describe("buildServerEntrySource — dict-shape end-to-end", () => {
   });
 
   test("user-only default.rpc dict (no named exports) surfaces verbatim", async () => {
-    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
     const { join } = await import("node:path");
-    const { tmpdir } = await import("node:os");
     const { pathToFileURL } = await import("node:url");
 
-    const dir = await mkdtemp(join(tmpdir(), "zsrpc-dict-only-"));
+    await mkdir(workspaceTmpRoot, { recursive: true });
+    const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-dict-only-"));
     try {
       const userPath = join(dir, "user.mjs");
       await writeFile(
