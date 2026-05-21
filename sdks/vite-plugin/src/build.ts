@@ -184,29 +184,79 @@ export function stripUseServer(bundle: string): string {
 }
 
 /**
- * Probe a server-entry source string for `export default`.
+ * Probe a server-entry source string for an own `default.fetch`.
  *
  * Internal helper — we call this on the user's untransformed entry
- * source to decide which catch-all rule the .zship emitter should
- * write (Worker(SSR) when the user wrote their own fetch, Static SPA
- * fallback otherwise). The synthetic SSR entry always exports a
- * default, so probing the bundled output would always say "yes" —
- * we have to look at the user's source instead.
+ * source to decide which catch-all rule the .zship emitter writes
+ * (Worker(SSR) when the user wrote their own fetch, Static SPA fallback
+ * otherwise). The synthetic SSR entry ALWAYS emits a `fetch:` key on
+ * its default (it surfaces the user's fetch when present, else
+ * undefined), so probing the synthetic output is meaningless — we
+ * inspect the USER's source.
  *
- * Detected:
- *   - `export default <expr>` (object, function, identifier, …)
- *   - `export default function …`
- *   - `export default class …`
+ * Stage 5b — the new synthetic entry is a normaliser that always emits
+ * `fetch:` on default. This probe used to just check for any
+ * `export default`; now it tries to detect whether the user actually
+ * wrote a `fetch` handler. Heuristics (kept simple — full AST analysis
+ * would over-fit):
  *
- * NOT detected (returns false → "user has no default"):
- *   - `export { foo as default }`  — rare, ambiguous
- *   - the alias / re-export form  — also rare in SSR entries
+ *   - `export default function fetch(…)`        → true
+ *   - `export default { fetch …}`               → true (object short-
+ *                                                 hand or property
+ *                                                 colon form)
+ *   - `export default <ident>` referring to a   → matched conservatively
+ *     module-level `fetch` symbol                  via standalone
+ *                                                  `function fetch(…)` /
+ *                                                  `export function
+ *                                                  fetch(…)`
+ *   - `export default { rpc: {…} }` ONLY        → false (RPC-only app)
+ *
+ * Conservative on any read failure / ambiguity: returns true (an
+ * unwanted Worker(SSR) 404s; an unwanted Static catch-all serves stale
+ * shell on intended SSR routes).
  */
-function probeUserDefaultExport(source: string): boolean {
+export function probeUserDefaultExport(source: string): boolean {
   const stripped = source
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:])\/\/.*$/gm, "$1");
-  return /^\s*export\s+default\b/m.test(stripped);
+
+  // No default export at all → no fetch handler the runtime can use.
+  // Match `export default` anywhere on any line — not anchored to
+  // line-start (a single-line source like
+  // `import x from "./x"; export default x;` would otherwise miss).
+  if (!/(?:^|[\s;])export\s+default\b/.test(stripped)) return false;
+
+  // `export default function fetch(...)` / `export default async function fetch(...)`
+  // Function shape — the function IS the WinterCG handler.
+  if (/export\s+default\s+(?:async\s+)?function\s+fetch\b/.test(stripped)) {
+    return true;
+  }
+
+  // `export default { ... }` — look for a `fetch:` or `fetch(...)` key
+  // somewhere inside the object literal. We don't try to brace-match
+  // perfectly; the false-positive cost (Worker(SSR) instead of Static
+  // when the user has a NESTED `fetch` key but no top-level one) is
+  // negligible.
+  const defaultBlock = stripped.match(/export\s+default\s+(\{[\s\S]*\})/);
+  if (defaultBlock) {
+    const block = defaultBlock[1];
+    // Top-level keys: `fetch:` (property), `fetch(` (method shorthand),
+    // `fetch,` / `fetch}` (shorthand from a binding).
+    if (/(?:^|[,{\s])fetch\s*[:(,}]/.test(block)) return true;
+    // No fetch key in the default object — RPC-only / schema-only app.
+    return false;
+  }
+
+  // `export default <identifier>` — we can't cheaply decide without an
+  // AST; check whether the source defines a top-level `fetch` symbol.
+  // (`function fetch(...)` / `const fetch = ...` / `export function fetch(...)`)
+  if (/(?:^|\n)\s*(?:export\s+)?(?:async\s+function|function|const|let|var)\s+fetch\b/.test(stripped)) {
+    return true;
+  }
+
+  // Default export of some other shape we can't probe (a class, an
+  // imported binding, a call result). Conservative: assume yes.
+  return true;
 }
 
 /** Find server entry point in project */
