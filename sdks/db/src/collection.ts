@@ -412,9 +412,12 @@ export class Collection<
     if (this._nativeCol) return this._nativeCol;
     const dbAny = this._native as unknown as { collection?: (n: string) => NativeCollection };
     if (typeof dbAny.collection !== "function") {
-      throw new Error(
-        "@zeroship/db: env.db.collection(name) not available — " +
-        "runtime is missing the Collection v8_class surface.",
+      throw Object.assign(
+        new Error(
+          "@zeroship/db: env.db.collection(name) not available — " +
+          "runtime is missing the Collection v8_class surface.",
+        ),
+        { code: "native_collection_unavailable" as const },
       );
     }
     this._nativeCol = dbAny.collection(this._name);
@@ -468,33 +471,48 @@ export class Collection<
     await Promise.all(
       Object.entries(withSpec).map(async ([field, spec]) => {
         if (spec !== true) {
-          throw new Error(
-            `find/get: with: { ${field}: ${JSON.stringify(spec)} } — only \`true\` is supported in v1`,
+          throw Object.assign(
+            new Error(
+              `find/get: with: { ${field}: ${JSON.stringify(spec)} } — only \`true\` is supported in v1`,
+            ),
+            { code: "with_unsupported_value" as const },
           );
         }
         const fieldDef = this._schema[field];
         if (!fieldDef || fieldDef.type !== "ref") {
-          throw new Error(
-            `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${this._name}"`,
+          throw Object.assign(
+            new Error(
+              `find/get: with: { ${field}: true } — "${field}" is not a t.ref field on "${this._name}"`,
+            ),
+            { code: "with_not_a_ref_field" as const },
           );
         }
         const targetName = fieldDef.refTarget;
         if (typeof targetName !== "string" || targetName.length === 0) {
-          throw new Error(
-            `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
+          throw Object.assign(
+            new Error(
+              `find/get: with: { ${field}: true } — "${field}" has no refTarget`,
+            ),
+            { code: "with_missing_ref_target" as const },
           );
         }
         const resolve = this._resolveCollection;
         if (resolve === null) {
-          throw new Error(
-            `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
-            `so sibling collections cannot be resolved. Declare the schema via "export default { schema }" to enable relation loading.`,
+          throw Object.assign(
+            new Error(
+              `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
+                `so sibling collections cannot be resolved. Declare the schema via "export default { schema }" to enable relation loading.`,
+            ),
+            { code: "with_no_parent_db" as const },
           );
         }
         const targetCol = resolve(targetName);
         if (!targetCol) {
-          throw new Error(
-            `find/get: with: { ${field}: true } — target collection "${targetName}" is not declared on this db`,
+          throw Object.assign(
+            new Error(
+              `find/get: with: { ${field}: true } — target collection "${targetName}" is not declared on this db`,
+            ),
+            { code: "with_target_not_found" as const },
           );
         }
         // Collect distinct FK values for this relation. The previous
@@ -503,6 +521,13 @@ export class Collection<
         // IN clause) and throw loudly on a non-numeric string so the
         // caller learns about the schema mismatch instead of seeing a
         // mysterious null in the joined field.
+        //
+        // bigint coercion fence: `Number(bigint)` loses precision above
+        // 2^53. A precision-loss here would surface much later as
+        // "wrong row joined" since the id→row map below keys on the
+        // truncated number. Round-trip via `BigInt(Number(v)) === v`
+        // and throw if the value can't fit losslessly — same TypeError
+        // class as the non-numeric branch so callers get one code path.
         const ids: number[] = [];
         const seen = new Set<number>();
         for (const r of rows) {
@@ -514,9 +539,20 @@ export class Collection<
             n = v;
           } else if (typeof v === "bigint") {
             n = Number(v);
+            if (BigInt(n) !== v) {
+              throw Object.assign(
+                new TypeError(
+                  `_loadRelations: FK value for field '${field}' (${String(v)}n) exceeds Number.MAX_SAFE_INTEGER — joining would lose precision`,
+                ),
+                { code: "with_fk_precision_loss" as const },
+              );
+            }
           } else {
-            throw new TypeError(
-              `_loadRelations: FK value for field '${field}' is not a number-like value (got ${typeof v})`,
+            throw Object.assign(
+              new TypeError(
+                `_loadRelations: FK value for field '${field}' is not a number-like value (got ${typeof v})`,
+              ),
+              { code: "with_fk_not_numeric" as const },
             );
           }
           if (!seen.has(n)) {
@@ -811,15 +847,21 @@ export class Collection<
       let conflictFields = opts?.conflictFields;
       if (conflictFields === undefined || conflictFields.length === 0) {
         if (filterKeys.length !== 1) {
-          throw new TypeError(
-            `findOrCreate: opts.conflictFields is required when filter has ${filterKeys.length} keys (only single-key unique filters auto-infer)`,
+          throw Object.assign(
+            new TypeError(
+              `findOrCreate: opts.conflictFields is required when filter has ${filterKeys.length} keys (only single-key unique filters auto-infer)`,
+            ),
+            { code: "find_or_create_needs_conflict_fields" as const },
           );
         }
         const k = filterKeys[0];
         const def = this._schema[k];
         if (!def || def.unique !== true) {
-          throw new TypeError(
-            `findOrCreate: filter key "${k}" is not declared .unique() — pass opts.conflictFields explicitly`,
+          throw Object.assign(
+            new TypeError(
+              `findOrCreate: filter key "${k}" is not declared .unique() — pass opts.conflictFields explicitly`,
+            ),
+            { code: "find_or_create_key_not_unique" as const },
           );
         }
         conflictFields = [k as string & keyof Row<S>];
