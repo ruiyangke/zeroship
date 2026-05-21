@@ -15,7 +15,7 @@ All critical and important issues have been resolved. Remaining items are future
 - [x] `$set` top-level: flatten inline, process all keys
 - [x] `insertMany`: union all columns across all docs via BTreeSet
 - [x] Numeric enum values in DDL CHECK constraint
-- [x] Spec updated: `model()` → `createDb()`, deferred list refreshed
+- [x] Spec updated: `model()` → schema map + `_installSchema`, deferred list refreshed
 
 ## Future Enhancements
 

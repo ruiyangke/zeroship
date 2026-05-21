@@ -1,32 +1,93 @@
 # @zeroship/db — Database SDK
 
 `@zeroship/db` is the database SDK for zeroship apps. You declare a typed
-schema once with `createDb({ ... })`, get a fully-typed `db` object back,
-and call CRUD methods on its collections. Behind the scenes the SDK calls
-into the native `env.db` v8_class surface (registered by the Rust runtime);
-no raw SQL is exposed to user code.
+schema once via the `export default { schema }` convention; the platform
+installs typed Collection wrappers on `env.db` at app boot, and your
+handlers call CRUD methods on `env.db.<name>` directly. Behind the scenes
+the SDK calls into the native `env.db` v8_class surface (registered by
+the Rust runtime); no raw SQL is exposed to user code.
 
 ```ts
-import { createDb, t } from "@zeroship/db";
+// src/index.ts — your app's entry module
+import { t } from "@zeroship/db";
+import { env } from "zeroship";
+import { mutation, query } from "@zeroship/server";
 
-const db = createDb({
-  users: {
-    name:  t.string().required().max(100),
-    email: t.string().required().unique(),
-    role:  t.string().enum("user", "admin").default("user"),
+// Declare your schema once. The platform reads `default.schema` at boot
+// and installs typed Collection wrappers as own properties on env.db.
+export default {
+  schema: {
+    users: {
+      name:  t.string().required().max(100),
+      email: t.string().required().unique(),
+      role:  t.string().enum("user", "admin").default("user"),
+    },
   },
+};
+
+// Anywhere in your code, just dereference env.db:
+const db = env.db;
+
+export const addUser = mutation(async ({ name, email }: { name: string; email: string }) => {
+  const { data: alice, error } = await db.users.insert({ name, email });
+  if (error) throw error;
+  return alice;
 });
 
-const { data: alice, error } = await db.users.insert({
-  name: "Alice", email: "alice@example.com",
+export const listAdmins = query(async () => {
+  const { data, error } = await db.users
+    .find({ role: "admin" })
+    .sort({ name: 1 })
+    .limit(10);
+  if (error) throw error;
+  return data ?? [];
 });
-if (error) throw error;
-
-const { data: admins } = await db.users
-  .find({ role: "admin" })
-  .sort({ name: 1 })
-  .limit(10);
 ```
+
+### TypeScript: typed `env.db`
+
+To make `env.db.<name>` strongly typed against your schema, add this to
+your project's `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "types": ["@zeroship/types"],
+    "paths": {
+      "zeroship-schema": ["./src/index.ts"]
+    }
+  }
+}
+```
+
+`@zeroship/types`' ambient `declare module "zeroship"` augmentation reads
+the user's `default.schema` shape via this `paths` alias and narrows
+`env.db` from the bare native handle to a typed `Db<typeof schema>` —
+so `env.db.users.find(...)` typechecks against the declared fields.
+
+### Split-file schemas
+
+For larger apps, lift the schema into its own module:
+
+```ts
+// src/schema.ts
+import { t } from "@zeroship/db";
+export default {
+  users: { name: t.string().required() },
+  todos: { userId: t.ref("users").required(), title: t.string().required() },
+};
+```
+
+Point the Vite plugin at it:
+
+```ts
+// vite.config.ts
+import { zeroship } from "@zeroship/vite-plugin";
+export default { plugins: [zeroship({ schema: "./src/schema.ts" })] };
+```
+
+The plugin records the resolved path in the deploy manifest; the
+synthetic SSR entry (prod) and dev-bootstrap (dev) both honour it.
 
 ## Two return contracts
 
@@ -110,14 +171,16 @@ When `softDelete: true` is enabled (see below), a fourth column is added:
 ### Per-collection options via `schema()`
 
 ```ts
-import { createDb, schema, t } from "@zeroship/db";
+import { schema, t } from "@zeroship/db";
 
-const db = createDb({
-  todos: schema({
-    title: t.string().required(),
-    done:  t.boolean().default(false),
-  }).softDelete().withVersioning(),
-});
+export default {
+  schema: {
+    todos: schema({
+      title: t.string().required(),
+      done:  t.boolean().default(false),
+    }).softDelete().withVersioning(),
+  },
+};
 ```
 
 - `schema({...}).softDelete()` — `delete()` / `deleteMany()` set `deletedAt`
@@ -137,15 +200,17 @@ the queries you intend to run and the SDK warns you when a filter walks
 the table without hitting one.
 
 ```ts
-const db = createDb({
-  todos: schema({
-    userId: t.ref("users"),
-    done:   t.boolean().default(false),
-    email:  t.string(),
-  })
-    .index("by_email",       ["email"])
-    .index("by_user_done",   ["userId", "done"]),
-});
+export default {
+  schema: {
+    todos: schema({
+      userId: t.ref("users"),
+      done:   t.boolean().default(false),
+      email:  t.string(),
+    })
+      .index("by_email",       ["email"])
+      .index("by_user_done",   ["userId", "done"]),
+  },
+};
 ```
 
 Each declaration becomes a CONCURRENTLY-built Postgres index named
@@ -523,7 +588,8 @@ surface keeps working without changing the calling convention.
 
 ## Migrations (`@zeroship/migrations`)
 
-Schema changes are immediate — `createDb` calls `registerModel` which
+Schema changes are immediate — the platform's schema installer calls
+`registerModel` on every collection in your `default.schema` map, which
 adds tables and columns idempotently on cold start. **Data backfills**
 are the asynchronous part: a separate orchestrator iterates rows in
 batches with resume, dry-run, cancel, and a dead-letter queue.

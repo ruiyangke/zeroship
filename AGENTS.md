@@ -141,10 +141,15 @@ Creators don't call these directly. SDK packages wrap them.
 ### SDK packages (`@zeroship/*` npm scope)
 
 ```javascript
-import { createDb, t, schema } from "@zeroship/db";
+import { t, schema } from "@zeroship/db";
+import { env } from "zeroship";
 import { auth } from "@zeroship/auth";
 import { storage } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
+
+// Declare your schema once via the `export default { schema }` convention;
+// the platform installs typed Collection wrappers on `env.db` at app boot.
+// Handlers then write `env.db.users.find(...)` directly.
 ```
 
 SDK packages call `zeroship.*` primitives internally. Validation, query building, error mapping, TypeScript types all live in JS. They evolve independently of the Rust runtime.
@@ -167,7 +172,7 @@ Default to npm package. Native primitives are forever.
 Stable contracts, live in `docs/reference/`:
 
 - `api-design-guidelines.md` — 10 principles for AI-friendly APIs
-- `db.md` — `@zeroship/db`: createDb, schema, CRUD, aggregation, naming strategy
+- `db.md` — `@zeroship/db`: `export default { schema }` convention, CRUD, aggregation, naming strategy
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent
 - `billing-metering.md` — Meter trait, 25+ metrics, pricing, spending limits
 - `zship.md` — `.zship` deploy artifact format (tar.zst with content-addressed blobs)

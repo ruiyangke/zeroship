@@ -809,8 +809,8 @@ zeroship's thesis.
 ## Strategic Takeaways for zeroship
 
 **Features zeroship already has that map to this landscape**:
-- Declarative SDK (`createDb({todos: {text: t.string()}})`) maps to auto-
-  provisioned backend pattern — strong
+- Declarative SDK (`export default { schema: { todos: { text: t.string() }}}`)
+  maps to auto-provisioned backend pattern — strong
 - Typed RPC via `"use server"` transform maps to the typed-wire gap — nobody
   else ships this
 - Runtime performance (512K/1.17M req/s) exceeds every competitor's hosted

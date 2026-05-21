@@ -102,9 +102,9 @@ pub struct Manifest {
     pub metadata: ManifestMetadata,
 
     /// Build-time export discovery. Stage 1 only writes this; the
-    /// runtime ignores it. Stage 2 will read `exports.schema` from the
-    /// V8 bootstrap to resolve the DB schema module without requiring
-    /// the user to call `createDb(...)`.
+    /// runtime ignores it. Stage 2 reads `exports.schema` from the V8
+    /// bootstrap to resolve the DB schema module exported via
+    /// `export default { schema }` without any factory call.
     ///
     /// Additive on the wire: an old manifest without `exports`
     /// deserializes unchanged, and a fresh build with no schema /
@@ -135,8 +135,8 @@ impl Default for Manifest {
 
 /// Build-time export discovery — populated by the build adapter
 /// (`@zeroship/vite-plugin`) so the runtime can locate user modules
-/// (DB schema, handler files) without depending on the user calling
-/// `createDb(...)` or registering handlers imperatively.
+/// (DB schema, handler files) without any imperative registration
+/// step in user code.
 ///
 /// Stage 1: the build writes `schema`; the runtime ignores it. Stage 2
 /// wires the read in the V8 bootstrap. Stage 3 adds file-based
