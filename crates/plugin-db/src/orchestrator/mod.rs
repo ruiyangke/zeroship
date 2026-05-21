@@ -20,4 +20,6 @@
 //! Each submodule is `pub(crate)` so [`crate::callbacks`] can
 //! re-export the public symbols at the legacy path.
 
+pub(crate) mod auto_tx;
 pub(crate) mod register_model;
+pub(crate) mod transaction;
