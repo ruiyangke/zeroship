@@ -30,7 +30,7 @@
 //! the privileged functions without changing the public Rust API. This
 //! is tracked as deferred follow-up in the dispatch report.
 
-use compio_postgres::Pool;
+use compio_postgres::{Client, Pool, Row};
 use serde_json::Value;
 
 /// Actor categories accepted by the audit table.
@@ -326,6 +326,413 @@ pub async fn update_audit_status(
         .await
         .map_err(|e| format!("audit: update status failed: {e}"))?;
     Ok(!rows.is_empty())
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// B1 backfill audit-row helpers.
+//
+// `crate::migrations` used to inline INSERT / UPDATE / SELECT against
+// `__zeroship_migrations` from ~13 distinct sites; those calls now go
+// through the typed helpers below, keeping the audit table's writers
+// in a single file. The wire SQL is identical to the previous inline
+// statements — same column list, same WHERE-clause shape, same RETURNING
+// clauses.
+//
+// The state machine the helpers implement (mirrors proposal A3):
+//
+//   [INSERT phase='backfill', status='running']
+//        │
+//        ▼
+//   ┌────running─────┐ ──progress──▶ running (cursor / dead_letter / heartbeat)
+//   │                │ ──reset─────▶ pending (audit_generation += 1)
+//   │                │ ──cancel────▶ cancelled
+//   │                │ ──terminal──▶ applied / applied_with_dead_letter / failed
+//   └────────────────┘
+//
+// The helpers come in two flavours: pool-driven (used by short
+// non-locking calls — status / cancel / reset / start-time bootstrap)
+// and client-driven (used while the dedicated `Client` holds the
+// session-scoped advisory lock so subsequent calls land on the same
+// backend session).
+
+/// Snapshot of a backfill row identified by (collection, change_kind).
+/// Returned by [`find_latest_backfill_row`] for callers that need to
+/// inspect prior state at `migration.start(...)` time.
+#[derive(Debug)]
+pub struct BackfillLookup {
+    pub id: i64,
+    pub status: String,
+    pub cursor: i64,
+    pub processed: i64,
+    pub dead_letter_pks: Value,
+    pub audit_generation: i64,
+    pub error: Option<String>,
+    pub is_done: bool,
+}
+
+/// Snapshot returned by [`lock_audit_row_for_update`] — the columns the
+/// commit-batch path needs to validate generation + cancellation before
+/// applying row updates.
+#[derive(Debug)]
+pub struct LockedAuditRow {
+    pub status: String,
+    pub audit_generation: i64,
+}
+
+/// Compatibility shim — the legacy `Pool` and `Client` types both expose
+/// `query_text_params(sql, &[&str])`, so the helpers below accept either
+/// via this trait. Keeps the audit-table SQL in one file without forcing
+/// callers to thread connection ownership through wrapper types.
+pub trait AuditExecutor {
+    fn query_text<'a>(
+        &'a self,
+        sql: &'a str,
+        params: &'a [&'a str],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Row>, compio_postgres::Error>> + 'a>>;
+}
+
+impl AuditExecutor for Pool {
+    fn query_text<'a>(
+        &'a self,
+        sql: &'a str,
+        params: &'a [&'a str],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Row>, compio_postgres::Error>> + 'a>> {
+        Box::pin(self.query_text_params(sql, params))
+    }
+}
+
+impl AuditExecutor for Client {
+    fn query_text<'a>(
+        &'a self,
+        sql: &'a str,
+        params: &'a [&'a str],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Row>, compio_postgres::Error>> + 'a>> {
+        Box::pin(self.query_text_params(sql, params))
+    }
+}
+
+/// Decode `details.processed` from a backfill audit row. The audit
+/// table's `details` column is `jsonb`; `Row::raw_value` returns the
+/// binary jsonb wire format (1-byte version prefix + JSON text).
+pub fn read_processed_from_audit_row(row: &Row) -> i64 {
+    let bytes = row.raw_value("details");
+    let Some(bytes) = bytes else { return 0 };
+    if bytes.len() < 2 {
+        return 0;
+    }
+    let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
+    let parsed: Value = serde_json::from_str(json_str).unwrap_or(Value::Null);
+    parsed
+        .get("processed")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
+/// Decode `dead_letter_pks` from a backfill audit row.
+pub fn read_dead_letter_pks_from_audit_row(row: &Row) -> Value {
+    let bytes = row.raw_value("dead_letter_pks");
+    let Some(bytes) = bytes else { return Value::Array(vec![]) };
+    if bytes.len() < 2 {
+        return Value::Array(vec![]);
+    }
+    let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
+    serde_json::from_str(json_str).unwrap_or(Value::Array(vec![]))
+}
+
+/// SELECT the latest backfill row for `(collection, change_kind=name)`.
+/// Returns `Ok(None)` if the row hasn't been inserted yet.
+pub async fn find_latest_backfill_row<E: AuditExecutor + ?Sized>(
+    exec: &E,
+    app_id: &str,
+    collection: &str,
+    name: &str,
+) -> Result<Option<BackfillLookup>, compio_postgres::Error> {
+    let sql = format!(
+        r#"SELECT id, status, validate_cursor, dead_letter_pks, details, error, audit_generation
+            FROM "{app_id}"."__zeroship_migrations"
+            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
+            ORDER BY id DESC LIMIT 1"#
+    );
+    let rows = exec.query_text(&sql, &[collection, name]).await?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let id: i64 = row.get("id");
+    let status: String = row.get("status");
+    let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
+    let processed = read_processed_from_audit_row(row);
+    let dead_letter_pks = read_dead_letter_pks_from_audit_row(row);
+    let audit_generation: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
+    // SQL NULL and empty-string both mean "no error". The migrations
+    // SDK's parseNative treats any string in `error` as a thrown
+    // exception, so an empty string would surface as a zero-message
+    // failure on the caller side.
+    let error: Option<String> = row
+        .try_get::<_, String>("error")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let is_done = matches!(
+        status.as_str(),
+        "applied" | "applied_with_dead_letter" | "failed" | "cancelled"
+    );
+    Ok(Some(BackfillLookup {
+        id,
+        status,
+        cursor,
+        processed,
+        dead_letter_pks,
+        audit_generation,
+        error,
+        is_done,
+    }))
+}
+
+/// `UPDATE … SET status='running'` — used at `migration.start(...)` time
+/// when an existing backfill row is being resumed by this worker.
+/// Refreshes `owner_session_id`/`last_heartbeat_at` to the current
+/// backend so operators can see who's running.
+pub async fn set_backfill_running(
+    client: &Client,
+    app_id: &str,
+    id: i64,
+) -> Result<(), compio_postgres::Error> {
+    let sql = format!(
+        r#"UPDATE "{app_id}"."__zeroship_migrations"
+            SET status = 'running',
+                owner_session_id = pg_backend_pid()::text,
+                last_heartbeat_at = NOW(),
+                updated_at = NOW(),
+                error = NULL
+            WHERE id = $1::bigint"#
+    );
+    let id_s = id.to_string();
+    client.query_text_params(&sql, &[id_s.as_str()]).await?;
+    Ok(())
+}
+
+/// `INSERT … status='running'` — first-time insert at
+/// `migration.start(...)`. Stamps `owner_session_id` to the connection's
+/// `pg_backend_pid()` and seeds `details.processed = 0`. Audit
+/// generation defaults to 0 from the column DEFAULT.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_backfill_running(
+    client: &Client,
+    app_id: &str,
+    collection: &str,
+    name: &str,
+    dry_run: bool,
+    deploy_id: &str,
+    schema_version: i32,
+) -> Result<i64, compio_postgres::Error> {
+    let sql = format!(
+        r#"INSERT INTO "{app_id}"."__zeroship_migrations"
+            (collection, phase, change_class, change_kind, details,
+             ddl_sql, status, deploy_id, applied_by_kind, schema_version,
+             owner_session_id, last_heartbeat_at, validate_cursor)
+            VALUES ($1, 'backfill', $2, $3, $4::jsonb,
+                    NULL, 'running', $5, $6, $7::integer,
+                    pg_backend_pid()::text, NOW(), 0)
+            RETURNING id"#
+    );
+    let details = serde_json::json!({
+        "processed": 0,
+        "dryRun": dry_run,
+    });
+    let details_s = details.to_string();
+    let sv_s = schema_version.to_string();
+    let rows = client
+        .query_text_params(
+            &sql,
+            &[
+                collection,
+                ChangeClass::Additive.as_sql(),
+                name,
+                details_s.as_str(),
+                deploy_id,
+                ActorKind::Auto.as_sql(),
+                sv_s.as_str(),
+            ],
+        )
+        .await?;
+    let id: i64 = rows
+        .first()
+        .map(|r| r.get::<_, i64>("id"))
+        .unwrap_or_default();
+    Ok(id)
+}
+
+/// `UPDATE … audit_generation = audit_generation + 1` — bumps the
+/// generation counter so any in-flight worker holding a stale snapshot
+/// will detect the reset on its next commit. Also zeroes the cursor,
+/// dead-letter PKs, and processed counter so a fresh run starts from
+/// the top.
+pub async fn reset_backfill_row<E: AuditExecutor + ?Sized>(
+    exec: &E,
+    app_id: &str,
+    collection: &str,
+    name: &str,
+) -> Result<(), compio_postgres::Error> {
+    let sql = format!(
+        r#"UPDATE "{app_id}"."__zeroship_migrations"
+            SET status = 'pending',
+                validate_cursor = NULL,
+                dead_letter_pks = NULL,
+                error = NULL,
+                applied_at = NULL,
+                updated_at = NOW(),
+                audit_generation = audit_generation + 1,
+                details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
+            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
+    );
+    exec.query_text(&sql, &[collection, name]).await?;
+    Ok(())
+}
+
+/// `SELECT status FROM … ORDER BY id DESC LIMIT 1` — fast-path peek
+/// used by `migration.fetchBatch(...)` to short-circuit if the operator
+/// cancelled between batches.
+pub async fn peek_latest_backfill_status<E: AuditExecutor + ?Sized>(
+    exec: &E,
+    app_id: &str,
+    collection: &str,
+    name: &str,
+) -> Result<Option<String>, compio_postgres::Error> {
+    let sql = format!(
+        r#"SELECT status FROM "{app_id}"."__zeroship_migrations"
+            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
+            ORDER BY id DESC LIMIT 1"#
+    );
+    let rows = exec.query_text(&sql, &[collection, name]).await?;
+    Ok(rows.first().map(|r| r.get::<_, String>("status")))
+}
+
+/// `UPDATE … SET last_heartbeat_at = NOW()` — best-effort write the
+/// fetch-batch path issues so operators can see the worker is alive.
+pub async fn heartbeat_backfill<E: AuditExecutor + ?Sized>(
+    exec: &E,
+    app_id: &str,
+    collection: &str,
+    name: &str,
+) -> Result<(), compio_postgres::Error> {
+    let sql = format!(
+        r#"UPDATE "{app_id}"."__zeroship_migrations"
+            SET last_heartbeat_at = NOW()
+            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2 AND status = 'running'"#
+    );
+    exec.query_text(&sql, &[collection, name]).await?;
+    Ok(())
+}
+
+/// `SELECT status, audit_generation … FOR UPDATE` — acquires the row
+/// lock inside the current transaction so a concurrent
+/// `migrations.cancel(...)` on another connection serialises against
+/// the commit. Caller must already be inside a `BEGIN`.
+///
+/// Returns `Ok(None)` if the row was missing (shouldn't happen after
+/// a successful `exec_begin`, but kept honest).
+pub async fn lock_audit_row_for_update(
+    client: &Client,
+    app_id: &str,
+    id: i64,
+) -> Result<Option<LockedAuditRow>, compio_postgres::Error> {
+    let sql = format!(
+        r#"SELECT status, audit_generation FROM "{app_id}"."__zeroship_migrations"
+            WHERE id = $1::bigint FOR UPDATE"#
+    );
+    let id_s = id.to_string();
+    let rows = client.query_text_params(&sql, &[id_s.as_str()]).await?;
+    let Some(row) = rows.first() else { return Ok(None) };
+    let status: String = row.get("status");
+    let audit_generation: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
+    Ok(Some(LockedAuditRow {
+        status,
+        audit_generation,
+    }))
+}
+
+/// `UPDATE … validate_cursor / dead_letter_pks / processed` — advances
+/// the row's progress columns after a successful batch. Must run on the
+/// same connection that holds the row lock from
+/// [`lock_audit_row_for_update`].
+pub async fn update_backfill_progress(
+    client: &Client,
+    app_id: &str,
+    id: i64,
+    next_cursor: i64,
+    dead_letter_pks: &Value,
+    processed_total: i64,
+) -> Result<(), compio_postgres::Error> {
+    let sql = format!(
+        r#"UPDATE "{app_id}"."__zeroship_migrations"
+            SET validate_cursor = $2::bigint,
+                dead_letter_pks = $3::jsonb,
+                details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', to_jsonb($4::bigint)),
+                last_heartbeat_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1::bigint"#
+    );
+    let dlp_s = dead_letter_pks.to_string();
+    let id_s = id.to_string();
+    let nc_s = next_cursor.to_string();
+    let pt_s = processed_total.to_string();
+    client
+        .query_text_params(
+            &sql,
+            &[id_s.as_str(), nc_s.as_str(), dlp_s.as_str(), pt_s.as_str()],
+        )
+        .await?;
+    Ok(())
+}
+
+/// `UPDATE … status=$terminal, owner_session_id = NULL` — terminal
+/// transition for a backfill row. Idempotent: only flips rows still in
+/// `running` / `pending`, so a doubled call is harmless. Used by
+/// `exec_commit_batch` when `isDone=true`.
+pub async fn finalise_backfill(
+    client: &Client,
+    app_id: &str,
+    id: i64,
+    terminal: TerminalStatus,
+    error_message: Option<&str>,
+) -> Result<(), compio_postgres::Error> {
+    let sql = format!(
+        r#"UPDATE "{app_id}"."__zeroship_migrations"
+            SET status = $2,
+                error = COALESCE($3, error),
+                updated_at = NOW(),
+                applied_at = CASE
+                    WHEN $2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL THEN NOW()
+                    ELSE applied_at
+                END,
+                owner_session_id = NULL
+            WHERE id = $1::bigint AND status IN ('running','pending')"#
+    );
+    let id_s = id.to_string();
+    let err_s = error_message.unwrap_or("").to_string();
+    client
+        .query_text_params(&sql, &[id_s.as_str(), terminal.as_sql(), err_s.as_str()])
+        .await?;
+    Ok(())
+}
+
+/// `UPDATE … status='cancelled'` — operator-driven cancel via
+/// `migrations.cancel(...)`. Runs on a pool client (no lock) — the
+/// row's FOR UPDATE in any concurrent `exec_commit_batch` serialises
+/// against this update.
+pub async fn cancel_backfill_row<E: AuditExecutor + ?Sized>(
+    exec: &E,
+    app_id: &str,
+    id: i64,
+) -> Result<(), compio_postgres::Error> {
+    let sql = format!(
+        r#"UPDATE "{app_id}"."__zeroship_migrations"
+            SET status = 'cancelled',
+                updated_at = NOW(),
+                owner_session_id = NULL,
+                error = COALESCE(error, 'cancelled by operator')
+            WHERE id = $1::bigint AND status IN ('pending','running')"#
+    );
+    let id_s = id.to_string();
+    exec.query_text(&sql, &[id_s.as_str()]).await?;
+    Ok(())
 }
 
 /// Validate an app_id used as a schema name — same rules as the query
