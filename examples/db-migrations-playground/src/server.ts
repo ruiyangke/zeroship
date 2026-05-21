@@ -11,7 +11,8 @@
 // State lives in __zeroship_migrations (A3 audit table); a crash
 // mid-migration is recoverable from `validate_cursor`.
 
-import { createDb, t, schema } from "@zeroship/db";
+import { t, schema } from "@zeroship/db";
+import { env } from "zeroship";
 import { defineMigration, migrations } from "@zeroship/migrations";
 import { action, mutation, query } from "@zeroship/server";
 
@@ -19,9 +20,12 @@ import { action, mutation, query } from "@zeroship/server";
 // Schema — represents the "post-expand" shape. Both old and new fields
 // are present + nullable so reads see whichever shape exists during the
 // migration window.
+//
+// Declared via the `export default { schema }` convention; the platform
+// installs typed Collection wrappers on `env.db` at app boot.
 // ---------------------------------------------------------------------------
 
-export const db = createDb({
+const dbSchema = {
   events: schema({
     // Pre-expand: `event_type` was the only kind discriminator.
     // Mid-expand: both `event_type` and `kind` exist; new writes set
@@ -34,7 +38,11 @@ export const db = createDb({
     user_hash:  t.string(),
     payload:    t.json(),
   }),
-});
+};
+
+export default { schema: dbSchema };
+
+const db = env.db;
 
 // ---------------------------------------------------------------------------
 // 1. backfillSeverity — set severity="info" where null. The simplest

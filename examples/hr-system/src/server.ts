@@ -12,10 +12,13 @@
  *   zeroship deploy . --app=<uuid> --control=http://localhost:9090 --key=<key>
  */
 
-import { createDb, schema, t } from "@zeroship/db";
+import { schema, t } from "@zeroship/db";
+import { env } from "zeroship";
 import { procedure } from "@zeroship/server";
 
-const db = createDb({
+// Schema declared via the `export default { schema }` convention; the
+// platform installs typed Collection wrappers on `env.db` at app boot.
+const dbSchema = {
   // ---------------------------------------------------------------------------
   // Core
   // ---------------------------------------------------------------------------
@@ -315,7 +318,11 @@ const db = createDb({
     isRead:     t.boolean().default(false),
     link:       t.string(),
   },
-});
+};
+
+export default { schema: dbSchema };
+
+const db = env.db;
 
 // ===========================================================================
 // API Endpoints

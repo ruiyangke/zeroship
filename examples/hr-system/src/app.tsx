@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { createDb } from "@zeroship/db";
+import { env } from "zeroship";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -9,31 +9,15 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 
 // ---------------------------------------------------------------------------
-// Server: models + data access (extracted by zeroship plugin)
+// Server: data access (extracted by the zeroship plugin)
+//
+// The schema is declared once in `./server.ts` via `export default
+// { schema }`. The platform installs typed Collection wrappers on
+// `env.db` at app boot, so these handlers just dereference the
+// collection by name.
 // ---------------------------------------------------------------------------
 
-const db = createDb({
-  employees: {
-    first_name: { type: String, required: true },
-    last_name: { type: String, required: true },
-    email: { type: String, required: true },
-    department_id: { type: Number },
-    salary: { type: Number },
-    status: { type: String, default: "active" },
-    skills: { type: [String] },
-  },
-  departments: {
-    name: { type: String, required: true },
-    code: { type: String, required: true },
-    headcount: { type: Number, default: 0 },
-  },
-  leave_requests: {
-    employee_id: { type: Number, required: true },
-    type: { type: String, required: true },
-    days: { type: Number, required: true },
-    status: { type: String, default: "pending" },
-  },
-});
+const db = env.db;
 
 export async function getEmployees() {
   return db.employees.find({ status: "active" }).sort({ last_name: 1 });

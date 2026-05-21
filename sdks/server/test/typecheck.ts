@@ -82,8 +82,10 @@ export const queryCannotRunMutation = query<unknown, unknown>(
 export const createUser = mutation<{ name: string }, unknown>(
   async (_args, ctx) => {
     // ctx.db is MutationCtxDb (Record<string, unknown>). User code
-    // narrows when paired with the concrete Db<T> from createDb, but
-    // for type-only enforcement we just verify it's *present*.
+    // narrows when paired with the concrete Db<T> from the
+    // `export default { schema }` convention (via env.db / the
+    // zeroship-schema tsconfig path), but for type-only enforcement
+    // we just verify it's *present*.
     return ctx.db.users;
   },
 );

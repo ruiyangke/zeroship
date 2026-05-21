@@ -16,16 +16,24 @@
 // Delete what you don't need; this file is a starting point, not a lecture.
 
 import { query, mutation } from "@zeroship/server";
-import { createDb, t } from "@zeroship/db";
+import { t } from "@zeroship/db";
+import { env } from "zeroship";
 import { bucket } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
 
-const db = createDb({
+// Declare the schema once via the `export default { schema }` convention;
+// the platform installs typed Collection wrappers on `env.db` at app
+// boot. Inside any procedure handler you write `env.db.notes.find(...)`.
+const dbSchema = {
   notes: {
     title: t.string().required(),
     body: t.string(),
   },
-});
+};
+
+export default { schema: dbSchema };
+
+const db = env.db;
 
 const uploads = bucket("uploads");
 

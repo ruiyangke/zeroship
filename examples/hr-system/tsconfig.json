@@ -8,8 +8,10 @@
     "jsx": "react-jsx",
     "skipLibCheck": true,
     "baseUrl": ".",
+    "types": ["@zeroship/types"],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "zeroship-schema": ["./src/server.ts"]
     }
   },
   "include": ["src"]

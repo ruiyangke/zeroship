@@ -3,7 +3,8 @@
 // db-todos — real-world example exercising @zeroship/db v2 surfaces.
 //
 // What this file demonstrates:
-//   • createDb({...}) with multi-collection schema
+//   • export default { schema } convention — multi-collection schema
+//     declared once; the platform installs typed wrappers on env.db
 //   • t.ref("users")  — typed cross-table relations + Postgres FK (B2)
 //   • .unique() / .index() — materialised as real Postgres indexes (A1)
 //   • Validation: required / min / max / enum / pattern (existing SDK)
@@ -24,12 +25,13 @@ import { query, mutation, action, runQuery } from "@zeroship/server";
 // Schema — the `export default { schema }` convention
 // ---------------------------------------------------------------------------
 //
-// dev-bootstrap reads `default.schema` at app boot and hands it to
-// `@zeroship/db/internal::__registerSchemas`, which both registers the
-// models AND installs typed Collection wrappers as own properties on
-// `env.db`. From handlers we just write `env.db.users.find(...)` —
-// the type comes from the tsconfig `paths` entry that maps
-// `zeroship-schema` to this file.
+// The synthetic SSR entry (prod) and dev-bootstrap (dev) read
+// `default.schema` at app boot and hand it to
+// `@zeroship/db::_installSchema`, which both registers the models AND
+// installs typed Collection wrappers as own properties on `env.db`.
+// From handlers we just write `env.db.users.find(...)` — the type
+// comes from the tsconfig `paths` entry that maps `zeroship-schema`
+// to this file.
 
 const dbSchema = {
   users: {

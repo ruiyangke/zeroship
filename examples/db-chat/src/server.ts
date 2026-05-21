@@ -4,7 +4,7 @@
 // read-set narrowing end-to-end.
 //
 // What this file demonstrates:
-//   • createDb({...}) with three related collections + t.ref FKs (B2)
+//   • export default { schema } with three related collections + t.ref FKs (B2)
 //   • query() handler captures read-set via the B3 CURRENT_KIND gate
 //     and the per-query Active capture guard — the broker's predicate
 //     evaluator (P8b) uses it to skip events that don't match
@@ -16,14 +16,15 @@
 // The client (src/App.tsx) uses @zeroship/react's useQuery against
 // the `listMessages` proc and auto-rerenders on broker events.
 
-import { createDb, t, schema } from "@zeroship/db";
+import { t, schema } from "@zeroship/db";
+import { env } from "zeroship";
 import { query, mutation, action, runQuery, runMutation } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
-// Schema
+// Schema — the `export default { schema }` convention
 // ---------------------------------------------------------------------------
 
-export const db = createDb({
+const dbSchema = {
   users: {
     handle: t.string().required().unique().pattern(/^[a-z0-9_]+$/),
     name:   t.string().required().max(100),
@@ -42,7 +43,11 @@ export const db = createDb({
     // For P8c moderation flow — content actions can flip this.
     flagged:   t.boolean().default(false),
   }),
-});
+};
+
+export default { schema: dbSchema };
+
+const db = env.db;
 
 type UserId    = typeof db.users.Id;
 type ChannelId = typeof db.channels.Id;

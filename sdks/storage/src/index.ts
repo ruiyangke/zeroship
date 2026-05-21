@@ -156,7 +156,7 @@ export class Bucket {
   }
 }
 
-/** Convenience factory — mirrors `createDb`'s shape. */
+/** Convenience factory — `bucket("uploads")` is the ergonomic entry point. */
 export function bucket(name: string): Bucket {
   return new Bucket(name);
 }
