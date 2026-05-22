@@ -1,10 +1,12 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 10:47.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 11:17.
+
+**Cycle 11:17 closures (2)**: [I12] (validate_field_name ASCII tightening, commit `403b3891`) + [I25] (OBJECT_PREFIX LIKE param-bind, retro-closed via cycle 04:35's `c0590506`). 4 reviewers dispatched (code-critique r10, performance r11, test-coverage r11, api-surface r9) — results pending at the time of this update.
 
 **Cycle 10:47 closures (2)**: MAJOR-R9-5 (auth/* hardening gate, commit `2fa9472e`) + [I23] (mig_lock state-drift tracing, commit `5d9acab8`). 4 reviewers returned: architecture r10 = 93 (+1, credited the hardening gate), security r9 = 83 (+1, same credit), error-ux r9 = 91 (±0), concurrency r10 = 88 (±0, surfaced one NEW MINOR-latent — Subscription::close at broker.rs:359-369 holds borrow_mut across w.wake).
 
-**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 20 IMPORTANT (mix actionable / judgment-call / cross-crate; was 21 pre-10:47).
+**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 18 IMPORTANT (mix actionable / judgment-call / cross-crate; was 20 pre-11:17).
 
 **STRONG PLATEAU SIGNAL (sustained through cycle 10:47)**: cycle 09:30's 4-of-4 ±0 movement has only marginally improved — cycle 10:47's +1/+1/0/0 came entirely from the hardening cfg-gate (a single forcing function), not from forward motion on lens-specific findings. Architecture reviewer recommends capping at r11 if the `query.rs` split lands; concurrency reviewer recommends skipping cycles until the two carried IMPORTANTs land. Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function".
 
@@ -159,16 +161,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I12] `validate_field_name` permits non-ASCII identifiers (test-coverage GAP-1; security MINOR)
-- **Source**: `plugin-db-test-coverage-2026-05-22-r2.md` §3 GAP-1; `plugin-db-security-2026-05-22-r1.md` §2 "MINOR — validate_collection not called for field names"
-- **File**: `crates/plugin-db/src/query.rs:104-121`
-- **Description**: `validate_collection` rejects non-ASCII; `validate_field_name` does not. Field name `"café"` (4 chars, 5 bytes) passes. `quote_ident` prevents injection but Postgres byte-truncation at 63 could alias two distinct fields. Either tighten to ASCII-only (matching `validate_collection`) or document the intentional unicode-permit policy.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — `query.rs:104-121` confirmed: only checks empty, null-byte, and 63-byte length.
-  - Blocker: small policy decision (allow unicode or not).
-  - Already-superseded-by: N/A
-- **Effort**: small (~5 lines + unit test)
-- **Pickable this cycle**: yes — policy + one-liner + test.
+### ~~[I12] `validate_field_name` permits non-ASCII identifiers (test-coverage GAP-1; security MINOR)~~ — CLOSED cycle 11:17
+- **Closed by**: `403b3891 plugin-db/query: validate_field_name rejects non-ASCII (I12)`
+- Added the same `is_ascii_alphanumeric() || '_'` check `validate_collection` uses. Two new unit tests (`validate_field_name_rejects_non_ascii`, `validate_field_name_accepts_ascii_allowlist`) pin the contract. 349 tests pass.
 
 ---
 
@@ -282,16 +277,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I25] `OBJECT_PREFIX` in `LIKE` predicate is format-string interpolated (security MINOR; replication M2)
-- **Source**: `plugin-db-security-2026-05-22-r1.md` §2 "MINOR — OBJECT_PREFIX literal"; `plugin-db-migration-pipeline-2026-05-22-r1.md` §3 M2 (related: SELECT-then-DROP race comment lies about implementation)
-- **File**: `crates/plugin-db/src/replication.rs:318,431`
-- **Description**: `format!(r"... WHERE slot_name LIKE '{OBJECT_PREFIX}%'")`. `OBJECT_PREFIX = "__zs_"` is a `const &str`, so no injection risk today. Future maintainer changing the constant to include `%` or `_` would break LIKE semantics. Safe fix: `$1 || '%'` bind.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes.
-  - Blocker: none.
-  - Already-superseded-by: N/A
-- **Effort**: small (one param-bind change × 2 sites)
-- **Pickable this cycle**: yes — purely defensive.
+### ~~[I25] `OBJECT_PREFIX` in `LIKE` predicate is format-string interpolated (security MINOR; replication M2)~~ — CLOSED cycle 11:17 (verification: already closed at `c0590506`)
+- **Closed by**: `c0590506 plugin-db/v8_classes/replication: scope watchdog + dropAbandoned to self.app_id (CRITICAL)` — the cross-app scoping fix also converted both sites to `slot_name LIKE $1` parameter binds.
+- Verification (cycle 11:17): `grep -n "LIKE '" crates/plugin-db/src/replication.rs` returns only two docstring references (lines 25 and 57); no `format!(... LIKE '{OBJECT_PREFIX}...')` remains in code. The `LIKE $1` form at the four real SQL sites (lines 413, 547, plus the watchdog/dropAbandoned CTEs) binds the per-app prefix safely. The two remaining `LIKE '__zs_%'` literals in `auth/bootstrap.rs:891,953` live inside SECURITY DEFINER CREATE FUNCTION bodies (different security model — server-side SQL, not Rust string interpolation) and only compile under `--features hardening` post-`2fa9472e`.
 
 ---
 
@@ -336,6 +324,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ---
 
 ## SUPERSEDED (already fixed; remove next cycle)
+
+### [S80] MINOR (security r1 + test-coverage r2 GAP-1; cycle 11:17) — [I12] validate_field_name unicode aliasing
+- **Closed by**: `403b3891 plugin-db/query: validate_field_name rejects non-ASCII (I12)`
+- Tightened `validate_field_name` to ASCII alphanumeric + underscore (same allowlist as `validate_collection`); two new unit tests pin both the rejection set (café / naïve / 日本 / em-dash / space) and the positive ASCII shape. Eliminates a class of byte-truncation aliasing where two unicode-spelled fields could collide on the same Postgres column after the 63-byte NAMEDATALEN truncation. Net 349 lib tests pass (was 347, +2 new).
+
+### [S81] MINOR (security r1 + migration-pipeline r1 M2; cycle 11:17) — [I25] OBJECT_PREFIX LIKE format-interpolation, retro-closed
+- **Closed by**: `c0590506 plugin-db/v8_classes/replication: scope watchdog + dropAbandoned to self.app_id (CRITICAL)` (which also did [S48] cycle 04:35)
+- Cycle-11:17 backlog audit found this entry stale: the cross-app scoping fix at `c0590506` ALREADY converted both `replication.rs` LIKE sites to `slot_name LIKE $1` parameter binds. The deferred entry's quoted format-string is no longer present in `replication.rs`. Remaining `LIKE '__zs_%'` literals in `auth/bootstrap.rs:891,953` live in SECURITY DEFINER CREATE FUNCTION bodies (server-side SQL, not Rust interpolation) and only compile under `--features hardening` post-`2fa9472e`. No new commit needed.
 
 ### [S78] MAJOR (code-critique r9 MAJOR-R9-5; cycle 10:47) — auth/* subtree pollutes default builds with 58 dead-code warnings
 - **Closed by**: `2fa9472e plugin-db/auth: gate dormant auth subtree behind hardening feature`
