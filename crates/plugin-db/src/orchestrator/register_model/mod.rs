@@ -23,13 +23,32 @@
 //! Each submodule is `pub(crate)` so integration tests can call into the
 //! stages independently. The V8-facing surface is
 //! [`register_model_dispatch`] — unchanged from before the split.
+//!
+//! ## Error rail
+//!
+//! Every fallible function here — including the three pipeline sequencers
+//! (`exec_register_model`, `run_pipeline`, `exec_register_model_with_pool`)
+//! and every stage submodule (`bootstrap`, `plan`, `apply`) — returns
+//! `Result<_, crate::error::DbError>`. The dispatch site renders the
+//! typed error through [`crate::error::DbError::to_op_error`] so the JS
+//! exception carries `.code` per variant (`lock_not_available`,
+//! `transient`, `lazy_init_failed`, etc.).
+//!
+//! The `validation_refused` envelope wire shape is preserved as the lone
+//! exception: `validate::validate` still returns `Err(envelope_json: String)`
+//! because the JSON body is the documented SDK contract. We wrap it at
+//! the boundary as [`crate::error::DbError::SchemaRefused`], whose
+//! `to_op_error()` arm materialises a plain `Error` with `message =
+//! envelope_json` — the SDK still does `JSON.parse(err.message)` exactly
+//! as before.
 
 use serde_json::Value;
-use zeroship_runtime::state::OpResult;
+use zeroship_runtime::state::{OpResult, ResolveValue};
 
 use crate::backend::PostgresBackend;
 use crate::context;
-use crate::v8_bridge::{runtime_state, setup_promise};
+use crate::error::DbError;
+use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 pub(crate) mod apply;
 pub(crate) mod bootstrap;
@@ -59,7 +78,7 @@ pub fn register_model_dispatch<'s>(
         return promise;
     }
 
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let app_id_owned = app_id.to_string();
     let collection_owned = collection.to_string();
 
@@ -67,15 +86,15 @@ pub fn register_model_dispatch<'s>(
         match exec_register_model(&app_id_owned, &collection_owned, &schema, &indexes).await {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
-                OpResult::Completed {
-                    op_id,
-                    value: "null".to_string(),
+                OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::String("null".to_string()),
                     request_id,
                 }
             }
-            Err(e) => OpResult::Failed {
-                op_id,
-                error: e,
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -91,17 +110,22 @@ async fn exec_register_model(
     collection: &str,
     schema: &Value,
     indexes: &Value,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     // Lazy pool init
     let has_pool = context::with(|c| c.pool_initialised());
     if !has_pool {
         crate::init_pool_async()
             .await
-            .map_err(|e| format!("db: lazy init failed: {e}"))?;
+            .map_err(|e| DbError::Configuration {
+                code: "lazy_init_failed",
+                message: format!("db: lazy init failed: {e}"),
+            })?;
     }
 
-    let backend = context::with(|c| c.backend())
-        .ok_or_else(|| "db: backend not initialized".to_string())?;
+    let backend = context::with(|c| c.backend()).ok_or_else(|| DbError::Configuration {
+        code: "backend_not_initialized",
+        message: "db: backend not initialized".to_string(),
+    })?;
 
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
@@ -139,7 +163,7 @@ pub async fn run_pipeline(
     schema: &Value,
     indexes: &Value,
     deploy_id: &str,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     // 1. Bootstrap — schema, audit table, advisory lock, schema_version,
     //    expanded index specs. The returned lock_client carries the
     //    pool borrow lifetime; we thread it through to apply where the
@@ -165,9 +189,23 @@ pub async fn run_pipeline(
     // Run the two stages and, on Err, explicitly release the lock
     // before propagating. Success cases keep the lock held — apply()
     // releases it between Pass 1 and Pass 2 as before.
+    //
+    // Validate's `Err` branch is always the `validation_refused` JSON
+    // envelope (the only fallible call inside it is a best-effort
+    // audit write under `tracing::warn`). Wrap that envelope in
+    // `DbError::SchemaRefused` so the dispatch boundary's
+    // `to_op_error()` materialises a plain `Error` with `message =
+    // envelope` — preserves the documented `JSON.parse(err.message)`
+    // SDK contract while keeping the rest of the pipeline on the
+    // typed rail.
     let plan_res = plan::compute_plan(backend, &ctx, collection, schema).await;
     let approved_res = match plan_res {
-        Ok(plan) => validate::validate(backend, &ctx, plan).await,
+        Ok(plan) => validate::validate(backend, &ctx, plan)
+            .await
+            .map_err(|envelope_json| DbError::SchemaRefused {
+                code: "validation_refused",
+                envelope_json,
+            }),
         Err(e) => Err(e),
     };
     let approved = match approved_res {
@@ -212,7 +250,7 @@ pub async fn exec_register_model_with_pool(
     schema: &Value,
     indexes: &Value,
     deploy_id: &str,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     let url = context::with(|c| c.db_url()).unwrap_or_default();
     let backend = PostgresBackend::new(pool, url);
     run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await

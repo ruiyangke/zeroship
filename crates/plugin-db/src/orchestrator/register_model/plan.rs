@@ -11,6 +11,7 @@ use serde_json::Value;
 use super::bootstrap::RegisterContext;
 use crate::backend::Backend;
 use crate::diff::{DiffOp, LiveSchema};
+use crate::error::DbError;
 use crate::query;
 
 /// Output of stage 2.
@@ -35,15 +36,9 @@ pub(crate) async fn compute_plan<B: Backend<LiveSchema = LiveSchema>>(
     ctx: &RegisterContext,
     collection: &str,
     schema: &Value,
-) -> Result<Plan, String> {
-    let mut live = backend
-        .introspect_schema(&ctx.app_id)
-        .await
-        .map_err(|e| e.into_string())?;
-    let rows_estimate = backend
-        .estimate_row_count(&ctx.app_id, collection)
-        .await
-        .map_err(|e| e.into_string())?;
+) -> Result<Plan, DbError> {
+    let mut live = backend.introspect_schema(&ctx.app_id).await?;
+    let rows_estimate = backend.estimate_row_count(&ctx.app_id, collection).await?;
     live.row_counts
         .insert(collection.to_string(), rows_estimate);
 
@@ -63,7 +58,7 @@ pub(crate) async fn compute_plan<B: Backend<LiveSchema = LiveSchema>>(
         schema,
         &query::FkEmission::Deferred(&existing_tables),
     )
-    .map_err(|e| format!("db: {e}"))?;
+    .map_err(DbError::from)?;
 
     let ops = crate::diff::compute_diff(
         &live,

@@ -13,19 +13,21 @@
 //!
 //! Returns an [`ApprovedPlan`] the apply stage executes.
 //!
-//! ### Future hook for surprise #1
+//! ### Why this stage stays on `Result<_, String>`
 //!
-//! The `Result<_, String>` returned today is consumed by the dispatch
-//! site as `OpResult::Failed { error: JSON_envelope }` — the SDK then
-//! `JSON.parse`s the envelope. The architecture review (sibling-bug
-//! awareness section) flagged a candidate refinement: split the failure
-//! types so "schema refused" stays as the JSON envelope (the documented
-//! SDK contract) but "lock contention" / "audit generation race" /
-//! "client connection" surface with a `.code` via `OpResult::JsValue {
-//! RejectError(OpError) }` so the SDK can branch programmatically. The
-//! decision was to leave this deferred — the JSON envelope is the
-//! published wire contract and no in-tree caller needs `.code` for the
-//! refusal path yet.
+//! Every other pipeline stage now returns `Result<_, DbError>` (Stage
+//! 8e final sweep). Validate is the lone exception: its only `Err` path
+//! is the `validation_refused` JSON envelope, and the envelope itself
+//! is the documented SDK wire contract — the SDK does
+//! `JSON.parse(err.message)` to recover the structured refusal, so the
+//! message body must reach JS byte-for-byte.
+//!
+//! `run_pipeline` wraps the `Err(envelope)` in
+//! [`crate::error::DbError::SchemaRefused`] at the boundary; that
+//! variant's `to_op_error()` arm explicitly does NOT add `.code` to
+//! the JS exception (the envelope already carries
+//! `"code":"validation_refused"` inside its JSON body). Net result:
+//! wire-compatible refusal flow + DbError-typed pipeline.
 
 use serde_json::Value;
 

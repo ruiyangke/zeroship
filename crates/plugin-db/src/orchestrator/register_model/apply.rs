@@ -27,6 +27,7 @@ use super::bootstrap::{lock_key, RegisterContext, LOCK_TAG};
 use super::validate::ApprovedPlan;
 use crate::backend::Backend;
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
+use crate::error::DbError;
 
 /// Run stage 4.
 ///
@@ -38,7 +39,7 @@ pub(crate) async fn apply<'p, B: Backend>(
     ctx: RegisterContext,
     lock_client: PooledClient<'p>,
     approved: ApprovedPlan,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     let RegisterContext {
         app_id,
         deploy_id,
@@ -47,7 +48,7 @@ pub(crate) async fn apply<'p, B: Backend>(
         declared_indexes,
     } = ctx;
 
-    let run_op = async |op: &DiffOp| -> Result<(), String> {
+    let run_op = async |op: &DiffOp| -> Result<(), DbError> {
         let audit_id = match backend
             .write_audit_row(
                 &app_id,
@@ -73,7 +74,7 @@ pub(crate) async fn apply<'p, B: Backend>(
             }
         };
 
-        let result = match &op.change_kind {
+        let result: Result<(), DbError> = match &op.change_kind {
             ChangeKind::CreateTable
             | ChangeKind::AddColumn
             | ChangeKind::AddForeignKey
@@ -83,12 +84,21 @@ pub(crate) async fn apply<'p, B: Backend>(
                         .pool_exec(sql, &[])
                         .await
                         .map(|_| ())
-                        .map_err(|e| {
-                            format!(
-                                "db: {} failed: {}",
-                                op.change_kind.as_sql(),
-                                e.into_string()
-                            )
+                        .map_err(|e| match e {
+                            // Preserve the operator-facing prefix
+                            // ("db: ADD COLUMN failed: ...") only for
+                            // the catch-all Internal arm; SQLSTATE-coded
+                            // variants (unique_violation, fk_violation,
+                            // lock_not_available, …) reach JS verbatim
+                            // so the SDK can branch on `.code`.
+                            DbError::Internal { message } => DbError::Internal {
+                                message: format!(
+                                    "db: {} failed: {}",
+                                    op.change_kind.as_sql(),
+                                    message
+                                ),
+                            },
+                            other => other,
                         })
                 } else {
                     Ok(())
@@ -103,6 +113,13 @@ pub(crate) async fn apply<'p, B: Backend>(
                     })
                     .cloned();
                 if let Some(spec) = spec_owned {
+                    // create_index_with_recovery still returns
+                    // `Result<(), String>` — its String body may carry a
+                    // structured envelope (UNIQUE-conflict during CIC).
+                    // Wrap as DbError::Internal so the body reaches JS
+                    // verbatim while the SDK gets a uniform `.code`
+                    // surface. Refining this surface is tracked in the
+                    // Backend trait sweep.
                     backend
                         .create_index_with_recovery(
                             &app_id,
@@ -112,6 +129,7 @@ pub(crate) async fn apply<'p, B: Backend>(
                             schema_version,
                         )
                         .await
+                        .map_err(|message| DbError::Internal { message })
                 } else {
                     Ok(())
                 }
@@ -132,12 +150,17 @@ pub(crate) async fn apply<'p, B: Backend>(
                         .await;
                 }
                 Err(e) => {
+                    // Render the typed error to a flat string for the
+                    // audit_error column. The DbError variants `to_op_error()`
+                    // strips for JS are recoverable here only as the
+                    // message body.
+                    let msg = e.clone().into_string();
                     let _ = backend
                         .update_audit_status(
                             &app_id,
                             id,
                             crate::audit::TerminalStatus::Failed,
-                            Some(e.as_str()),
+                            Some(msg.as_str()),
                         )
                         .await;
                 }
@@ -155,7 +178,7 @@ pub(crate) async fn apply<'p, B: Backend>(
     // caller and `PooledClient::Drop` parks the connection back in the
     // pool with its session-scoped lock still held, blocking every
     // subsequent caller (cross-app stall).
-    let pass1: Result<(), String> = async {
+    let pass1: Result<(), DbError> = async {
         for op in &approved.ops {
             if op.class == ChangeClass::Destructive {
                 continue;

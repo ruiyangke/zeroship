@@ -25,6 +25,7 @@ use compio_postgres::PooledClient;
 use serde_json::Value;
 
 use crate::backend::{Backend, PostgresBackend};
+use crate::error::DbError;
 use crate::query;
 
 /// Threaded context produced by `bootstrap`. Pure value type — does
@@ -81,7 +82,7 @@ pub(crate) async fn bootstrap<'p>(
     schema: &Value,
     indexes: &Value,
     deploy_id: &str,
-) -> Result<(RegisterContext, PooledClient<'p>), String> {
+) -> Result<(RegisterContext, PooledClient<'p>), DbError> {
     // Strictness — proposal A2 line 122. Read from schema._meta.strictness
     // if present; default is 'strict'.
     let strictness = schema
@@ -99,16 +100,23 @@ pub(crate) async fn bootstrap<'p>(
     // the CREATE INDEX CONCURRENTLY phases (which can't run in a
     // transaction). Released when `apply` drops the client at the end
     // of pass 1.
-    let lock_client = backend
-        .pool()
-        .get()
-        .await
-        .map_err(|e| format!("db: failed to acquire orchestrator client: {e}"))?;
+    let lock_client = backend.pool().get().await.map_err(|e| DbError::Transient {
+        message: format!("db: failed to acquire orchestrator client: {e}"),
+    })?;
     let key = lock_key(app_id);
     backend
         .acquire_advisory_lock(&lock_client, &key, LOCK_TAG)
         .await
-        .map_err(|e| format!("db: pg_advisory_lock failed: {}", e.into_string()))?;
+        .map_err(|e| match e {
+            // Preserve the operator-facing prefix when the lock attempt
+            // produced a pg error; other DbError variants flow through
+            // verbatim so `lock_not_available` / `transient` reach JS
+            // with their canonical `.code`.
+            DbError::Internal { message } => DbError::Internal {
+                message: format!("db: pg_advisory_lock failed: {message}"),
+            },
+            other => other,
+        })?;
     // From here on, any other orchestrator call against the same app_id
     // blocks until lock_client is dropped.
 
@@ -118,22 +126,21 @@ pub(crate) async fn bootstrap<'p>(
     backend
         .ensure_app_schema(app_id)
         .await
-        .map_err(|e| format!("db: create schema failed: {}", e.into_string()))?;
+        .map_err(|e| match e {
+            DbError::Internal { message } => DbError::Internal {
+                message: format!("db: create schema failed: {message}"),
+            },
+            other => other,
+        })?;
 
-    backend
-        .ensure_audit_table(app_id)
-        .await
-        .map_err(|e| e.into_string())?;
+    backend.ensure_audit_table(app_id).await?;
 
-    let schema_version = backend
-        .next_schema_version(app_id)
-        .await
-        .map_err(|e| e.into_string())?;
+    let schema_version = backend.next_schema_version(app_id).await?;
 
-    let mut declared_indexes = query::build_create_indexes(app_id, collection, schema)
-        .map_err(|e| format!("db: {e}"))?;
-    let named_indexes = query::build_named_indexes(app_id, collection, indexes)
-        .map_err(|e| format!("db: {e}"))?;
+    let mut declared_indexes =
+        query::build_create_indexes(app_id, collection, schema).map_err(DbError::from)?;
+    let named_indexes =
+        query::build_named_indexes(app_id, collection, indexes).map_err(DbError::from)?;
     declared_indexes.extend(named_indexes);
 
     let ctx = RegisterContext {
