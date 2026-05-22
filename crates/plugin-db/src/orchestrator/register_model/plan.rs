@@ -1,16 +1,16 @@
 //! Stage 2 — Plan.
 //!
-//! Introspects `pg_catalog` for the live schema, builds the declared
+//! Introspects the live schema for the app, builds the declared
 //! `CREATE TABLE` (with FK emission deferred for cross-table cold-start
 //! cases — proposal B2), and diffs them. The result is a flat
 //! `Vec<DiffOp>` already classified as additive / compatible /
 //! destructive.
 
-use compio_postgres::Pool;
 use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
-use crate::diff::DiffOp;
+use crate::backend::Backend;
+use crate::diff::{DiffOp, LiveSchema};
 use crate::query;
 
 /// Output of stage 2.
@@ -22,18 +22,28 @@ pub(crate) struct Plan {
 
 /// Run stage 2.
 ///
-/// `read_live_schema` is the heavy I/O — it pulls the column / index /
-/// FK lists from `pg_catalog` for the entire app schema. Caching that
+/// `introspect_schema` is the heavy I/O — it pulls the column / index /
+/// FK lists from the catalog for the entire app schema. Caching that
 /// across registerModel calls is a future optimisation; today every
 /// call pays the round-trip.
-pub(crate) async fn compute_plan(
-    pool: &Pool,
-    ctx: &RegisterContext<'_>,
+///
+/// The Backend's associated `LiveSchema` is constrained to the diff
+/// engine's [`LiveSchema`] so the orchestrator can hand the snapshot
+/// straight to `compute_diff` without an adapter.
+pub(crate) async fn compute_plan<B: Backend<LiveSchema = LiveSchema>>(
+    backend: &B,
+    ctx: &RegisterContext,
     collection: &str,
     schema: &Value,
 ) -> Result<Plan, String> {
-    let mut live = crate::diff::read_live_schema(pool, &ctx.app_id).await?;
-    let rows_estimate = crate::diff::estimate_row_count(pool, &ctx.app_id, collection).await?;
+    let mut live = backend
+        .introspect_schema(&ctx.app_id)
+        .await
+        .map_err(|e| e.into_string())?;
+    let rows_estimate = backend
+        .estimate_row_count(&ctx.app_id, collection)
+        .await
+        .map_err(|e| e.into_string())?;
     live.row_counts
         .insert(collection.to_string(), rows_estimate);
 

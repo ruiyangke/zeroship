@@ -9,32 +9,34 @@
 //!    between pass 1 and pass 2.
 //! 2. `CREATE SCHEMA IF NOT EXISTS` for the app.
 //! 3. `CREATE TABLE IF NOT EXISTS __zeroship_migrations` (delegated to
-//!    `crate::audit::ensure_audit_table_exists`).
+//!    [`crate::backend::Backend::ensure_audit_table`]).
 //! 4. Compute `schema_version` from `MAX(schema_version) + 1` over the
 //!    audited DDL history.
 //! 5. Expand declared inline indexes + named indexes into a single
-//!    `Vec<IndexSpec>` the plan stage will diff against `pg_catalog`.
+//!    `Vec<IndexSpec>` the plan stage will diff against the live
+//!    snapshot.
 //!
-//! Returns a [`RegisterContext`] the later stages thread through.
+//! Returns a [`RegisterContext`] the later stages thread through, plus
+//! a separate `PooledClient` carrying the advisory lock. The two are
+//! split so `RegisterContext` can be passed by value without dragging
+//! the pool's borrow lifetime through the type.
 
-use compio_postgres::{Pool, PooledClient};
+use compio_postgres::PooledClient;
 use serde_json::Value;
 
+use crate::backend::{Backend, PostgresBackend};
 use crate::query;
 
-/// Threaded context produced by `bootstrap`. Owns the lock client so
-/// `apply` can drop it (releasing the advisory lock) between transactional
-/// DDL and CIC.
-///
-/// Lifetime `'p` ties the held `PooledClient` to the borrowed `Pool`
-/// the caller passed in; the context cannot outlive the pool reference.
-pub(crate) struct RegisterContext<'p> {
+/// Threaded context produced by `bootstrap`. Pure value type — does
+/// not own any borrow-lifetimed handle. The advisory-lock client is
+/// returned separately by [`bootstrap`].
+pub(crate) struct RegisterContext {
     /// App identifier — schema name, audit-row key.
     pub app_id: String,
     /// Deploy identifier — audit-row grouping key. `'cold_start'` for
     /// pre-deploy bootstrap.
     pub deploy_id: String,
-    /// `schema_version` snapshot captured AFTER `ensure_audit_table_exists`
+    /// `schema_version` snapshot captured AFTER `ensure_audit_table`
     /// runs, so each DDL row gets a monotonic version. Set once at
     /// bootstrap and shared across every audit write in this run.
     pub schema_version: i32,
@@ -46,26 +48,40 @@ pub(crate) struct RegisterContext<'p> {
     /// `compute_diff` so the plan correctly identifies which need
     /// `CREATE INDEX CONCURRENTLY`.
     pub declared_indexes: Vec<query::IndexSpec>,
-    /// Dedicated pool client holding the session advisory lock. Moves
-    /// into `apply`; dropped between pass 1 (transactional) and pass 2
-    /// (CIC) so the second pass runs unlocked.
-    pub lock_client: PooledClient<'p>,
 }
+
+/// Advisory-lock key namespacing — matches the Postgres
+/// `pg_advisory_lock(hashtext('zs_reg:' || $1)::int4,
+/// hashtext('register_model')::int4)` pair the pre-Stage-8e code
+/// emitted inline. `pub(crate)` so `apply()` uses the same key when
+/// releasing.
+pub(crate) fn lock_key(app_id: &str) -> String {
+    format!("zs_reg:{app_id}")
+}
+
+pub(crate) const LOCK_TAG: &str = "register_model";
 
 /// Run stage 1.
 ///
 /// Order is load-bearing: the schema must exist before
-/// `ensure_audit_table_exists` runs, the audit table must exist before
+/// `ensure_audit_table` runs, the audit table must exist before
 /// `next_schema_version` reads from it, the lock must be held before
 /// any diff/apply work to serialise concurrent deploys per-app.
+///
+/// The advisory-lock client is acquired via the pool's `get()` (a
+/// `PooledClient`) rather than a fresh `connect()`. The pool already
+/// runs the connection task on whatever compio runtime the warm-up
+/// happened on; reusing that task avoids the test-harness pattern
+/// where each `dispatch_zs` spins a fresh runtime and would orphan a
+/// freshly-spawned connection.
 pub(crate) async fn bootstrap<'p>(
-    pool: &'p Pool,
+    backend: &'p PostgresBackend,
     app_id: &str,
     collection: &str,
     schema: &Value,
     indexes: &Value,
     deploy_id: &str,
-) -> Result<RegisterContext<'p>, String> {
+) -> Result<(RegisterContext, PooledClient<'p>), String> {
     // Strictness — proposal A2 line 122. Read from schema._meta.strictness
     // if present; default is 'strict'.
     let strictness = schema
@@ -75,45 +91,44 @@ pub(crate) async fn bootstrap<'p>(
         .unwrap_or("strict")
         .to_string();
 
-    let empty: Vec<&str> = Vec::new();
-
     // -------------------------------------------------------------------
     // Concurrent-deploy serialisation: proposal A2 line 202.
     //
     // Two-key advisory lock keyed on (app_id, register_model). Held at
-    // session scope on a dedicated pool client so the lock survives the
-    // CREATE INDEX CONCURRENTLY phases (which can't run in a transaction).
-    // Released when `apply` drops the client at the end of pass 1.
-    //
-    // The proposal calls for `pg_advisory_xact_lock` (transaction scope);
-    // because registerModel spans non-transactional CONCURRENTLY DDL, we
-    // use the session-scoped equivalent `pg_advisory_lock` on a dedicated
-    // connection. Functionally identical for our serialisation goal: a
-    // second worker calling the same function blocks on the same key.
-    let lock_client = pool
+    // session scope on a dedicated pool client so the lock survives
+    // the CREATE INDEX CONCURRENTLY phases (which can't run in a
+    // transaction). Released when `apply` drops the client at the end
+    // of pass 1.
+    let lock_client = backend
+        .pool()
         .get()
         .await
         .map_err(|e| format!("db: failed to acquire orchestrator client: {e}"))?;
-    let lock_sql =
-        "SELECT pg_advisory_lock(hashtext('zs_reg:' || $1)::int4, hashtext('register_model')::int4)";
-    lock_client
-        .query_text_params(lock_sql, &[app_id])
+    let key = lock_key(app_id);
+    backend
+        .acquire_advisory_lock(&lock_client, &key, LOCK_TAG)
         .await
-        .map_err(|e| format!("db: pg_advisory_lock failed: {e}"))?;
+        .map_err(|e| format!("db: pg_advisory_lock failed: {}", e.into_string()))?;
     // From here on, any other orchestrator call against the same app_id
     // blocks until lock_client is dropped.
 
     // -------------------------------------------------------------------
     // Schema + audit table.
     // -------------------------------------------------------------------
-    let create_schema = query::build_create_schema(app_id);
-    pool.query_text_params(&create_schema, &empty)
+    backend
+        .ensure_app_schema(app_id)
         .await
-        .map_err(|e| format!("db: create schema failed: {e}"))?;
+        .map_err(|e| format!("db: create schema failed: {}", e.into_string()))?;
 
-    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
+    backend
+        .ensure_audit_table(app_id)
+        .await
+        .map_err(|e| e.into_string())?;
 
-    let schema_version = crate::audit::next_schema_version(pool, app_id).await?;
+    let schema_version = backend
+        .next_schema_version(app_id)
+        .await
+        .map_err(|e| e.into_string())?;
 
     let mut declared_indexes = query::build_create_indexes(app_id, collection, schema)
         .map_err(|e| format!("db: {e}"))?;
@@ -121,12 +136,12 @@ pub(crate) async fn bootstrap<'p>(
         .map_err(|e| format!("db: {e}"))?;
     declared_indexes.extend(named_indexes);
 
-    Ok(RegisterContext {
+    let ctx = RegisterContext {
         app_id: app_id.to_string(),
         deploy_id: deploy_id.to_string(),
         schema_version,
         strictness,
         declared_indexes,
-        lock_client,
-    })
+    };
+    Ok((ctx, lock_client))
 }

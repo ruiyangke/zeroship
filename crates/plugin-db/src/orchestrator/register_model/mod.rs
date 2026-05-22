@@ -3,12 +3,12 @@
 //!
 //! Proposal A2 (docs/proposals/zeroship-db.md) defines the contract:
 //!
-//! 1. **Bootstrap** ([`bootstrap`]) — create the per-app Postgres schema,
-//!    the `__zeroship_migrations` audit table (idempotent), acquire the
+//! 1. **Bootstrap** ([`bootstrap`]) — create the per-app schema, the
+//!    `__zeroship_migrations` audit table (idempotent), acquire the
 //!    session-scoped advisory lock, compute the deploy's `schema_version`,
 //!    expand declared + named indexes. Returns a [`RegisterContext`] the
 //!    later stages thread through.
-//! 2. **Plan** ([`plan`]) — introspect `pg_catalog`, diff against the
+//! 2. **Plan** ([`plan`]) — introspect the live schema, diff against the
 //!    declared schema, classify each change as additive / compatible /
 //!    destructive. Returns a [`Plan`].
 //! 3. **Validate** ([`validate`]) — apply safety rules. Destructive ops
@@ -17,8 +17,8 @@
 //!    proceeds.
 //! 4. **Apply** ([`apply`]) — two-pass DDL execution under the advisory
 //!    lock (transactional ops first; `CREATE INDEX CONCURRENTLY` after
-//!    releasing the lock). Every op writes an audit row through
-//!    [`crate::audit`].
+//!    releasing the lock). Every op writes an audit row through the
+//!    [`crate::backend::Backend`] facade.
 //!
 //! Each submodule is `pub(crate)` so integration tests can call into the
 //! stages independently. The V8-facing surface is
@@ -27,6 +27,7 @@
 use serde_json::Value;
 use zeroship_runtime::state::OpResult;
 
+use crate::backend::PostgresBackend;
 use crate::context;
 use crate::v8_bridge::{runtime_state, setup_promise};
 
@@ -84,7 +85,7 @@ pub fn register_model_dispatch<'s>(
 }
 
 /// Lazily initialise the pool, resolve the deploy id, then drive the
-/// four-phase pipeline.
+/// four-phase pipeline through the backend.
 async fn exec_register_model(
     app_id: &str,
     collection: &str,
@@ -99,20 +100,21 @@ async fn exec_register_model(
             .map_err(|e| format!("db: lazy init failed: {e}"))?;
     }
 
-    let pool = context::with(|c| c.pool())
-        .ok_or_else(|| "db: pool not initialized".to_string())?;
+    let backend = context::with(|c| c.backend())
+        .ok_or_else(|| "db: backend not initialized".to_string())?;
 
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
 
-    exec_register_model_with_pool(&pool, app_id, collection, schema, indexes, &deploy_id).await
+    run_pipeline(backend.as_ref(), app_id, collection, schema, indexes, &deploy_id).await
 }
 
-/// Pool-driven variant of `exec_register_model`. Public so integration
-/// tests can drive the four-phase orchestrator without going through V8.
+/// Backend-driven variant of `exec_register_model`. Public so
+/// integration tests can drive the four-phase orchestrator without
+/// going through V8.
 ///
-/// `deploy_id` controls audit-log grouping (proposal A3 line 233 reserves
-/// `'cold_start'` for pre-deploy DDL).
+/// `deploy_id` controls audit-log grouping (proposal A3 line 233
+/// reserves `'cold_start'` for pre-deploy DDL).
 ///
 /// The four stages are:
 ///
@@ -121,11 +123,17 @@ async fn exec_register_model(
 /// ```
 ///
 /// Each stage is implemented as a free function in its own submodule;
-/// this entry just sequences them. The advisory lock is held by the
-/// `RegisterContext` returned from `bootstrap`; `apply` releases it
-/// after pass 1 before running `CREATE INDEX CONCURRENTLY`.
-pub async fn exec_register_model_with_pool(
-    pool: &compio_postgres::Pool,
+/// this entry just sequences them. The advisory-lock client returned
+/// from `bootstrap` lives until `apply` releases the lock between
+/// passes.
+///
+/// Concrete-typed on [`PostgresBackend`] for the lock-client step —
+/// the PG pool's `get()` is what produces the `PooledClient` whose
+/// lifetime threads through to `apply`. Other stages talk the trait,
+/// so swapping in a future backend's pool semantics would localise
+/// here.
+pub async fn run_pipeline(
+    backend: &PostgresBackend,
     app_id: &str,
     collection: &str,
     schema: &Value,
@@ -133,20 +141,44 @@ pub async fn exec_register_model_with_pool(
     deploy_id: &str,
 ) -> Result<(), String> {
     // 1. Bootstrap — schema, audit table, advisory lock, schema_version,
-    //    expanded index specs. The returned context owns the lock_client
-    //    so apply can release the lock between passes.
-    let ctx = bootstrap::bootstrap(pool, app_id, collection, schema, indexes, deploy_id).await?;
+    //    expanded index specs. The returned lock_client carries the
+    //    pool borrow lifetime; we thread it through to apply where the
+    //    advisory unlock + drop happens between passes.
+    let (ctx, lock_client) =
+        bootstrap::bootstrap(backend, app_id, collection, schema, indexes, deploy_id).await?;
 
     // 2. Plan — introspect live schema, diff against declared schema,
     //    classify each op.
-    let plan = plan::compute_plan(pool, &ctx, collection, schema).await?;
+    let plan = plan::compute_plan(backend, &ctx, collection, schema).await?;
 
     // 3. Validate — refuse destructive ops under `strict`, audit them
     //    either way so operators can see what was refused.
-    let approved = validate::validate(pool, &ctx, plan).await?;
+    let approved = validate::validate(backend, &ctx, plan).await?;
 
     // 4. Apply — execute the validated ops under the lock (pass 1) then
     //    release and run CIC unlocked (pass 2). Each op writes an audit
     //    row.
-    apply::apply(pool, ctx, approved).await
+    apply::apply(backend, ctx, lock_client, approved).await
+}
+
+/// Pool-driven entry retained for integration tests that hand in a
+/// `Rc<Pool>` directly (predates the Backend trait). Builds an ad-hoc
+/// [`PostgresBackend`] around the pool and delegates to
+/// [`run_pipeline`].
+///
+/// Production code reaches the orchestrator through
+/// [`register_model_dispatch`] / [`exec_register_model`], which read
+/// the backend from the per-isolate context. Test code that doesn't
+/// drive the V8 lifecycle uses this helper to skip the lookup.
+pub async fn exec_register_model_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    indexes: &Value,
+    deploy_id: &str,
+) -> Result<(), String> {
+    let url = context::with(|c| c.db_url()).unwrap_or_default();
+    let backend = PostgresBackend::new(pool, url);
+    run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
 }

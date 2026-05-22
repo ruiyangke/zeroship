@@ -21,6 +21,13 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
+            // Stage 8e-R2: the orchestrator's bootstrap stage opens a
+            // dedicated client via the Backend trait's
+            // `acquire_dedicated_client`, which reads the URL from the
+            // per-isolate context. Tests that drive the orchestrator
+            // through `exec_register_model_with_pool` need the URL
+            // installed in the context BEFORE the call.
+            zeroship_plugin_db::set_db_url_for_tests(&url);
             url
         }
         Err(e) => {
@@ -139,7 +146,7 @@ use zeroship_plugin_db::query::*;
 #[compio::test]
 async fn insert_and_find() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     // Insert
@@ -164,7 +171,7 @@ async fn insert_and_find() {
 #[compio::test]
 async fn insert_many_round_trip() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -191,7 +198,7 @@ async fn insert_many_round_trip() {
 #[compio::test]
 async fn update_one_inc() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     // Insert
@@ -217,7 +224,7 @@ async fn update_one_inc() {
 #[compio::test]
 async fn update_one_dec_mul() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let bq = build_insert(SCHEMA, "notes", &json!({"title": "Math", "category": "tech", "views": 10})).unwrap();
@@ -241,7 +248,7 @@ async fn update_one_dec_mul() {
 #[compio::test]
 async fn update_one_jsonb_array_ops() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let bq = build_insert(SCHEMA, "notes", &json!({"title": "Tags", "category": "tech"})).unwrap();
@@ -288,7 +295,7 @@ async fn update_one_jsonb_array_ops() {
 #[compio::test]
 async fn update_many_round_trip() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     // Insert 3 tech, 1 food
@@ -326,7 +333,7 @@ async fn update_many_round_trip() {
 #[compio::test]
 async fn delete_operations() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -369,7 +376,7 @@ async fn delete_operations() {
 #[compio::test]
 async fn filter_comparison_operators() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -414,7 +421,7 @@ async fn filter_comparison_operators() {
 #[compio::test]
 async fn filter_logical_operators() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -449,7 +456,7 @@ async fn filter_logical_operators() {
 #[compio::test]
 async fn filter_pattern_operators() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -478,7 +485,7 @@ async fn filter_pattern_operators() {
 #[compio::test]
 async fn find_with_options() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -510,7 +517,7 @@ async fn find_with_options() {
 #[compio::test]
 async fn find_with_projection() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let bq = build_insert(SCHEMA, "notes", &json!({"title": "Proj", "body": "secret", "category": "tech"})).unwrap();
@@ -533,7 +540,7 @@ async fn find_with_projection() {
 #[compio::test]
 async fn distinct_values() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -566,7 +573,7 @@ async fn distinct_values() {
 #[compio::test]
 async fn count_with_filter() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -597,7 +604,7 @@ async fn count_with_filter() {
 #[compio::test]
 async fn aggregate_full() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -638,7 +645,7 @@ async fn aggregate_full() {
 #[compio::test]
 async fn aggregate_multi_group() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -671,7 +678,7 @@ async fn aggregate_multi_group() {
 #[compio::test]
 async fn aggregate_having() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let docs = json!([
@@ -707,7 +714,7 @@ async fn aggregate_having() {
 #[compio::test]
 async fn null_handling() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     // Insert with body
@@ -743,7 +750,7 @@ async fn null_handling() {
 #[compio::test]
 async fn mixed_update() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let bq = build_insert(SCHEMA, "notes", &json!({"title": "Mix", "category": "tech", "views": 10})).unwrap();
@@ -769,7 +776,7 @@ async fn mixed_update() {
 #[compio::test]
 async fn timestamps_as_numbers() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     setup(&pool).await;
 
     let bq = build_insert(SCHEMA, "notes", &json!({"title": "Time", "category": "tech"})).unwrap();
@@ -788,7 +795,7 @@ async fn timestamps_as_numbers() {
 #[compio::test]
 async fn aggregate_having_postgres_docs_example() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     // Set up weather table
     pool.execute(&format!("DROP TABLE IF EXISTS \"{SCHEMA}\".\"weather\""), &[]).await.unwrap();
@@ -851,7 +858,7 @@ async fn aggregate_having_postgres_docs_example() {
 #[compio::test]
 async fn a1_unique_index_actually_enforces_uniqueness() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     // Fresh schema + table — `build_create_table` is the production path.
     let app = "a1_test";
@@ -964,7 +971,7 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
 #[compio::test]
 async fn a3_audit_table_created_and_idempotent() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a3_audit_test";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1005,7 +1012,7 @@ async fn a3_audit_table_created_and_idempotent() {
 #[compio::test]
 async fn a2_first_deploy_writes_audit_rows() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a2_first_deploy";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1018,7 +1025,7 @@ async fn a2_first_deploy_writes_audit_rows() {
     });
 
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool,
+        std::rc::Rc::clone(&pool),
         app,
         "users",
         &schema,
@@ -1067,7 +1074,7 @@ async fn a2_first_deploy_writes_audit_rows() {
 #[compio::test]
 async fn a2_destructive_drop_column_refused_strict() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a2_destructive";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1080,7 +1087,7 @@ async fn a2_destructive_drop_column_refused_strict() {
         "legacy_score": {"type": "number"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &v1, &serde_json::json!([]), "deploy_v1",)
+        std::rc::Rc::clone(&pool), app, "posts", &v1, &serde_json::json!([]), "deploy_v1",)
     .await
     .unwrap();
 
@@ -1089,7 +1096,7 @@ async fn a2_destructive_drop_column_refused_strict() {
         "name": {"type": "string"},
     });
     let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &v2, &serde_json::json!([]), "deploy_v2",)
+        std::rc::Rc::clone(&pool), app, "posts", &v2, &serde_json::json!([]), "deploy_v2",)
     .await
     .expect_err("strict deploy should refuse drop_column");
 
@@ -1144,7 +1151,7 @@ async fn a2_destructive_drop_column_refused_strict() {
 #[compio::test]
 async fn a2_strictness_off_skips_validation_refused() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a2_strict_off";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1156,7 +1163,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         "legacy_score": {"type": "number"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &v1, &serde_json::json!([]), "off_v1",)
+        std::rc::Rc::clone(&pool), app, "posts", &v1, &serde_json::json!([]), "off_v1",)
     .await
     .unwrap();
 
@@ -1166,7 +1173,7 @@ async fn a2_strictness_off_skips_validation_refused() {
         "name": {"type": "string"},
     });
     let result = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &v2, &serde_json::json!([]), "off_v2",)
+        std::rc::Rc::clone(&pool), app, "posts", &v2, &serde_json::json!([]), "off_v2",)
     .await;
     assert!(result.is_ok(), "strictness=off should not refuse: {result:?}");
 
@@ -1190,7 +1197,7 @@ async fn a2_strictness_off_skips_validation_refused() {
 #[compio::test]
 async fn a2_additive_add_column_applied() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a2_additive";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1199,7 +1206,7 @@ async fn a2_additive_add_column_applied() {
 
     let v1 = json!({"name": {"type": "string"}});
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "items", &v1, &serde_json::json!([]), "add_v1",)
+        std::rc::Rc::clone(&pool), app, "items", &v1, &serde_json::json!([]), "add_v1",)
     .await
     .unwrap();
 
@@ -1209,7 +1216,7 @@ async fn a2_additive_add_column_applied() {
         "description": {"type": "string"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "items", &v2, &serde_json::json!([]), "add_v2",)
+        std::rc::Rc::clone(&pool), app, "items", &v2, &serde_json::json!([]), "add_v2",)
     .await
     .unwrap();
 
@@ -1250,7 +1257,7 @@ async fn a2_additive_add_column_applied() {
 #[compio::test]
 async fn a2_not_null_on_non_empty_refused() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a2_notnull";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1260,7 +1267,7 @@ async fn a2_not_null_on_non_empty_refused() {
     // v1: schema with 'name' field.
     let v1 = json!({"name": {"type": "string"}});
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "people", &v1, &serde_json::json!([]), "nn_v1",)
+        std::rc::Rc::clone(&pool), app, "people", &v1, &serde_json::json!([]), "nn_v1",)
     .await
     .unwrap();
 
@@ -1282,7 +1289,7 @@ async fn a2_not_null_on_non_empty_refused() {
         "ssn": {"type": "string", "required": true},
     });
     let err = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "people", &v2, &serde_json::json!([]), "nn_v2",)
+        std::rc::Rc::clone(&pool), app, "people", &v2, &serde_json::json!([]), "nn_v2",)
     .await
     .expect_err("NOT NULL add on non-empty table should be refused");
 
@@ -1313,7 +1320,7 @@ async fn a2_not_null_on_non_empty_refused() {
 #[compio::test]
 async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 8).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 8).await.unwrap());
 
     let app = "a2_concurrent";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1337,7 +1344,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     // sequential variant is sufficient to verify the lock-acquire /
     // release / re-diff path without needing a second OS thread.
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool,
+        std::rc::Rc::clone(&pool),
         "a2_concurrent",
         "races",
         &schema,
@@ -1347,7 +1354,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
     .expect("first deploy under lock");
 
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool,
+        std::rc::Rc::clone(&pool),
         "a2_concurrent",
         "races",
         &schema,
@@ -1400,7 +1407,7 @@ async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
 #[compio::test]
 async fn a2_required_with_default_is_compatible() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "a2_reqdefault";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -1409,7 +1416,7 @@ async fn a2_required_with_default_is_compatible() {
 
     let v1 = json!({"name": {"type": "string"}});
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "things", &v1, &serde_json::json!([]), "rd_v1",)
+        std::rc::Rc::clone(&pool), app, "things", &v1, &serde_json::json!([]), "rd_v1",)
     .await
     .unwrap();
 
@@ -1425,7 +1432,7 @@ async fn a2_required_with_default_is_compatible() {
         "status": {"type": "string", "required": true, "default": "active"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "things", &v2, &serde_json::json!([]), "rd_v2",)
+        std::rc::Rc::clone(&pool), app, "things", &v2, &serde_json::json!([]), "rd_v2",)
     .await
     .unwrap_or_else(|e| panic!("required-with-default should be compatible: {e}"));
 
@@ -1624,7 +1631,7 @@ async fn b1_simple_backfill() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_simple";
     b1_setup_users(&pool, app, 250, false).await;
@@ -1664,7 +1671,7 @@ async fn b1_resume_after_crash() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_resume";
     b1_setup_users(&pool, app, 250, false).await;
@@ -1745,7 +1752,7 @@ async fn b1_dry_run_does_not_mutate() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_dryrun";
     b1_setup_users(&pool, app, 50, false).await;
@@ -1782,7 +1789,7 @@ async fn b1_dead_letter_under_budget() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_dlu";
     b1_setup_users(&pool, app, 100, false).await;
@@ -1846,7 +1853,7 @@ async fn b1_dead_letter_over_budget() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_dlo";
     b1_setup_users(&pool, app, 30, false).await;
@@ -1894,7 +1901,7 @@ async fn b1_cancel_running() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_cancel";
     b1_setup_users(&pool, app, 100, false).await;
@@ -1938,7 +1945,7 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "gap_c_cancel";
     b1_setup_users(&pool, app, 50, false).await;
@@ -2022,7 +2029,7 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "gap_x_reset";
     b1_setup_users(&pool, app, 50, false).await;
@@ -2134,7 +2141,7 @@ async fn gap_i_migration_finalizer_churn() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "gap_i_churn";
     b1_setup_users(&pool, app, 10, false).await;
@@ -2249,7 +2256,7 @@ async fn b1_cancel_completed_returns_error() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_cancel_done";
     b1_setup_users(&pool, app, 25, false).await;
@@ -2275,7 +2282,7 @@ async fn b1_advisory_lock_prevents_concurrent_runs() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_lock";
     b1_setup_users(&pool, app, 5, false).await;
@@ -2328,7 +2335,7 @@ async fn b1_reset_clears_state() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
     zeroship_plugin_db::clear_migration_lock_for_tests();
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_reset";
     b1_setup_users(&pool, app, 20, false).await;
@@ -2358,14 +2365,14 @@ async fn b1_reset_clears_state() {
 // ---------------------------------------------------------------------------
 
 /// Helper: register two collections where `posts.authorId` is t.ref("users").
-async fn b2_setup_users_posts(pool: &Pool, app: &str) {
+async fn b2_setup_users_posts(pool: &std::rc::Rc<Pool>, app: &str) {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
     // Users first so the FK target exists when posts is created.
     let users_schema = json!({"name": {"type": "string", "required": true}});
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        pool,
+        std::rc::Rc::clone(pool),
         app,
         "users",
         &users_schema,
@@ -2378,7 +2385,7 @@ async fn b2_setup_users_posts(pool: &Pool, app: &str) {
         "authorId": {"type": "ref", "refTarget": "users"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        pool,
+        std::rc::Rc::clone(pool),
         app,
         "posts",
         &posts_schema,
@@ -2391,7 +2398,7 @@ async fn b2_setup_users_posts(pool: &Pool, app: &str) {
 #[compio::test]
 async fn b2_ref_creates_foreign_key() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b2_fk_basic";
     b2_setup_users_posts(&pool, app).await;
@@ -2430,7 +2437,7 @@ SELECT con.conname AS name,
 #[compio::test]
 async fn b2_ref_blocks_orphan_insert() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b2_orphan_insert";
     b2_setup_users_posts(&pool, app).await;
@@ -2456,7 +2463,7 @@ async fn b2_ref_blocks_orphan_insert() {
 #[compio::test]
 async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b2_restrict_delete";
     b2_setup_users_posts(&pool, app).await;
@@ -2497,7 +2504,7 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
 #[compio::test]
 async fn b2_ref_on_delete_cascade_deletes_children() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b2_cascade_delete";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -2506,7 +2513,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
 
     let users_schema = json!({"name": {"type": "string", "required": true}});
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "users", &users_schema, &serde_json::json!([]), "b2_cas_v1",)
+        std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "b2_cas_v1",)
     .await
     .unwrap();
     // cascade override
@@ -2515,7 +2522,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &posts_schema, &serde_json::json!([]), "b2_cas_v1",)
+        std::rc::Rc::clone(&pool), app, "posts", &posts_schema, &serde_json::json!([]), "b2_cas_v1",)
     .await
     .unwrap();
 
@@ -2561,7 +2568,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
 #[compio::test]
 async fn b2_circular_refs_via_deferrable() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b2_circular";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -2687,7 +2694,7 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 #[compio::test]
 async fn b2_adding_fk_to_existing_data_validates() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b2_existing_data";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -2697,7 +2704,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
     // V1 — users + posts with a bare number column.
     let users_schema = json!({"name": {"type": "string", "required": true}});
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "users", &users_schema, &serde_json::json!([]), "v1",)
+        std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
     let posts_schema_v1 = json!({
@@ -2705,7 +2712,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "authorId": {"type": "number"},
     });
     zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
+        std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
 
@@ -2740,7 +2747,7 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "authorId": {"type": "ref", "refTarget": "users"},
     });
     let res = zeroship_plugin_db::orchestrator::register_model::exec_register_model_with_pool(
-        &pool, app, "posts", &posts_schema_v2, &serde_json::json!([]), "v2",)
+        std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v2, &serde_json::json!([]), "v2",)
     .await;
     assert!(
         res.is_err(),
@@ -2802,7 +2809,7 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
 #[compio::test]
 async fn c1_setup_creates_publication_and_slot_idempotently() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -2835,7 +2842,7 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
 #[compio::test]
 async fn c1_watchdog_reports_new_slot() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -2873,7 +2880,7 @@ async fn c1_watchdog_reports_new_slot() {
 #[compio::test]
 async fn c1_drop_abandoned_reaps_inactive_slot() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -2914,7 +2921,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     // re-running `ensure_publication_and_slot`. The slot survives
     // and reports the same `confirmed_flush_lsn`.
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -3066,7 +3073,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     // the insert.
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     let app = "gap_b_e2e";
     // Fresh schema with one collection table.
@@ -3157,7 +3164,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 #[compio::test]
 async fn p8a2_consumer_publishes_wal_event_to_broker() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -3321,7 +3328,7 @@ fn role_url(role: &str, password: &str) -> String {
 #[compio::test]
 async fn b8c_bootstrap_is_idempotent_and_creates_objects() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     let first = zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
@@ -3373,7 +3380,7 @@ async fn b8c_bootstrap_is_idempotent_and_creates_objects() {
 #[compio::test]
 async fn b8c_per_app_role_cannot_create_slot_directly() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     // Make sure the admin objects exist (idempotent).
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
@@ -3429,7 +3436,7 @@ async fn b8c_per_app_role_cannot_create_slot_directly() {
 #[compio::test]
 async fn b8c_per_app_role_cannot_read_hmac_keys() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3482,7 +3489,7 @@ async fn b8c_per_app_role_cannot_read_hmac_keys() {
 #[compio::test]
 async fn b8c_per_app_role_can_init_session_via_function() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3523,7 +3530,7 @@ async fn b8c_per_app_role_can_init_session_via_function() {
 #[compio::test]
 async fn b8c_init_session_rejects_expired_token() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3553,7 +3560,7 @@ async fn b8c_init_session_rejects_expired_token() {
 #[compio::test]
 async fn b8c_init_session_rejects_replay_nonce() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3587,7 +3594,7 @@ async fn b8c_init_session_rejects_replay_nonce() {
 #[compio::test]
 async fn b8c_init_session_rejects_tampered_signature() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3618,7 +3625,7 @@ async fn b8c_init_session_rejects_tampered_signature() {
 #[compio::test]
 async fn b8c_key_rotation_grace_window_accepts_both() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3733,7 +3740,7 @@ async fn b8c_key_rotation_grace_window_accepts_both() {
 #[compio::test]
 async fn b8c_per_app_role_can_call_init_session_via_grant() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3849,7 +3856,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     // must produce the same publication + slot names and idempotency
     // semantics as the raw `replication::ensure_publication_and_slot`.
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -3925,7 +3932,7 @@ async fn b8c_consumer_runs_under_platform_role_grants() {
     // function (which itself is SECURITY DEFINER — invoking with a
     // role that has EXECUTE-grant succeeds).
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 2).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .unwrap();
@@ -3972,7 +3979,7 @@ async fn b8c_consumer_runs_under_platform_role_grants() {
 #[compio::test]
 async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -4094,7 +4101,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 #[compio::test]
 async fn p8a2_supervised_consumer_exits_on_slot_invalidated() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;
@@ -4278,7 +4285,7 @@ async fn p8a2_auto_spawn_is_idempotent_via_registry() {
 #[compio::test]
 async fn p8a2_auto_spawn_via_callback_short_circuits() {
     let url = require_pg().await;
-    let pool = Pool::connect(&url, 4).await.unwrap();
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         eprintln!("Skipping — server wal_level is not 'logical'");
         return;

@@ -27,11 +27,11 @@
 //! published wire contract and no in-tree caller needs `.code` for the
 //! refusal path yet.
 
-use compio_postgres::Pool;
 use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
 use super::plan::Plan;
+use crate::backend::Backend;
 use crate::diff::{ChangeClass, DiffOp};
 
 /// Output of stage 3. Apply still receives the destructive ops (kept
@@ -48,9 +48,9 @@ pub(crate) struct ApprovedPlan {
 /// Best-effort audit writes — a failed insert to `__zeroship_migrations`
 /// must NOT mask the validation_refused envelope. `tracing::warn` so it
 /// shows up in worker logs but the user-facing error stays clean.
-pub(crate) async fn validate(
-    pool: &Pool,
-    ctx: &RegisterContext<'_>,
+pub(crate) async fn validate<B: Backend>(
+    backend: &B,
+    ctx: &RegisterContext,
     plan: Plan,
 ) -> Result<ApprovedPlan, String> {
     let destructive: Vec<&DiffOp> = plan
@@ -78,8 +78,8 @@ pub(crate) async fn validate(
             // Best-effort: a failure to write the audit row should not
             // mask the envelope — tracing::warn so it shows in worker
             // logs but the user-facing error stays clean.
-            if let Err(e) = crate::audit::write_audit_row(pool, &ctx.app_id, &row).await {
-                tracing::warn!(error = %e, "audit: failed to log destructive op");
+            if let Err(e) = backend.write_audit_row(&ctx.app_id, &row).await {
+                tracing::warn!(error = %e.into_string(), "audit: failed to log destructive op");
             }
         }
 
