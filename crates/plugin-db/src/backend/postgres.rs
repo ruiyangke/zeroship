@@ -186,21 +186,18 @@ impl Backend for PostgresBackend {
     // ----- audit table reads/writes -----------------------------------
 
     async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
-        audit::ensure_audit_table_exists(&self.pool, app_id)
-            .await
-            .map_err(|m| DbError::Internal { message: m })
+        // The audit helpers now return `Result<_, DbError>` directly —
+        // SQLSTATE classification + context phrase happen inside
+        // `audit::*`, so the Backend impl is a straight forward.
+        audit::ensure_audit_table_exists(&self.pool, app_id).await
     }
 
     async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
-        audit::next_schema_version(&self.pool, app_id)
-            .await
-            .map_err(|m| DbError::Internal { message: m })
+        audit::next_schema_version(&self.pool, app_id).await
     }
 
     async fn write_audit_row(&self, app_id: &str, row: &AuditRow) -> Result<i64, DbError> {
-        audit::write_audit_row(&self.pool, app_id, row)
-            .await
-            .map_err(|m| DbError::Internal { message: m })
+        audit::write_audit_row(&self.pool, app_id, row).await
     }
 
     async fn update_audit_status(
@@ -210,9 +207,7 @@ impl Backend for PostgresBackend {
         new_status: TerminalStatus,
         error: Option<&str>,
     ) -> Result<bool, DbError> {
-        audit::update_audit_status(&self.pool, app_id, id, new_status, error)
-            .await
-            .map_err(|m| DbError::Internal { message: m })
+        audit::update_audit_status(&self.pool, app_id, id, new_status, error).await
     }
 
     async fn find_latest_backfill_row(
@@ -222,9 +217,7 @@ impl Backend for PostgresBackend {
         collection: &str,
         name: &str,
     ) -> Result<Option<BackfillLookup>, DbError> {
-        audit::find_latest_backfill_row(client, app_id, collection, name)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::find_latest_backfill_row(client, app_id, collection, name).await
     }
 
     async fn find_latest_backfill_row_pool(
@@ -233,9 +226,7 @@ impl Backend for PostgresBackend {
         collection: &str,
         name: &str,
     ) -> Result<Option<BackfillLookup>, DbError> {
-        audit::find_latest_backfill_row(self.pool.as_ref(), app_id, collection, name)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::find_latest_backfill_row(self.pool.as_ref(), app_id, collection, name).await
     }
 
     async fn set_backfill_running(
@@ -244,9 +235,7 @@ impl Backend for PostgresBackend {
         app_id: &str,
         id: i64,
     ) -> Result<(), DbError> {
-        audit::set_backfill_running(client, app_id, id)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::set_backfill_running(client, app_id, id).await
     }
 
     async fn insert_backfill_running(
@@ -269,7 +258,6 @@ impl Backend for PostgresBackend {
             schema_version,
         )
         .await
-        .map_err(|e| DbError::from_pg(&e))
     }
 
     async fn reset_backfill_row_pool(
@@ -278,9 +266,7 @@ impl Backend for PostgresBackend {
         collection: &str,
         name: &str,
     ) -> Result<(), DbError> {
-        audit::reset_backfill_row(self.pool.as_ref(), app_id, collection, name)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::reset_backfill_row(self.pool.as_ref(), app_id, collection, name).await
     }
 
     async fn reset_backfill_row_client(
@@ -290,9 +276,7 @@ impl Backend for PostgresBackend {
         collection: &str,
         name: &str,
     ) -> Result<(), DbError> {
-        audit::reset_backfill_row(client, app_id, collection, name)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::reset_backfill_row(client, app_id, collection, name).await
     }
 
     async fn peek_latest_backfill_status(
@@ -302,9 +286,7 @@ impl Backend for PostgresBackend {
         collection: &str,
         name: &str,
     ) -> Result<Option<String>, DbError> {
-        audit::peek_latest_backfill_status(client, app_id, collection, name)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::peek_latest_backfill_status(client, app_id, collection, name).await
     }
 
     async fn heartbeat_backfill(
@@ -314,9 +296,7 @@ impl Backend for PostgresBackend {
         collection: &str,
         name: &str,
     ) -> Result<(), DbError> {
-        audit::heartbeat_backfill(client, app_id, collection, name)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::heartbeat_backfill(client, app_id, collection, name).await
     }
 
     async fn lock_audit_row_for_update(
@@ -325,9 +305,7 @@ impl Backend for PostgresBackend {
         app_id: &str,
         id: i64,
     ) -> Result<Option<LockedAuditRow>, DbError> {
-        audit::lock_audit_row_for_update(client, app_id, id)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::lock_audit_row_for_update(client, app_id, id).await
     }
 
     async fn update_backfill_progress(
@@ -348,7 +326,6 @@ impl Backend for PostgresBackend {
             processed_total,
         )
         .await
-        .map_err(|e| DbError::from_pg(&e))
     }
 
     async fn finalise_backfill(
@@ -359,9 +336,7 @@ impl Backend for PostgresBackend {
         terminal: TerminalStatus,
         error_message: Option<&str>,
     ) -> Result<(), DbError> {
-        audit::finalise_backfill(client, app_id, id, terminal, error_message)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::finalise_backfill(client, app_id, id, terminal, error_message).await
     }
 
     async fn cancel_backfill_row_pool(
@@ -369,9 +344,7 @@ impl Backend for PostgresBackend {
         app_id: &str,
         id: i64,
     ) -> Result<(), DbError> {
-        audit::cancel_backfill_row(self.pool.as_ref(), app_id, id)
-            .await
-            .map_err(|e| DbError::from_pg(&e))
+        audit::cancel_backfill_row(self.pool.as_ref(), app_id, id).await
     }
 
     async fn create_index_with_recovery(

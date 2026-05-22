@@ -6,6 +6,16 @@
 //! identifier. The A1 `create_index_with_recovery` retry path that used
 //! to log via `tracing::warn!` now writes structured audit rows here.
 //!
+//! ## Error contract
+//!
+//! Every fallible helper returns [`Result<_, DbError>`]. SQLSTATE
+//! classification (`unique_violation`, `serialization_failure`,
+//! `transient`, …) is preserved via [`coded_sql`] which wraps the
+//! Postgres error in [`DbError`] through the `From<compio_postgres::Error>`
+//! impl in `crate::error`. Callers `?`-flow these through the
+//! [`Backend`](crate::backend::Backend) trait — there is no string
+//! flattening at any boundary inside the crate.
+//!
 //! ## Divergence from proposal
 //!
 //! The proposal section A3 specifies a tamper-evident
@@ -32,6 +42,33 @@
 
 use compio_postgres::{Client, Pool, Row};
 use serde_json::Value;
+
+use crate::error::DbError;
+
+/// Wrap a `compio_postgres::Error` in a [`DbError`] with a context
+/// phrase so operators see *what* the audit layer was doing when the
+/// SQL failed. The SQLSTATE classification still drives the `.code`
+/// (`unique_violation`, `serialization_failure`, …) — this helper only
+/// prepends `"audit: <ctx>: "` to the message body. Mirrors the
+/// `coded_db` shape used in `crate::migrations` so the two layers
+/// produce the same error envelope.
+fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
+    let mut err: DbError = e.into();
+    match &mut err {
+        DbError::UniqueViolation { message }
+        | DbError::FkViolation { message }
+        | DbError::NotNullViolation { message }
+        | DbError::CheckViolation { message }
+        | DbError::Serialization { message }
+        | DbError::LockContention { message }
+        | DbError::Transient { message }
+        | DbError::Internal { message } => {
+            *message = format!("audit: {context}: {message}");
+        }
+        _ => {}
+    }
+    err
+}
 
 /// Actor categories accepted by the audit table.
 ///
@@ -152,7 +189,7 @@ pub struct AuditRow {
 ///
 /// The schema name doubles as the app identifier. The caller MUST have
 /// already created the schema (e.g. via `build_create_schema`).
-pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), String> {
+pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), DbError> {
     validate_app_id(app_id)?;
 
     // Quote-escape app_id for embedding in the DDL. The validation pass
@@ -198,7 +235,7 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
     let empty: Vec<&str> = Vec::new();
     pool.query_text_params(&create_sql, &empty)
         .await
-        .map_err(|e| format!("audit: create __zeroship_migrations failed: {e}"))?;
+        .map_err(|e| coded_sql("create __zeroship_migrations", e))?;
 
     // Gap X: idempotent column add for tables created before this
     // commit. `audit_generation` is bumped by `exec_reset` so a
@@ -211,7 +248,7 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
     );
     pool.query_text_params(&add_gen, &empty)
         .await
-        .map_err(|e| format!("audit: add audit_generation column failed: {e}"))?;
+        .map_err(|e| coded_sql("add audit_generation column", e))?;
 
     // Indexes — proposal section A3. These are plain (non-CONCURRENT)
     // because we're inside the cold-start orchestration that has the
@@ -222,14 +259,14 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
     );
     pool.query_text_params(&idx_deploy, &empty)
         .await
-        .map_err(|e| format!("audit: create deploy_idx failed: {e}"))?;
+        .map_err(|e| coded_sql("create deploy_idx", e))?;
 
     let idx_updated = format!(
         r#"CREATE INDEX IF NOT EXISTS "__zeroship_migrations_updated_at_idx" ON "{app_id}"."__zeroship_migrations" (updated_at DESC)"#
     );
     pool.query_text_params(&idx_updated, &empty)
         .await
-        .map_err(|e| format!("audit: create updated_at_idx failed: {e}"))?;
+        .map_err(|e| coded_sql("create updated_at_idx", e))?;
 
     Ok(())
 }
@@ -237,7 +274,7 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
 /// Compute the next monotonic `schema_version` for a deploy. Proposal
 /// A2: `SELECT COALESCE(MAX(schema_version), 0) + 1 FROM
 /// __zeroship_migrations WHERE phase='ddl' AND status='applied'`.
-pub async fn next_schema_version(pool: &Pool, app_id: &str) -> Result<i32, String> {
+pub async fn next_schema_version(pool: &Pool, app_id: &str) -> Result<i32, DbError> {
     validate_app_id(app_id)?;
     let sql = format!(
         r#"SELECT COALESCE(MAX(schema_version), 0) + 1 AS v FROM "{app_id}"."__zeroship_migrations" WHERE phase = 'ddl' AND status = 'applied'"#
@@ -246,7 +283,7 @@ pub async fn next_schema_version(pool: &Pool, app_id: &str) -> Result<i32, Strin
     let rows = pool
         .query_text_params(&sql, &empty)
         .await
-        .map_err(|e| format!("audit: read schema_version failed: {e}"))?;
+        .map_err(|e| coded_sql("read schema_version", e))?;
     let v: i32 = rows.first().map(|r| r.get::<_, i32>("v")).unwrap_or(1);
     Ok(v)
 }
@@ -254,7 +291,7 @@ pub async fn next_schema_version(pool: &Pool, app_id: &str) -> Result<i32, Strin
 /// Insert a single row into the audit table, returning its PK so callers
 /// can later call [`update_audit_status`] to drive it to a terminal
 /// state.
-pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Result<i64, String> {
+pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Result<i64, DbError> {
     validate_app_id(app_id)?;
 
     let sql = format!(
@@ -284,11 +321,13 @@ pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Resul
     let rows = pool
         .query_text_params(&sql, &params)
         .await
-        .map_err(|e| format!("audit: insert failed: {e}"))?;
+        .map_err(|e| coded_sql("insert", e))?;
     let id: i64 = rows
         .first()
         .map(|r| r.get::<_, i64>("id"))
-        .ok_or_else(|| "audit: INSERT returned no row".to_string())?;
+        .ok_or_else(|| DbError::Internal {
+            message: "audit: INSERT returned no row".to_string(),
+        })?;
     Ok(id)
 }
 
@@ -302,7 +341,7 @@ pub async fn update_audit_status(
     id: i64,
     new_status: TerminalStatus,
     error: Option<&str>,
-) -> Result<bool, String> {
+) -> Result<bool, DbError> {
     validate_app_id(app_id)?;
 
     let sql = format!(
@@ -324,7 +363,7 @@ pub async fn update_audit_status(
     let rows = pool
         .query_text_params(&sql, &params)
         .await
-        .map_err(|e| format!("audit: update status failed: {e}"))?;
+        .map_err(|e| coded_sql("update status", e))?;
     Ok(!rows.is_empty())
 }
 
@@ -383,31 +422,38 @@ pub struct LockedAuditRow {
 /// `query_text_params(sql, &[&str])`, so the helpers below accept either
 /// via this trait. Keeps the audit-table SQL in one file without forcing
 /// callers to thread connection ownership through wrapper types.
-pub trait AuditExecutor {
-    fn query_text<'a>(
-        &'a self,
-        sql: &'a str,
-        params: &'a [&'a str],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Row>, compio_postgres::Error>> + 'a>>;
+///
+/// Uses `async_fn_in_trait` (single-thread compio invariant — same
+/// posture as [`crate::backend::Backend`]) so callers don't pay a
+/// `Box<dyn Future>` allocation per call. Both impls (`Pool`,
+/// `Client`) are sized types — there is no `dyn AuditExecutor` use
+/// site in the crate, so `?Sized` is unnecessary.
+pub(crate) trait AuditExecutor {
+    #[allow(async_fn_in_trait)]
+    async fn query_text(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>, compio_postgres::Error>;
 }
 
 impl AuditExecutor for Pool {
-    fn query_text<'a>(
-        &'a self,
-        sql: &'a str,
-        params: &'a [&'a str],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Row>, compio_postgres::Error>> + 'a>> {
-        Box::pin(self.query_text_params(sql, params))
+    async fn query_text(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>, compio_postgres::Error> {
+        self.query_text_params(sql, params).await
     }
 }
 
 impl AuditExecutor for Client {
-    fn query_text<'a>(
-        &'a self,
-        sql: &'a str,
-        params: &'a [&'a str],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Row>, compio_postgres::Error>> + 'a>> {
-        Box::pin(self.query_text_params(sql, params))
+    async fn query_text(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>, compio_postgres::Error> {
+        self.query_text_params(sql, params).await
     }
 }
 
@@ -441,19 +487,22 @@ pub fn read_dead_letter_pks_from_audit_row(row: &Row) -> Value {
 
 /// SELECT the latest backfill row for `(collection, change_kind=name)`.
 /// Returns `Ok(None)` if the row hasn't been inserted yet.
-pub async fn find_latest_backfill_row<E: AuditExecutor + ?Sized>(
+pub(crate) async fn find_latest_backfill_row<E: AuditExecutor>(
     exec: &E,
     app_id: &str,
     collection: &str,
     name: &str,
-) -> Result<Option<BackfillLookup>, compio_postgres::Error> {
+) -> Result<Option<BackfillLookup>, DbError> {
     let sql = format!(
         r#"SELECT id, status, validate_cursor, dead_letter_pks, details, error, audit_generation
             FROM "{app_id}"."__zeroship_migrations"
             WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
             ORDER BY id DESC LIMIT 1"#
     );
-    let rows = exec.query_text(&sql, &[collection, name]).await?;
+    let rows = exec
+        .query_text(&sql, &[collection, name])
+        .await
+        .map_err(|e| coded_sql("find_latest_backfill_row", e))?;
     let Some(row) = rows.first() else { return Ok(None) };
     let id: i64 = row.get("id");
     let status: String = row.get("status");
@@ -493,7 +542,7 @@ pub async fn set_backfill_running(
     client: &Client,
     app_id: &str,
     id: i64,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<(), DbError> {
     let sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET status = 'running',
@@ -504,7 +553,10 @@ pub async fn set_backfill_running(
             WHERE id = $1::bigint"#
     );
     let id_s = id.to_string();
-    client.query_text_params(&sql, &[id_s.as_str()]).await?;
+    client
+        .query_text_params(&sql, &[id_s.as_str()])
+        .await
+        .map_err(|e| coded_sql("set_backfill_running", e))?;
     Ok(())
 }
 
@@ -521,7 +573,7 @@ pub async fn insert_backfill_running(
     dry_run: bool,
     deploy_id: &str,
     schema_version: i32,
-) -> Result<i64, compio_postgres::Error> {
+) -> Result<i64, DbError> {
     let sql = format!(
         r#"INSERT INTO "{app_id}"."__zeroship_migrations"
             (collection, phase, change_class, change_kind, details,
@@ -551,7 +603,8 @@ pub async fn insert_backfill_running(
                 sv_s.as_str(),
             ],
         )
-        .await?;
+        .await
+        .map_err(|e| coded_sql("insert_backfill_running", e))?;
     let id: i64 = rows
         .first()
         .map(|r| r.get::<_, i64>("id"))
@@ -564,12 +617,12 @@ pub async fn insert_backfill_running(
 /// will detect the reset on its next commit. Also zeroes the cursor,
 /// dead-letter PKs, and processed counter so a fresh run starts from
 /// the top.
-pub async fn reset_backfill_row<E: AuditExecutor + ?Sized>(
+pub(crate) async fn reset_backfill_row<E: AuditExecutor>(
     exec: &E,
     app_id: &str,
     collection: &str,
     name: &str,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<(), DbError> {
     let sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET status = 'pending',
@@ -582,42 +635,49 @@ pub async fn reset_backfill_row<E: AuditExecutor + ?Sized>(
                 details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
             WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
     );
-    exec.query_text(&sql, &[collection, name]).await?;
+    exec.query_text(&sql, &[collection, name])
+        .await
+        .map_err(|e| coded_sql("reset_backfill_row", e))?;
     Ok(())
 }
 
 /// `SELECT status FROM … ORDER BY id DESC LIMIT 1` — fast-path peek
 /// used by `migration.fetchBatch(...)` to short-circuit if the operator
 /// cancelled between batches.
-pub async fn peek_latest_backfill_status<E: AuditExecutor + ?Sized>(
+pub(crate) async fn peek_latest_backfill_status<E: AuditExecutor>(
     exec: &E,
     app_id: &str,
     collection: &str,
     name: &str,
-) -> Result<Option<String>, compio_postgres::Error> {
+) -> Result<Option<String>, DbError> {
     let sql = format!(
         r#"SELECT status FROM "{app_id}"."__zeroship_migrations"
             WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
             ORDER BY id DESC LIMIT 1"#
     );
-    let rows = exec.query_text(&sql, &[collection, name]).await?;
+    let rows = exec
+        .query_text(&sql, &[collection, name])
+        .await
+        .map_err(|e| coded_sql("peek_latest_backfill_status", e))?;
     Ok(rows.first().map(|r| r.get::<_, String>("status")))
 }
 
 /// `UPDATE … SET last_heartbeat_at = NOW()` — best-effort write the
 /// fetch-batch path issues so operators can see the worker is alive.
-pub async fn heartbeat_backfill<E: AuditExecutor + ?Sized>(
+pub(crate) async fn heartbeat_backfill<E: AuditExecutor>(
     exec: &E,
     app_id: &str,
     collection: &str,
     name: &str,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<(), DbError> {
     let sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET last_heartbeat_at = NOW()
             WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2 AND status = 'running'"#
     );
-    exec.query_text(&sql, &[collection, name]).await?;
+    exec.query_text(&sql, &[collection, name])
+        .await
+        .map_err(|e| coded_sql("heartbeat_backfill", e))?;
     Ok(())
 }
 
@@ -632,13 +692,16 @@ pub async fn lock_audit_row_for_update(
     client: &Client,
     app_id: &str,
     id: i64,
-) -> Result<Option<LockedAuditRow>, compio_postgres::Error> {
+) -> Result<Option<LockedAuditRow>, DbError> {
     let sql = format!(
         r#"SELECT status, audit_generation FROM "{app_id}"."__zeroship_migrations"
             WHERE id = $1::bigint FOR UPDATE"#
     );
     let id_s = id.to_string();
-    let rows = client.query_text_params(&sql, &[id_s.as_str()]).await?;
+    let rows = client
+        .query_text_params(&sql, &[id_s.as_str()])
+        .await
+        .map_err(|e| coded_sql("lock_audit_row_for_update", e))?;
     let Some(row) = rows.first() else { return Ok(None) };
     let status: String = row.get("status");
     let audit_generation: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
@@ -659,7 +722,7 @@ pub async fn update_backfill_progress(
     next_cursor: i64,
     dead_letter_pks: &Value,
     processed_total: i64,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<(), DbError> {
     let sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET validate_cursor = $2::bigint,
@@ -678,7 +741,8 @@ pub async fn update_backfill_progress(
             &sql,
             &[id_s.as_str(), nc_s.as_str(), dlp_s.as_str(), pt_s.as_str()],
         )
-        .await?;
+        .await
+        .map_err(|e| coded_sql("update_backfill_progress", e))?;
     Ok(())
 }
 
@@ -692,7 +756,7 @@ pub async fn finalise_backfill(
     id: i64,
     terminal: TerminalStatus,
     error_message: Option<&str>,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<(), DbError> {
     let sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET status = $2,
@@ -709,7 +773,8 @@ pub async fn finalise_backfill(
     let err_s = error_message.unwrap_or("").to_string();
     client
         .query_text_params(&sql, &[id_s.as_str(), terminal.as_sql(), err_s.as_str()])
-        .await?;
+        .await
+        .map_err(|e| coded_sql("finalise_backfill", e))?;
     Ok(())
 }
 
@@ -717,11 +782,11 @@ pub async fn finalise_backfill(
 /// `migrations.cancel(...)`. Runs on a pool client (no lock) — the
 /// row's FOR UPDATE in any concurrent `exec_commit_batch` serialises
 /// against this update.
-pub async fn cancel_backfill_row<E: AuditExecutor + ?Sized>(
+pub(crate) async fn cancel_backfill_row<E: AuditExecutor>(
     exec: &E,
     app_id: &str,
     id: i64,
-) -> Result<(), compio_postgres::Error> {
+) -> Result<(), DbError> {
     let sql = format!(
         r#"UPDATE "{app_id}"."__zeroship_migrations"
             SET status = 'cancelled',
@@ -731,22 +796,38 @@ pub async fn cancel_backfill_row<E: AuditExecutor + ?Sized>(
             WHERE id = $1::bigint AND status IN ('pending','running')"#
     );
     let id_s = id.to_string();
-    exec.query_text(&sql, &[id_s.as_str()]).await?;
+    exec.query_text(&sql, &[id_s.as_str()])
+        .await
+        .map_err(|e| coded_sql("cancel_backfill_row", e))?;
     Ok(())
 }
 
 /// Validate an app_id used as a schema name — same rules as the query
 /// builder's `validate_schema`. Local copy avoids exporting a private
 /// function out of `query.rs`.
-fn validate_app_id(name: &str) -> Result<(), String> {
+///
+/// Refusals stamp `invalid_app_id` so the SDK can branch on
+/// `err.code === 'invalid_app_id'` rather than substring-matching the
+/// message. This is a defensive guardrail — every caller in this
+/// crate threads through a worker-controlled `app_id`, but the audit
+/// helpers are the only file in `plugin-db` that string-interpolates
+/// the app id directly into DDL, so we belt-and-braces the input
+/// here.
+fn validate_app_id(name: &str) -> Result<(), DbError> {
     if name.is_empty() {
-        return Err("audit: app_id cannot be empty".to_string());
+        return Err(DbError::validation(
+            "invalid_app_id",
+            "audit: app_id cannot be empty",
+        ));
     }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!("audit: invalid app_id: {name}"));
+        return Err(DbError::validation(
+            "invalid_app_id",
+            format!("audit: invalid app_id: {name}"),
+        ));
     }
     Ok(())
 }
@@ -764,10 +845,19 @@ mod tests {
 
     #[test]
     fn validate_app_id_rejects_injection() {
-        assert!(validate_app_id("").is_err());
-        assert!(validate_app_id("app\"; DROP TABLE x; --").is_err());
-        assert!(validate_app_id("app.other").is_err());
-        assert!(validate_app_id("app/other").is_err());
+        for bad in ["", "app\"; DROP TABLE x; --", "app.other", "app/other"] {
+            let err = validate_app_id(bad).expect_err("must reject");
+            // Refusal must stamp the static `invalid_app_id` code so the
+            // SDK can branch on it programmatically — the guard predates
+            // the typed-error rail but is now the only `audit::*` path
+            // that surfaces a non-SQLSTATE-classified DbError.
+            match err {
+                DbError::ValidationFailed { code, .. } => {
+                    assert_eq!(code, "invalid_app_id");
+                }
+                other => panic!("expected ValidationFailed, got {other:?}"),
+            }
+        }
     }
 
     #[test]
