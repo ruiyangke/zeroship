@@ -1,6 +1,8 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 12:17.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 12:47.
+
+**Cycle 12:47 closures (2)**: F1 warn-half style unification (`7c6bd2ec` — pinned 6-site shape per code-critique r11 MINOR-R11-1) + `finalise_backfill` name/collection (6th cycle error-ux carry, folded into same commit). 3 reviewers returned: **migration-pipeline r11 = 86 (+1)** plateau broken by warn-half forcing function; **error-ux r10 = 92.5 (+1.5)** plateau broken across all 3 prior commits; **code-critique r11 = 95 (±0)** plateau held but cycle audit clean.
 
 **Cycle 12:17 closures (4)**: [I6] release_advisory_lock returns Result (`51c342e8`) + [F1] warn-half (`fcf7ce3c` — 5 `let _ = update_audit_status` sites converted to structured `tracing::warn!`) + 2 doc-drift cleanups (`71a457a1` — auth/mod.rs Backwards-compatibility section + lib.rs module-visibility note, both from docs-audit r7). 3 reviewers returned: **docs-audit r7 = 87 (+4)**, **migration-pipeline r10 = 85 (±0, plateau n=3)**, **security r10 = 84 (+1, credited [I12])**. Total +5 score-points across 3 lenses. Reviewers under-covered this cycle: error-ux, architecture, concurrency, code-critique, performance, test-coverage, api-surface.
 
