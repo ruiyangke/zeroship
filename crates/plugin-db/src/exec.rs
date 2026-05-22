@@ -4,9 +4,12 @@
 //! Every CRUD dispatch helper (in `crate::crud`) lowers its
 //! `BuiltQuery` through one of:
 //!
-//! - `exec_query` — read path, returns rows as a JSON array string.
+//! - `exec_query` — read path, returns rows as `Vec<serde_json::Value>`
+//!   (one `Value::Object` per row); the CRUD resolver serialises once
+//!   at the V8 boundary.
 //! - `exec_count` — read path that extracts a single `count` column.
-//! - `exec_mutation` — write path, returns RETURNING rows as JSON.
+//! - `exec_mutation` — write path, returns RETURNING rows as
+//!   `Vec<serde_json::Value>`.
 //! - `exec_mutation_with_emit` — write path + broker emit (or queue
 //!   when inside a transaction).
 //!
@@ -34,7 +37,7 @@ use serde_json::Value;
 use crate::context;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
-use crate::v8_bridge::rows_to_json;
+use crate::v8_bridge::rows_to_json_value;
 
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 pub(crate) async fn run_sql(
@@ -69,11 +72,18 @@ pub(crate) async fn run_sql(
         .map_err(|e| DbError::from_pg(&e))
 }
 
-/// Execute a built query via pool (or TX conn) and return JSON string result.
-pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<String, DbError> {
+/// Execute a built query via pool (or TX conn) and return the
+/// per-row JSON values.
+///
+/// Returning `Vec<Value>` (rather than a pre-serialised JSON array
+/// string) lets the CRUD resolver chain in `crate::crud` inspect or
+/// take a single row without paying for an intermediate serialise +
+/// reparse round-trip. The final JSON string is materialised once at
+/// the V8 boundary (`ResolveValue::Json`).
+pub(crate) async fn exec_query(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = run_sql(&bq.sql, &param_refs).await?;
-    Ok(rows_to_json(&rows))
+    Ok(rows_to_json_value(&rows))
 }
 
 /// Execute a built query expecting a count result.
@@ -91,11 +101,18 @@ pub(crate) async fn exec_count(bq: BuiltQuery) -> Result<i64, DbError> {
         .unwrap_or(0))
 }
 
-/// Execute an insert/update/delete query, returning the affected rows.
-pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<String, DbError> {
+/// Execute an insert/update/delete query, returning the affected
+/// rows as `Vec<serde_json::Value>` (one `Value::Object` per row).
+///
+/// Returning the typed intermediate (instead of a pre-serialised JSON
+/// string) lets [`exec_mutation_with_emit`] iterate the live `Value`s
+/// to build broker events without paying for a JSON parse of its own
+/// output; the CRUD resolver chain then serialises once at the V8
+/// boundary.
+pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = run_sql(&bq.sql, &param_refs).await?;
-    Ok(rows_to_json(&rows))
+    Ok(rows_to_json_value(&rows))
 }
 
 /// Execute a mutation, then emit a [`crate::wal_consumer::emit_local`]
@@ -115,26 +132,25 @@ pub(crate) async fn exec_mutation(bq: BuiltQuery) -> Result<String, DbError> {
 ///
 /// Future read-set narrowing (P8b) extends this helper to populate
 /// `changed_columns` from the SET clause and `pk` from the RETURNING
-/// row. For P8a we collect what's already in the result JSON.
+/// row. For P8a we collect what's already in the result `Value`.
 pub(crate) async fn exec_mutation_with_emit(
     bq: BuiltQuery,
     app_id: &str,
     collection: &str,
     op: crate::broker::ChangeOp,
-) -> Result<String, DbError> {
-    let json = exec_mutation(bq).await?;
-    // Parse the returned JSON to derive (pk per row, count of rows).
-    // The query builders all use RETURNING * (insert/update) or
-    // RETURNING id (delete) — see `query::build_*`. We pull `id` as
-    // i64 when present and treat the missing case as a non-affecting
-    // mutation (publish a single event with pk=None so subscribers
-    // can still re-fetch).
-    let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+) -> Result<Vec<Value>, DbError> {
+    // `exec_mutation` returns the typed `Vec<Value>` already decoded
+    // from `compio_postgres::Row`. Pre-fix we re-parsed our own JSON
+    // string here just to extract the PK + changed-column set; now we
+    // iterate the live `Value`s directly. The CRUD resolver in
+    // `crud.rs` does the final `Value::Array(rows).to_string()` once
+    // at the V8 boundary.
+    let rows = exec_mutation(bq).await?;
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
         // matching filter falls here; subscribers should not see a
         // spurious change.
-        return Ok(json);
+        return Ok(rows);
     }
     for row in &rows {
         let pk = row
@@ -178,7 +194,7 @@ pub(crate) async fn exec_mutation_with_emit(
         };
         queue_or_emit(app_id, collection, op, pk, columns, tuple);
     }
-    Ok(json)
+    Ok(rows)
 }
 
 /// If a transaction is active on this thread, queue the event in
@@ -268,7 +284,7 @@ pub async fn exec_mutation_with_emit_for_tests(
     app_id: &str,
     collection: &str,
     op: crate::broker::ChangeOp,
-) -> Result<String, String> {
+) -> Result<Vec<Value>, String> {
     exec_mutation_with_emit(bq, app_id, collection, op)
         .await
         .map_err(DbError::into_string)

@@ -91,23 +91,37 @@ where
     }
 }
 
-/// Lower a JSON-array string result to a single JSON value: the first
-/// row, or `null` when the result was empty. Used by `findOne` /
-/// `insert` / `updateOne` / `deleteOne` / `upsert`, all of which the
-/// SDK expects to resolve to a single row or `null`.
-fn first_row_or_null(json: String) -> ResolveValue {
-    let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-    let value = arr.into_iter().next().unwrap_or(Value::Null).to_string();
+/// Lower a `Vec<Value>` result to a single JSON value: the first row,
+/// or `null` when the result was empty. Used by `findOne` / `insert` /
+/// `updateOne` / `deleteOne` / `upsert`, all of which the SDK expects
+/// to resolve to a single row or `null`.
+///
+/// The `Vec<Value>` arrives already decoded from `compio_postgres::Row`
+/// — see [`crate::v8_bridge::rows_to_json_value`]. We serialise the
+/// single row once here; V8 then parses it via `JSON.parse` inside
+/// `ResolveValue::Json`. Net cost: one `to_string` + one
+/// `JSON.parse`, down from the pre-fix four
+/// (rows→string→parse→string→parse).
+fn first_row_or_null(rows: Vec<Value>) -> ResolveValue {
+    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
     ResolveValue::Json(value)
 }
 
-/// Lower a JSON-array string result to the row count, as a JS
-/// `number`. Used by `updateMany` / `deleteMany` (resolves to the
-/// affected-row count).
+/// Lower a `Vec<Value>` result to the row count, as a JS `number`.
+/// Used by `updateMany` / `deleteMany` (resolves to the affected-row
+/// count).
 #[allow(clippy::cast_precision_loss)]
-fn row_count_as_f64(json: String) -> ResolveValue {
-    let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-    ResolveValue::F64(arr.len() as f64)
+fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
+    ResolveValue::F64(rows.len() as f64)
+}
+
+/// Lower a `Vec<Value>` result to a JSON-array string. Used by `find`
+/// / `insertMany` / `aggregate` where the SDK expects an array of
+/// rows. The serialisation happens exactly once — at the V8 boundary
+/// — replacing the pre-fix "stringify the result set → parse it →
+/// re-stringify it" round-trip.
+fn rows_as_json_array(rows: Vec<Value>) -> ResolveValue {
+    ResolveValue::Json(Value::Array(rows).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +192,7 @@ pub(crate) fn dispatch_find<'s>(
         request_id,
         built,
         exec_query,
-        ResolveValue::Json,
+        rows_as_json_array,
     )));
 
     promise
@@ -239,7 +253,7 @@ pub(crate) fn dispatch_insert_many<'s>(
         move |bq| async move {
             exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
         },
-        ResolveValue::Json,
+        rows_as_json_array,
     )));
 
     promise
@@ -403,7 +417,7 @@ pub(crate) fn dispatch_aggregate<'s>(
         request_id,
         built,
         exec_query,
-        ResolveValue::Json,
+        rows_as_json_array,
     )));
 
     promise
@@ -428,9 +442,10 @@ pub(crate) fn dispatch_distinct<'s>(
         request_id,
         built,
         exec_query,
-        |json: String| {
-            // Extract single-column values into a flat array
-            let rows: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
+        |rows: Vec<Value>| {
+            // Extract single-column values into a flat array. `rows`
+            // is the pre-decoded result set — no JSON parse needed
+            // before reshaping.
             let flat: Vec<Value> = rows
                 .into_iter()
                 .filter_map(|row| {
@@ -548,9 +563,11 @@ pub(crate) fn dispatch_find_or_create<'s>(
             // us from missing wake-ups when the row really was created.
             exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
         },
-        |json: String| {
-            let arr: Vec<Value> = serde_json::from_str(&json).unwrap_or_default();
-            let mut row = arr.into_iter().next().unwrap_or(Value::Null);
+        |rows: Vec<Value>| {
+            // `rows` is the pre-decoded result of the INSERT ... ON
+            // CONFLICT — typically a single row. Take it without a
+            // JSON round-trip; the `__created` flag rides in the row.
+            let mut row = rows.into_iter().next().unwrap_or(Value::Null);
             let created = match row.as_object_mut() {
                 Some(obj) => obj
                     .remove("__created")

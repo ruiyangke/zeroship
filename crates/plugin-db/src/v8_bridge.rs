@@ -19,11 +19,12 @@
 //! - **Capability gate**: `refuse_if_query_capability` — the B3 gate
 //!   that rejects writes from inside a `query()` handler.
 //! - **Row decoding**: `row_to_json`, `column_to_json`,
-//!   `rows_to_json` — Postgres OID → JSON conversion, used by every
-//!   exec path. `fmt_db_err` walks the source chain so DbError
-//!   messages reach JS instead of bare wrapper kinds; this is a thin
-//!   shim over [`crate::error::DbError::from_pg`] that returns the
-//!   flattened message string for callers still on the `Result<_,
+//!   `rows_to_json_value` (the typed `Vec<Value>` intermediate the
+//!   CRUD chain threads end-to-end) — Postgres OID → JSON conversion,
+//!   used by every exec path. `fmt_db_err` walks the source chain so
+//!   DbError messages reach JS instead of bare wrapper kinds; this is
+//!   a thin shim over [`crate::error::DbError::from_pg`] that returns
+//!   the flattened message string for callers still on the `Result<_,
 //!   String>` rail.
 
 use serde_json::Value;
@@ -324,10 +325,19 @@ pub(crate) fn fmt_db_err(e: &compio_postgres::Error) -> String {
     crate::error::DbError::from_pg(e).into_string()
 }
 
-/// Convert rows to a JSON array string.
-pub(crate) fn rows_to_json(rows: &[compio_postgres::Row]) -> String {
-    let arr: Vec<Value> = rows.iter().map(row_to_json).collect();
-    Value::Array(arr).to_string()
+/// Convert rows to a `Vec<serde_json::Value>` — one `Value::Object`
+/// per row, in result order.
+///
+/// This is the typed intermediate the exec layer threads from
+/// `compio_postgres::Row` through to the V8 boundary. Callers that
+/// need the final JSON-array string serialise once at the boundary
+/// (`Value::Array(rows_to_json_value(&rows)).to_string()`); the
+/// intermediate `Vec<Value>` lets the CRUD resolvers
+/// (`first_row_or_null`, `row_count_as_f64`) inspect or take a single
+/// row without paying for a JSON parse + reserialise of the whole
+/// result set.
+pub(crate) fn rows_to_json_value(rows: &[compio_postgres::Row]) -> Vec<Value> {
+    rows.iter().map(row_to_json).collect()
 }
 
 /// Convert a single Row to a JSON object.
