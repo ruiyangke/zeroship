@@ -16,8 +16,8 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    Backend, IndexBuilder, LockManager, NamespaceManager, PgSqlExecutor, SchemaIntrospect,
-    SqlExecutor,
+    Backend, IndexBuilder, LockManager, NamespaceManager, PgLockManager, PgSqlExecutor,
+    SchemaIntrospect, SqlExecutor,
 };
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
@@ -236,6 +236,19 @@ impl IndexBuilder for PostgresBackend {
 impl PgSqlExecutor for PostgresBackend {
     fn pool_handle(&self) -> &Rc<compio_postgres::Pool> {
         &self.pool
+    }
+}
+
+impl PgLockManager for PostgresBackend {
+    async fn acquire_pooled_client_for_lock<'p>(
+        &'p self,
+    ) -> Result<compio_postgres::PooledClient<'p>, DbError> {
+        // Mirror the pre-PR-3 inline call site at
+        // `register_model/bootstrap.rs:103`: pool.get() with the same
+        // operator-facing error message so log lines stay grep-able.
+        self.pool.get().await.map_err(|e| DbError::Transient {
+            message: format!("db: failed to acquire orchestrator client: {e}"),
+        })
     }
 }
 
@@ -554,8 +567,8 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        Backend, IndexBuilder, LockManager, NamespaceManager, PgSqlExecutor, SchemaIntrospect,
-        SqlExecutor,
+        Backend, IndexBuilder, LockManager, NamespaceManager, PgLockManager, PgSqlExecutor,
+        RegisterBackend, SchemaIntrospect, SqlExecutor,
     };
 
     /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
@@ -579,12 +592,16 @@ mod tests {
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
         fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::Client>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
+        fn impls_pg_lock_manager<T: PgLockManager>() {}
+        fn impls_register_backend<T: RegisterBackend>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
         impls_namespace_manager::<PostgresBackend>();
         impls_schema_introspect::<PostgresBackend>();
         impls_index_builder::<PostgresBackend>();
         impls_pg_sql_executor::<PostgresBackend>();
+        impls_pg_lock_manager::<PostgresBackend>();
+        impls_register_backend::<PostgresBackend>();
     }
 
     /// Compile-time: the associated types must remain wired to the

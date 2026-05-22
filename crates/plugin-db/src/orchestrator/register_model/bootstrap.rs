@@ -24,7 +24,7 @@
 use serde_json::Value;
 
 use super::super::lock_guard::OrchestratorLockGuard;
-use crate::backend::{NamespaceManager, PgSqlExecutor, PostgresBackend};
+use crate::backend::RegisterBackend;
 use crate::error::DbError;
 use crate::query;
 
@@ -75,8 +75,18 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 /// happened on; reusing that task avoids the test-harness pattern
 /// where each `dispatch_zs` spins a fresh runtime and would orphan a
 /// freshly-spawned connection.
-pub(crate) async fn bootstrap<'p>(
-    backend: &'p PostgresBackend,
+///
+/// **P0 PR 3**: bound narrowed from `&PostgresBackend` to
+/// [`RegisterBackend`] — the composition marker over the six
+/// capability traits this stage actually uses. The
+/// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
+/// method closes the `backend.pool().get()` escape hatch while
+/// preserving the borrow-lifetime `'p` that threads through
+/// [`OrchestratorLockGuard`] (Open Q5 resolution; see
+/// `docs/proposals/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
+/// `docs/proposals/db-system-design.md` §7).
+pub(crate) async fn bootstrap<'p, B: RegisterBackend>(
+    backend: &'p B,
     app_id: &str,
     collection: &str,
     schema: &Value,
@@ -100,9 +110,13 @@ pub(crate) async fn bootstrap<'p>(
     // the CREATE INDEX CONCURRENTLY phases (which can't run in a
     // transaction). Released when `apply` calls
     // [`OrchestratorLockGuard::release`] at the end of pass 1.
-    let lock_client = backend.pool().get().await.map_err(|e| DbError::Transient {
-        message: format!("db: failed to acquire orchestrator client: {e}"),
-    })?;
+    // P0 PR 3: closes the `backend.pool().get()` escape hatch — the
+    // PG-only `PgLockManager::acquire_pooled_client_for_lock` returns
+    // the same `PooledClient<'p>` shape so `'p` still threads through
+    // `OrchestratorLockGuard<'p>` exactly as before. The error mapping
+    // (`DbError::Transient` with the same operator-facing prefix)
+    // lives in the PG impl now. Open Q5 resolution.
+    let lock_client = backend.acquire_pooled_client_for_lock().await?;
     let key = lock_key(app_id);
     let guard = OrchestratorLockGuard::acquire(backend, lock_client, key, LOCK_TAG)
         .await
@@ -145,9 +159,13 @@ pub(crate) async fn bootstrap<'p>(
 /// Inner half of [`bootstrap`] — runs everything that can fail AFTER
 /// the lock has been acquired so the outer function can release on
 /// `Err` in one place.
+///
+/// **P0 PR 3**: bound narrowed from `&PostgresBackend` to
+/// [`RegisterBackend`] in lock-step with `bootstrap`. See the
+/// outer function's rustdoc for the rationale.
 #[allow(clippy::too_many_arguments)]
-async fn build_ctx(
-    backend: &PostgresBackend,
+async fn build_ctx<B: RegisterBackend>(
+    backend: &B,
     app_id: &str,
     collection: &str,
     schema: &Value,

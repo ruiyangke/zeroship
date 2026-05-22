@@ -45,7 +45,7 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
-use crate::backend::PostgresBackend;
+use crate::backend::RegisterBackend;
 use crate::context;
 use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
@@ -153,13 +153,15 @@ async fn exec_register_model(
 /// from `bootstrap` lives until `apply` releases the lock between
 /// passes.
 ///
-/// Concrete-typed on [`PostgresBackend`] for the lock-client step —
-/// the PG pool's `get()` is what produces the `PooledClient` whose
-/// lifetime threads through to `apply`. Other stages talk the trait,
-/// so swapping in a future backend's pool semantics would localise
-/// here.
-pub async fn run_pipeline(
-    backend: &PostgresBackend,
+/// **P0 PR 3**: generic over [`RegisterBackend`] (was concrete
+/// `&PostgresBackend`). The PG pool's `get()` lives behind
+/// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
+/// now, so the `PooledClient<'p>` lifetime still threads through to
+/// `apply` but no concrete-type leak remains in this signature. Open
+/// Q5 resolution per `docs/proposals/p0-implementation-plan.md`
+/// §"PR 3" + §3 Q5 and `docs/proposals/db-system-design.md` §7.
+pub async fn run_pipeline<B: RegisterBackend>(
+    backend: &B,
     app_id: &str,
     collection: &str,
     schema: &Value,
@@ -246,6 +248,6 @@ pub async fn exec_register_model_with_pool(
     deploy_id: &str,
 ) -> Result<(), DbError> {
     let url = context::with(|c| c.db_url()).unwrap_or_default();
-    let backend = PostgresBackend::new(pool, url);
+    let backend = crate::backend::PostgresBackend::new(pool, url);
     run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
 }

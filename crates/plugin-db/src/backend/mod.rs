@@ -311,6 +311,82 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
     fn pool_handle(&self) -> &Rc<compio_postgres::Pool>;
 }
 
+/// Postgres-specific extension trait carrying the
+/// `acquire_pooled_client_for_lock` primitive — the one piece of the
+/// register-model bootstrap that has to return a `PooledClient<'p>`
+/// whose `'p` borrow lifetime threads through
+/// [`crate::orchestrator::lock_guard::OrchestratorLockGuard`].
+///
+/// **Open Q5 resolution (P0 PR 3)**: the alternative was a GAT on
+/// [`LockManager`] of the form
+/// `type PooledLockClient<'p>: 'p where Self: 'p`. async-fn-in-trait
+/// + GAT is workable but fights the trait solver in subtle ways
+/// (HRTB-style bounds at consumer sites). Since the PG impl is the
+/// only one that needs a borrow-lifetimed lock client today — and
+/// future backends (sqlite, planetscale) would have their own
+/// session-management primitive on a different extension trait —
+/// we take the PG extension-trait path and defer cross-backend
+/// lifetime threading to P1. See
+/// `docs/proposals/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
+/// `docs/proposals/db-system-design.md` §7.
+///
+/// The `: LockManager<Client = compio_postgres::Client>` super-bound
+/// is load-bearing: the returned `PooledClient` is the
+/// [`SqlExecutor::Client`] that [`LockManager::acquire_advisory_lock`]
+/// takes, so the orchestrator can hand the returned client straight
+/// into `OrchestratorLockGuard::acquire` without an adapter.
+pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
+    /// Acquire a pool-leased client for advisory-lock duty. The
+    /// returned [`compio_postgres::PooledClient`]'s `'p` lifetime is
+    /// the pool borrow lifetime — it threads through
+    /// [`crate::orchestrator::lock_guard::OrchestratorLockGuard`] so
+    /// the lock auto-returns to the pool on Drop.
+    ///
+    /// Postgres impl wraps `self.pool().get().await` and maps the
+    /// pool error to [`DbError::Transient`] with the same operator-
+    /// facing message the bootstrap call site used to emit inline.
+    #[allow(async_fn_in_trait)]
+    async fn acquire_pooled_client_for_lock<'p>(
+        &'p self,
+    ) -> Result<compio_postgres::PooledClient<'p>, DbError>;
+}
+
+/// Marker super-trait composing every capability the register-model
+/// pipeline needs from a backend, so the `bootstrap` / `run_pipeline`
+/// signatures can write `B: RegisterBackend` instead of restating the
+/// 6-trait compound bound at each function.
+///
+/// **P0 PR 3 ergonomics**: the bound is exactly
+/// [`PgSqlExecutor`] (transitively [`SqlExecutor`]) +
+/// [`LockManager`] + [`NamespaceManager`] + [`SchemaIntrospect`] with
+/// `LiveSchema = crate::diff::LiveSchema` + [`IndexBuilder`] +
+/// [`PgLockManager`]. The blanket `impl<T> RegisterBackend for T`
+/// auto-impls the marker for any type that already satisfies the
+/// six sub-bounds (today, [`PostgresBackend`]; tomorrow, any other
+/// concrete impl that wires up the same set).
+///
+/// See `docs/proposals/p0-implementation-plan.md` §"PR 3" step 4
+/// ("Ergonomics") and `docs/proposals/db-system-design.md` §7.
+pub trait RegisterBackend:
+    PgSqlExecutor
+    + LockManager<Client = compio_postgres::Client>
+    + NamespaceManager
+    + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
+    + IndexBuilder
+    + PgLockManager
+{
+}
+
+impl<T> RegisterBackend for T where
+    T: PgSqlExecutor
+        + LockManager<Client = compio_postgres::Client>
+        + NamespaceManager
+        + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
+        + IndexBuilder
+        + PgLockManager
+{
+}
+
 /// The data-store boundary. One impl per storage backend; today only
 /// Postgres ([`PostgresBackend`]).
 ///
@@ -448,6 +524,30 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
+    /// Compile-time: [`PostgresBackend`] satisfies the PG-only
+    /// [`PgLockManager`] extension trait (P0 PR 3). This is the
+    /// escape-hatch closer for the `backend.pool().get()` call site at
+    /// `register_model/bootstrap.rs:103`: the returned
+    /// `PooledClient<'p>` keeps the `'p` lifetime threaded through
+    /// [`OrchestratorLockGuard`] without needing a GAT on
+    /// [`LockManager`] (Open Q5 resolution).
+    fn assert_postgres_backend_impls_pg_lock_manager() {
+        fn assert_impl<T: PgLockManager>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: [`PostgresBackend`] satisfies the
+    /// [`RegisterBackend`] marker super-trait (P0 PR 3). The
+    /// blanket `impl<T> RegisterBackend for T where T: …` auto-impls
+    /// the marker for any type with the six sub-bounds; if a future
+    /// refactor pulls one bound off (or detaches a sub-impl block),
+    /// this stops compiling here rather than at the `bootstrap` /
+    /// `run_pipeline` call sites.
+    fn assert_postgres_backend_impls_register_backend() {
+        fn assert_impl<T: RegisterBackend>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
     /// Compile-time: the associated types stay anchored to the concrete
     /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A
     /// regression here would silently change every `B::Client` /
@@ -503,6 +603,8 @@ mod tests {
         let _ = assert_postgres_backend_impls_schema_introspect as fn();
         let _ = assert_postgres_backend_impls_index_builder as fn();
         let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
+        let _ = assert_postgres_backend_impls_pg_lock_manager as fn();
+        let _ = assert_postgres_backend_impls_register_backend as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();
         let _ = assert_backend_handle_alias as fn();
