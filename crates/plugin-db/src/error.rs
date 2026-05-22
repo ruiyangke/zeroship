@@ -378,4 +378,111 @@ mod tests {
             other => panic!("expected CodedError, got {other:?}"),
         }
     }
+
+    /// Sweep the SQL-violation variants (the four 23xxx codes plus
+    /// Serialization, LockContention, Transient, Internal) — each must
+    /// stamp the canonical wire `code` that the SDK branches on. The
+    /// pre-existing four tests cover the *bespoke* paths (SchemaRefused
+    /// envelope, ValidationFailed, Configuration, Coded passthrough);
+    /// this sweep guards the much larger constant-table set against a
+    /// rename that would silently break SDK error handling.
+    #[test]
+    fn sql_violation_variants_stamp_canonical_codes() {
+        fn op_code(e: DbError) -> String {
+            match e.to_op_error().kind {
+                zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => code,
+                other => panic!("expected CodedError, got {other:?}"),
+            }
+        }
+        let cases = [
+            (
+                DbError::UniqueViolation { message: "".into() },
+                "unique_violation",
+            ),
+            (
+                DbError::FkViolation { message: "".into() },
+                "fk_violation",
+            ),
+            (
+                DbError::NotNullViolation { message: "".into() },
+                "not_null_violation",
+            ),
+            (
+                DbError::CheckViolation { message: "".into() },
+                "check_violation",
+            ),
+            (
+                DbError::Serialization { message: "".into() },
+                "serialization_failure",
+            ),
+            (
+                DbError::LockContention { message: "".into() },
+                "lock_not_available",
+            ),
+            (
+                DbError::Transient { message: "".into() },
+                "transient",
+            ),
+            (
+                DbError::Internal { message: "".into() },
+                "internal",
+            ),
+        ];
+        for (variant, expected_code) in cases {
+            let got = op_code(variant);
+            assert_eq!(got, expected_code, "wrong wire code for variant");
+        }
+    }
+
+    /// Retryable variants (Serialization, Transient) must carry a
+    /// human-facing `hint` so the SDK can surface "retry the
+    /// transaction" / "retry after backoff" without re-deriving it.
+    /// Non-retryable ones (UniqueViolation, etc.) must NOT — the SDK
+    /// treats a hinted error as recoverable advice.
+    #[test]
+    fn retryable_variants_carry_hint() {
+        fn op_hint(e: DbError) -> Option<String> {
+            match e.to_op_error().kind {
+                zeroship_runtime::state::OpErrorKind::CodedError { hint, .. } => hint,
+                other => panic!("expected CodedError, got {other:?}"),
+            }
+        }
+        assert!(op_hint(DbError::Serialization { message: "x".into() }).is_some());
+        assert!(op_hint(DbError::Transient { message: "x".into() }).is_some());
+        // Non-retryable violations must not advise a retry.
+        assert!(op_hint(DbError::UniqueViolation { message: "x".into() }).is_none());
+        assert!(op_hint(DbError::FkViolation { message: "x".into() }).is_none());
+        assert!(op_hint(DbError::Internal { message: "x".into() }).is_none());
+    }
+
+    /// `From<QueryError>` collapses the builder's three error kinds
+    /// onto a `ValidationFailed` with a stable static code the SDK
+    /// branches on. Each kind must map to a distinct code.
+    #[test]
+    fn from_query_error_assigns_distinct_codes() {
+        let cases = [
+            (
+                crate::query::QueryError::InvalidFilter("bad".into()),
+                "invalid_filter",
+            ),
+            (
+                crate::query::QueryError::InvalidCollection("bad".into()),
+                "invalid_collection",
+            ),
+            (
+                crate::query::QueryError::InvalidIdent("bad".into()),
+                "invalid_identifier",
+            ),
+        ];
+        for (qe, expected_code) in cases {
+            let db = DbError::from(qe);
+            match db {
+                DbError::ValidationFailed { code, hint, .. } => {
+                    assert_eq!(code, expected_code);
+                    assert!(hint.is_none(), "builder errors carry no hint");
+                }
+                other => panic!("expected ValidationFailed, got {other:?}"),
+            }
+        }
+    }
 }
