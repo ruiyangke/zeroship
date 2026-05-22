@@ -2795,6 +2795,14 @@ async fn pg_has_logical_wal(pool: &Pool) -> bool {
 
 /// Drop any leftover slot / publication for the given app, so tests
 /// can re-run from a clean state. Tolerates "does not exist".
+///
+/// Replication-slot accumulation under different app names was the root
+/// cause of the p8a2 ordering hang: each test created a slot under a
+/// distinct name and only dropped its OWN slot at the start, so over a
+/// long suite run `max_replication_slots` (default 10) would exhaust.
+/// We now drop the app-specific resources AND sweep every `__zs_*` slot
+/// + publication left over from prior tests in the same suite. Integration
+/// tests run with `--test-threads=1` so the global sweep is safe.
 async fn c1_cleanup(pool: &Pool, app: &str) {
     let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
     let slot = zeroship_plugin_db::replication::slot_name(app).unwrap();
@@ -2810,6 +2818,33 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
     let _ = pool
         .execute(&format!(r#"DROP SCHEMA IF EXISTS "{app}" CASCADE"#), &[])
         .await;
+
+    // Defensive global sweep: drop every leftover `__zs_*` slot + publication
+    // from prior tests under different app names. Without this, replication
+    // slots accumulate across tests and exhaust `max_replication_slots`
+    // (default 10) on long suite runs — the p8a2 ordering hang.
+    let _ = pool
+        .query_text_params(
+            "SELECT pg_drop_replication_slot(slot_name) \
+             FROM pg_replication_slots \
+             WHERE slot_name LIKE '__zs_%' AND active = false",
+            &[],
+        )
+        .await;
+    if let Ok(rows) = pool
+        .query_text_params(
+            "SELECT pubname FROM pg_publication WHERE pubname LIKE '__zs_%'",
+            &[],
+        )
+        .await
+    {
+        for row in rows {
+            let name: String = row.get(0);
+            let _ = pool
+                .execute(&format!(r#"DROP PUBLICATION IF EXISTS "{name}""#), &[])
+                .await;
+        }
+    }
 }
 
 #[compio::test]
