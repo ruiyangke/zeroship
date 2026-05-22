@@ -148,25 +148,36 @@ pub(crate) async fn apply<'p, B: Backend>(
     };
 
     // Pass 1: transactional ops under advisory lock.
-    for op in &approved.ops {
-        if op.class == ChangeClass::Destructive {
-            continue;
+    //
+    // Run the loop inside an async block so we can capture its Result
+    // and ALWAYS release the advisory lock — even on early `?`
+    // propagation. Without this, an error path returns directly to the
+    // caller and `PooledClient::Drop` parks the connection back in the
+    // pool with its session-scoped lock still held, blocking every
+    // subsequent caller (cross-app stall).
+    let pass1: Result<(), String> = async {
+        for op in &approved.ops {
+            if op.class == ChangeClass::Destructive {
+                continue;
+            }
+            if matches!(op.change_kind, ChangeKind::AddIndex) {
+                continue;
+            }
+            run_op(op).await?;
         }
-        if matches!(op.change_kind, ChangeKind::AddIndex) {
-            continue;
-        }
-        run_op(op).await?;
+        Ok(())
     }
+    .await;
 
-    // Release advisory lock BEFORE CIC. Two orchestrators racing on CIC
-    // is safe (IF NOT EXISTS), but holding the lock through CIC
-    // deadlocks: a second waiter blocked on pg_advisory_lock pins a
-    // snapshot that CIC waits on.
+    // Release advisory lock BEFORE CIC, **regardless of Pass 1 outcome**.
+    // Two orchestrators racing on CIC is safe (IF NOT EXISTS), but
+    // holding the lock through CIC deadlocks: a second waiter blocked on
+    // pg_advisory_lock pins a snapshot that CIC waits on. And if Pass 1
+    // errored, we MUST still unlock — otherwise the pooled connection
+    // returns to the pool with the session-scoped lock held.
     //
     // Issue `pg_advisory_unlock` explicitly so the lock count
-    // decrements while the connection is still parked. The
-    // PooledClient then returns to the pool unlocked for the next
-    // caller to reuse.
+    // decrements while the connection is still parked.
     let unlock_sql =
         "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
     let key = lock_key(&app_id);
@@ -174,6 +185,9 @@ pub(crate) async fn apply<'p, B: Backend>(
         .query_text_params(unlock_sql, &[key.as_str(), LOCK_TAG])
         .await;
     drop(lock_client);
+
+    // Propagate Pass 1 error after the lock has been released.
+    pass1?;
 
     // Pass 2: CIC ops, unlocked.
     for op in &approved.ops {
