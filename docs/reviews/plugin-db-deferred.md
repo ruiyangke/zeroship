@@ -1,6 +1,10 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 13:47.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 14:17.
+
+**Cycle 14:17 closures (1 + design milestone)**: [I16] continued — privatization confirmed by architecture r11 / security r11 / api-surface r11 (already committed at cycle 13:47 as `f6adb68b`). **Design milestone**: full plugin-db system design doc drafted in worktree `proposal/db-system-design` (~3000 LOC) covering positioning (PG=prod, SQLite=dev), 15-capability trait split (closes [C1]), SQLite workaround mapping for all 25 cross-cutting capabilities, migration pipeline, reactive queries (PG WAL + SQLite update_hook+outbox), auth subsystem, metering, multi-tenancy, threat model, 6 implementation phases, open questions. Not committed (per `feedback_proposal_workflow.md`). 3 reviewers returned: **architecture r11 = 95 (+2)** — privatization was structurally meaningful (api-surface +3, module-boundaries +3, coupling-debt +2); **docs-audit r8 = 91 (+4)** — all cycle-13:17/13:47 commits land docs cleanly; **security r11 = 85 (+1)** — privatization compile-time-enforces `tx_token_counter` invariant; surfaced r10 location-inaccuracy (corrected below). Total +7 across 3 lenses.
+
+**r10 location correction** (per security r11): [I43] blocking `pg_advisory_lock` is at `crates/plugin-db/src/backend/postgres.rs:118` (always-compiled), NOT in `auth/bootstrap.rs` as the deferred entry previously claimed. The site is in production builds regardless of `--features hardening`. The DoS-within-app concern remains; the fix path is unchanged.
 
 **Cycle 13:47 closures (1)**: [I16] (`f6adb68b` — privatize 11 `IsolateDbContext` fields; api-surface r11 confirmed +2 ceiling step). 3 reviewers returned: **api-surface r11 = 92 (+1, NEW-R10-1 closed)**, **migration-pipeline r12 = 86 (±0, r11's clarification — I35 narrower than predicted)**, **performance r12 = 81 (±0, harness can't see I35; recommends `Row::new_for_test` cross-crate constructor + `bench_row_to_json`)**. Total +1 across 3 lenses.
 
