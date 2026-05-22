@@ -55,6 +55,16 @@ use crate::error::DbError;
 
 /// Session-scoped advisory-lock guard for the register-model
 /// orchestrator. See module docs for the lifecycle contract.
+///
+/// **Must be consumed via `release().await` or `into_held()`.**
+/// `Drop` cannot await the unlock SQL, so a guard dropped without
+/// one of those calls leaks the session-scoped advisory lock until
+/// the PG session ends (typically when the pool recycles the
+/// connection — could be tens of seconds to minutes). The
+/// `#[must_use]` annotation surfaces accidental drops as compile-time
+/// warnings on common patterns (e.g. `let _ = acquire(...).await`).
+#[must_use = "OrchestratorLockGuard must be released via .release().await or .into_held(); \
+              dropping it leaks the session-scoped advisory lock"]
 pub(crate) struct OrchestratorLockGuard<'p> {
     /// The pooled client that holds the advisory lock at session
     /// scope. `None` after `release()` or `into_held()` has moved it
@@ -183,8 +193,13 @@ impl Drop for OrchestratorLockGuard<'_> {
             tracing::error!(
                 key = %self.key,
                 tag = %self.tag,
-                "OrchestratorLockGuard dropped without release() or into_held(); \
-                 advisory lock will stay held until the backend session closes"
+                "leak: OrchestratorLockGuard dropped without release()/into_held(); \
+                 session-scoped pg_advisory_lock will stay held until the pooled \
+                 client's PG session closes (typically on pool recycle). \
+                 Concurrent register_model callers for this app will stall in \
+                 the meantime. Either an async-cancellation hit the release().await, \
+                 a panic unwound the call stack, or a code path forgot to call \
+                 release()/into_held() — investigate."
             );
         }
     }
