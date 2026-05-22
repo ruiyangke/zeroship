@@ -345,10 +345,15 @@ async fn do_restore_inner(
         });
     }
 
-    // 5. Rewrite config.json per § 5.
+    // 5. Rewrite config.json per § 5 — controller-side rewrites
+    //    ONLY the vm_index-dependent fields (net[].tap, net[].mac).
+    //    The path-bearing fields (disks[].path, fs[].socket,
+    //    serial.file) are NOT touched here; the wrapper rewrites
+    //    them at exec time because only the wrapper knows the
+    //    actual NOMAD_TASK_DIR (Nomad assigns the alloc UUID after
+    //    job submission). See bug-#8 diagnostic 2026-05-22.
     let config_path = alloc_dir.join("config.json");
-    let alloc_uuid = Uuid::now_v7();
-    rewrite_config_json(&config_path, snap.vm_index, alloc_uuid)
+    rewrite_config_json(&config_path, snap.vm_index)
         .map_err(RestoreHandlerError::ConfigRewrite)?;
 
     // 6. Submit the restore job.
@@ -411,18 +416,20 @@ pub(crate) fn derive_tap(vm_index: i16) -> String {
 pub(crate) fn rewrite_config_json(
     config_path: &Path,
     vm_index: i16,
-    alloc_uuid: Uuid,
 ) -> Result<(), String> {
     let raw = std::fs::read_to_string(config_path)
         .map_err(|e| format!("read {}: {e}", config_path.display()))?;
     let mut v: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| format!("parse {}: {e}", config_path.display()))?;
 
-    // 5.1 net[].tap rewrite. MAC is unchanged because the source
-    // worker's vm_index equals the dest worker's vm_index in v1
-    // (cross-worker rewrite is v2). We still write the MAC field
-    // explicitly so an operator who manually re-uploads a snapshot
-    // gets a consistent image.
+    // 5.1 net[].tap + net[].mac: vm_index-dependent. Source and dest
+    // may have different vm_indices (cluster-fallback in v2). We
+    // recompute from the destination vm_index. This is the ONLY
+    // path the controller rewrites — path-bearing fields (disks[].path,
+    // fs[].socket, serial.file) require the runtime NOMAD_TASK_DIR
+    // which the controller cannot know at job-submit time. The
+    // wrapper handles path rewrites at exec time. See bug-#8
+    // diagnostic 2026-05-22 / proposal § 5.
     let tap = derive_tap(vm_index);
     let mac = derive_mac(vm_index);
     if let Some(nets) = v.get_mut("net").and_then(|n| n.as_array_mut()) {
@@ -430,43 +437,6 @@ pub(crate) fn rewrite_config_json(
             if let Some(obj) = net.as_object_mut() {
                 obj.insert("tap".into(), serde_json::Value::String(tap.clone()));
                 obj.insert("mac".into(), serde_json::Value::String(mac.clone()));
-            }
-        }
-    }
-
-    // 5.1 fs[].socket + serial.file: replace the alloc-uuid path
-    // segment. Source paths look like
-    // `/opt/nomad/data/alloc/<old-uuid>/.../<rest>`. We rewrite by
-    // pattern-matching the `/alloc/<uuid>/` infix.
-    let alloc_uuid_str = alloc_uuid.simple().to_string();
-    if let Some(fses) = v.get_mut("fs").and_then(|n| n.as_array_mut()) {
-        for fs in fses.iter_mut() {
-            if let Some(obj) = fs.as_object_mut() {
-                if let Some(serde_json::Value::String(s)) = obj.get_mut("socket") {
-                    *s = rewrite_alloc_path(s, &alloc_uuid_str);
-                }
-            }
-        }
-    }
-    if let Some(serial) = v.get_mut("serial").and_then(|n| n.as_object_mut()) {
-        if let Some(serde_json::Value::String(s)) = serial.get_mut("file") {
-            *s = rewrite_alloc_path(s, &alloc_uuid_str);
-        }
-    }
-
-    // 5.1 disks[].path: same shape as fs[].socket. The snapshot
-    // config embeds the source alloc dir in disk paths (e.g.,
-    // `/opt/nomad/data/alloc/<old-uuid>/ch/local/rootfs.img`).
-    // Without this rewrite, CH --restore opens the (Nomad-GC'd)
-    // source path and the VM never boots — bug #7 surfaced on the
-    // 2026-05-10 cluster smoke. Test pinning at
-    // `rewrite_config_json_rewrites_disks_path`.
-    if let Some(disks) = v.get_mut("disks").and_then(|n| n.as_array_mut()) {
-        for disk in disks.iter_mut() {
-            if let Some(obj) = disk.as_object_mut() {
-                if let Some(serde_json::Value::String(s)) = obj.get_mut("path") {
-                    *s = rewrite_alloc_path(s, &alloc_uuid_str);
-                }
             }
         }
     }
@@ -483,28 +453,11 @@ pub(crate) fn rewrite_config_json(
     Ok(())
 }
 
-/// Replace the `/alloc/<old-uuid>/` segment in a path with the new
-/// uuid. Match is conservative: we look for the literal `/alloc/`
-/// + hex/uuid-like segment + `/`. If the source pattern doesn't
-/// match, the path is returned unchanged (defensive — the snapshot
-/// might have been produced on a non-Nomad backend in dev mode).
-fn rewrite_alloc_path(s: &str, new_alloc_uuid: &str) -> String {
-    const NEEDLE: &str = "/alloc/";
-    let Some(start) = s.find(NEEDLE) else {
-        return s.to_string();
-    };
-    let after = start + NEEDLE.len();
-    // Find the next '/' after the alloc uuid segment.
-    let Some(rel_end) = s[after..].find('/') else {
-        return s.to_string();
-    };
-    let end = after + rel_end;
-    let mut out = String::with_capacity(s.len());
-    out.push_str(&s[..after]);
-    out.push_str(new_alloc_uuid);
-    out.push_str(&s[end..]);
-    out
-}
+// `rewrite_alloc_path` removed 2026-05-22 (bug #8 fix). The controller
+// can't fabricate a meaningful alloc UUID at job-submit time; the
+// wrapper rewrites path-bearing fields at exec time using the real
+// `NOMAD_TASK_DIR` env var. See `crates/sandbox/scripts/nomad-vm-wrapper.sh`
+// restore branch and the diagnostic at the top of this commit.
 
 // ────────────────────────────────────────────────────────────────────
 // Test stub `RestoreBackend`.
@@ -608,22 +561,14 @@ mod unit_tests {
         assert_eq!(derive_tap(42), "zsbx-nm-42");
     }
 
+    /// Bug #8 fix (2026-05-22 cluster diagnostic): the controller
+    /// rewrites ONLY net[].tap + net[].mac. Path-bearing fields
+    /// (disks[].path, fs[].socket, serial.file) are left untouched
+    /// because the controller can't know the runtime NOMAD_TASK_DIR
+    /// at job-submit time. The wrapper does that rewrite at exec
+    /// time with a `sed` against the real env-resolved task dir.
     #[test]
-    fn rewrite_alloc_path_replaces_uuid_segment() {
-        let s = "/opt/nomad/data/alloc/abc-123/foo/vfs.sock";
-        let r = rewrite_alloc_path(s, "newuuidxxx");
-        assert_eq!(r, "/opt/nomad/data/alloc/newuuidxxx/foo/vfs.sock");
-    }
-
-    #[test]
-    fn rewrite_alloc_path_unchanged_when_no_match() {
-        let s = "/var/lib/notnomad/foo";
-        let r = rewrite_alloc_path(s, "newuuidxxx");
-        assert_eq!(r, s);
-    }
-
-    #[test]
-    fn rewrite_config_json_rewrites_net_and_socket_paths() {
+    fn rewrite_config_json_rewrites_only_net_fields() {
         let dir = std::env::temp_dir().join(format!(
             "zsbx-restore-test-{}-{}",
             std::process::id(),
@@ -631,66 +576,32 @@ mod unit_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = dir.join("config.json");
-        // Minimal source-shaped config.
+        // Source-shaped config with paths that must NOT be touched.
+        let source_disk = "/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img";
+        let source_sock = "/opt/nomad/data/alloc/oldalloc/ch/local/vfs-keys.sock";
+        let source_serial = "/opt/nomad/data/alloc/oldalloc/ch/local/serial.log";
         std::fs::write(
             &cfg,
-            r#"{
-                "net":[{"tap":"zsbx-nm-9","mac":"12:34:56:78:9b:09"}],
-                "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
-                "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
-            }"#,
+            format!(
+                r#"{{
+                    "net":[{{"tap":"zsbx-nm-9","mac":"12:34:56:78:9b:09"}}],
+                    "fs":[{{"tag":"keys","socket":"{source_sock}"}}],
+                    "disks":[{{"path":"{source_disk}"}}],
+                    "serial":{{"mode":"File","file":"{source_serial}"}}
+                }}"#
+            ),
         )
         .unwrap();
-        let alloc_uuid = Uuid::now_v7();
-        rewrite_config_json(&cfg, 7, alloc_uuid).unwrap();
+        rewrite_config_json(&cfg, 7).unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        // net.tap + net.mac rewritten from vm_index=7
         assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
         assert_eq!(v["net"][0]["mac"], "12:34:56:78:9b:07");
-        let new_alloc = alloc_uuid.simple().to_string();
-        assert_eq!(
-            v["fs"][0]["socket"],
-            format!("/opt/nomad/data/alloc/{new_alloc}/zsbx-keys/vfs-keys.sock")
-        );
-        assert_eq!(
-            v["serial"]["file"],
-            format!("/opt/nomad/data/alloc/{new_alloc}/serial.log")
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Bug #7 (2026-05-10 cluster smoke): the rootfs disk path embeds
-    /// the SOURCE alloc UUID. Without rewrite, CH `--restore` opens
-    /// the (Nomad-GC'd) source path and the VM never boots; wake
-    /// fails with `agent never returned 200 on /livez`.
-    #[test]
-    fn rewrite_config_json_rewrites_disks_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "zsbx-restore-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::now_v7().simple()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cfg = dir.join("config.json");
-        std::fs::write(
-            &cfg,
-            r#"{
-                "net":[{"tap":"zsbx-nm-2","mac":"12:34:56:78:9b:02"}],
-                "fs":[],
-                "disks":[{"path":"/opt/nomad/data/alloc/oldalloc/ch/local/rootfs.img"}],
-                "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
-            }"#,
-        )
-        .unwrap();
-        let alloc_uuid = Uuid::now_v7();
-        rewrite_config_json(&cfg, 2, alloc_uuid).unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-        let new_alloc = alloc_uuid.simple().to_string();
-        assert_eq!(
-            v["disks"][0]["path"],
-            format!("/opt/nomad/data/alloc/{new_alloc}/ch/local/rootfs.img")
-        );
+        // Paths LEFT UNTOUCHED — the wrapper handles them at exec.
+        assert_eq!(v["fs"][0]["socket"], source_sock);
+        assert_eq!(v["disks"][0]["path"], source_disk);
+        assert_eq!(v["serial"]["file"], source_serial);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

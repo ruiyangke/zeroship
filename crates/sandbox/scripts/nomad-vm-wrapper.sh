@@ -298,7 +298,28 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
     echo "[wrapper] FATAL: ZSBX_RESTORE_FROM=$ZSBX_RESTORE_FROM missing one of {memory-ranges,config.json,state.json}" >&2
     exit 1
   fi
-  echo "[wrapper] restore path: source=$ZSBX_RESTORE_FROM"
+
+  # Rewrite path-bearing fields in config.json to point at THIS
+  # alloc's NOMAD_TASK_DIR. The controller can't do this at job-
+  # submit time because Nomad assigns the alloc UUID only after the
+  # job is submitted, so the controller's restore_handler leaves
+  # disks[].path / fs[].socket / serial.file pointing at the source
+  # alloc's path. Without this rewrite CH --restore opens
+  # `<source_alloc>/serial.log` → ENOENT → "Error creating console
+  # device" → CH exits at t=3ms before reaching net/fs setup.
+  # Diagnostic capture 2026-05-22; see commit message of bug-#8 fix.
+  #
+  # The pattern matches /opt/nomad/data/alloc/<alloc-id>/<task>/local
+  # (Nomad's per-task local-dir layout). The substitution is
+  # idempotent across re-wakes — a prior wake's task-dir also matches
+  # the same prefix pattern and gets replaced with the current one.
+  if ! sed -i -E "s#/opt/nomad/data/alloc/[^/]+/[^/]+/local#${NOMAD_TASK_DIR}#g" \
+       "$ZSBX_RESTORE_FROM/config.json"; then
+    echo "[wrapper] FATAL: config.json path rewrite failed" >&2
+    exit 1
+  fi
+
+  echo "[wrapper] restore path: source=$ZSBX_RESTORE_FROM, NOMAD_TASK_DIR=$NOMAD_TASK_DIR"
   cloud-hypervisor \
     --api-socket "$API_SOCK" \
     --restore    "source_url=file://$ZSBX_RESTORE_FROM" \
