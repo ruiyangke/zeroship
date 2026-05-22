@@ -2903,7 +2903,7 @@ async fn c1_watchdog_reports_new_slot() {
         .await
         .unwrap();
 
-    let slots = zeroship_plugin_db::replication::watchdog_query(&pool)
+    let slots = zeroship_plugin_db::replication::watchdog_query(&pool, app)
         .await
         .unwrap();
     let me = slots
@@ -2944,7 +2944,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
 
     // The slot is brand-new and inactive (no consumer). Run the GC
     // with a 0-byte floor — must reap.
-    let dropped = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, 0)
+    let dropped = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, app, 0)
         .await
         .unwrap();
     assert!(
@@ -2953,7 +2953,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
     );
 
     // A second sweep with the same threshold must not error.
-    let _ = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, 0)
+    let _ = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, app, 0)
         .await
         .unwrap();
 
