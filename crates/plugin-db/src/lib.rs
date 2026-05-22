@@ -33,7 +33,7 @@ use crate::context::with_mut as ctx_mut;
 pub mod audit;
 pub mod auth;
 pub mod broker;
-pub mod context;
+pub(crate) mod context;
 pub mod crud;
 pub mod diff;
 pub mod error;

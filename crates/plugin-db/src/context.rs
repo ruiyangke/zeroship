@@ -39,7 +39,7 @@ use crate::migrations::MigrationLock;
 
 /// Per-isolate DB plug-in state. One instance per worker thread, held
 /// by the [`ISOLATE_CTX`] thread-local.
-#[allow(missing_debug_implementations, dead_code)]
+#[allow(missing_debug_implementations)]
 pub struct IsolateDbContext {
     /// Connection pool — created lazily on first DB operation.
     pub(crate) pool: Option<Rc<Pool>>,
@@ -124,7 +124,6 @@ pub struct IsolateDbContext {
     pub(crate) running_consumers: HashSet<String>,
 }
 
-#[allow(dead_code)]
 impl IsolateDbContext {
     /// Build a fresh per-isolate context. Called once per worker
     /// thread on first access (via [`ISOLATE_CTX`]'s `const`
@@ -387,14 +386,12 @@ thread_local! {
 /// The compio runtime is single-threaded per worker; this never
 /// contends. Callers must NOT re-enter [`with`] / [`with_mut`] from
 /// inside `f` (the underlying `RefCell` will panic).
-#[allow(dead_code)]
 pub fn with<R>(f: impl FnOnce(&IsolateDbContext) -> R) -> R {
     ISOLATE_CTX.with(|c| f(&c.borrow()))
 }
 
 /// Run `f` with an exclusive reference to the per-isolate DB context.
 /// Same re-entrancy rule as [`with`].
-#[allow(dead_code)]
 pub fn with_mut<R>(f: impl FnOnce(&mut IsolateDbContext) -> R) -> R {
     ISOLATE_CTX.with(|c| f(&mut c.borrow_mut()))
 }
