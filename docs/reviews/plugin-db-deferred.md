@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 06:00.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 06:55.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +594,22 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S57] MAJOR (code-critique r5 MAJOR-R5-1; cycle 06:55) — auth/session.rs P0001 substring matching
+- **Closed by**: `a272d1af plugin-db/auth: classify P0001 RAISE via DETAIL token instead of substring`
+- PG side: 5 RAISE EXCEPTION statements in the SECURITY DEFINER `init_session` function now carry `USING DETAIL = '<token>'`. Rust side: new `classify_p0001_detail()` helper reads `e.as_db_error()?.detail()` and maps to `DbError::ValidationFailed { code }`. Locale- and formatter-independent.
+
+### [S58] MAJOR (code-critique r5 MAJOR-R5-4; cycle 06:55) — WalConsumer::new flattens DbError to ConsumerError::NotProvisioned(String)
+- **Closed by**: `aa639715 plugin-db/wal_consumer: WalConsumer::new returns Result<_, DbError>`
+- Removed `ConsumerError::NotProvisioned(String)` variant. `WalConsumer::new` now returns `Result<_, DbError>` directly with distinct codes: `ValidationFailed { code: "invalid_app_id" }` (developer error) vs `Configuration { code: "not_provisioned" }` (operator error). Dispatch site no longer re-stamps the typed error.
+
+### [S59] NEW MINOR (concurrency r7; cycle 06:55) — startReplicationConsumer race window
+- **Closed by**: `70921112 plugin-db/replication_ops: atomic try-claim closes startReplicationConsumer race`
+- Two rapid-succession startReplicationConsumer() calls could both pass the outer `is_consumer_running` gate before either marked. Added `try_mark_consumer_running -> bool` atomic check-and-set; spawned task uses `try_claim: Option<Self>` constructor — the loser bails without spawning a duplicate consumer.
+
+### [S60] CRITICAL (docs-audit r5 NEW; cycle 06:55) — replication_ops.rs comment block contradicted code
+- **Closed by**: `4b2e7046 plugin-db/replication_ops: rewrite ConsumerRunningGuard comment block`
+- Three accreted comment paragraphs across e399eeea/34d209b5/70921112 had the pre-34d209b5 "Mark BEFORE the spawn" rationale at the top contradicting the post-34d209b5 paragraphs below. Rewrote as one coherent paragraph + 3-line history block citing each commit's specific failure mode.
+
 ### [S54] IMPORTANT (migration-pipeline r5 R5-M7; cycle 06:00) — finalise_backfill let _ on terminal update
 - **Closed by**: `51ced4a0 plugin-db: warn on finalise_backfill errors + document lock_guard hardening history`
 - Replaced silent `let _ =` on the `finalise_backfill` await with `if let Err(e)` + `tracing::warn!` capturing app_id, audit_id, terminal state, and error. F1-family discipline regression closed.
@@ -673,19 +689,20 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **04:00** closed [I28] ~70-site sweep, [I42] lock_guard await order
 - **04:35** closed [I39], [I44], NEW CRITICAL (watchdog cross-app), first_row_or_internal
 - **05:25** closed MAJOR-R5-2, MAJOR-R5-3, 2 CRITICALs (test-helpers build break + error preamble drift)
-- **06:00** closed R5-M7 (finalise_backfill warn), docs-audit r4 (lock_guard hardening-history), MAJOR-R6-1 (mark_consumer_running inside guard)
+- **06:00** closed R5-M7, docs-audit r4 lock_guard hardening, MAJOR-R6-1
+- **06:55** closed MAJOR-R5-1 (P0001 DETAIL), MAJOR-R5-4 (WalConsumer typed), concurrency-r7 race, docs-audit r5 CRITICAL
 
-**Net since pilot started**: ~33 closures, ~24 new findings.
+**Net since pilot started**: ~37 closures, ~25 new findings.
 
-### Pick #1 (next cycle): **MAJOR-R5-1 — auth/session.rs P0001 substring matching**
-- **File**: `crates/plugin-db/src/auth/session.rs:188-225`
-- **Fix sketch**: Replace `msg.contains("…")` substring matches on rendered RAISE messages with a SQLSTATE + DETAIL machine-readable token (`RAISE EXCEPTION ... USING ERRCODE = 'P0001', DETAIL = 'session_signature_expired'`). Read `e.code()` + `e.detail()` instead of free-text.
-- **Why next**: code-critique r5 + security r5 both flagged. Fragile against future RAISE additions or compio-postgres formatter changes. SDK retry contract could silently change.
+### Pick #1 (next cycle): **Test-coverage r7 HIGH — [I42] release-flag ordering branch unverified (2-round carry-over)**
+- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:160-183`
+- **Fix sketch**: Add either (a) integration test that constructs the guard with a live PooledClient, drops the future mid-await, captures the Drop log via `tracing-subscriber` test layer; or (b) a source-text invariant test (analogous to `mint_subscription_does_not_leak`) that pins `self.released = true` AFTER the `unlock_sql.await` call in the function source.
+- **Why next**: bd1e7ce1's defining behaviour has gone two rounds unverified; a silent revert (move `released = true` back before await) would have no failing test.
 
-### Pick #2 (next cycle): **MAJOR-R5-4 — WalConsumer::new flattens DbError to String**
-- **File**: `crates/plugin-db/src/wal_consumer.rs:333-336`; dispatch boundary at `crates/plugin-db/src/replication_ops.rs:239-241`
-- **Fix sketch**: Replace `ConsumerError::NotProvisioned(String)` with `ConsumerError::NotProvisioned(DbError)` or have WalConsumer::new return `Result<_, DbError>`. Dispatch site at replication_ops.rs:239 then routes the typed error rather than re-stamping `"not_provisioned"`.
-- **Why next**: code-critique r5 + r6 both carry this. Currently SDK gets `"not_provisioned"` for what could be `invalid_app_id` (replication.rs sanitisation) or `wal_level_not_logical` (configuration) — observability gap.
+### Pick #2 (next cycle): **Test-coverage r7 MEDIUM — ConsumerRunningGuard mark/unmark lifecycle**
+- **File**: `crates/plugin-db/src/replication_ops.rs:277-294` (now with `try_claim` after 70921112)
+- **Fix sketch**: Lift `ConsumerRunningGuard` out of the local function scope OR expose via `#[cfg(test)]` re-export. Add 3 tests: `guard_new_marks`, `guard_drop_unmarks`, `guard_drop_unmarks_on_panic_unwind` (mirror `wal_consumer.rs::p8a2_per_app_emit_suppression_drop_guard_restores_on_panic`).
+- **Why next**: 3 commits (e399eeea, 34d209b5, 70921112) touched both `new()` and `Drop`; only context.rs primitives have direct tests.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - Status unchanged; needs retry/backoff policy decision.
