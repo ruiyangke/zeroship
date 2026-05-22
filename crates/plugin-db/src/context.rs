@@ -355,7 +355,7 @@ impl IsolateDbContext {
     // ----- MIG_LOCK ---------------------------------------------------
 
     /// True iff a migration run is active on this isolate.
-    pub fn has_mig_lock(&self) -> bool {
+    pub(crate) fn has_mig_lock(&self) -> bool {
         self.mig_lock.is_some()
     }
 
@@ -385,14 +385,14 @@ impl IsolateDbContext {
 
     /// Drop the active migration lock state. Best-effort —
     /// idempotent.
-    pub fn clear_mig_lock(&mut self) {
+    pub(crate) fn clear_mig_lock(&mut self) {
         self.mig_lock = None;
     }
 
     /// Take the lock client out of the active migration state for an
     /// await; the caller's future is responsible for putting it back
     /// via [`Self::return_mig_client`].
-    pub fn take_mig_client(&mut self) -> Option<Client> {
+    pub(crate) fn take_mig_client(&mut self) -> Option<Client> {
         self.mig_lock.as_mut().and_then(|l| l.client.take())
     }
 
@@ -403,7 +403,7 @@ impl IsolateDbContext {
     /// state-machine bug that silently dropped the client (paired
     /// with the `tracing::error!` on `set_mig_lock`'s shadow-replace
     /// branch above).
-    pub fn return_mig_client(&mut self, client: Client) {
+    pub(crate) fn return_mig_client(&mut self, client: Client) {
         match self.mig_lock.as_mut() {
             Some(lock) => lock.client = Some(client),
             None => tracing::warn!(
@@ -415,7 +415,7 @@ impl IsolateDbContext {
     /// Snapshot the migration lock's identifying fields (name,
     /// collection, audit_id, dry_run, start_generation). Returns
     /// `None` outside an active run.
-    pub fn mig_lock_snapshot(&self) -> Option<(String, String, i64, bool, i64)> {
+    pub(crate) fn mig_lock_snapshot(&self) -> Option<(String, String, i64, bool, i64)> {
         self.mig_lock.as_ref().map(|l| {
             (
                 l.name.clone(),
