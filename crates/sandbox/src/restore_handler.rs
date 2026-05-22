@@ -229,7 +229,7 @@ struct SnapshotRowMeta {
     sha256: [u8; 32],
     vm_index: i16,
     /// Source sandbox's `user_id` (typed-id form `usr_<base62>`).
-    /// Needed by `submit_restore_job` to derive `ZSBX_USER_HOME_DIR`
+    /// Needed by `submit_restore_job` to derive `ZSBX_USER_HOME_IMG`
     /// per the cold-boot env contract (Phase B fix #6).
     user_id: String,
 }
@@ -827,20 +827,31 @@ fn build_restore_nomad_job_json(
     memory_mb: u32,
     cpus: f32,
 ) -> serde_json::Value {
-    // Phase B fix #6: the wrapper unconditionally validates 8 envs
-    // before branching to the restore path. Derive the same per-
-    // sandbox host dirs the cold-boot path uses (see
-    // backend/nomad_ch.rs::NomadCHBackend::create, around the
-    // `host_dir`/`keys_dir`/`workspace_dir`/`user_home_dir` block).
+    // Phase B fix #6 (later: virtio-blk pivot, bug #11): the wrapper
+    // up-front validates a 5-env block (VM_INDEX + ARTIFACT_DIR +
+    // RUNTIME + MEMORY_MB + CPUS_BOOT) on both branches, and on
+    // cold-boot it additionally validates WORKSPACE_IMG +
+    // USER_HOME_IMG + PUBKEY_HEX. Restore doesn't *need* the latter
+    // three (CH `--restore` reads the disk paths + cmdline from the
+    // snapshot's saved config.json), but we still emit the image
+    // paths because the controller derives them deterministically
+    // and the wrapper's defensive `[ -f $PATH ]` check on the
+    // images catches a hand-edited restore jobspec with a typo'd
+    // path before CH's "block device file" error.
+    //
+    // PUBKEY_HEX is left empty on restore: it's hex-only validated
+    // only when set, and we have no separate persisted hex form on
+    // hand here (the signing key lives in the persist layer as raw
+    // 32 bytes; the restore path doesn't need to recompute the hex
+    // because CH never reads the cmdline on restore).
     let host_dir = cfg
         .host_state_dir
         .join(sandbox_id.simple().to_string());
-    let keys_dir = host_dir.join("keys");
-    let workspace_dir = host_dir.join("workspace");
-    let user_home_dir = cfg
+    let workspace_img = host_dir.join("workspace.img");
+    let user_home_img = cfg
         .user_home_dir_root
         .join(user_id)
-        .join("home");
+        .join("home.img");
     // cpus_boot: ceil(cpus) with a min of 1; mirrors nomad_ch::cpus_boot.
     let cpus_boot = if !cpus.is_finite() {
         1u32
@@ -884,9 +895,20 @@ fn build_restore_nomad_job_json(
                         "ZSBX_VM_INDEX": vm_index.to_string(),
                         "ZSBX_ARTIFACT_DIR": cfg.runtime_dir.display().to_string(),
                         "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
-                        "ZSBX_KEYS_DIR": keys_dir.display().to_string(),
-                        "ZSBX_WORKSPACE_DIR": workspace_dir.display().to_string(),
-                        "ZSBX_USER_HOME_DIR": user_home_dir.display().to_string(),
+                        // virtio-blk pivot (bug #11): the three
+                        // virtio-fs share dirs are gone from the
+                        // cold-boot env contract; mirror that here
+                        // by emitting the two image paths. The
+                        // controller derives both paths the same
+                        // way cold-boot does (host_state_dir +
+                        // user_home_dir_root) so the wrapper's
+                        // existence checks pass. PUBKEY_HEX is left
+                        // unset on restore: CH ignores --cmdline on
+                        // --restore, and the wrapper's hex
+                        // validation now skips when
+                        // ZSBX_RESTORE_FROM is set.
+                        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
+                        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
                         // Must match the snapshot's saved config —
                         // CH refuses to restore against a memory
                         // size mismatch. Pulled from the controller's

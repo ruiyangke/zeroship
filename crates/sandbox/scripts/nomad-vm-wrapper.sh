@@ -104,11 +104,23 @@ trap 'err_trap $LINENO' ERR
 : "${ZSBX_VM_INDEX:?missing ZSBX_VM_INDEX}"
 : "${ZSBX_ARTIFACT_DIR:?missing ZSBX_ARTIFACT_DIR}"
 : "${ZSBX_RUNTIME:?missing ZSBX_RUNTIME}"
-: "${ZSBX_WORKSPACE_IMG:?missing ZSBX_WORKSPACE_IMG}"
-: "${ZSBX_USER_HOME_IMG:?missing ZSBX_USER_HOME_IMG}"
-: "${ZSBX_PUBKEY_HEX:?missing ZSBX_PUBKEY_HEX}"
 : "${ZSBX_VM_MEMORY_MB:?missing ZSBX_VM_MEMORY_MB}"
 : "${ZSBX_VM_CPUS_BOOT:?missing ZSBX_VM_CPUS_BOOT}"
+# WORKSPACE_IMG / USER_HOME_IMG / PUBKEY_HEX: required on cold-boot
+# (the wrapper passes them to CH as `--disk` + cmdline arg). On
+# restore the snapshot's recorded config.json already carries the
+# disk paths and the cmdline (CH `--restore` ignores `--cmdline`),
+# so they're not strictly needed — but we still validate them when
+# present so a hand-edited restore jobspec with a typo'd path
+# surfaces in the Nomad task log instead of as a 401-loop in the
+# agent. The controller passes the same three values on both
+# branches (cheap; derived from the sandbox row); the cold-boot
+# branch uses them, the restore branch ignores them.
+if [ -z "${ZSBX_RESTORE_FROM:-}" ]; then
+  : "${ZSBX_WORKSPACE_IMG:?missing ZSBX_WORKSPACE_IMG}"
+  : "${ZSBX_USER_HOME_IMG:?missing ZSBX_USER_HOME_IMG}"
+  : "${ZSBX_PUBKEY_HEX:?missing ZSBX_PUBKEY_HEX}"
+fi
 # M6: subnet base octet is configurable on the controller side; default
 # 99 keeps the historical 10.99/16 layout. The wrapper validates it's a
 # u8 to catch typos that would otherwise silently produce a different
@@ -150,15 +162,20 @@ fi
 # would silently produce garbage bytes and the agent would reject
 # every signed request from the controller. Surface it here, in the
 # Nomad task log, rather than chasing a "401 invalid signature" loop.
-case "$ZSBX_PUBKEY_HEX" in
-  *[!0-9a-fA-F]*)
-    echo "[wrapper] FATAL: ZSBX_PUBKEY_HEX contains non-hex characters" >&2
+# Only validated on cold-boot — on restore the cmdline (with its
+# embedded pubkey) is preserved from the snapshot, so this env var
+# is unused.
+if [ -z "${ZSBX_RESTORE_FROM:-}" ]; then
+  case "$ZSBX_PUBKEY_HEX" in
+    *[!0-9a-fA-F]*)
+      echo "[wrapper] FATAL: ZSBX_PUBKEY_HEX contains non-hex characters" >&2
+      exit 1
+      ;;
+  esac
+  if [ $(( ${#ZSBX_PUBKEY_HEX} % 2 )) -ne 0 ]; then
+    echo "[wrapper] FATAL: ZSBX_PUBKEY_HEX has odd length ${#ZSBX_PUBKEY_HEX}" >&2
     exit 1
-    ;;
-esac
-if [ $(( ${#ZSBX_PUBKEY_HEX} % 2 )) -ne 0 ]; then
-  echo "[wrapper] FATAL: ZSBX_PUBKEY_HEX has odd length ${#ZSBX_PUBKEY_HEX}" >&2
-  exit 1
+  fi
 fi
 
 cd "$ZSBX_ARTIFACT_DIR"
@@ -197,11 +214,16 @@ fi
 # Defensive existence check here: a missing image would manifest
 # downstream as CH "Error opening block device file" — surface it now
 # in the Nomad task log instead.
-if [ ! -f "$ZSBX_WORKSPACE_IMG" ]; then
+#
+# Restore branch uses paths embedded in the snapshot's config.json
+# (not these env vars), but we still check the env-supplied paths
+# exist so a hand-edited restore jobspec with a typo'd path doesn't
+# get past this gate.
+if [ -n "${ZSBX_WORKSPACE_IMG:-}" ] && [ ! -f "$ZSBX_WORKSPACE_IMG" ]; then
   echo "[wrapper] FATAL: workspace image missing: $ZSBX_WORKSPACE_IMG" >&2
   exit 1
 fi
-if [ ! -f "$ZSBX_USER_HOME_IMG" ]; then
+if [ -n "${ZSBX_USER_HOME_IMG:-}" ] && [ ! -f "$ZSBX_USER_HOME_IMG" ]; then
   echo "[wrapper] FATAL: user-home image missing: $ZSBX_USER_HOME_IMG" >&2
   exit 1
 fi
