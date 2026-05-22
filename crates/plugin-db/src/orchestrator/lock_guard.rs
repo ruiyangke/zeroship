@@ -115,18 +115,27 @@ impl<'p> OrchestratorLockGuard<'p> {
         if self.released {
             return Ok(self.client.take());
         }
+        // Issue the unlock SQL via a `&` borrow so `self.client` stays
+        // Some(_) for the duration of the await. If the future is
+        // cancelled / dropped / panics mid-await, Drop sees
+        // `released = false` AND `client = Some(_)` and fires its
+        // catastrophic-path log. The client then drops back to the
+        // pool with the session lock still held — best we can do
+        // without a runtime handle (Drop can't await an unlock SQL).
+        //
+        // [I42] (concurrency r5 M-NEW-r5-1): the prior version flipped
+        // `released = true` BEFORE the await, so a cancellation here
+        // silently leaked the lock with no Drop log. Defer the state
+        // flip to AFTER the await completes.
+        if let Some(client) = self.client.as_ref() {
+            let unlock_sql =
+                "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
+            let _ = client
+                .query_text_params(unlock_sql, &[self.key.as_str(), self.tag])
+                .await;
+        }
         self.released = true;
-        let client = match self.client.take() {
-            Some(c) => c,
-            None => return Ok(None),
-        };
-        // Same SQL shape the inline sites used pre-refactor — the
-        // invariant we're centralising is the *call*, not the syntax.
-        let unlock_sql = "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
-        let _ = client
-            .query_text_params(unlock_sql, &[self.key.as_str(), self.tag])
-            .await;
-        Ok(Some(client))
+        Ok(self.client.take())
     }
 
     /// Hand off the still-locked client to the caller. The guard's
