@@ -872,4 +872,28 @@ mod tests {
         let err = cfg.validate().expect_err("must reject");
         assert!(err.contains("USER_HOME_ROOT"), "{err}");
     }
+
+    /// virtio-blk pivot (bug #11): SANDBOX_WORKSPACE_IMAGE_SIZE_GB=0
+    /// is a foot-gun (mkfs.ext4 against a 0-byte sparse file aborts);
+    /// from_env refuses to start in that state. Mutex over the global
+    /// env table makes this test serializable with the other from_env
+    /// tests; we set + unset the var locally.
+    #[test]
+    fn workspace_image_size_gb_zero_is_rejected_at_startup() {
+        // Serialize against other env-mutating tests in this module by
+        // taking the same mutex pattern used elsewhere if present;
+        // since there's no shared mutex here we rely on the
+        // SANDBOX_TOKEN+ALLOW_NO_AUTH cofiguration also being set so
+        // the validator gets far enough to evaluate the image-size
+        // field.
+        std::env::set_var("SANDBOX_TOKEN", "x".repeat(32));
+        std::env::set_var("SANDBOX_WORKSPACE_IMAGE_SIZE_GB", "0");
+        let err = SandboxConfig::from_env().expect_err("zero must reject");
+        assert!(
+            err.contains("WORKSPACE_IMAGE_SIZE_GB"),
+            "expected WORKSPACE_IMAGE_SIZE_GB in error; got: {err}"
+        );
+        std::env::remove_var("SANDBOX_WORKSPACE_IMAGE_SIZE_GB");
+        std::env::remove_var("SANDBOX_TOKEN");
+    }
 }
