@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 01:35.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 02:05.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -361,32 +361,12 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I27] Missing OrchestratorLockGuard abstraction (architecture r4 I1)
-- **Source**: `plugin-db-architecture-review-2026-05-22-r4.md` §"IMPORTANT I1"
-- **File**: `bootstrap.rs:179-184`, `apply.rs:203-209`, `orchestrator/register_model/mod.rs:219-225` — three sites all execute the same explicit `pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)` + `drop(lock_client)` on error.
-- **Description**: Three commits in two days plugged the same invariant in different stages (`b4e533e2`, `37a0ef76`, `3bb41fa1`). Architect identifies this as the strongest missing-abstraction signal in the crate: extract `OrchestratorLockGuard { client: PooledClient, key: String }` with a Drop impl issuing the unlock SQL. Success path consumes the guard via `into_inner()`; error path drops it normally.
-- **Status as of 2026-05-22 01:10**: actionable; needs an RAII guard that owns the pooled client during the lock-held window.
-- **Effort**: medium (new type + 3 call-site refactors; risk of changing the success-path ownership semantics)
-- **Pickable this cycle**: rolled forward.
-
----
-
 ### [I28] ~50 Result<_, String> sites in replication.rs + auth/bootstrap.rs (architecture r4 I3; code-critique r3 I2)
 - **Source**: `plugin-db-architecture-review-2026-05-22-r4.md` §I3; `plugin-db-code-critique-2026-05-22-r3.md` §I2
 - **File**: `crates/plugin-db/src/replication.rs` (7 sites); `crates/plugin-db/src/auth/bootstrap.rs` and related (~15 sites). `replication_ops.rs` wraps the returned String as `DbError::Internal { message: e }` at the dispatch boundary, collapsing every replication op to `.code = "internal"` — SDK loses retry discrimination.
 - **Description**: Same mechanical-sweep pattern that the prior cycle closed for `audit.rs`. Replication ops should return typed `Result<_, DbError>`; auth/bootstrap likewise.
 - **Status as of 2026-05-22 01:10**: actionable; mechanical sweep ~2 files.
 - **Effort**: medium (~22 sites across 2 files; need to map each error site to a typed variant)
-- **Pickable this cycle**: rolled forward.
-
----
-
-### [I30] auto_tx.rs OpResult::Failed { error: String } collapses typed DbError (code-critique r3 I4; api-surface r2 IMPORTANT)
-- **Source**: `plugin-db-code-critique-2026-05-22-r3.md` §I4; `plugin-db-api-surface-2026-05-22-r2.md` §IMPORTANT
-- **File**: `crates/plugin-db/src/orchestrator/auto_tx.rs:67,104`
-- **Description**: Two sites in the auto-tx begin/end dispatch flatten typed `DbError` into `OpResult::Failed { error: e.into_string() }` rather than routing via `RejectError(e.to_op_error())` like `orchestrator/transaction.rs` does. SDK loses `.code` discrimination on auto-tx errors.
-- **Status as of 2026-05-22 01:10**: actionable; mirror the `transaction.rs` route.
-- **Effort**: small (2 sites + add a unit test asserting `.code` preservation)
 - **Pickable this cycle**: rolled forward.
 
 ---
@@ -417,6 +397,46 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Description**: `update_backfill_progress` runs OUTSIDE the BEGIN/COMMIT envelope and without an `audit_generation` predicate. Operator `reset` between COMMIT and the progress UPDATE is silently clobbered — fresh runs resume from stale cursor.
 - **Status as of 2026-05-22 01:10**: actionable; add `audit_generation` column or move progress UPDATE into the COMMIT.
 - **Effort**: medium (schema migration + WHERE clause)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I35] row_to_json O(N²) per row in column count (performance r4 N4-I3)
+- **Source**: `plugin-db-performance-2026-05-22-r4.md` §"N4-I3"
+- **File**: `crates/plugin-db/src/v8_bridge.rs:357` (`column_to_json`); `compio-postgres/src/row.rs:65-82` (`row.try_get` linear scan)
+- **Description**: Each `column_to_json(row, col.name(), ...)` call does `row.try_get::<_, T>(name)` which linear-scans `columns()` to find the index. For a 20-column row: 400 string compares per row. Hot on every `findOne` and large `find`.
+- **Status as of 2026-05-22 02:05**: actionable; fix is index-by-position. Either change `row_to_json` to iterate by `enumerate()` index, or cache the column→index map once at the start.
+- **Effort**: small (single function refactor; compio-postgres may need a position-aware accessor exposed)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I36] query.rs:77 name.to_ascii_lowercase() on every CRUD call (performance r4 N4-I4)
+- **Source**: `plugin-db-performance-2026-05-22-r4.md` §"N4-I4"
+- **File**: `crates/plugin-db/src/query.rs:77`
+- **Description**: Every CRUD dispatch allocates a fresh String to lower-case `name` just to test against two short reserved prefixes. Use `eq_ignore_ascii_case` or check prefixes case-insensitively without allocating.
+- **Status as of 2026-05-22 02:05**: actionable; one-line fix.
+- **Effort**: tiny
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I37] api-surface r3: replication.rs Result<_, String> wrapped as DbError::Internal at boundary (api-surface r3 I4)
+- **Source**: `plugin-db-api-surface-2026-05-22-r3.md` §"I4 NEW"
+- **File**: `crates/plugin-db/src/replication_ops.rs:82-86, 116-120, 153-157` — three dispatch boundary sites
+- **Description**: `replication_ops.rs` re-wraps the `Result<_, String>` returned by `replication.rs` as `DbError::Internal { message: e }`. Every replication operation surfaces to JS as `err.code = "internal"` — SDK loses retry discrimination. This is the same bug class as [S33] (broker key alloc) but for the error rail.
+- **Status as of 2026-05-22 02:05**: actionable; depends on [I28] (replication.rs typed-error sweep). Pre-[I28] partial fix: change `replication_ops.rs` to call `from_pg(e)` or pattern-match on the string for known prefixes (ugly but unblocks SDK retry).
+- **Effort**: small-medium (depends on whether [I28] lands first)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I38] wal_consumer.rs legacy `pub fn` shims ungated in release builds (api-surface r3 I3)
+- **Source**: `plugin-db-api-surface-2026-05-22-r3.md` §"I3 carried"
+- **File**: `crates/plugin-db/src/wal_consumer.rs` — `any_app_suppressed`, `set_local_emit_suppressed`, `local_emit_suppressed` (3 fns, all `#[doc(hidden)] pub fn`)
+- **Description**: Three legacy shim functions are `pub fn` without `cfg(any(test, feature = "test-helpers"))` gating. They ship as dead code in release builds. Build emits dead-code warnings.
+- **Status as of 2026-05-22 02:05**: actionable; add `#[cfg(any(test, feature = "test-helpers"))]`.
+- **Effort**: tiny (3 cfg attrs)
 - **Pickable this cycle**: rolled forward.
 
 ---
@@ -572,6 +592,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0e58c4e8 plugin-db/broker: two-level HashMap eliminates per-call (String, String) alloc` + `b32ba383 plugin-db/broker: remove duplicate has_subscribers after cherry-pick`
 - `Broker::by_key` refactored from `HashMap<(String, String), _>` to `HashMap<String, HashMap<String, _>>`. `publish`/`has_subscribers`/`drop_app` all now lookup via `&str` borrow — zero allocs on the WAL hot path. 7 new unit tests + drop_app collapses to O(1) `remove(app_id)`.
 
+### [S35] IMPORTANT [I27] (cycle 02:05) — extract OrchestratorLockGuard RAII abstraction
+- **Closed by**: `cbd12944 plugin-db/orchestrator: extract OrchestratorLockGuard RAII abstraction`
+- New `crates/plugin-db/src/orchestrator/lock_guard.rs` (~254 lines + 5 unit tests). Three sites that open-coded the same explicit `pg_advisory_unlock` + drop sequence (bootstrap.rs, apply.rs, run_pipeline mod.rs) now thread an `OrchestratorLockGuard<'p>` instead. Internal `Option<PooledClient>` permits clean move-out via `release().await` (normal path) and `into_held()` (cross-scope hand-off). Drop is a `tracing::error!` fallback for catastrophic paths since Drop can't await. Also incidentally fixed: `bootstrap.rs`'s `ensure_app_schema` / `ensure_audit_table` failures now release the lock (the inner-async-block fix in `3bb41fa1` is replaced by the guard, broadening release coverage). Architect r4 + r5 top recommendation.
+
+### [S36] IMPORTANT [I30] (cycle 02:05) — auto_tx flattened typed DbError to OpResult::Failed { String }
+- **Closed by**: `8ff1b2de plugin-db/auto_tx: preserve typed DbError code through OpResult::Failed`
+- `orchestrator/auto_tx.rs::auto_begin_transaction` and `auto_end_transaction` switched from `OpResult::Failed { error: String }` to `OpResult::JsValue { ... ResolveValue::RejectError(OpError) ... }` mirroring `transaction.rs`. JS surfaces now receive `e.code` and `e.hint` properties on COMMIT-path errors. 4 new unit tests (Transient + LockContention code preservation, plus 2 Ok-path guards against arm-swap regression). No cross-crate change needed — `setup_js_promise` already existed in the runtime.
+
 ### [S34] CRITICAL × 2 (docs-audit r2; cycle 01:35) — error.rs lone-holdout claim + db.md broken path
 - **Closed by**: `e37b188f plugin-db/error + docs/db: fix docs CRITICALs from docs-audit r2`
 - (a) `error.rs:9-14`'s "lone hold-out" claim was false (~30 `Result<_, String>` sites remain in `replication.rs`, `auth/*`, `diff.rs`, etc.). Rewrote preamble to accurately describe the pending sweep (now tracked as [I28]).
@@ -585,23 +613,28 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ## Pilot Pick
 
-**Cycle of 2026-05-22 00:17** closed [I1] + 3 new CRITICALs. **Cycle of 2026-05-22 01:10** closed [I11], [I19], and 1 new perf CRITICAL. **Cycle of 2026-05-22 01:35** closed [I29], [I34], and 2 docs CRITICALs (error.rs lone-holdout claim + db.md broken path).
+**Cycle history:**
+- **00:17** closed [I1] + 3 new CRITICALs (bootstrap lock leak, cross-app appId × 2, test-helpers visibility)
+- **00:47** closed [I11] docs, [I19] DropColumn, perf CRITICAL N3-C1 (exec_mutation_with_emit)
+- **01:10** closed [I29] silent-empty-RETURNING, [I34] broker key alloc, 2 docs CRITICALs
+- **01:35** closed [I27] OrchestratorLockGuard, [I30] auto_tx error flattening (this cycle)
 
-### Pick #1 (next cycle): **[I27] OrchestratorLockGuard abstraction**
-- **File** (multi): `bootstrap.rs:179-184`, `apply.rs:203-209`, `orchestrator/register_model/mod.rs:219-225`
-- **Fix sketch**: New `OrchestratorLockGuard { client: PooledClient<'p>, key: String }` with a `Drop` impl issuing `pg_advisory_unlock(...)`. Success path consumes via `into_inner()` to release without unlock-on-Drop; error path drops normally → unlock fires. Mirrors the std `MutexGuard` / `tokio::sync::MutexGuard` idiom.
-- **Why next**: architect's R4 top finding; three commits in two days for the same invariant; eliminates a class of future regression.
-- **Caveat**: medium effort + worktree isolation strongly recommended (touches 3 files in different orchestrator stages).
-- **Verification gate**: all 3 call sites converted; unit test asserting Drop-on-Err issues the unlock query; existing 328 lib tests stay green.
+**Net since pilot started**: ~12 CRITICALs/IMPORTANTs closed; ~14 new findings surfaced. The architecture trajectory has been net-positive across all 5 lenses.
 
-### Pick #2 (next cycle): **[I30] auto_tx.rs OpResult::Failed { error: String } collapses typed DbError**
-- **File**: `crates/plugin-db/src/orchestrator/auto_tx.rs:67,104`
-- **Fix sketch**: Mirror `orchestrator/transaction.rs`'s `RejectError(e.to_op_error())` pattern. Add a unit test asserting `.code` is preserved on transient/lock-not-available errors at the auto-tx COMMIT path.
-- **Why next**: error-ux r2 flagged as HIGH-impact (this is the COMMIT-time error path where retry-by-code matters most). api-surface r2 + code-critique r3 both independently flagged.
-- **Verification gate**: 2 unit tests + `cargo test -p zeroship-plugin-db --lib` green.
+### Pick #1 (next cycle): **[I38] cfg-gate wal_consumer.rs legacy shims**
+- **File**: `crates/plugin-db/src/wal_consumer.rs` — `any_app_suppressed`, `set_local_emit_suppressed`, `local_emit_suppressed`
+- **Fix sketch**: Wrap each `pub fn` in `#[cfg(any(test, feature = "test-helpers"))]`. Build will lose 3 dead-code warnings.
+- **Why next**: tiny (3 cfg attrs), api-surface tightening.
+- **Verification gate**: build clean + `cargo test --lib` green.
+
+### Pick #2 (next cycle): **[I36] query.rs:77 to_ascii_lowercase per CRUD call**
+- **File**: `crates/plugin-db/src/query.rs:77`
+- **Fix sketch**: Replace `name.to_ascii_lowercase()` allocation with `eq_ignore_ascii_case` or prefix-check via `as_bytes()`. One-line.
+- **Why next**: tiny + every CRUD call's hot path.
+- **Verification gate**: build clean + lib tests green.
 
 ### Pick #3 (next cycle, larger): **[I28] ~50 Result<_, String> sites in replication.rs + auth/bootstrap.rs**
 - **File** (multi): `crates/plugin-db/src/replication.rs` (7 sites), `crates/plugin-db/src/auth/*` (~15 sites), plus tail-end stragglers in `diff.rs`.
-- **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant. `replication_ops.rs` wraps with `DbError::Internal { message: e }` — convert wrapping to typed passthrough.
-- **Why**: every replication op currently surfaces as `.code = "internal"`. SDK loses retry discrimination on every replication failure. Cumulative blocker for SDK ergonomics.
-- **Caveat**: medium-to-large; needs careful triage of which error variant fits each site.
+- **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant. `replication_ops.rs` wraps with `DbError::Internal { message: e }` (see [I37]) — convert wrapping to typed passthrough.
+- **Why**: every replication op currently surfaces as `.code = "internal"`. Closes [I37] (api-surface r3) once landed.
+- **Caveat**: medium-to-large; needs careful triage of which error variant fits each site. Worktree isolation strongly recommended.
