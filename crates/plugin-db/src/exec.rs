@@ -450,6 +450,139 @@ mod tests {
         reset_world();
     }
 
+    // -------------------------------------------------------------------
+    // I13 — queue_or_emit / drain_pending_emits_on_commit / clear_pending_emits
+    // -------------------------------------------------------------------
+    //
+    // The in-tx branch of `queue_or_emit` is gated on
+    // `context::with(|c| c.has_tx())`, which is `self.tx_conn.is_some()`.
+    // The slot can only hold a real `compio_postgres::Client`, which the
+    // context-module test docs explicitly note is not constructible
+    // outside `compio-postgres`. So these tests cover three of the four
+    // branches:
+    //
+    //  (a) queue_or_emit in autocommit (no tx) → immediate emit_local
+    //  (b) drain_pending_emits_on_commit fires every queued event
+    //  (c) clear_pending_emits drops the queue without firing
+    //
+    // The in-tx queue branch is exercised by the integration suite
+    // (gap_b_subscriber_does_not_observe_pre_commit_state in
+    // tests/integration.rs).
+
+    /// In autocommit mode (`has_tx() == false`), `queue_or_emit` must
+    /// route the event directly to `wal_consumer::emit_local`, which
+    /// publishes to the broker. The subscriber's queue receives the
+    /// event without any explicit drain.
+    #[test]
+    fn queue_or_emit_no_tx_emits_immediately() {
+        reset_world();
+        // Defensive: make sure no tx is parked on the slot from an
+        // earlier test on the same OS thread.
+        context::with(|c| assert!(!c.has_tx(), "precondition: no tx"));
+
+        let sub = crate::broker::subscribe("app_active", "messages");
+
+        let mut tuple = HashMap::new();
+        tuple.insert("id".to_string(), "9".to_string());
+        queue_or_emit(
+            "app_active",
+            "messages",
+            ChangeOp::Insert,
+            Some(9),
+            vec!["id".to_string()],
+            tuple,
+        );
+
+        match sub.pop() {
+            Some(crate::broker::SubscriptionMessage::Change(ev)) => {
+                assert_eq!(ev.pk, Some(9));
+                assert_eq!(ev.op, ChangeOp::Insert);
+            }
+            other => panic!("expected immediate Change event, got {other:?}"),
+        }
+        reset_world();
+    }
+
+    /// `drain_pending_emits_on_commit` must publish every event sitting
+    /// on the per-isolate `pending_emits` queue. We seed the queue
+    /// directly via the context accessor (bypassing the `has_tx` gate
+    /// the production path uses) since the slot is the unit under test
+    /// here — the gate's role is verified by the integration suite.
+    #[test]
+    fn drain_pending_emits_on_commit_fires_every_queued_event() {
+        reset_world();
+        let sub = crate::broker::subscribe("app_active", "messages");
+
+        let mk_event = |pk: i64| crate::broker::ChangeEvent {
+            app_id: "app_active".to_string(),
+            collection: "messages".to_string(),
+            op: ChangeOp::Insert,
+            pk: Some(pk),
+            changed_columns: vec!["id".to_string()],
+            new_tuple: {
+                let mut m = HashMap::new();
+                m.insert("id".to_string(), pk.to_string());
+                m
+            },
+            old_tuple: None,
+        };
+        context::with_mut(|c| {
+            c.push_pending_emit(mk_event(1));
+            c.push_pending_emit(mk_event(2));
+            c.push_pending_emit(mk_event(3));
+        });
+        // Sanity: nothing has been delivered before drain.
+        assert!(sub.pop().is_none(), "drain must not have happened yet");
+
+        drain_pending_emits_on_commit();
+
+        let mut pks = Vec::new();
+        while let Some(msg) = sub.pop() {
+            if let crate::broker::SubscriptionMessage::Change(ev) = msg {
+                pks.push(ev.pk.unwrap());
+            }
+        }
+        pks.sort();
+        assert_eq!(pks, vec![1, 2, 3], "drain must publish every queued event");
+
+        // Drain a second time → nothing left (queue is consumed, not
+        // copied).
+        drain_pending_emits_on_commit();
+        assert!(sub.pop().is_none(), "second drain must be a no-op");
+        reset_world();
+    }
+
+    /// `clear_pending_emits` must drop the queue WITHOUT publishing
+    /// anything — the ROLLBACK path relies on this so subscribers
+    /// never observe aborted mutations.
+    #[test]
+    fn clear_pending_emits_drops_without_firing() {
+        reset_world();
+        let sub = crate::broker::subscribe("app_active", "messages");
+
+        let ev = crate::broker::ChangeEvent {
+            app_id: "app_active".to_string(),
+            collection: "messages".to_string(),
+            op: ChangeOp::Insert,
+            pk: Some(99),
+            changed_columns: vec!["id".to_string()],
+            new_tuple: HashMap::new(),
+            old_tuple: None,
+        };
+        context::with_mut(|c| c.push_pending_emit(ev));
+
+        clear_pending_emits();
+
+        assert!(
+            sub.pop().is_none(),
+            "ROLLBACK path must drop queued events silently",
+        );
+        // After clear, drain must also be a no-op (queue is empty).
+        drain_pending_emits_on_commit();
+        assert!(sub.pop().is_none(), "post-clear drain must publish nothing");
+        reset_world();
+    }
+
     #[test]
     fn exec_mutation_with_emit_builds_when_active_subscriber() {
         reset_world();
