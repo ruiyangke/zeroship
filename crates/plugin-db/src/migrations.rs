@@ -37,11 +37,9 @@
 //!
 //! `pg_try_advisory_lock(hashtext('zs_mig:<app>')::int4,
 //! hashtext(<name>)::int4)` is session-scoped, held on a dedicated
-//! [`compio_postgres::Client`] stashed in [`MIG_LOCK`]. The same client
-//! runs every SELECT/UPDATE in the run because advisory locks are
-//! invisible across connections.
-
-use std::cell::RefCell;
+//! [`compio_postgres::Client`] stashed in the per-isolate context's
+//! `mig_lock` slot. The same client runs every SELECT/UPDATE in the
+//! run because advisory locks are invisible across connections.
 
 use compio_postgres::{Client, Pool};
 use serde_json::Value;
@@ -50,18 +48,9 @@ use zeroship_runtime::state::OpError;
 use crate::audit::TerminalStatus;
 use crate::query::{quote_ident, validate_collection};
 
-thread_local! {
-    /// Active migration owner state. `Some` after a successful
-    /// `migrationBegin`; `None` once `migrationCommitBatch` with
-    /// `isDone=true` (or `migrationCancel` on the owner thread) clears
-    /// it. Single-isolate invariant — only one migration may be active
-    /// per V8 thread at a time (mirrors `TX_CONN`).
-    pub(crate) static MIG_LOCK: RefCell<Option<MigrationLock>> = const { RefCell::new(None) };
-}
-
-/// Lock state for the in-flight migration. The `client` is held in an
-/// `Option` so callers can `take()` it across an await and `replace()`
-/// it back — the same pattern `TX_CONN` uses.
+/// Lock state for the in-flight migration. The `client` is held in
+/// an `Option` so callers can `take()` it across an await and
+/// `replace()` it back — the same pattern the transaction slot uses.
 pub(crate) struct MigrationLock {
     pub(crate) name: String,
     pub(crate) collection: String,
@@ -203,30 +192,16 @@ async fn open_dedicated_client() -> Result<Client, String> {
 /// Take the lock client out for an await; the caller's future is
 /// responsible for putting it back via [`return_lock_client`].
 fn take_lock_client() -> Option<Client> {
-    MIG_LOCK.with(|m| m.borrow_mut().as_mut().and_then(|l| l.client.take()))
+    crate::context::with_mut(|c| c.take_mig_client())
 }
 
 /// Restore the lock client after an await.
 fn return_lock_client(client: Client) {
-    MIG_LOCK.with(|m| {
-        if let Some(lock) = m.borrow_mut().as_mut() {
-            lock.client = Some(client);
-        }
-    });
+    crate::context::with_mut(|c| c.return_mig_client(client));
 }
 
 fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
-    MIG_LOCK.with(|m| {
-        m.borrow().as_ref().map(|l| {
-            (
-                l.name.clone(),
-                l.collection.clone(),
-                l.audit_id,
-                l.dry_run,
-                l.start_generation,
-            )
-        })
-    })
+    crate::context::with(|c| c.mig_lock_snapshot())
 }
 
 /// Begin a migration run.
@@ -253,7 +228,7 @@ pub async fn exec_begin(
         ));
     }
 
-    let already_active = MIG_LOCK.with(|m| m.borrow().is_some());
+    let already_active = crate::context::with(|c| c.has_mig_lock());
     if already_active {
         return Err(coded(
             "migration_already_active",
@@ -344,8 +319,8 @@ pub async fn exec_begin(
         (id, 0i64, 0i64, Value::Array(vec![]), 0i64)
     };
 
-    MIG_LOCK.with(|m| {
-        *m.borrow_mut() = Some(MigrationLock {
+    crate::context::with_mut(|c| {
+        let _previous = c.set_mig_lock(MigrationLock {
             name: name.to_string(),
             collection: collection.to_string(),
             audit_id,
@@ -353,6 +328,10 @@ pub async fn exec_begin(
             start_generation,
             client: Some(client),
         });
+        debug_assert!(
+            _previous.is_none(),
+            "exec_begin: mig_lock slot already occupied"
+        );
     });
 
     Ok(serde_json::json!({
@@ -439,7 +418,7 @@ pub async fn exec_fetch_batch(
 ///
 /// If `is_done=true`, the audit row is driven to the terminal status the
 /// SDK requested (via `terminal_status` — see [`AuditTerminal`]). The
-/// advisory lock is released and `MIG_LOCK` is cleared.
+/// advisory lock is released and the per-isolate `mig_lock` slot is cleared.
 #[allow(clippy::too_many_arguments)]
 pub async fn exec_commit_batch(
     app_id: &str,
@@ -622,7 +601,7 @@ pub async fn exec_commit_batch(
         let _ = release_advisory(&client, app_id, &name).await;
         // Drop the client — backend session ends, releasing all locks.
         drop(client);
-        MIG_LOCK.with(|m| *m.borrow_mut() = None);
+        crate::context::with_mut(|c| c.clear_mig_lock());
         return Ok(serde_json::json!({ "committed": !dry_run, "done": true }).to_string());
     }
 
@@ -732,5 +711,5 @@ pub async fn exec_reset(
 /// migration lock so the connection is released. Safe to call when no
 /// migration is active.
 pub fn release_active_lock() {
-    MIG_LOCK.with(|m| *m.borrow_mut() = None);
+    crate::context::with_mut(|c| c.clear_mig_lock());
 }
