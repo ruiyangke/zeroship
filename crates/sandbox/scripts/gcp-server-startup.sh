@@ -140,6 +140,18 @@ server {
     retry_interval = "5s"
     retry_max      = 0
   }
+
+  # Bug-#10 fix (2026-05-22). Nomad ignores task-level MemoryMaxMB
+  # unless memory_oversubscription_enabled = true at the scheduler
+  # level. Without this, the controller's 2 × MemoryMB ceiling
+  # (bug-#9 fix) is silently dropped and the task's cgroup
+  # memory.max stays at MemoryMB (1024). CH v51.1 mmap-faults the
+  # full guest RAM during snapshot/restore and gets oom-killed at
+  # ~1 GB shmem-rss before /livez is reachable. Enabling this lets
+  # the controller's MemoryMaxMB ceiling flow through to memory.high.
+  default_scheduler_config {
+    memory_oversubscription_enabled = true
+  }
 }
 
 # Servers do NOT run client tasks. Workloads land on the worker nodes.
@@ -161,6 +173,25 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
+
+# ───── 3.5. enable memory oversubscription via API ───────────────
+# Belt-and-suspenders for the HCL default_scheduler_config above:
+# different Nomad versions parse the block at different layers and
+# some need an explicit operator API call to flip the flag. Idempotent.
+# Only the leader can write scheduler config; non-leaders 4xx, which we
+# swallow because the leader handles it.
+for _ in $(seq 1 30); do
+  LEADER=$(curl -sS --max-time 2 http://127.0.0.1:4646/v1/status/leader 2>/dev/null | tr -d '"')
+  if [ -n "$LEADER" ]; then
+    curl -sS -X POST -H 'Content-Type: application/json' \
+      -d '{"MemoryOversubscriptionEnabled": true, "SchedulerAlgorithm": "binpack"}' \
+      "http://127.0.0.1:4646/v1/operator/scheduler/configuration" \
+      >/dev/null 2>&1 || true
+    break
+  fi
+  sleep 1
+done
+echo "[startup] scheduler config: memory_oversubscription_enabled requested"
 
 # ───── 4. postgres bootstrap (pg-host only) ──────────────────────
 if [ "$PG_HOST_FLAG" = "1" ]; then
