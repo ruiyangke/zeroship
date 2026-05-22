@@ -261,8 +261,29 @@ pub fn start_replication_consumer_dispatch<'s>(
         // app stays "running" forever and a re-spawn is impossible.
         // Move the unmark into a struct-Drop guard so panic-unwind
         // also frees the slot.
+        // Code-critique r6 MAJOR-R6-1: a previous version called
+        // `mark_consumer_running` synchronously BEFORE the spawn so a
+        // racing second call would short-circuit. Problem: if the spawn
+        // or the future-first-poll failed, the mark stuck forever.
+        // Move both mark + unmark inside the guard so the lifecycle is
+        // atomic with the future's existence — `ConsumerRunningGuard::new`
+        // marks; `Drop` unmarks; ANY exit path (graceful, panic, future
+        // dropped without poll) hits Drop.
+        //
+        // The brief race window between dispatch return and the future's
+        // first poll is acceptable: compio runs callbacks single-threaded
+        // per isolate; a second `startReplicationConsumer()` would
+        // already be queued behind this one on the same event loop.
         struct ConsumerRunningGuard {
             app_id: String,
+        }
+        impl ConsumerRunningGuard {
+            fn new(app_id: String) -> Self {
+                crate::context::with_mut(|c| {
+                    c.mark_consumer_running(&app_id)
+                });
+                Self { app_id }
+            }
         }
         impl Drop for ConsumerRunningGuard {
             fn drop(&mut self) {
@@ -272,11 +293,8 @@ pub fn start_replication_consumer_dispatch<'s>(
             }
         }
         let app_for_task = app_id.clone();
-        crate::context::with_mut(|c| c.mark_consumer_running(&app_id));
         compio::runtime::spawn(async move {
-            let _guard = ConsumerRunningGuard {
-                app_id: app_for_task,
-            };
+            let _guard = ConsumerRunningGuard::new(app_for_task);
             crate::wal_consumer::run_supervised(consumer).await;
             // _guard drops here on graceful exit; Drop also fires on
             // panic-unwind, so the running marker is always cleared.
