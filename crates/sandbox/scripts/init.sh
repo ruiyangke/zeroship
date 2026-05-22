@@ -79,7 +79,15 @@ if [ $(( PUBKEY_HEX_LEN % 2 )) -ne 0 ]; then
     exit 1
 fi
 
-printf %s "$PUBKEY_HEX" | xxd -r -p > /run/keys/controller-pubkey
+# Hex → binary via portable sed + printf '%b'. Earlier revision used
+# `xxd -r -p` but debian-trixie-slim ships without `vim-common`, so
+# xxd is absent — boot panics on /sbin/init exit (bug #12, 2026-05-22
+# cluster smoke). `sed 's/\(..\)/\\x\1/g'` transforms `ab12cd` into
+# `\xab\x12\xcd`; `printf '%b'` interprets the backslash escapes and
+# emits raw bytes. Both `sed` and `printf` are POSIX-mandated and
+# always present in any /sbin/init runtime.
+printf '%b' "$(printf '%s' "$PUBKEY_HEX" | sed 's/\(..\)/\\x\1/g')" \
+    > /run/keys/controller-pubkey
 chmod 0444 /run/keys/controller-pubkey
 
 # ---- data disks (workspace + userhome) ----
