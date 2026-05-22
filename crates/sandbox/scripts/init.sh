@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Tiny PID-1 wrapper for the sandbox microVM. Brings up minimal
 # namespaces, parses the controller's signing pubkey out of the
 # kernel command line, formats + mounts the virtio-blk data disks,
@@ -79,13 +79,17 @@ if [ $(( PUBKEY_HEX_LEN % 2 )) -ne 0 ]; then
     exit 1
 fi
 
-# Hex → binary via portable sed + printf '%b'. Earlier revision used
-# `xxd -r -p` but debian-trixie-slim ships without `vim-common`, so
-# xxd is absent — boot panics on /sbin/init exit (bug #12, 2026-05-22
-# cluster smoke). `sed 's/\(..\)/\\x\1/g'` transforms `ab12cd` into
-# `\xab\x12\xcd`; `printf '%b'` interprets the backslash escapes and
-# emits raw bytes. Both `sed` and `printf` are POSIX-mandated and
-# always present in any /sbin/init runtime.
+# Hex → binary via sed + bash's printf '%b'. The earlier xxd path
+# failed because debian-trixie-slim omits vim-common (bug #12). The
+# sed+printf path then failed under /bin/sh → dash because dash's
+# `printf '%b'` only honours POSIX-mandated octal escapes (\NNN), not
+# the GNU extension `\xNN` (bug #13 — 2026-05-22 cluster smoke; the
+# pubkey came out as the literal 128-byte string "\xab\xcd..." instead
+# of 32 decoded bytes, and the agent rejected it). Switching the
+# shebang to `#!/bin/bash` (which IS in trixie-slim at /usr/bin/bash)
+# routes through bash's `printf '%b'`, which DOES honour `\xNN`. The
+# bash dependency is acceptable for /sbin/init in this rootfs; busybox
+# was never in scope. `sed` 's POSIX semantics are untouched.
 printf '%b' "$(printf '%s' "$PUBKEY_HEX" | sed 's/\(..\)/\\x\1/g')" \
     > /run/keys/controller-pubkey
 chmod 0444 /run/keys/controller-pubkey
