@@ -266,7 +266,7 @@ async fn ensure_backend() -> Result<Rc<crate::backend::PostgresBackend>, OpError
         .await
         .map_err(crate::error::DbError::to_op_error)?;
     crate::context::with(|c| c.backend()).ok_or_else(|| {
-        crate::error::DbError::config("not_configured", "db: backend not initialised")
+        crate::error::DbError::config("backend_not_initialized", "db: backend not initialized")
             .to_op_error()
     })
 }

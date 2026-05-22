@@ -177,8 +177,8 @@ fn dispatch_by_spec<'s>(
                     resolver: resolver_global,
                     value: ResolveValue::RejectError(
                         crate::error::DbError::config(
-                            "not_configured",
-                            "db: backend not initialised",
+                            "backend_not_initialized",
+                            "db: backend not initialized",
                         )
                         .to_op_error(),
                     ),
