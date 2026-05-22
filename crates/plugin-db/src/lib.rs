@@ -37,13 +37,23 @@ use crate::context::with_mut as ctx_mut;
 // consumed by external test crates under `tests/`, which are compiled
 // as separate crate targets. Those need `pub` visibility when the
 // `test-helpers` Cargo feature is enabled (the `[[test]] integration`
-// target lists `required-features = ["test-helpers"]`). The cfg-fork
-// below keeps the release surface tight while exposing the modules
-// for tests.
+// target lists `required-features = ["test-helpers", "hardening"]`).
+// The cfg-fork below keeps the release surface tight while exposing
+// the modules for tests.
 //
 // The unconditionally-`pub` modules (`broker`, `error`, `query`,
 // `v8_classes`) are reached even without the feature — see
 // tests/subscription_finalizer.rs and tests/db_v8_class.rs.
+//
+// The `auth` module carries an extra cfg dimension (`hardening`
+// Cargo feature, commit `2fa9472e`, cycle 10:47): without
+// `--features hardening` the subtree is compile-out, regardless of
+// `test-helpers`. The three-arm ladder below means default builds
+// see no auth, default+`test-helpers` builds still see no auth,
+// and only `hardening`-on builds compile it. The
+// `required-features` list on `[[test]] integration` therefore must
+// include BOTH features so the integration suite can probe the
+// auth surface.
 
 // Always pub:
 pub mod broker;

@@ -53,13 +53,22 @@
 //! problem entirely: the secret lives in the DB from the moment the
 //! cluster is bootstrapped; an env-var bootstrap is unnecessary.
 //!
-//! ## Backwards compatibility
+//! ## Compile-time gating (`hardening` Cargo feature)
 //!
-//! The hardened path is **opt-in** per the proposal's gradual-migration
-//! guidance. `replication::ensure_publication_and_slot` and the rest of
-//! P8a/P8b continue to function unchanged when bootstrap has not been
-//! run; callers that pass `--harden` (or invoke
-//! `bootstrap::ensure_admin_schema` themselves) get the hardened path.
+//! The entire subtree is gated behind `#[cfg(feature = "hardening")]`
+//! at `lib.rs` (commit `2fa9472e`, cycle 10:47). Default builds do
+//! NOT compile this module — `crate::auth::*` is invisible to
+//! `cargo build -p zeroship-plugin-db --lib`. The eventual control-
+//! plane wire-up (per the auth-r1 design) flips the feature on; until
+//! then `replication::ensure_publication_and_slot` and the rest of
+//! P8a/P8b continue to function unchanged using the per-app role
+//! directly. Integration tests probe this surface via
+//! `required-features = ["test-helpers", "hardening"]` on the
+//! `[[test]] integration` target.
+//!
+//! The original `--harden` CLI flag in the proposal is one possible
+//! runtime opt-in once this module ships; it is NOT how the subtree
+//! is currently gated.
 
 pub mod bootstrap;
 pub mod keys;
