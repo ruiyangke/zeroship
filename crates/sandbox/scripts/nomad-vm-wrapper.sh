@@ -3,12 +3,29 @@
 # Nomad raw_exec wrapper — launches one Cloud-Hypervisor microVM and
 # ties its lifetime to this script. When Nomad sends SIGTERM (on `nomad
 # job stop` or alloc reschedule), the trap below tears everything
-# down cleanly: virtiofsd × 3 + cloud-hypervisor.
+# down cleanly: just cloud-hypervisor.
+#
+# **virtio-blk pivot (closes bug #11).** Prior to this revision the
+# wrapper spawned virtiofsd × 3 (keys / workspace / userhome) and
+# wired them into CH as `--fs`. virtio-fs requires the host-side
+# virtiofsd to hold vhost-user negotiated state; on `--restore` CH
+# resumes from the snapshot's recorded vring state but a fresh
+# virtiofsd doesn't know the prior handshake → `Connection reset by
+# peer` on `SetVringEnable`. The pivot replaces those three shares
+# with:
+#   - `/workspace` → virtio-blk disk backed by `$ZSBX_WORKSPACE_IMG`
+#     (raw ext4 image, per-sandbox, lives in host_dir)
+#   - `/userhome`  → virtio-blk disk backed by `$ZSBX_USER_HOME_IMG`
+#     (raw ext4 image, per-user, reused across sandboxes)
+#   - `/keys/controller-pubkey` → written by the guest's /sbin/init
+#     from the kernel command line `zsbx_pubkey=<hex>` we inject
+#     here. No host-side daemon; nothing to survive snapshot.
 #
 # This is the controller-shipped wrapper; the controller writes a
 # Nomad job spec whose `Config.command` points at this path. The
 # script is committed alongside the Rust crate so the wire contract
-# (env vars + virtiofs tags + IP plumbing) is visible in source.
+# (env vars + disk image paths + IP plumbing + pubkey hex) is
+# visible in source.
 #
 # Inputs (all required, set by zeroship-sandbox in the Nomad job env):
 #   ZSBX_VM_INDEX        small int in [1,155] → tap zsbx-nm-$IDX,
@@ -20,9 +37,18 @@
 #                        matches the Rust-side struct field `runtime_dir`'s
 #                        intent.)
 #   ZSBX_RUNTIME         per-allocation working dir (Nomad sets NOMAD_TASK_DIR)
-#   ZSBX_KEYS_DIR        host dir holding controller-pubkey  (virtiofs tag=keys)
-#   ZSBX_WORKSPACE_DIR   host dir for the project workspace  (virtiofs tag=workspace)
-#   ZSBX_USER_HOME_DIR   host dir for the per-user $HOME      (virtiofs tag=userhome)
+#   ZSBX_WORKSPACE_IMG   absolute path to the workspace ext4 image
+#                        (raw, attached as virtio-blk → guest /dev/vdb → /workspace).
+#                        Created + formatted by the controller on cold-boot;
+#                        idempotent on re-create.
+#   ZSBX_USER_HOME_IMG   absolute path to the per-user $HOME ext4 image
+#                        (raw, attached as virtio-blk → guest /dev/vdc → /userhome).
+#                        Per-user, reused across that user's sandboxes.
+#   ZSBX_PUBKEY_HEX      hex-encoded controller signing pubkey bytes (lowercase,
+#                        no `0x` prefix). Injected into the guest via
+#                        `zsbx_pubkey=$ZSBX_PUBKEY_HEX` on the kernel cmdline;
+#                        the guest's /sbin/init decodes + writes it to
+#                        /keys/controller-pubkey for sandbox-agent to read.
 #   ZSBX_VM_MEMORY_MB    integer MiB → CH `--memory size=${N}M,shared=on`
 #   ZSBX_VM_CPUS_BOOT    integer vCPU count → CH `--cpus boot=${N}`
 #   ZSBX_SUBNET_BASE_OCTET   second octet of the per-VM /30 subnet (default 99
@@ -39,22 +65,25 @@
 #                        memory-ranges, state.json) prepared by the
 #                        controller's `RestoreHandler`. The controller is
 #                        responsible for staging the alloc dir to match
-#                        the rewritten `config.json`'s socket / disk /
-#                        serial-log paths; the wrapper just spawns
-#                        virtiofsd × 3 at the standard sock paths and
-#                        execs `cloud-hypervisor --restore source_url=
-#                        file://$ZSBX_RESTORE_FROM`. See § 11.1 division
-#                        of labor.
+#                        the rewritten `config.json`'s disk / serial-log
+#                        paths; the wrapper then execs `cloud-hypervisor
+#                        --restore source_url=file://$ZSBX_RESTORE_FROM`.
+#                        Snapshots taken under the virtio-fs era will fail
+#                        to restore (their config.json carries `fs[]`
+#                        entries CH can't reconstruct); this is acceptable
+#                        because the pivot lands pre-launch.
 #
 # The host operator is responsible for pre-provisioning:
 #   - tap device `zsbx-nm-$IDX` in the /30 subnet
 #     10.${ZSBX_SUBNET_BASE_OCTET}.$((100+IDX)).0/30
 #     (host=.1, VM=.2, no gateway, broadcast at .3)
-#   - cloud-hypervisor + virtiofsd installed and on PATH
+#   - cloud-hypervisor installed and on PATH
 #   - vmlinuz built with CONFIG_IP_PNP=y at "$ZSBX_ARTIFACT_DIR/vmlinuz"
 #   - rootfs-slim.img at "$ZSBX_ARTIFACT_DIR/rootfs-slim.img" with an
-#     /sbin/init that mounts the three virtiofs tags (keys, workspace,
-#     userhome) and execs /usr/local/bin/sandbox-agent
+#     /sbin/init that: parses zsbx_pubkey= from /proc/cmdline → writes
+#     /keys/controller-pubkey; mounts /dev/vdb → /workspace and
+#     /dev/vdc → /userhome (mkfs.ext4 on first boot if unformatted);
+#     execs /usr/local/bin/sandbox-agent
 #
 # This wrapper does NOT provision tap devices or kernels — that's
 # fleet-level setup, not per-sandbox.
@@ -75,9 +104,9 @@ trap 'err_trap $LINENO' ERR
 : "${ZSBX_VM_INDEX:?missing ZSBX_VM_INDEX}"
 : "${ZSBX_ARTIFACT_DIR:?missing ZSBX_ARTIFACT_DIR}"
 : "${ZSBX_RUNTIME:?missing ZSBX_RUNTIME}"
-: "${ZSBX_KEYS_DIR:?missing ZSBX_KEYS_DIR}"
-: "${ZSBX_WORKSPACE_DIR:?missing ZSBX_WORKSPACE_DIR}"
-: "${ZSBX_USER_HOME_DIR:?missing ZSBX_USER_HOME_DIR}"
+: "${ZSBX_WORKSPACE_IMG:?missing ZSBX_WORKSPACE_IMG}"
+: "${ZSBX_USER_HOME_IMG:?missing ZSBX_USER_HOME_IMG}"
+: "${ZSBX_PUBKEY_HEX:?missing ZSBX_PUBKEY_HEX}"
 : "${ZSBX_VM_MEMORY_MB:?missing ZSBX_VM_MEMORY_MB}"
 : "${ZSBX_VM_CPUS_BOOT:?missing ZSBX_VM_CPUS_BOOT}"
 # M6: subnet base octet is configurable on the controller side; default
@@ -116,6 +145,22 @@ if [ "$ZSBX_VM_INDEX" -lt 1 ] || [ "$ZSBX_VM_INDEX" -gt 155 ]; then
   exit 1
 fi
 
+# Defensive: the pubkey hex must be even-length and hex-only. The
+# guest's init.sh decodes it with `xxd -r -p`; a malformed value
+# would silently produce garbage bytes and the agent would reject
+# every signed request from the controller. Surface it here, in the
+# Nomad task log, rather than chasing a "401 invalid signature" loop.
+case "$ZSBX_PUBKEY_HEX" in
+  *[!0-9a-fA-F]*)
+    echo "[wrapper] FATAL: ZSBX_PUBKEY_HEX contains non-hex characters" >&2
+    exit 1
+    ;;
+esac
+if [ $(( ${#ZSBX_PUBKEY_HEX} % 2 )) -ne 0 ]; then
+  echo "[wrapper] FATAL: ZSBX_PUBKEY_HEX has odd length ${#ZSBX_PUBKEY_HEX}" >&2
+  exit 1
+fi
+
 cd "$ZSBX_ARTIFACT_DIR"
 
 TAP=zsbx-nm-${ZSBX_VM_INDEX}
@@ -125,9 +170,6 @@ HOST_IP=10.${ZSBX_SUBNET_BASE_OCTET}.${SUBNET_IDX}.1
 MAC=$(printf '12:34:56:78:9b:%02x' "$ZSBX_VM_INDEX")
 
 API_SOCK="$ZSBX_RUNTIME/ch.sock"
-VFS_KEYS_SOCK="$ZSBX_RUNTIME/vfs-keys.sock"
-VFS_WS_SOCK="$ZSBX_RUNTIME/vfs-ws.sock"
-VFS_HOME_SOCK="$ZSBX_RUNTIME/vfs-home.sock"
 DISK="$ZSBX_RUNTIME/rootfs.img"
 
 # Tap re-up. CH brings the tap UP when it attaches and leaves it DOWN
@@ -149,22 +191,31 @@ else
   exit 1
 fi
 
-# The workspace + user-home dirs are owned by the controller; the
-# wrapper only ensures they exist as a defensive measure (the
-# controller mkdir -p's them before submitting the job, so this is a
-# belt-and-braces no-op in the happy path).
-mkdir -p "$ZSBX_KEYS_DIR" "$ZSBX_WORKSPACE_DIR" "$ZSBX_USER_HOME_DIR"
+# The workspace + user-home disk images are owned by the controller
+# (see `create_sandbox` in `nomad_ch.rs`): they're sparse ext4 images
+# created via `truncate -s … + mkfs.ext4` on first sandbox/user.
+# Defensive existence check here: a missing image would manifest
+# downstream as CH "Error opening block device file" — surface it now
+# in the Nomad task log instead.
+if [ ! -f "$ZSBX_WORKSPACE_IMG" ]; then
+  echo "[wrapper] FATAL: workspace image missing: $ZSBX_WORKSPACE_IMG" >&2
+  exit 1
+fi
+if [ ! -f "$ZSBX_USER_HOME_IMG" ]; then
+  echo "[wrapper] FATAL: user-home image missing: $ZSBX_USER_HOME_IMG" >&2
+  exit 1
+fi
 
 # Per-allocation copy of the rootfs (so concurrent jobs don't share
 # state — each VM writes its own rootfs in /, which is r/w).
 # `--reflink=auto` is fast on btrfs/xfs; falls back to a normal copy
 # elsewhere.
 #
-# Doing this BEFORE virtiofsd spawn is intentional: a cp failure
-# (missing source, no disk space, FS read-only) used to manifest
-# downstream as "agent never returned 200 on /livez" — misleading,
-# because the agent never even got a chance to start. With cp first
-# AND the explicit error message below, the Nomad task log carries
+# Doing this BEFORE CH spawn is intentional: a cp failure (missing
+# source, no disk space, FS read-only) used to manifest downstream
+# as "agent never returned 200 on /livez" — misleading, because the
+# agent never even got a chance to start. With cp first AND the
+# explicit error message below, the Nomad task log carries
 # "rootfs copy failed" within ~250 ms; the controller's
 # `wait_for_alloc_running` surfaces it immediately.
 #
@@ -183,108 +234,53 @@ if [ ! -f "$DISK" ]; then
   fi
 fi
 
-# Clean any stale sockets from a crashed prior run (Nomad gives us a
-# fresh NOMAD_TASK_DIR per alloc, so this should already be empty,
-# but defensive).
-rm -f "$API_SOCK" "$VFS_KEYS_SOCK" "$VFS_WS_SOCK" "$VFS_HOME_SOCK"
+# Clean any stale CH API socket from a crashed prior run (Nomad gives
+# us a fresh NOMAD_TASK_DIR per alloc, so this should already be
+# empty, but defensive). Post-pivot there are no virtiofsd sockets to
+# clean.
+rm -f "$API_SOCK"
 
 echo "[wrapper] index=$ZSBX_VM_INDEX  tap=$TAP  vm_ip=$VM_IP  host_ip=$HOST_IP"
-echo "[wrapper] keys=$ZSBX_KEYS_DIR  workspace=$ZSBX_WORKSPACE_DIR  userhome=$ZSBX_USER_HOME_DIR"
-
-# Spawn virtiofsd × 3, one per share. `cache=auto` — virtiofsd will
-# use writeback caching if the kernel supports it. We background each
-# and capture its PID for the cleanup trap.
-virtiofsd --socket-path="$VFS_KEYS_SOCK" --shared-dir="$ZSBX_KEYS_DIR"      --cache=auto \
-    > "$ZSBX_RUNTIME/vfs-keys.log" 2>&1 &
-VFS_KEYS_PID=$!
-
-virtiofsd --socket-path="$VFS_WS_SOCK"   --shared-dir="$ZSBX_WORKSPACE_DIR" --cache=auto \
-    > "$ZSBX_RUNTIME/vfs-ws.log" 2>&1 &
-VFS_WS_PID=$!
-
-virtiofsd --socket-path="$VFS_HOME_SOCK" --shared-dir="$ZSBX_USER_HOME_DIR" --cache=auto \
-    > "$ZSBX_RUNTIME/vfs-home.log" 2>&1 &
-VFS_HOME_PID=$!
+echo "[wrapper] workspace_img=$ZSBX_WORKSPACE_IMG  userhome_img=$ZSBX_USER_HOME_IMG"
 
 # Cleanup trap. Any signal (or the script exits naturally on CH
-# termination) → kill all three virtiofsd processes plus CH itself.
-# SIGTERM first with a brief grace, then SIGKILL.
+# termination) → kill CH. SIGTERM first with a brief grace, then
+# SIGKILL.
 #
-# **Tightened for the FM-F long tail.** The N=8 stress run showed
-# that the previous 0.5 s sleep between TERM and KILL contributed a
-# meaningful chunk of the 0.5–60 s host-side process-tree drain that
-# Nomad's "alloc terminal" hides. Reducing to 0.2 s shaves ~300 ms
-# off the median teardown (cloud-hypervisor honours TERM in <50 ms
-# on a healthy host; the grace exists for the rare panic path).
-#
-# **`wait` after the kills.** Without an explicit wait the script
-# can exit while reaped-but-not-collected zombies keep the parent
-# bash visible to Nomad — `raw_exec`'s ClientStatus flips to
-# "complete" only when the wrapper bash itself exits. The wait
-# blocks until each child PID is fully reaped (or already-gone, in
-# which case `wait $pid` returns immediately). This shortens the
-# Nomad-vs-host-process-tree skew that the controller's host_fence
-# now polls for.
+# Post-pivot the trap is much simpler: virtiofsd is gone, so the
+# only child we own is cloud-hypervisor. We still `wait` after kill
+# so the wrapper bash doesn't exit ahead of CH being fully reaped
+# (Nomad's `raw_exec` ClientStatus flips to "complete" only when the
+# wrapper bash itself exits; pre-reap exit would leave a brief
+# zombie window the host_fence has to ride out).
 cleanup() {
-  # When CH already exited normally we clear CH_PID below so the
-  # log says "ch already-exited" rather than "ch ?", which reads
-  # cleaner in the Nomad task log on the happy-path teardown.
-  echo "[wrapper] cleaning up (vfs $VFS_KEYS_PID/$VFS_WS_PID/$VFS_HOME_PID, ch ${CH_PID:-already-exited})"
+  echo "[wrapper] cleaning up (ch ${CH_PID:-already-exited})"
   [ -n "${CH_PID-}" ] && kill -TERM "$CH_PID" 2>/dev/null || true
-  kill -TERM "$VFS_KEYS_PID" "$VFS_WS_PID" "$VFS_HOME_PID" 2>/dev/null || true
   sleep 0.2
   [ -n "${CH_PID-}" ] && kill -KILL "$CH_PID" 2>/dev/null || true
-  kill -KILL "$VFS_KEYS_PID" "$VFS_WS_PID" "$VFS_HOME_PID" 2>/dev/null || true
-  # Reap so the wrapper bash doesn't exit ahead of its children.
+  # Reap so the wrapper bash doesn't exit ahead of CH.
   # `wait` on a PID we don't own (because some other ancestor
   # collected it) returns immediately with status 127 — harmless,
   # we discard via `|| true`. The point is: when this function
-  # returns, every child we know of has been collected.
+  # returns, CH has been collected.
   [ -n "${CH_PID-}" ] && wait "$CH_PID" 2>/dev/null || true
-  wait "$VFS_KEYS_PID" 2>/dev/null || true
-  wait "$VFS_WS_PID"   2>/dev/null || true
-  wait "$VFS_HOME_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
-
-# Wait for each virtiofsd UDS to appear before launching CH.
-# A few hundred ms is typical; bound to ~1 s.
-#
-# If a socket never shows up the corresponding virtiofsd died at
-# startup (bad config, missing share dir, permission error). Failing
-# loud HERE means Nomad reports the alloc as failed; the controller's
-# `wait_for_alloc_running` surfaces it within ~250 ms. Without this
-# guard the script proceeded into `cloud-hypervisor`, which would
-# fail to register the missing fs device and the controller would
-# only notice via the 30 s `/livez` timeout — much worse signal.
-for sock in "$VFS_KEYS_SOCK" "$VFS_WS_SOCK" "$VFS_HOME_SOCK"; do
-  for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.02; done
-  if [ ! -S "$sock" ]; then
-    echo "[wrapper] virtiofsd socket $sock did not appear within ~1s; aborting" >&2
-    # Try to surface what virtiofsd logged before we exit. The trap
-    # will then tear down whatever did manage to start.
-    case "$sock" in
-      "$VFS_KEYS_SOCK") tail -n 20 "$ZSBX_RUNTIME/vfs-keys.log" 2>/dev/null || true ;;
-      "$VFS_WS_SOCK")   tail -n 20 "$ZSBX_RUNTIME/vfs-ws.log"   2>/dev/null || true ;;
-      "$VFS_HOME_SOCK") tail -n 20 "$ZSBX_RUNTIME/vfs-home.log" 2>/dev/null || true ;;
-    esac
-    exit 1
-  fi
-done
 
 # Spawn cloud-hypervisor in the background so we can capture its PID
 # for the cleanup trap.
 #
-# Important CH quirk: `--fs` takes ALL fs arguments as ONE space-
-# separated token, NOT one per flag. Listing them as separate `--fs`
-# args makes CH only register the last one. Same for `--disk` etc.
+# Important CH quirk: `--disk` takes ALL disk arguments as ONE space-
+# separated token, NOT one per flag. Listing them as separate `--disk`
+# args makes CH only register the last one. Same applies to `--fs`
+# (which we no longer use).
 #
 # Branch: restore vs. cold boot. When ZSBX_RESTORE_FROM is set, the
 # memory/state/config triple at that path carries the entire VM
-# config (cmdline, disks, net, fs, memory, cpus, serial), so CH
+# config (cmdline, disks, net, memory, cpus, serial), so CH
 # `--restore source_url=file://$DIR` is invoked WITHOUT the
-# kernel / cmdline / disk / net / fs / memory / cpus / serial
-# flags — those would conflict with the snapshot's embedded config.
+# kernel / cmdline / disk / net / memory / cpus / serial flags —
+# those would conflict with the snapshot's embedded config.
 # `--api-socket` is fresh (unrelated to the snapshot's recorded
 # api-socket path; CH treats it as a new control channel).
 if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
@@ -303,16 +299,24 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
   # alloc's NOMAD_TASK_DIR. The controller can't do this at job-
   # submit time because Nomad assigns the alloc UUID only after the
   # job is submitted, so the controller's restore_handler leaves
-  # disks[].path / fs[].socket / serial.file pointing at the source
-  # alloc's path. Without this rewrite CH --restore opens
+  # disks[].path / serial.file pointing at the source alloc's path.
+  # Without this rewrite CH --restore opens
   # `<source_alloc>/serial.log` → ENOENT → "Error creating console
-  # device" → CH exits at t=3ms before reaching net/fs setup.
+  # device" → CH exits at t=3ms before reaching net/disk setup.
   # Diagnostic capture 2026-05-22; see commit message of bug-#8 fix.
   #
   # The pattern matches /opt/nomad/data/alloc/<alloc-id>/<task>/local
   # (Nomad's per-task local-dir layout). The substitution is
   # idempotent across re-wakes — a prior wake's task-dir also matches
   # the same prefix pattern and gets replaced with the current one.
+  #
+  # Post virtio-blk pivot: snapshots no longer carry `fs[].socket`
+  # entries, so the pattern only matches `disks[].path` and
+  # `serial.file`. Older (pre-pivot) snapshots that DO still have
+  # `fs[].socket` would also get rewritten by this sed and then
+  # fail to restore at CH level (no virtiofsd backing the socket) —
+  # acceptable, the pivot lands pre-launch and we don't carry
+  # legacy snapshots.
   if ! sed -i -E "s#/opt/nomad/data/alloc/[^/]+/[^/]+/local#${NOMAD_TASK_DIR}#g" \
        "$ZSBX_RESTORE_FROM/config.json"; then
     echo "[wrapper] FATAL: config.json path rewrite failed" >&2
@@ -326,13 +330,19 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
     > "$ZSBX_RUNTIME/ch.log" 2>&1 &
   CH_PID=$!
 else
+  # Cold boot. The cmdline carries the controller pubkey as hex
+  # (`zsbx_pubkey=<hex>`); /sbin/init in the guest decodes it and
+  # writes /keys/controller-pubkey before exec'ing sandbox-agent.
+  # The two extra `--disk` entries (workspace + userhome) appear in
+  # the guest as /dev/vdb + /dev/vdc respectively (PCI device order
+  # matches CH argument order); init.sh mounts them at /workspace
+  # and /userhome, formatting on first boot if unformatted.
   cloud-hypervisor \
     --api-socket "$API_SOCK" \
     --kernel    vmlinuz \
-    --cmdline   "console=ttyS0 root=/dev/vda rw init=/sbin/init reboot=t panic=1 ip=${VM_IP}::${HOST_IP}:255.255.255.252::eth0:none" \
-    --disk      path="$DISK",readonly=off,direct=off,image_type=raw \
+    --cmdline   "console=ttyS0 root=/dev/vda rw init=/sbin/init reboot=t panic=1 ip=${VM_IP}::${HOST_IP}:255.255.255.252::eth0:none zsbx_pubkey=${ZSBX_PUBKEY_HEX}" \
+    --disk      path="$DISK",readonly=off,direct=off,image_type=raw path="$ZSBX_WORKSPACE_IMG",readonly=off,direct=off,image_type=raw path="$ZSBX_USER_HOME_IMG",readonly=off,direct=off,image_type=raw \
     --net       tap="$TAP",mac="$MAC" \
-    --fs        tag=keys,socket="$VFS_KEYS_SOCK" tag=workspace,socket="$VFS_WS_SOCK" tag=userhome,socket="$VFS_HOME_SOCK" \
     --memory    size=${ZSBX_VM_MEMORY_MB}M,shared=on \
     --cpus      boot=${ZSBX_VM_CPUS_BOOT} \
     --console   off \
@@ -341,14 +351,13 @@ else
   CH_PID=$!
 fi
 
-echo "[wrapper] cloud-hypervisor pid=$CH_PID, vfs keys=$VFS_KEYS_PID ws=$VFS_WS_PID home=$VFS_HOME_PID"
+echo "[wrapper] cloud-hypervisor pid=$CH_PID"
 # Port 7777 mirrors `zeroship_sandbox_agent::AGENT_PORT` — keep them
 # in sync if either side ever needs a different port.
 echo "[wrapper] agent reachable at http://${VM_IP}:7777/"
 
-# Block on CH; if it exits the trap fires and tears down virtiofsd.
-# Capture the exit code so we can propagate it (the EXIT trap will
-# still fire afterwards for virtiofsd cleanup).
+# Block on CH; if it exits the trap fires and tears down anything
+# left over. Capture the exit code so we can propagate it.
 wait "$CH_PID"
 ch_rc=$?
 # Clear CH_PID so the cleanup trap doesn't `kill -TERM` a *reused*
