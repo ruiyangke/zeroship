@@ -39,8 +39,15 @@
 
 use std::cell::{Cell, RefCell};
 
-use compio_postgres::Client;
 use zeroship_runtime::state::OpError;
+
+// The transaction wrapper owns a backend session client borrowed
+// out of the per-isolate context's tx slot. The concrete type is
+// `<PostgresBackend as Backend>::Client` (= `compio_postgres::Client`
+// today) but consumer files name it through the type alias so the
+// `compio_postgres` crate stays scoped to `backend/postgres.rs` and
+// `context.rs`.
+type Client = <crate::backend::PostgresBackend as crate::backend::Backend>::Client;
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};

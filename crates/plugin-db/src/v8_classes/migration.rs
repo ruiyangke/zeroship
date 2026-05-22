@@ -100,14 +100,14 @@ impl Drop for Migration {
         // safe here. We `detach` the task: the cleanup is best-effort
         // and we don't have anything to await on.
         //
-        // The pool is captured by Rc-clone; if the pool was never
-        // initialised (e.g. unit-test path where the per-isolate
-        // context's pool slot is empty), we silently skip the cancel
-        // call. The advisory lock will still be released when the
-        // owning thread's migration lock client is dropped on isolate
-        // teardown.
-        let pool_opt: Option<Rc<compio_postgres::Pool>> = crate::context::with(|c| c.pool());
-        let Some(pool) = pool_opt else {
+        // The backend handle is captured by Rc-clone; if the backend
+        // was never initialised (e.g. unit-test path where the per-
+        // isolate context's pool slot is empty), we silently skip
+        // the cancel call. The advisory lock will still be released
+        // when the owning thread's migration lock client is dropped
+        // on isolate teardown.
+        let backend_opt = crate::context::with(|c| c.backend());
+        let Some(backend) = backend_opt else {
             return;
         };
         // `compio::runtime::spawn` panics if the runtime is mid-
@@ -119,7 +119,7 @@ impl Drop for Migration {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             compio::runtime::spawn(async move {
                 let _ = crate::migrations::exec_cancel(
-                    &pool,
+                    backend.as_ref(),
                     &owner.app_id,
                     &owner.name,
                     &owner.collection,
@@ -167,8 +167,8 @@ impl Migration {
                 )
                 .to_op_error()
             })?;
-        let pool = ensure_pool().await?;
-        crate::migrations::exec_status(&pool, &owner.app_id, &owner.name, &owner.collection)
+        let backend = ensure_backend().await?;
+        crate::migrations::exec_status(backend.as_ref(), &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(JsonValue)
     }
@@ -187,8 +187,8 @@ impl Migration {
             .borrow_mut()
             .take()
             .ok_or_else(crate::migrations::err_not_active)?;
-        let pool = ensure_pool().await?;
-        crate::migrations::exec_cancel(&pool, &owner.app_id, &owner.name, &owner.collection)
+        let backend = ensure_backend().await?;
+        crate::migrations::exec_cancel(backend.as_ref(), &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
     }
@@ -204,8 +204,8 @@ impl Migration {
             .borrow_mut()
             .take()
             .ok_or_else(crate::migrations::err_not_active)?;
-        let pool = ensure_pool().await?;
-        crate::migrations::exec_reset(&pool, &owner.app_id, &owner.name, &owner.collection)
+        let backend = ensure_backend().await?;
+        crate::migrations::exec_reset(backend.as_ref(), &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
     }
@@ -225,7 +225,8 @@ impl Migration {
             .ok_or_else(crate::migrations::err_not_active)?;
         let cursor_i = checked_int(cursor, "cursor")?;
         let batch_size_i = checked_int(batch_size, "batchSize")?;
-        crate::migrations::exec_fetch_batch(&owner.app_id, cursor_i, batch_size_i)
+        let backend = ensure_backend().await?;
+        crate::migrations::exec_fetch_batch(backend.as_ref(), &owner.app_id, cursor_i, batch_size_i)
             .await
             .map(JsonValue)
     }
@@ -252,16 +253,21 @@ impl Migration {
     }
 }
 
-/// Lazy pool accessor — wraps [`crate::exec::ensure_pool`] with
-/// an `OpError` boundary so the `Migration` v8_async_methods return
-/// the V8-aware error type the macro expects. The typed `DbError` from
-/// `exec::ensure_pool` is stamped onto `OpError::coded(...)` via
-/// `to_op_error()`, so the JS exception carries `.code` (typically
-/// `not_configured`).
-async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, OpError> {
+/// Lazy backend accessor — initialises the pool via
+/// [`crate::exec::ensure_pool`] (which constructs the
+/// [`crate::backend::PostgresBackend`] alongside the pool in
+/// `IsolateDbContext::set_pool`) and then returns the per-isolate
+/// backend handle. The `Migration` v8_async_methods route every
+/// migration RPC through this handle so they stay free of direct
+/// `compio_postgres` type references.
+async fn ensure_backend() -> Result<Rc<crate::backend::PostgresBackend>, OpError> {
     crate::exec::ensure_pool()
         .await
-        .map_err(crate::error::DbError::to_op_error)
+        .map_err(crate::error::DbError::to_op_error)?;
+    crate::context::with(|c| c.backend()).ok_or_else(|| {
+        crate::error::DbError::config("not_configured", "db: backend not initialised")
+            .to_op_error()
+    })
 }
 
 /// Coerce a JS number to a finite, integer-valued `i64`. Used by
@@ -385,17 +391,20 @@ fn commit_batch_with_spec<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let _keepalive = wrapper_global;
-        let pool_check = ensure_pool().await;
-        if let Err(e) = pool_check {
-            return OpResult::JsValue {
-                resolver: resolver_global,
-                value: ResolveValue::RejectError(e),
-                request_id,
-            };
-        }
+        let backend = match ensure_backend().await {
+            Ok(b) => b,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::RejectError(e),
+                    request_id,
+                };
+            }
+        };
         let terminal_status_opt = spec.terminal_status.as_deref();
         let error_message_opt = spec.error_message.as_deref();
         let result = crate::migrations::exec_commit_batch(
+            backend.as_ref(),
             &owner.app_id,
             &spec.updates,
             &spec.dead_letter_pks,
@@ -650,8 +659,8 @@ pub fn migration_start_with_spec<'s>(
         // for the entire future — so the Box behind `raw_addr` cannot
         // be GC'd before we either activate (success) or drop the
         // Global (failure).
-        let pool = match ensure_pool().await {
-            Ok(p) => p,
+        let backend = match ensure_backend().await {
+            Ok(b) => b,
             Err(e) => {
                 drop(migration_global);
                 return OpResult::JsValue {
@@ -662,7 +671,7 @@ pub fn migration_start_with_spec<'s>(
             }
         };
         match crate::migrations::exec_begin(
-            &pool, &app_id, &name, &collection, dry_run, reset,
+            backend.as_ref(), &app_id, &name, &collection, dry_run, reset,
         )
         .await
         {

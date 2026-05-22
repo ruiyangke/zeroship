@@ -37,36 +37,24 @@
 //!
 //! `pg_try_advisory_lock(hashtext('zs_mig:<app>')::int4,
 //! hashtext(<name>)::int4)` is session-scoped, held on a dedicated
-//! [`compio_postgres::Client`] stashed in the per-isolate context's
+//! `Backend::Client` stashed in the per-isolate context's
 //! `mig_lock` slot. The same client runs every SELECT/UPDATE in the
 //! run because advisory locks are invisible across connections.
 
-use compio_postgres::{Client, Pool};
 use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
+use crate::backend::{Backend, PostgresBackend};
+use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
 
-/// Lock state for the in-flight migration. The `client` is held in
-/// an `Option` so callers can `take()` it across an await and
-/// `replace()` it back — the same pattern the transaction slot uses.
-pub(crate) struct MigrationLock {
-    pub(crate) name: String,
-    pub(crate) collection: String,
-    pub(crate) audit_id: i64,
-    /// Dry-run runs do not persist `validate_cursor`, dead_letter_pks,
-    /// or processed updates (proposal B1.6).
-    pub(crate) dry_run: bool,
-    /// `audit_generation` snapshot captured at `exec_begin`. The audit
-    /// row's generation is bumped by `exec_reset`; any subsequent
-    /// `commit_batch` whose stored generation no longer matches the
-    /// row's must ROLLBACK and surface `migration_reset_externally`
-    /// (Gap X). Lives in the lock so `exec_commit_batch` reads it
-    /// without an extra round-trip.
-    pub(crate) start_generation: i64,
-    pub(crate) client: Option<Client>,
-}
+/// Convenience alias — the migration loop holds a backend-owned
+/// client across awaits. `<PostgresBackend as Backend>::Client` is
+/// the concrete `compio_postgres::Client` today; future backends
+/// can swap in their own session type without rewriting every site
+/// that pulls the lock client out of the per-isolate context.
+type LockClient = <PostgresBackend as Backend>::Client;
 
 /// Build a coded `OpError` for a migration lifecycle failure. The
 /// runtime pump materialises a JS `Error` with `e.code` (and optional
@@ -87,10 +75,12 @@ fn coded(code: &str, message: &str, hint: Option<&str>) -> OpError {
 /// The phrase is prepended to the message so the operator sees both
 /// the lifecycle context AND the SQLSTATE message; the `.code` stays
 /// the SQLSTATE classification.
-fn coded_sql(context: &str, e: compio_postgres::Error) -> OpError {
-    let mut db_err = crate::error::DbError::from_pg(&e);
-    // Re-wrap the message with the context phrase the original
-    // `format!("db: <ctx>: {e}")` provided.
+/// Stamp a `DbError` with a context phrase and convert to `OpError`.
+/// Replaces the previous `coded_sql(context, compio_postgres::Error)`
+/// helper — Backend methods already classify Postgres errors into
+/// `DbError`, so we just take the typed error here.
+fn coded_db(context: &str, e: crate::error::DbError) -> OpError {
+    let mut db_err = e;
     match &mut db_err {
         crate::error::DbError::UniqueViolation { message }
         | crate::error::DbError::FkViolation { message }
@@ -172,31 +162,14 @@ pub(crate) fn err_not_active() -> OpError {
     )
 }
 
-/// Open a dedicated client. Mirrors `exec_begin` in
-/// `orchestrator::transaction`.
-async fn open_dedicated_client() -> Result<Client, String> {
-    let url = crate::context::with(|c| c.db_url())
-        .ok_or_else(|| "db: not configured".to_string())?;
-    let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
-        .await
-        .map_err(|e| format!("db: migration connect failed: {e}"))?;
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            eprintln!("db: migration connection task error: {e}");
-        }
-    })
-    .detach();
-    Ok(client)
-}
-
 /// Take the lock client out for an await; the caller's future is
 /// responsible for putting it back via [`return_lock_client`].
-fn take_lock_client() -> Option<Client> {
+fn take_lock_client() -> Option<LockClient> {
     crate::context::with_mut(|c| c.take_mig_client())
 }
 
 /// Restore the lock client after an await.
-fn return_lock_client(client: Client) {
+fn return_lock_client(client: LockClient) {
     crate::context::with_mut(|c| c.return_mig_client(client));
 }
 
@@ -204,9 +177,10 @@ fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
     crate::context::with(|c| c.mig_lock_snapshot())
 }
 
-/// Begin a migration run.
+/// Begin a migration run. Routes connection / SQL execution through
+/// the [`Backend`] facade (Stage 8e-R2).
 pub async fn exec_begin(
-    pool: &Pool,
+    backend: &PostgresBackend,
     app_id: &str,
     name: &str,
     collection: &str,
@@ -241,29 +215,25 @@ pub async fn exec_begin(
     // before any DDL deploy, so we bootstrap defensively. `CREATE
     // SCHEMA IF NOT EXISTS` + audit-table IF NOT EXISTS are both
     // idempotent.
-    let create_schema = crate::query::build_create_schema(app_id);
-    let empty: Vec<&str> = Vec::new();
-    pool.query_text_params(&create_schema, &empty)
+    backend
+        .ensure_app_schema(app_id)
         .await
-        .map_err(|e| coded_sql("create schema", e))?;
-    crate::audit::ensure_audit_table_exists(pool, app_id)
+        .map_err(|e| coded_db("create schema", e))?;
+    backend
+        .ensure_audit_table(app_id)
         .await
-        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
 
-    let client = open_dedicated_client()
+    let client = backend
+        .acquire_dedicated_client()
         .await
-        .map_err(|m| coded("tx_connect_failed", &m, None))?;
+        .map_err(|e| coded("tx_connect_failed", &e.into_string(), None))?;
 
-    let lock_sql =
-        "SELECT pg_try_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4) AS got";
-    let lock_rows = client
-        .query_text_params(lock_sql, &[app_id, name])
+    let lock_key = format!("zs_mig:{app_id}");
+    let got = backend
+        .try_acquire_advisory_lock(&client, &lock_key, name)
         .await
-        .map_err(|e| coded_sql("advisory_lock query", e))?;
-    let got: bool = lock_rows
-        .first()
-        .map(|r| r.try_get::<_, bool>("got").unwrap_or(false))
-        .unwrap_or(false);
+        .map_err(|e| coded_db("advisory_lock query", e))?;
     if !got {
         // Client drops here; backend session ends; no locks were held
         // on it (since pg_try_advisory_lock returned false).
@@ -272,42 +242,50 @@ pub async fn exec_begin(
 
     if reset {
         // Same generation bump as `exec_reset` — see Gap X.
-        crate::audit::reset_backfill_row(&client, app_id, collection, name)
+        backend
+            .reset_backfill_row_client(&client, app_id, collection, name)
             .await
-            .map_err(|e| coded_sql("migration reset", e))?;
+            .map_err(|e| coded_db("migration reset", e))?;
     }
 
-    let existing = crate::audit::find_latest_backfill_row(&client, app_id, collection, name)
+    let existing = backend
+        .find_latest_backfill_row(&client, app_id, collection, name)
         .await
-        .map_err(|e| coded_sql("migration lookup", e))?;
+        .map_err(|e| coded_db("migration lookup", e))?;
 
     let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing {
         if row.status == "cancelled" {
             // Refuse — operator must reset to clear state.
-            let _ = release_advisory(&client, app_id, name).await;
+            backend
+                .release_advisory_lock(&client, &lock_key, name)
+                .await;
             drop(client);
             return Err(err_cancelled_on_start());
         }
-        crate::audit::set_backfill_running(&client, app_id, row.id)
+        backend
+            .set_backfill_running(&client, app_id, row.id)
             .await
-            .map_err(|e| coded_sql("migration set running", e))?;
+            .map_err(|e| coded_db("migration set running", e))?;
         (row.id, row.cursor, row.processed, row.dead_letter_pks, row.audit_generation)
     } else {
-        let schema_version =
-            crate::audit::next_schema_version(pool, app_id).await.unwrap_or(1);
+        let schema_version = backend
+            .next_schema_version(app_id)
+            .await
+            .unwrap_or(1);
         let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID")
             .unwrap_or_else(|_| "cold_start".to_string());
-        let id = crate::audit::insert_backfill_running(
-            &client,
-            app_id,
-            collection,
-            name,
-            dry_run,
-            deploy_id.as_str(),
-            schema_version,
-        )
-        .await
-        .map_err(|e| coded_sql("migration insert", e))?;
+        let id = backend
+            .insert_backfill_running(
+                &client,
+                app_id,
+                collection,
+                name,
+                dry_run,
+                deploy_id.as_str(),
+                schema_version,
+            )
+            .await
+            .map_err(|e| coded_db("migration insert", e))?;
         if id == 0 {
             return Err(coded(
                 "internal",
@@ -346,6 +324,7 @@ pub async fn exec_begin(
 
 /// Fetch a batch of rows after `cursor`.
 pub async fn exec_fetch_batch(
+    backend: &PostgresBackend,
     app_id: &str,
     cursor: i64,
     batch_size: i64,
@@ -375,7 +354,10 @@ pub async fn exec_fetch_batch(
         )
     })?;
 
-    match crate::audit::peek_latest_backfill_status(&client, app_id, &collection, &name).await {
+    match backend
+        .peek_latest_backfill_status(&client, app_id, &collection, &name)
+        .await
+    {
         Ok(status) => {
             if status.as_deref() == Some("cancelled") {
                 return_lock_client(client);
@@ -384,7 +366,7 @@ pub async fn exec_fetch_batch(
         }
         Err(e) => {
             return_lock_client(client);
-            return Err(coded_sql("status read", e));
+            return Err(coded_db("status read", e));
         }
     }
 
@@ -395,16 +377,22 @@ pub async fn exec_fetch_batch(
     );
     let cursor_s = cursor.to_string();
     let bs_s = batch_size.to_string();
+    // Use the client directly to fetch rows — we need the raw `Row`
+    // values for `row_to_json` rendering, not just a count. The
+    // backend trait's `client_exec` returns affected-rows only, so
+    // we stay on the concrete Client here for this one SELECT.
     let rows_result = client
         .query_text_params(&sql, &[cursor_s.as_str(), bs_s.as_str()])
         .await;
 
     // Heartbeat — best-effort.
-    let _ = crate::audit::heartbeat_backfill(&client, app_id, &collection, &name).await;
+    let _ = backend
+        .heartbeat_backfill(&client, app_id, &collection, &name)
+        .await;
 
     return_lock_client(client);
 
-    let rows = rows_result.map_err(|e| coded_sql("migration fetch", e))?;
+    let rows = rows_result.map_err(|e| coded_db("migration fetch", crate::error::DbError::from_pg(&e)))?;
     let row_jsons: Vec<Value> = rows.iter().map(crate::v8_bridge::row_to_json).collect();
     Ok(Value::Array(row_jsons).to_string())
 }
@@ -421,6 +409,7 @@ pub async fn exec_fetch_batch(
 /// advisory lock is released and the per-isolate `mig_lock` slot is cleared.
 #[allow(clippy::too_many_arguments)]
 pub async fn exec_commit_batch(
+    backend: &PostgresBackend,
     app_id: &str,
     updates: &Value,
     dead_letter_pks: &Value,
@@ -446,10 +435,16 @@ pub async fn exec_commit_batch(
         coded("no_active_migration", "lock client missing", None)
     })?;
 
-    // BEGIN
-    if let Err(e) = client.execute("BEGIN", &[]).await {
+    // Helper: rollback + restore the client to the per-isolate slot.
+    async fn rollback_and_return(backend: &PostgresBackend, client: LockClient) {
+        let _ = backend.client_exec(&client, "ROLLBACK", &[]).await;
         return_lock_client(client);
-        return Err(coded_sql("BEGIN", e));
+    }
+
+    // BEGIN
+    if let Err(e) = backend.client_exec(&client, "BEGIN", &[]).await {
+        return_lock_client(client);
+        return Err(coded_db("BEGIN", e));
     }
 
     // Gap C: lock the audit row FOR UPDATE inside the batch's own
@@ -461,18 +456,19 @@ pub async fn exec_commit_batch(
     // the batch's mutations, which means concurrent cancels block
     // until COMMIT — at which point they see `status='running'` flip
     // to whatever the SDK requested (or stay running for another pass).
-    let locked = match crate::audit::lock_audit_row_for_update(&client, app_id, audit_id).await {
+    let locked = match backend
+        .lock_audit_row_for_update(&client, app_id, audit_id)
+        .await
+    {
         Ok(row) => row,
         Err(e) => {
-            let _ = client.execute("ROLLBACK", &[]).await;
-            return_lock_client(client);
-            return Err(coded_sql("audit lock", e));
+            rollback_and_return(backend, client).await;
+            return Err(coded_db("audit lock", e));
         }
     };
     if let Some(row) = locked {
         if row.status == "cancelled" {
-            let _ = client.execute("ROLLBACK", &[]).await;
-            return_lock_client(client);
+            rollback_and_return(backend, client).await;
             return Err(err_cancelled_mid_run());
         }
         // Gap X: an operator's `migrations.reset` bumps
@@ -480,8 +476,7 @@ pub async fn exec_commit_batch(
         // advance the cursor past the new reset point — abort with a
         // coded error so the SDK mints a fresh wrapper.
         if row.audit_generation != start_generation {
-            let _ = client.execute("ROLLBACK", &[]).await;
-            return_lock_client(client);
+            rollback_and_return(backend, client).await;
             return Err(err_reset_externally());
         }
     }
@@ -489,8 +484,7 @@ pub async fn exec_commit_batch(
     // Apply each update.
     for upd in updates_arr {
         let Some(obj) = upd.as_object() else {
-            let _ = client.execute("ROLLBACK", &[]).await;
-            return_lock_client(client);
+            rollback_and_return(backend, client).await;
             return Err(coded(
                 "invalid_argument",
                 "each update entry must be an object",
@@ -500,8 +494,7 @@ pub async fn exec_commit_batch(
         let id = match obj.get("id").and_then(Value::as_i64) {
             Some(v) => v,
             None => {
-                let _ = client.execute("ROLLBACK", &[]).await;
-                return_lock_client(client);
+                rollback_and_return(backend, client).await;
                 return Err(coded(
                     "invalid_argument",
                     "each update entry must have a numeric id",
@@ -545,35 +538,35 @@ pub async fn exec_commit_batch(
             assignments.join(", ")
         );
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        if let Err(e) = client.query_text_params(&sql, &param_refs).await {
-            let _ = client.execute("ROLLBACK", &[]).await;
-            return_lock_client(client);
-            return Err(coded_sql(&format!("migration row UPDATE (id={id})"), e));
+        if let Err(e) = backend.client_exec(&client, &sql, &param_refs).await {
+            rollback_and_return(backend, client).await;
+            return Err(coded_db(&format!("migration row UPDATE (id={id})"), e));
         }
     }
 
     // Commit or rollback.
     let final_sql = if dry_run { "ROLLBACK" } else { "COMMIT" };
-    if let Err(e) = client.execute(final_sql, &[]).await {
+    if let Err(e) = backend.client_exec(&client, final_sql, &[]).await {
         return_lock_client(client);
-        return Err(coded_sql(&format!("migration {final_sql}"), e));
+        return Err(coded_db(&format!("migration {final_sql}"), e));
     }
 
     // Audit row update — only persist cursor/dead_letter/processed on a
     // real run. Dry runs explicitly do NOT advance state (B1.6).
     if !dry_run {
-        if let Err(e) = crate::audit::update_backfill_progress(
-            &client,
-            app_id,
-            audit_id,
-            next_cursor,
-            dead_letter_pks,
-            processed_total,
-        )
-        .await
+        if let Err(e) = backend
+            .update_backfill_progress(
+                &client,
+                app_id,
+                audit_id,
+                next_cursor,
+                dead_letter_pks,
+                processed_total,
+            )
+            .await
         {
             return_lock_client(client);
-            return Err(coded_sql("audit row update", e));
+            return Err(coded_db("audit row update", e));
         }
     }
 
@@ -595,10 +588,12 @@ pub async fn exec_commit_batch(
             }
         };
 
-        let _ = crate::audit::finalise_backfill(&client, app_id, audit_id, terminal, error_message)
+        let _ = backend
+            .finalise_backfill(&client, app_id, audit_id, terminal, error_message)
             .await;
 
-        let _ = release_advisory(&client, app_id, &name).await;
+        let lock_key = format!("zs_mig:{app_id}");
+        backend.release_advisory_lock(&client, &lock_key, &name).await;
         // Drop the client — backend session ends, releasing all locks.
         drop(client);
         crate::context::with_mut(|c| c.clear_mig_lock());
@@ -609,28 +604,22 @@ pub async fn exec_commit_batch(
     Ok(serde_json::json!({ "committed": !dry_run, "done": false }).to_string())
 }
 
-/// Release the session advisory lock. Best-effort.
-async fn release_advisory(client: &Client, app_id: &str, name: &str) -> Result<(), String> {
-    let unlock_sql =
-        "SELECT pg_advisory_unlock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)";
-    let _ = client.query_text_params(unlock_sql, &[app_id, name]).await;
-    Ok(())
-}
-
 /// Read the current audit row state for a (collection, name) pair.
 /// Returns a JSON object the SDK can shape into the `status` API.
 pub async fn exec_status(
-    pool: &Pool,
+    backend: &PostgresBackend,
     app_id: &str,
     name: &str,
     collection: &str,
 ) -> Result<String, OpError> {
-    crate::audit::ensure_audit_table_exists(pool, app_id)
+    backend
+        .ensure_audit_table(app_id)
         .await
-        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
-    let row = crate::audit::find_latest_backfill_row(pool, app_id, collection, name)
+        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
+    let row = backend
+        .find_latest_backfill_row_pool(app_id, collection, name)
         .await
-        .map_err(|e| coded_sql("migration status read", e))?;
+        .map_err(|e| coded_db("migration status read", e))?;
     let Some(row) = row else {
         return Ok(serde_json::json!({
             "exists": false,
@@ -659,18 +648,20 @@ pub async fn exec_status(
 /// `running` (proposal B1, "Cancel happens-before the next batch").
 /// Returns `{ ok: true }` on transition, structured error otherwise.
 pub async fn exec_cancel(
-    pool: &Pool,
+    backend: &PostgresBackend,
     app_id: &str,
     name: &str,
     collection: &str,
 ) -> Result<String, OpError> {
-    crate::audit::ensure_audit_table_exists(pool, app_id)
+    backend
+        .ensure_audit_table(app_id)
         .await
-        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
     // Read current status.
-    let row = crate::audit::find_latest_backfill_row(pool, app_id, collection, name)
+    let row = backend
+        .find_latest_backfill_row_pool(app_id, collection, name)
         .await
-        .map_err(|e| coded_sql("migration cancel lookup", e))?;
+        .map_err(|e| coded_db("migration cancel lookup", e))?;
     let Some(row) = row else {
         return Err(err_not_cancellable("missing"));
     };
@@ -678,9 +669,10 @@ pub async fn exec_cancel(
         return Err(err_not_cancellable(&row.status));
     }
 
-    crate::audit::cancel_backfill_row(pool, app_id, row.id)
+    backend
+        .cancel_backfill_row_pool(app_id, row.id)
         .await
-        .map_err(|e| coded_sql("migration cancel update", e))?;
+        .map_err(|e| coded_db("migration cancel update", e))?;
 
     Ok(serde_json::json!({ "ok": true }).to_string())
 }
@@ -689,21 +681,23 @@ pub async fn exec_cancel(
 /// dead_letter_pks=null). Used when an operator wants to retry from
 /// scratch after a `cancelled` or `failed` run.
 pub async fn exec_reset(
-    pool: &Pool,
+    backend: &PostgresBackend,
     app_id: &str,
     name: &str,
     collection: &str,
 ) -> Result<String, OpError> {
-    crate::audit::ensure_audit_table_exists(pool, app_id)
+    backend
+        .ensure_audit_table(app_id)
         .await
-        .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
     // Gap X: bump `audit_generation` so any in-flight worker holding
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor
     // we just zeroed.
-    crate::audit::reset_backfill_row(pool, app_id, collection, name)
+    backend
+        .reset_backfill_row_pool(app_id, collection, name)
         .await
-        .map_err(|e| coded_sql("migration reset", e))?;
+        .map_err(|e| coded_db("migration reset", e))?;
     Ok(serde_json::json!({ "ok": true }).to_string())
 }
 
@@ -712,4 +706,110 @@ pub async fn exec_reset(
 /// migration is active.
 pub fn release_active_lock() {
     crate::context::with_mut(|c| c.clear_mig_lock());
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Test-only wrappers — keep the integration tests on `Rc<Pool>`
+// without forcing every call site to construct a PostgresBackend.
+// Each wrapper takes a pre-wrapped `Rc<Pool>` and forwards to the
+// canonical backend-taking surface above.
+//
+// These are `#[doc(hidden)]` and `pub` so the `tests/integration.rs`
+// file can reach them; production code goes through the v8_classes
+// layer.
+// ─────────────────────────────────────────────────────────────────────
+
+#[doc(hidden)]
+pub async fn exec_begin_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    name: &str,
+    collection: &str,
+    dry_run: bool,
+    reset: bool,
+) -> Result<String, OpError> {
+    let backend = make_test_backend(pool);
+    exec_begin(&backend, app_id, name, collection, dry_run, reset).await
+}
+
+#[doc(hidden)]
+pub async fn exec_fetch_batch_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    cursor: i64,
+    batch_size: i64,
+) -> Result<String, OpError> {
+    let backend = make_test_backend(pool);
+    exec_fetch_batch(&backend, app_id, cursor, batch_size).await
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn exec_commit_batch_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    updates: &Value,
+    dead_letter_pks: &Value,
+    next_cursor: i64,
+    processed_total: i64,
+    is_done: bool,
+    terminal_status: Option<&str>,
+    error_message: Option<&str>,
+) -> Result<String, OpError> {
+    let backend = make_test_backend(pool);
+    exec_commit_batch(
+        &backend,
+        app_id,
+        updates,
+        dead_letter_pks,
+        next_cursor,
+        processed_total,
+        is_done,
+        terminal_status,
+        error_message,
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn exec_status_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    name: &str,
+    collection: &str,
+) -> Result<String, OpError> {
+    let backend = make_test_backend(pool);
+    exec_status(&backend, app_id, name, collection).await
+}
+
+#[doc(hidden)]
+pub async fn exec_cancel_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    name: &str,
+    collection: &str,
+) -> Result<String, OpError> {
+    let backend = make_test_backend(pool);
+    exec_cancel(&backend, app_id, name, collection).await
+}
+
+#[doc(hidden)]
+pub async fn exec_reset_with_pool(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+    app_id: &str,
+    name: &str,
+    collection: &str,
+) -> Result<String, OpError> {
+    let backend = make_test_backend(pool);
+    exec_reset(&backend, app_id, name, collection).await
+}
+
+/// Build an ad-hoc PostgresBackend wrapping an owned `Rc<Pool>`.
+/// Reads the URL from the per-isolate context (set by
+/// `set_db_url_for_tests` in the test harness).
+fn make_test_backend(
+    pool: std::rc::Rc<compio_postgres::Pool>,
+) -> crate::backend::PostgresBackend {
+    let url = crate::context::with(|c| c.db_url()).unwrap_or_default();
+    crate::backend::PostgresBackend::new(pool, url)
 }

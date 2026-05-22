@@ -1512,7 +1512,7 @@ fn parse(s: &str) -> Value {
 /// short-circuit one row out of the batch into dead-letter or failure.
 #[allow(clippy::too_many_arguments)]
 async fn b1_run_loop(
-    pool: &Pool,
+    pool: &std::rc::Rc<Pool>,
     app: &str,
     name: &str,
     batch_size: i64,
@@ -1523,7 +1523,7 @@ async fn b1_run_loop(
     failure_budget: usize,
 ) -> (i64, Vec<i64>, String) {
     let begin = parse(
-        &mig::exec_begin(pool, app, name, "users", dry_run, reset)
+        &mig::exec_begin_with_pool(std::rc::Rc::clone(pool), app, name, "users", dry_run, reset)
             .await
             .expect("exec_begin"),
     );
@@ -1539,7 +1539,7 @@ async fn b1_run_loop(
 
     loop {
         let fetched = parse(
-            &mig::exec_fetch_batch(app, cursor, batch_size)
+            &mig::exec_fetch_batch_with_pool(std::rc::Rc::clone(pool), app, cursor, batch_size)
                 .await
                 .expect("exec_fetch_batch"),
         );
@@ -1555,7 +1555,8 @@ async fn b1_run_loop(
                 "applied"
             };
             terminal = final_term.to_string();
-            let _ = mig::exec_commit_batch(
+            let _ = mig::exec_commit_batch_with_pool(
+                std::rc::Rc::clone(pool),
                 app,
                 &Value::Array(vec![]),
                 &Value::Array(dead_letter.iter().map(|i| Value::Number((*i).into())).collect()),
@@ -1577,7 +1578,8 @@ async fn b1_run_loop(
                 failures += 1;
                 if failures > failure_budget {
                     terminal = "failed".to_string();
-                    let _ = mig::exec_commit_batch(
+                    let _ = mig::exec_commit_batch_with_pool(
+                        std::rc::Rc::clone(pool),
                         app,
                         &Value::Array(vec![]),
                         &Value::Array(dead_letter.iter().map(|i| Value::Number((*i).into())).collect()),
@@ -1607,7 +1609,8 @@ async fn b1_run_loop(
         let new_cursor = rows.iter().map(|r| r["id"].as_i64().unwrap()).max().unwrap();
         processed += rows.len() as i64;
 
-        let _ = mig::exec_commit_batch(
+        let _ = mig::exec_commit_batch_with_pool(
+            std::rc::Rc::clone(pool),
             app,
             &Value::Array(updates),
             &Value::Array(dead_letter.iter().map(|i| Value::Number((*i).into())).collect()),
@@ -1656,7 +1659,7 @@ async fn b1_simple_backfill() {
 
     // Audit row should be 'applied' with processed=250.
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
@@ -1679,11 +1682,11 @@ async fn b1_resume_after_crash() {
     // Run one batch, then simulate crash by clearing MIG_LOCK without
     // calling commit-with-done. The audit row stays `running`, cursor=100.
     {
-        let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+        let _ = mig::exec_begin_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users", false, false)
             .await
             .unwrap();
         let fetched = parse(
-            &mig::exec_fetch_batch(app, 0, 100)
+            &mig::exec_fetch_batch_with_pool(std::rc::Rc::clone(&pool), app, 0, 100)
                 .await
                 .unwrap(),
         );
@@ -1698,7 +1701,8 @@ async fn b1_resume_after_crash() {
                 "set": { "role": "user" }
             }))
             .collect();
-        let _ = mig::exec_commit_batch(
+        let _ = mig::exec_commit_batch_with_pool(
+            std::rc::Rc::clone(&pool),
             app,
             &Value::Array(updates),
             &Value::Array(vec![]),
@@ -1739,7 +1743,7 @@ async fn b1_resume_after_crash() {
     assert_eq!(n, 250);
 
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
@@ -1774,7 +1778,7 @@ async fn b1_dry_run_does_not_mutate() {
 
     // Audit row cursor must stay 0 (dry-run does not advance state).
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
@@ -1832,7 +1836,7 @@ async fn b1_dead_letter_under_budget() {
     assert_eq!(n, 99);
 
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
@@ -1885,7 +1889,7 @@ async fn b1_dead_letter_over_budget() {
     assert_eq!(terminal, "failed");
 
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
@@ -1906,21 +1910,21 @@ async fn b1_cancel_running() {
     let app = "b1_cancel";
     b1_setup_users(&pool, app, 100, false).await;
 
-    let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+    let _ = mig::exec_begin_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users", false, false)
         .await
         .expect("begin");
 
     // Operator cancels via a separate pool connection (just like an
     // out-of-band admin would).
     let cancel = parse(
-        &mig::exec_cancel(&pool, app, "backfill_role", "users")
+        &mig::exec_cancel_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .expect("cancel"),
     );
     assert_eq!(cancel["ok"], true);
 
     // Next fetch should return a `migration_cancelled` error envelope.
-    let fetch_err = mig::exec_fetch_batch(app, 0, 50).await.unwrap_err();
+    let fetch_err = mig::exec_fetch_batch_with_pool(std::rc::Rc::clone(&pool), app, 0, 50).await.unwrap_err();
     assert!(
         matches!(
             &fetch_err.kind,
@@ -1951,11 +1955,11 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
     b1_setup_users(&pool, app, 50, false).await;
 
     // Phase 1: begin + fetch the first batch (cursor=0, size=10).
-    let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+    let _ = mig::exec_begin_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users", false, false)
         .await
         .expect("begin");
     let fetched = parse(
-        &mig::exec_fetch_batch(app, 0, 10)
+        &mig::exec_fetch_batch_with_pool(std::rc::Rc::clone(&pool), app, 0, 10)
             .await
             .expect("fetch_batch"),
     );
@@ -1966,7 +1970,7 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
     // `pool` (auto-checkout), simulating an out-of-band operator
     // hitting the `/migrations.cancel` endpoint on a peer worker.
     let cancel = parse(
-        &mig::exec_cancel(&pool, app, "backfill_role", "users")
+        &mig::exec_cancel_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .expect("cancel"),
     );
@@ -1984,7 +1988,8 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
             })
         })
         .collect();
-    let commit_err = mig::exec_commit_batch(
+    let commit_err = mig::exec_commit_batch_with_pool(
+        std::rc::Rc::clone(&pool),
         app,
         &Value::Array(updates),
         &Value::Array(vec![]),
@@ -2035,11 +2040,11 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     b1_setup_users(&pool, app, 50, false).await;
 
     // Begin + fetch the first batch.
-    let _ = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+    let _ = mig::exec_begin_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users", false, false)
         .await
         .expect("begin");
     let fetched = parse(
-        &mig::exec_fetch_batch(app, 0, 10)
+        &mig::exec_fetch_batch_with_pool(std::rc::Rc::clone(&pool), app, 0, 10)
             .await
             .expect("fetch_batch"),
     );
@@ -2051,7 +2056,7 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     // 'pending' (not 'cancelled') so the existing cancel guard won't
     // catch it.
     let r = parse(
-        &mig::exec_reset(&pool, app, "backfill_role", "users")
+        &mig::exec_reset_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .expect("reset"),
     );
@@ -2067,7 +2072,8 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
             })
         })
         .collect();
-    let commit_err = mig::exec_commit_batch(
+    let commit_err = mig::exec_commit_batch_with_pool(
+        std::rc::Rc::clone(&pool),
         app,
         &Value::Array(updates),
         &Value::Array(vec![]),
@@ -2104,7 +2110,7 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     // status() reports cursor=0, processed=0) — the operator's reset
     // took effect cleanly.
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
@@ -2156,7 +2162,7 @@ async fn gap_i_migration_finalizer_churn() {
         // (1) Begin — claims MIG_LOCK + advisory lock + INSERTs the
         // audit row in `running`. The dedicated client lives inside
         // MIG_LOCK; releasing it requires clearing the thread-local.
-        let begin = mig::exec_begin(&pool, app, &name, "users", false, false)
+        let begin = mig::exec_begin_with_pool(std::rc::Rc::clone(&pool), app, &name, "users", false, false)
             .await
             .unwrap_or_else(|e| panic!("exec_begin failed at i={i}: {e:?}"));
         let begin_v = parse(&begin);
@@ -2168,7 +2174,7 @@ async fn gap_i_migration_finalizer_churn() {
 
         // (2) Cancel from the pool — same call the GC-spawned future
         // makes. Transitions the audit row to 'cancelled'.
-        let cancel = mig::exec_cancel(&pool, app, &name, "users")
+        let cancel = mig::exec_cancel_with_pool(std::rc::Rc::clone(&pool), app, &name, "users")
             .await
             .unwrap_or_else(|e| panic!("exec_cancel failed at i={i}: {e:?}"));
         assert_eq!(parse(&cancel)["ok"], true);
@@ -2263,7 +2269,7 @@ async fn b1_cancel_completed_returns_error() {
 
     let _ = b1_run_loop(&pool, app, "backfill_role", 10, false, false, &[], &[], 0).await;
 
-    let cancel_err = mig::exec_cancel(&pool, app, "backfill_role", "users").await.unwrap_err();
+    let cancel_err = mig::exec_cancel_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users").await.unwrap_err();
     assert!(
         matches!(
             &cancel_err.kind,
@@ -2303,7 +2309,7 @@ async fn b1_advisory_lock_prevents_concurrent_runs() {
         .unwrap();
 
     // The migration's `exec_begin` must fail with `migration_already_running`.
-    let begin_err = mig::exec_begin(&pool, app, "backfill_role", "users", false, false)
+    let begin_err = mig::exec_begin_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users", false, false)
         .await
         .unwrap_err();
     assert!(
@@ -2344,14 +2350,14 @@ async fn b1_reset_clears_state() {
 
     // Reset and verify status returns to pending.
     let r = parse(
-        &mig::exec_reset(&pool, app, "backfill_role", "users")
+        &mig::exec_reset_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );
     assert_eq!(r["ok"], true);
 
     let st = parse(
-        &mig::exec_status(&pool, app, "backfill_role", "users")
+        &mig::exec_status_with_pool(std::rc::Rc::clone(&pool), app, "backfill_role", "users")
             .await
             .unwrap(),
     );

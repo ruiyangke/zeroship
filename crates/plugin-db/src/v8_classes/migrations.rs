@@ -26,7 +26,8 @@ use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method};
 
-use crate::exec::ensure_pool;
+// `crate::exec::ensure_pool` is invoked inside the spawned op to lazily
+// initialise the pool + the per-isolate PostgresBackend handle.
 use crate::v8_bridge::v8_value_to_serde_json;
 
 // ---------------------------------------------------------------------------
@@ -158,25 +159,42 @@ fn dispatch_by_spec<'s>(
     let request_id = state.borrow().executing_request_id;
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let pool = match ensure_pool().await {
-            Ok(p) => p,
-            Err(e) => {
+        // Lazy-init the pool then read the per-isolate backend handle.
+        // `exec::ensure_pool` lazily creates the pool (and the
+        // `PostgresBackend` in lockstep — see context::set_pool); the
+        // subsequent `c.backend()` lookup is infallible after that.
+        if let Err(e) = crate::exec::ensure_pool().await {
+            return OpResult::JsValue {
+                resolver: resolver_global,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+        let backend = match crate::context::with(|c| c.backend()) {
+            Some(b) => b,
+            None => {
                 return OpResult::JsValue {
                     resolver: resolver_global,
-                    value: ResolveValue::RejectError(e.to_op_error()),
+                    value: ResolveValue::RejectError(
+                        crate::error::DbError::config(
+                            "not_configured",
+                            "db: backend not initialised",
+                        )
+                        .to_op_error(),
+                    ),
                     request_id,
                 };
             }
         };
         let result = match op {
             MigrationOp::Status => {
-                crate::migrations::exec_status(&pool, &app_id, &name, &collection).await
+                crate::migrations::exec_status(backend.as_ref(), &app_id, &name, &collection).await
             }
             MigrationOp::Cancel => {
-                crate::migrations::exec_cancel(&pool, &app_id, &name, &collection).await
+                crate::migrations::exec_cancel(backend.as_ref(), &app_id, &name, &collection).await
             }
             MigrationOp::Reset => {
-                crate::migrations::exec_reset(&pool, &app_id, &name, &collection).await
+                crate::migrations::exec_reset(backend.as_ref(), &app_id, &name, &collection).await
             }
         };
         let value = match result {
