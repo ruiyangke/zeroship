@@ -68,17 +68,32 @@ impl Replication {
     }
 
     /// `db.replication.watchdog()` → `Promise<SlotHealth[] JSON>`.
+    /// Scoped to `self.app_id`; the underlying SQL filters
+    /// `pg_replication_slots` by the per-app slot prefix so a tenant
+    /// can never enumerate co-tenant slot names (cross-tenant info
+    /// disclosure — sibling of the cross-app `setup` hijack closed
+    /// at 309ed52f).
     #[v8_method]
     fn watchdog<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
+        opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        replication_watchdog_dispatch(scope).into()
+        // Parse `opts` defensively even though we don't read any field
+        // today: this keeps `resolve_watchdog_app_id` unit-testable for
+        // the "ignore any caller-supplied override" invariant and
+        // mirrors the `setup` pattern.
+        let opts_v = read_json_arg(scope, Some(opts));
+        let app_id = resolve_watchdog_app_id(&self.app_id, &opts_v);
+        replication_watchdog_dispatch(scope, app_id).into()
     }
 
     /// `db.replication.dropAbandoned(opts?)` → `Promise<string[] JSON>`.
     /// `opts.inactiveSeconds` (default 3600) is the threshold; returns
-    /// the names of dropped slots.
+    /// the names of dropped slots. Scoped to `self.app_id`; the
+    /// underlying SQL filters candidate slots by the per-app prefix so
+    /// a tenant can never reap co-tenant slots (cross-tenant DoS —
+    /// sibling of the cross-app `setup` hijack closed at 309ed52f).
     #[v8_method]
     #[v8_name = "dropAbandoned"]
     fn drop_abandoned<'s>(
@@ -91,7 +106,8 @@ impl Replication {
             .get("inactiveSeconds")
             .and_then(Value::as_i64)
             .unwrap_or(3600);
-        replication_drop_abandoned_dispatch(scope, inactive_seconds).into()
+        let app_id = resolve_drop_abandoned_app_id(&self.app_id, &opts_v);
+        replication_drop_abandoned_dispatch(scope, app_id, inactive_seconds).into()
     }
 }
 
@@ -108,6 +124,39 @@ fn resolve_setup_app_id(stamped: &str, _opts: &Value) -> String {
     // INVARIANT: never read app-id-shaped fields from `_opts`. The
     // v8_class executes inside the tenant isolate; any caller-supplied
     // override is a cross-app hijack vector. See module docs.
+    stamped.to_string()
+}
+
+/// Resolve the app_id used by `Replication::watchdog` for dispatch.
+///
+/// Returns `stamped` verbatim, ignoring any `appId` field in the
+/// JS-supplied `opts` object. Lifted out for the same reasons as
+/// [`resolve_setup_app_id`] — a security-critical resolution policy
+/// that must stay unit-testable and visible to reviewers if anyone
+/// tries to restore caller-controlled overrides.
+///
+/// Sibling of the cross-app `setup` hijack closed at 309ed52f: prior
+/// to this fix, `watchdog()` issued a cluster-wide
+/// `pg_replication_slots` enumeration, letting App A discover every
+/// co-tenant app's slot names (info disclosure).
+#[inline]
+fn resolve_watchdog_app_id(stamped: &str, _opts: &Value) -> String {
+    // INVARIANT: never read app-id-shaped fields from `_opts`.
+    stamped.to_string()
+}
+
+/// Resolve the app_id used by `Replication::dropAbandoned` for dispatch.
+///
+/// Returns `stamped` verbatim, ignoring any `appId` field in the
+/// JS-supplied `opts` object.
+///
+/// Sibling of the cross-app `setup` hijack closed at 309ed52f: prior
+/// to this fix, `dropAbandoned()` issued a cluster-wide DROP sweep,
+/// letting App A reap co-tenant inactive slots (cross-tenant DoS —
+/// the next subscriber for the affected victim app has to resync).
+#[inline]
+fn resolve_drop_abandoned_app_id(stamped: &str, _opts: &Value) -> String {
+    // INVARIANT: never read app-id-shaped fields from `_opts`.
     stamped.to_string()
 }
 
@@ -164,7 +213,9 @@ mod tests {
     //! [`super::resolve_setup_app_id`], which always returns the
     //! mint-time `self.app_id`.
 
-    use super::resolve_setup_app_id;
+    use super::{
+        resolve_drop_abandoned_app_id, resolve_setup_app_id, resolve_watchdog_app_id,
+    };
     use serde_json::json;
 
     #[test]
@@ -209,5 +260,82 @@ mod tests {
         // sanitisation at this layer. Callers above already vetted it.
         let stamped = "app_测试_🛡";
         assert_eq!(resolve_setup_app_id(stamped, &json!({"appId": "x"})), stamped);
+    }
+
+    // -----------------------------------------------------------------
+    // Sibling regression guards for the CRITICAL cross-tenant scoping
+    // gap on `watchdog` and `dropAbandoned` (security review r5,
+    // 2026-05-22). Before the fix, both methods called the underlying
+    // dispatchers without any app_id parameter and the SQL ran cluster-
+    // wide; App A could enumerate co-tenant slot names (info
+    // disclosure) or drop co-tenant inactive slots (cross-tenant DoS).
+    //
+    // Mirror the `setup_app_id_ignores_*` pattern: the resolver helpers
+    // must always return the mint-time stamp, never reading
+    // `opts.appId` regardless of shape.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn watchdog_app_id_ignores_string_override() {
+        let opts = json!({"appId": "victim_app"});
+        assert_eq!(resolve_watchdog_app_id("app_a", &opts), "app_a");
+    }
+
+    #[test]
+    fn watchdog_app_id_ignores_non_string_override() {
+        for shape in [
+            json!({"appId": 123}),
+            json!({"appId": true}),
+            json!({"appId": null}),
+            json!({"appId": ["app_b"]}),
+            json!({"appId": {"name": "app_b"}}),
+        ] {
+            assert_eq!(
+                resolve_watchdog_app_id("app_a", &shape),
+                "app_a",
+                "override shape leaked through watchdog: {shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn watchdog_app_id_empty_opts_uses_stamped() {
+        assert_eq!(resolve_watchdog_app_id("app_a", &json!({})), "app_a");
+        assert_eq!(resolve_watchdog_app_id("app_a", &json!(null)), "app_a");
+    }
+
+    #[test]
+    fn drop_abandoned_app_id_ignores_string_override() {
+        let opts = json!({"appId": "victim_app", "inactiveSeconds": 0});
+        assert_eq!(resolve_drop_abandoned_app_id("app_a", &opts), "app_a");
+    }
+
+    #[test]
+    fn drop_abandoned_app_id_ignores_non_string_override() {
+        for shape in [
+            json!({"appId": 123, "inactiveSeconds": 0}),
+            json!({"appId": true}),
+            json!({"appId": null}),
+            json!({"appId": ["app_b"]}),
+            json!({"appId": {"name": "app_b"}}),
+        ] {
+            assert_eq!(
+                resolve_drop_abandoned_app_id("app_a", &shape),
+                "app_a",
+                "override shape leaked through dropAbandoned: {shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_abandoned_app_id_empty_opts_uses_stamped() {
+        assert_eq!(
+            resolve_drop_abandoned_app_id("app_a", &json!({})),
+            "app_a"
+        );
+        assert_eq!(
+            resolve_drop_abandoned_app_id("app_a", &json!(null)),
+            "app_a"
+        );
     }
 }

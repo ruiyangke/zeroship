@@ -87,8 +87,15 @@ pub fn replication_setup_dispatch<'s>(
 }
 
 /// `db.replication.watchdog()` dispatch.
+///
+/// `app_id` is the mint-time stamp from the `Replication` v8_class
+/// wrapper — see the cross-tenant scoping note on
+/// [`crate::replication::watchdog_query`]. The dispatch boundary never
+/// reads an `appId` field from JS opts; callers in `v8_classes/replication.rs`
+/// always pass `self.app_id`.
 pub fn replication_watchdog_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    app_id: String,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
@@ -104,7 +111,7 @@ pub fn replication_watchdog_dispatch<'s>(
                 }
             }
         };
-        match crate::replication::watchdog_query(&pool).await {
+        match crate::replication::watchdog_query(&pool, &app_id).await {
             Ok(rows) => OpResult::JsValue {
                 resolver,
                 value: ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
@@ -121,8 +128,15 @@ pub fn replication_watchdog_dispatch<'s>(
 }
 
 /// `db.replication.dropAbandoned(opts?)` dispatch.
+///
+/// `app_id` is the mint-time stamp from the `Replication` v8_class
+/// wrapper — see the cross-tenant scoping note on
+/// [`crate::replication::drop_abandoned_slots`]. The dispatch boundary
+/// never reads an `appId` field from JS opts; callers in
+/// `v8_classes/replication.rs` always pass `self.app_id`.
 pub fn replication_drop_abandoned_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    app_id: String,
     inactive_seconds: i64,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
@@ -139,7 +153,7 @@ pub fn replication_drop_abandoned_dispatch<'s>(
                 }
             }
         };
-        match crate::replication::drop_abandoned_slots(&pool, inactive_seconds).await {
+        match crate::replication::drop_abandoned_slots(&pool, &app_id, inactive_seconds).await {
             Ok(names) => OpResult::JsValue {
                 resolver,
                 value: ResolveValue::String(

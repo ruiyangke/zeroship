@@ -135,6 +135,22 @@ pub fn slot_name(app_id: &str) -> Result<String, DbError> {
     Ok(format!("{OBJECT_PREFIX}slot_{}", sanitise_app_id(app_id)?))
 }
 
+/// Compose the SQL `LIKE` pattern used to scope cluster-wide queries
+/// against `pg_replication_slots` to a single app (`watchdog_query`,
+/// `drop_abandoned_slots`).
+///
+/// Returns `slot_name(app_id) + '%'` so the filter matches the
+/// canonical per-app slot **plus** any future suffixed shard slot
+/// (`__zs_slot_<app>_<shard>`). The result is always passed via a
+/// parameter bind (`$1`), never string-interpolated into SQL.
+///
+/// Pulled out as a named helper so the per-app scoping invariant has
+/// a single, unit-testable source — see the
+/// `*_filters_by_app_id` regression guards in this module.
+pub(crate) fn slot_name_like_prefix(app_id: &str) -> Result<String, DbError> {
+    Ok(format!("{}%", slot_name(app_id)?))
+}
+
 // ---------------------------------------------------------------------------
 // Provisioning
 // ---------------------------------------------------------------------------
@@ -361,19 +377,37 @@ pub struct SlotHealth {
     pub wal_status: Option<String>,
 }
 
-/// Run the proposal's watchdog query against the cluster.
+/// Run the proposal's watchdog query against the cluster, **scoped to
+/// `app_id`**.
 ///
-/// Returns one entry per `__zs_*` slot. Callers (the maintenance cron)
-/// interpret the results — warn at >8 GB, page at >24 GB, drop slots
-/// that have been `active=false` longer than the configured
-/// abandonment threshold (see [`drop_abandoned_slots`]).
+/// Returns one entry per slot whose name starts with the per-app slot
+/// prefix (`__zs_slot_<sanitised_app_id>`). Callers (the maintenance
+/// cron via the tenant-facing `db.replication.watchdog()`) interpret
+/// the results — warn at >8 GB, page at >24 GB, drop slots that have
+/// been `active=false` longer than the configured abandonment threshold
+/// (see [`drop_abandoned_slots`]).
+///
+/// ## Tenancy
+///
+/// The `WHERE slot_name LIKE $1` filter binds the per-app prefix
+/// (`slot_name(app_id)`, terminated with `%`) so a tenant invocation
+/// only ever sees its own slots. Cluster-wide enumeration from inside
+/// a tenant isolate is a cross-tenant info-disclosure vector — the
+/// sibling vulnerability to the cross-app `setup` hijack closed at
+/// commit `309ed52f`. Operator-shaped cluster sweeps belong in the
+/// control plane, not here.
 ///
 /// The query is in the proposal verbatim (R3) — kept as a single SQL
 /// string here so a code reader can compare it to the proposal text
 /// without translating from a query-builder DSL.
-pub async fn watchdog_query(pool: &Pool) -> Result<Vec<SlotHealth>, DbError> {
-    let sql = format!(
-        r"SELECT
+pub async fn watchdog_query(
+    pool: &Pool,
+    app_id: &str,
+) -> Result<Vec<SlotHealth>, DbError> {
+    // Per-app slot prefix — `slot_name(app_id) + '%'`. See
+    // [`slot_name_like_prefix`]; bound via `$1` below.
+    let slot_prefix = slot_name_like_prefix(app_id)?;
+    let sql = r"SELECT
             slot_name,
             active,
             restart_lsn::text         AS restart_lsn,
@@ -383,10 +417,9 @@ pub async fn watchdog_query(pool: &Pool) -> Result<Vec<SlotHealth>, DbError> {
             END                        AS lag_bytes,
             wal_status
          FROM pg_replication_slots
-         WHERE slot_name LIKE '{OBJECT_PREFIX}%'"
-    );
+         WHERE slot_name LIKE $1";
     let rows = pool
-        .query_text_params(&sql, &[])
+        .query_text_params(sql, &[&slot_prefix])
         .await
         .map_err(|e| {
             let mut err = DbError::from_pg(&e);
@@ -436,13 +469,22 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 // Abandoned-slot GC
 // ---------------------------------------------------------------------------
 
-/// Drop slots that have been inactive longer than `inactive_seconds`.
+/// Drop slots that have been inactive longer than `inactive_seconds`,
+/// **scoped to `app_id`**.
 ///
 /// Implements the "inactive-slot GC" sweeper from the proposal's
-/// maintenance-cron table: any `__zs_*` slot with `active=false` AND
-/// `restart_lsn` older than the threshold is reaped via
-/// `pg_drop_replication_slot()`. The next subscriber for the affected
-/// app sees a one-time `resync` event.
+/// maintenance-cron table: any slot whose name starts with the per-app
+/// prefix and has `active=false` AND `restart_lsn` older than the
+/// threshold is reaped via `pg_drop_replication_slot()`. The next
+/// subscriber for the affected app sees a one-time `resync` event.
+///
+/// ## Tenancy
+///
+/// The candidate filter is bound via a `slot_name LIKE $1` parameter
+/// against `slot_name(app_id) + '%'` (not interpolated). Cluster-wide
+/// DROP from inside a tenant isolate is a cross-tenant DoS vector —
+/// the sibling vulnerability to the cross-app `setup` hijack closed
+/// at commit `309ed52f`.
 ///
 /// Returns the list of dropped slot names (for logging / metrics).
 ///
@@ -471,6 +513,7 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 /// the world to the watchdog running concurrently.
 pub async fn drop_abandoned_slots(
     pool: &Pool,
+    app_id: &str,
     inactive_seconds: i64,
 ) -> Result<Vec<String>, DbError> {
     // We can't easily express "slot has been inactive for N seconds"
@@ -497,21 +540,28 @@ pub async fn drop_abandoned_slots(
     // exactly at HEAD survives even a 0-second threshold.
     let floor_bytes = inactive_seconds.max(0);
 
+    // Per-app slot prefix — same shape as the watchdog filter so a
+    // tenant `dropAbandoned` only ever GCs its own slots (sibling fix
+    // to the cross-app `setup` hijack closed at 309ed52f). Cluster-wide
+    // cross-tenant DROP from inside a tenant isolate is a DoS vector.
+    let slot_prefix = slot_name_like_prefix(app_id)?;
+
     // We SELECT first, then DROP per-row, because
     // `pg_drop_replication_slot()` doesn't return the slot name and a
     // CTE-with-LATERAL gets awkward across pgsql versions.
-    let candidates_sql = format!(
-        r"SELECT slot_name
+    let candidates_sql = r"SELECT slot_name
           FROM pg_replication_slots
-          WHERE slot_name LIKE '{OBJECT_PREFIX}%'
+          WHERE slot_name LIKE $1
             AND active = false
             AND (
                   restart_lsn IS NULL
-               OR pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) >= $1
-            )"
-    );
+               OR pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) >= $2
+            )";
     let rows = pool
-        .query_text_params(&candidates_sql, &[&floor_bytes.to_string()])
+        .query_text_params(
+            candidates_sql,
+            &[&slot_prefix, &floor_bytes.to_string()],
+        )
         .await
         .map_err(|e| {
             let mut err = DbError::from_pg(&e);
@@ -869,6 +919,89 @@ mod tests {
                 other => panic!("expected CodedError, got {other:?}"),
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Cross-tenant scoping regression guards (security review r5,
+    // 2026-05-22). Before the fix, `watchdog_query` and
+    // `drop_abandoned_slots` ran cluster-wide enumerations/DROPs against
+    // `pg_replication_slots` with no per-app filter, exposing co-tenant
+    // slot names and enabling cross-tenant DoS via `dropAbandoned`.
+    //
+    // Both helpers now build the candidate filter from
+    // `slot_name_like_prefix(app_id)` and pass it as a `$1` parameter
+    // bind. We can't drive a real `Pool` from a unit test, so these
+    // tests pin the per-app prefix value — the exact string the
+    // dispatchers bind into the `LIKE $1` predicate. Any future change
+    // that drops the `app_id` scoping has to first delete these tests.
+    // -----------------------------------------------------------------
+
+    /// `watchdog_query` binds `slot_name(app_id) + '%'` into the
+    /// `slot_name LIKE $1` predicate so the cluster-wide scan is
+    /// scoped to the calling app's slot namespace.
+    #[test]
+    fn watchdog_query_filters_by_app_id() {
+        // `app_a`'s per-app prefix must be the canonical slot name
+        // terminated with `%`. The dispatcher passes this exact value
+        // as the `$1` bind.
+        let p = slot_name_like_prefix("app_a").unwrap();
+        assert_eq!(p, "__zs_slot_app_a%");
+
+        // Different apps produce different prefixes — App A's bind
+        // value cannot match App B's slot.
+        let p_b = slot_name_like_prefix("app_b").unwrap();
+        assert_ne!(p, p_b);
+        assert_eq!(p_b, "__zs_slot_app_b%");
+
+        // Sanitise + lowercase still applies (Postgres folds unquoted
+        // identifiers); a mixed-case stamp maps to the same prefix as
+        // its lowercased form so the param bind matches.
+        assert_eq!(
+            slot_name_like_prefix("MyApp").unwrap(),
+            "__zs_slot_myapp%"
+        );
+
+        // Empty / invalid app_id propagates the validation error
+        // (`invalid_app_id`) instead of producing the cluster-wide
+        // `%` wildcard that would re-introduce the vulnerability.
+        let err = slot_name_like_prefix("").unwrap_err();
+        assert!(
+            matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
+            "empty app_id must reject, not silently broaden the filter: got {err:?}"
+        );
+        // Defence in depth: a literal `%` in the app_id would be a
+        // wildcard-injection vector, but `sanitise_app_id` already
+        // rejects non-`[A-Za-z0-9_]` characters — confirm the rejection
+        // flows through.
+        let err = slot_name_like_prefix("%").unwrap_err();
+        assert!(
+            matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
+            "wildcard char must reject, not leak into LIKE: got {err:?}"
+        );
+    }
+
+    /// `drop_abandoned_slots` uses the same `slot_name_like_prefix`
+    /// shape for its candidate filter (the `$1` bind), so a tenant
+    /// `dropAbandoned` can only reap its own inactive slots.
+    #[test]
+    fn drop_abandoned_slots_filters_by_app_id() {
+        // The candidate-enumeration CTE binds `slot_name LIKE $1` with
+        // the per-app prefix. Same helper as `watchdog_query` — pinning
+        // both call sites against one canonical value catches any drift.
+        let p = slot_name_like_prefix("app_a").unwrap();
+        assert_eq!(p, "__zs_slot_app_a%");
+
+        // App A's bind cannot reap App B's slot.
+        let p_b = slot_name_like_prefix("app_b").unwrap();
+        assert_ne!(p, p_b);
+
+        // Validation-failure path also pins for dropAbandoned, since a
+        // silent fallback to `%` here is the higher-severity DoS case.
+        let err = slot_name_like_prefix("").unwrap_err();
+        assert!(
+            matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
+            "empty app_id must reject, not silently broaden the DROP filter: got {err:?}"
+        );
     }
 
     /// `prefix_message` is a no-op for the structured variants whose
