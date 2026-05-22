@@ -23,7 +23,6 @@
 //! isolation. The pool is created lazily on first use (one per worker
 //! thread).
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use compio_postgres::Pool;
@@ -50,27 +49,11 @@ pub mod v8_classes;
 pub mod wal_consumer;
 
 // ---------------------------------------------------------------------------
-// Thread-local state
+// Per-isolate state
 // ---------------------------------------------------------------------------
-
-thread_local! {
-    /// Broker events queued during an active transaction.
-    ///
-    /// While a transaction connection is parked, every successful CRUD
-    /// mutation pushes its `ChangeEvent` here instead of calling
-    /// [`crate::wal_consumer::emit_local`] directly. The transaction
-    /// settle path (`Transaction::end` for user-driven tx;
-    /// `exec_auto_end` for the auto-tx wrapper) drains the queue and
-    /// either fires every event through `emit_local` on COMMIT or
-    /// clears it on ROLLBACK. This closes the "emit-before-commit"
-    /// dual-write window where a subscriber could `find()` rows that
-    /// don't yet exist on disk (or that a ROLLBACK is about to undo).
-    ///
-    /// `None` outside a transaction; non-empty `Some(Vec<_>)` only
-    /// while a tx is active. Drained atomically by `Vec::take`.
-    pub(crate) static PENDING_EMITS: RefCell<Option<Vec<crate::broker::ChangeEvent>>> =
-        const { RefCell::new(None) };
-}
+//
+// All per-isolate slots live on [`context::IsolateDbContext`]; this
+// module just re-exports the helpers the rest of the crate calls.
 
 /// Allocate a fresh non-zero TX_TOKEN value. Called by
 /// `orchestrator::transaction::begin_transaction_dispatch` right before
@@ -227,10 +210,7 @@ pub fn uninstall_tx_marker_for_tests() {
 /// running real SQL.
 #[doc(hidden)]
 pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
-    PENDING_EMITS.with(|p| {
-        let mut slot = p.borrow_mut();
-        slot.get_or_insert_with(Vec::new).push(ev);
-    });
+    ctx_mut(|c| c.push_pending_emit(ev));
 }
 
 /// **Test-only**: drain the pending-emits queue (fire all events

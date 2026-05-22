@@ -182,9 +182,10 @@ pub(crate) async fn exec_mutation_with_emit(
 }
 
 /// If a transaction is active on this thread, queue the event in
-/// [`crate::PENDING_EMITS`] for the settle path to drain on COMMIT.
-/// Otherwise (autocommit), fire it immediately. Closes Gap B —
-/// subscribers no longer observe pre-commit state.
+/// the per-isolate context's `pending_emits` slot for the settle
+/// path to drain on COMMIT. Otherwise (autocommit), fire it
+/// immediately. Closes Gap B — subscribers no longer observe
+/// pre-commit state.
 fn queue_or_emit(
     app_id: &str,
     collection: &str,
@@ -207,17 +208,15 @@ fn queue_or_emit(
         new_tuple,
         old_tuple: None,
     };
-    crate::PENDING_EMITS.with(|p| {
-        let mut slot = p.borrow_mut();
-        slot.get_or_insert_with(Vec::new).push(ev);
-    });
+    context::with_mut(|c| c.push_pending_emit(ev));
 }
 
-/// Drain [`crate::PENDING_EMITS`] and fire every queued event through
-/// the broker. Called by the transaction settle path on COMMIT.
+/// Drain the per-isolate `pending_emits` queue and fire every queued
+/// event through the broker. Called by the transaction settle path
+/// on COMMIT.
 pub(crate) fn drain_pending_emits_on_commit() {
-    let queued: Vec<crate::broker::ChangeEvent> = crate::PENDING_EMITS
-        .with(|p| p.borrow_mut().take().unwrap_or_default());
+    let queued: Vec<crate::broker::ChangeEvent> =
+        context::with_mut(|c| c.drain_pending_emits());
     for ev in queued {
         crate::wal_consumer::emit_local(
             &ev.app_id,
@@ -230,11 +229,12 @@ pub(crate) fn drain_pending_emits_on_commit() {
     }
 }
 
-/// Clear [`crate::PENDING_EMITS`] without firing any events. Called by
-/// the transaction settle path on ROLLBACK (and by `exec_begin` to
-/// drop any stale residue from an interrupted prior run).
+/// Clear the per-isolate `pending_emits` queue without firing any
+/// events. Called by the transaction settle path on ROLLBACK (and by
+/// `exec_begin` to drop any stale residue from an interrupted prior
+/// run).
 pub(crate) fn clear_pending_emits() {
-    crate::PENDING_EMITS.with(|p| *p.borrow_mut() = None);
+    context::with_mut(|c| c.clear_pending_emits());
 }
 
 /// Lazy pool accessor shared by every async helper that needs the
