@@ -78,7 +78,7 @@ use compio_postgres::replication::{
     pgoutput::{self, PgOutputMessage, TupleColumn, TupleData},
 };
 
-use crate::broker::{publish, ChangeEvent, ChangeOp};
+use crate::broker::{has_subscribers, publish, ChangeEvent, ChangeOp};
 
 // ---------------------------------------------------------------------------
 // Per-app emit-suppression
@@ -532,6 +532,20 @@ impl WalConsumer {
             return;
         };
         if rel.namespace != self.app_id {
+            return;
+        }
+
+        // Perf CRITICAL N-C1: short-circuit before the
+        // (column-name-clone) `changed_columns` Vec and the two
+        // `tuple_to_map` HashMaps. On a table with no reactive
+        // subscribers — the majority of tables in typical apps — the
+        // event would otherwise be built only for `broker::publish` to
+        // immediately discard it. The check is a single
+        // `HashMap::get` on the thread-local broker; safe because the
+        // broker and this consumer run on the same compio thread, so a
+        // subscriber registered after the check would only see FUTURE
+        // events anyway.
+        if !has_subscribers(&self.app_id, &rel.table) {
             return;
         }
 
