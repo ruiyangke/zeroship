@@ -288,6 +288,17 @@ impl DbError {
     }
 }
 
+// Postgres-side → DbError so SQL helpers can `?`-flow driver errors
+// through the same `to_op_error()` boundary. Routes through
+// [`DbError::from_pg`] so SQLSTATE classification is the single source
+// of truth — callers gain ergonomic `?` operator while the variant
+// selection stays in one place.
+impl From<compio_postgres::Error> for DbError {
+    fn from(e: compio_postgres::Error) -> Self {
+        DbError::from_pg(&e)
+    }
+}
+
 // Builder-side QueryError → DbError so the dispatch helpers can
 // `?`-flow query-construction failures through the same `to_op_error()`
 // boundary. Builder errors are user-input refusals (bad filter, bad
@@ -453,6 +464,19 @@ mod tests {
         assert!(op_hint(DbError::UniqueViolation { message: "x".into() }).is_none());
         assert!(op_hint(DbError::FkViolation { message: "x".into() }).is_none());
         assert!(op_hint(DbError::Internal { message: "x".into() }).is_none());
+    }
+
+    /// `From<compio_postgres::Error>` must route through
+    /// [`DbError::from_pg`] so the SQLSTATE classification stays the
+    /// single source of truth. We can't fabricate a real
+    /// `compio_postgres::Error` from a `#[test]` without a live
+    /// listener (the type's constructors are crate-private), so this
+    /// test pins the contract at the type level — if the `From` impl
+    /// disappears or its signature drifts, compile fails here.
+    #[test]
+    fn from_pg_error_impl_is_wired() {
+        fn assert_from<T: From<compio_postgres::Error>>() {}
+        assert_from::<DbError>();
     }
 
     /// `From<QueryError>` collapses the builder's three error kinds
