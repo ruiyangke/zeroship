@@ -119,10 +119,21 @@ impl ChangeClass {
 /// Initial status accepted on INSERT — proposal A3 state machine
 /// (`pending` for asynchronous queueing, `running` for synchronous DDL
 /// where the orchestrator owns the work).
+///
+/// `ValidationRefused` is a terminal status that may ALSO appear on
+/// INSERT — the validate stage writes destructive-op audit rows that
+/// land terminal at creation, eliminating the orphan-Pending window the
+/// previous Failed+marker pattern carried. The audit table's status
+/// CHECK accepts it as both an initial and terminal value (see
+/// `ensure_audit_table_exists`).
 #[derive(Debug, Clone, Copy)]
 pub enum InitialStatus {
     Pending,
     Running,
+    /// Destructive op refused by the validate stage. Lands terminal at
+    /// INSERT so there is no orphan-Pending window for operators to
+    /// chase. Mirrors `TerminalStatus::ValidationRefused`.
+    ValidationRefused,
 }
 
 impl InitialStatus {
@@ -130,6 +141,7 @@ impl InitialStatus {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
+            Self::ValidationRefused => "validation_refused",
         }
     }
 }
@@ -141,6 +153,14 @@ pub enum TerminalStatus {
     AppliedWithDeadLetter,
     Failed,
     Cancelled,
+    /// Destructive op refused by validate (proposal A2 strict mode).
+    /// Distinguishes "the platform refused to run this DDL" from
+    /// "the DDL ran and failed" (`Failed`). Operators can grep on
+    /// `status = 'validation_refused'` without parsing `error_message`.
+    /// Symmetric with `InitialStatus::ValidationRefused` so callers
+    /// can express the state either as an INSERT-direct terminal or
+    /// as a transition target.
+    ValidationRefused,
 }
 
 impl TerminalStatus {
@@ -150,6 +170,7 @@ impl TerminalStatus {
             Self::AppliedWithDeadLetter => "applied_with_dead_letter",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::ValidationRefused => "validation_refused",
         }
     }
 }
@@ -216,7 +237,7 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
     change_class IN ('additive','compatible','destructive')
   ),
   CONSTRAINT __zeroship_migrations_status_chk CHECK (
-    status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back')
+    status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back','validation_refused')
   )
 )"#
     );
@@ -238,6 +259,35 @@ pub async fn ensure_audit_table_exists(pool: &Pool, app_id: &str) -> Result<(), 
     pool.query_text_params(&add_gen, &empty)
         .await
         .map_err(|e| coded_sql("add audit_generation column", e))?;
+
+    // F2 (r13): widen the status CHECK on pre-existing audit tables to
+    // include `'validation_refused'`. `DROP CONSTRAINT IF EXISTS` makes
+    // this idempotent — on a freshly created table the constraint name
+    // matches what we just emitted (`CREATE TABLE` above wired the same
+    // constraint) so DROP+ADD is a no-op rewrite; on an old table from
+    // before this commit the DROP succeeds (constraint exists) and the
+    // ADD installs the wider list. On a really old table without the
+    // named constraint at all, the IF EXISTS clause swallows the miss
+    // and ADD still installs the new constraint.
+    //
+    // The ADD uses the same constraint name as `CREATE TABLE` so the
+    // post-state is identical regardless of which branch ran.
+    let drop_status_chk = format!(
+        r#"ALTER TABLE "{app_id}"."__zeroship_migrations"
+            DROP CONSTRAINT IF EXISTS __zeroship_migrations_status_chk"#
+    );
+    pool.query_text_params(&drop_status_chk, &empty)
+        .await
+        .map_err(|e| coded_sql("drop status_chk", e))?;
+    let add_status_chk = format!(
+        r#"ALTER TABLE "{app_id}"."__zeroship_migrations"
+            ADD CONSTRAINT __zeroship_migrations_status_chk CHECK (
+                status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back','validation_refused')
+            )"#
+    );
+    pool.query_text_params(&add_status_chk, &empty)
+        .await
+        .map_err(|e| coded_sql("add status_chk", e))?;
 
     // Indexes — proposal section A3. These are plain (non-CONCURRENT)
     // because we're inside the cold-start orchestration that has the
@@ -885,10 +935,12 @@ mod tests {
         assert_eq!(ChangeClass::Destructive.as_sql(), "destructive");
         assert_eq!(InitialStatus::Pending.as_sql(), "pending");
         assert_eq!(InitialStatus::Running.as_sql(), "running");
+        assert_eq!(InitialStatus::ValidationRefused.as_sql(), "validation_refused");
         assert_eq!(TerminalStatus::Applied.as_sql(), "applied");
         assert_eq!(TerminalStatus::AppliedWithDeadLetter.as_sql(), "applied_with_dead_letter");
         assert_eq!(TerminalStatus::Failed.as_sql(), "failed");
         assert_eq!(TerminalStatus::Cancelled.as_sql(), "cancelled");
+        assert_eq!(TerminalStatus::ValidationRefused.as_sql(), "validation_refused");
         assert_eq!(ActorKind::Auto.as_sql(), "auto");
     }
 }

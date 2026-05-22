@@ -4,10 +4,11 @@
 //!
 //! - `strictness == "strict"` (default): destructive ops produce a
 //!   `validation_refused` envelope and short-circuit the pipeline.
-//!   Every refused destructive op is still audited as `pending` so
-//!   operators can see what was refused.
-//! - `strictness == "lenient"`: destructive ops are audited as
-//!   `pending` and silently dropped from the apply set.
+//!   Every refused destructive op is INSERTed terminal as
+//!   `validation_refused` so operators can see what was refused (no
+//!   orphan-Pending row).
+//! - `strictness == "lenient"`: destructive ops are INSERTed terminal
+//!   as `validation_refused` and silently dropped from the apply set.
 //! - `strictness == "off"`: destructive ops fall through into apply
 //!   (this is the test/CI mode — proposal A2 line 122).
 //!
@@ -64,29 +65,20 @@ pub(crate) async fn validate<B: Backend>(
         .collect();
 
     if !destructive.is_empty() && ctx.strictness != "off" {
-        // F2 resolution (migration-pipeline r2 §F2; 4+ cycle carry):
-        // every audit row must reach a terminal status. Previously the
-        // destructive-op Pending row was written here and then ORPHANED —
-        // strict mode short-circuited via the envelope without touching
-        // the row, and lenient mode let `apply` skip the destructive op
-        // without terminalising it. Operators querying
-        // `status = 'pending'` saw phantom in-flight work that never
-        // resolved.
+        // F2 resolution upgrade (migration-pipeline r13): every audit
+        // row must reach a terminal status. The earlier shape wrote
+        // `Pending` then drove it to `Failed` via a second UPDATE — a
+        // two-statement transition that could leave a row stranded in
+        // `pending` if the worker crashed or the UPDATE failed between
+        // the two writes (the prior commit `14d7608f` warned about
+        // this on the second-write error path).
         //
-        // The fix writes the Pending row AND immediately drives it to
-        // `Failed` with `validation_refused` as the error message
-        // marker. We use `Failed` (not a new `ValidationRefused`
-        // terminal) because the audit table's status CHECK constraint
-        // (`audit.rs:218-220`) doesn't include `validation_refused`,
-        // and rolling a new terminal across existing tables would need
-        // a CHECK ALTER on every app's `__zeroship_migrations` — out
-        // of scope for a refactor-safe pickup. The error_message
-        // marker is the distinguishable token (`validation_refused`)
-        // operators grep on, the change_class column carries
-        // `destructive`, and the deploy_id ties the row to the rejected
-        // deploy. The design doc's "new ValidationRefused terminal"
-        // recommendation is preserved as future work gated on a
-        // coordinated CHECK rewrite.
+        // The r13 upgrade lands the row directly terminal via INSERT
+        // with `status = 'validation_refused'`. The audit table's
+        // status CHECK now accepts `'validation_refused'` (extended in
+        // `ensure_audit_table_exists`); both strict and lenient modes
+        // route through this terminal — eliminating the orphan window
+        // entirely, with no UPDATE round-trip to fail.
         for op in &destructive {
             let row = crate::audit::AuditRow {
                 collection: op.collection.clone(),
@@ -95,7 +87,7 @@ pub(crate) async fn validate<B: Backend>(
                 change_kind: op.change_kind.as_sql().to_string(),
                 details: op.details.clone(),
                 ddl_sql: op.sql.clone(),
-                status: crate::audit::InitialStatus::Pending,
+                status: crate::audit::InitialStatus::ValidationRefused,
                 deploy_id: ctx.deploy_id.clone(),
                 schema_version: ctx.schema_version,
                 actor: crate::audit::ActorKind::Auto,
@@ -103,33 +95,8 @@ pub(crate) async fn validate<B: Backend>(
             // Best-effort: a failure to write the audit row should not
             // mask the envelope — tracing::warn so it shows in worker
             // logs but the user-facing error stays clean.
-            match backend.write_audit_row(&ctx.app_id, &row).await {
-                Ok(audit_id) => {
-                    // Terminalise immediately to close the orphan-Pending
-                    // window (F2). Field shape matches the F1 warn-half
-                    // family (`audit_err`, `transition`) so operators
-                    // grep the same emissions.
-                    if let Err(audit_err) = backend
-                        .update_audit_status(
-                            &ctx.app_id,
-                            audit_id,
-                            crate::audit::TerminalStatus::Failed,
-                            Some("validation_refused"),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            app_id = %ctx.app_id,
-                            audit_id = audit_id,
-                            transition = "Failed/validation_refused",
-                            audit_err = %audit_err,
-                            "update_audit_status failed; row stays in 'pending' until reset",
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = ?e, "audit: failed to log destructive op");
-                }
+            if let Err(e) = backend.write_audit_row(&ctx.app_id, &row).await {
+                tracing::warn!(error = ?e, "audit: failed to log destructive op");
             }
         }
 
@@ -137,7 +104,8 @@ pub(crate) async fn validate<B: Backend>(
             return Err(build_validation_refused_envelope(&ctx.deploy_id, &destructive));
         }
         // strictness == "lenient": fall through, but apply will skip
-        // destructive ops.
+        // destructive ops. The audit row above already terminalised so
+        // operators see the refusal without an orphan-Pending row.
     }
 
     // -------------------------------------------------------------------

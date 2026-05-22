@@ -1111,7 +1111,10 @@ async fn a2_destructive_drop_column_refused_strict() {
     assert_eq!(pending[0]["change_kind"], "drop_column");
     assert_eq!(pending[0]["field"], "legacy_score");
 
-    // The audit table should show the refused op as 'pending' (not applied).
+    // The audit table should show the refused op as 'validation_refused'
+    // (migration-pipeline r13: INSERT-direct terminal — no orphan-Pending
+    // window). Distinguishes "platform refused this DDL" from "DDL ran
+    // and failed" without parsing `error`.
     let rows = pool
         .query_text_params(
             &format!(
@@ -1124,7 +1127,10 @@ async fn a2_destructive_drop_column_refused_strict() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     let st: String = rows[0].get("status");
-    assert_eq!(st, "pending", "refused destructive ops stay pending for operator review");
+    assert_eq!(
+        st, "validation_refused",
+        "refused destructive ops land in validation_refused terminal",
+    );
 
     // The legacy_score column must still exist (refused = no DDL run).
     let cols = pool
