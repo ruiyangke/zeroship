@@ -56,7 +56,7 @@ use crate::v8_bridge::row_to_json;
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
 /// `LIKE '__zs_%'` stays selective and the names fit inside Postgres's
 /// 63-character `NAMEDATALEN` budget alongside even a long app_id.
-pub const OBJECT_PREFIX: &str = "__zs_";
+pub(crate) const OBJECT_PREFIX: &str = "__zs_";
 
 // ---------------------------------------------------------------------------
 // Naming
