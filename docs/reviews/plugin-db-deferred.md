@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 04:00.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 04:35.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -401,16 +401,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I39] OrchestratorLockGuard::Drop leaks session-scoped advisory lock (code-critique r4 M-NEW-1)
-- **Source**: `plugin-db-code-critique-2026-05-22-r4.md` §"M-NEW-1"
-- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:159-182`
-- **Description**: Drop only logs `tracing::error!` — the still-locked `PooledClient` returns to the pool. Session-scoped advisory lock leaks across tenants if a code path drops the guard without `release().await`. Fundamental: Drop can't await. Mitigations: (a) document the consequence more loudly; (b) detect Drop-with-unreleased earlier (compile-time `must_use`?); (c) spawn a fire-and-forget unlock task from Drop (requires runtime handle).
-- **Status as of 2026-05-22 02:50**: design needed; pure docs/warnings work + maybe a `#[must_use]` annotation.
-- **Effort**: small (docs) to medium (compile-time enforcement)
-- **Pickable this cycle**: rolled forward as part of code-critique follow-up.
-
----
-
 ### [I43] bootstrap.rs still uses blocking pg_advisory_lock (security r4 IMPORTANT)
 - **Source**: `plugin-db-security-2026-05-22-r4.md` §"sharpened IMPORTANT"
 - **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
@@ -604,6 +594,22 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S46] IMPORTANT [I39] (cycle 04:35) — OrchestratorLockGuard Drop docs + #[must_use]
+- **Closed by**: `808a32af plugin-db/orchestrator/lock_guard: must_use + louder Drop log`
+- Added `#[must_use]` attribute to the guard struct so accidental `let _ = acquire(...).await` patterns surface as compile-time warnings. Strengthened Drop log with "leak:" prefix, operator-facing consequence ("Concurrent register_model callers for this app will stall"), and diagnostic checklist (cancellation / panic / forgotten release).
+
+### [S47] MAJOR [I44] (cycle 04:35) — lock_guard.release silently swallowed unlock SQL errors
+- **Closed by**: `ffb1e101 plugin-db/orchestrator/lock_guard: warn on pg_advisory_unlock errors`
+- Code-critique r5 MAJOR-R5-5: the [I42] reorder kept `let _ =` on the unlock-SQL await, silently swallowing runtime errors (network blips, connection invalidation, etc.). Replaced with `if let Err(e)` + `tracing::warn!` capturing key/tag/error. Lock still auto-releases on PG session close; the warn makes a transient leak visible.
+
+### [S48] CRITICAL (security r5 NEW; cycle 04:35) — Replication::watchdog + dropAbandoned cross-app exposure
+- **Closed by**: `c0590506 plugin-db/v8_classes/replication: scope watchdog + dropAbandoned to self.app_id (CRITICAL)`
+- Sibling of the cross-app `setup` hijack (309ed52f). Both `watchdog()` and `dropAbandoned()` were `#[v8_method]` exposed to tenant JS but executed cluster-wide queries with no app_id scoping. App A could enumerate every co-tenant's slot names (info disclosure) or drop their inactive slots (DoS via forced resync). Plumbed `self.app_id` through both dispatch helpers; added `WHERE slot_name LIKE '<per-app-prefix>%'` filter via parameter binds. New `resolve_watchdog_app_id` + `resolve_drop_abandoned_app_id` helpers mirror the regression-trip-wire pattern.
+
+### [S49] IMPORTANT (architecture r6 §I4; cycle 04:35) — first_row_or_internal() helper for empty-RETURNING cluster
+- **Closed by**: `eda96ead plugin-db: extract first_row_or_internal() helper for empty-RETURNING cluster`
+- N=4 sibling-pattern cluster (audit.rs ×2, replication.rs, migrations.rs:326) extracted to a single `first_row_or_internal<R>(rows, op)` helper in error.rs. 3 sites converted (migrations.rs:326 left untouched per the architect's note — its sentinel-check shape doesn't fit the helper's slice signature). 2 new unit tests pin the helper's contract.
+
 ### [S45] IMPORTANT [I42] (cycle 04:00) — lock_guard.release flipped state before await
 - **Closed by**: `bd1e7ce1 plugin-db/orchestrator/lock_guard: defer released-flag flip to AFTER unlock await`
 - `release()` previously set `self.released = true` and took the client out of self BEFORE the unlock-SQL await. A cancellation/panic mid-await silently leaked the lock — Drop's catastrophic-log path was suppressed because `released = true`. Reordered: unlock SQL via `&`-borrow, await completes, then flip `released` and take the client. On cancellation: `released = false`, `client = Some(_)`, Drop fires its log; client drops back to pool with lock held until the underlying PG session ends.
@@ -636,21 +642,20 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **01:35** closed [I27], [I30]
 - **02:50** closed [I36], [I38]; recovered 60ca1ad6 silent reversion
 - **03:25** closed [I40], [I41], 5 mint_* demote, validate.rs doc CRITICAL
-- **04:00** closed [I28] ~70-site Result<_,String> sweep, [I42] lock_guard await order
+- **04:00** closed [I28] ~70-site sweep, [I42] lock_guard await order
+- **04:35** closed [I39] guard #[must_use], [I44] unlock-SQL warn, NEW CRITICAL (watchdog+dropAbandoned cross-app), first_row_or_internal helper
 
-**Net since pilot started**: ~22 closures, ~21 new findings. Score trajectory net-positive across all lenses.
+**Net since pilot started**: ~26 closures, ~22 new findings. Score trajectory net-positive across all lenses.
 
-### Pick #1 (next cycle): **[I39] OrchestratorLockGuard::Drop semantics + `#[must_use]`**
-- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:159-182`
-- **Fix sketch**: Annotate the struct with `#[must_use]` so any code path that drops the guard without `release().await` or `into_held()` gets a compile-time warning. Strengthen the Drop log to include the full key + a "session-scoped lock leaked" phrasing. Document that PG auto-release on session close is the safety net.
-- **Why next**: small (annotation + doc); raises the floor on the residual silent-lock-leak class beyond what [I42] addressed.
-- **Verification gate**: build clean; verify any test that drops a guard without release triggers the warning (or document the limitation if the type pattern doesn't support it cleanly).
+### Pick #1 (next cycle): **Code-critique r5 MAJOR-R5-2 — mark_consumer_running races spawn panic**
+- **File**: `crates/plugin-db/src/replication_ops.rs:244-252`
+- **Fix sketch**: Reorder to spawn BEFORE writing to running_consumers, OR wrap the spawn in `std::panic::catch_unwind` and remove the mark on panic. The current shape silently leaves the app permanently marked-running if `compio::runtime::spawn` panics.
+- **Why next**: small refactor (2-3 lines); concurrency-class correctness; clear regression test possible.
 
-### Pick #2 (next cycle): **architecture r6 follow-up — `first_row_or_internal()` helper**
-- **File** (multi): `audit.rs:325-330, 613-618`, `replication.rs:240-249`, `migrations.rs:326-332`
-- **Fix sketch**: Extract a generic helper `fn first_row_or_internal<T>(rows: &[Row], op: &str) -> Result<&Row, DbError>` (or similar) that absorbs the 4-site cluster of "empty RETURNING is silent". Call sites become `let r = first_row_or_internal(&rows, "...")?;`.
-- **Why**: architecture r6 top recommendation; cluster grew from N=2 to N=4 since the pattern was first identified, validating it as a real abstraction.
-- **Verification gate**: all 4 call sites converted + new helper has its own unit tests.
+### Pick #2 (next cycle): **Code-critique r5 MAJOR-R5-3 — extract shared coded_sql helper**
+- **File** (multi): `audit.rs`, `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `diff.rs` — 5 duplicate copies of `coded_sql`.
+- **Fix sketch**: Move to `error.rs` (or a `error_helpers.rs`) as a `pub(crate)` function. DRY follow-up to the [I28] sweep.
+- **Why**: code-critique r5 MAJOR-R5-3; introduced by per-file [I28] migration; pattern consolidation.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
