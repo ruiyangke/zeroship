@@ -47,7 +47,7 @@ use compio_postgres::{Client, Pool};
 use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
-use crate::audit::{ActorKind, ChangeClass, TerminalStatus};
+use crate::audit::TerminalStatus;
 use crate::query::{quote_ident, validate_collection};
 
 thread_local! {
@@ -298,110 +298,49 @@ pub async fn exec_begin(
 
     if reset {
         // Same generation bump as `exec_reset` — see Gap X.
-        let sql = format!(
-            r#"UPDATE "{app_id}"."__zeroship_migrations"
-                SET status = 'pending',
-                    validate_cursor = NULL,
-                    dead_letter_pks = NULL,
-                    error = NULL,
-                    applied_at = NULL,
-                    updated_at = NOW(),
-                    audit_generation = audit_generation + 1,
-                    details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
-                WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
-        );
-        client
-            .query_text_params(&sql, &[collection, name])
+        crate::audit::reset_backfill_row(&client, app_id, collection, name)
             .await
             .map_err(|e| coded_sql("migration reset", e))?;
     }
 
-    let lookup_sql = format!(
-        r#"SELECT id, status, validate_cursor, dead_letter_pks, details, audit_generation
-            FROM "{app_id}"."__zeroship_migrations"
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
-            ORDER BY id DESC LIMIT 1"#
-    );
-    let existing = client
-        .query_text_params(&lookup_sql, &[collection, name])
+    let existing = crate::audit::find_latest_backfill_row(&client, app_id, collection, name)
         .await
         .map_err(|e| coded_sql("migration lookup", e))?;
 
-    let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing.first() {
-        let id: i64 = row.get("id");
-        let status: String = row.get("status");
-        if status == "cancelled" {
+    let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing {
+        if row.status == "cancelled" {
             // Refuse — operator must reset to clear state.
             let _ = release_advisory(&client, app_id, name).await;
             drop(client);
             return Err(err_cancelled_on_start());
         }
-        let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
-        let processed = read_processed_from_row(row);
-        let dlp = read_dead_letter_pks(row);
-        let gen: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
-
-        let upd_sql = format!(
-            r#"UPDATE "{app_id}"."__zeroship_migrations"
-                SET status = 'running',
-                    owner_session_id = pg_backend_pid()::text,
-                    last_heartbeat_at = NOW(),
-                    updated_at = NOW(),
-                    error = NULL
-                WHERE id = $1::bigint"#
-        );
-        let id_s = id.to_string();
-        client
-            .query_text_params(&upd_sql, &[id_s.as_str()])
+        crate::audit::set_backfill_running(&client, app_id, row.id)
             .await
             .map_err(|e| coded_sql("migration set running", e))?;
-        (id, cursor, processed, dlp, gen)
+        (row.id, row.cursor, row.processed, row.dead_letter_pks, row.audit_generation)
     } else {
         let schema_version =
             crate::audit::next_schema_version(pool, app_id).await.unwrap_or(1);
-        let details = serde_json::json!({
-            "processed": 0,
-            "dryRun": dry_run,
-        });
-        let sql = format!(
-            r#"INSERT INTO "{app_id}"."__zeroship_migrations"
-                (collection, phase, change_class, change_kind, details,
-                 ddl_sql, status, deploy_id, applied_by_kind, schema_version,
-                 owner_session_id, last_heartbeat_at, validate_cursor)
-                VALUES ($1, 'backfill', $2, $3, $4::jsonb,
-                        NULL, 'running', $5, $6, $7::integer,
-                        pg_backend_pid()::text, NOW(), 0)
-                RETURNING id"#
-        );
         let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID")
             .unwrap_or_else(|_| "cold_start".to_string());
-        let details_s = details.to_string();
-        let sv_s = schema_version.to_string();
-        let rows = client
-            .query_text_params(
-                &sql,
-                &[
-                    collection,
-                    ChangeClass::Additive.as_sql(),
-                    name,
-                    details_s.as_str(),
-                    deploy_id.as_str(),
-                    ActorKind::Auto.as_sql(),
-                    sv_s.as_str(),
-                ],
-            )
-            .await
-            .map_err(|e| coded_sql("migration insert", e))?;
-        let id: i64 = rows
-            .first()
-            .map(|r| r.get::<_, i64>("id"))
-            .ok_or_else(|| {
-                coded(
-                    "internal",
-                    "db: migration insert returned no row",
-                    None,
-                )
-            })?;
+        let id = crate::audit::insert_backfill_running(
+            &client,
+            app_id,
+            collection,
+            name,
+            dry_run,
+            deploy_id.as_str(),
+            schema_version,
+        )
+        .await
+        .map_err(|e| coded_sql("migration insert", e))?;
+        if id == 0 {
+            return Err(coded(
+                "internal",
+                "db: migration insert returned no row",
+                None,
+            ));
+        }
         // Freshly INSERTed row — DEFAULT 0 for audit_generation.
         (id, 0i64, 0i64, Value::Array(vec![]), 0i64)
     };
@@ -425,30 +364,6 @@ pub async fn exec_begin(
         "deadLetterPks": dead_letter_pks,
     })
     .to_string())
-}
-
-fn read_processed_from_row(row: &compio_postgres::Row) -> i64 {
-    let bytes = row.raw_value("details");
-    let Some(bytes) = bytes else { return 0 };
-    if bytes.len() < 2 {
-        return 0;
-    }
-    let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
-    let parsed: Value = serde_json::from_str(json_str).unwrap_or(Value::Null);
-    parsed
-        .get("processed")
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
-}
-
-fn read_dead_letter_pks(row: &compio_postgres::Row) -> Value {
-    let bytes = row.raw_value("dead_letter_pks");
-    let Some(bytes) = bytes else { return Value::Array(vec![]) };
-    if bytes.len() < 2 {
-        return Value::Array(vec![]);
-    }
-    let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
-    serde_json::from_str(json_str).unwrap_or(Value::Array(vec![]))
 }
 
 /// Fetch a batch of rows after `cursor`.
@@ -482,21 +397,9 @@ pub async fn exec_fetch_batch(
         )
     })?;
 
-    let status_sql = format!(
-        r#"SELECT status FROM "{app_id}"."__zeroship_migrations"
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
-            ORDER BY id DESC LIMIT 1"#
-    );
-    let status_rows = client
-        .query_text_params(&status_sql, &[collection.as_str(), name.as_str()])
-        .await;
-    match status_rows {
-        Ok(rows) => {
-            let status = rows
-                .first()
-                .map(|r| r.get::<_, String>("status"))
-                .unwrap_or_default();
-            if status == "cancelled" {
+    match crate::audit::peek_latest_backfill_status(&client, app_id, &collection, &name).await {
+        Ok(status) => {
+            if status.as_deref() == Some("cancelled") {
                 return_lock_client(client);
                 return Err(err_cancelled_mid_run());
             }
@@ -519,16 +422,7 @@ pub async fn exec_fetch_batch(
         .await;
 
     // Heartbeat — best-effort.
-    let _ = client
-        .query_text_params(
-            &format!(
-                r#"UPDATE "{app_id}"."__zeroship_migrations"
-                    SET last_heartbeat_at = NOW()
-                    WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2 AND status = 'running'"#
-            ),
-            &[collection.as_str(), name.as_str()],
-        )
-        .await;
+    let _ = crate::audit::heartbeat_backfill(&client, app_id, &collection, &name).await;
 
     return_lock_client(client);
 
@@ -589,25 +483,16 @@ pub async fn exec_commit_batch(
     // the batch's mutations, which means concurrent cancels block
     // until COMMIT — at which point they see `status='running'` flip
     // to whatever the SDK requested (or stay running for another pass).
-    let id_s = audit_id.to_string();
-    let status_sql = format!(
-        r#"SELECT status, audit_generation FROM "{app_id}"."__zeroship_migrations"
-            WHERE id = $1::bigint FOR UPDATE"#
-    );
-    let status_rows = match client
-        .query_text_params(&status_sql, &[id_s.as_str()])
-        .await
-    {
-        Ok(rows) => rows,
+    let locked = match crate::audit::lock_audit_row_for_update(&client, app_id, audit_id).await {
+        Ok(row) => row,
         Err(e) => {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
             return Err(coded_sql("audit lock", e));
         }
     };
-    if let Some(row) = status_rows.first() {
-        let status: String = row.get("status");
-        if status == "cancelled" {
+    if let Some(row) = locked {
+        if row.status == "cancelled" {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
             return Err(err_cancelled_mid_run());
@@ -616,8 +501,7 @@ pub async fn exec_commit_batch(
         // `audit_generation`. If our snapshot is stale we MUST NOT
         // advance the cursor past the new reset point — abort with a
         // coded error so the SDK mints a fresh wrapper.
-        let current_gen: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
-        if current_gen != start_generation {
+        if row.audit_generation != start_generation {
             let _ = client.execute("ROLLBACK", &[]).await;
             return_lock_client(client);
             return Err(err_reset_externally());
@@ -700,22 +584,15 @@ pub async fn exec_commit_batch(
     // Audit row update — only persist cursor/dead_letter/processed on a
     // real run. Dry runs explicitly do NOT advance state (B1.6).
     if !dry_run {
-        let dlp_str = dead_letter_pks.to_string();
-        let nc_s = next_cursor.to_string();
-        let pt_s = processed_total.to_string();
-        let id_s = audit_id.to_string();
-        let upd_sql = format!(
-            r#"UPDATE "{app_id}"."__zeroship_migrations"
-                SET validate_cursor = $2::bigint,
-                    dead_letter_pks = $3::jsonb,
-                    details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', to_jsonb($4::bigint)),
-                    last_heartbeat_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = $1::bigint"#
-        );
-        if let Err(e) = client
-            .query_text_params(&upd_sql, &[id_s.as_str(), nc_s.as_str(), dlp_str.as_str(), pt_s.as_str()])
-            .await
+        if let Err(e) = crate::audit::update_backfill_progress(
+            &client,
+            app_id,
+            audit_id,
+            next_cursor,
+            dead_letter_pks,
+            processed_total,
+        )
+        .await
         {
             return_lock_client(client);
             return Err(coded_sql("audit row update", e));
@@ -740,25 +617,7 @@ pub async fn exec_commit_batch(
             }
         };
 
-        let term_sql = format!(
-            r#"UPDATE "{app_id}"."__zeroship_migrations"
-                SET status = $2,
-                    error = COALESCE($3, error),
-                    updated_at = NOW(),
-                    applied_at = CASE
-                        WHEN $2 IN ('applied','applied_with_dead_letter') AND applied_at IS NULL THEN NOW()
-                        ELSE applied_at
-                    END,
-                    owner_session_id = NULL
-                WHERE id = $1::bigint AND status IN ('running','pending')"#
-        );
-        let id_s = audit_id.to_string();
-        let err_s = error_message.unwrap_or("").to_string();
-        let _ = client
-            .query_text_params(
-                &term_sql,
-                &[id_s.as_str(), terminal.as_sql(), err_s.as_str()],
-            )
+        let _ = crate::audit::finalise_backfill(&client, app_id, audit_id, terminal, error_message)
             .await;
 
         let _ = release_advisory(&client, app_id, &name).await;
@@ -791,17 +650,10 @@ pub async fn exec_status(
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
         .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
-    let sql = format!(
-        r#"SELECT id, status, validate_cursor, dead_letter_pks, details, error
-            FROM "{app_id}"."__zeroship_migrations"
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
-            ORDER BY id DESC LIMIT 1"#
-    );
-    let rows = pool
-        .query_text_params(&sql, &[collection, name])
+    let row = crate::audit::find_latest_backfill_row(pool, app_id, collection, name)
         .await
         .map_err(|e| coded_sql("migration status read", e))?;
-    let Some(row) = rows.first() else {
+    let Some(row) = row else {
         return Ok(serde_json::json!({
             "exists": false,
             "status": null,
@@ -813,30 +665,14 @@ pub async fn exec_status(
         })
         .to_string());
     };
-    let status: String = row.get("status");
-    let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
-    let processed = read_processed_from_row(row);
-    let dlp = read_dead_letter_pks(row);
-    // SQL NULL and empty-string both mean "no error". The migrations
-    // SDK's parseNative treats any string in `error` as a thrown
-    // exception (`throw new Error(errVal)`), so emitting `""` would
-    // surface as a zero-message failure on the caller side.
-    let error: Option<String> = row
-        .try_get::<_, String>("error")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let is_done = matches!(
-        status.as_str(),
-        "applied" | "applied_with_dead_letter" | "failed" | "cancelled"
-    );
     Ok(serde_json::json!({
         "exists": true,
-        "status": status,
-        "cursor": cursor,
-        "processed": processed,
-        "deadLetterPks": dlp,
-        "isDone": is_done,
-        "error": error,
+        "status": row.status,
+        "cursor": row.cursor,
+        "processed": row.processed,
+        "deadLetterPks": row.dead_letter_pks,
+        "isDone": row.is_done,
+        "error": row.error,
     })
     .to_string())
 }
@@ -854,34 +690,17 @@ pub async fn exec_cancel(
         .await
         .map_err(|m| coded("audit_bootstrap_failed", &m, None))?;
     // Read current status.
-    let lookup_sql = format!(
-        r#"SELECT id, status FROM "{app_id}"."__zeroship_migrations"
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
-            ORDER BY id DESC LIMIT 1"#
-    );
-    let rows = pool
-        .query_text_params(&lookup_sql, &[collection, name])
+    let row = crate::audit::find_latest_backfill_row(pool, app_id, collection, name)
         .await
         .map_err(|e| coded_sql("migration cancel lookup", e))?;
-    let Some(row) = rows.first() else {
+    let Some(row) = row else {
         return Err(err_not_cancellable("missing"));
     };
-    let status: String = row.get("status");
-    if status != "pending" && status != "running" {
-        return Err(err_not_cancellable(&status));
+    if row.status != "pending" && row.status != "running" {
+        return Err(err_not_cancellable(&row.status));
     }
-    let id: i64 = row.get("id");
 
-    let upd_sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET status = 'cancelled',
-                updated_at = NOW(),
-                owner_session_id = NULL,
-                error = COALESCE(error, 'cancelled by operator')
-            WHERE id = $1::bigint AND status IN ('pending','running')"#
-    );
-    let id_s = id.to_string();
-    pool.query_text_params(&upd_sql, &[id_s.as_str()])
+    crate::audit::cancel_backfill_row(pool, app_id, row.id)
         .await
         .map_err(|e| coded_sql("migration cancel update", e))?;
 
@@ -904,19 +723,7 @@ pub async fn exec_reset(
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor
     // we just zeroed.
-    let upd_sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET status = 'pending',
-                validate_cursor = NULL,
-                dead_letter_pks = NULL,
-                error = NULL,
-                applied_at = NULL,
-                updated_at = NOW(),
-                audit_generation = audit_generation + 1,
-                details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', '0'::jsonb)
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2"#
-    );
-    pool.query_text_params(&upd_sql, &[collection, name])
+    crate::audit::reset_backfill_row(pool, app_id, collection, name)
         .await
         .map_err(|e| coded_sql("migration reset", e))?;
     Ok(serde_json::json!({ "ok": true }).to_string())
