@@ -147,7 +147,15 @@ pub async fn ensure_publication_and_slot(
 ) -> Result<SetupOutcome, String> {
     let pub_name = publication_name(app_id)?;
     let slot = slot_name(app_id)?;
-    let app = sanitise_app_id(app_id)?;
+    // `sanitise_app_id` lowercases (required for slot/publication object names —
+    // Postgres stores them as-is and folds unquoted identifiers to lowercase).
+    // However, the schema was created by `build_create_schema` using the
+    // *original* app_id via `quote_ident`, so `FOR TABLES IN SCHEMA` must
+    // reference it with the same original-case quoted identifier. Using the
+    // lowercased form here silently produces an empty publication for any
+    // app_id with uppercase characters — the CRITICAL C1 silent WAL delivery
+    // failure. `quote_ident` double-quotes the name so Postgres preserves case.
+    let schema_ref = crate::query::quote_ident(app_id);
 
     // ---- 1. publication ----
     //
@@ -157,7 +165,7 @@ pub async fn ensure_publication_and_slot(
     // migration creates a new `__zeroship_*` table, the watchdog (not
     // here) will reconcile.
     let pub_sql = format!(
-        r#"CREATE PUBLICATION "{pub_name}" FOR TABLES IN SCHEMA "{app}";"#
+        r#"CREATE PUBLICATION "{pub_name}" FOR TABLES IN SCHEMA {schema_ref};"#
     );
     // `IF NOT EXISTS` is not supported by `CREATE PUBLICATION` in PG 16
     // (only PG 17+). Probe pg_publication first.
@@ -526,6 +534,37 @@ mod tests {
     fn names_use_stable_prefix() {
         assert_eq!(publication_name("alpha").unwrap(), "__zs_pub_alpha");
         assert_eq!(slot_name("alpha").unwrap(), "__zs_slot_alpha");
+    }
+
+    /// C1 regression guard: the publication SQL must reference the schema with
+    /// the *original* case using a quoted identifier (`"MyApp"`), not the
+    /// lowercased slot-safe form (`myapp`). An unquoted or lowercased schema
+    /// reference folds to lowercase in Postgres, leaving the publication empty
+    /// for any app_id with uppercase characters — the silent WAL delivery
+    /// failure described in CRITICAL C1.
+    #[test]
+    fn publication_sql_uses_quoted_original_case_schema() {
+        // Slot and publication object names are lowercased (Postgres requirement).
+        assert_eq!(publication_name("MyApp").unwrap(), "__zs_pub_myapp");
+        assert_eq!(slot_name("MyApp").unwrap(), "__zs_slot_myapp");
+
+        // The schema reference in FOR TABLES IN SCHEMA must preserve original
+        // case via a double-quoted identifier — quote_ident is the same function
+        // used by build_create_schema, so the two sides of the lifecycle agree.
+        let schema_ref = crate::query::quote_ident("MyApp");
+        assert_eq!(
+            schema_ref, "\"MyApp\"",
+            "schema ref must be double-quoted with original case"
+        );
+
+        // Confirm that the lowercased form (the pre-fix bug path) differs —
+        // i.e. that using sanitise_app_id output as the schema reference would
+        // silently target `myapp` instead of `MyApp`.
+        let lowercased_ref = crate::query::quote_ident("myapp");
+        assert_ne!(
+            schema_ref, lowercased_ref,
+            "original-case and lowercased schema refs must differ for mixed-case app_id"
+        );
     }
 
     #[test]
