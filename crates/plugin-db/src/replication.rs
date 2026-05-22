@@ -744,13 +744,15 @@ mod tests {
         }
     }
 
-    /// `ensure_publication_and_slot` returns `Result<_, String>` (not
-    /// `Result<_, DbError>` like audit.rs), so the runtime fix calls
-    /// `.into_string()` on the `DbError::Internal` before flowing it
-    /// through `?`. This test pins the wire shape — the operator-
-    /// facing message must include both the `replication:` prefix
-    /// (so log scrapers route it) and the operation tag (so the
-    /// failure can be pinpointed without a stack trace).
+    /// Wire-shape regression guard. The post-[I28] sweep changed
+    /// `ensure_publication_and_slot` to return `Result<_, DbError>`
+    /// directly, so the runtime path no longer calls `.into_string()`
+    /// — but the operator-facing message must still carry the
+    /// `replication:` prefix (so log scrapers route it) and the
+    /// operation tag (so the failure can be pinpointed without a
+    /// stack trace). Pin those two pieces so a future refactor of
+    /// `first_row_or_internal`'s message format doesn't silently
+    /// drop them.
     #[test]
     fn empty_returning_string_shape_keeps_replication_prefix() {
         let s = DbError::Internal {
