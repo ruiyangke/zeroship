@@ -90,7 +90,10 @@ fn coded_db(context: &str, e: crate::error::DbError) -> OpError {
         | crate::error::DbError::LockContention { message }
         | crate::error::DbError::Transient { message }
         | crate::error::DbError::Internal { message } => {
-            *message = format!("db: {context} failed: {message}");
+            // `message` already starts with "db: " from `walk_pg_chain`;
+            // prepend only the lifecycle context phrase to avoid the
+            // doubly-prefixed "db: {context} failed: db: ..." output.
+            *message = format!("{context}: {message}");
         }
         _ => {}
     }
@@ -222,12 +225,15 @@ pub async fn exec_begin(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
 
     let client = backend
         .acquire_dedicated_client()
         .await
-        .map_err(|e| coded("tx_connect_failed", &e.into_string(), None))?;
+        // Route through `to_op_error()` so the SQLSTATE-derived code
+        // (`transient`, etc.) and its retry hint reach the SDK, rather
+        // than being discarded by `into_string()`.
+        .map_err(|e| e.to_op_error())?;
 
     let lock_key = format!("zs_mig:{app_id}");
     let got = backend
@@ -615,7 +621,7 @@ pub async fn exec_status(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
     let row = backend
         .find_latest_backfill_row_pool(app_id, collection, name)
         .await
@@ -656,7 +662,7 @@ pub async fn exec_cancel(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
     // Read current status.
     let row = backend
         .find_latest_backfill_row_pool(app_id, collection, name)
@@ -689,7 +695,7 @@ pub async fn exec_reset(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
     // Gap X: bump `audit_generation` so any in-flight worker holding
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor
