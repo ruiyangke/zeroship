@@ -45,21 +45,27 @@ use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
-use crate::backend::{
-    LockManager, NamespaceManager, PgSqlExecutor, PostgresBackend, SqlExecutor,
-};
+use crate::backend::{LockManager, NamespaceManager, PgSqlExecutor, SqlExecutor};
 use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
 
 /// Convenience alias — the migration loop holds a backend-owned
-/// client across awaits. `<PostgresBackend as SqlExecutor>::Client`
-/// is the concrete `compio_postgres::Client` today; future backends
-/// can swap in their own session type without rewriting every site
-/// that pulls the lock client out of the per-isolate context. The
-/// associated type lives on the carved [`SqlExecutor`] capability
-/// trait (P0 PR 1), but [`Backend: SqlExecutor<Client = compio_postgres::Client>`]
-/// keeps the constraint pinned end-to-end.
-type LockClient = <PostgresBackend as SqlExecutor>::Client;
+/// client across awaits.
+///
+/// **P0 PR 4**: reified to the concrete `compio_postgres::Client`.
+/// The alias was originally typed as
+/// `<PostgresBackend as SqlExecutor>::Client` to hide the concrete
+/// driver type from external consumers; after PR 4 the only consumer
+/// is `migrations.rs` itself, which parks PG-shaped state in
+/// [`crate::context::MigrationLock::client`] (an
+/// `Option<compio_postgres::Client>` — see `context.rs`). The 7 fns
+/// in this file now take generic `<B: …>` bounds with the PG client
+/// constraint pinned via `LockManager<Client = compio_postgres::Client>`
+/// at the only site that touches the lock client (`exec_begin`), so
+/// the alias serves as a single-source-of-truth for "the client type
+/// the migration lock parks". See
+/// `docs/proposals/p0-implementation-plan.md` §"PR 4".
+type LockClient = compio_postgres::Client;
 
 /// Build a coded `OpError` for a migration lifecycle failure. The
 /// runtime pump materialises a JS `Error` with `e.code` (and optional
@@ -206,15 +212,32 @@ fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
 }
 
 /// Begin a migration run. Routes connection / SQL execution through
-/// the [`Backend`] facade (Stage 8e-R2).
-pub async fn exec_begin(
-    backend: &PostgresBackend,
+/// the carved capability traits (P0 PR 4).
+///
+/// The compound bound is the narrowest set this function actually
+/// uses: [`PgSqlExecutor`] (transitively [`SqlExecutor`]) for
+/// `acquire_dedicated_client` + `pool_handle()`; [`LockManager`] with
+/// `Client = compio_postgres::Client` for
+/// `try_acquire_advisory_lock` / `release_advisory_lock` on the lock
+/// client that gets parked into [`MigrationLock::client`]; and
+/// [`NamespaceManager`] for `ensure_app_schema`. The
+/// [`crate::backend::RegisterBackend`] marker is a superset of these
+/// (it additionally requires `SchemaIntrospect` + `IndexBuilder` +
+/// `PgLockManager` for the register-model pipeline), so we keep the
+/// narrower compound bound here rather than reusing `RegisterBackend`
+/// — `migrations.rs` doesn't need the introspection or index-build
+/// capabilities.
+pub async fn exec_begin<B>(
+    backend: &B,
     app_id: &str,
     name: &str,
     collection: &str,
     dry_run: bool,
     reset: bool,
-) -> Result<String, OpError> {
+) -> Result<String, OpError>
+where
+    B: PgSqlExecutor + LockManager<Client = compio_postgres::Client> + NamespaceManager,
+{
     validate_collection(collection).map_err(|e| {
         coded(
             "invalid_collection",
@@ -364,14 +387,15 @@ pub async fn exec_begin(
 
 /// Fetch a batch of rows after `cursor`.
 ///
-/// P0 PR 2: the `backend` parameter is no longer consulted — every
-/// audit op (`peek_latest_backfill_status`, `heartbeat_backfill`)
-/// now goes through `crate::audit::*` free functions taking the lock
-/// `client` directly. The parameter is kept for ABI compatibility
-/// with the existing test wrappers + v8_classes bridge; PR 4 will
-/// remove it when migrations.rs goes off `&PostgresBackend`.
+/// P0 PR 4: the `backend` parameter has been removed. Every audit op
+/// (`peek_latest_backfill_status`, `heartbeat_backfill`) now goes
+/// through `crate::audit::*` free functions taking the lock `client`
+/// directly, and the data-batch SELECT runs on the same lock client
+/// via `query_text_params` (a `compio_postgres::Client` method).
+/// Nothing in this function needs the backend — PR 2 noted the
+/// parameter was kept "for ABI compatibility until PR 4", and PR 4
+/// is here.
 pub async fn exec_fetch_batch(
-    _backend: &PostgresBackend,
     app_id: &str,
     cursor: i64,
     batch_size: i64,
@@ -450,8 +474,8 @@ pub async fn exec_fetch_batch(
 /// SDK requested (via `terminal_status` — see the `AuditTerminal` enum). The
 /// advisory lock is released and the per-isolate `mig_lock` slot is cleared.
 #[allow(clippy::too_many_arguments)]
-pub async fn exec_commit_batch(
-    backend: &PostgresBackend,
+pub async fn exec_commit_batch<B>(
+    backend: &B,
     app_id: &str,
     updates: &Value,
     dead_letter_pks: &Value,
@@ -460,7 +484,10 @@ pub async fn exec_commit_batch(
     is_done: bool,
     terminal_status: Option<&str>,
     error_message: Option<&str>,
-) -> Result<String, OpError> {
+) -> Result<String, OpError>
+where
+    B: PgSqlExecutor + LockManager<Client = compio_postgres::Client>,
+{
     let Some((name, collection, audit_id, dry_run, start_generation)) = lock_snapshot() else {
         return Err(coded(
             "no_active_migration",
@@ -478,7 +505,10 @@ pub async fn exec_commit_batch(
     })?;
 
     // Helper: rollback + restore the client to the per-isolate slot.
-    async fn rollback_and_return(backend: &PostgresBackend, client: LockClient) {
+    async fn rollback_and_return<B>(backend: &B, client: LockClient)
+    where
+        B: SqlExecutor<Client = compio_postgres::Client>,
+    {
         let _ = backend.client_exec(&client, "ROLLBACK", &[]).await;
         return_lock_client(client);
     }
@@ -691,12 +721,15 @@ pub async fn exec_commit_batch(
 
 /// Read the current audit row state for a (collection, name) pair.
 /// Returns a JSON object the SDK can shape into the `status` API.
-pub async fn exec_status(
-    backend: &PostgresBackend,
+pub async fn exec_status<B>(
+    backend: &B,
     app_id: &str,
     name: &str,
     collection: &str,
-) -> Result<String, OpError> {
+) -> Result<String, OpError>
+where
+    B: PgSqlExecutor,
+{
     let pool = backend.pool_handle().as_ref();
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
@@ -731,12 +764,15 @@ pub async fn exec_status(
 /// Cancel a migration. Allowed only when status is `pending` or
 /// `running` (proposal B1, "Cancel happens-before the next batch").
 /// Returns `{ ok: true }` on transition, structured error otherwise.
-pub async fn exec_cancel(
-    backend: &PostgresBackend,
+pub async fn exec_cancel<B>(
+    backend: &B,
     app_id: &str,
     name: &str,
     collection: &str,
-) -> Result<String, OpError> {
+) -> Result<String, OpError>
+where
+    B: PgSqlExecutor,
+{
     let pool = backend.pool_handle().as_ref();
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
@@ -762,12 +798,15 @@ pub async fn exec_cancel(
 /// Reset a migration's state (status='pending', cursor=0, processed=0,
 /// dead_letter_pks=null). Used when an operator wants to retry from
 /// scratch after a `cancelled` or `failed` run.
-pub async fn exec_reset(
-    backend: &PostgresBackend,
+pub async fn exec_reset<B>(
+    backend: &B,
     app_id: &str,
     name: &str,
     collection: &str,
-) -> Result<String, OpError> {
+) -> Result<String, OpError>
+where
+    B: PgSqlExecutor,
+{
     let pool = backend.pool_handle().as_ref();
     crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
@@ -819,13 +858,17 @@ pub async fn exec_begin_with_pool(
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub async fn exec_fetch_batch_with_pool(
-    pool: std::rc::Rc<compio_postgres::Pool>,
+    _pool: std::rc::Rc<compio_postgres::Pool>,
     app_id: &str,
     cursor: i64,
     batch_size: i64,
 ) -> Result<String, OpError> {
-    let backend = make_test_backend(pool);
-    exec_fetch_batch(&backend, app_id, cursor, batch_size).await
+    // P0 PR 4: `exec_fetch_batch` no longer takes a backend — it
+    // operates entirely on the lock client parked in the per-isolate
+    // context. The `pool` parameter is kept on this wrapper for
+    // signature parity with the other `_with_pool` test helpers and
+    // is intentionally ignored.
+    exec_fetch_batch(app_id, cursor, batch_size).await
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

@@ -226,8 +226,10 @@ impl Migration {
             .ok_or_else(crate::migrations::err_not_active)?;
         let cursor_i = checked_int(cursor, "cursor")?;
         let batch_size_i = checked_int(batch_size, "batchSize")?;
-        let backend = ensure_backend().await?;
-        crate::migrations::exec_fetch_batch(backend.as_ref(), &owner.app_id, cursor_i, batch_size_i)
+        // P0 PR 4: `exec_fetch_batch` no longer needs the backend —
+        // every operation runs on the lock client parked in the
+        // per-isolate context.
+        crate::migrations::exec_fetch_batch(&owner.app_id, cursor_i, batch_size_i)
             .await
             .map(JsonValue)
     }
