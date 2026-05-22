@@ -175,8 +175,7 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     // `begin_transaction`). compio-postgres splits the connection into
     // (Client, Connection); spawn the run loop on a detached task, hold
     // the Client in TX_CONN.
-    let url = crate::DB_URL
-        .with(|u| u.borrow().clone())
+    let url = crate::context::with(|c| c.db_url())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await

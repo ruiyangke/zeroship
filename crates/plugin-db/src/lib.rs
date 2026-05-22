@@ -54,9 +54,6 @@ pub mod wal_consumer;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// Database URL — poisoned during `register()`, consumed on first pool creation.
-    pub(crate) static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
-
     /// Registered models — keyed by "app_id:collection". Prevents redundant DDL
     /// on subsequent cold starts within the same deploy.
     static REGISTERED_MODELS: RefCell<std::collections::HashSet<String>> =
@@ -207,12 +204,9 @@ impl NativePlugin for DbPlugin {
         // previously-created pool so `init_pool_async` / `ensure_pool`
         // build a fresh one for the new URL instead of silently aliasing
         // the first pool to the second URL.
-        DB_URL.with(|u| {
-            let mut cell = u.borrow_mut();
-            let different = cell.as_deref() != Some(self.url.as_str());
-            if different {
-                *cell = Some(self.url.clone());
-                ctx_mut(|c| c.clear_pool());
+        ctx_mut(|c| {
+            if c.set_db_url(&self.url) {
+                c.clear_pool();
             }
         });
         // Every JS-visible entry point lives on the Db v8_class
@@ -230,7 +224,9 @@ impl NativePlugin for DbPlugin {
 /// drive `migrations::exec_*` without spinning up a full runtime.
 #[doc(hidden)]
 pub fn set_db_url_for_tests(url: &str) {
-    DB_URL.with(|u| *u.borrow_mut() = Some(url.to_string()));
+    ctx_mut(|c| {
+        c.set_db_url(url);
+    });
 }
 
 /// **Test-only**: clear `MIG_LOCK` for the current thread. Safe across
@@ -316,7 +312,7 @@ pub fn clear_pending_emits_for_tests() {
 /// // Now safe to run JS that calls zeroship.db.*
 /// ```
 pub async fn init_pool_async() -> Result<(), String> {
-    let url = DB_URL.with(|u| u.borrow().clone());
+    let url = context::with(|c| c.db_url());
     let Some(url) = url else {
         return Ok(()); // No URL configured — DB plugin is disabled
     };

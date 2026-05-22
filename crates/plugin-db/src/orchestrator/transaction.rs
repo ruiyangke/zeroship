@@ -139,8 +139,7 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
     // the Connection on a detached task so its run loop drives I/O, and store
     // the Client in TX_CONN. When the Client is eventually dropped, the task
     // terminates gracefully.
-    let url = crate::DB_URL
-        .with(|u| u.borrow().clone())
+    let url = crate::context::with(|c| c.db_url())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await

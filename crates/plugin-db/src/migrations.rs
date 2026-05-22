@@ -186,8 +186,7 @@ pub(crate) fn err_not_active() -> OpError {
 /// Open a dedicated client. Mirrors `exec_begin` in
 /// `orchestrator::transaction`.
 async fn open_dedicated_client() -> Result<Client, String> {
-    let url = crate::DB_URL
-        .with(|u| u.borrow().clone())
+    let url = crate::context::with(|c| c.db_url())
         .ok_or_else(|| "db: not configured".to_string())?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await

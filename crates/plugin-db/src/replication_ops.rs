@@ -204,9 +204,7 @@ pub fn start_replication_consumer_dispatch<'s>(
         };
 
         // Step 2: build the consumer descriptor.
-        let url = crate::DB_URL
-            .with(|u| u.borrow().clone())
-            .unwrap_or_default();
+        let url = crate::context::with(|c| c.db_url()).unwrap_or_default();
         let consumer = match crate::wal_consumer::WalConsumer::new(&app_id, &url) {
             Ok(c) => c.with_start_lsn(setup.confirmed_flush_lsn.clone()),
             Err(e) => {
