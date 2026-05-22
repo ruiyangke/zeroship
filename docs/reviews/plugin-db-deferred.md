@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 01:10.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 01:35.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -381,16 +381,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I29] replication.rs:236 silent unwrap_or_default on empty RETURNING (code-critique r3 I3)
-- **Source**: `plugin-db-code-critique-2026-05-22-r3.md` §I3
-- **File**: `crates/plugin-db/src/replication.rs:236`
-- **Description**: Same shape as the audit-id=0 bug that `d7cfc089` closed in audit.rs: `unwrap_or_default()` on a missing/empty RETURNING coerces silent failure into a sentinel value. Pattern: `.first().and_then(|r| r.get_text("col")).unwrap_or_default()` returning `""` on empty.
-- **Status as of 2026-05-22 01:10**: actionable; mirror `d7cfc089` fix (`ok_or_else(DbError::Internal {...})`).
-- **Effort**: small (1 site + audit nearby for siblings)
-- **Pickable this cycle**: rolled forward.
-
----
-
 ### [I30] auto_tx.rs OpResult::Failed { error: String } collapses typed DbError (code-critique r3 I4; api-surface r2 IMPORTANT)
 - **Source**: `plugin-db-code-critique-2026-05-22-r3.md` §I4; `plugin-db-api-surface-2026-05-22-r2.md` §IMPORTANT
 - **File**: `crates/plugin-db/src/orchestrator/auto_tx.rs:67,104`
@@ -427,16 +417,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Description**: `update_backfill_progress` runs OUTSIDE the BEGIN/COMMIT envelope and without an `audit_generation` predicate. Operator `reset` between COMMIT and the progress UPDATE is silently clobbered — fresh runs resume from stale cursor.
 - **Status as of 2026-05-22 01:10**: actionable; add `audit_generation` column or move progress UPDATE into the COMMIT.
 - **Effort**: medium (schema migration + WHERE clause)
-- **Pickable this cycle**: rolled forward.
-
----
-
-### [I34] broker.has_subscribers per-call allocates two Strings for lookup key (performance r3 N3-I1)
-- **Source**: `plugin-db-performance-2026-05-22-r3.md` §"IMPORTANT N3-I1"
-- **File**: `crates/plugin-db/src/broker.rs:486-490`
-- **Description**: Regression introduced by the R2 N-C1 fix. Fires on every WAL frame. Allocates `(String, String)` lookup key per call; fix is `&(&str, &str)` borrow via `Borrow` or a typed `SubscriberKey<'_>` struct.
-- **Status as of 2026-05-22 01:10**: actionable; small.
-- **Effort**: small (Borrow impl or key newtype)
 - **Pickable this cycle**: rolled forward.
 
 ---
@@ -584,6 +564,19 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `d53f90b0 plugin-db/docs: scrub stale TX_CONN / callbacks.rs references`
 - 6 doc sites annotated or rewritten; `crud.rs`/`diff.rs` preambles already present (closed previously by `29b8a013`). Note: 9 stale TX_CONN refs remain in `transaction.rs:108,116,161,192,214,284,285`, `crud.rs:53`, `exec.rs:277`, `orchestrator/transaction.rs:143` — see new backlog entry [I26].
 
+### [S32] IMPORTANT [I29] (cycle 01:35) — replication.rs empty-RETURNING silent default
+- **Closed by**: `c83d6a8c plugin-db/replication: surface empty-RETURNING as DbError::Internal, not silent default`
+- `ensure_publication_and_slot`'s `pg_create_logical_replication_slot` RETURNING was coerced via `unwrap_or_default()`; now uses `.ok_or_else(|| DbError::Internal { ... })?` mirroring `d7cfc089`'s audit.rs fix. 2 unit tests pin the wire shape (operation name + `replication:` log-scraper prefix + `no row` text).
+
+### [S33] IMPORTANT [I34] (cycle 01:35) — broker.has_subscribers per-call (String, String) alloc
+- **Closed by**: `0e58c4e8 plugin-db/broker: two-level HashMap eliminates per-call (String, String) alloc` + `b32ba383 plugin-db/broker: remove duplicate has_subscribers after cherry-pick`
+- `Broker::by_key` refactored from `HashMap<(String, String), _>` to `HashMap<String, HashMap<String, _>>`. `publish`/`has_subscribers`/`drop_app` all now lookup via `&str` borrow — zero allocs on the WAL hot path. 7 new unit tests + drop_app collapses to O(1) `remove(app_id)`.
+
+### [S34] CRITICAL × 2 (docs-audit r2; cycle 01:35) — error.rs lone-holdout claim + db.md broken path
+- **Closed by**: `e37b188f plugin-db/error + docs/db: fix docs CRITICALs from docs-audit r2`
+- (a) `error.rs:9-14`'s "lone hold-out" claim was false (~30 `Result<_, String>` sites remain in `replication.rs`, `auth/*`, `diff.rs`, etc.). Rewrote preamble to accurately describe the pending sweep (now tracked as [I28]).
+- (b) `docs/reference/db.md:90` pointed at deleted path `crates/runtime/src/bootstrap/db_init.js`. Repointed to `sdks/bootstrap/src/runtime-entry.ts` (embedded via `DB_INIT_JS` in `crates/runtime/src/core/init.rs`).
+
 ### [S28] Error-UX — double `db:` prefix
 - **Source**: `plugin-db-error-ux-2026-05-22-r1.md` §4e
 - **Fixed by**: `60ca1ad6 plugin-db: use Display instead of Debug in user-facing error messages; drop double db: prefix; route tx_connect_failed via from_pg`. Also closed §4b for `tx_connect_failed` (now via `from_pg`).
@@ -592,23 +585,23 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ## Pilot Pick
 
-**Cycle of 2026-05-22 00:17** closed [I1] + 3 new CRITICALs. **Cycle of 2026-05-22 01:10** closed [I11], [I19], and 1 new perf CRITICAL ([S30] exec_mutation_with_emit). [I27]-[I34] surfaced for future cycles.
+**Cycle of 2026-05-22 00:17** closed [I1] + 3 new CRITICALs. **Cycle of 2026-05-22 01:10** closed [I11], [I19], and 1 new perf CRITICAL. **Cycle of 2026-05-22 01:35** closed [I29], [I34], and 2 docs CRITICALs (error.rs lone-holdout claim + db.md broken path).
 
-### Pick #1 (next cycle): **[I29] replication.rs:236 silent unwrap_or_default on empty RETURNING**
-- **File**: `crates/plugin-db/src/replication.rs:236`
-- **Fix sketch**: Mirror the d7cfc089 pattern that closed the audit-id=0 bug: `.first().and_then(...).ok_or_else(|| DbError::Internal { message: "replication: empty RETURNING from <op>".into() })?`. Audit sibling sites in `replication.rs` and `replication_ops.rs` for the same shape.
-- **Why next**: tiny scope (1 site + grep audit), high-leverage (silent data-loss class bug; same shape that already burned us once).
-- **Verification gate**: `cargo test -p zeroship-plugin-db --lib` + add a unit test asserting the empty-RETURNING path returns `Err(DbError::Internal)`.
-
-### Pick #2 (next cycle): **[I34] broker.has_subscribers two-String alloc per WAL frame**
-- **File**: `crates/plugin-db/src/broker.rs:486-490`
-- **Fix sketch**: Replace `HashMap<(String, String), _>::contains_key(&(s1.to_string(), s2.to_string()))` with a `Borrow`-impl key-tuple, or extract a typed `SubKey<'a> { app: &'a str, collection: &'a str }`. Mirror the std hashmap-with-borrow-key pattern.
-- **Why next**: hot path (every WAL frame in every multi-tenant worker); small surface (single function); regression introduced by R2 fix, so it's a "fix-the-fix" follow-up.
-- **Verification gate**: `cargo test -p zeroship-plugin-db --lib`; benchmark would be nice but the path is correctness-clear without.
-
-### Pick #3 (next cycle, larger): **[I27] OrchestratorLockGuard abstraction**
+### Pick #1 (next cycle): **[I27] OrchestratorLockGuard abstraction**
 - **File** (multi): `bootstrap.rs:179-184`, `apply.rs:203-209`, `orchestrator/register_model/mod.rs:219-225`
-- **Fix sketch**: New `OrchestratorLockGuard { client: PooledClient<'p>, key: String }` with a `Drop` impl issuing `pg_advisory_unlock(...)`. Success path consumes via `into_inner()` to release without unlock-on-Drop; error path drops normally → unlock fires.
-- **Why**: three commits in two days for the same invariant — the strongest missing-abstraction signal in the crate. Architect's R4 top finding.
-- **Caveat**: medium effort + risk of changing the success-path ownership semantics. Worth its own focused worktree.
-- **Verification gate**: all 3 call sites converted; unit test asserting Drop-on-Err issues the unlock query; existing 319 lib tests stay green.
+- **Fix sketch**: New `OrchestratorLockGuard { client: PooledClient<'p>, key: String }` with a `Drop` impl issuing `pg_advisory_unlock(...)`. Success path consumes via `into_inner()` to release without unlock-on-Drop; error path drops normally → unlock fires. Mirrors the std `MutexGuard` / `tokio::sync::MutexGuard` idiom.
+- **Why next**: architect's R4 top finding; three commits in two days for the same invariant; eliminates a class of future regression.
+- **Caveat**: medium effort + worktree isolation strongly recommended (touches 3 files in different orchestrator stages).
+- **Verification gate**: all 3 call sites converted; unit test asserting Drop-on-Err issues the unlock query; existing 328 lib tests stay green.
+
+### Pick #2 (next cycle): **[I30] auto_tx.rs OpResult::Failed { error: String } collapses typed DbError**
+- **File**: `crates/plugin-db/src/orchestrator/auto_tx.rs:67,104`
+- **Fix sketch**: Mirror `orchestrator/transaction.rs`'s `RejectError(e.to_op_error())` pattern. Add a unit test asserting `.code` is preserved on transient/lock-not-available errors at the auto-tx COMMIT path.
+- **Why next**: error-ux r2 flagged as HIGH-impact (this is the COMMIT-time error path where retry-by-code matters most). api-surface r2 + code-critique r3 both independently flagged.
+- **Verification gate**: 2 unit tests + `cargo test -p zeroship-plugin-db --lib` green.
+
+### Pick #3 (next cycle, larger): **[I28] ~50 Result<_, String> sites in replication.rs + auth/bootstrap.rs**
+- **File** (multi): `crates/plugin-db/src/replication.rs` (7 sites), `crates/plugin-db/src/auth/*` (~15 sites), plus tail-end stragglers in `diff.rs`.
+- **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant. `replication_ops.rs` wraps with `DbError::Internal { message: e }` — convert wrapping to typed passthrough.
+- **Why**: every replication op currently surfaces as `.code = "internal"`. SDK loses retry discrimination on every replication failure. Cumulative blocker for SDK ergonomics.
+- **Caveat**: medium-to-large; needs careful triage of which error variant fits each site.
