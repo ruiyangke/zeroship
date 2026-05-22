@@ -255,13 +255,31 @@ pub fn start_replication_consumer_dispatch<'s>(
         // Mark the app as running BEFORE the spawn so a racing second
         // call to startReplicationConsumer() short-circuits even if
         // the consumer task hasn't yet entered its decode loop.
+        //
+        // Code-critique r5 MAJOR-R5-2: if `run_supervised` panics
+        // before its terminal `unmark_consumer_running` line, the
+        // app stays "running" forever and a re-spawn is impossible.
+        // Move the unmark into a struct-Drop guard so panic-unwind
+        // also frees the slot.
+        struct ConsumerRunningGuard {
+            app_id: String,
+        }
+        impl Drop for ConsumerRunningGuard {
+            fn drop(&mut self) {
+                crate::context::with_mut(|c| {
+                    c.unmark_consumer_running(&self.app_id)
+                });
+            }
+        }
         let app_for_task = app_id.clone();
         crate::context::with_mut(|c| c.mark_consumer_running(&app_id));
         compio::runtime::spawn(async move {
+            let _guard = ConsumerRunningGuard {
+                app_id: app_for_task,
+            };
             crate::wal_consumer::run_supervised(consumer).await;
-            // When the supervisor exits (graceful or fatal), free the
-            // slot so a later opt-in re-spawn is allowed.
-            crate::context::with_mut(|c| c.unmark_consumer_running(&app_for_task));
+            // _guard drops here on graceful exit; Drop also fires on
+            // panic-unwind, so the running marker is always cleared.
         })
         .detach();
 
