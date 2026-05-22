@@ -102,7 +102,12 @@ pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
 ///
 /// Postgres silently truncates identifiers longer than 63 bytes (NAMEDATALEN),
 /// which would alias two distinct fields to the same column. Injection is
-/// already blocked by `quote_ident`.
+/// already blocked by `quote_ident`. The ASCII allowlist matches
+/// [`validate_collection`]'s policy: a multi-byte identifier like `"café"`
+/// is 4 chars / 5 bytes, and two distinct unicode-spelled fields could
+/// collide on the same Postgres-truncated column if either side approached
+/// the 63-byte ceiling. Enforcing ASCII-alphanumeric + underscore prevents
+/// that whole class.
 pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
@@ -117,6 +122,14 @@ pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
     if name.len() > 63 {
         return Err(QueryError::InvalidIdent(format!(
             "field name exceeds 63-byte Postgres identifier limit: {name}"
+        )));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(QueryError::InvalidIdent(format!(
+            "invalid field name: {name} (allowed: ASCII alphanumeric + underscore)"
         )));
     }
     Ok(())
@@ -4262,6 +4275,33 @@ mod tests {
     fn validate_field_name_rejects_null_byte() {
         let err = validate_field_name("col\0name").unwrap_err();
         assert!(matches!(err, QueryError::InvalidIdent(_)), "expected InvalidIdent");
+    }
+
+    /// Field names with non-ASCII characters must be rejected (closes
+    /// [I12] / test-coverage GAP-1 / security MINOR). A multi-byte
+    /// identifier could collide with another after Postgres' 63-byte
+    /// truncation; ASCII-only matches `validate_collection`.
+    #[test]
+    fn validate_field_name_rejects_non_ascii() {
+        for name in &["café", "naïve", "日本", "user—id", "field name"] {
+            let err = validate_field_name(name).unwrap_err();
+            assert!(
+                matches!(err, QueryError::InvalidIdent(_)),
+                "expected InvalidIdent for {name:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// ASCII allowlist must accept the same shape `validate_collection`
+    /// accepts: alphanumeric + underscore.
+    #[test]
+    fn validate_field_name_accepts_ascii_allowlist() {
+        for name in &["id", "user_id", "createdAt", "v2", "_private"] {
+            assert!(
+                validate_field_name(name).is_ok(),
+                "ASCII allowlist should accept {name:?}",
+            );
+        }
     }
 
     /// build_create_table_with_fks must propagate field-name validation errors.
