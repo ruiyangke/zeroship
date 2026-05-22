@@ -28,10 +28,10 @@
 //!    at the V8 boundary (these are TypeError-class, never need `.code`).
 //!
 //! 4. **Cold-init**: `lib.rs::init_pool_async` returns `Result<_, String>`;
-//!    the two call sites at `orchestrator/register_model/mod.rs:120` and
-//!    `exec.rs::ensure_pool` synthesise `DbError::Configuration` with a
-//!    static `code` (`lazy_init_failed` and `not_configured` respectively
-//!    — names drift; tracked separately as a follow-up).
+//!    the call sites at `orchestrator/register_model/mod.rs:120` and
+//!    `exec.rs::ensure_pool` synthesise `DbError::Configuration` with
+//!    code `lazy_init_failed` (unified at `7d0bc4c5`; same code at
+//!    every cold-init call site).
 //!
 //! 5. **Test helpers** (`exec.rs::exec_query_with_pool_for_tests`,
 //!    similar): `#[cfg(any(test, feature = "test-helpers"))]`-gated;

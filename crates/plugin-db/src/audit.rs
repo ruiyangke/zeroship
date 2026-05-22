@@ -2,7 +2,7 @@
 //! (docs/proposals/zeroship-db.md, section A3).
 //!
 //! Provides an append-only, per-app schema migration log: every DDL,
-//! validation pass, and (future) backfill writes a row keyed by deploy
+//! validation pass, and backfill writes a row keyed by deploy
 //! identifier. The A1 `create_index_with_recovery` retry path that used
 //! to log via `tracing::warn!` now writes structured audit rows here.
 //!

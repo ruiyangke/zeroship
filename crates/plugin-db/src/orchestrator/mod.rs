@@ -19,11 +19,12 @@
 //!   `query()` / `mutation()` handlers in a per-kind isolation
 //!   envelope; commits or rolls back at the end of the handler.
 //!
-//! Each submodule is `pub(crate)` to scope visibility; the v8_class
-//! layer (`v8_classes/*.rs`) imports the dispatchers directly. There
-//! is no longer an aggregating re-export — `crate::callbacks` was
-//! deleted in Stage 8b once each consumer moved to its canonical
-//! import.
+//! Three of the four submodules (`auto_tx`, `register_model`,
+//! `transaction`) are `pub` so the v8_class layer (`v8_classes/*.rs`)
+//! can name their dispatch helpers; `lock_guard` is `pub(crate)`
+//! since the RAII guard never crosses the crate boundary. There is
+//! no aggregating re-export — `crate::callbacks` was deleted in
+//! Stage 8b once each consumer moved to its canonical import.
 
 pub mod auto_tx;
 pub(crate) mod lock_guard;

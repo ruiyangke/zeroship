@@ -439,11 +439,9 @@ pub struct IndexSpec {
 ///   * a non-unique index per field with `index: true`,
 ///   * a unique index per field with `unique: true`.
 ///
-/// Composite indexes (the proposal's
-/// `defineCollection(fields).index(name, columns[])` builder) are not yet
-/// surfaced by the SDK; when they land, append them to the returned `Vec`.
-/// TODO: A1 composite indexes — wire through `schema_meta.indexes` once the
-/// SDK builder exists.
+/// Composite indexes (the proposal's `schema(...).index(name, fields)`
+/// builder) are wired separately via [`build_named_indexes`] — callers
+/// merge that `Vec` with this function's output at `bootstrap.rs`.
 ///
 /// Statements are emitted in deterministic order: declared field order in the
 /// schema, with `index` markers before `unique` markers for the same field
