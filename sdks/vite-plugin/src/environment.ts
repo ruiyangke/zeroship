@@ -276,6 +276,12 @@ export function createZeroshipEnvironmentOptions(
       entries: serverEntry
         ? [serverEntry]
         : ["src/index.{ts,tsx,js,jsx}", "src/server.{ts,js}", "server.{ts,js}"],
+      // The framework-internal bootstrap package is wired up via
+      // resolve.alias above (pointing at the workspace install).
+      // Users don't import it themselves — the dev-bootstrap loads
+      // `@zeroship/bootstrap/install-schema` through the ModuleRunner
+      // for `instanceof TypeBuilder` identity matching with the
+      // user's `t.*` builders.
     },
   };
 }
