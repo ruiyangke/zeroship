@@ -1,6 +1,8 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 09:30.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 10:30 (backlog audit).
+
+**Backlog audit performed cycle 10:30**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 21 IMPORTANT (mix actionable / judgment-call / cross-crate).
 
 **STRONG PLATEAU SIGNAL (cycle 09:30)**: 4 of 4 reviewers this cycle returned ZERO net score movement (error-ux 91, test-coverage 84, performance 78, migration-pipeline 85). Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function". Cycle delivered only one small inline fix (R8-2 code-name unification at 7d0bc4c5). Per-cycle yield is collapsing.
 
@@ -73,19 +75,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ## IMPORTANT (mechanical, actionable)
 
-### [I2] `SchemaRefused` has `.code` on OpError but error-ux review flagged absence (verify state)
-- **Source**: `plugin-db-error-ux-2026-05-22-r1.md` §4a
-- **File**: `crates/plugin-db/src/error.rs` (DbError::SchemaRefused arm in `to_op_error`)
-- **Description**: Error-UX review said `SchemaRefused.to_op_error()` calls `OpError::error(envelope_json)` (no `.code`), forcing the SDK to `JSON.parse(e.message)`. Commit `d2aeada6 plugin-db/error: stamp .code on SchemaRefused (SDK can now branch on validation_refused)` appears to have closed this — verify before deciding.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Partial closure. Commit `d2aeada6` claims `.code` is now stamped on `SchemaRefused`. Spot-verify needed against `error.rs` `to_op_error()` arm and the SDK's `mapNativeError`.
-  - Blocker: none if commit closed it; SDK contract test is the verification gate.
-  - Already-superseded-by: likely `d2aeada6` — promote to SUPERSEDED if `error.rs` confirms.
-- **Effort**: small (verification, not a fix)
-- **Pickable this cycle**: yes for verification; promote to SUPERSEDED if confirmed.
-
----
-
 ### [I3] Migration advisory lock has no RAII guard (security DoS)
 - **Source**: `plugin-db-security-2026-05-22-r1.md` §2 "Advisory-lock DoS via stalled migration client"; `plugin-db-concurrency-2026-05-22-r2.md` §2 "exec_commit_batch leaves mig_lock slot occupied on dry-run COMMIT network failure"
 - **File**: `crates/plugin-db/src/migrations.rs:548-553` (dry-run ROLLBACK path); migration `mig_lock` lifecycle in `IsolateDbContext`
@@ -148,32 +137,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
   - Already-superseded-by: N/A
 - **Effort**: small (one branch in `validate.rs` or one transition in `apply.rs`)
 - **Pickable this cycle**: yes — small, but needs the operator-visible state-machine decision (which terminal state to use).
-
----
-
-### [I8] Cursor advance not atomic with COMMIT in real-run backfill (migration-pipeline I2)
-- **Source**: `plugin-db-migration-pipeline-2026-05-22-r1.md` §3-I2
-- **File**: `crates/plugin-db/src/migrations.rs:550-573`
-- **Description**: Real-run `exec_commit_batch` issues COMMIT, then calls `update_backfill_progress` as a separate statement. If the process crashes between COMMIT and the cursor update, the next run resumes from the old cursor and re-processes the already-committed batch. `migrateOne` idempotency is documented as the user's responsibility, but the platform contract should either include the cursor advance inside the COMMIT or document the non-exactly-once semantics explicitly.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes (reviewed code unchanged).
-  - Blocker: design — the fix is to move the `update_backfill_progress` UPDATE inside the same transaction as the user updates. Requires re-checking the transaction boundaries and the audit-row lock ordering (FOR UPDATE).
-  - Already-superseded-by: N/A
-- **Effort**: medium (transaction re-shaping, ordering review)
-- **Pickable this cycle**: no — design decision (atomic vs documented at-least-once) needs user input.
-
----
-
-### [I9] `running_consumers` slot diverges from live task on rapid teardown (concurrency)
-- **Source**: `plugin-db-concurrency-2026-05-22-r2.md` §2 "RUNNING_CONSUMERS slot can diverge"
-- **File**: `crates/plugin-db/src/replication_ops.rs:221-226` (mark_consumer_running before spawn; unmark inside spawned future)
-- **Description**: If the runtime is shutting down when the future is dropped before polling `run_supervised` to completion, `unmark_consumer_running` never executes. The slot stays marked "running" but no task is live. Subsequent `startReplicationConsumer()` short-circuits with `alreadyRunning: true` and leaves the app with no consumer and no local-emit. Long-lived isolates never trigger this; rapid LRU eviction mid-spawn does.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — `replication_ops.rs:251-257` confirms `mark_consumer_running` is called before `spawn`, `unmark` inside the future body.
-  - Blocker: small — needs an RAII Drop guard wrapping `app_for_task` so cancellation also clears the slot.
-  - Already-superseded-by: N/A
-- **Effort**: small (one Drop-guard struct, ~20 lines)
-- **Pickable this cycle**: yes — bounded, mechanical.
 
 ---
 
@@ -294,19 +257,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I21] Hand-rolled JSON in `create_index_with_recovery_audited` (code-critique I-NEW-3)
-- **Source**: `plugin-db-code-critique-2026-05-22-r2.md` §I-NEW-3
-- **File**: `crates/plugin-db/src/backend/postgres.rs:478-525, 558-568`
-- **Description**: Three return paths hand-roll JSON via `format!`. The `replace('"', "\\\"")` escaping misses `\n`, `\r`, `\t`, and Unicode control characters; any of which in a Postgres error message produces syntactically invalid JSON. SDK does `JSON.parse` on the envelope; malformed JSON becomes an opaque parse error masking the cause. The function returned `Result<(), String>` per the review — verify against the `ff220fce plugin-db/backend: create_index_with_recovery returns Result<(), DbError> (last trait outlier); serde_json-based envelope` commit, which appears to have closed this.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Likely closed — `ff220fce` claims `serde_json-based envelope`. Spot-verify against `backend/postgres.rs:478-525`.
-  - Blocker: none if closed.
-  - Already-superseded-by: likely `ff220fce` — promote to SUPERSEDED if `format!`-based JSON is gone.
-- **Effort**: small (verification only)
-- **Pickable this cycle**: yes for verification.
-
----
-
 ### [I22] `mint_*` Box leak risk on isolate teardown — 7 copies (code-critique I3)
 - **Source**: `plugin-db-code-critique-2026-05-21.md` §I3
 - **File**: `crates/plugin-db/src/v8_classes/{db,collection,transaction,migration,migrations,replication,subscription}.rs`
@@ -333,19 +283,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I24] `exec_mutation_with_emit` redundant string clone on tuple values (perf review residue)
-- **Source**: `plugin-db-performance-2026-05-22-r1.md` §3-I2 (now closed via `c54a9f15` for the broker side, but the per-row tuple build still pays)
-- **File**: `crates/plugin-db/src/exec.rs:180-192`
-- **Description**: For every returned row, builds a `HashMap<String, String>` cloning every column name. For an INSERT returning a 20-column row, 20 String clones per emitted event. Broker fan-out is now zero-clone (per `c54a9f15`), but the per-row build is unchanged. If the WAL consumer fast-paths via `has_subscribers` (commit `78a95d3b` + `967a7362` closed this on the WAL side), the local-emit path here still pays unconditionally.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — `exec.rs:180-192` builds the HashMap unconditionally.
-  - Blocker: small — wrap in `broker::has_subscribers(app_id, collection)` check (the same fast-path used in `wal_consumer::emit_for_tuple`).
-  - Already-superseded-by: N/A (broker side closed, mutation-emit side open)
-- **Effort**: small (one conditional + reuse existing `broker::has_subscribers`)
-- **Pickable this cycle**: yes — small, mirrors a recently-landed pattern.
-
----
-
 ### [I25] `OBJECT_PREFIX` in `LIKE` predicate is format-string interpolated (security MINOR; replication M2)
 - **Source**: `plugin-db-security-2026-05-22-r1.md` §2 "MINOR — OBJECT_PREFIX literal"; `plugin-db-migration-pipeline-2026-05-22-r1.md` §3 M2 (related: SELECT-then-DROP race comment lies about implementation)
 - **File**: `crates/plugin-db/src/replication.rs:318,431`
@@ -356,16 +293,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
   - Already-superseded-by: N/A
 - **Effort**: small (one param-bind change × 2 sites)
 - **Pickable this cycle**: yes — purely defensive.
-
----
-
-### [I26] Stale TX_CONN/TX_TOKEN refs in 9 sites (docs-audit follow-up; cycle 01:10)
-- **Source**: cycle-01:10 [I11] docs-sweep agent — stragglers outside the agent's 8-site scope guard
-- **File**: `crates/plugin-db/src/v8_classes/transaction.rs:108,116,161,192,214,284,285`; `crates/plugin-db/src/crud.rs:53`; `crates/plugin-db/src/exec.rs:277`; `crates/plugin-db/src/orchestrator/transaction.rs:143`
-- **Description**: Inline doc/comment references to the retired `TX_CONN` / `TX_TOKEN` thread-locals (now `IsolateDbContext` fields). All in production code; not user-visible but newcomer-confusing.
-- **Status as of 2026-05-22 01:10**: pickable next cycle. Pure doc edits.
-- **Effort**: small (~9 line edits, single sweep)
-- **Pickable this cycle**: yes — pure docs.
 
 ---
 
@@ -386,16 +313,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Status as of 2026-05-22 01:10**: actionable but needs design for the cancellation/refusal flow.
 - **Effort**: medium
 - **Pickable this cycle**: no — paired with [I31].
-
----
-
-### [I33] Migration-pipeline: update_backfill_progress race with reset (migration-pipeline r2 F3)
-- **Source**: `plugin-db-migration-pipeline-2026-05-22-r2.md` §F3
-- **File**: `crates/plugin-db/src/migrations.rs:577-598`
-- **Description**: `update_backfill_progress` runs OUTSIDE the BEGIN/COMMIT envelope and without an `audit_generation` predicate. Operator `reset` between COMMIT and the progress UPDATE is silently clobbered — fresh runs resume from stale cursor.
-- **Status as of 2026-05-22 01:10**: actionable; add `audit_generation` column or move progress UPDATE into the COMMIT.
-- **Effort**: medium (schema migration + WHERE clause)
-- **Pickable this cycle**: rolled forward.
 
 ---
 
@@ -601,6 +518,15 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ### [S44] IMPORTANT [I28] (cycle 04:00) — Result<_, String> sweep in auth/* + replication.rs
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
+
+### [S73-S79] Backlog audit (cycle 10:30) — 7 IMPORTANTs verified closed and moved from open list
+- **[I2] SchemaRefused .code**: Closed by `d2aeada6`. Verified in `error.rs::to_op_error` arm — `code: &'static str` stamped on SchemaRefused.
+- **[I8] Cursor advance not atomic with COMMIT**: Duplicate of [I41] / F3. Closed by `37e61803 plugin-db/migrations: move update_backfill_progress BEFORE COMMIT` (cycle 03:25). Progress UPDATE now inside the BEGIN/COMMIT envelope under FOR UPDATE row lock.
+- **[I9] running_consumers diverges on rapid teardown**: Closed by `386f9bf5` (lifecycle tests caught the underlying then_some bug) + `34d209b5` (mark inside guard) + `70921112` (atomic try_claim). `ConsumerRunningGuard::Drop` fires on every exit path including future-dropped-pre-poll.
+- **[I21] Hand-rolled JSON in create_index_with_recovery_audited**: Closed by `ff220fce plugin-db/backend: ... serde_json-based envelope`. Verified `format!`-based JSON escaping is gone.
+- **[I24] exec_mutation_with_emit redundant string clone**: Closed by `49b0b98e plugin-db/exec: gate exec_mutation_with_emit tuple build behind subscriber check`. `emit_for_rows` now early-returns if `is_app_suppressed || !has_subscribers`.
+- **[I26] Stale TX_CONN/TX_TOKEN refs in 9 sites**: Closed by `09e32998` (7 files swept; 4 broken intra-doc links repaired). Remaining `TX_CONN` mentions in context.rs are explicit historical annotations.
+- **[I33] update_backfill_progress race with reset**: Duplicate of [I41] / F3. Closed by `37e61803` — progress UPDATE moved inside the COMMIT envelope under the FOR UPDATE row lock.
 
 ### [S72] MAJOR (code-critique r8 R8-2; cycle 09:30) — init_pool_async code-name drift unified
 - **Closed by**: `7d0bc4c5 plugin-db/exec: unify cold-init failure code to lazy_init_failed (R8-2)`
