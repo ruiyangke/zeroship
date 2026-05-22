@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 02:50.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 03:25.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -431,23 +431,23 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I40] mint_subscription leaks broker entry on V8 allocation failure (code-critique r4 M-NEW-2)
-- **Source**: `plugin-db-code-critique-2026-05-22-r4.md` §"M-NEW-2"
-- **File**: `crates/plugin-db/src/v8_classes/subscription.rs:157-208`
-- **Description**: Subscribes to the broker (line ~166) BEFORE the fallible V8 allocation chain (lines 167-192). Any `?` propagation in that chain leaks the broker entry — `subs.retain(|s| !s.is_closed())` never prunes it because the JS-side Subscription wrapper that would set `is_closed` was never created. The doc comment is exactly backwards on this point. Fix: defer broker subscription until V8 allocation succeeds, OR add an explicit cleanup path that calls `subscription.close()` on Err.
-- **Status as of 2026-05-22 02:50**: actionable; small refactor.
-- **Effort**: small (move subscribe call after V8 alloc succeeds, or wrap in scope-guard)
+### [I42] OrchestratorLockGuard::release flips state before await (concurrency r5 M-NEW-r5-1)
+- **Source**: `plugin-db-concurrency-2026-05-22-r5.md` §"new MINOR"
+- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs::release()`
+- **Description**: `release()` sets `self.released = true` and `self.client.take()` BEFORE the unlock-SQL await. If the await is cancelled or panics, the lock leaks silently — Drop's catastrophic-path log doesn't fire because `released = true`. Fix: take the client only after the await completes successfully (move the `released = true` assignment after the await).
+- **Status as of 2026-05-22 03:25**: actionable; small.
+- **Effort**: tiny (reorder 2 statements + add a unit test for the cancellation path if feasible)
 - **Pickable this cycle**: rolled forward.
 
 ---
 
-### [I41] Migration-pipeline R3-I3: update_backfill_progress race with operator reset (migration-pipeline r3)
-- **Source**: `plugin-db-migration-pipeline-2026-05-22-r3.md` §"R3-I3"
-- **File**: `crates/plugin-db/src/migrations.rs:577,585-598`; `audit.rs:725-754`
-- **Description**: `update_backfill_progress` runs UNLOCKED after the COMMIT, no `audit_generation` predicate. Operator `migrations.reset(...)` between COMMIT and progress-write is silently clobbered — fresh runs resume from stale cursor. Smallest fix: move the progress UPDATE BEFORE the COMMIT (2-line move). Better fix: add `audit_generation` column + WHERE predicate.
-- **Status as of 2026-05-22 02:50**: pickable; 2-line move-before-COMMIT is the fast fix.
-- **Effort**: tiny (2 lines) or small (add column)
-- **Pickable this cycle**: rolled forward as high-leverage.
+### [I43] bootstrap.rs still uses blocking pg_advisory_lock (security r4 IMPORTANT)
+- **Source**: `plugin-db-security-2026-05-22-r4.md` §"sharpened IMPORTANT"
+- **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
+- **Description**: Bootstrap uses blocking `pg_advisory_lock` with no try-with-deadline / per-app cap. `migrations.rs` uses `try_acquire_advisory_lock`. The cbd12944 RAII refactor could have unified on the try-pattern but didn't — cross-tenant pool starvation risk remains: one app blocked on its lock holds a connection that other apps can't reach.
+- **Status as of 2026-05-22 03:25**: design decision needed — non-blocking with retry/backoff vs blocking with cap. Either is a meaningful semantic change.
+- **Effort**: small (mechanical swap to try-acquire) but requires a retry/backoff policy decision.
+- **Pickable this cycle**: rolled forward; needs design input.
 
 ---
 
@@ -618,6 +618,22 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `5ceb6daa plugin-db: drop per-CRUD lowercase alloc + tighten wal_consumer shim visibility`
 - The api-surface r3 finding's "dead code in release" claim was partially wrong — `local_emit_suppressed()` is called from `emit_change()` at line 223. So cfg-gating would have broken the build. Right fix: demote `pub` → `pub(crate)` on all three legacy shims (`any_app_suppressed`, `set_local_emit_suppressed`, `local_emit_suppressed`). Removes them from the release `pub` surface without breaking internal consumers.
 
+### [S40] IMPORTANT [I40] (cycle 03:25) — subscription.rs broker entry leak on V8 alloc fail
+- **Closed by**: `4cbe9fa1 plugin-db/v8_classes/subscription: defer broker subscribe until V8 alloc succeeds`
+- Reordered `mint_subscription`: all fallible V8 ops (install, instance_template, new_instance, get_function, prototype get, set_prototype) now run BEFORE `broker::subscribe(...)`. Once subscribe lands, only infallible ops follow (Box::into_raw, External::new, set_internal_field, Weak::with_guaranteed_finalizer). Doc comment rewritten — was "exactly backwards" per the r4 reviewer. 2 unit tests: structural assertion (byte-offset ordering of `?` markers vs subscribe call) + happy-path subscription count.
+
+### [S41] IMPORTANT [I41] (cycle 03:25) — update_backfill_progress race with operator reset
+- **Closed by**: `37e61803 plugin-db/migrations: move update_backfill_progress BEFORE COMMIT`
+- Moved the audit progress UPDATE BEFORE the COMMIT so the row lock acquired by `lock_audit_row_for_update` (FOR UPDATE) is still held. Operator `migrations.reset(...)` racing between data UPDATEs and progress write now blocks on the lock; reset can only land AFTER the new cursor commits atomically with the data. Switched the audit-update error path to `rollback_and_return` since we're now inside the transaction.
+
+### [S42] IMPORTANT (api-surface r4 M1; cycle 03:25) — 5 mint_* helpers demoted pub → pub(crate)
+- **Closed by**: `07205e54 plugin-db: demote 5 mint_* helpers + fix validate.rs SchemaRefused doc lie`
+- The persistent r2→r3→r4 finding finally closed. `mint_collection`, `mint_migrations`, `mint_replication`, `mint_transaction`, `migration_start_with_spec` are all `pub(crate)` now; external test crates only need `mint_db` + `mint_subscription` (verified by grep).
+
+### [S43] CRITICAL (docs-audit r3 NEW; cycle 03:25) — validate.rs preamble lied about SchemaRefused .code
+- **Closed by**: `07205e54 plugin-db: demote 5 mint_* helpers + fix validate.rs SchemaRefused doc lie`
+- `validate.rs:25-30` claimed SchemaRefused's `to_op_error()` arm does NOT stamp `.code`; verified in `error.rs::to_op_error()` that it DOES stamp from the static discriminator. SDK CAN branch on `err.code === "validation_refused"` directly. Rewrote the preamble.
+
 ### [S39] HIGH (error-ux r3; cycle 02:50) — recover 60ca1ad6 silently reverted by ed697c45
 - **Closed by**: `dec2bd42 plugin-db/migrations: restore 60ca1ad6 fixes silently reverted by ed697c45`
 - The cycle 01:10 [I1] audit-rail refactor (ed697c45) silently reverted two unrelated fixes from `60ca1ad6`: (a) line 258 `tx_connect_failed` was routed through `to_op_error()` to preserve SQLSTATE; reverted to flat string. (b) `coded_db` prefix was changed from `"db: {context} failed: {message}"` to `"{context}: {message}"` because the message already carries `"db: "`; reverted, causing doubled prefix. Both restored. Pilot-discipline lesson: a fixer's diff can be wider than its commit message claims; verify by running a follow-up review on the SAME paths.
@@ -640,24 +656,25 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **00:47** closed [I11], [I19], perf CRITICAL N3-C1
 - **01:10** closed [I29], [I34], 2 docs CRITICALs
 - **01:35** closed [I27] OrchestratorLockGuard, [I30] auto_tx flattening
-- **02:50** closed [I36] CRUD lowercase alloc, [I38] wal_consumer shim visibility; recovered 60ca1ad6's silent reversion (dec2bd42)
+- **02:50** closed [I36], [I38]; recovered 60ca1ad6 silent reversion
+- **03:25** closed [I40] subscription leak, [I41] backfill race, [I42] 5 mint_* demote, [I43] validate.rs doc CRITICAL
 
-**Net since pilot started**: ~14 closures, ~17 new findings (some are surfaced regressions). Score trajectory net-positive across all 6 lenses.
+**Net since pilot started**: ~18 closures, ~19 new findings. Score trajectory net-positive across all 6 lenses.
 
-### Pick #1 (next cycle): **[I41] migrations.rs update_backfill_progress race (2-line move)**
-- **File**: `crates/plugin-db/src/migrations.rs:577,585-598`
-- **Fix sketch**: Move `update_backfill_progress` call BEFORE the COMMIT — eliminates the reset-clobber race window where operator `migrations.reset(...)` between COMMIT and progress-write is silently lost.
-- **Why next**: 2-line move, eliminates data-loss race, migration-pipeline r3 top recommendation.
-- **Verification gate**: build clean + lib tests green; add an integration test if reset-during-backfill is feasible.
+### Pick #1 (next cycle): **[I42] OrchestratorLockGuard::release flips state before await**
+- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs::release()`
+- **Fix sketch**: Reorder the function — perform the await first, then set `self.released = true` only on success. Drop's catastrophic-path log will fire if the await cancels/panics.
+- **Why next**: tiny (2-line reorder); concurrency r5 new MINOR; silent-lock-leak class bug.
+- **Verification gate**: lib tests green; if feasible, add a cancellation-path unit test (drop the future before await completes; assert lock would re-release on next acquire).
 
-### Pick #2 (next cycle): **[I40] subscription.rs broker-entry leak on V8 alloc failure**
-- **File**: `crates/plugin-db/src/v8_classes/subscription.rs:157-208`
-- **Fix sketch**: Defer the `broker.subscribe()` call until after V8 wrapper allocation succeeds, OR add explicit cleanup via scope-guard on Err.
-- **Why next**: small refactor; concurrency-class bug (silent broker entry leak); code-critique r4 MAJOR finding.
-- **Verification gate**: unit test exercising the V8-alloc-failure path; existing tests green.
-
-### Pick #3 (next cycle, larger): **[I28] ~45 Result<_, String> sweep in replication.rs + auth/bootstrap.rs**
+### Pick #2 (next cycle): **[I28] ~45 Result<_, String> sweep in replication.rs + auth/**
 - **File** (multi): `crates/plugin-db/src/auth/bootstrap.rs` (13 sites), `crates/plugin-db/src/replication.rs` (8 sites), `crates/plugin-db/src/auth/session.rs` (6 sites), plus stragglers.
 - **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant.
-- **Why**: every replication/auth op currently surfaces as `.code = "internal"`. Closes [I37] once landed.
+- **Why**: every replication/auth op surfaces as `.code = "internal"`. Closes [I37] once landed.
 - **Caveat**: medium-large; worktree isolation strongly recommended; each site needs typed-variant triage.
+
+### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
+- **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
+- **Fix sketch**: Switch from blocking `pg_advisory_lock` to `try_acquire_advisory_lock` with a backoff loop and a per-app cap, like `migrations.rs` does. Cross-tenant pool starvation risk.
+- **Why**: security r4 sharpened IMPORTANT.
+- **Caveat**: needs design decision on retry/backoff policy + max-wait semantics.
