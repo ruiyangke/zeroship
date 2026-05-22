@@ -243,7 +243,7 @@ fn getrandom_or_fallback(buf: &mut [u8]) {
     // Fallback — never expected in production. The proposal requires
     // pgcrypto for the HMAC key (which IS the secret); the nonce only
     // needs to be unique within the retention window.
-    eprintln!("auth/session: /dev/urandom unavailable, using time-perturbed fallback");
+    tracing::error!("auth/session: /dev/urandom unavailable, using time-perturbed fallback");
     let mut t = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)

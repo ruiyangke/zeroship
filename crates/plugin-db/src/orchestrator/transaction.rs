@@ -148,7 +148,7 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
         })?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
-            eprintln!("db: tx connection task error: {e}");
+            tracing::error!(error = ?e, "db: tx connection task error");
         }
     })
     .detach();

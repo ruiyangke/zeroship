@@ -184,7 +184,7 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
         })?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
-            eprintln!("db: auto-tx connection task error: {e}");
+            tracing::error!(error = ?e, "db: auto-tx connection task error");
         }
     })
     .detach();

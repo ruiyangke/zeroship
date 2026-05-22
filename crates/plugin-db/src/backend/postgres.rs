@@ -75,7 +75,7 @@ impl Backend for PostgresBackend {
             })?;
         compio::runtime::spawn(async move {
             if let Err(e) = connection.run().await {
-                eprintln!("db: backend connection task error: {e}");
+                tracing::error!(error = ?e, "db: backend connection task error");
             }
         })
         .detach();
