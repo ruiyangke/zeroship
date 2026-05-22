@@ -18,6 +18,14 @@
 #   `ld.so` cache. The agent's only dynamic deps (glibc) are present on
 #   debian-trixie at the canonical paths.
 #
+# We also install the in-repo `init.sh` (the PID-1 script that parses
+# `zsbx_pubkey=` from /proc/cmdline and mounts /dev/vdb,/vdc) to
+# `/sbin/init` inside the rootfs, so the wire contract between the
+# wrapper (cmdline-injected pubkey + two extra virtio-blk disks) and
+# the guest's boot path stays in source. Prior to the virtio-blk
+# pivot init.sh mounted three virtio-fs shares; bumping the rootfs
+# image without rebaking init.sh would silently break booting.
+#
 # Usage:
 #   bake-rootfs.sh <source-binary> <rootfs-img> [--mount-dir <dir>] [--build]
 #
@@ -214,6 +222,18 @@ DEST_BIN="${DEST_DIR}/sandbox-agent"
 echo "[bake] installing patched agent at ${DEST_BIN} (mode 0755)"
 sudo install -d -m 0755 "${DEST_DIR}"
 sudo install -m 0755 "${PATCHED_BIN}" "${DEST_BIN}"
+
+# Install the in-repo PID-1 init script at /sbin/init. This is the
+# script the wrapper's `init=/sbin/init` cmdline points at; it parses
+# zsbx_pubkey= from /proc/cmdline, formats + mounts /dev/vdb,/vdc,
+# then execs sandbox-agent. See ./init.sh for the contract.
+INIT_SRC="${SCRIPT_DIR}/init.sh"
+if [[ ! -f "${INIT_SRC}" ]]; then
+    echo "FATAL: init.sh missing next to bake-rootfs.sh: ${INIT_SRC}" >&2
+    exit 1
+fi
+echo "[bake] installing /sbin/init from ${INIT_SRC} (mode 0755)"
+sudo install -m 0755 "${INIT_SRC}" "${MOUNT_DIR}/sbin/init"
 sudo sync
 
 # ---- explicit unmount (cleanup trap is best-effort fallback) ----
