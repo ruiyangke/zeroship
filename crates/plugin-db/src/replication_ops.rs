@@ -28,11 +28,31 @@
 //! We chose explicit opt-in (a) over implicit spawn-on-first-subscribe
 //! (b): the failure surfaces at the call site, not deep inside a
 //! subscribe Promise. Apps with no reactive surface skip the cost.
+//!
+//! ## Error rail
+//!
+//! Every dispatch failure here is routed through [`crate::error::DbError`]
+//! → [`crate::error::DbError::to_op_error`] so the rejection carries a
+//! stable `.code` the SDK can branch on:
+//!
+//! - `ensure_pool` failures preserve their DbError variant verbatim
+//!   (typically `not_configured` / `transient`).
+//! - The `replication::*` helpers currently return `Result<_, String>`
+//!   with already-formatted messages (e.g. `"replication: …"`); the
+//!   dispatch boundary wraps these in [`crate::error::DbError::Internal`]
+//!   so the operator-facing message reaches JS verbatim while the SDK
+//!   still sees `.code = "internal"`. Refining the inner module to
+//!   surface Configuration / Transient / LockContention variants is
+//!   tracked separately.
+//! - `WalConsumer::new` failures map to [`crate::error::DbError::Configuration`]
+//!   with `code = "not_provisioned"` (the only thing that can fail
+//!   pre-spawn is sanitisation of `app_id`).
 
-use zeroship_runtime::state::OpResult;
+use zeroship_runtime::state::{OpResult, ResolveValue};
 
+use crate::error::DbError;
 use crate::exec::ensure_pool;
-use crate::v8_bridge::{runtime_state, setup_promise};
+use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 /// `db.replication.setup(opts?)` dispatch.
 pub fn replication_setup_dispatch<'s>(
@@ -40,28 +60,28 @@ pub fn replication_setup_dispatch<'s>(
     app_id: String,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let pool = match ensure_pool().await {
             Ok(p) => p,
             Err(e) => {
-                return OpResult::Failed {
-                    op_id,
-                    error: e.into_string(),
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }
         };
         match crate::replication::ensure_publication_and_slot(&pool, &app_id).await {
-            Ok(out) => OpResult::Completed {
-                op_id,
-                value: out.to_json(),
+            Ok(out) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::String(out.to_json()),
                 request_id,
             },
-            Err(e) => OpResult::Failed {
-                op_id,
-                error: e,
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(DbError::Internal { message: e }.to_op_error()),
                 request_id,
             },
         }
@@ -74,28 +94,28 @@ pub fn replication_watchdog_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let pool = match ensure_pool().await {
             Ok(p) => p,
             Err(e) => {
-                return OpResult::Failed {
-                    op_id,
-                    error: e.into_string(),
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }
         };
         match crate::replication::watchdog_query(&pool).await {
-            Ok(rows) => OpResult::Completed {
-                op_id,
-                value: crate::replication::watchdog_to_json(&rows),
+            Ok(rows) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
                 request_id,
             },
-            Err(e) => OpResult::Failed {
-                op_id,
-                error: e,
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(DbError::Internal { message: e }.to_op_error()),
                 request_id,
             },
         }
@@ -109,28 +129,30 @@ pub fn replication_drop_abandoned_dispatch<'s>(
     inactive_seconds: i64,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let pool = match ensure_pool().await {
             Ok(p) => p,
             Err(e) => {
-                return OpResult::Failed {
-                    op_id,
-                    error: e.into_string(),
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }
         };
         match crate::replication::drop_abandoned_slots(&pool, inactive_seconds).await {
-            Ok(names) => OpResult::Completed {
-                op_id,
-                value: serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+            Ok(names) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::String(
+                    serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+                ),
                 request_id,
             },
-            Err(e) => OpResult::Failed {
-                op_id,
-                error: e,
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(DbError::Internal { message: e }.to_op_error()),
                 request_id,
             },
         }
@@ -154,7 +176,7 @@ pub fn start_replication_consumer_dispatch<'s>(
     app_id: String,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Idempotent: if a consumer is already running for this app on
@@ -166,9 +188,9 @@ pub fn start_replication_consumer_dispatch<'s>(
                 "app_id": app_id,
             })
             .to_string();
-            return OpResult::Completed {
-                op_id,
-                value,
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::String(value),
                 request_id,
             };
         }
@@ -177,9 +199,9 @@ pub fn start_replication_consumer_dispatch<'s>(
         let pool = match ensure_pool().await {
             Ok(p) => p,
             Err(e) => {
-                return OpResult::Failed {
-                    op_id,
-                    error: e.into_string(),
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }
@@ -187,9 +209,11 @@ pub fn start_replication_consumer_dispatch<'s>(
         let setup = match crate::replication::ensure_publication_and_slot(&pool, &app_id).await {
             Ok(s) => s,
             Err(e) => {
-                return OpResult::Failed {
-                    op_id,
-                    error: e,
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(
+                        DbError::Internal { message: e }.to_op_error(),
+                    ),
                     request_id,
                 }
             }
@@ -200,9 +224,15 @@ pub fn start_replication_consumer_dispatch<'s>(
         let consumer = match crate::wal_consumer::WalConsumer::new(&app_id, &url) {
             Ok(c) => c.with_start_lsn(setup.confirmed_flush_lsn.clone()),
             Err(e) => {
-                return OpResult::Failed {
-                    op_id,
-                    error: e.to_string(),
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(
+                        DbError::Configuration {
+                            code: "not_provisioned",
+                            message: e.to_string(),
+                        }
+                        .to_op_error(),
+                    ),
                     request_id,
                 };
             }
@@ -233,9 +263,9 @@ pub fn start_replication_consumer_dispatch<'s>(
             m.insert("consumerStarted".into(), serde_json::Value::Bool(true));
             m.insert("alreadyRunning".into(), serde_json::Value::Bool(false));
         }
-        OpResult::Completed {
-            op_id,
-            value: env.to_string(),
+        OpResult::JsValue {
+            resolver,
+            value: ResolveValue::String(env.to_string()),
             request_id,
         }
     }));
