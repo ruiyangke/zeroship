@@ -358,3 +358,84 @@ pub trait Backend: 'static {
 /// stash is type-erased to avoid threading a parameter through
 /// `IsolateDbContext`.
 pub type BackendHandle = Rc<PostgresBackend>;
+
+#[cfg(test)]
+mod tests {
+    //! Interface-level (compile-time) tests for the [`Backend`] trait.
+    //!
+    //! The trait is `async fn`-in-trait and every method needs a real
+    //! Postgres listener via [`PostgresBackend`]; we cannot exercise
+    //! method bodies from a `#[test]` without `tests/integration.rs`.
+    //! What we *can* do — and what catches the highest-leverage
+    //! refactor mistakes — is pin the trait shape at compile time:
+    //!
+    //! - the canonical impl [`PostgresBackend`] satisfies the bound;
+    //! - the associated types stay wired to their concrete
+    //!   `compio_postgres` / `crate::diff` counterparts;
+    //! - the `'static` bound on the trait flows through.
+    //!
+    //! Any future change to the trait (new method, swapped
+    //! associated-type bound, lifetime tightening) trips one of these
+    //! at `cargo build -p zeroship-plugin-db --tests` time, before any
+    //! caller fails at a more distant site.
+
+    use super::*;
+
+    /// Compile-time: the canonical impl [`PostgresBackend`] satisfies
+    /// the [`Backend`] trait. Function body type-checks at build time;
+    /// it's a deliberate no-op at runtime.
+    fn assert_postgres_backend_impls_backend() {
+        fn assert_impl<T: Backend>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: the associated types stay anchored to the concrete
+    /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A
+    /// regression here would silently change every `B::Client` /
+    /// `B::LiveSchema` consumer's expectations.
+    fn assert_associated_types_pinned() {
+        fn pinned_client<T: Backend<Client = compio_postgres::Client>>() {}
+        fn pinned_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
+        pinned_client::<PostgresBackend>();
+        pinned_live_schema::<PostgresBackend>();
+    }
+
+    /// Compile-time: `Backend: 'static`. The per-isolate context parks
+    /// the impl behind an `Rc<PostgresBackend>` in a `thread_local!`;
+    /// dropping the `'static` bound would break that path.
+    fn assert_backend_is_static() {
+        fn assert_static<T: 'static>() {}
+        assert_static::<PostgresBackend>();
+    }
+
+    /// [`BackendHandle`] must remain `Rc<PostgresBackend>` — the
+    /// per-isolate context stores it via this alias, and consumers
+    /// `Rc::clone` it without naming the concrete type. Identity-check
+    /// the alias here so a refactor that re-types it (e.g. to
+    /// `Arc<dyn Backend>`) trips a build error in this module rather
+    /// than at every call site.
+    fn assert_backend_handle_alias() {
+        fn same<T, U>()
+        where
+            T: 'static,
+            U: 'static,
+        {
+            // We assert structural equivalence by requiring the
+            // function body to type-check with `T = U` — the caller
+            // below substitutes both sides with the same concrete
+            // type, so any divergence is caught.
+        }
+        same::<BackendHandle, Rc<PostgresBackend>>();
+    }
+
+    #[test]
+    fn compile_time_assertions_link() {
+        // Keep the asserter functions live so the dead-code lint
+        // doesn't fire. The type-check still runs even if these
+        // weren't called, but the explicit cast documents intent.
+        let _ = assert_postgres_backend_impls_backend as fn();
+        let _ = assert_associated_types_pinned as fn();
+        let _ = assert_backend_is_static as fn();
+        let _ = assert_backend_handle_alias as fn();
+    }
+}

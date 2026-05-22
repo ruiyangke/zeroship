@@ -603,3 +603,128 @@ async fn create_index_with_recovery_audited(
         spec.name
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for [`PostgresBackend`].
+    //!
+    //! ## What this layer can — and cannot — test in isolation
+    //!
+    //! `PostgresBackend` is, by design, a thin facade: every method in
+    //! `impl Backend for PostgresBackend` either calls the `Rc<Pool>`
+    //! directly or forwards into [`crate::audit`] / [`crate::diff`] /
+    //! [`crate::query`] free functions. The only non-async logic in this
+    //! file is:
+    //!
+    //! * [`PostgresBackend::new`] — captures the `pool` + `url` fields.
+    //! * [`PostgresBackend::pool`] / [`PostgresBackend::url`] — getters.
+    //! * The [`std::fmt::Debug`] impl — deliberately opaque
+    //!   ("PostgresBackend").
+    //!
+    //! Even those need an `Rc<compio_postgres::Pool>` to construct, and
+    //! `Pool::connect` requires a live Postgres listener. There is no
+    //! stub / no-IO constructor. The async methods need both a Pool
+    //! AND a real `Client`; they're exercised by `tests/integration.rs`.
+    //!
+    //! That leaves *compile-time* tests as the highest-signal coverage
+    //! we can add in `--lib`:
+    //!
+    //! 1. `PostgresBackend: Backend` — proves the trait impl is wired
+    //!    up so any future bound change to `Backend` (adding a method,
+    //!    tightening a lifetime, swapping an associated type) fails
+    //!    compilation here, not at a distant call site.
+    //! 2. Associated-type identities — pin `Client = compio_postgres::Client`
+    //!    and `LiveSchema = crate::diff::LiveSchema` so a refactor that
+    //!    accidentally swaps either is caught here.
+    //! 3. The `Backend: 'static` bound on the trait — re-asserted at
+    //!    the impl site.
+    //!
+    //! These are runtime no-ops (the bodies never execute) — they exist
+    //! so `cargo build -p zeroship-plugin-db --tests` fails fast on a
+    //! seam break.
+
+    use super::*;
+    use crate::backend::Backend;
+
+    /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait.
+    /// The function is never called; the bound is checked at type-check
+    /// time.
+    fn assert_postgres_backend_impls_backend() {
+        fn assert_impl<T: Backend>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: the associated types must remain wired to the
+    /// concrete `compio_postgres` / `crate::diff` types. Swapping
+    /// either accidentally would silently change the `B::Client` /
+    /// `B::LiveSchema` shape every consumer sees.
+    fn assert_postgres_backend_assoc_types() {
+        fn same_client<T: Backend<Client = compio_postgres::Client>>() {}
+        fn same_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
+        same_client::<PostgresBackend>();
+        same_live_schema::<PostgresBackend>();
+    }
+
+    /// Compile-time: the `Backend: 'static` bound carries through to
+    /// the impl. The per-isolate context relies on this to park
+    /// `Rc<PostgresBackend>` in a thread-local without explicit lifetime
+    /// gymnastics.
+    fn assert_postgres_backend_is_static() {
+        fn assert_static<T: 'static>() {}
+        assert_static::<PostgresBackend>();
+    }
+
+    // Runtime side: the only Pool-free observation we can make is on
+    // the `Debug` impl shape. It must remain opaque ("PostgresBackend")
+    // so accidentally adding a field that exposes the URL or pool
+    // internals via #[derive(Debug)] would be caught here.
+
+    #[test]
+    fn debug_impl_is_opaque_source_check() {
+        // We can't construct a real `PostgresBackend` without a Pool
+        // (Pool::connect needs a live Postgres listener). Instead we
+        // verify the *source* of the Debug impl: it must render a
+        // bare struct name with no fields, so the URL (which may
+        // carry credentials) is never printed.
+        //
+        // Regression guard: if someone switches to `#[derive(Debug)]`,
+        // the rendered string would include
+        // `pool: Rc { ... }, url: "postgres://..."` and break the
+        // assertion below.
+        let src = include_str!("postgres.rs");
+        let debug_block = src
+            .split("impl std::fmt::Debug for PostgresBackend")
+            .nth(1)
+            .expect("Debug impl present");
+        // First `}` that closes the impl block (the impl body has only
+        // one inner `fn fmt` whose own braces match).
+        let body_end = debug_block
+            .find("\n}\n")
+            .expect("Debug impl block has a closing brace");
+        let body = &debug_block[..body_end];
+        assert!(
+            body.contains("debug_struct(\"PostgresBackend\")"),
+            "Debug impl must use a `debug_struct(\"PostgresBackend\")` builder"
+        );
+        assert!(
+            body.contains(".finish()"),
+            "Debug impl must close with `.finish()` (no fields)"
+        );
+        assert!(
+            !body.contains(".field("),
+            "Debug impl must NOT expose internal fields — `url` may contain secrets"
+        );
+    }
+
+    #[test]
+    fn compile_time_trait_assertions_link() {
+        // Calling the asserter functions ensures rustc keeps them
+        // alive and the `unused` lints don't fire. The compile-time
+        // checks happen at type-check time on the function body
+        // regardless of whether we call them, but the explicit
+        // `_ = ...` documents intent and silences `dead_code`.
+        let _ = assert_postgres_backend_impls_backend as fn();
+        let _ = assert_postgres_backend_assoc_types as fn();
+        let _ = assert_postgres_backend_is_static as fn();
+    }
+}
