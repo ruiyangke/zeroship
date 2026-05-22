@@ -1,12 +1,14 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 11:17.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 12:17.
+
+**Cycle 12:17 closures (4)**: [I6] release_advisory_lock returns Result (`51c342e8`) + [F1] warn-half (`fcf7ce3c` — 5 `let _ = update_audit_status` sites converted to structured `tracing::warn!`) + 2 doc-drift cleanups (`71a457a1` — auth/mod.rs Backwards-compatibility section + lib.rs module-visibility note, both from docs-audit r7). 3 reviewers returned: **docs-audit r7 = 87 (+4)**, **migration-pipeline r10 = 85 (±0, plateau n=3)**, **security r10 = 84 (+1, credited [I12])**. Total +5 score-points across 3 lenses. Reviewers under-covered this cycle: error-ux, architecture, concurrency, code-critique, performance, test-coverage, api-surface.
 
 **Cycle 11:17 closures (4)**: [I12] ASCII tightening (`403b3891`) + [I25] retro-closed via `c0590506` + 3 doc/vis cleanups (`4cab871a` — slot_status visibility, context.rs:404 docstring, error.rs preamble) + [I13] testable subset (`ae5570dc`). 4 reviewers returned: **code-critique r10 = 95 (+1)**, **api-surface r9 = 89 (+7)**, **test-coverage r11 = 85 (+1)**, **performance r11 = 81 (±0, no forcing function)**. Total +9 score-points across 4 lenses — significantly above cycle 10:47's +2.
 
 **Cycle 10:47 closures (2)**: MAJOR-R9-5 (auth/* hardening gate, commit `2fa9472e`) + [I23] (mig_lock state-drift tracing, commit `5d9acab8`). 4 reviewers returned: architecture r10 = 93 (+1, credited the hardening gate), security r9 = 83 (+1, same credit), error-ux r9 = 91 (±0), concurrency r10 = 88 (±0, surfaced one NEW MINOR-latent — Subscription::close at broker.rs:359-369 holds borrow_mut across w.wake).
 
-**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 17 IMPORTANT (mix actionable / judgment-call / cross-crate; was 20 pre-11:17, dropped 3 via [I12]/[I25]/[I13]).
+**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 16 IMPORTANT (was 17 pre-12:17; [I6] closed this cycle). [I31]/F1 is now half-closed (warn-half landed; sweeper-half still needs design).
 
 **STRONG PLATEAU SIGNAL (sustained through cycle 10:47)**: cycle 09:30's 4-of-4 ±0 movement has only marginally improved — cycle 10:47's +1/+1/0/0 came entirely from the hardening cfg-gate (a single forcing function), not from forward motion on lens-specific findings. Architecture reviewer recommends capping at r11 if the `query.rs` split lands; concurrency reviewer recommends skipping cycles until the two carried IMPORTANTs land. Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function".
 
@@ -16,7 +18,7 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 11:17.
 3. **F1+F2 schema migration** (orphan Running + Pending audit rows) — needs deployment story.
 4. **Downshift cadence**: reduce cron from `:17/:47` to once per hour or longer until a forcing function lands.
 
-Source reviews triaged (22 total):
+Source reviews triaged (25 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
 - `plugin-db-api-surface-2026-05-22-r9.md`
 - `plugin-db-architecture-review-2026-05-21.md`
@@ -29,14 +31,17 @@ Source reviews triaged (22 total):
 - `plugin-db-concurrency-2026-05-22-r2.md`
 - `plugin-db-concurrency-2026-05-22-r10.md`
 - `plugin-db-docs-audit-2026-05-22-r1.md`
+- `plugin-db-docs-audit-2026-05-22-r7.md`
 - `plugin-db-error-ux-2026-05-22-r1.md`
 - `plugin-db-error-ux-2026-05-22-r9.md`
 - `plugin-db-migration-pipeline-2026-05-22-r1.md`
+- `plugin-db-migration-pipeline-2026-05-22-r10.md`
 - `plugin-db-performance-2026-05-22-r1.md`
 - `plugin-db-performance-2026-05-22-r2.md`
 - `plugin-db-performance-2026-05-22-r11.md`
 - `plugin-db-security-2026-05-22-r1.md`
 - `plugin-db-security-2026-05-22-r9.md`
+- `plugin-db-security-2026-05-22-r10.md`
 - `plugin-db-test-coverage-2026-05-22-r2.md`
 - `plugin-db-test-coverage-2026-05-22-r11.md`
 
@@ -126,16 +131,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I6] `release_advisory_lock` trait signature returns `()` (code-critique I-NEW-2 / R1 I6)
-- **Source**: `plugin-db-code-critique-2026-05-22-r2.md` §I-NEW-2; `plugin-db-code-critique-2026-05-21.md` §I6
-- **File**: `crates/plugin-db/src/backend/mod.rs` (trait declaration); `crates/plugin-db/src/backend/postgres.rs:157-160`
-- **Description**: `async fn release_advisory_lock(&self, client: &Self::Client, key1: &str, key2: &str);` — no `Result`. The impl swallows errors silently (`let _ = client.query_text_params(...).await`). `apply.rs` was fixed by issuing the unlock inline (not via the trait method), so this trait method has no production callers — but it remains a footgun for any future caller added behind the trait.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes. `backend/postgres.rs:157-160` matches the review verbatim.
-  - Blocker: none. The trait change is mechanical: `→ Result<(), DbError>`. The one impl returns `Ok(())`. The trait has no production callers, so call-site burden is zero.
-  - Already-superseded-by: N/A
-- **Effort**: small (signature change + `Ok(())` in one impl)
-- **Pickable this cycle**: yes — single-file mechanical change; closes a footgun. But also low-urgency because no production caller hits it.
+### ~~[I6] `release_advisory_lock` trait signature returns `()`~~ — CLOSED cycle 12:17
+- **Closed by**: `51c342e8 plugin-db/backend: release_advisory_lock returns Result (I6)`
+- Trait now returns `Result<(), DbError>`; Postgres impl lifts via `DbError::from_pg`. Cycle 12:17 audit found two production callers in `migrations.rs` (not zero as the deferred entry claimed) — both now `tracing::warn!` on Err and continue, matching `OrchestratorLockGuard::release`'s pattern. The lock auto-releases on session end so this stays observability-only. 352 lib tests pass.
 
 ---
 
@@ -280,13 +278,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I31] Migration-pipeline: orphan `Running` DDL audit rows have no heartbeat/sweeper (migration-pipeline r2 F1)
+### [I31] Migration-pipeline: orphan `Running` DDL audit rows have no heartbeat/sweeper (migration-pipeline r2 F1) — WARN-HALF CLOSED cycle 12:17
 - **Source**: `plugin-db-migration-pipeline-2026-05-22-r2.md` §F1
-- **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` — `update_audit_status` errors silently discarded via `let _ = …`
+- **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:160-190`; `crates/plugin-db/src/backend/postgres.rs` (3 retry sites)
 - **Description**: Worker dying between DDL completion and audit terminal-update leaves the row in `Running` forever. No `owner_session_id`/heartbeat on DDL rows, no sweeper to terminalise abandoned entries.
-- **Status as of 2026-05-22 01:10**: design needed (sweeper cadence, ownership claim, watchdog policy). Not a simple mechanical fix.
-- **Effort**: medium-large (needs new schema column + background task)
-- **Pickable this cycle**: no — design decision required.
+- **Warn-half closed (cycle 12:17)**: `fcf7ce3c plugin-db: warn on audit-status update failure (F1 warn-half)` — all 5 `let _ = update_audit_status(...)` sites converted to `if let Err(e) = ...` + structured `tracing::warn!` with app_id / audit_id / attempt / inner-error. The DDL error still propagates via `result` / `refuse(...)` so JS sees the failure; the warn surfaces the audit-write secondary failure operators can grep for. Closes the observability half of F1.
+- **Remainder**: full F1 still open — needs design for sweeper cadence + `owner_session_id`/heartbeat column + watchdog policy. The warn logs are observability-only; a stuck `Running` row still requires an operator-driven reset until the sweeper lands.
+- **Effort (remaining)**: medium-large (needs new schema column + background task)
+- **Pickable this cycle**: no — design decision still required for the sweeper.
 
 ---
 
@@ -321,6 +320,18 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ---
 
 ## SUPERSEDED (already fixed; remove next cycle)
+
+### [S86] IMPORTANT (docs-audit r7 NEW × 2; cycle 12:17) — auth/mod.rs + lib.rs preambles after hardening cargo gate
+- **Closed by**: `71a457a1 plugin-db: doc-drift cleanup after hardening cargo gate (docs-audit r7)`
+- Two preambles missed when cycle-10:47's `2fa9472e` landed the `hardening` Cargo feature. (a) `auth/mod.rs` "Backwards compatibility" section described `--harden` CLI flag as the opt-in; rewritten to describe the cfg-gate as the actual compile-time mechanism and note `--harden` as one possible runtime opt-in once the module ships. (b) `lib.rs` module-visibility note explained the `test-helpers` cfg-fork but omitted the three-arm `hardening` ladder; now documents the cross-product + updates the `required-features` reference. Both NEW IMPORTANTs from docs-audit r7 closed.
+
+### [S85] HIGH (migration-pipeline r2 §F1; cycle 12:17) — F1 warn-half (observability)
+- **Closed by**: `fcf7ce3c plugin-db: warn on audit-status update failure (F1 warn-half)`
+- All 5 `let _ = update_audit_status(...).await;` sites converted to `if let Err(e) = ...` + structured `tracing::warn!` with `app_id` / `audit_id` / `attempt` / inner-error context. Sites: `apply.rs:163-170` (Applied terminal), `apply.rs:178-186` (Failed terminal on DDL Err), `backend/postgres.rs` (INVALID-index loop), `backend/postgres.rs` (data-violation retry), `backend/postgres.rs` (transient/non-transient index build failure). DDL errors still propagate via `result` / `refuse(...)`; retry semantics unchanged. The warn surfaces audit-write secondary failures operators can grep for. **Sweeper-half remains open at [I31]** — needs design for owner_session_id/heartbeat column + watchdog policy.
+
+### [S84] IMPORTANT (code-critique I-NEW-2 + r1 I6; cycle 12:17) — [I6] release_advisory_lock silent error swallow
+- **Closed by**: `51c342e8 plugin-db/backend: release_advisory_lock returns Result (I6)`
+- Trait method now returns `Result<(), DbError>` (was `()`); Postgres impl propagates `compio_postgres::Error` via `DbError::from_pg`. Cycle-12:17 audit corrected the deferred entry's "no production callers" claim — two callers exist in `migrations.rs` (cancelled-refusal path at :288, backfill-finalise path at :651). Both updated to `tracing::warn!` on Err and continue; the lock auto-releases on session end so this stays observability-only.
 
 ### [S82] HIGH (test-coverage r2 GAP-2 + r11 carry; cycle 11:17) — [I13] queue_or_emit / drain / clear unit-test gap
 - **Closed by**: `ae5570dc plugin-db/exec: unit tests for queue_or_emit / drain / clear (I13)`
