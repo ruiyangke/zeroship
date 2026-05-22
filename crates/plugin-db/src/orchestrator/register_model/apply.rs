@@ -68,7 +68,7 @@ pub(crate) async fn apply<'p, B: Backend>(
         {
             Ok(id) => Some(id),
             Err(e) => {
-                tracing::warn!(error = %e.into_string(), "audit: failed to insert running row");
+                tracing::warn!(error = ?e, "audit: failed to insert running row");
                 None
             }
         };

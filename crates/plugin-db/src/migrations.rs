@@ -222,7 +222,7 @@ pub async fn exec_begin(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
 
     let client = backend
         .acquire_dedicated_client()
@@ -615,7 +615,7 @@ pub async fn exec_status(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
     let row = backend
         .find_latest_backfill_row_pool(app_id, collection, name)
         .await
@@ -656,7 +656,7 @@ pub async fn exec_cancel(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
     // Read current status.
     let row = backend
         .find_latest_backfill_row_pool(app_id, collection, name)
@@ -689,7 +689,7 @@ pub async fn exec_reset(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &e.into_string(), None))?;
+        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e:?}"), None))?;
     // Gap X: bump `audit_generation` so any in-flight worker holding
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor

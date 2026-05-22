@@ -79,7 +79,7 @@ pub(crate) async fn validate<B: Backend>(
             // mask the envelope — tracing::warn so it shows in worker
             // logs but the user-facing error stays clean.
             if let Err(e) = backend.write_audit_row(&ctx.app_id, &row).await {
-                tracing::warn!(error = %e.into_string(), "audit: failed to log destructive op");
+                tracing::warn!(error = ?e, "audit: failed to log destructive op");
             }
         }
 
