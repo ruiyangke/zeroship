@@ -411,7 +411,16 @@ impl IsolateDbContext {
         self.running_consumers.contains(app_id)
     }
 
-    /// Mark a replication consumer as running for this app.
+    /// Mark a replication consumer as running for this app — test-only.
+    ///
+    /// Production code uses [`Self::try_mark_consumer_running`]
+    /// (atomic check-and-set; returns whether the caller won the
+    /// race). This unconditional variant is retained for test
+    /// fixtures that need to mark without caring whether the slot was
+    /// already taken; api-surface r6 MAJOR-R6-1 noted it was dead in
+    /// production builds and would footgun a contributor picking it
+    /// over the atomic variant.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn mark_consumer_running(&mut self, app_id: &str) {
         self.running_consumers.insert(app_id.to_string());
     }

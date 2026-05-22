@@ -41,13 +41,17 @@
 //!   — SQLSTATE classification + Configuration/Transient/LockContention
 //!   variants are picked inside `crate::replication` and flow through
 //!   here verbatim (no Internal-wrapping at the dispatch boundary).
-//! - `WalConsumer::new` failures map to [`crate::error::DbError::Configuration`]
-//!   with `code = "not_provisioned"` (the only thing that can fail
-//!   pre-spawn is sanitisation of `app_id`).
+//! - `WalConsumer::new` failures preserve their typed DbError variant
+//!   (post-aa639715): an empty `db_url` surfaces as
+//!   [`crate::error::DbError::Configuration`] with `code =
+//!   "not_provisioned"` (operator/config error), while a bad `app_id`
+//!   (sanitisation failure) surfaces as
+//!   [`crate::error::DbError::ValidationFailed`] with `code =
+//!   "invalid_app_id"` (developer/deploy error). The dispatch boundary
+//!   no longer re-stamps a generic `"not_provisioned"` over both classes.
 
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
-use crate::error::DbError;
 use crate::exec::ensure_pool;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 

@@ -227,49 +227,24 @@ pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), Db
         .await
         .map(|_| ())
         .map_err(|e| {
-            // Walk the source chain — compio-postgres's top-level
-            // Display is "db error"; the SQLSTATE-bearing inner
-            // DbError is one source-hop away.
-            let mut msg = format!("{e}");
-            let mut cur: &dyn std::error::Error = &e;
-            while let Some(src) = std::error::Error::source(cur) {
-                msg.push_str(" | ");
-                msg.push_str(&format!("{src}"));
-                cur = src;
-            }
-            // Promote the structured RAISE messages to typed
-            // ValidationFailed variants with stable `.code`s the SDK
-            // can branch on. The SECURITY DEFINER function raises
-            // SQLSTATE P0001 with a machine-readable DETAIL token
-            // (set in auth/bootstrap.rs's CREATE FUNCTION body) — we
-            // discriminate on the DETAIL, not on free-text message
-            // substrings (MAJOR-R5-1: code-critique r5 + security r5;
-            // substring matching was fragile against RAISE additions,
-            // formatter changes, and locale changes).
-            let detail = classify_p0001_detail(&e);
-            match detail {
-                Some(("session_nonce_replay", op_msg)) => {
-                    DbError::validation("session_nonce_replay", op_msg)
-                }
-                Some(("session_signature_expired", op_msg)) => {
-                    DbError::validation("session_signature_expired", op_msg)
-                }
-                Some(("session_invalid_signature", op_msg)) => {
-                    DbError::validation("session_invalid_signature", op_msg)
-                }
-                Some(("session_invalid_actor_kind", op_msg)) => {
-                    DbError::validation("session_invalid_actor_kind", op_msg)
-                }
-                Some(("session_nonce_too_short", op_msg)) => {
-                    DbError::validation("session_nonce_too_short", op_msg)
-                }
-                _ => {
-                    // Anything else — SQLSTATE class 23, transient
-                    // connection failures, unknown P0001 detail, etc. —
-                    // flows through SQLSTATE classification verbatim.
-                    let _ = msg;
-                    coded_sql("init_session", e)
-                }
+            // Promote structured RAISEs to typed ValidationFailed
+            // variants with stable `.code`s. The SECURITY DEFINER
+            // function raises SQLSTATE P0001 with a machine-readable
+            // DETAIL token (set in auth/bootstrap.rs's CREATE FUNCTION
+            // body) — discriminate on DETAIL via
+            // [`classify_p0001_detail`], not on free-text message
+            // substrings (MAJOR-R5-1: substring matching was fragile
+            // against RAISE additions, formatter changes, locale).
+            //
+            // Anything else — SQLSTATE class 23, transient connection
+            // failures, unknown P0001 detail, etc. — flows through
+            // [`coded_sql`] verbatim. (perf r7 N7-M0: the prior
+            // implementation built `format!("{e}")` + walked the
+            // source chain even though `classify_p0001_detail` reads
+            // detail() borrow-only; removed the dead allocation.)
+            match classify_p0001_detail(&e) {
+                Some((code, op_msg)) => DbError::validation(code, op_msg),
+                None => coded_sql("init_session", e),
             }
         })
 }
