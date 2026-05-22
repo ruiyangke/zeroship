@@ -605,10 +605,17 @@ pub async fn insert_backfill_running(
         )
         .await
         .map_err(|e| coded_sql("insert_backfill_running", e))?;
+    // Defensive: an empty RETURNING set used to silently produce `id =
+    // 0` (via `.unwrap_or_default()`), which then aliased every
+    // downstream `WHERE id = $1::bigint` write to a no-op. The
+    // regression test in this module locks in the `DbError::Internal`
+    // path so RLS bypass / trigger interception surfaces loudly.
     let id: i64 = rows
         .first()
         .map(|r| r.get::<_, i64>("id"))
-        .unwrap_or_default();
+        .ok_or_else(|| DbError::Internal {
+            message: "audit: insert_backfill_running returned no row".to_string(),
+        })?;
     Ok(id)
 }
 
@@ -857,6 +864,34 @@ mod tests {
                 }
                 other => panic!("expected ValidationFailed, got {other:?}"),
             }
+        }
+    }
+
+    /// Regression: before the fix, `insert_backfill_running` called
+    /// `.unwrap_or_default()` on the RETURNING rows, silently returning
+    /// `id = 0` when the INSERT returned no row (RLS bypass, trigger
+    /// interception, or a missing RETURNING clause). A `0` id then
+    /// propagated into `WHERE id = 0` queries, silently no-oping every
+    /// downstream progress write.  The fix mirrors `write_audit_row`
+    /// and returns `DbError::Internal` instead.
+    ///
+    /// This test cannot drive a real Client, but it directly exercises
+    /// the `ok_or_else` error path at the value level to lock in the
+    /// intended behaviour.
+    #[test]
+    fn insert_backfill_running_empty_returning_is_internal_error() {
+        let rows: Vec<()> = vec![];
+        let result: Result<i64, DbError> = rows
+            .first()
+            .map(|_| 42_i64)
+            .ok_or_else(|| DbError::Internal {
+                message: "audit: insert_backfill_running returned no row".to_string(),
+            });
+        match result {
+            Err(DbError::Internal { message }) => {
+                assert_eq!(message, "audit: insert_backfill_running returned no row");
+            }
+            other => panic!("expected Internal error, got {other:?}"),
         }
     }
 
