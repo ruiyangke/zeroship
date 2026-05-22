@@ -74,13 +74,15 @@ pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
             "collection name exceeds 63-byte Postgres identifier limit: {name}"
         )));
     }
-    let lower = name.to_ascii_lowercase();
-    if lower.starts_with("pg_") {
+    // Reserved-prefix checks via byte-slice equality avoid an allocating
+    // .to_ascii_lowercase() per CRUD dispatch (performance r4 N4-I4).
+    let bytes = name.as_bytes();
+    if bytes.len() >= 3 && bytes[..3].eq_ignore_ascii_case(b"pg_") {
         return Err(QueryError::InvalidCollection(format!(
             "collection name '{name}' uses reserved prefix 'pg_' (Postgres system catalog)"
         )));
     }
-    if lower.starts_with("__zeroship") {
+    if bytes.len() >= 10 && bytes[..10].eq_ignore_ascii_case(b"__zeroship") {
         return Err(QueryError::InvalidCollection(format!(
             "collection name '{name}' uses reserved prefix '__zeroship' (platform internal)"
         )));

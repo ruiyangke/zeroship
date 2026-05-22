@@ -128,7 +128,7 @@ pub fn is_app_suppressed(app_id: &str) -> bool {
 /// True when ANY app on this thread is suppressed. Diagnostic helper —
 /// the production code path always checks a specific app.
 #[doc(hidden)]
-pub fn any_app_suppressed() -> bool {
+pub(crate) fn any_app_suppressed() -> bool {
     SUPPRESSED_APPS.with(|s| !s.borrow().is_empty())
 }
 
@@ -170,7 +170,7 @@ const LEGACY_SUPPRESSION_KEY: &str = "__legacy_thread_wide__";
 /// Internally maps to a sentinel entry in [`SUPPRESSED_APPS`] so the
 /// new per-app check still covers callers that drive this surface.
 #[doc(hidden)]
-pub fn set_local_emit_suppressed(v: bool) {
+pub(crate) fn set_local_emit_suppressed(v: bool) {
     if v {
         suppress_app(LEGACY_SUPPRESSION_KEY);
     } else {
@@ -182,7 +182,7 @@ pub fn set_local_emit_suppressed(v: bool) {
 /// [`set_local_emit_suppressed`]. Production code should use
 /// [`is_app_suppressed`] with a concrete app id.
 #[doc(hidden)]
-pub fn local_emit_suppressed() -> bool {
+pub(crate) fn local_emit_suppressed() -> bool {
     is_app_suppressed(LEGACY_SUPPRESSION_KEY)
 }
 
