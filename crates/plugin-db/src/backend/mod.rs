@@ -148,11 +148,20 @@ pub trait Backend: 'static {
         key2: &str,
     ) -> Result<bool, DbError>;
 
-    /// Best-effort release of a session-scoped advisory lock. Always
-    /// succeeds at the trait level — call sites already swallow the
-    /// underlying error (the lock auto-releases on session end).
+    /// Release a session-scoped advisory lock. The lock auto-releases
+    /// on session end, so callers can treat an `Err` as
+    /// observability-only (warn-and-continue) — but returning the
+    /// typed error lets them emit a structured log instead of
+    /// silently swallowing it. Mirrors the pattern
+    /// `OrchestratorLockGuard::release` adopted at `ffb1e101`
+    /// (code-critique MAJOR-R5-5).
     #[allow(async_fn_in_trait)]
-    async fn release_advisory_lock(&self, client: &Self::Client, key1: &str, key2: &str);
+    async fn release_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<(), DbError>;
 
     // ----- schema bootstrap + introspection ---------------------------
 

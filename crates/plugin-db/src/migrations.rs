@@ -284,9 +284,17 @@ pub async fn exec_begin(
     let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing {
         if row.status == "cancelled" {
             // Refuse — operator must reset to clear state.
-            backend
+            if let Err(e) = backend
                 .release_advisory_lock(&client, &lock_key, name)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    app_id,
+                    name,
+                    error = %e,
+                    "release_advisory_lock failed on cancelled-refusal path (lock auto-releases on session end)",
+                );
+            }
             drop(client);
             return Err(err_cancelled_on_start());
         }
@@ -648,7 +656,17 @@ pub async fn exec_commit_batch(
         }
 
         let lock_key = format!("zs_mig:{app_id}");
-        backend.release_advisory_lock(&client, &lock_key, &name).await;
+        if let Err(e) = backend
+            .release_advisory_lock(&client, &lock_key, &name)
+            .await
+        {
+            tracing::warn!(
+                app_id,
+                name,
+                error = %e,
+                "release_advisory_lock failed on backfill-finalise path (lock auto-releases on session end)",
+            );
+        }
         // Drop the client — backend session ends, releasing all locks.
         drop(client);
         crate::context::with_mut(|c| c.clear_mig_lock());

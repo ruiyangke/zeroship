@@ -154,9 +154,18 @@ impl Backend for PostgresBackend {
         Ok(got)
     }
 
-    async fn release_advisory_lock(&self, client: &Self::Client, key1: &str, key2: &str) {
+    async fn release_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<(), DbError> {
         let sql = "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
-        let _ = client.query_text_params(sql, &[key1, key2]).await;
+        client
+            .query_text_params(sql, &[key1, key2])
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        Ok(())
     }
 
     // ----- schema bootstrap + introspection ---------------------------
