@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 08:00.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 08:30.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +594,16 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S67] INFO (error-ux r7; cycle 08:30) — DbError::Configuration `hint` field
+- **Closed by**: `f1c5184e plugin-db/error: add hint field to DbError::Configuration`
+- Added `hint: Option<String>` to `Configuration` variant + new `DbError::config_hinted()` convenience constructor. `wal_level_not_logical` and `not_provisioned` (missing db_url) now ship operator-remediation prose in the `.hint` slot instead of baked into the message body.
+
+### [S68] CRITICAL+IMPORTANT (docs-audit r6; cycle 08:30) — 3 doc drift sites
+- **Closed by**: `3d79d2da plugin-db: docs-audit r6 fixes`
+- migrations.rs:67-86 CRITICAL: deeefe18 left both the old + new coded_db preamble in place, contradicting each other. Collapsed to one coherent block.
+- wal_consumer.rs:49 IMPORTANT: renamed obsolete `replicationConsumerStart` → `startReplicationConsumer`.
+- error.rs:336-341 IMPORTANT: prefix_message preamble updated to include migrations::coded_db as the 7th consumer.
+
 ### [S64] MINOR (architecture r8 M11; cycle 08:00) — migrations::coded_db inline variant-walk
 - **Closed by**: `deeefe18 plugin-db/migrations: route coded_db through the shared prefix_message`
 - Last remaining inline copy of the variant-walk pattern after cbbc9059's dedup wave. `migrations::coded_db` now delegates to `crate::error::prefix_message` with the `"<context>: "` prefix; preserves double-prefix-avoidance rationale.
@@ -721,19 +731,19 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **06:55** closed MAJOR-R5-1, MAJOR-R5-4, concurrency-r7 race, docs-audit r5 CRITICAL
 - **07:30** closed [I42] structural test, ConsumerRunningGuard lifecycle tests (+ LATENT BUG caught), 3× api-surface r6 MAJORs, perf r7 N7-M0
 - **08:00** closed M11 coded_db dedup, classify_detail unit tests (+ test-coverage r8 NEW gap), MIN-R7-1 replication SQLSTATE substring-match
+- **08:30** closed Configuration hint field, 3 docs-audit r6 drift sites (1 CRITICAL + 2 IMPORTANT)
 
-**Net since pilot started**: ~45 closures, ~27 new findings.
+**Net since pilot started**: ~49 closures, ~28 new findings.
 
 ### Pick #1 (next cycle): **Migration-pipeline F1 + F2 (5+ cycle carry, design needed)**
 - **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` (F1) + `validate.rs:67-87` (F2)
 - **Fix sketch**: F1 needs owner_session_id + heartbeat column on `__zeroship_migrations` + a sweeper. F2 needs `validation_refused` added to status CHECK + transition in validate.rs.
 - **Caveat**: schema migration to `__zeroship_migrations` requires careful rollout; needs deployment story.
 
-### Pick #2 (next cycle): **error-ux r7 hint discipline gap — `DbError::Configuration` lacks `hint` field**
-- **File**: `crates/plugin-db/src/error.rs::DbError::Configuration`
-- **Fix sketch**: add a `hint: Option<String>` field to `Configuration`, mirroring `ValidationFailed`. Operator-remediation prose belongs in hint, not message body.
-- **Why next**: small surgical change; error-ux r7 INFO finding; `Configuration` is the variant most needing remediation text.
-- **Caveat**: enum variant change → may need updating ~6 construction sites in replication.rs, wal_consumer.rs.
+### Pick #2 (next cycle): **docs-audit r6 four-round hold-outs — v8_classes/transaction.rs TX_CONN drift sweep**
+- **File** (multi): `v8_classes/transaction.rs` (~14 prose sites + 4 broken intra-doc links to `crate::TX_CONN` / `crate::TX_TOKEN`), `crud.rs:53`, `exec.rs:329`, `lib.rs:110,216`, `backend/mod.rs:66`, `orchestrator/transaction.rs:51,52,89,143`.
+- **Fix sketch**: pure doc sweep — replace `TX_CONN`/`TX_TOKEN` with `IsolateDbContext::tx_conn`/`tx_token`; fix broken intra-doc links via `[`...`]` removal or rewrite.
+- **Why next**: these hold-outs have been carried for 4 rounds without movement. Mechanical, safe. ~20 line edits across 7 files.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - Status unchanged; needs retry/backoff policy decision.
