@@ -164,9 +164,35 @@ pub fn set_db_url_for_tests(url: &str) {
 
 /// **Test-only**: clear `MIG_LOCK` for the current thread. Safe across
 /// test boundaries when an earlier test left the lock held.
+///
+/// Async + best-effort `ROLLBACK; SELECT pg_advisory_unlock_all();` on
+/// the lock client BEFORE dropping it. We can't rely on Client::drop
+/// alone to clean up the server-side state — dropping the Client just
+/// closes the channel to the per-connection task. That task is on the
+/// same compio runtime as the test; when the test fn returns, the
+/// runtime drops, and the task is dropped *before* it gets to send
+/// Terminate / shutdown the socket. With io_uring the fd is still
+/// closed (so the server eventually notices EOF), but in the meantime
+/// the backend is "idle in transaction" / holding session-scoped
+/// advisory locks, which blocks `pg_create_logical_replication_slot()`
+/// in a later p8a2 test (logical-slot creation must drain the proc
+/// array of in-flight xacts before it can take its snapshot).
+///
+/// Sending an explicit ROLLBACK + advisory_unlock_all over the wire
+/// from within the test makes the server-side cleanup synchronous from
+/// PG's perspective — the next test's slot creation never observes
+/// our backend as in-transaction.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn clear_migration_lock_for_tests() {
+pub async fn clear_migration_lock_for_tests() {
+    // Take the client out (if any) so we can send cleanup SQL on it
+    // before drop. Best-effort: a connection that's already dead is
+    // expected during the panic-recovery path and not worth treating
+    // as an error.
+    if let Some(client) = ctx_mut(|c| c.take_mig_client()) {
+        let _ = client.batch_execute("ROLLBACK; SELECT pg_advisory_unlock_all();").await;
+        drop(client);
+    }
     migrations::release_active_lock();
 }
 
@@ -199,14 +225,31 @@ pub async fn install_tx_marker_for_tests(url: &str) {
     });
 }
 
-/// **Test-only**: drop the transaction-connection slot (rolls back the
-/// dummy tx server-side via connection close). Mirrors
+/// **Test-only**: drop the transaction-connection slot, rolling back
+/// the dummy tx server-side via an explicit `ROLLBACK` on the wire
+/// (NOT just relying on connection close). Mirrors
 /// [`install_tx_marker_for_tests`].
+///
+/// Async + sends `ROLLBACK` before dropping the Client because the
+/// per-isolate `IsolateDbContext` is thread-local and the test's
+/// compio runtime drops between tests. With `--test-threads=1` every
+/// test shares one thread; if a prior test's Client is dropped without
+/// explicit `ROLLBACK` the PG backend on the other end can linger as
+/// `idle in transaction` for a window after Runtime::drop (the
+/// connection task is dropped before its terminate-flush path runs,
+/// and the server only observes EOF when the OS reaps the fd). A
+/// later `pg_create_logical_replication_slot()` call (the p8a2
+/// auto-spawn test) then blocks waiting for that ghost transaction —
+/// the p8a2 ordering hang.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
-pub fn uninstall_tx_marker_for_tests() {
-    let client = ctx_mut(|c| c.take_tx_client());
-    drop(client);
+pub async fn uninstall_tx_marker_for_tests() {
+    if let Some(client) = ctx_mut(|c| c.take_tx_client()) {
+        // Best-effort: a connection already torn down (panic recovery)
+        // is fine — drop closes the fd.
+        let _ = client.batch_execute("ROLLBACK").await;
+        drop(client);
+    }
 }
 
 /// **Test-only**: push a `ChangeEvent` onto the pending-emits queue

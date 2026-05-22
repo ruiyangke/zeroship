@@ -1633,7 +1633,7 @@ async fn b1_run_loop(
 async fn b1_simple_backfill() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_simple";
@@ -1673,7 +1673,7 @@ async fn b1_simple_backfill() {
 async fn b1_resume_after_crash() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_resume";
@@ -1716,7 +1716,7 @@ async fn b1_resume_after_crash() {
         .unwrap();
         // Drop session client + clear lock = simulated crash. The
         // audit row stays 'running' but no operator is holding it.
-        zeroship_plugin_db::clear_migration_lock_for_tests();
+        zeroship_plugin_db::clear_migration_lock_for_tests().await;
         // Also clear status so a re-begin succeeds. Real recovery would
         // either reset status to 'pending' via reset() OR begin would
         // reclaim a stale 'running' row. The migrations module's begin
@@ -1755,7 +1755,7 @@ async fn b1_resume_after_crash() {
 async fn b1_dry_run_does_not_mutate() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_dryrun";
@@ -1792,7 +1792,7 @@ async fn b1_dry_run_does_not_mutate() {
 async fn b1_dead_letter_under_budget() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_dlu";
@@ -1856,7 +1856,7 @@ async fn b1_dead_letter_under_budget() {
 async fn b1_dead_letter_over_budget() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_dlo";
@@ -1904,7 +1904,7 @@ async fn b1_dead_letter_over_budget() {
 async fn b1_cancel_running() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_cancel";
@@ -1935,7 +1935,7 @@ async fn b1_cancel_running() {
     );
 
     // Reset lock for subsequent tests.
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
 // Gap C — cancel landing between fetchBatch and commitBatch must
@@ -1948,7 +1948,7 @@ async fn b1_cancel_running() {
 async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "gap_c_cancel";
@@ -2021,7 +2021,7 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
     let count: i64 = rows_after[0].get("c");
     assert_eq!(count, 0, "no rows must be mutated when commit refused");
 
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
 // Gap X — reset landing mid-run must abort the next commit, not let
@@ -2033,7 +2033,7 @@ async fn gap_c_cancel_during_commit_batch_aborts_and_returns_coded_error() {
 async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "gap_x_reset";
@@ -2118,7 +2118,7 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
     assert_eq!(st["cursor"], 0);
     assert_eq!(st["processed"], 0);
 
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
 // Gap I — Migration finalizer churn (soft variant).
@@ -2146,7 +2146,7 @@ async fn gap_x_reset_during_run_aborts_commit_with_coded_error() {
 async fn gap_i_migration_finalizer_churn() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "gap_i_churn";
@@ -2184,7 +2184,7 @@ async fn gap_i_migration_finalizer_churn() {
         // the Migration struct (and thus its captured client, held
         // indirectly via MIG_LOCK) is dropped. The backend session
         // ends → its advisory lock is released.
-        zeroship_plugin_db::clear_migration_lock_for_tests();
+        zeroship_plugin_db::clear_migration_lock_for_tests().await;
     }
 
     // (a) MIG_LOCK is None after each iteration — proved by the fact
@@ -2252,7 +2252,7 @@ async fn gap_i_migration_finalizer_churn() {
             .unwrap();
     }
 
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
 // 38. B1 — cancel against an already-applied migration returns
@@ -2261,7 +2261,7 @@ async fn gap_i_migration_finalizer_churn() {
 async fn b1_cancel_completed_returns_error() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_cancel_done";
@@ -2287,7 +2287,7 @@ async fn b1_cancel_completed_returns_error() {
 async fn b1_advisory_lock_prevents_concurrent_runs() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_lock";
@@ -2330,7 +2330,7 @@ async fn b1_advisory_lock_prevents_concurrent_runs() {
         .await;
     drop(sibling);
 
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
 }
 
 // 40. B1 — reset returns audit row to pending+cursor=0 so a fresh
@@ -2340,7 +2340,7 @@ async fn b1_advisory_lock_prevents_concurrent_runs() {
 async fn b1_reset_clears_state() {
     let url = require_pg().await;
     zeroship_plugin_db::set_db_url_for_tests(&url);
-    zeroship_plugin_db::clear_migration_lock_for_tests();
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
     let app = "b1_reset";
@@ -3167,7 +3167,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 
     // Simulate commit: drain pending emits.
     zeroship_plugin_db::drain_pending_emits_for_tests();
-    zeroship_plugin_db::uninstall_tx_marker_for_tests();
+    zeroship_plugin_db::uninstall_tx_marker_for_tests().await;
 
     let got = sub.pop();
     match got {
