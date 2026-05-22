@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 04:35.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 05:25.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +594,22 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S50] MAJOR (code-critique r5 MAJOR-R5-2; cycle 05:25) — mark_consumer_running spawn-panic race
+- **Closed by**: `e399eeea plugin-db/replication_ops: clear consumer-running marker on panic via Drop guard`
+- Wrapped the spawned `run_supervised` task in a `ConsumerRunningGuard` struct with `Drop` impl that calls `unmark_consumer_running`. Fires on graceful exit AND panic-unwind — app no longer permanently marked "running" if the supervisor panics.
+
+### [S51] MAJOR (code-critique r5 MAJOR-R5-3; cycle 05:25) — 5 duplicate coded_sql helpers deduped
+- **Closed by**: `e44cc6b7 plugin-db/error: dedupe coded_sql/prefix_message across 5 sites` + helpers landing via `f7d0961c`
+- Five copies of the variant-walking `coded_sql` / `prefix_message` helper (audit.rs, auth/{bootstrap,keys,session}.rs, diff.rs, replication.rs) collapsed to a single `crate::error::prefix_message` + `crate::error::coded_sql`. Net 142 LOC reduction. Per-module wrappers retained for the operator-facing prefix shape ("audit: ...", "auth/bootstrap: ...", etc.) without churning call sites.
+
+### [S52] CRITICAL (api-surface r5 H1; cycle 05:25) — c0590506 broke test-helpers integration build
+- **Closed by**: `f1f06900 plugin-db/tests: thread app_id through watchdog/dropAbandoned integration callers`
+- The cross-app scope fix at c0590506 (cycle 04:35) added `app_id` parameter to `watchdog_query` + `drop_abandoned_slots` but missed three call sites in tests/integration.rs. Lib build was clean, but `--features test-helpers` build broke. Three-line fix. Pilot-discipline lesson: any signature change in a `pub` fn must include a same-commit test-helpers build verification.
+
+### [S53] CRITICAL (docs-audit r4 NEW; cycle 05:25) — error.rs preamble drift after [I28] sweep
+- **Closed by**: `f7d0961c plugin-db/error: update preamble after [I28] sweep closed the rail`
+- The e37b188f preamble rewrite (cycle 01:35) listed remaining Result<_, String> sites as "replication.rs ~7, auth/* ~15, parts of diff.rs". The [I28] sweep at 0049d9be closed all of those, but the preamble drifted into the same shape as the original "lone hold-out" lie. Rewrote to accurately describe the now-narrow set of intentional hold-outs (validate stage envelope + ASCII hex pure-fns).
+
 ### [S46] IMPORTANT [I39] (cycle 04:35) — OrchestratorLockGuard Drop docs + #[must_use]
 - **Closed by**: `808a32af plugin-db/orchestrator/lock_guard: must_use + louder Drop log`
 - Added `#[must_use]` attribute to the guard struct so accidental `let _ = acquire(...).await` patterns surface as compile-time warnings. Strengthened Drop log with "leak:" prefix, operator-facing consequence ("Concurrent register_model callers for this app will stall"), and diagnostic checklist (cancellation / panic / forgotten release).
@@ -643,19 +659,20 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **02:50** closed [I36], [I38]; recovered 60ca1ad6 silent reversion
 - **03:25** closed [I40], [I41], 5 mint_* demote, validate.rs doc CRITICAL
 - **04:00** closed [I28] ~70-site sweep, [I42] lock_guard await order
-- **04:35** closed [I39] guard #[must_use], [I44] unlock-SQL warn, NEW CRITICAL (watchdog+dropAbandoned cross-app), first_row_or_internal helper
+- **04:35** closed [I39], [I44], NEW CRITICAL (watchdog cross-app), first_row_or_internal
+- **05:25** closed MAJOR-R5-2 (consumer-running Drop guard), MAJOR-R5-3 (coded_sql dedup), CRITICAL (c0590506 test-helpers build break), CRITICAL (error.rs preamble drift)
 
-**Net since pilot started**: ~26 closures, ~22 new findings. Score trajectory net-positive across all lenses.
+**Net since pilot started**: ~30 closures, ~23 new findings.
 
-### Pick #1 (next cycle): **Code-critique r5 MAJOR-R5-2 — mark_consumer_running races spawn panic**
-- **File**: `crates/plugin-db/src/replication_ops.rs:244-252`
-- **Fix sketch**: Reorder to spawn BEFORE writing to running_consumers, OR wrap the spawn in `std::panic::catch_unwind` and remove the mark on panic. The current shape silently leaves the app permanently marked-running if `compio::runtime::spawn` panics.
-- **Why next**: small refactor (2-3 lines); concurrency-class correctness; clear regression test possible.
+### Pick #1 (next cycle): **Migration-pipeline r5 R5-M7 — finalise_backfill let _ on terminal update**
+- **File**: `crates/plugin-db/src/migrations.rs:639-641`
+- **Fix sketch**: Same `let _ = ` discipline regression as F1 family — `finalise_backfill`'s terminal audit-row UPDATE error is discarded. Either `tracing::warn` on Err (cheap) or surface via the function's Result (more invasive).
+- **Why next**: small, mirrors recent F1-class hardening; closes a regression-prone pattern.
 
-### Pick #2 (next cycle): **Code-critique r5 MAJOR-R5-3 — extract shared coded_sql helper**
-- **File** (multi): `audit.rs`, `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `diff.rs` — 5 duplicate copies of `coded_sql`.
-- **Fix sketch**: Move to `error.rs` (or a `error_helpers.rs`) as a `pub(crate)` function. DRY follow-up to the [I28] sweep.
-- **Why**: code-critique r5 MAJOR-R5-3; introduced by per-file [I28] migration; pattern consolidation.
+### Pick #2 (next cycle): **Docs-audit r4 — lock_guard.rs preamble incomplete after 3-pass hardening**
+- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:1-50`
+- **Fix sketch**: Append a "Hardening history" block naming `[I42]` (bd1e7ce1 await-order), `[I39]` (808a32af must_use+log), `[I44]` (ffb1e101 unlock-SQL warn) so a future reader can trace the design.
+- **Why**: docs-audit r4 IMPORTANT; recurring drift pattern after multi-pass hardening; doc-only.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
