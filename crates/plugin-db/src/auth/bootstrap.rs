@@ -521,16 +521,19 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
            BEGIN
              IF p_expires_at < NOW() THEN
                RAISE EXCEPTION 'session-init signature expired'
-                 USING ERRCODE = 'P0001';
+                 USING ERRCODE = 'P0001',
+                       DETAIL = 'session_signature_expired';
              END IF;
              IF p_actor_kind NOT IN
                 ('auto','user','operator','ai-builder','platform') THEN
                RAISE EXCEPTION 'invalid actor_kind: %', p_actor_kind
-                 USING ERRCODE = 'P0001';
+                 USING ERRCODE = 'P0001',
+                       DETAIL = 'session_invalid_actor_kind';
              END IF;
              IF octet_length(p_nonce) < 16 THEN
                RAISE EXCEPTION 'nonce too short (need >=16 bytes)'
-                 USING ERRCODE = 'P0001';
+                 USING ERRCODE = 'P0001',
+                       DETAIL = 'session_nonce_too_short';
              END IF;
 
              -- Replay protection: a nonce, once observed, cannot be
@@ -543,14 +546,16 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
                VALUES (p_nonce, p_expires_at);
              EXCEPTION WHEN unique_violation THEN
                RAISE EXCEPTION 'session-init nonce replay detected'
-                 USING ERRCODE = 'P0001';
+                 USING ERRCODE = 'P0001',
+                       DETAIL = 'session_nonce_replay';
              END;
 
              IF NOT "{ADMIN_SCHEMA}".verify_signature(
                     p_actor_kind, p_actor_id, pg_backend_pid(),
                     p_nonce, p_expires_at, p_signature) THEN
                RAISE EXCEPTION 'invalid session-init signature'
-                 USING ERRCODE = 'P0001';
+                 USING ERRCODE = 'P0001',
+                       DETAIL = 'session_invalid_signature';
              END IF;
 
              INSERT INTO "{ADMIN_SCHEMA}".session_ctx

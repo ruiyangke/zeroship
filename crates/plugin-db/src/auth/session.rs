@@ -160,6 +160,47 @@ pub async fn mint_session_token(
     })
 }
 
+/// Extract the structured DETAIL field from a P0001 RAISE EXCEPTION.
+///
+/// The SECURITY DEFINER `init_session` function in
+/// [`crate::auth::bootstrap`] tags each refusal with a stable
+/// machine-readable DETAIL token (`session_signature_expired`,
+/// `session_nonce_replay`, etc.). The Rust side reads `e.detail()` so
+/// classification is locale- / formatter-independent.
+///
+/// Returns `Some((static_code, operator_message))` if the error is a
+/// known P0001 + DETAIL pair; `None` otherwise (the caller falls
+/// through to generic SQLSTATE classification).
+fn classify_p0001_detail(
+    e: &compio_postgres::Error,
+) -> Option<(&'static str, &'static str)> {
+    let db_err = e.as_db_error()?;
+    if db_err.code() != &compio_postgres::error::SqlState::RAISE_EXCEPTION {
+        return None;
+    }
+    match db_err.detail()? {
+        "session_signature_expired" => {
+            Some(("session_signature_expired", "auth/session: signature expired"))
+        }
+        "session_nonce_replay" => {
+            Some(("session_nonce_replay", "auth/session: nonce replay detected"))
+        }
+        "session_invalid_signature" => Some((
+            "session_invalid_signature",
+            "auth/session: invalid signature",
+        )),
+        "session_invalid_actor_kind" => Some((
+            "session_invalid_actor_kind",
+            "auth/session: invalid actor_kind",
+        )),
+        "session_nonce_too_short" => Some((
+            "session_nonce_too_short",
+            "auth/session: nonce too short (need >=16 bytes)",
+        )),
+        _ => None,
+    }
+}
+
 /// Hand a minted token to `__zeroship_admin.init_session`. Must be
 /// called on the same backend PID the token was minted for — the
 /// SECURITY DEFINER function uses `pg_backend_pid()` to re-derive the
@@ -199,28 +240,36 @@ pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), Db
             // Promote the structured RAISE messages to typed
             // ValidationFailed variants with stable `.code`s the SDK
             // can branch on. The SECURITY DEFINER function raises
-            // SQLSTATE P0001 with these messages — they are
-            // user-input-shaped refusals, not server bugs.
-            if msg.contains("nonce replay detected") {
-                DbError::validation(
-                    "session_nonce_replay",
-                    "auth/session: nonce replay detected",
-                )
-            } else if msg.contains("signature expired") {
-                DbError::validation(
-                    "session_signature_expired",
-                    "auth/session: signature expired",
-                )
-            } else if msg.contains("invalid session-init signature") {
-                DbError::validation(
-                    "session_invalid_signature",
-                    "auth/session: invalid signature",
-                )
-            } else {
-                // Anything else — SQLSTATE class 23, transient
-                // connection failures, etc. — flows through SQLSTATE
-                // classification verbatim.
-                coded_sql("init_session", e)
+            // SQLSTATE P0001 with a machine-readable DETAIL token
+            // (set in auth/bootstrap.rs's CREATE FUNCTION body) — we
+            // discriminate on the DETAIL, not on free-text message
+            // substrings (MAJOR-R5-1: code-critique r5 + security r5;
+            // substring matching was fragile against RAISE additions,
+            // formatter changes, and locale changes).
+            let detail = classify_p0001_detail(&e);
+            match detail {
+                Some(("session_nonce_replay", op_msg)) => {
+                    DbError::validation("session_nonce_replay", op_msg)
+                }
+                Some(("session_signature_expired", op_msg)) => {
+                    DbError::validation("session_signature_expired", op_msg)
+                }
+                Some(("session_invalid_signature", op_msg)) => {
+                    DbError::validation("session_invalid_signature", op_msg)
+                }
+                Some(("session_invalid_actor_kind", op_msg)) => {
+                    DbError::validation("session_invalid_actor_kind", op_msg)
+                }
+                Some(("session_nonce_too_short", op_msg)) => {
+                    DbError::validation("session_nonce_too_short", op_msg)
+                }
+                _ => {
+                    // Anything else — SQLSTATE class 23, transient
+                    // connection failures, unknown P0001 detail, etc. —
+                    // flows through SQLSTATE classification verbatim.
+                    let _ = msg;
+                    coded_sql("init_session", e)
+                }
             }
         })
 }
