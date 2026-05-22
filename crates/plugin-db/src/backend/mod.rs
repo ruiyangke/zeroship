@@ -63,8 +63,9 @@ pub use postgres::PostgresBackend;
 ///   the audit helpers borrow it for one operation).
 /// - [`Backend::acquire_dedicated_client`] returns an owned `Client`
 ///   detached from any pool lifetime — the caller is free to park it
-///   in a thread-local (e.g. `MigrationLock::client`, `tx_conn`) for
-///   the duration of a session-scoped lock.
+///   on the per-isolate context (e.g. `MigrationLock::client`,
+///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
+///   of a session-scoped lock.
 pub trait Backend: 'static {
     /// Concrete connection / client handle. The orchestrator threads
     /// this through audit helpers and advisory-lock acquisition without

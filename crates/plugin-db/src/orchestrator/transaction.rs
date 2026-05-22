@@ -48,9 +48,10 @@ pub fn begin_transaction_dispatch<'s>(
 
     // Allocate the ownership token + mint the wrapper synchronously.
     // We need a scope to allocate the V8 object; the spawned future
-    // doesn't have one. On BEGIN success the future stamps TX_TOKEN
-    // with this same token; on failure TX_TOKEN stays 0 so the
-    // wrapper's Drop sees `current(0) != token` and no-ops.
+    // doesn't have one. On BEGIN success the future stamps
+    // `IsolateDbContext::tx_token` with this same token; on failure
+    // `tx_token` stays 0 so the wrapper's Drop sees
+    // `current(0) != token` and no-ops.
     let token = crate::next_tx_token();
     let tx_obj = match crate::v8_classes::transaction::mint_transaction(scope, token, app_id) {
         Ok(obj) => obj,
@@ -86,7 +87,7 @@ pub fn begin_transaction_dispatch<'s>(
                 }
             }
             Err(e) => {
-                // Wrapper's `token` never matches TX_TOKEN(=0), so when
+                // Wrapper's `token` never matches `tx_token`(=0), so when
                 // V8 collects the wrapper (no JS reference survives a
                 // rejected await) the Drop is a no-op.
                 drop(tx_global);
@@ -140,8 +141,8 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
     // Open a dedicated connection (not from pool — we need to hold it).
     // compio-postgres splits a connection into (Client, Connection); we spawn
     // the Connection on a detached task so its run loop drives I/O, and store
-    // the Client in TX_CONN. When the Client is eventually dropped, the task
-    // terminates gracefully.
+    // the Client in `IsolateDbContext::tx_conn`. When the Client is eventually
+    // dropped, the task terminates gracefully.
     let url = crate::context::with(|c| c.db_url())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)

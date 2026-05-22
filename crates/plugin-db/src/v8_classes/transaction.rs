@@ -65,10 +65,10 @@ use crate::v8_classes::collection::mint_collection;
 /// Box on GC and our `Drop` impl auto-rollbacks if this wrapper still
 /// owns the active transaction.
 pub struct Transaction {
-    /// Ownership token stamped into [`crate::TX_TOKEN`] at successful
-    /// BEGIN. Commit / rollback / GC compare to the current TX_TOKEN
-    /// before taking action — once one path settles the tx and clears
-    /// TX_TOKEN, the others see the mismatch and no-op (so an
+    /// Ownership token stamped into [`crate::context::IsolateDbContext::tx_token`]
+    /// at successful BEGIN. Commit / rollback / GC compare to the current
+    /// `tx_token` before taking action — once one path settles the tx and
+    /// clears `tx_token`, the others see the mismatch and no-op (so an
     /// explicit `.commit()` followed by GC doesn't run COMMIT twice).
     pub(crate) token: Cell<u64>,
     /// True once the wrapper has been committed or rolled back.
@@ -104,8 +104,9 @@ impl Drop for Transaction {
     /// on every instance: when V8 collects the wrapper, the finalizer
     /// drops the Box, which runs this.
     ///
-    /// If our token still matches the current TX_TOKEN, this wrapper is
-    /// the live owner of TX_CONN — take the Client out and drop it.
+    /// If our token still matches the current `tx_token`, this wrapper is
+    /// the live owner of `IsolateDbContext::tx_conn` — take the Client
+    /// out and drop it.
     /// Dropping the Client closes the per-tx connection (the spawned
     /// `Connection` run-loop observes the closed sender and sends
     /// Terminate), and Postgres rolls the open transaction back
@@ -113,7 +114,8 @@ impl Drop for Transaction {
     ///
     /// If our token doesn't match — either the user committed via
     /// `.commit()` / `commitTransaction()`, rolled back, or the
-    /// auto-tx wrapper repurposed TX_CONN — we leave TX_CONN alone.
+    /// auto-tx wrapper repurposed `tx_conn` — we leave
+    /// `IsolateDbContext::tx_conn` alone.
     fn drop(&mut self) {
         let token = self.token.get();
         if token == 0 || self.settled.get() {
@@ -158,8 +160,8 @@ impl Transaction {
     /// instance whose CRUD methods forward through this Transaction
     /// wrapper. Cached by `name`; identity holds across calls.
     ///
-    /// Because each CRUD callback consults [`crate::TX_CONN`] via
-    /// `run_sql`, any operation through this collection automatically
+    /// Because each CRUD callback consults [`crate::context::IsolateDbContext::tx_conn`]
+    /// via `run_sql`, any operation through this collection automatically
     /// participates in the open transaction.
     #[v8_method]
     fn collection<'s>(
@@ -189,10 +191,10 @@ impl Transaction {
     }
 
     /// `tx.commit(): Promise<void>` — run COMMIT against the
-    /// transaction connection, clear [`crate::TX_CONN`], and mark this
-    /// wrapper settled. Idempotent: a second `commit()` / `rollback()`
-    /// resolves void instead of rejecting, and the GC finalizer no-
-    /// ops once a settle path has run.
+    /// transaction connection, clear [`crate::context::IsolateDbContext::tx_conn`],
+    /// and mark this wrapper settled. Idempotent: a second `commit()` /
+    /// `rollback()` resolves void instead of rejecting, and the GC
+    /// finalizer no-ops once a settle path has run.
     #[v8_async_method]
     async fn commit(&self) -> Result<(), OpError> {
         end(self, "COMMIT").await
@@ -211,11 +213,11 @@ impl Transaction {
 // ---------------------------------------------------------------------------
 
 /// Run `cmd` (`"COMMIT"` or `"ROLLBACK"`) against the transaction's
-/// connection, then clear [`crate::TX_CONN`] / [`crate::TX_TOKEN`] and
-/// mark the wrapper settled.
+/// connection, then clear [`crate::context::IsolateDbContext::tx_conn`] /
+/// [`crate::context::IsolateDbContext::tx_token`] and mark the wrapper settled.
 ///
 /// Idempotent: if our `token` is zero, the wrapper is already settled,
-/// or `TX_TOKEN` has been claimed by another path (Drop finalizer,
+/// or `tx_token` has been claimed by another path (Drop finalizer,
 /// concurrent commit), `end` returns `Ok(())` without re-running the
 /// SQL. Postgres errors during the live commit path are surfaced
 /// verbatim.
@@ -275,14 +277,16 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
 // ---------------------------------------------------------------------------
 
 /// Mint a Transaction v8_class instance and stamp `token` into the
-/// wrapper state. The matching `TX_TOKEN` write happens in
+/// wrapper state. The matching [`crate::context::IsolateDbContext::tx_token`]
+/// write happens in
 /// [`crate::orchestrator::transaction::begin_transaction_dispatch`] only after the async BEGIN
 /// succeeds — so a failed BEGIN leaves the wrapper with a token that
 /// never matches, and its `Drop` is a no-op when V8 eventually
 /// collects it.
 ///
-/// Caller invariant: TX_CONN has just been set by a successful BEGIN
-/// and no other Transaction wrapper is alive for the same TX_CONN —
+/// Caller invariant: [`crate::context::IsolateDbContext::tx_conn`] has just
+/// been set by a successful BEGIN and no other Transaction wrapper is alive
+/// for the same `tx_conn` —
 /// enforced by the "nested transactions not supported" check in
 /// [`crate::orchestrator::transaction::begin_transaction_dispatch`]'s async path.
 pub(crate) fn mint_transaction<'s>(
@@ -321,8 +325,8 @@ pub(crate) fn mint_transaction<'s>(
     // SAFETY: `raw_addr` was Box::into_raw'd from `Box<Transaction>`;
     // the finalizer closure casts back to the same type and drops the
     // Box exactly once when V8 reclaims the wrapper. The `Drop` impl
-    // above checks the current TX_TOKEN and auto-rollbacks if we still
-    // own the open transaction.
+    // above checks the current `IsolateDbContext::tx_token` and
+    // auto-rollbacks if we still own the open transaction.
     let weak = v8::Weak::with_guaranteed_finalizer(
         scope,
         obj,

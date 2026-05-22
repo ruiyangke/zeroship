@@ -326,7 +326,8 @@ pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> 
 /// so integration tests can drive the queue/drain machinery against a
 /// real Postgres connection without spinning up a V8 isolate.
 ///
-/// The caller is responsible for setting `TX_CONN` (via
+/// The caller is responsible for setting
+/// [`crate::context::IsolateDbContext::tx_conn`] (via
 /// [`crate::install_tx_marker_for_tests`]) when the test wants the
 /// queueing path to fire.
 #[cfg(any(test, feature = "test-helpers"))]

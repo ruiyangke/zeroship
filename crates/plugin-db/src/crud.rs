@@ -50,8 +50,9 @@ use crate::v8_bridge::{runtime_state, setup_js_promise};
 /// JS error carries `code = "invalid_filter"` / `"invalid_collection"`
 /// / `"invalid_identifier"`.
 ///
-/// `exec` runs against either the pool or the active TX_CONN
-/// (transparently — `exec::run_sql` already handles that).
+/// `exec` runs against either the pool or the active
+/// [`crate::context::IsolateDbContext::tx_conn`] (transparently —
+/// `exec::run_sql` already handles that).
 ///
 /// `resolve` lowers the exec's success value to the V8-bound
 /// `ResolveValue` shape (typically `Json` for arrays/objects, `F64`

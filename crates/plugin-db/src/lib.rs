@@ -107,7 +107,8 @@ pub mod wal_consumer;
 // All per-isolate slots live on [`context::IsolateDbContext`]; this
 // module just re-exports the helpers the rest of the crate calls.
 
-/// Allocate a fresh non-zero TX_TOKEN value. Called by
+/// Allocate a fresh non-zero [`crate::context::IsolateDbContext::tx_token`]
+/// value. Called by
 /// `orchestrator::transaction::begin_transaction_dispatch` right before
 /// stamping the token onto the freshly-minted `Transaction` wrapper.
 pub(crate) fn next_tx_token() -> u64 {
@@ -213,8 +214,9 @@ pub fn set_db_url_for_tests(url: &str) {
     });
 }
 
-/// **Test-only**: clear `MIG_LOCK` for the current thread. Safe across
-/// test boundaries when an earlier test left the lock held.
+/// **Test-only**: clear [`crate::context::IsolateDbContext::mig_lock`]
+/// for the current thread. Safe across test boundaries when an earlier
+/// test left the lock held.
 ///
 /// Async + best-effort `ROLLBACK; SELECT pg_advisory_unlock_all();` on
 /// the lock client BEFORE dropping it. We can't rely on Client::drop
