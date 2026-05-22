@@ -147,13 +147,47 @@ pub async fn run_pipeline(
     let (ctx, lock_client) =
         bootstrap::bootstrap(backend, app_id, collection, schema, indexes, deploy_id).await?;
 
-    // 2. Plan — introspect live schema, diff against declared schema,
-    //    classify each op.
-    let plan = plan::compute_plan(backend, &ctx, collection, schema).await?;
-
-    // 3. Validate — refuse destructive ops under `strict`, audit them
-    //    either way so operators can see what was refused.
-    let approved = validate::validate(backend, &ctx, plan).await?;
+    // 2 + 3. Plan / validate. These two stages happen BEFORE the
+    // apply-side advisory-unlock. If either returns Err we must still
+    // release the advisory lock — otherwise the `PooledClient` returns
+    // to the pool with the session-scoped lock held, and every later
+    // caller hangs on `pg_advisory_lock(zs_reg:<app>, register_model)`.
+    //
+    // The original code propagated plan/validate errors via `?`,
+    // dropping `lock_client` back into the pool without an explicit
+    // unlock. The advisory lock leak cascades into the p8a2 ordering
+    // hang: tests that `expect_err` on a destructive deploy (strict
+    // refusal at validate) leave the orchestrator lock stuck, the next
+    // register_model in another test waits forever, and the
+    // `pg_create_logical_replication_slot()` in p8a2_auto_spawn
+    // ultimately blocks behind that chain.
+    //
+    // Run the two stages and, on Err, explicitly release the lock
+    // before propagating. Success cases keep the lock held — apply()
+    // releases it between Pass 1 and Pass 2 as before.
+    let plan_res = plan::compute_plan(backend, &ctx, collection, schema).await;
+    let approved_res = match plan_res {
+        Ok(plan) => validate::validate(backend, &ctx, plan).await,
+        Err(e) => Err(e),
+    };
+    let approved = match approved_res {
+        Ok(a) => a,
+        Err(e) => {
+            // Plan/validate failed — release the advisory lock before
+            // returning the PooledClient to the pool. Best-effort:
+            // the unlock SQL may itself error if the connection was
+            // already torn down, but the more important guarantee is
+            // that we don't leak a held lock back into the pool.
+            let unlock_sql =
+                "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
+            let key = bootstrap::lock_key(app_id);
+            let _ = lock_client
+                .query_text_params(unlock_sql, &[key.as_str(), bootstrap::LOCK_TAG])
+                .await;
+            drop(lock_client);
+            return Err(e);
+        }
+    };
 
     // 4. Apply — execute the validated ops under the lock (pass 1) then
     //    release and run CIC unlocked (pass 2). Each op writes an audit
