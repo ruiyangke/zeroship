@@ -27,6 +27,13 @@ with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
 with-smol_str-01 = ["postgres-types/with-smol_str-01"]
 with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
 tls = ["dep:compio-tls"]
+# Test-only surface for downstream bench / unit-test crates that need to
+# synthesise `Row` / `Statement` / `Column` values without a live
+# Postgres. The feature is dev-only (consumers add it under
+# `[dev-dependencies]`); production builds never see the constructors.
+# Added for plugin-db `bench_row_to_json` ([I35] forcing function —
+# performance r12). See `crates/compio-postgres/src/test_utils.rs`.
+test-utils = []
 
 [dependencies]
 async-trait = "0.1"
