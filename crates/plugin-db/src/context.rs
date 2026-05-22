@@ -362,7 +362,24 @@ impl IsolateDbContext {
     /// Install a fresh migration lock state. Returns the previous
     /// state if any (callers should ensure this is `None` — every
     /// begin path checks [`Self::has_mig_lock`] first).
+    ///
+    /// If a prior lock is shadowed, log it at `error` (state-machine
+    /// drift the begin path should have caught via `has_mig_lock`)
+    /// and proceed with `replace` so a worker is recoverable by the
+    /// next operator-driven reset rather than panicking. The slot's
+    /// unit tests deliberately exercise the swap-on-replace shape;
+    /// the log keeps them passing while still surfacing the drift in
+    /// production logs.
     pub(crate) fn set_mig_lock(&mut self, lock: MigrationLock) -> Option<MigrationLock> {
+        if let Some(prev) = self.mig_lock.as_ref() {
+            tracing::error!(
+                prev_name = %prev.name,
+                prev_audit_id = prev.audit_id,
+                new_name = %lock.name,
+                new_audit_id = lock.audit_id,
+                "set_mig_lock called while another lock is active — begin path should gate on has_mig_lock",
+            );
+        }
         self.mig_lock.replace(lock)
     }
 
@@ -381,10 +398,16 @@ impl IsolateDbContext {
 
     /// Restore the lock client after an await. No-op if the migration
     /// state has been cleared in the meantime (e.g. by an operator
-    /// cancel).
+    /// cancel). The slot-empty case is observable but rare — log it
+    /// at `warn` so we can distinguish a real cancel race from a
+    /// state-machine bug that silently dropped the client (paired
+    /// with the `set_mig_lock` debug_asserts above).
     pub fn return_mig_client(&mut self, client: Client) {
-        if let Some(lock) = self.mig_lock.as_mut() {
-            lock.client = Some(client);
+        match self.mig_lock.as_mut() {
+            Some(lock) => lock.client = Some(client),
+            None => tracing::warn!(
+                "return_mig_client: mig_lock slot empty — client dropped (expected only on operator-cancel race)",
+            ),
         }
     }
 
