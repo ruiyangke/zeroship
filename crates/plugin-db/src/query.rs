@@ -180,7 +180,7 @@ pub enum FkEmission<'a> {
     Deferred(&'a std::collections::HashSet<String>),
 }
 
-#[doc(hidden)]
+// pub (not pub(crate)): external consumer tests/integration.rs calls this via glob import.
 pub fn build_create_table_with_fks(
     app_id: &str,
     collection: &str,
@@ -367,7 +367,7 @@ fn build_fk_clause(
 }
 
 /// Normalise an FK action to the SQL keyword form Postgres accepts.
-fn normalize_fk_action(s: Option<&str>) -> &'static str {
+fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
     match s.unwrap_or("restrict").to_ascii_lowercase().as_str() {
         "cascade" => "CASCADE",
         "set null" | "set_null" => "SET NULL",
@@ -376,11 +376,9 @@ fn normalize_fk_action(s: Option<&str>) -> &'static str {
     }
 }
 
-/// Public re-export of [`normalize_fk_action`] for cross-module use
-/// (diff engine needs to compare declared vs. live policies).
-#[doc(hidden)]
-pub fn normalize_fk_action_pub(s: Option<&str>) -> &'static str {
-    normalize_fk_action(s)
+/// Normalise an FK action; used cross-module by the diff engine.
+pub(crate) fn normalize_fk_action(s: Option<&str>) -> &'static str {
+    normalize_fk_action_inner(s)
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
@@ -2071,7 +2069,7 @@ fn build_order_by(order: &Value) -> Result<String, QueryError> {
 }
 
 /// Convert a JSON value to a text parameter string for Postgres.
-fn value_to_param(value: &Value) -> String {
+fn value_to_param_inner(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),
@@ -2082,10 +2080,9 @@ fn value_to_param(value: &Value) -> String {
     }
 }
 
-/// Public re-export of [`value_to_param`] for B1 migrations.
-#[doc(hidden)]
-pub fn value_to_param_pub(value: &Value) -> String {
-    value_to_param(value)
+/// Convert a JSON value to a Postgres text param; used cross-module (B1 migrations).
+pub(crate) fn value_to_param(value: &Value) -> String {
+    value_to_param_inner(value)
 }
 
 /// Build an UPSERT (INSERT ... ON CONFLICT DO UPDATE) query:

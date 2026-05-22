@@ -603,10 +603,10 @@ pub fn compute_diff(
                 });
             } else if let Some(fk) = live_fk {
                 // Detect policy mismatch — surfaced as paired DROP+ADD.
-                let declared_on_delete = crate::query::normalize_fk_action_pub(
+                let declared_on_delete = crate::query::normalize_fk_action(
                     def.get("onDelete").and_then(|v| v.as_str()),
                 );
-                let declared_on_update = crate::query::normalize_fk_action_pub(
+                let declared_on_update = crate::query::normalize_fk_action(
                     def.get("onUpdate").and_then(|v| v.as_str()),
                 );
                 let declared_target = target;
