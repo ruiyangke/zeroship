@@ -595,7 +595,7 @@ fn mint_migration<'s>(
 /// [`super::migrations`]).
 ///
 /// `spec` is a JS object: `{ name, collection, dryRun?, reset? }`.
-pub fn migration_start_with_spec<'s>(
+pub(crate) fn migration_start_with_spec<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     spec_val: v8::Local<v8::Value>,
 ) -> v8::Local<'s, v8::Promise> {

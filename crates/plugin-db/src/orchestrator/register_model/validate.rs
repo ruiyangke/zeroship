@@ -24,9 +24,11 @@
 //!
 //! `run_pipeline` wraps the `Err(envelope)` in
 //! [`crate::error::DbError::SchemaRefused`] at the boundary; that
-//! variant's `to_op_error()` arm explicitly does NOT add `.code` to
-//! the JS exception (the envelope already carries
-//! `"code":"validation_refused"` inside its JSON body). Net result:
+//! variant's `to_op_error()` arm stamps `.code` from the static
+//! discriminator (typically `"validation_refused"`) AND emits the
+//! envelope as the JS `Error.message`. SDK callers can branch on
+//! `err.code === "validation_refused"` directly or `JSON.parse` the
+//! message to recover the structured payload. Net result:
 //! wire-compatible refusal flow + DbError-typed pipeline.
 
 use serde_json::Value;

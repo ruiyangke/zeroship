@@ -114,7 +114,7 @@ fn resolve_setup_app_id(stamped: &str, _opts: &Value) -> String {
 /// Mint a `Replication` v8_class instance with `app_id` stamped from
 /// the parent `Db`. Cached on the Db wrapper so identity holds across
 /// reads.
-pub fn mint_replication<'s>(
+pub(crate) fn mint_replication<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {

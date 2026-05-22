@@ -248,7 +248,7 @@ fn parse_name_and_collection(
 /// Mint a `Migrations` v8_class instance with `app_id` stamped from
 /// the parent `Db`. Cached on the Db wrapper so
 /// `env.db.migrations === env.db.migrations` holds.
-pub fn mint_migrations<'s>(
+pub(crate) fn mint_migrations<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {

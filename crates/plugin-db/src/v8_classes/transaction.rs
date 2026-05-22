@@ -285,7 +285,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
 /// and no other Transaction wrapper is alive for the same TX_CONN —
 /// enforced by the "nested transactions not supported" check in
 /// [`crate::orchestrator::transaction::begin_transaction_dispatch`]'s async path.
-pub fn mint_transaction<'s>(
+pub(crate) fn mint_transaction<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     token: u64,
     app_id: String,

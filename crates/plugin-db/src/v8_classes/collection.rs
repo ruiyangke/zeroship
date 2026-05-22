@@ -350,7 +350,7 @@ impl Collection {
 /// on cache miss. Callers stash the returned wrapper in their own
 /// `collection_cache` so subsequent `.collection(name)` calls return
 /// the same JS object.
-pub fn mint_collection<'s>(
+pub(crate) fn mint_collection<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: String,
     app_id: String,
