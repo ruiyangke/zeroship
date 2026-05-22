@@ -542,12 +542,6 @@ impl Broker {
     /// `false`. This is the cheaper of the two failure modes: at worst
     /// the caller builds one extra tuple after a subscriber drop, which
     /// `publish` then discards harmlessly.
-    pub(crate) fn has_subscribers(&self, app_id: &str, collection: &str) -> bool {
-        self.by_key
-            .get(&(app_id.to_string(), collection.to_string()))
-            .is_some_and(|v| !v.is_empty())
-    }
-
     /// Number of registered (not-yet-closed) subscriptions across all
     /// keys. Used by tests + the maintenance cron for metrics.
     pub fn subscription_count(&self) -> usize {
