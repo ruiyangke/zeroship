@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 00:45.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 01:10.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -182,19 +182,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I11] Stale docs reference deleted `callbacks.rs` and retired `TX_CONN` thread-local (docs-audit drift #1-#7)
-- **Source**: `plugin-db-docs-audit-2026-05-22-r1.md` §2 drift table rows 1-7, §3 missing preambles
-- **File**: `docs/reference/db.md:123,592`; `docs/proposals/zeroship-db.md:76,196`; `crates/plugin-db/src/lib.rs:173`; `crates/plugin-db/src/orchestrator/mod.rs:13`; `crates/plugin-db/src/v8_classes/mod.rs:17`; `crates/plugin-db/src/orchestrator/register_model/validate.rs:17-18`; `crates/plugin-db/src/error.rs:3-7`; missing preambles in `crud.rs`, `diff.rs`, `replication_ops.rs`
-- **Description**: Docs reference deleted `callbacks.rs` (split into `orchestrator/register_model/*`) and the retired `TX_CONN`/`TX_TOKEN` thread-locals (now `IsolateDbContext` fields). Three high-traffic files (`crud.rs`, `diff.rs`, `replication_ops.rs`) lack module preambles. The `validate.rs` comment misrepresents the current return type as `Result<_, String>` when it's `DbError::SchemaRefused`.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — confirmed multiple drift sites in the docs-audit review; spot-checks at the cited lines match.
-  - Blocker: none. Pure doc-edit sweep.
-  - Already-superseded-by: N/A (note `replication_ops.rs` got a doc preamble, see earlier read — partial closure; `crud.rs` and `diff.rs` still lack module-level `//!` blocks)
-- **Effort**: small (multi-file doc sweep, no code change)
-- **Pickable this cycle**: yes — pure docs.
-
----
-
 ### [I12] `validate_field_name` permits non-ASCII identifiers (test-coverage GAP-1; security MINOR)
 - **Source**: `plugin-db-test-coverage-2026-05-22-r2.md` §3 GAP-1; `plugin-db-security-2026-05-22-r1.md` §2 "MINOR — validate_collection not called for field names"
 - **File**: `crates/plugin-db/src/query.rs:104-121`
@@ -286,19 +273,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I19] Migration `apply::run_op` silently no-ops unhandled `ChangeKind`s (code-critique M6; migration-pipeline C2)
-- **Source**: `plugin-db-code-critique-2026-05-21.md` §M6; `plugin-db-migration-pipeline-2026-05-22-r1.md` §3-C2 (rated CRITICAL but contingent on classifier evolution)
-- **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:137` (`ChangeKind::DropColumn | ChangeKind::DropIndex => Ok(()),`)
-- **Description**: Today benign because validate filters destructive ops; the silent `Ok(())` is a latent trap. A future reclassification (e.g., `DropIndex` as Compatible for "drop unused index") would silently audit-lie — write a `running` row, then an `applied` row, with no DDL executed and no `sql` field populated.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — `apply.rs:137` matches.
-  - Blocker: none. Fix is `unreachable!("classifier returned Drop as non-destructive")` or `debug_assert!(false, …)`.
-  - Already-superseded-by: N/A
-- **Effort**: small (one-line + comment)
-- **Pickable this cycle**: yes — but the impact is latent.
-
----
-
 ### [I20] WAL replication: cross-tenant isolation is Rust-only (security)
 - **Source**: `plugin-db-security-2026-05-22-r1.md` §2 "WAL replication credentials scope"; `plugin-db-architecture-review-2026-05-22-r3.md` §5
 - **File**: `crates/plugin-db/src/wal_consumer.rs:361`, `crates/plugin-db/src/replication_ops.rs:199`
@@ -374,6 +348,96 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
   - Already-superseded-by: N/A
 - **Effort**: small (one param-bind change × 2 sites)
 - **Pickable this cycle**: yes — purely defensive.
+
+---
+
+### [I26] Stale TX_CONN/TX_TOKEN refs in 9 sites (docs-audit follow-up; cycle 01:10)
+- **Source**: cycle-01:10 [I11] docs-sweep agent — stragglers outside the agent's 8-site scope guard
+- **File**: `crates/plugin-db/src/v8_classes/transaction.rs:108,116,161,192,214,284,285`; `crates/plugin-db/src/crud.rs:53`; `crates/plugin-db/src/exec.rs:277`; `crates/plugin-db/src/orchestrator/transaction.rs:143`
+- **Description**: Inline doc/comment references to the retired `TX_CONN` / `TX_TOKEN` thread-locals (now `IsolateDbContext` fields). All in production code; not user-visible but newcomer-confusing.
+- **Status as of 2026-05-22 01:10**: pickable next cycle. Pure doc edits.
+- **Effort**: small (~9 line edits, single sweep)
+- **Pickable this cycle**: yes — pure docs.
+
+---
+
+### [I27] Missing OrchestratorLockGuard abstraction (architecture r4 I1)
+- **Source**: `plugin-db-architecture-review-2026-05-22-r4.md` §"IMPORTANT I1"
+- **File**: `bootstrap.rs:179-184`, `apply.rs:203-209`, `orchestrator/register_model/mod.rs:219-225` — three sites all execute the same explicit `pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)` + `drop(lock_client)` on error.
+- **Description**: Three commits in two days plugged the same invariant in different stages (`b4e533e2`, `37a0ef76`, `3bb41fa1`). Architect identifies this as the strongest missing-abstraction signal in the crate: extract `OrchestratorLockGuard { client: PooledClient, key: String }` with a Drop impl issuing the unlock SQL. Success path consumes the guard via `into_inner()`; error path drops it normally.
+- **Status as of 2026-05-22 01:10**: actionable; needs an RAII guard that owns the pooled client during the lock-held window.
+- **Effort**: medium (new type + 3 call-site refactors; risk of changing the success-path ownership semantics)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I28] ~50 Result<_, String> sites in replication.rs + auth/bootstrap.rs (architecture r4 I3; code-critique r3 I2)
+- **Source**: `plugin-db-architecture-review-2026-05-22-r4.md` §I3; `plugin-db-code-critique-2026-05-22-r3.md` §I2
+- **File**: `crates/plugin-db/src/replication.rs` (7 sites); `crates/plugin-db/src/auth/bootstrap.rs` and related (~15 sites). `replication_ops.rs` wraps the returned String as `DbError::Internal { message: e }` at the dispatch boundary, collapsing every replication op to `.code = "internal"` — SDK loses retry discrimination.
+- **Description**: Same mechanical-sweep pattern that the prior cycle closed for `audit.rs`. Replication ops should return typed `Result<_, DbError>`; auth/bootstrap likewise.
+- **Status as of 2026-05-22 01:10**: actionable; mechanical sweep ~2 files.
+- **Effort**: medium (~22 sites across 2 files; need to map each error site to a typed variant)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I29] replication.rs:236 silent unwrap_or_default on empty RETURNING (code-critique r3 I3)
+- **Source**: `plugin-db-code-critique-2026-05-22-r3.md` §I3
+- **File**: `crates/plugin-db/src/replication.rs:236`
+- **Description**: Same shape as the audit-id=0 bug that `d7cfc089` closed in audit.rs: `unwrap_or_default()` on a missing/empty RETURNING coerces silent failure into a sentinel value. Pattern: `.first().and_then(|r| r.get_text("col")).unwrap_or_default()` returning `""` on empty.
+- **Status as of 2026-05-22 01:10**: actionable; mirror `d7cfc089` fix (`ok_or_else(DbError::Internal {...})`).
+- **Effort**: small (1 site + audit nearby for siblings)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I30] auto_tx.rs OpResult::Failed { error: String } collapses typed DbError (code-critique r3 I4; api-surface r2 IMPORTANT)
+- **Source**: `plugin-db-code-critique-2026-05-22-r3.md` §I4; `plugin-db-api-surface-2026-05-22-r2.md` §IMPORTANT
+- **File**: `crates/plugin-db/src/orchestrator/auto_tx.rs:67,104`
+- **Description**: Two sites in the auto-tx begin/end dispatch flatten typed `DbError` into `OpResult::Failed { error: e.into_string() }` rather than routing via `RejectError(e.to_op_error())` like `orchestrator/transaction.rs` does. SDK loses `.code` discrimination on auto-tx errors.
+- **Status as of 2026-05-22 01:10**: actionable; mirror the `transaction.rs` route.
+- **Effort**: small (2 sites + add a unit test asserting `.code` preservation)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I31] Migration-pipeline: orphan `Running` DDL audit rows have no heartbeat/sweeper (migration-pipeline r2 F1)
+- **Source**: `plugin-db-migration-pipeline-2026-05-22-r2.md` §F1
+- **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` — `update_audit_status` errors silently discarded via `let _ = …`
+- **Description**: Worker dying between DDL completion and audit terminal-update leaves the row in `Running` forever. No `owner_session_id`/heartbeat on DDL rows, no sweeper to terminalise abandoned entries.
+- **Status as of 2026-05-22 01:10**: design needed (sweeper cadence, ownership claim, watchdog policy). Not a simple mechanical fix.
+- **Effort**: medium-large (needs new schema column + background task)
+- **Pickable this cycle**: no — design decision required.
+
+---
+
+### [I32] Migration-pipeline: orphan `Pending` audit rows never reach terminal state (migration-pipeline r2 F2)
+- **Source**: `plugin-db-migration-pipeline-2026-05-22-r2.md` §F2
+- **File**: `crates/plugin-db/src/orchestrator/register_model/validate.rs:74-85` (writes Pending); `apply.rs` (skips destructive ops without terminalising)
+- **Description**: Strict and lenient paths both leave `Pending` rows stranded. Operator queries on `status='pending'` see phantoms.
+- **Status as of 2026-05-22 01:10**: actionable but needs design for the cancellation/refusal flow.
+- **Effort**: medium
+- **Pickable this cycle**: no — paired with [I31].
+
+---
+
+### [I33] Migration-pipeline: update_backfill_progress race with reset (migration-pipeline r2 F3)
+- **Source**: `plugin-db-migration-pipeline-2026-05-22-r2.md` §F3
+- **File**: `crates/plugin-db/src/migrations.rs:577-598`
+- **Description**: `update_backfill_progress` runs OUTSIDE the BEGIN/COMMIT envelope and without an `audit_generation` predicate. Operator `reset` between COMMIT and the progress UPDATE is silently clobbered — fresh runs resume from stale cursor.
+- **Status as of 2026-05-22 01:10**: actionable; add `audit_generation` column or move progress UPDATE into the COMMIT.
+- **Effort**: medium (schema migration + WHERE clause)
+- **Pickable this cycle**: rolled forward.
+
+---
+
+### [I34] broker.has_subscribers per-call allocates two Strings for lookup key (performance r3 N3-I1)
+- **Source**: `plugin-db-performance-2026-05-22-r3.md` §"IMPORTANT N3-I1"
+- **File**: `crates/plugin-db/src/broker.rs:486-490`
+- **Description**: Regression introduced by the R2 N-C1 fix. Fires on every WAL frame. Allocates `(String, String)` lookup key per call; fix is `&(&str, &str)` borrow via `Borrow` or a typed `SubscriberKey<'_>` struct.
+- **Status as of 2026-05-22 01:10**: actionable; small.
+- **Effort**: small (Borrow impl or key newtype)
+- **Pickable this cycle**: rolled forward.
 
 ---
 
@@ -508,6 +572,18 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `90d992d5 plugin-db/lib: cfg-gate module visibility on test-helpers feature`
 - The api-surface r1 demotion (`2fe9e9f0`) over-reached: 8 modules consumed by `tests/integration.rs` (audit, auth, exec, migrations, orchestrator, replication, replication_ops, wal_consumer) were left `pub(crate)`, breaking the entire 4400-line integration suite. Cfg-fork the visibility on the `test-helpers` feature — `pub(crate)` in release, `pub` for tests. The release surface stays tight; the integration tests build clean again.
 
+### [S29] IMPORTANT [I19] (cycle 01:10) — apply::run_op silent no-op on DropColumn/DropIndex
+- **Closed by**: `3ef6a170 plugin-db/apply: hard-error on DropColumn/DropIndex outside destructive class`
+- Latent silent-Ok arm replaced with `Err(destructive_invariant_error(op))`. Invariant check now gates the audit-row write — no orphan `Running` row on contract violation. 3 unit tests cover the error path, the canonical destructive-skip, and a 15-case sweep across all (kind × class) combinations confirming the gate doesn't interfere with other paths.
+
+### [S30] CRITICAL (perf r3 N3-C1; cycle 01:10) — exec_mutation_with_emit built tuple before subscriber check
+- **Closed by**: `49b0b98e plugin-db/exec: gate exec_mutation_with_emit tuple build behind subscriber check`
+- Mutation path built `(columns, tuple)` per row before checking `is_app_suppressed` or `has_subscribers`. With WAL consumer active this was unconditionally discarded. Refactored into `emit_for_rows` helper with the gate at the top; 3 unit tests verify suppressed / no-subscriber / active-subscriber paths.
+
+### [S31] IMPORTANT [I11] (cycle 01:10) — stale TX_CONN/callbacks.rs docs
+- **Closed by**: `d53f90b0 plugin-db/docs: scrub stale TX_CONN / callbacks.rs references`
+- 6 doc sites annotated or rewritten; `crud.rs`/`diff.rs` preambles already present (closed previously by `29b8a013`). Note: 9 stale TX_CONN refs remain in `transaction.rs:108,116,161,192,214,284,285`, `crud.rs:53`, `exec.rs:277`, `orchestrator/transaction.rs:143` — see new backlog entry [I26].
+
 ### [S28] Error-UX — double `db:` prefix
 - **Source**: `plugin-db-error-ux-2026-05-22-r1.md` §4e
 - **Fixed by**: `60ca1ad6 plugin-db: use Display instead of Debug in user-facing error messages; drop double db: prefix; route tx_connect_failed via from_pg`. Also closed §4b for `tx_connect_failed` (now via `from_pg`).
@@ -516,20 +592,23 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ## Pilot Pick
 
-**Cycle of 2026-05-22 00:17** picked Pick #1 [I1] (now closed; see [S28a]) plus three new CRITICALs surfaced by this cycle's reviewers ([S28b] bootstrap lock leak, [S28c] cross-app replication override × 2, [S28d] test-helpers visibility). Pick #2 [I11] doc sweep is rolled forward to the next cycle.
+**Cycle of 2026-05-22 00:17** closed [I1] + 3 new CRITICALs. **Cycle of 2026-05-22 01:10** closed [I11], [I19], and 1 new perf CRITICAL ([S30] exec_mutation_with_emit). [I27]-[I34] surfaced for future cycles.
 
-### Pick #2 (rolled forward): **[I11] Stale docs reference deleted `callbacks.rs` and retired `TX_CONN` thread-local**
-- **File** (multi):
-  - `docs/reference/db.md:123, 592` — `TX_CONN` → `IsolateDbContext::tx_conn`
-  - `docs/proposals/zeroship-db.md:76, 196` — annotate "superseded; see `orchestrator/register_model/{bootstrap,plan,validate,apply}.rs`"
-  - `crates/plugin-db/src/lib.rs:173` — doc comment naming retired thread-local
-  - `crates/plugin-db/src/orchestrator/mod.rs:13` — same
-  - `crates/plugin-db/src/v8_classes/mod.rs:17` — same
-  - `crates/plugin-db/src/orchestrator/register_model/validate.rs:17-18` — comment misrepresents the return type as `Result<_, String>`
-  - `crates/plugin-db/src/error.rs:3-7` — present-tense "is being migrated"
-  - Missing module preambles: `crates/plugin-db/src/crud.rs`, `crates/plugin-db/src/diff.rs`
-- **Fix sketch**: Pure doc-edit sweep. Replace `TX_CONN` references with `IsolateDbContext::tx_conn`; add a superseded annotation block at the head of `docs/proposals/zeroship-db.md` listing the new implementation site; add `//!` preambles to `crud.rs` and `diff.rs`; tense-fix `error.rs` preamble.
-- **Why this cycle**: small (zero behaviour change), high-leverage for newcomer navigability (the task router in AGENTS.md sends people directly to these files), and unblocks the docs-audit review from regressing as a recurring finding.
-- **Verification gate**:
-  - `cargo doc -p zeroship-plugin-db --no-deps` (zero warnings — currently clean per `29b8a013`).
-  - `grep -rn 'TX_CONN\|TX_TOKEN\|callbacks\.rs' crates/plugin-db/src/ docs/reference/db.md docs/proposals/zeroship-db.md` — expect zero hits after the sweep (the names should appear only as historical context with explicit "renamed to" annotations, if at all).
+### Pick #1 (next cycle): **[I29] replication.rs:236 silent unwrap_or_default on empty RETURNING**
+- **File**: `crates/plugin-db/src/replication.rs:236`
+- **Fix sketch**: Mirror the d7cfc089 pattern that closed the audit-id=0 bug: `.first().and_then(...).ok_or_else(|| DbError::Internal { message: "replication: empty RETURNING from <op>".into() })?`. Audit sibling sites in `replication.rs` and `replication_ops.rs` for the same shape.
+- **Why next**: tiny scope (1 site + grep audit), high-leverage (silent data-loss class bug; same shape that already burned us once).
+- **Verification gate**: `cargo test -p zeroship-plugin-db --lib` + add a unit test asserting the empty-RETURNING path returns `Err(DbError::Internal)`.
+
+### Pick #2 (next cycle): **[I34] broker.has_subscribers two-String alloc per WAL frame**
+- **File**: `crates/plugin-db/src/broker.rs:486-490`
+- **Fix sketch**: Replace `HashMap<(String, String), _>::contains_key(&(s1.to_string(), s2.to_string()))` with a `Borrow`-impl key-tuple, or extract a typed `SubKey<'a> { app: &'a str, collection: &'a str }`. Mirror the std hashmap-with-borrow-key pattern.
+- **Why next**: hot path (every WAL frame in every multi-tenant worker); small surface (single function); regression introduced by R2 fix, so it's a "fix-the-fix" follow-up.
+- **Verification gate**: `cargo test -p zeroship-plugin-db --lib`; benchmark would be nice but the path is correctness-clear without.
+
+### Pick #3 (next cycle, larger): **[I27] OrchestratorLockGuard abstraction**
+- **File** (multi): `bootstrap.rs:179-184`, `apply.rs:203-209`, `orchestrator/register_model/mod.rs:219-225`
+- **Fix sketch**: New `OrchestratorLockGuard { client: PooledClient<'p>, key: String }` with a `Drop` impl issuing `pg_advisory_unlock(...)`. Success path consumes via `into_inner()` to release without unlock-on-Drop; error path drops normally → unlock fires.
+- **Why**: three commits in two days for the same invariant — the strongest missing-abstraction signal in the crate. Architect's R4 top finding.
+- **Caveat**: medium effort + risk of changing the success-path ownership semantics. Worth its own focused worktree.
+- **Verification gate**: all 3 call sites converted; unit test asserting Drop-on-Err issues the unlock query; existing 319 lib tests stay green.
