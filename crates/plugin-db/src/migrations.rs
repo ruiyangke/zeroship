@@ -548,7 +548,7 @@ pub async fn exec_commit_batch(
             if col == "id" {
                 continue;
             }
-            params.push(crate::query::value_to_param_pub(val));
+            params.push(crate::query::value_to_param(val));
             assignments.push(format!(
                 "{} = ${}",
                 crate::query::quote_ident(col),
