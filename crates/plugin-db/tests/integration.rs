@@ -1101,8 +1101,9 @@ async fn a2_destructive_drop_column_refused_strict() {
     .expect_err("strict deploy should refuse drop_column");
 
     // The error must be a JSON envelope with code: validation_refused.
-    let parsed: serde_json::Value = serde_json::from_str(&err)
-        .unwrap_or_else(|_| panic!("error envelope not JSON: {err}"));
+    let err_str = err.to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&err_str)
+        .unwrap_or_else(|_| panic!("error envelope not JSON: {err_str}"));
     assert_eq!(parsed["code"], "validation_refused", "envelope: {parsed}");
     assert_eq!(parsed["deploy_id"], "deploy_v2");
     let pending = parsed["destructive_pending"].as_array().unwrap();
@@ -1293,7 +1294,8 @@ async fn a2_not_null_on_non_empty_refused() {
     .await
     .expect_err("NOT NULL add on non-empty table should be refused");
 
-    let parsed: serde_json::Value = serde_json::from_str(&err).unwrap();
+    let err_str = err.to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&err_str).unwrap();
     assert_eq!(parsed["code"], "validation_refused");
     let pending = parsed["destructive_pending"].as_array().unwrap();
     let ssn_op = pending
@@ -2760,9 +2762,12 @@ async fn b2_adding_fk_to_existing_data_validates() {
         "adding FK with orphan rows must fail; got: {res:?}"
     );
     let err = res.unwrap_err();
+    let err_str = err.to_string();
     assert!(
-        err.contains("foreign key") || err.contains("23503") || err.contains("add_foreign_key"),
-        "expected FK validation failure, got: {err}"
+        err_str.contains("foreign key")
+            || err_str.contains("23503")
+            || err_str.contains("add_foreign_key"),
+        "expected FK validation failure, got: {err_str}"
     );
 }
 

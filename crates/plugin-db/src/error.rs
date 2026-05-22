@@ -288,6 +288,34 @@ impl DbError {
     }
 }
 
+/// `Display` renders the same body that `into_string` returns — the
+/// message body for the variant (or the JSON envelope for
+/// `SchemaRefused`). The `.code` is NOT emitted because Display is
+/// used by callers that want the human-readable text (log lines,
+/// `format!("{e}")` panics in tests, `serde_json::from_str(&e.to_string())`
+/// envelope round-trips); the code surfaces through `to_op_error()`
+/// at the V8 boundary, not through Display.
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DbError::SchemaRefused { envelope_json, .. } => f.write_str(envelope_json),
+            DbError::ValidationFailed { message, .. }
+            | DbError::UniqueViolation { message }
+            | DbError::FkViolation { message }
+            | DbError::NotNullViolation { message }
+            | DbError::CheckViolation { message }
+            | DbError::Serialization { message }
+            | DbError::LockContention { message }
+            | DbError::Transient { message }
+            | DbError::Configuration { message, .. }
+            | DbError::Coded { message, .. }
+            | DbError::Internal { message } => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DbError {}
+
 // Postgres-side → DbError so SQL helpers can `?`-flow driver errors
 // through the same `to_op_error()` boundary. Routes through
 // [`DbError::from_pg`] so SQLSTATE classification is the single source
