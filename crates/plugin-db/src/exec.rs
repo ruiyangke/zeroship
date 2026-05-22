@@ -31,10 +31,10 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
+use crate::context;
 use crate::error::DbError;
 use crate::query::BuiltQuery;
 use crate::v8_bridge::rows_to_json;
-use crate::DB_POOL;
 
 /// Execute SQL with text params — uses TX connection if active, otherwise pool.
 pub(crate) async fn run_sql(
@@ -57,13 +57,13 @@ pub(crate) async fn run_sql(
     }
 
     // No transaction — use pool
-    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    let has_pool = context::with(|c| c.pool_initialised());
     if !has_pool {
         crate::init_pool_async()
             .await
             .map_err(|e| DbError::config("not_configured", format!("db: lazy init failed: {e}")))?;
     }
-    let pool = DB_POOL.with(|p| p.borrow().as_ref().map(Rc::clone));
+    let pool = context::with(|c| c.pool());
     let pool = pool.ok_or_else(|| {
         DbError::config("not_configured", "db: pool not initialized".to_string())
     })?;
@@ -245,14 +245,13 @@ pub(crate) fn clear_pending_emits() {
 /// connect + warm-up); subsequent calls clone the `Rc<Pool>` out of
 /// the per-thread cell.
 pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> {
-    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    let has_pool = context::with(|c| c.pool_initialised());
     if !has_pool {
         crate::init_pool_async()
             .await
             .map_err(|e| DbError::config("not_configured", format!("db: lazy init failed: {e}")))?;
     }
-    DB_POOL
-        .with(|p| p.borrow().as_ref().map(Rc::clone))
+    context::with(|c| c.pool())
         .ok_or_else(|| {
             DbError::config("not_configured", "db: pool not initialized".to_string())
         })

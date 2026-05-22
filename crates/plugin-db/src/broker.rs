@@ -497,8 +497,8 @@ impl std::fmt::Debug for Broker {
 // Thread-local accessor
 // ---------------------------------------------------------------------------
 //
-// The broker lives in a thread-local cell mirroring `DB_POOL` /
-// `TX_CONN`: the compio runtime is single-threaded per worker and
+// The broker lives in a thread-local cell mirroring the per-isolate
+// DB context: the compio runtime is single-threaded per worker and
 // every callback that needs the broker (mutation publish, subscribe,
 // unsubscribe) runs on the same isolate thread.
 

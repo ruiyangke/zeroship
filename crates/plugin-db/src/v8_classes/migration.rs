@@ -101,12 +101,12 @@ impl Drop for Migration {
         // and we don't have anything to await on.
         //
         // The pool is captured by Rc-clone; if the pool was never
-        // initialised (e.g. unit-test path where `DB_POOL` is never
-        // populated), we silently skip the cancel call. The advisory
-        // lock will still be released when the owning thread's
-        // `MIG_LOCK` client is dropped on isolate teardown.
-        let pool_opt: Option<Rc<compio_postgres::Pool>> =
-            crate::DB_POOL.with(|p| p.borrow().as_ref().map(Rc::clone));
+        // initialised (e.g. unit-test path where the per-isolate
+        // context's pool slot is empty), we silently skip the cancel
+        // call. The advisory lock will still be released when the
+        // owning thread's migration lock client is dropped on isolate
+        // teardown.
+        let pool_opt: Option<Rc<compio_postgres::Pool>> = crate::context::with(|c| c.pool());
         let Some(pool) = pool_opt else {
             return;
         };

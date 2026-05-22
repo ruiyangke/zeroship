@@ -24,13 +24,11 @@
 //! stages independently. The V8-facing surface is
 //! [`register_model_dispatch`] — unchanged from before the split.
 
-use std::rc::Rc;
-
 use serde_json::Value;
 use zeroship_runtime::state::OpResult;
 
+use crate::context;
 use crate::v8_bridge::{runtime_state, setup_promise};
-use crate::DB_POOL;
 
 pub(crate) mod apply;
 pub(crate) mod bootstrap;
@@ -94,18 +92,15 @@ async fn exec_register_model(
     indexes: &Value,
 ) -> Result<(), String> {
     // Lazy pool init
-    let has_pool = DB_POOL.with(|p| p.borrow().is_some());
+    let has_pool = context::with(|c| c.pool_initialised());
     if !has_pool {
         crate::init_pool_async()
             .await
             .map_err(|e| format!("db: lazy init failed: {e}"))?;
     }
 
-    let pool = DB_POOL.with(|p| {
-        let borrow = p.borrow();
-        borrow.as_ref().map(Rc::clone)
-    });
-    let pool = pool.ok_or_else(|| "db: pool not initialized".to_string())?;
+    let pool = context::with(|c| c.pool())
+        .ok_or_else(|| "db: pool not initialized".to_string())?;
 
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());

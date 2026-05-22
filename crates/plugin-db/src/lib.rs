@@ -29,6 +29,8 @@ use std::rc::Rc;
 use compio_postgres::{Client, Pool};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
+use crate::context::with_mut as ctx_mut;
+
 pub mod audit;
 pub mod auth;
 pub mod broker;
@@ -52,9 +54,6 @@ pub mod wal_consumer;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// Connection pool — created lazily on first DB operation.
-    pub(crate) static DB_POOL: RefCell<Option<Rc<Pool>>> = const { RefCell::new(None) };
-
     /// Database URL — poisoned during `register()`, consumed on first pool creation.
     pub(crate) static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
 
@@ -147,7 +146,7 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
 // has been removed — every callback dispatches through
-// `init_pool_async()` + `DB_POOL.with(...)` directly (or the
+// `init_pool_async()` + `context::with_mut(...)` directly (or the
 // `exec::ensure_pool` async helper that wraps the same).
 
 // ---------------------------------------------------------------------------
@@ -213,7 +212,7 @@ impl NativePlugin for DbPlugin {
             let different = cell.as_deref() != Some(self.url.as_str());
             if different {
                 *cell = Some(self.url.clone());
-                DB_POOL.with(|p| *p.borrow_mut() = None);
+                ctx_mut(|c| c.clear_pool());
             }
         });
         // Every JS-visible entry point lives on the Db v8_class
@@ -337,6 +336,6 @@ pub async fn init_pool_async() -> Result<(), String> {
             msg
         })?;
 
-    DB_POOL.with(|p| *p.borrow_mut() = Some(Rc::new(pool)));
+    ctx_mut(|c| c.set_pool(Rc::new(pool)));
     Ok(())
 }
