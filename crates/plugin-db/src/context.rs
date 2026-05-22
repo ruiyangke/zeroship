@@ -416,6 +416,15 @@ impl IsolateDbContext {
         self.running_consumers.insert(app_id.to_string());
     }
 
+    /// Atomically check-and-mark: returns `true` if the caller won the
+    /// mark (was not previously running), `false` if another caller
+    /// already marked this app. Used by the spawned consumer task to
+    /// close the race between dispatch's idempotent gate and the
+    /// task's first poll (concurrency r7 NEW MINOR).
+    pub fn try_mark_consumer_running(&mut self, app_id: &str) -> bool {
+        self.running_consumers.insert(app_id.to_string())
+    }
+
     /// Mark a replication consumer as no-longer-running.
     pub fn unmark_consumer_running(&mut self, app_id: &str) {
         self.running_consumers.remove(app_id);

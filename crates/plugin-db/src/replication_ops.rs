@@ -274,15 +274,28 @@ pub fn start_replication_consumer_dispatch<'s>(
         // first poll is acceptable: compio runs callbacks single-threaded
         // per isolate; a second `startReplicationConsumer()` would
         // already be queued behind this one on the same event loop.
+        // Concurrency r7 NEW MINOR: two rapid-succession
+        // startReplicationConsumer() calls from the same isolate can
+        // both pass the outer `is_consumer_running` gate at lines
+        // 195-207 before either marks. Result: two spawned tasks both
+        // attempt to provision the same slot and Postgres rejects the
+        // second with SQLSTATE 55006 in a tight retry loop.
+        //
+        // Defense: have the spawned task try-mark atomically. If
+        // another task won the race, the loser bails without
+        // provisioning or marking. The winner constructs the guard,
+        // ensuring Drop unmarks on every exit path.
         struct ConsumerRunningGuard {
             app_id: String,
         }
         impl ConsumerRunningGuard {
-            fn new(app_id: String) -> Self {
-                crate::context::with_mut(|c| {
-                    c.mark_consumer_running(&app_id)
+            /// Try to claim the running-marker; returns Some(guard) on
+            /// success, None if another task already holds it.
+            fn try_claim(app_id: String) -> Option<Self> {
+                let won = crate::context::with_mut(|c| {
+                    c.try_mark_consumer_running(&app_id)
                 });
-                Self { app_id }
+                won.then_some(Self { app_id })
             }
         }
         impl Drop for ConsumerRunningGuard {
@@ -294,7 +307,10 @@ pub fn start_replication_consumer_dispatch<'s>(
         }
         let app_for_task = app_id.clone();
         compio::runtime::spawn(async move {
-            let _guard = ConsumerRunningGuard::new(app_for_task);
+            let Some(_guard) = ConsumerRunningGuard::try_claim(app_for_task) else {
+                // Another task won the race; nothing to do.
+                return;
+            };
             crate::wal_consumer::run_supervised(consumer).await;
             // _guard drops here on graceful exit; Drop also fires on
             // panic-unwind, so the running marker is always cleared.
