@@ -173,7 +173,7 @@ impl IsolateDbContext {
     /// `RefCell` is initialised lazily through `std::cell::RefCell::new`
     /// in the `thread_local!` body).
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pool: None,
             db_url: None,
@@ -192,19 +192,19 @@ impl IsolateDbContext {
     // ----- DB_POOL ----------------------------------------------------
 
     /// Snapshot the pool handle (cloned `Rc`).
-    pub fn pool(&self) -> Option<Rc<Pool>> {
+    pub(crate) fn pool(&self) -> Option<Rc<Pool>> {
         self.pool.as_ref().map(Rc::clone)
     }
 
     /// True iff the pool has been initialised.
-    pub fn pool_initialised(&self) -> bool {
+    pub(crate) fn pool_initialised(&self) -> bool {
         self.pool.is_some()
     }
 
     /// Install the pool — called by `init_pool_async` once Postgres
     /// `connect` succeeds. Constructs the [`PostgresBackend`] facade
     /// in lockstep so the two never drift.
-    pub fn set_pool(&mut self, pool: Rc<Pool>) {
+    pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
         self.backend = Some(Rc::new(PostgresBackend::new(Rc::clone(&pool), url)));
         self.pool = Some(pool);
@@ -213,27 +213,27 @@ impl IsolateDbContext {
     /// Drop the cached pool (e.g. when the URL changes on
     /// `register`). The next CRUD call will re-`init_pool_async`
     /// against the new URL.
-    pub fn clear_pool(&mut self) {
+    pub(crate) fn clear_pool(&mut self) {
         self.pool = None;
         self.backend = None;
     }
 
     /// Snapshot the backend facade (cloned `Rc`).
-    pub fn backend(&self) -> Option<Rc<PostgresBackend>> {
+    pub(crate) fn backend(&self) -> Option<Rc<PostgresBackend>> {
         self.backend.as_ref().map(Rc::clone)
     }
 
     // ----- DB_URL -----------------------------------------------------
 
     /// Read the configured URL.
-    pub fn db_url(&self) -> Option<String> {
+    pub(crate) fn db_url(&self) -> Option<String> {
         self.db_url.clone()
     }
 
     /// Poison the URL slot. Returns `true` iff the URL changed (the
     /// caller wants to drop the pool in that case so the next CRUD
     /// call rebuilds it).
-    pub fn set_db_url(&mut self, url: &str) -> bool {
+    pub(crate) fn set_db_url(&mut self, url: &str) -> bool {
         let different = self.db_url.as_deref() != Some(url);
         if different {
             self.db_url = Some(url.to_string());
@@ -244,13 +244,13 @@ impl IsolateDbContext {
     // ----- REGISTERED_MODELS -----------------------------------------
 
     /// Check whether the model has been registered on this isolate.
-    pub fn is_model_registered(&self, app_id: &str, collection: &str) -> bool {
+    pub(crate) fn is_model_registered(&self, app_id: &str, collection: &str) -> bool {
         let key = format!("{app_id}:{collection}");
         self.registered_models.contains(&key)
     }
 
     /// Mark the model as registered (idempotent).
-    pub fn mark_model_registered(&mut self, app_id: &str, collection: &str) {
+    pub(crate) fn mark_model_registered(&mut self, app_id: &str, collection: &str) {
         let key = format!("{app_id}:{collection}");
         self.registered_models.insert(key);
     }
@@ -263,14 +263,14 @@ impl IsolateDbContext {
     /// `put_tx_client`), because callers wrap the await in those two
     /// calls and the slot is conceptually still "active". See
     /// [`Self::has_tx`] for the conservative caller-facing predicate.
-    pub fn has_tx(&self) -> bool {
+    pub(crate) fn has_tx(&self) -> bool {
         self.tx_conn.is_some()
     }
 
     /// Park a connection in the transaction slot. Returns the
     /// previous occupant, if any (callers should ensure this is `None`
     /// — every begin path checks [`Self::has_tx`] first).
-    pub fn install_tx_client(&mut self, client: Client) -> Option<Client> {
+    pub(crate) fn install_tx_client(&mut self, client: Client) -> Option<Client> {
         self.tx_conn.replace(client)
     }
 
@@ -278,17 +278,17 @@ impl IsolateDbContext {
     /// either return it via [`Self::put_tx_client`] (when the await
     /// is short and the slot should remain "in transaction") or drop
     /// the client (when settling the tx).
-    pub fn take_tx_client(&mut self) -> Option<Client> {
+    pub(crate) fn take_tx_client(&mut self) -> Option<Client> {
         self.tx_conn.take()
     }
 
     /// Return a client previously taken via [`Self::take_tx_client`].
-    pub fn put_tx_client(&mut self, client: Client) {
+    pub(crate) fn put_tx_client(&mut self, client: Client) {
         self.tx_conn = Some(client);
     }
 
     /// Read the live ownership token (zero outside a transaction).
-    pub fn tx_token(&self) -> u64 {
+    pub(crate) fn tx_token(&self) -> u64 {
         self.tx_token
     }
 
@@ -298,7 +298,7 @@ impl IsolateDbContext {
     /// Invariant: a non-zero token implies the tx_conn slot is
     /// occupied — every settle path drains the client BEFORE
     /// clearing the token.
-    pub fn set_tx_token(&mut self, token: u64) {
+    pub(crate) fn set_tx_token(&mut self, token: u64) {
         debug_assert!(
             token == 0 || self.tx_conn.is_some(),
             "set_tx_token: non-zero token without an active tx_conn",
@@ -310,14 +310,14 @@ impl IsolateDbContext {
     /// `orchestrator::transaction::begin_transaction_dispatch` right
     /// before stamping the token onto the freshly-minted
     /// `Transaction` wrapper.
-    pub fn next_tx_token(&mut self) -> u64 {
+    pub(crate) fn next_tx_token(&mut self) -> u64 {
         self.tx_token_counter = self.tx_token_counter.wrapping_add(1);
         self.tx_token_counter
     }
 
     /// True iff the live transaction was opened by the auto-tx
     /// wrapper (vs. a user-driven `db.beginTransaction`).
-    pub fn auto_tx_owned(&self) -> bool {
+    pub(crate) fn auto_tx_owned(&self) -> bool {
         self.auto_tx_owned
     }
 
@@ -329,7 +329,7 @@ impl IsolateDbContext {
     /// `exec_auto_end` clears the flag right after taking the client
     /// out, so the slot is briefly `None` while the flag is also
     /// being cleared.
-    pub fn set_auto_tx_owned(&mut self, owned: bool) {
+    pub(crate) fn set_auto_tx_owned(&mut self, owned: bool) {
         debug_assert!(
             !owned || self.tx_conn.is_some(),
             "set_auto_tx_owned(true) called without an active tx_conn",
@@ -341,14 +341,14 @@ impl IsolateDbContext {
 
     /// Push a `ChangeEvent` onto the pending-emits queue (initialises
     /// the slot to `Some(Vec::new())` on first push within a tx).
-    pub fn push_pending_emit(&mut self, ev: ChangeEvent) {
+    pub(crate) fn push_pending_emit(&mut self, ev: ChangeEvent) {
         self.pending_emits.get_or_insert_with(Vec::new).push(ev);
     }
 
     /// Drain the pending-emits queue (returns `Vec::new()` if the
     /// slot was empty). Called by the transaction settle path on
     /// COMMIT.
-    pub fn drain_pending_emits(&mut self) -> Vec<ChangeEvent> {
+    pub(crate) fn drain_pending_emits(&mut self) -> Vec<ChangeEvent> {
         self.pending_emits.take().unwrap_or_default()
     }
 
@@ -356,7 +356,7 @@ impl IsolateDbContext {
     /// Called by the transaction settle path on ROLLBACK and by
     /// `exec_begin` to drop any stale residue from an interrupted
     /// prior run.
-    pub fn clear_pending_emits(&mut self) {
+    pub(crate) fn clear_pending_emits(&mut self) {
         self.pending_emits = None;
     }
 
@@ -439,7 +439,7 @@ impl IsolateDbContext {
 
     /// True iff a replication consumer is already running for this
     /// app on this isolate.
-    pub fn is_consumer_running(&self, app_id: &str) -> bool {
+    pub(crate) fn is_consumer_running(&self, app_id: &str) -> bool {
         self.running_consumers.contains(app_id)
     }
 
@@ -453,7 +453,7 @@ impl IsolateDbContext {
     /// production builds and would footgun a contributor picking it
     /// over the atomic variant.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn mark_consumer_running(&mut self, app_id: &str) {
+    pub(crate) fn mark_consumer_running(&mut self, app_id: &str) {
         self.running_consumers.insert(app_id.to_string());
     }
 
@@ -462,12 +462,12 @@ impl IsolateDbContext {
     /// already marked this app. Used by the spawned consumer task to
     /// close the race between dispatch's idempotent gate and the
     /// task's first poll (concurrency r7 NEW MINOR).
-    pub fn try_mark_consumer_running(&mut self, app_id: &str) -> bool {
+    pub(crate) fn try_mark_consumer_running(&mut self, app_id: &str) -> bool {
         self.running_consumers.insert(app_id.to_string())
     }
 
     /// Mark a replication consumer as no-longer-running.
-    pub fn unmark_consumer_running(&mut self, app_id: &str) {
+    pub(crate) fn unmark_consumer_running(&mut self, app_id: &str) {
         self.running_consumers.remove(app_id);
     }
 
@@ -475,7 +475,7 @@ impl IsolateDbContext {
     /// production code should rely on the supervised task's exit path
     /// to call [`Self::unmark_consumer_running`]).
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn clear_consumer_registry(&mut self) {
+    pub(crate) fn clear_consumer_registry(&mut self) {
         self.running_consumers.clear();
     }
 }
