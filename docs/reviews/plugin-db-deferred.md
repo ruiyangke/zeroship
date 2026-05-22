@@ -1,6 +1,8 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 08:30.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 09:00.
+
+**Plateau signal (cycle 09:00)**: architecture r9 + code-critique r8 both explicitly flag that the trajectory has plateaued (architecture R3→R4 +5 to R8→R9 +1; code-critique recommends "stop at 95"). Further pilot work has diminishing per-LOC value. Remaining IMPORTANTs are mostly judgment-call (cfg-fork visibility, Backend trait shape, auto_tx/transaction parallelism) rather than correctness gaps. Future cycles should either: (1) land cross-crate I5 (auth/* `--harden` wire-up in `crates/control/`), (2) close I1+I2+I3+I4 as judgment-landed, or (3) downshift the review cadence.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +596,18 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S69] IMPORTANT (docs-audit r4/r5/r6 4-round hold-out; cycle 09:00) — TX_CONN/TX_TOKEN/MIG_LOCK drift sweep
+- **Closed by**: `09e32998 plugin-db: scrub stale TX_CONN/TX_TOKEN/MIG_LOCK refs + demote OBJECT_PREFIX`
+- ~20 inline doc/comment sites across 7 files (backend/mod.rs, crud.rs, exec.rs, lib.rs, orchestrator/transaction.rs, v8_classes/migration.rs, v8_classes/transaction.rs) referenced the retired thread-local names. Replaced with current `IsolateDbContext::tx_conn`/`tx_token`/`mig_lock` paths. 4 broken intra-doc links now resolve. Remaining mentions in context.rs are explicit historical-name annotations.
+
+### [S70] MAJOR (api-surface r7 NEW MAJOR-R7-2; cycle 09:00) — OBJECT_PREFIX demote
+- **Closed by**: `09e32998` + `bc4363f0 plugin-db/replication: demote OBJECT_PREFIX to pub(crate) (re-apply)`
+- `replication::OBJECT_PREFIX` was `pub` with zero external consumers. Demoted to `pub(crate)`. Race with parallel TX_CONN fixer required a re-apply (bc4363f0).
+
+### [S71] MAJOR (code-critique r8 R8-1; cycle 09:00) — error.rs preamble drift on Result<_, String> hold-outs
+- **Closed by**: `9e392ba1 plugin-db/error: accurate enumeration of Result<_, String> hold-outs (R8-1)`
+- Preamble claimed "saturated at 2 sites" but the actual count is 8 sites across 5 categories. Rewrote to accurately enumerate wire-contract envelopes, pure parsers, JS-input arg parsers, cold-init (with the "lazy_init_failed" vs "not_configured" code-name drift flagged as a follow-up), and test helpers.
+
 ### [S67] INFO (error-ux r7; cycle 08:30) — DbError::Configuration `hint` field
 - **Closed by**: `f1c5184e plugin-db/error: add hint field to DbError::Configuration`
 - Added `hint: Option<String>` to `Configuration` variant + new `DbError::config_hinted()` convenience constructor. `wal_level_not_logical` and `not_provisioned` (missing db_url) now ship operator-remediation prose in the `.hint` slot instead of baked into the message body.
@@ -731,19 +745,20 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **06:55** closed MAJOR-R5-1, MAJOR-R5-4, concurrency-r7 race, docs-audit r5 CRITICAL
 - **07:30** closed [I42] structural test, ConsumerRunningGuard lifecycle tests (+ LATENT BUG caught), 3× api-surface r6 MAJORs, perf r7 N7-M0
 - **08:00** closed M11 coded_db dedup, classify_detail unit tests (+ test-coverage r8 NEW gap), MIN-R7-1 replication SQLSTATE substring-match
-- **08:30** closed Configuration hint field, 3 docs-audit r6 drift sites (1 CRITICAL + 2 IMPORTANT)
+- **08:30** closed Configuration hint field, 3 docs-audit r6 drift sites
+- **09:00** closed TX_CONN sweep (4-round hold-out), OBJECT_PREFIX demote (api-surface r7 MAJOR-R7-2), R8-1 error.rs preamble drift
 
-**Net since pilot started**: ~49 closures, ~28 new findings.
+**Net since pilot started**: ~52 closures, ~29 new findings. **Trajectory has plateaued** per architecture r9 + code-critique r8 — further pilot cycles have diminishing per-LOC value.
 
-### Pick #1 (next cycle): **Migration-pipeline F1 + F2 (5+ cycle carry, design needed)**
-- **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` (F1) + `validate.rs:67-87` (F2)
-- **Fix sketch**: F1 needs owner_session_id + heartbeat column on `__zeroship_migrations` + a sweeper. F2 needs `validation_refused` added to status CHECK + transition in validate.rs.
-- **Caveat**: schema migration to `__zeroship_migrations` requires careful rollout; needs deployment story.
+### Pick #1 (next cycle): **R8-2 init_pool_async code-name drift**
+- **File**: `crates/plugin-db/src/lib.rs:351` + the two call sites (`orchestrator/register_model/mod.rs:120` synthesises `lazy_init_failed`; `exec.rs::ensure_pool` synthesises `not_configured`)
+- **Fix sketch**: tighten the two synthesised codes to one canonical value, OR convert `init_pool_async` to `Result<_, DbError>` directly and pass the typed error through.
+- **Why next**: small surface area; SDK sees two different codes for the same root cause (cold-start pool init failure).
 
-### Pick #2 (next cycle): **docs-audit r6 four-round hold-outs — v8_classes/transaction.rs TX_CONN drift sweep**
-- **File** (multi): `v8_classes/transaction.rs` (~14 prose sites + 4 broken intra-doc links to `crate::TX_CONN` / `crate::TX_TOKEN`), `crud.rs:53`, `exec.rs:329`, `lib.rs:110,216`, `backend/mod.rs:66`, `orchestrator/transaction.rs:51,52,89,143`.
-- **Fix sketch**: pure doc sweep — replace `TX_CONN`/`TX_TOKEN` with `IsolateDbContext::tx_conn`/`tx_token`; fix broken intra-doc links via `[`...`]` removal or rewrite.
-- **Why next**: these hold-outs have been carried for 4 rounds without movement. Mechanical, safe. ~20 line edits across 7 files.
+### Pick #2 (next cycle, larger): **F1 + F2 (5+ cycle carry, design needed)**
+- **Caveat**: requires schema migration to `__zeroship_migrations` + sweeper task. Won't land in a single cycle.
 
-### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
-- Status unchanged; needs retry/backoff policy decision.
+### Pick #3 (cross-crate, needs scope grant): **R7 I5 — auth/* dormancy**
+- **File**: `crates/plugin-db/src/auth/*.rs` + `crates/control/src/main.rs` (out of pilot scope).
+- **Fix sketch**: wire `auth::ensure_admin_schema(pool)` into `zeroship-control` startup behind a `--harden` CLI flag.
+- **Why**: architecture r9's recommendation for breaking through the plateau. Requires explicit cross-crate scope grant from the user.
