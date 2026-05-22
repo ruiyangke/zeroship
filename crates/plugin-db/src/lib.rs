@@ -30,29 +30,74 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 use crate::context::with_mut as ctx_mut;
 
-pub(crate) mod audit;
-pub(crate) mod auth;
-pub(crate) mod backend;
-// broker stays pub: tests/integration.rs + tests/subscription_finalizer.rs
-// (external test crates) reach in via zeroship_plugin_db::broker::*.
+// Module visibility note:
+//
+// Most modules are `pub(crate)` in normal builds. Several are also
+// consumed by external test crates under `tests/`, which are compiled
+// as separate crate targets. Those need `pub` visibility when the
+// `test-helpers` Cargo feature is enabled (the `[[test]] integration`
+// target lists `required-features = ["test-helpers"]`). The cfg-fork
+// below keeps the release surface tight while exposing the modules
+// for tests.
+//
+// The unconditionally-`pub` modules (`broker`, `error`, `query`,
+// `v8_classes`) are reached even without the feature — see
+// tests/subscription_finalizer.rs and tests/db_v8_class.rs.
+
+// Always pub:
 pub mod broker;
+pub mod error;
+pub mod query;
+pub mod v8_classes;
+
+// Always crate-private:
+pub(crate) mod backend;
 pub(crate) mod context;
 pub(crate) mod crud;
 pub(crate) mod diff;
-pub mod error;
-pub(crate) mod exec;
-pub(crate) mod migrations;
-pub(crate) mod orchestrator;
-// query stays pub: tests/integration.rs (external test crate) imports via use zeroship_plugin_db::query::*
-pub mod query;
 pub(crate) mod read_set;
-pub(crate) mod replication;
-pub(crate) mod replication_ops;
 pub(crate) mod v8_bridge;
-// v8_classes stays pub: tests/db_v8_class.rs (external test crate)
-// imports Collection / mint_db / Db directly.
-pub mod v8_classes;
+
+// Crate-private in release, pub under `test-helpers` (for tests/integration.rs):
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod audit;
+#[cfg(feature = "test-helpers")]
+pub mod audit;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod auth;
+#[cfg(feature = "test-helpers")]
+pub mod auth;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod exec;
+#[cfg(feature = "test-helpers")]
+pub mod exec;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod migrations;
+#[cfg(feature = "test-helpers")]
+pub mod migrations;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod orchestrator;
+#[cfg(feature = "test-helpers")]
+pub mod orchestrator;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod replication;
+#[cfg(feature = "test-helpers")]
+pub mod replication;
+
+#[cfg(not(feature = "test-helpers"))]
+pub(crate) mod replication_ops;
+#[cfg(feature = "test-helpers")]
+pub mod replication_ops;
+
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod wal_consumer;
+#[cfg(feature = "test-helpers")]
+pub mod wal_consumer;
 
 // ---------------------------------------------------------------------------
 // Per-isolate state
