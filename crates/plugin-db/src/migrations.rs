@@ -45,7 +45,9 @@ use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
-use crate::backend::{Backend, LockManager, PostgresBackend, SqlExecutor};
+use crate::backend::{
+    LockManager, NamespaceManager, PgSqlExecutor, PostgresBackend, SqlExecutor,
+};
 use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
 
@@ -241,12 +243,16 @@ pub async fn exec_begin(
     // before any DDL deploy, so we bootstrap defensively. `CREATE
     // SCHEMA IF NOT EXISTS` + audit-table IF NOT EXISTS are both
     // idempotent.
+    //
+    // P0 PR 2: audit-table helpers live as free fns in `crate::audit`;
+    // pool access goes through the `PgSqlExecutor::pool_handle()`
+    // accessor on `PostgresBackend` (Open Q1 resolution per
+    // `docs/proposals/p0-implementation-plan.md` §3 Q1 / §"PR 2").
     backend
         .ensure_app_schema(app_id)
         .await
         .map_err(|e| coded_db("create schema", e))?;
-    backend
-        .ensure_audit_table(app_id)
+    crate::audit::ensure_audit_table_exists(backend.pool_handle().as_ref(), app_id)
         .await
         .map_err(map_audit_bootstrap_err)?;
 
@@ -273,14 +279,12 @@ pub async fn exec_begin(
 
     if reset {
         // Same generation bump as `exec_reset` — see Gap X.
-        backend
-            .reset_backfill_row_client(&client, app_id, collection, name)
+        crate::audit::reset_backfill_row(&client, app_id, collection, name)
             .await
             .map_err(|e| coded_db("migration reset", e))?;
     }
 
-    let existing = backend
-        .find_latest_backfill_row(&client, app_id, collection, name)
+    let existing = crate::audit::find_latest_backfill_row(&client, app_id, collection, name)
         .await
         .map_err(|e| coded_db("migration lookup", e))?;
 
@@ -301,30 +305,27 @@ pub async fn exec_begin(
             drop(client);
             return Err(err_cancelled_on_start());
         }
-        backend
-            .set_backfill_running(&client, app_id, row.id)
+        crate::audit::set_backfill_running(&client, app_id, row.id)
             .await
             .map_err(|e| coded_db("migration set running", e))?;
         (row.id, row.cursor, row.processed, row.dead_letter_pks, row.audit_generation)
     } else {
-        let schema_version = backend
-            .next_schema_version(app_id)
+        let schema_version = crate::audit::next_schema_version(backend.pool_handle().as_ref(), app_id)
             .await
             .unwrap_or(1);
         let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID")
             .unwrap_or_else(|_| "cold_start".to_string());
-        let id = backend
-            .insert_backfill_running(
-                &client,
-                app_id,
-                collection,
-                name,
-                dry_run,
-                deploy_id.as_str(),
-                schema_version,
-            )
-            .await
-            .map_err(|e| coded_db("migration insert", e))?;
+        let id = crate::audit::insert_backfill_running(
+            &client,
+            app_id,
+            collection,
+            name,
+            dry_run,
+            deploy_id.as_str(),
+            schema_version,
+        )
+        .await
+        .map_err(|e| coded_db("migration insert", e))?;
         if id == 0 {
             return Err(coded(
                 "internal",
@@ -362,8 +363,15 @@ pub async fn exec_begin(
 }
 
 /// Fetch a batch of rows after `cursor`.
+///
+/// P0 PR 2: the `backend` parameter is no longer consulted — every
+/// audit op (`peek_latest_backfill_status`, `heartbeat_backfill`)
+/// now goes through `crate::audit::*` free functions taking the lock
+/// `client` directly. The parameter is kept for ABI compatibility
+/// with the existing test wrappers + v8_classes bridge; PR 4 will
+/// remove it when migrations.rs goes off `&PostgresBackend`.
 pub async fn exec_fetch_batch(
-    backend: &PostgresBackend,
+    _backend: &PostgresBackend,
     app_id: &str,
     cursor: i64,
     batch_size: i64,
@@ -393,10 +401,7 @@ pub async fn exec_fetch_batch(
         )
     })?;
 
-    match backend
-        .peek_latest_backfill_status(&client, app_id, &collection, &name)
-        .await
-    {
+    match crate::audit::peek_latest_backfill_status(&client, app_id, &collection, &name).await {
         Ok(status) => {
             if status.as_deref() == Some("cancelled") {
                 return_lock_client(client);
@@ -425,9 +430,7 @@ pub async fn exec_fetch_batch(
         .await;
 
     // Heartbeat — best-effort.
-    let _ = backend
-        .heartbeat_backfill(&client, app_id, &collection, &name)
-        .await;
+    let _ = crate::audit::heartbeat_backfill(&client, app_id, &collection, &name).await;
 
     return_lock_client(client);
 
@@ -495,10 +498,7 @@ pub async fn exec_commit_batch(
     // the batch's mutations, which means concurrent cancels block
     // until COMMIT — at which point they see `status='running'` flip
     // to whatever the SDK requested (or stay running for another pass).
-    let locked = match backend
-        .lock_audit_row_for_update(&client, app_id, audit_id)
-        .await
-    {
+    let locked = match crate::audit::lock_audit_row_for_update(&client, app_id, audit_id).await {
         Ok(row) => row,
         Err(e) => {
             rollback_and_return(backend, client).await;
@@ -594,16 +594,15 @@ pub async fn exec_commit_batch(
     // window where reset clobbered the cursor we were about to write —
     // fresh runs then resumed from the stale pre-clobber cursor.
     if !dry_run {
-        if let Err(e) = backend
-            .update_backfill_progress(
-                &client,
-                app_id,
-                audit_id,
-                next_cursor,
-                dead_letter_pks,
-                processed_total,
-            )
-            .await
+        if let Err(e) = crate::audit::update_backfill_progress(
+            &client,
+            app_id,
+            audit_id,
+            next_cursor,
+            dead_letter_pks,
+            processed_total,
+        )
+        .await
         {
             rollback_and_return(backend, client).await;
             return Err(coded_db("audit row update", e));
@@ -643,9 +642,9 @@ pub async fn exec_commit_batch(
         // F1 family). Log via tracing::warn so operators see the
         // stall; we still continue with lock release because the row
         // state is already as-good-as-it-gets at this point.
-        if let Err(audit_err) = backend
-            .finalise_backfill(&client, app_id, audit_id, terminal, error_message)
-            .await
+        if let Err(audit_err) =
+            crate::audit::finalise_backfill(&client, app_id, audit_id, terminal, error_message)
+                .await
         {
             // Field shape pinned by code-critique r11 MINOR-R11-1
             // (unified across the F1 warn family — now 8 sites total at
@@ -698,12 +697,11 @@ pub async fn exec_status(
     name: &str,
     collection: &str,
 ) -> Result<String, OpError> {
-    backend
-        .ensure_audit_table(app_id)
+    let pool = backend.pool_handle().as_ref();
+    crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
         .map_err(map_audit_bootstrap_err)?;
-    let row = backend
-        .find_latest_backfill_row_pool(app_id, collection, name)
+    let row = crate::audit::find_latest_backfill_row(pool, app_id, collection, name)
         .await
         .map_err(|e| coded_db("migration status read", e))?;
     let Some(row) = row else {
@@ -739,13 +737,12 @@ pub async fn exec_cancel(
     name: &str,
     collection: &str,
 ) -> Result<String, OpError> {
-    backend
-        .ensure_audit_table(app_id)
+    let pool = backend.pool_handle().as_ref();
+    crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
         .map_err(map_audit_bootstrap_err)?;
     // Read current status.
-    let row = backend
-        .find_latest_backfill_row_pool(app_id, collection, name)
+    let row = crate::audit::find_latest_backfill_row(pool, app_id, collection, name)
         .await
         .map_err(|e| coded_db("migration cancel lookup", e))?;
     let Some(row) = row else {
@@ -755,8 +752,7 @@ pub async fn exec_cancel(
         return Err(err_not_cancellable(&row.status));
     }
 
-    backend
-        .cancel_backfill_row_pool(app_id, row.id)
+    crate::audit::cancel_backfill_row(pool, app_id, row.id)
         .await
         .map_err(|e| coded_db("migration cancel update", e))?;
 
@@ -772,16 +768,15 @@ pub async fn exec_reset(
     name: &str,
     collection: &str,
 ) -> Result<String, OpError> {
-    backend
-        .ensure_audit_table(app_id)
+    let pool = backend.pool_handle().as_ref();
+    crate::audit::ensure_audit_table_exists(pool, app_id)
         .await
         .map_err(map_audit_bootstrap_err)?;
     // Gap X: bump `audit_generation` so any in-flight worker holding
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor
     // we just zeroed.
-    backend
-        .reset_backfill_row_pool(app_id, collection, name)
+    crate::audit::reset_backfill_row(pool, app_id, collection, name)
         .await
         .map_err(|e| coded_db("migration reset", e))?;
     Ok(serde_json::json!({ "ok": true }).to_string())

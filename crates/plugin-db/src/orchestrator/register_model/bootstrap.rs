@@ -24,7 +24,7 @@
 use serde_json::Value;
 
 use super::super::lock_guard::OrchestratorLockGuard;
-use crate::backend::{Backend, PostgresBackend};
+use crate::backend::{NamespaceManager, PgSqlExecutor, PostgresBackend};
 use crate::error::DbError;
 use crate::query;
 
@@ -165,9 +165,14 @@ async fn build_ctx(
             other => other,
         })?;
 
-    backend.ensure_audit_table(app_id).await?;
+    // P0 PR 2: audit-table helpers live as free fns in `crate::audit`;
+    // reach the pool through the `PgSqlExecutor::pool_handle` accessor.
+    // Open Q1 resolution per `docs/proposals/p0-implementation-plan.md`
+    // §3 Q1 + §"PR 2".
+    let pool = backend.pool_handle().as_ref();
+    crate::audit::ensure_audit_table_exists(pool, app_id).await?;
 
-    let schema_version = backend.next_schema_version(app_id).await?;
+    let schema_version = crate::audit::next_schema_version(pool, app_id).await?;
 
     let mut declared_indexes =
         query::build_create_indexes(app_id, collection, schema).map_err(DbError::from)?;

@@ -34,15 +34,37 @@
 //!
 //! Associated types `Client` / `LiveSchema` keep the consumer files
 //! free of `compio_postgres::Client` / `crate::diff::LiveSchema`
-//! direct references — they go through `B::Client` instead. The PG
-//! impl ties them to the concrete types in
+//! direct references — they go through `B::Client` / `B::LiveSchema`
+//! instead. The PG impl ties them to the concrete types in
 //! [`postgres::PostgresBackend`].
+//!
+//! ## Capability traits (P0 PR 1 + PR 2)
+//!
+//! After P0 PR 2, [`Backend`] is a **pure composition marker** — every
+//! operation lives on one of five focused capability traits:
+//!
+//! - [`SqlExecutor`] — connection lifecycle + run-a-statement (PR 1).
+//! - [`LockManager`] — session-scoped advisory locks (PR 1).
+//! - [`NamespaceManager`] — idempotent per-app schema bootstrap (PR 2).
+//! - [`SchemaIntrospect`] — live-schema snapshot + row-count estimate
+//!   (PR 2). Owns the `LiveSchema` associated type that used to live
+//!   on `Backend`.
+//! - [`IndexBuilder`] — `CREATE INDEX CONCURRENTLY` with audit-driven
+//!   retry recovery (PR 2).
+//!
+//! A sixth PG-only extension trait, [`PgSqlExecutor`], exposes
+//! `pool_handle()` so free-function audit helpers in [`crate::audit`]
+//! can reach `&compio_postgres::Pool` without naming the concrete
+//! backend (Open Q1 resolution, see
+//! `docs/proposals/p0-implementation-plan.md` §3 Q1).
+//!
+//! The 16 audit-table operations that used to live as methods on
+//! `Backend` (`ensure_audit_table`, `write_audit_row`, …) were deleted
+//! in PR 2; they stay as `pub`/`pub(crate)` free functions in
+//! [`crate::audit`].
 
 use std::rc::Rc;
 
-use serde_json::Value;
-
-use crate::audit::{AuditRow, BackfillLookup, LockedAuditRow, TerminalStatus};
 use crate::error::DbError;
 
 pub mod postgres;
@@ -167,41 +189,49 @@ pub trait LockManager: SqlExecutor {
     ) -> Result<(), DbError>;
 }
 
-/// The data-store boundary. One impl per storage backend; today only
-/// Postgres ([`PostgresBackend`]).
+/// Per-app schema-namespace capability — "idempotently provision the
+/// app's logical namespace".
 ///
-/// `Send + Sync` so the trait object can live behind an `Rc` shared
-/// across the per-isolate context's borrow surface (compio is
-/// single-threaded but the bound is cheap to satisfy).
+/// Carved out of the monolithic [`Backend`] trait in P0 PR 2 (see
+/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and the
+/// converged design at `docs/proposals/db-system-design.md` §7). Carries
+/// the single `ensure_app_schema` method that used to live on
+/// [`Backend`] directly; consumer bounds in
+/// `orchestrator/register_model/bootstrap.rs` will narrow onto this
+/// trait in PR 3.
 ///
-/// Lifetime invariants:
+/// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
+pub trait NamespaceManager: 'static {
+    /// Idempotently create the per-app schema namespace.
+    ///
+    /// For Postgres this is `CREATE SCHEMA IF NOT EXISTS "<app_id>"`;
+    /// future backends would map to whatever per-tenant namespace
+    /// primitive that engine exposes (a sqlite ATTACH DATABASE, a
+    /// PlanetScale keyspace, …).
+    #[allow(async_fn_in_trait)]
+    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError>;
+}
+
+/// Live-schema introspection capability — "read the catalog and return
+/// a typed snapshot the diff engine can consume".
 ///
-/// - Methods that take `&Self::Client` use it borrow-only; the caller
-///   owns the client (e.g. the migration lock holds it across awaits,
-///   the audit helpers borrow it for one operation).
-/// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
-///   detached from any pool lifetime — the caller is free to park it
-///   on the per-isolate context (e.g. `MigrationLock::client`,
-///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
-///   of a session-scoped lock.
-#[doc = "`Backend` is now a super-trait composition of \
-[`SqlExecutor`] + [`LockManager`] (P0 PR 1) plus the remaining 16 \
-methods that have not yet been carved into focused capability traits. \
-P0 PR 2 carves `NamespaceManager` / `SchemaIntrospect` / \
-`IndexBuilder` off the 16; the asymmetry is intentional and tracked \
-in `docs/proposals/p0-implementation-plan.md` §\"PR 2\"."]
-pub trait Backend: SqlExecutor<Client = compio_postgres::Client> + LockManager + 'static {
+/// Carved out of the monolithic [`Backend`] trait in P0 PR 2 (see
+/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and
+/// `docs/proposals/db-system-design.md` §7). The trait owns the
+/// `LiveSchema` associated type that used to live on [`Backend`] —
+/// pinning it here means consumer bounds like
+/// `<B: SchemaIntrospect<LiveSchema = LiveSchema>>` in
+/// `register_model::plan` go through a narrow capability trait instead
+/// of the omnibus super-trait. [`Backend`] re-anchors the same
+/// associated type via the `SchemaIntrospect<LiveSchema = LiveSchema>`
+/// super-bound below so the constraint is unchanged for existing
+/// callers.
+pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
     /// [`crate::diff::LiveSchema`]; alternate backends would produce
     /// the same shape from their own catalog tables.
     type LiveSchema;
-
-    // ----- schema bootstrap + introspection ---------------------------
-
-    /// Idempotently create the per-app schema namespace.
-    #[allow(async_fn_in_trait)]
-    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError>;
 
     /// Introspect the live schema for an app. Returns the typed
     /// snapshot the diff engine consumes via
@@ -214,164 +244,20 @@ pub trait Backend: SqlExecutor<Client = compio_postgres::Client> + LockManager +
     /// `reltuples`-style estimate is fine.
     #[allow(async_fn_in_trait)]
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError>;
+}
 
-    // ----- audit table reads/writes -----------------------------------
-
-    /// Create `__zeroship_migrations` for an app if it doesn't exist.
-    /// Idempotent.
-    #[allow(async_fn_in_trait)]
-    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError>;
-
-    /// Compute the next monotonic `schema_version` for a deploy.
-    #[allow(async_fn_in_trait)]
-    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError>;
-
-    /// Insert a single row into the audit table, returning its PK.
-    #[allow(async_fn_in_trait)]
-    async fn write_audit_row(&self, app_id: &str, row: &AuditRow) -> Result<i64, DbError>;
-
-    /// Drive an audit row to a terminal status. Returns `true` if the
-    /// row transitioned, `false` if the UPDATE matched nothing (row
-    /// was already terminal).
-    #[allow(async_fn_in_trait)]
-    async fn update_audit_status(
-        &self,
-        app_id: &str,
-        id: i64,
-        new_status: TerminalStatus,
-        error: Option<&str>,
-    ) -> Result<bool, DbError>;
-
-    /// SELECT the latest backfill row for `(collection, name)`.
-    #[allow(async_fn_in_trait)]
-    async fn find_latest_backfill_row(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<Option<BackfillLookup>, DbError>;
-
-    /// Pool-driven variant of [`Self::find_latest_backfill_row`] — used
-    /// by the `migrations.status({name, collection})` observation API
-    /// which has no dedicated client.
-    #[allow(async_fn_in_trait)]
-    async fn find_latest_backfill_row_pool(
-        &self,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<Option<BackfillLookup>, DbError>;
-
-    /// Mark a backfill row as `running` — used when an existing row is
-    /// being resumed by this worker.
-    #[allow(async_fn_in_trait)]
-    async fn set_backfill_running(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-    ) -> Result<(), DbError>;
-
-    /// Insert a fresh `running` backfill row.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(async_fn_in_trait)]
-    async fn insert_backfill_running(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-        dry_run: bool,
-        deploy_id: &str,
-        schema_version: i32,
-    ) -> Result<i64, DbError>;
-
-    /// Bump `audit_generation` + reset progress columns. Pool-driven
-    /// variant (called from `migrations.reset({name, collection})`).
-    #[allow(async_fn_in_trait)]
-    async fn reset_backfill_row_pool(
-        &self,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError>;
-
-    /// Client-driven variant of [`Self::reset_backfill_row_pool`] —
-    /// called from `exec_begin` when `reset: true` is passed.
-    #[allow(async_fn_in_trait)]
-    async fn reset_backfill_row_client(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError>;
-
-    /// Peek the latest backfill row's status without locking. Used by
-    /// `fetchBatch` to short-circuit on cancel.
-    #[allow(async_fn_in_trait)]
-    async fn peek_latest_backfill_status(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<Option<String>, DbError>;
-
-    /// Best-effort heartbeat write on the backfill row.
-    #[allow(async_fn_in_trait)]
-    async fn heartbeat_backfill(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError>;
-
-    /// `SELECT status, audit_generation ... FOR UPDATE` — acquires the
-    /// row lock inside the current transaction.
-    #[allow(async_fn_in_trait)]
-    async fn lock_audit_row_for_update(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-    ) -> Result<Option<LockedAuditRow>, DbError>;
-
-    /// Advance a backfill row's progress columns.
-    #[allow(async_fn_in_trait)]
-    async fn update_backfill_progress(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-        next_cursor: i64,
-        dead_letter_pks: &Value,
-        processed_total: i64,
-    ) -> Result<(), DbError>;
-
-    /// Drive a backfill row to its terminal status.
-    #[allow(async_fn_in_trait)]
-    async fn finalise_backfill(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-        terminal: TerminalStatus,
-        error_message: Option<&str>,
-    ) -> Result<(), DbError>;
-
-    /// Operator-driven cancel of a backfill row.
-    #[allow(async_fn_in_trait)]
-    async fn cancel_backfill_row_pool(
-        &self,
-        app_id: &str,
-        id: i64,
-    ) -> Result<(), DbError>;
-
-    // ----- create-index recovery -------------------------------------
-
+/// Online index-build capability — "create an index without blocking
+/// writers, classify SQLSTATE failures, audit retries".
+///
+/// Carved out of the monolithic [`Backend`] trait in P0 PR 2 (see
+/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and
+/// `docs/proposals/db-system-design.md` §7). The single method —
+/// `create_index_with_recovery` — runs `CREATE INDEX CONCURRENTLY` with
+/// a SQLSTATE-driven retry loop and writes structured audit rows on
+/// every retry. The `: SqlExecutor` super-bound is load-bearing: the
+/// PG impl pulls the pool through that trait's [`SqlExecutor::Client`]
+/// associated type so the SQLSTATE classification stays in one place.
+pub trait IndexBuilder: SqlExecutor {
     /// Idempotent `CREATE INDEX CONCURRENTLY` with retry + audit.
     /// SQLSTATE-driven: unique/not-null/fk/check violations are fatal;
     /// deadlock / disk-full / OOM retry up to a small budget.
@@ -397,6 +283,71 @@ pub trait Backend: SqlExecutor<Client = compio_postgres::Client> + LockManager +
         deploy_id: &str,
         schema_version: i32,
     ) -> Result<(), DbError>;
+}
+
+/// Postgres-specific extension trait exposing the underlying pool
+/// handle so free-function consumers — chiefly the audit helpers in
+/// [`crate::audit`] — can reach an `&compio_postgres::Pool` without
+/// naming the concrete backend type.
+///
+/// **Open Q1 resolution (P0 PR 2)**: the 16 audit-table operations
+/// that used to live as methods on [`Backend`] were deleted; the
+/// helpers stay as free functions in `crate::audit::*` taking
+/// `&Pool` / `&Client`, and generic consumers reach the pool through
+/// `backend.pool_handle()`. See `docs/proposals/p0-implementation-plan.md`
+/// §"PR 2" + §3 Q1 and `docs/proposals/db-system-design.md` §7.
+///
+/// **Feature gating**: this trait is unconditional at HEAD. P0 PR 5 will
+/// move the `impl` side under `#[cfg(feature = "pg")]`; a hypothetical
+/// `SqliteBackend` would not implement this trait — it would have its
+/// own audit-helper signatures (a `SqliteExecutor` accessor returning
+/// `&sqlite::Connection`, etc.).
+pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
+    /// Borrow the underlying `compio_postgres::Pool`. Free-function
+    /// audit helpers in [`crate::audit`] take `&Pool` directly; this
+    /// accessor lets generic consumers (e.g.
+    /// `<B: PgSqlExecutor>`) reach the pool without naming
+    /// `PostgresBackend`.
+    fn pool_handle(&self) -> &Rc<compio_postgres::Pool>;
+}
+
+/// The data-store boundary. One impl per storage backend; today only
+/// Postgres ([`PostgresBackend`]).
+///
+/// `Backend` is now a **pure composition marker** — every operation
+/// lives on a focused sub-trait. After P0 PR 2 the super-trait bound
+/// is the carved capability set:
+///
+/// - [`SqlExecutor`] (`compio_postgres::Client`)
+/// - [`LockManager`]
+/// - [`NamespaceManager`]
+/// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
+/// - [`IndexBuilder`]
+///
+/// The 16 audit-table operations that used to live here (`ensure_audit_table`,
+/// `next_schema_version`, `write_audit_row`, …) were deleted in PR 2
+/// — they stay as free functions in [`crate::audit`], reached via
+/// [`PgSqlExecutor::pool_handle`] (Open Q1 resolution, see
+/// `docs/proposals/p0-implementation-plan.md` §3 Q1).
+///
+/// Lifetime invariants (preserved from the pre-carving shape):
+///
+/// - Methods that take `&Self::Client` use it borrow-only; the caller
+///   owns the client (e.g. the migration lock holds it across awaits,
+///   the audit free functions borrow it for one operation).
+/// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
+///   detached from any pool lifetime — the caller is free to park it
+///   on the per-isolate context (e.g. `MigrationLock::client`,
+///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
+///   of a session-scoped lock.
+pub trait Backend:
+    SqlExecutor<Client = compio_postgres::Client>
+    + LockManager
+    + NamespaceManager
+    + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
+    + IndexBuilder
+    + 'static
+{
 }
 
 /// Opaque trait-object handle that the per-isolate context stores.
@@ -458,10 +409,53 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
+    /// Compile-time: [`PostgresBackend`] satisfies the carved
+    /// [`NamespaceManager`] capability trait (P0 PR 2). If a future
+    /// refactor pulls `ensure_app_schema` back onto the omnibus
+    /// `Backend` trait or detaches the impl block, this stops
+    /// compiling.
+    fn assert_postgres_backend_impls_namespace_manager() {
+        fn assert_impl<T: NamespaceManager>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: [`PostgresBackend`] satisfies
+    /// [`SchemaIntrospect`] with the associated type pinned to
+    /// [`crate::diff::LiveSchema`] (P0 PR 2). This is the constraint
+    /// `register_model::plan` now uses (`<B: SchemaIntrospect<LiveSchema = LiveSchema>>`).
+    fn assert_postgres_backend_impls_schema_introspect() {
+        fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: [`PostgresBackend`] satisfies the carved
+    /// [`IndexBuilder`] capability trait (P0 PR 2). The
+    /// `: SqlExecutor` super-bound on `IndexBuilder` plus the
+    /// PG-side `Client = compio_postgres::Client` constraint pin the
+    /// shape so a regression on either side fails compilation here.
+    fn assert_postgres_backend_impls_index_builder() {
+        fn assert_impl<T: IndexBuilder<Client = compio_postgres::Client>>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: [`PostgresBackend`] satisfies the PG-only
+    /// [`PgSqlExecutor`] extension trait (P0 PR 2). The free-function
+    /// audit-helper path (Open Q1 resolution) hinges on `pool_handle()`
+    /// being reachable through this trait without naming
+    /// `PostgresBackend`.
+    fn assert_postgres_backend_impls_pg_sql_executor() {
+        fn assert_impl<T: PgSqlExecutor>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
     /// Compile-time: the associated types stay anchored to the concrete
     /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A
     /// regression here would silently change every `B::Client` /
-    /// `B::LiveSchema` consumer's expectations.
+    /// `B::LiveSchema` consumer's expectations. `LiveSchema` flows
+    /// through [`SchemaIntrospect`] now (P0 PR 2 moved it off
+    /// [`Backend`]); `Backend` re-anchors it via the
+    /// `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound so the
+    /// `Backend<LiveSchema = …>` shorthand below still resolves.
     fn assert_associated_types_pinned() {
         fn pinned_client<T: Backend<Client = compio_postgres::Client>>() {}
         fn pinned_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
@@ -505,6 +499,10 @@ mod tests {
         let _ = assert_postgres_backend_impls_backend as fn();
         let _ = assert_postgres_backend_impls_sql_executor as fn();
         let _ = assert_postgres_backend_impls_lock_manager as fn();
+        let _ = assert_postgres_backend_impls_namespace_manager as fn();
+        let _ = assert_postgres_backend_impls_schema_introspect as fn();
+        let _ = assert_postgres_backend_impls_index_builder as fn();
+        let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();
         let _ = assert_backend_handle_alias as fn();

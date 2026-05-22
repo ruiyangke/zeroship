@@ -12,15 +12,13 @@
 
 use std::rc::Rc;
 
-use serde_json::Value;
-
-use crate::audit::{
-    self, AuditRow, BackfillLookup, LockedAuditRow, TerminalStatus,
-};
 use crate::diff::LiveSchema;
 use crate::error::DbError;
 
-use super::{Backend, LockManager, SqlExecutor};
+use super::{
+    Backend, IndexBuilder, LockManager, NamespaceManager, PgSqlExecutor, SchemaIntrospect,
+    SqlExecutor,
+};
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
 ///
@@ -62,19 +60,25 @@ impl PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Capability impls — three blocks (P0 PR 1):
+// Capability impls — six blocks after P0 PR 2:
 //
-//   1. `impl SqlExecutor for PostgresBackend` — connection lifecycle
-//      (3 methods).
-//   2. `impl LockManager for PostgresBackend` — advisory locks
-//      (3 methods).
-//   3. `impl Backend for PostgresBackend` — the remaining 16 methods
-//      that have not yet been carved into focused capability traits
-//      (P0 PR 2 will carve `NamespaceManager` / `SchemaIntrospect` /
-//      `IndexBuilder` off this block).
+//   1. `impl SqlExecutor for PostgresBackend`     — PR 1 (3 methods).
+//   2. `impl LockManager for PostgresBackend`     — PR 1 (3 methods).
+//   3. `impl NamespaceManager for PostgresBackend` — PR 2 (1 method).
+//   4. `impl SchemaIntrospect for PostgresBackend` — PR 2 (2 methods +
+//      `type LiveSchema`).
+//   5. `impl IndexBuilder for PostgresBackend`     — PR 2 (1 method).
+//   6. `impl PgSqlExecutor for PostgresBackend`    — PR 2 (1 method —
+//      the PG-only `pool_handle()` accessor that lets free-function
+//      audit helpers reach `&Pool` without naming `PostgresBackend`).
 //
-// Method bodies are unchanged from the pre-PR-1 monolithic
-// `impl Backend for PostgresBackend` block — pure cut-and-paste.
+// `impl Backend for PostgresBackend {}` below is a one-line composition
+// marker — every operation lives on the sub-trait impls above.
+//
+// Audit-row operations: see free fns in `crate::audit`. Open Q1
+// resolution per `docs/proposals/p0-implementation-plan.md` §3 Q1 +
+// §"PR 2"; consumers reach `&compio_postgres::Pool` through
+// [`PgSqlExecutor::pool_handle`].
 // ---------------------------------------------------------------------------
 
 impl SqlExecutor for PostgresBackend {
@@ -182,11 +186,7 @@ impl LockManager for PostgresBackend {
     }
 }
 
-impl Backend for PostgresBackend {
-    type LiveSchema = LiveSchema;
-
-    // ----- schema bootstrap + introspection ---------------------------
-
+impl NamespaceManager for PostgresBackend {
     async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError> {
         let create_schema = crate::query::build_create_schema(app_id);
         let empty: Vec<&str> = Vec::new();
@@ -196,6 +196,10 @@ impl Backend for PostgresBackend {
             .map_err(|e| DbError::from_pg(&e))?;
         Ok(())
     }
+}
+
+impl SchemaIntrospect for PostgresBackend {
+    type LiveSchema = LiveSchema;
 
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
         // `read_live_schema` now returns typed `DbError` with SQLSTATE
@@ -206,171 +210,9 @@ impl Backend for PostgresBackend {
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
         crate::diff::estimate_row_count(&self.pool, app_id, collection).await
     }
+}
 
-    // ----- audit table reads/writes -----------------------------------
-
-    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
-        // The audit helpers now return `Result<_, DbError>` directly —
-        // SQLSTATE classification + context phrase happen inside
-        // `audit::*`, so the Backend impl is a straight forward.
-        audit::ensure_audit_table_exists(&self.pool, app_id).await
-    }
-
-    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError> {
-        audit::next_schema_version(&self.pool, app_id).await
-    }
-
-    async fn write_audit_row(&self, app_id: &str, row: &AuditRow) -> Result<i64, DbError> {
-        audit::write_audit_row(&self.pool, app_id, row).await
-    }
-
-    async fn update_audit_status(
-        &self,
-        app_id: &str,
-        id: i64,
-        new_status: TerminalStatus,
-        error: Option<&str>,
-    ) -> Result<bool, DbError> {
-        audit::update_audit_status(&self.pool, app_id, id, new_status, error).await
-    }
-
-    async fn find_latest_backfill_row(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<Option<BackfillLookup>, DbError> {
-        audit::find_latest_backfill_row(client, app_id, collection, name).await
-    }
-
-    async fn find_latest_backfill_row_pool(
-        &self,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<Option<BackfillLookup>, DbError> {
-        audit::find_latest_backfill_row(self.pool.as_ref(), app_id, collection, name).await
-    }
-
-    async fn set_backfill_running(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-    ) -> Result<(), DbError> {
-        audit::set_backfill_running(client, app_id, id).await
-    }
-
-    async fn insert_backfill_running(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-        dry_run: bool,
-        deploy_id: &str,
-        schema_version: i32,
-    ) -> Result<i64, DbError> {
-        audit::insert_backfill_running(
-            client,
-            app_id,
-            collection,
-            name,
-            dry_run,
-            deploy_id,
-            schema_version,
-        )
-        .await
-    }
-
-    async fn reset_backfill_row_pool(
-        &self,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError> {
-        audit::reset_backfill_row(self.pool.as_ref(), app_id, collection, name).await
-    }
-
-    async fn reset_backfill_row_client(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError> {
-        audit::reset_backfill_row(client, app_id, collection, name).await
-    }
-
-    async fn peek_latest_backfill_status(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<Option<String>, DbError> {
-        audit::peek_latest_backfill_status(client, app_id, collection, name).await
-    }
-
-    async fn heartbeat_backfill(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError> {
-        audit::heartbeat_backfill(client, app_id, collection, name).await
-    }
-
-    async fn lock_audit_row_for_update(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-    ) -> Result<Option<LockedAuditRow>, DbError> {
-        audit::lock_audit_row_for_update(client, app_id, id).await
-    }
-
-    async fn update_backfill_progress(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-        next_cursor: i64,
-        dead_letter_pks: &Value,
-        processed_total: i64,
-    ) -> Result<(), DbError> {
-        audit::update_backfill_progress(
-            client,
-            app_id,
-            id,
-            next_cursor,
-            dead_letter_pks,
-            processed_total,
-        )
-        .await
-    }
-
-    async fn finalise_backfill(
-        &self,
-        client: &Self::Client,
-        app_id: &str,
-        id: i64,
-        terminal: TerminalStatus,
-        error_message: Option<&str>,
-    ) -> Result<(), DbError> {
-        audit::finalise_backfill(client, app_id, id, terminal, error_message).await
-    }
-
-    async fn cancel_backfill_row_pool(
-        &self,
-        app_id: &str,
-        id: i64,
-    ) -> Result<(), DbError> {
-        audit::cancel_backfill_row(self.pool.as_ref(), app_id, id).await
-    }
-
+impl IndexBuilder for PostgresBackend {
     async fn create_index_with_recovery(
         &self,
         app_id: &str,
@@ -390,6 +232,17 @@ impl Backend for PostgresBackend {
         .await
     }
 }
+
+impl PgSqlExecutor for PostgresBackend {
+    fn pool_handle(&self) -> &Rc<compio_postgres::Pool> {
+        &self.pool
+    }
+}
+
+// `Backend` is a pure composition marker after P0 PR 2 — every method
+// lives on a sub-trait impl above. Audit-row operations: see free fns
+// in `crate::audit`. Open Q1 resolution per p0-implementation-plan.md.
+impl Backend for PostgresBackend {}
 
 // ---------------------------------------------------------------------------
 // create_index_with_recovery_audited — moved from
@@ -664,10 +517,13 @@ mod tests {
     //! ## What this layer can — and cannot — test in isolation
     //!
     //! `PostgresBackend` is, by design, a thin facade: every method in
-    //! `impl Backend for PostgresBackend` either calls the `Rc<Pool>`
-    //! directly or forwards into [`crate::audit`] / [`crate::diff`] /
-    //! [`crate::query`] free functions. The only non-async logic in this
-    //! file is:
+    //! its per-capability impls (`SqlExecutor` / `LockManager` /
+    //! `NamespaceManager` / `SchemaIntrospect` / `IndexBuilder`) either
+    //! calls the `Rc<Pool>` directly or forwards into [`crate::audit`] /
+    //! [`crate::diff`] / [`crate::query`] free functions. After P0 PR 2
+    //! `impl Backend for PostgresBackend` is a one-line composition
+    //! marker — every method body lives on a sub-trait impl. The only
+    //! non-async logic in this file is:
     //!
     //! * [`PostgresBackend::new`] — captures the `pool` + `url` fields.
     //! * [`PostgresBackend::pool`] / [`PostgresBackend::url`] — getters.
@@ -697,9 +553,13 @@ mod tests {
     //! seam break.
 
     use super::*;
-    use crate::backend::Backend;
+    use crate::backend::{
+        Backend, IndexBuilder, LockManager, NamespaceManager, PgSqlExecutor, SchemaIntrospect,
+        SqlExecutor,
+    };
 
-    /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait.
+    /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
+    /// (after P0 PR 2 — a pure composition marker over five sub-traits).
     /// The function is never called; the bound is checked at type-check
     /// time.
     fn assert_postgres_backend_impls_backend() {
@@ -707,10 +567,33 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
+    /// Compile-time: each carved capability trait is impl'd directly on
+    /// `PostgresBackend` after P0 PR 2 (not just visible through the
+    /// `Backend` super-bound). A regression that pulls one back onto
+    /// the omnibus trait or detaches the impl block fails here at
+    /// build time.
+    fn assert_postgres_backend_impls_sub_traits() {
+        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::Client>>() {}
+        fn impls_lock_manager<T: LockManager<Client = compio_postgres::Client>>() {}
+        fn impls_namespace_manager<T: NamespaceManager>() {}
+        fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
+        fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::Client>>() {}
+        fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
+        impls_sql_executor::<PostgresBackend>();
+        impls_lock_manager::<PostgresBackend>();
+        impls_namespace_manager::<PostgresBackend>();
+        impls_schema_introspect::<PostgresBackend>();
+        impls_index_builder::<PostgresBackend>();
+        impls_pg_sql_executor::<PostgresBackend>();
+    }
+
     /// Compile-time: the associated types must remain wired to the
     /// concrete `compio_postgres` / `crate::diff` types. Swapping
     /// either accidentally would silently change the `B::Client` /
-    /// `B::LiveSchema` shape every consumer sees.
+    /// `B::LiveSchema` shape every consumer sees. `LiveSchema` is owned
+    /// by [`SchemaIntrospect`] after P0 PR 2 — the `Backend` super-bound
+    /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
+    /// `Backend<LiveSchema = …>` still resolves here.
     fn assert_postgres_backend_assoc_types() {
         fn same_client<T: Backend<Client = compio_postgres::Client>>() {}
         fn same_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
@@ -777,6 +660,7 @@ mod tests {
         // regardless of whether we call them, but the explicit
         // `_ = ...` documents intent and silences `dead_code`.
         let _ = assert_postgres_backend_impls_backend as fn();
+        let _ = assert_postgres_backend_impls_sub_traits as fn();
         let _ = assert_postgres_backend_assoc_types as fn();
         let _ = assert_postgres_backend_is_static as fn();
     }

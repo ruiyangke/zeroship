@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
-use crate::backend::Backend;
+use crate::backend::SchemaIntrospect;
 use crate::diff::{DiffOp, LiveSchema};
 use crate::error::DbError;
 use crate::query;
@@ -31,7 +31,14 @@ pub(crate) struct Plan {
 /// The Backend's associated `LiveSchema` is constrained to the diff
 /// engine's [`LiveSchema`] so the orchestrator can hand the snapshot
 /// straight to `compute_diff` without an adapter.
-pub(crate) async fn compute_plan<B: Backend<LiveSchema = LiveSchema>>(
+///
+/// **P0 PR 2**: bound narrowed to
+/// [`SchemaIntrospect<LiveSchema = LiveSchema>`] (was `Backend<…>`).
+/// Plan only does live-schema introspection + row-count estimation —
+/// the carved capability trait expresses exactly that. See
+/// `docs/proposals/p0-implementation-plan.md` §"PR 2" and
+/// `docs/proposals/db-system-design.md` §7.
+pub(crate) async fn compute_plan<B: SchemaIntrospect<LiveSchema = LiveSchema>>(
     backend: &B,
     ctx: &RegisterContext,
     collection: &str,

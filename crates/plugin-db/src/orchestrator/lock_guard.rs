@@ -70,7 +70,7 @@
 
 use compio_postgres::PooledClient;
 
-use crate::backend::Backend;
+use crate::backend::LockManager;
 use crate::error::DbError;
 
 /// Session-scoped advisory-lock guard for the register-model
@@ -114,7 +114,7 @@ impl<'p> OrchestratorLockGuard<'p> {
     /// The caller chooses how to release: `release().await` (normal
     /// exit) or `into_held()` (hand off to a downstream stage that
     /// will release later).
-    pub(crate) async fn acquire<B: Backend<Client = compio_postgres::Client>>(
+    pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::Client>>(
         backend: &B,
         client: PooledClient<'p>,
         key: String,

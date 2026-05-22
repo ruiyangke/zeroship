@@ -24,7 +24,7 @@ use serde_json::Value;
 use super::super::lock_guard::OrchestratorLockGuard;
 use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
-use crate::backend::Backend;
+use crate::backend::{IndexBuilder, PgSqlExecutor};
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
 use crate::error::DbError;
 
@@ -34,7 +34,15 @@ use crate::error::DbError;
 /// released between passes without dragging the `'p` borrow through
 /// every upstream type. The guard is consumed by the explicit
 /// `release().await` between Pass 1 and Pass 2.
-pub(crate) async fn apply<'p, B: Backend>(
+///
+/// **P0 PR 2**: bound narrowed to [`PgSqlExecutor`] + [`IndexBuilder`]
+/// (was `Backend`). `PgSqlExecutor` gives us pool access for the
+/// free-function audit helpers (Open Q1 resolution) plus `pool_exec`
+/// for Pass-1 DDL via its [`crate::backend::SqlExecutor`] super-bound;
+/// `IndexBuilder` carries the `create_index_with_recovery` call used
+/// by Pass 2. See `docs/proposals/p0-implementation-plan.md` §"PR 2"
+/// and `docs/proposals/db-system-design.md` §7.
+pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder>(
     backend: &B,
     ctx: RegisterContext,
     lock_guard: OrchestratorLockGuard<'p>,
@@ -61,23 +69,23 @@ pub(crate) async fn apply<'p, B: Backend>(
         // row is emitted for a contract violation.
         check_destructive_invariant(op)?;
 
-        let audit_id = match backend
-            .write_audit_row(
-                &app_id,
-                &crate::audit::AuditRow {
-                    collection: op.collection.clone(),
-                    phase: crate::audit::Phase::Ddl,
-                    change_class: op.class.as_audit(),
-                    change_kind: op.change_kind.as_sql().to_string(),
-                    details: op.details.clone(),
-                    ddl_sql: op.sql.clone(),
-                    status: crate::audit::InitialStatus::Running,
-                    deploy_id: deploy_id.clone(),
-                    schema_version,
-                    actor: crate::audit::ActorKind::Auto,
-                },
-            )
-            .await
+        let audit_id = match crate::audit::write_audit_row(
+            backend.pool_handle().as_ref(),
+            &app_id,
+            &crate::audit::AuditRow {
+                collection: op.collection.clone(),
+                phase: crate::audit::Phase::Ddl,
+                change_class: op.class.as_audit(),
+                change_kind: op.change_kind.as_sql().to_string(),
+                details: op.details.clone(),
+                ddl_sql: op.sql.clone(),
+                status: crate::audit::InitialStatus::Running,
+                deploy_id: deploy_id.clone(),
+                schema_version,
+                actor: crate::audit::ActorKind::Auto,
+            },
+        )
+        .await
         {
             Ok(id) => Some(id),
             Err(audit_err) => {
@@ -172,14 +180,14 @@ pub(crate) async fn apply<'p, B: Backend>(
         if let Some(id) = audit_id {
             match &result {
                 Ok(_) => {
-                    if let Err(audit_err) = backend
-                        .update_audit_status(
-                            &app_id,
-                            id,
-                            crate::audit::TerminalStatus::Applied,
-                            None,
-                        )
-                        .await
+                    if let Err(audit_err) = crate::audit::update_audit_status(
+                        backend.pool_handle().as_ref(),
+                        &app_id,
+                        id,
+                        crate::audit::TerminalStatus::Applied,
+                        None,
+                    )
+                    .await
                     {
                         // F1 warn-half: the audit row stays in
                         // `Running` until the next reset sweeps it.
@@ -203,14 +211,14 @@ pub(crate) async fn apply<'p, B: Backend>(
                     // strips for JS are recoverable here only as the
                     // message body.
                     let msg = e.clone().into_string();
-                    if let Err(audit_err) = backend
-                        .update_audit_status(
-                            &app_id,
-                            id,
-                            crate::audit::TerminalStatus::Failed,
-                            Some(msg.as_str()),
-                        )
-                        .await
+                    if let Err(audit_err) = crate::audit::update_audit_status(
+                        backend.pool_handle().as_ref(),
+                        &app_id,
+                        id,
+                        crate::audit::TerminalStatus::Failed,
+                        Some(msg.as_str()),
+                    )
+                    .await
                     {
                         // Same F1 warn-half: the underlying DDL error
                         // still propagates via `result`, so JS still
