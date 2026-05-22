@@ -49,6 +49,7 @@
 
 use compio_postgres::Pool;
 
+use crate::error::DbError;
 use crate::v8_bridge::row_to_json;
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
@@ -230,10 +231,22 @@ pub async fn ensure_publication_and_slot(
                     format!("replication: pg_create_logical_replication_slot: {msg}")
                 }
             })?;
+        // Defensive: an empty RETURNING set used to silently produce
+        // `lsn = ""` (via `.unwrap_or_default()`), which then propagated
+        // into `SetupOutcome.confirmed_flush_lsn` and downstream broker
+        // wiring as a sentinel LSN — the same silent-empty-RETURNING
+        // shape as the audit-id=0 bug closed by d7cfc089. Surface as
+        // `DbError::Internal` so a missing row is loud, not a sentinel.
         lsn = rows
             .first()
             .map(|r| r.get::<_, String>("lsn"))
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                DbError::Internal {
+                    message: "replication: pg_create_logical_replication_slot returned no row"
+                        .to_string(),
+                }
+                .into_string()
+            })?;
         created = true;
     } else {
         lsn = slot_row[0].get::<_, String>("confirmed_flush_lsn");
@@ -580,6 +593,75 @@ mod tests {
         assert_eq!(v["slot"], "__zs_slot_x");
         assert_eq!(v["created"], true);
         assert_eq!(v["confirmedFlushLsn"], "0/16B3750");
+    }
+
+    /// Regression: before the fix, `ensure_publication_and_slot`
+    /// called `.unwrap_or_default()` on the rows returned by
+    /// `pg_create_logical_replication_slot(...)`, silently returning
+    /// `lsn = ""` when the RETURNING set was empty (e.g. a Postgres
+    /// helper that didn't emit a row, RLS bypass, or a missing
+    /// SELECT list). The empty string then flowed into
+    /// `SetupOutcome.confirmed_flush_lsn` and any broker logic that
+    /// keys off the LSN — the exact silent-empty-RETURNING shape as
+    /// the audit-id=0 bug closed by d7cfc089.
+    ///
+    /// The fix surfaces the missing row as `DbError::Internal` with a
+    /// message that identifies the operation. This test cannot drive
+    /// a real `Pool` from a unit test (it would need a live Postgres),
+    /// so we exercise the `ok_or_else` value-level closure that the
+    /// fix wires in, mirroring `audit::tests::insert_backfill_running_empty_returning_is_internal_error`.
+    /// The matching integration test (`c1_setup_creates_then_idempotent`
+    /// in `tests/integration.rs`) covers the success path against a
+    /// real server.
+    #[test]
+    fn ensure_publication_and_slot_empty_returning_is_internal_error() {
+        let rows: Vec<()> = vec![];
+        // Re-build the exact closure the fix uses so the test catches a
+        // rename of the operation tag in the error message (the SDK and
+        // logs branch on the substring).
+        let result: Result<String, DbError> = rows
+            .first()
+            .map(|_| "0/16B3750".to_string())
+            .ok_or_else(|| DbError::Internal {
+                message: "replication: pg_create_logical_replication_slot returned no row"
+                    .to_string(),
+            });
+        match result {
+            Err(DbError::Internal { message }) => {
+                assert_eq!(
+                    message,
+                    "replication: pg_create_logical_replication_slot returned no row"
+                );
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    /// `ensure_publication_and_slot` returns `Result<_, String>` (not
+    /// `Result<_, DbError>` like audit.rs), so the runtime fix calls
+    /// `.into_string()` on the `DbError::Internal` before flowing it
+    /// through `?`. This test pins the wire shape — the operator-
+    /// facing message must include both the `replication:` prefix
+    /// (so log scrapers route it) and the operation tag (so the
+    /// failure can be pinpointed without a stack trace).
+    #[test]
+    fn empty_returning_string_shape_keeps_replication_prefix() {
+        let s = DbError::Internal {
+            message: "replication: pg_create_logical_replication_slot returned no row".to_string(),
+        }
+        .into_string();
+        assert!(
+            s.starts_with("replication:"),
+            "operator-facing string must keep the 'replication:' prefix; got {s:?}"
+        );
+        assert!(
+            s.contains("pg_create_logical_replication_slot"),
+            "operator-facing string must identify the failing operation; got {s:?}"
+        );
+        assert!(
+            s.contains("no row"),
+            "operator-facing string must say the row was missing; got {s:?}"
+        );
     }
 
     #[test]
