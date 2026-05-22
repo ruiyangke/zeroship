@@ -47,6 +47,26 @@
 //! `mem::replace` / `ManuallyDrop` gymnastics. After either call, the
 //! `Option` is `None` and `released` is `true`, so subsequent `Drop`
 //! is a no-op (idempotent).
+//!
+//! # Hardening history
+//!
+//! The lifecycle invariant lives in one type now, but several rounds
+//! of review surfaced edge cases the initial extraction missed.
+//! Listed so a future reader can trace the design:
+//!
+//! - `cbd12944` (cycle 02:05) — extract the guard from 3 open-coded
+//!   `pg_advisory_unlock` sites (bootstrap.rs / apply.rs / mod.rs).
+//! - `bd1e7ce1` ([I42], cycle 04:00) — defer `released = true` flip
+//!   until AFTER the unlock-SQL await completes; a mid-await
+//!   cancellation/panic now triggers Drop's catastrophic-path log
+//!   instead of silently leaking the lock.
+//! - `808a32af` ([I39], cycle 04:35) — annotate `#[must_use]` so
+//!   accidental drops surface as compile-time warnings; strengthen
+//!   Drop log with "leak:" prefix + operator-facing consequence +
+//!   diagnostic checklist.
+//! - `ffb1e101` ([I44], cycle 04:35) — replace `let _ =` on the
+//!   unlock-SQL await with `if let Err(e) =` + `tracing::warn!` so
+//!   an unlock-SQL runtime failure is observable rather than silent.
 
 use compio_postgres::PooledClient;
 

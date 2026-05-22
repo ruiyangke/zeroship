@@ -636,9 +636,25 @@ pub async fn exec_commit_batch(
             }
         };
 
-        let _ = backend
+        // Discarding finalise_backfill errors silently can leave the
+        // audit row stuck in Running (migration-pipeline r5 R5-M7,
+        // F1 family). Log via tracing::warn so operators see the
+        // stall; we still continue with lock release because the row
+        // state is already as-good-as-it-gets at this point.
+        if let Err(e) = backend
             .finalise_backfill(&client, app_id, audit_id, terminal, error_message)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                app_id = %app_id,
+                audit_id = audit_id,
+                terminal = ?terminal,
+                error = %e,
+                "finalise_backfill failed; audit row may stay in 'running' \
+                 status until next reset() — investigate if the operator \
+                 sees stuck migrations"
+            );
+        }
 
         let lock_key = format!("zs_mig:{app_id}");
         backend.release_advisory_lock(&client, &lock_key, &name).await;
