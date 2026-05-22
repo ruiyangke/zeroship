@@ -1,11 +1,17 @@
 //! Typed error classification for `plugin-db`.
 //!
-//! Every fallible internal helper that used to return `Result<_, String>`
-//! is being migrated to `Result<_, DbError>`. At the V8 boundary the
-//! dispatcher calls [`DbError::to_op_error`] to materialise an
-//! [`OpError`] whose `.code` is stamped from the variant — the SDK can
-//! then branch on `err.code` instead of substring-matching opaque
-//! messages.
+//! Every fallible internal helper returns `Result<_, DbError>`. At the
+//! V8 boundary the dispatcher calls [`DbError::to_op_error`] to
+//! materialise an [`OpError`] whose `.code` is stamped from the variant
+//! — the SDK can then branch on `err.code` instead of substring-matching
+//! opaque messages.
+//!
+//! The lone hold-out is the `validate` stage in
+//! `crate::orchestrator::register_model`, which still returns
+//! `Result<_, String>` because its `Err` is the `validation_refused`
+//! JSON envelope (a documented SDK wire contract). `run_pipeline` wraps
+//! that envelope in [`DbError::SchemaRefused`] at the boundary, so the
+//! typed-error invariant still holds at every public surface.
 //!
 //! The wire format JS sees is unchanged: still a JS `Error` with
 //! `message` + `code` (+ `hint` when present). All this layer does is

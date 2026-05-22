@@ -14,7 +14,9 @@
 //!   auto-rollbacks if user code drops the handle without explicit
 //!   `.commit()` / `.rollback()`. `.collection(name)` returns a
 //!   Collection wrapper bound to the open transaction (CRUD routes
-//!   through `TX_CONN` automatically).
+//!   through `IsolateDbContext::tx_conn` — formerly the `TX_CONN`
+//!   thread-local, folded into `IsolateDbContext` in Stage 8d-R4 —
+//!   automatically).
 //! - [`migrations`] — `env.db.migrations` (v8_getter) is the
 //!   `Migrations` namespace exposing `.start / .status / .cancel /
 //!   .reset(spec)`. `.start(spec)` returns a [`migration::Migration`]

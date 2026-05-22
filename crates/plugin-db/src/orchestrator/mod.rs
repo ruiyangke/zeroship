@@ -10,8 +10,10 @@
 //!   create-index recovery loop.
 //! - [`transaction`] — explicit `db.beginTransaction()` lifecycle:
 //!   mints the `Transaction` v8_class, issues BEGIN on a dedicated
-//!   connection, and stamps `TX_TOKEN` so the wrapper's
-//!   commit/rollback/Drop paths can fence each other.
+//!   connection, and stamps `IsolateDbContext::tx_token` (formerly a
+//!   `TX_TOKEN` thread-local, folded into `IsolateDbContext` in Stage
+//!   8d-R4) so the wrapper's commit/rollback/Drop paths can fence
+//!   each other.
 //! - [`auto_tx`] — defense-in-depth wrappers (`__zsBeginAutoTx` /
 //!   `__zsEndAutoTx`) the runtime installs on `globalThis`. Wraps
 //!   `query()` / `mutation()` handlers in a per-kind isolation

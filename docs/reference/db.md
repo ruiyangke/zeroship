@@ -120,8 +120,10 @@ const result = await db.transaction(async (tx) => {
 
 The `tx.<table>` wrapper is a JS-side throw-style adapter around the
 outer Collection. Routing the CRUD call to the transaction connection
-happens in Rust via a `TX_CONN` thread-local; the JS adapter only flips
-the surface from Result to throw.
+happens in Rust via the per-isolate `IsolateDbContext::tx_conn` slot
+(formerly a `TX_CONN` thread-local, folded into `IsolateDbContext` in
+Stage 8d-R4); the JS adapter only flips the surface from Result to
+throw.
 
 ## Schema builders
 
@@ -589,8 +591,10 @@ The procedure wrappers `query()`, `mutation()`, and `action()` from
   `fetch()`); use `runMutation`/`runQuery` from inside an action to write.
 
 Inside such a wrapper, all `db.<table>.*` calls are routed to the active
-tx connection via the Rust `TX_CONN` thread-local — so the `Result`-shape
-surface keeps working without changing the calling convention.
+tx connection via the Rust `IsolateDbContext::tx_conn` slot (formerly
+the `TX_CONN` thread-local, folded into `IsolateDbContext` in Stage
+8d-R4) — so the `Result`-shape surface keeps working without changing
+the calling convention.
 
 ## Migrations (`@zeroship/migrations`)
 

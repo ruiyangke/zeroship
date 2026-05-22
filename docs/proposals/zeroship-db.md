@@ -73,7 +73,7 @@ Field-level `.unique()` and `.index()` produce single-column indexes named by co
 **Implementation.**
 
 - `crates/plugin-db/src/query.rs` — new `build_create_indexes(app_id, collection, schema)` returning a `Vec<String>` of `CREATE INDEX CONCURRENTLY IF NOT EXISTS ...` statements
-- `crates/plugin-db/src/callbacks.rs::exec_register_model` runs these after the `CREATE TABLE` / `ALTER TABLE ADD COLUMN` cascade
+- `crates/plugin-db/src/callbacks.rs::exec_register_model` runs these after the `CREATE TABLE` / `ALTER TABLE ADD COLUMN` cascade <!-- superseded; `callbacks.rs` was deleted in Stage 8b — see `crates/plugin-db/src/orchestrator/register_model/{bootstrap,plan,validate,apply}.rs` for the shipped four-phase pipeline. -->
 - `CONCURRENTLY` is critical — never block writes on index creation; tradeoff is can't run inside a transaction, so this is a separate phase after DDL
 - Index naming via a deterministic helper so re-runs are idempotent
 - Identifier length: Postgres truncates names beyond 63 bytes. Naming helper produces `<table>_<col>_idx`; if the result exceeds 60 bytes, the suffix is replaced by an 8-char base32 hash of the full name (Atlas's strategy in `migrate/sqltool`). Hash is deterministic so re-runs hit the same name.
@@ -193,7 +193,7 @@ CLI prints the failing PK samples (`zeroship deploy` exits non-zero with the hum
 
 - New module `crates/plugin-db/src/diff.rs` — schema introspection (`pg_class` + `pg_attribute` + `pg_constraint` + `pg_index` + `pg_proc` for default-expr volatility) and diff classification
 - DDL ordering: the emitter topologically sorts `CREATE TABLE` statements by FK dependency (Kahn's algorithm); FK additions on existing tables are ordered after their target tables; cyclic FKs use `DEFERRABLE INITIALLY DEFERRED` to permit any insert order (B2).
-- `callbacks.rs::exec_register_model` becomes the orchestrator
+- `callbacks.rs::exec_register_model` becomes the orchestrator <!-- superseded; `callbacks.rs` was deleted in Stage 8b — see `crates/plugin-db/src/orchestrator/register_model/{bootstrap,plan,validate,apply}.rs` for the shipped four-phase pipeline. -->
 - Returns a structured response: `{ applied: [...], pending_destructive: [...], pending_validation: [...], errors: [...] }`
 - SDK side: `createDb` awaits the response; if `errors.length > 0` AND strictness=`strict`, throws at module-init time so the app fails fast in dev. If `pending_destructive`, surfaces a deploy-pipeline gate.
 - Idempotency: every `registerModel` call carries a `deploy_id` (issued by the control plane). A duplicate call with the same `deploy_id` short-circuits to the cached result. Prevents two concurrent worker cold-starts racing the diff engine — the second waits on the first via the same two-key advisory lock used in the *Concurrent-deploy semantics* section below: `pg_advisory_xact_lock(hashtext('zs_reg:<app_id>')::int4, hashtext(<deploy_id>)::int4)`.

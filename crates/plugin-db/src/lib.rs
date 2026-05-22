@@ -247,8 +247,10 @@ pub async fn clear_migration_lock_for_tests() {
     migrations::release_active_lock();
 }
 
-/// **Test-only**: install a real Postgres client into `TX_CONN` so
-/// the Gap B integration tests can drive the deferred-broker-emit
+/// **Test-only**: install a real Postgres client into the active
+/// isolate's `IsolateDbContext::tx_conn` slot (formerly the `TX_CONN`
+/// thread-local, folded into `IsolateDbContext` in Stage 8d-R4) so the
+/// Gap B integration tests can drive the deferred-broker-emit
 /// queue/drain machinery without standing up a V8 isolate. Returns
 /// the connection-task handle so the caller can detach it.
 ///
