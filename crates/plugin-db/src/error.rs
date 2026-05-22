@@ -6,17 +6,21 @@
 //! — the SDK can then branch on `err.code` instead of substring-matching
 //! opaque messages.
 //!
-//! `Result<_, String>` is not yet fully eliminated below the JS
-//! boundary. Known remaining sites (see backlog [I28]): replication.rs
-//! (~7 sites), the `auth/*` bootstrap helpers (~15 sites), parts of
-//! `diff.rs`, plus the `validate` stage in
-//! `crate::orchestrator::register_model` whose `Err` is the
-//! `validation_refused` JSON envelope (a documented SDK wire contract).
-//! `run_pipeline` and the orchestrator dispatchers wrap those strings
-//! in typed [`DbError`] variants at the boundary, so the typed-error
-//! invariant still holds at every JS-visible surface — but the SDK
-//! loses `.code` discrimination on the wrapped paths and a mechanical
-//! sweep is pending.
+//! `Result<_, String>` is now (post-[I28] sweep, commit `0049d9be`)
+//! confined to a small set of deliberate hold-outs:
+//!
+//! - The `validate` stage in `crate::orchestrator::register_model`
+//!   whose `Err` IS the `validation_refused` JSON envelope (a documented
+//!   SDK wire contract — `JSON.parse(err.message)` recovers the payload).
+//!   `run_pipeline` wraps it in [`DbError::SchemaRefused`] at the
+//!   boundary; the static `.code` is stamped from the variant.
+//! - Two ASCII-only `hex_decode` / `hex_nibble` pure-function helpers
+//!   in `auth/session.rs` — internal parsers, never crosses an isolate
+//!   boundary.
+//!
+//! Every fallible helper that touches Postgres or the V8 boundary now
+//! returns `Result<_, DbError>` — SDK callers can branch on `err.code`
+//! end-to-end on the production code path.
 //!
 //! The wire format JS sees is unchanged: still a JS `Error` with
 //! `message` + `code` (+ `hint` when present). All this layer does is
@@ -302,6 +306,58 @@ impl DbError {
             message: message.into(),
         }
     }
+}
+
+/// Prepend a contextual phrase to the human-readable body of `err`
+/// while keeping its variant (and therefore its wire `.code`) intact.
+///
+/// This is the shared primitive every per-module `coded_sql` helper
+/// (in `audit`, `auth::bootstrap`, `auth::keys`, `auth::session`,
+/// `diff`, `replication`) routes through — operators see "what we were
+/// doing when the SQL failed" without losing the SQLSTATE-driven
+/// classification at the V8 boundary.
+///
+/// The set of "prefix-eligible" variants is the SQLSTATE-derived
+/// classification set plus `Internal` (the catch-all). The structured
+/// variants — `ValidationFailed`, `Configuration`, `Coded`,
+/// `SchemaRefused` — carry their own contracted message bodies (and
+/// `.code`s the SDK already branches on) and are intentionally left
+/// alone: prefixing them would distort a wire payload the SDK parses
+/// verbatim.
+pub(crate) fn prefix_message(err: &mut DbError, prefix: &str) {
+    match err {
+        DbError::UniqueViolation { message }
+        | DbError::FkViolation { message }
+        | DbError::NotNullViolation { message }
+        | DbError::CheckViolation { message }
+        | DbError::Serialization { message }
+        | DbError::LockContention { message }
+        | DbError::Transient { message }
+        | DbError::Internal { message } => {
+            *message = format!("{prefix}{message}");
+        }
+        // ValidationFailed / Configuration / Coded / SchemaRefused
+        // carry their own structured messages and `.code`s the SDK
+        // branches on; leaving them alone keeps the wire format
+        // verbatim.
+        _ => {}
+    }
+}
+
+/// Classify a `compio_postgres::Error` into a [`DbError`] and prepend a
+/// `"<context>: "` phrase to the resulting message body via
+/// [`prefix_message`]. The SQLSTATE-derived `.code` is preserved
+/// (`unique_violation`, `serialization_failure`, `transient`, …).
+///
+/// Replaces the per-file `coded_sql` duplicates that lived in `audit`,
+/// `auth::bootstrap`, `auth::keys`, `auth::session`, and `diff`. Each
+/// caller composes its module-scoped prefix into `context` (e.g.
+/// `"audit: INSERT migrations"`, `"diff: probe pg_attribute"`) so the
+/// operator-facing message keeps the same shape.
+pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
+    let mut err: DbError = e.into();
+    prefix_message(&mut err, &format!("{context}: "));
+    err
 }
 
 /// Return the first row from a query result slice, or surface a
@@ -609,6 +665,141 @@ mod tests {
                 );
             }
             other => panic!("expected DbError::Internal, got {other:?}"),
+        }
+    }
+
+    /// `prefix_message` must leave the variant intact so the SQLSTATE
+    /// classification still drives the wire `.code` at the V8 boundary;
+    /// it only prepends the context phrase to the human body. Without
+    /// this guarantee, prefixing in any of the 6 call-site modules
+    /// would silently re-flatten everything to `Internal` and break the
+    /// SDK's `.code`-branching contract.
+    #[test]
+    fn prefix_message_preserves_variant_and_code() {
+        let cases = [
+            (
+                DbError::UniqueViolation { message: "boom".into() },
+                "unique_violation",
+            ),
+            (
+                DbError::FkViolation { message: "boom".into() },
+                "fk_violation",
+            ),
+            (
+                DbError::NotNullViolation { message: "boom".into() },
+                "not_null_violation",
+            ),
+            (
+                DbError::CheckViolation { message: "boom".into() },
+                "check_violation",
+            ),
+            (
+                DbError::Serialization { message: "boom".into() },
+                "serialization_failure",
+            ),
+            (
+                DbError::LockContention { message: "boom".into() },
+                "lock_not_available",
+            ),
+            (
+                DbError::Transient { message: "boom".into() },
+                "transient",
+            ),
+            (
+                DbError::Internal { message: "boom".into() },
+                "internal",
+            ),
+        ];
+        for (mut variant, expected_code) in cases {
+            prefix_message(&mut variant, "audit: ctx: ");
+            // Body must have been prefixed AND keep the original tail.
+            let body = variant.to_string();
+            assert!(
+                body.starts_with("audit: ctx: "),
+                "missing prefix in body: {variant:?}"
+            );
+            assert!(
+                body.ends_with("boom"),
+                "original body lost after prefixing: {variant:?}"
+            );
+            // Variant -> wire code unchanged.
+            let op = variant.to_op_error();
+            match op.kind {
+                zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                    assert_eq!(code, expected_code, "wire code drifted for variant");
+                }
+                other => panic!("expected CodedError, got {other:?}"),
+            }
+        }
+    }
+
+    /// `prefix_message` is a no-op for the structured variants whose
+    /// `.code` and message body are part of the SDK contract
+    /// (Configuration, Coded, ValidationFailed, SchemaRefused). Their
+    /// messages already carry their semantic (the `SchemaRefused`
+    /// envelope is parsed verbatim by the SDK); prefixing would distort
+    /// the wire payload.
+    #[test]
+    fn prefix_message_leaves_structured_variants_alone() {
+        // Configuration — message body must be untouched, code preserved.
+        let mut cfg = DbError::Configuration {
+            code: "wal_level_not_logical",
+            message: "needs logical".into(),
+        };
+        prefix_message(&mut cfg, "replication: ctx: ");
+        assert_eq!(cfg.to_string(), "needs logical");
+        match cfg.to_op_error().kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "wal_level_not_logical");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+
+        // ValidationFailed — message body + code untouched.
+        let mut val = DbError::ValidationFailed {
+            code: "invalid_app_id",
+            message: "must be [A-Za-z0-9_]".into(),
+            hint: None,
+        };
+        prefix_message(&mut val, "diff: ctx: ");
+        assert_eq!(val.to_string(), "must be [A-Za-z0-9_]");
+        match val.to_op_error().kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "invalid_app_id");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+
+        // Coded — message body + dynamic code untouched.
+        let mut coded = DbError::Coded {
+            code: "migration_already_running".to_string(),
+            message: "another worker holds the lock".into(),
+            hint: Some("retry later".into()),
+        };
+        prefix_message(&mut coded, "audit: ctx: ");
+        assert_eq!(coded.to_string(), "another worker holds the lock");
+        match coded.to_op_error().kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, "migration_already_running");
+                assert_eq!(hint.as_deref(), Some("retry later"));
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+
+        // SchemaRefused — envelope JSON body is the wire format; must
+        // round-trip unchanged through `prefix_message`.
+        let envelope = r#"{"code":"validation_refused","violations":[]}"#;
+        let mut refused = DbError::SchemaRefused {
+            code: "validation_refused",
+            envelope_json: envelope.to_string(),
+        };
+        prefix_message(&mut refused, "diff: ctx: ");
+        assert_eq!(refused.to_string(), envelope);
+        match refused.to_op_error().kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "validation_refused");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
         }
     }
 
