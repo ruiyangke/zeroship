@@ -275,30 +275,11 @@ pub fn start_replication_consumer_dispatch<'s>(
         //   that race past the outer gate cannot both spawn — the loser
         //   bails without provisioning, the winner runs run_supervised.
         //
-        // Defense: spawned task try-marks atomically. If
-        // another task won the race, the loser bails without
-        // provisioning or marking. The winner constructs the guard,
-        // ensuring Drop unmarks on every exit path.
-        struct ConsumerRunningGuard {
-            app_id: String,
-        }
-        impl ConsumerRunningGuard {
-            /// Try to claim the running-marker; returns Some(guard) on
-            /// success, None if another task already holds it.
-            fn try_claim(app_id: String) -> Option<Self> {
-                let won = crate::context::with_mut(|c| {
-                    c.try_mark_consumer_running(&app_id)
-                });
-                won.then_some(Self { app_id })
-            }
-        }
-        impl Drop for ConsumerRunningGuard {
-            fn drop(&mut self) {
-                crate::context::with_mut(|c| {
-                    c.unmark_consumer_running(&self.app_id)
-                });
-            }
-        }
+        // Defense: spawned task try-marks atomically via
+        // `ConsumerRunningGuard::try_claim` (defined at module scope
+        // below). If another task won the race, the loser bails
+        // without provisioning or marking. The winner constructs the
+        // guard, ensuring Drop unmarks on every exit path.
         let app_for_task = app_id.clone();
         compio::runtime::spawn(async move {
             let Some(_guard) = ConsumerRunningGuard::try_claim(app_for_task) else {
@@ -342,4 +323,99 @@ pub fn is_consumer_registered_for_tests(app_id: &str) -> bool {
 #[doc(hidden)]
 pub fn clear_consumer_registry_for_tests() {
     crate::context::with_mut(|c| c.clear_consumer_registry());
+}
+
+/// RAII guard owning the per-app `running_consumers` marker for the
+/// lifetime of a spawned `run_supervised` future. See the comment
+/// block at `start_replication_consumer_dispatch` for the design
+/// history (commits e399eeea, 34d209b5, 70921112).
+///
+/// Two invariants:
+/// 1. `try_claim()` is atomic — if another task already holds the
+///    mark, returns `None` and the caller MUST NOT spawn.
+/// 2. `Drop` unmarks unconditionally. Fires on graceful exit, panic
+///    unwind, AND future-dropped-pre-poll.
+struct ConsumerRunningGuard {
+    app_id: String,
+}
+
+impl ConsumerRunningGuard {
+    /// Try to claim the running-marker; returns Some(guard) on
+    /// success, None if another task already holds it.
+    ///
+    /// **Lazy construction is load-bearing**: we use `then(|| ...)`
+    /// rather than `then_some(...)` because `then_some` evaluates its
+    /// argument eagerly. If we constructed `Self { app_id }` even on
+    /// the lost-race path, that ephemeral Self would immediately
+    /// drop, firing our `Drop` impl, which would unmark the running
+    /// consumer that the winner just claimed.
+    fn try_claim(app_id: String) -> Option<Self> {
+        let won = crate::context::with_mut(|c| c.try_mark_consumer_running(&app_id));
+        won.then(|| Self { app_id })
+    }
+}
+
+impl Drop for ConsumerRunningGuard {
+    fn drop(&mut self) {
+        crate::context::with_mut(|c| c.unmark_consumer_running(&self.app_id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context;
+
+    /// Reset state before each test to avoid cross-test pollution.
+    fn reset_consumer_registry(app_id: &str) {
+        context::with_mut(|c| c.unmark_consumer_running(app_id));
+    }
+
+    #[test]
+    fn consumer_running_guard_new_marks_app() {
+        reset_consumer_registry("guard_t1");
+        assert!(!context::with(|c| c.is_consumer_running("guard_t1")));
+        let _g = ConsumerRunningGuard::try_claim("guard_t1".into()).expect("first claim wins");
+        assert!(context::with(|c| c.is_consumer_running("guard_t1")));
+        // Cleanup: drop _g implicitly at end of scope.
+    }
+
+    #[test]
+    fn consumer_running_guard_drop_unmarks_app() {
+        reset_consumer_registry("guard_t2");
+        {
+            let _g = ConsumerRunningGuard::try_claim("guard_t2".into()).expect("first claim wins");
+            assert!(context::with(|c| c.is_consumer_running("guard_t2")));
+        } // _g dropped here
+        assert!(!context::with(|c| c.is_consumer_running("guard_t2")));
+    }
+
+    #[test]
+    fn consumer_running_guard_drop_unmarks_on_panic_unwind() {
+        reset_consumer_registry("guard_t3");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = ConsumerRunningGuard::try_claim("guard_t3".into()).expect("first claim wins");
+            assert!(context::with(|c| c.is_consumer_running("guard_t3")));
+            panic!("simulated supervisor panic mid-loop");
+        }));
+        assert!(result.is_err(), "the closure should have panicked");
+        // The Drop guard should have cleared the mark despite the panic.
+        assert!(
+            !context::with(|c| c.is_consumer_running("guard_t3")),
+            "Drop must run on panic-unwind and clear the running marker"
+        );
+    }
+
+    #[test]
+    fn consumer_running_guard_try_claim_loses_when_already_marked() {
+        reset_consumer_registry("guard_t4");
+        let g1 = ConsumerRunningGuard::try_claim("guard_t4".into()).expect("first claim wins");
+        // Second try_claim should return None — the loser bails.
+        let g2 = ConsumerRunningGuard::try_claim("guard_t4".into());
+        assert!(g2.is_none(), "second concurrent claim must return None");
+        // First guard still holds the mark.
+        assert!(context::with(|c| c.is_consumer_running("guard_t4")));
+        drop(g1);
+        assert!(!context::with(|c| c.is_consumer_running("guard_t4")));
+    }
 }

@@ -329,4 +329,55 @@ mod tests {
         assert_eq!(guard.key, "zs_reg:app_46");
         assert_eq!(guard.tag, "register_model");
     }
+
+    /// Structural invariant pin for [I42] (bd1e7ce1 fix order):
+    /// `self.released = true` MUST appear AFTER the unlock-SQL
+    /// `.await` in the `release()` function body. Otherwise a
+    /// cancellation mid-await silently leaks the lock with no Drop
+    /// log (because Drop sees `released = true` and short-circuits).
+    ///
+    /// Mirrors the byte-offset structural test on
+    /// `mint_subscription` (`v8_classes/subscription.rs::tests::
+    /// mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure`)
+    /// — invariant lives in the source layout, not in observable
+    /// runtime state, so we pin it via include_str! + index search.
+    ///
+    /// A future contributor restoring the pre-bd1e7ce1 order (flip
+    /// `released = true` BEFORE awaiting the unlock SQL) trips this
+    /// test at compile-time without needing a live PG fixture.
+    #[test]
+    fn release_flips_flag_after_unlock_await_structural() {
+        let src = include_str!("lock_guard.rs");
+        // Locate the release() function body.
+        let release_start = src
+            .find("pub(crate) async fn release(")
+            .expect("release fn signature should exist");
+        // The next `fn ` after release() bounds its body.
+        let release_end = release_start
+            + src[release_start + 1..]
+                .find("\n    /// ")
+                .expect("release fn should be followed by another doc-commented method")
+            + 1;
+        let release_body = &src[release_start..release_end];
+
+        // The unlock-SQL `.await;` appears once in release().
+        let await_pos = release_body
+            .find(".query_text_params(")
+            .expect("release() should contain the unlock SQL call");
+        // The `self.released = true` assignment appears once in
+        // release() (the test-only branch above the closure doesn't
+        // count — it's outside the function).
+        let flip_pos = release_body
+            .find("self.released = true;")
+            .expect("release() should set released = true");
+
+        assert!(
+            flip_pos > await_pos,
+            "[I42] regression: `self.released = true` must follow the unlock-SQL \
+             await in release(); otherwise a cancellation mid-await silently \
+             leaks the session-scoped advisory lock without firing Drop's \
+             catastrophic-path log. See bd1e7ce1's commit message for the \
+             cancellation-safety rationale. flip_pos={flip_pos}, await_pos={await_pos}"
+        );
+    }
 }
