@@ -33,11 +33,11 @@
 //! gate (B3 runtime layer) is the primary enforcement; auto-tx is a
 //! second line of defense at the Postgres level.
 
-use zeroship_runtime::state::{OpResult, SharedState};
+use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
-use crate::v8_bridge::{get_i64_arg, get_string_arg, setup_promise};
+use crate::v8_bridge::{get_i64_arg, get_string_arg, setup_js_promise};
 
 /// `globalThis.__zsBeginAutoTx(kindStr)` — see module comment above.
 pub fn auto_begin_transaction(
@@ -55,20 +55,20 @@ pub fn auto_begin_transaction(
     // ("read committed" | "repeatable read" | "serializable"). Empty /
     // missing → use the per-kind default in `auto_tx_begin_sql`.
     let isolation = get_string_arg(scope, &args, 1);
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_auto_begin(kind.as_deref(), isolation.as_deref()).await {
-            Ok(token) => OpResult::Completed {
-                op_id,
-                value: token.to_string(),
-                request_id,
-            },
-            Err(e) => OpResult::Failed {
-                op_id,
-                error: e.into_string(),
-                request_id,
-            },
+        // Route via the typed `OpResult::JsValue` channel so the COMMIT-
+        // time error path preserves `DbError.code` / `.hint` (mirrors
+        // `orchestrator::transaction::begin_transaction_dispatch`). The
+        // legacy `OpResult::Failed { error: String }` rail flattened the
+        // typed `DbError` and stripped the SDK's retry-by-code signal —
+        // the exact site retry-by-code matters most.
+        let value = begin_to_resolve_value(exec_auto_begin(kind.as_deref(), isolation.as_deref()).await);
+        OpResult::JsValue {
+            resolver,
+            value,
+            request_id,
         }
     }));
 
@@ -92,24 +92,50 @@ pub fn auto_end_transaction(
     // SSR shim always passes a real boolean and any other shape is a
     // bug we want surfaced as a rollback (defense in depth).
     let success = args.length() >= 2 && args.get(1).is_true();
-    let (op_id, request_id, promise) = setup_promise(scope, &state);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_auto_end(token, success).await {
-            Ok(()) => OpResult::Completed {
-                op_id,
-                value: "null".to_string(),
-                request_id,
-            },
-            Err(e) => OpResult::Failed {
-                op_id,
-                error: e.into_string(),
-                request_id,
-            },
+        // COMMIT-time `DbError` (e.g. 40001 serialization, 55P03 lock
+        // contention, class 08 transient) must reach JS with `.code` /
+        // `.hint` intact so the SDK can branch on `err.code` for
+        // retry-vs-bail decisions. See module note in `error.rs`.
+        let value = end_to_resolve_value(exec_auto_end(token, success).await);
+        OpResult::JsValue {
+            resolver,
+            value,
+            request_id,
         }
     }));
 
     rv.set(promise.into());
+}
+
+/// Convert an `exec_auto_begin` result into the `ResolveValue` that
+/// settles the promise handed to JS. Mirrors the
+/// `orchestrator::transaction::begin_transaction_dispatch` pattern —
+/// success carries the u32 token, failure carries the *typed* `OpError`
+/// (code + hint preserved) instead of a flat string. Extracted as a
+/// standalone fn so tests can exercise the conversion without a V8
+/// scope.
+fn begin_to_resolve_value(result: Result<u32, DbError>) -> ResolveValue {
+    match result {
+        Ok(token) => ResolveValue::U32(token),
+        Err(e) => ResolveValue::RejectError(e.to_op_error()),
+    }
+}
+
+/// Convert an `exec_auto_end` result into the `ResolveValue` that
+/// settles the promise handed to JS. The success path resolves with
+/// `undefined` (the JS dispatcher ignores the value — it only cares
+/// whether the promise rejected); the failure path carries the *typed*
+/// `OpError` so the SDK can branch on `err.code` at the
+/// COMMIT/ROLLBACK boundary. See module note + `error.rs` for the
+/// retry-by-code rationale.
+fn end_to_resolve_value(result: Result<(), DbError>) -> ResolveValue {
+    match result {
+        Ok(()) => ResolveValue::Undefined,
+        Err(e) => ResolveValue::RejectError(e.to_op_error()),
+    }
 }
 
 /// Per-kind BEGIN SQL. Returns `None` for kinds we don't wrap. For
@@ -261,5 +287,98 @@ pub fn install_auto_tx_globals(scope: &mut v8::PinScope<'_, '_>) {
         let f = v8::Function::new(scope, auto_end_transaction).unwrap();
         let key = v8::String::new(scope, "__zsEndAutoTx").unwrap();
         global.set(scope, key.into(), f.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Code-preservation tests for the auto-tx COMMIT-time error path.
+    //!
+    //! Pre-fix: both sites flattened typed `DbError` into
+    //! `OpResult::Failed { error: e.into_string() }`, stripping `.code` /
+    //! `.hint`. The SDK can no longer branch on `err.code === "transient"`
+    //! / `"lock_not_available"` to decide whether to retry a serialized
+    //! mutation, so application-level retry loops degenerate to
+    //! `if (e.message.includes(...))` substring sniffing.
+    //!
+    //! These tests pin the canonical `to_op_error()` pathway for the two
+    //! variants the SDK most needs to branch on at the auto-tx boundary
+    //! (`Transient` — connection drops, class 08; `LockContention` —
+    //! 55P03 from `SELECT … FOR UPDATE NOWAIT`).
+    use super::*;
+    use zeroship_runtime::state::OpErrorKind;
+
+    /// Extract `(code, hint)` from a `ResolveValue::RejectError` produced
+    /// by the conversion helpers. Panics on any other shape — the
+    /// auto-tx error path must always materialise a `CodedError` (every
+    /// `DbError` variant maps to one via `to_op_error()`, including the
+    /// catch-all `Internal` which stamps `"internal"`).
+    fn reject_code_hint(rv: ResolveValue) -> (String, Option<String>) {
+        match rv {
+            ResolveValue::RejectError(op_err) => match op_err.kind {
+                OpErrorKind::CodedError { code, hint } => (code, hint),
+                other => panic!("expected CodedError, got {other:?}"),
+            },
+            _ => panic!("expected ResolveValue::RejectError"),
+        }
+    }
+
+    #[test]
+    fn auto_begin_transient_error_preserves_code() {
+        // `Transient` is the SQL class 08 / connection-drop bucket — the
+        // SDK retries by `err.code === "transient"`. Pre-fix the wire
+        // payload carried only `err.message` (the connect/socket text).
+        let rv = begin_to_resolve_value(Err(DbError::Transient {
+            message: "db: auto-tx connect failed: connection refused".into(),
+        }));
+        let (code, hint) = reject_code_hint(rv);
+        assert_eq!(code, "transient", "wire code must equal 'transient'");
+        // Transient variants must carry the human-facing retry hint so
+        // the SDK can surface it verbatim — verified centrally in
+        // `error::tests::retryable_variants_carry_hint`; re-asserted
+        // here so a hint regression at the auto-tx boundary doesn't
+        // sneak past the conversion path.
+        assert!(
+            hint.is_some(),
+            "transient errors must carry a retry hint"
+        );
+    }
+
+    #[test]
+    fn auto_end_lock_contention_preserves_code() {
+        // `LockContention` is Postgres 55P03 — emitted by COMMIT-time
+        // deferred-constraint paths or SELECT…FOR UPDATE NOWAIT.
+        // SDK branches on `err.code === "lock_not_available"` to back
+        // off vs. abort.
+        let rv = end_to_resolve_value(Err(DbError::LockContention {
+            message: "db: could not obtain lock on row in relation users".into(),
+        }));
+        let (code, _hint) = reject_code_hint(rv);
+        assert_eq!(
+            code, "lock_not_available",
+            "wire code must equal 'lock_not_available'"
+        );
+    }
+
+    /// Sanity guard: the success paths must NOT route through the
+    /// `RejectError` arm. A regression that swapped Ok/Err arms would
+    /// silently turn every successful COMMIT into a rejection — the
+    /// SDK would observe phantom failures.
+    #[test]
+    fn auto_begin_ok_resolves_with_token() {
+        let rv = begin_to_resolve_value(Ok(1));
+        match rv {
+            ResolveValue::U32(t) => assert_eq!(t, 1),
+            _ => panic!("expected ResolveValue::U32 for Ok(1)"),
+        }
+    }
+
+    #[test]
+    fn auto_end_ok_resolves_with_undefined() {
+        let rv = end_to_resolve_value(Ok(()));
+        match rv {
+            ResolveValue::Undefined => {}
+            _ => panic!("expected ResolveValue::Undefined for Ok(())"),
+        }
     }
 }
