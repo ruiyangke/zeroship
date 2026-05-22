@@ -1,6 +1,10 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 15:47.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 16:17.
+
+**Cycle 16:17 closures (2)**: NEW-R14-1 CHECK ALTER upgrade-path integration test (`7506bd73` — integration suite now 73 pass / 1 ignored; verified `pg_get_constraintdef` post-ALTER) + MINOR-R12-1 F1 warn-shape unification on apply.rs:84 running-row insert failure (`cbd21112` — 8th F1 family site). 3 reviewers returned: **error-ux r12 = 95.5 (+1.5)** (audit.rs:818 5-cycle carry CLOSED; F1 family now 7 sites with uniform shape; `validation_refused` SDK surface cross-checked clean); **code-critique r12 = 95 (±0)** (plateau confirmed; MINOR-R12-1 already closed inline); **migration-pipeline r14 = 89 (+2)** (F2 verified closed verbatim per r13's recommendation). Design-loop **round 4 critic = 87 (+2)**; round-4 reviser in flight (1 CRITICAL + 5 IMPORTANT to address).
+
+
 
 **Cycle 15:47 closures (3)**: 5-cycle error-ux carry on `audit.rs:818` alphabet-naming (`02ead3f4`) + NEW-R14-2 F1 warn-shape drift in `validate.rs:100` (folded into `d07616a2`) + NEW-R9 `update_audit_status` docstring terminal-status enumeration (same commit). 3 reviewers returned: **security r12 = 86 (+1)** (F2 upgrade audit clean — ALTER race-free under PG semantics); **docs-audit r9 = 92 (+1)** (F2 docs exemplary; one new NIT closed inline); **test-coverage r14 = 87 (+1)** (capture-layer NEW-R11-1+R12-1 CLOSED at `0bf71f27`; surfaced NEW-R14-1 = MEDIUM CHECK-ALTER upgrade-path untested; NEW-R14-2 = drift just closed).
 
