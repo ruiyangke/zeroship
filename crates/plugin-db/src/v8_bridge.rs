@@ -395,22 +395,50 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
         // TIMESTAMP = 1114, TIMESTAMPTZ = 1184
         // Postgres sends as i64 microseconds since 2000-01-01 00:00:00 UTC.
         // Return as Unix milliseconds (number) — matches JS Date.now() / new Date(ts).
+        // Postgres `infinity`/`-infinity` arrive as `i64::MAX`/`i64::MIN`;
+        // wrap arithmetic in `checked_*` so an overflowing sentinel becomes
+        // `null` (the conceptual `DbError::Internal`) instead of panicking
+        // the worker thread.
         1114 | 1184 => match row.raw_value(name) {
             Some(bytes) if bytes.len() == 8 => {
                 let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
                 // 2000-01-01 = 946684800 seconds since Unix epoch
-                let unix_ms = pg_usec / 1_000 + 946_684_800_000;
-                Value::Number(serde_json::Number::from(unix_ms))
+                match (pg_usec / 1_000).checked_add(946_684_800_000) {
+                    Some(unix_ms) => Value::Number(serde_json::Number::from(unix_ms)),
+                    None => {
+                        tracing::warn!(
+                            oid = oid,
+                            pg_usec = pg_usec,
+                            "db: TIMESTAMP arithmetic overflow (likely Postgres ±infinity); returning null"
+                        );
+                        Value::Null
+                    }
+                }
             }
             _ => Value::Null,
         },
         // DATE = 1082 — i32 days since 2000-01-01
         // Return as Unix milliseconds at midnight UTC.
+        // Same overflow concern as TIMESTAMP: `infinity` arrives as
+        // `i32::MAX`, which multiplies past `i64::MAX`. Checked math
+        // turns the overflow into `null` rather than a panic.
         1082 => match row.raw_value(name) {
             Some(bytes) if bytes.len() == 4 => {
                 let pg_days = i32::from_be_bytes(bytes.try_into().unwrap());
-                let unix_ms = (i64::from(pg_days) + 10957) * 86_400_000;
-                Value::Number(serde_json::Number::from(unix_ms))
+                let unix_ms = i64::from(pg_days)
+                    .checked_add(10957)
+                    .and_then(|d| d.checked_mul(86_400_000));
+                match unix_ms {
+                    Some(ms) => Value::Number(serde_json::Number::from(ms)),
+                    None => {
+                        tracing::warn!(
+                            oid = oid,
+                            pg_days = pg_days,
+                            "db: DATE arithmetic overflow (likely Postgres ±infinity); returning null"
+                        );
+                        Value::Null
+                    }
+                }
             }
             _ => Value::Null,
         },
