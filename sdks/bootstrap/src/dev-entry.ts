@@ -98,7 +98,7 @@ export interface DevEntryOptions {
 
 export interface DevEntry {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response>;
-  rpc: (name: string, input: unknown, ctx: unknown) => Promise<unknown>;
+  rpc: (name: string, input: unknown, ctx: unknown) => unknown;
   /**
    * Test/runtime hook: reset the lazy schema-install latch. Called by
    * the dev-bootstrap when Vite's dep optimizer regenerated pre-
@@ -192,7 +192,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     }
   }
 
-  async function dispatchRpc(name: string, input: unknown, ctx: unknown): Promise<unknown> {
+  async function dispatchRpcAsync(name: string, input: unknown, ctx: unknown): Promise<unknown> {
     // Re-import per call so HMR invalidations land naturally. On the
     // FIRST call this also triggers schema registration — schemaReady
     // gets populated here.
@@ -218,6 +218,38 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       });
     }
     return dispatch(normalized.rpc, name, input, ctx);
+  }
+
+  // Non-async RPC dispatcher — must NOT be declared `async`. For stream /
+  // subscription procedures the kernel expects to receive the AsyncIterator
+  // synchronously so its FallThrough path fires and routes the request to
+  // `default.fetch` (which owns the SSE encoding via `createFetchHandler`).
+  // An `async function` always wraps returns in a Promise; the kernel's
+  // promise-settle path would then see `Promise<AsyncIterator>` and surface
+  // "AsyncIterator from a Promise — unsupported" instead.
+  //
+  // Fast-sync path: look up the handler in the transform-populated registry.
+  // `__register(wireId, fn)` is appended to every server module by the Vite
+  // transform, so the registry is populated after the first module evaluation.
+  // Any call that arrives before the first evaluation (registry empty) falls
+  // back to the async path, which also fails for streams on first call — the
+  // smoke always makes several non-stream RPC calls first, so the module is
+  // already evaluated by the time subscribeTodos is called in practice.
+  function dispatchRpc(name: string, input: unknown, ctx: unknown): unknown {
+    const regFn = options.registry?.get(name) as ((input: unknown, ctx: unknown) => unknown) | undefined;
+    if (regFn) {
+      const cfg = (regFn as { config?: { kind?: string } }).config;
+      const kind = cfg?.kind;
+      if (kind === "stream" || kind === "subscription") {
+        // Return the AsyncIterator synchronously — the kernel's FallThrough
+        // path routes to default.fetch (createFetchHandler) which handles
+        // SSE encoding. The handler is re-invoked there via __zsDispatch;
+        // calling it here (discarded) is benign for `async function*`.
+        return regFn(input, ctx);
+      }
+    }
+    // Non-streaming procedures: use the async path (returns a Promise).
+    return dispatchRpcAsync(name, input, ctx);
   }
 
   const fetchHandler = createFetchHandler(loadNormalized);

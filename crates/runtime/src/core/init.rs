@@ -734,6 +734,23 @@ if (user && user.default && user.default.rpc != null) {
         USER_RPC = _rpc;
     } else if (typeof _rpc === "object") {
         USER_RPC = function dispatchRpc(name, input, ctx) {
+            // Stream/subscription handlers are `async function*` — calling
+            // them returns an AsyncIterator synchronously (not a Promise).
+            // Returning it here lets the kernel's sync FallThrough path
+            // kick in, which routes the request to `default.fetch` where
+            // the SSE encoder (`sseFromAsyncGen` / `createFetchHandler`)
+            // wraps the iterator into a streaming Response.
+            //
+            // If we let `__zsDispatch` (an async function) handle these,
+            // it wraps the iterator in a Promise; the kernel's promise-
+            // settle path then sees `Promise<AsyncIterator>` and surfaces
+            // the "AsyncIterator from a Promise — unsupported" error.
+            const _fn = _rpc[name];
+            const _cfg = _fn && _fn.config;
+            const _kind = _cfg && typeof _cfg.kind === "string" ? _cfg.kind : undefined;
+            if (_kind === "stream" || _kind === "subscription") {
+                return _fn(input, ctx);
+            }
             return globalThis.__zsDispatch(_rpc, name, input, ctx);
         };
     }
