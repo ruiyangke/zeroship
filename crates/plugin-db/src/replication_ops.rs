@@ -37,13 +37,10 @@
 //!
 //! - `ensure_pool` failures preserve their DbError variant verbatim
 //!   (typically `not_configured` / `transient`).
-//! - The `replication::*` helpers currently return `Result<_, String>`
-//!   with already-formatted messages (e.g. `"replication: …"`); the
-//!   dispatch boundary wraps these in [`crate::error::DbError::Internal`]
-//!   so the operator-facing message reaches JS verbatim while the SDK
-//!   still sees `.code = "internal"`. Refining the inner module to
-//!   surface Configuration / Transient / LockContention variants is
-//!   tracked separately.
+//! - The `replication::*` helpers return `Result<_, DbError>` directly
+//!   — SQLSTATE classification + Configuration/Transient/LockContention
+//!   variants are picked inside `crate::replication` and flow through
+//!   here verbatim (no Internal-wrapping at the dispatch boundary).
 //! - `WalConsumer::new` failures map to [`crate::error::DbError::Configuration`]
 //!   with `code = "not_provisioned"` (the only thing that can fail
 //!   pre-spawn is sanitisation of `app_id`).
@@ -81,7 +78,7 @@ pub fn replication_setup_dispatch<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(DbError::Internal { message: e }.to_op_error()),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -115,7 +112,7 @@ pub fn replication_watchdog_dispatch<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(DbError::Internal { message: e }.to_op_error()),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -152,7 +149,7 @@ pub fn replication_drop_abandoned_dispatch<'s>(
             },
             Err(e) => OpResult::JsValue {
                 resolver,
-                value: ResolveValue::RejectError(DbError::Internal { message: e }.to_op_error()),
+                value: ResolveValue::RejectError(e.to_op_error()),
                 request_id,
             },
         }
@@ -211,9 +208,7 @@ pub fn start_replication_consumer_dispatch<'s>(
             Err(e) => {
                 return OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(
-                        DbError::Internal { message: e }.to_op_error(),
-                    ),
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
             }

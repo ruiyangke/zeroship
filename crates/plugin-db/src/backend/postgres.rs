@@ -172,15 +172,13 @@ impl Backend for PostgresBackend {
     }
 
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        crate::diff::read_live_schema(&self.pool, app_id)
-            .await
-            .map_err(|m| DbError::Internal { message: m })
+        // `read_live_schema` now returns typed `DbError` with SQLSTATE
+        // classification preserved — flow through verbatim.
+        crate::diff::read_live_schema(&self.pool, app_id).await
     }
 
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        crate::diff::estimate_row_count(&self.pool, app_id, collection)
-            .await
-            .map_err(|m| DbError::Internal { message: m })
+        crate::diff::estimate_row_count(&self.pool, app_id, collection).await
     }
 
     // ----- audit table reads/writes -----------------------------------

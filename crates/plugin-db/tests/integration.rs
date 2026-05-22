@@ -3597,10 +3597,20 @@ async fn b8c_init_session_rejects_expired_token() {
     let result = zeroship_plugin_db::auth::init_session(&*client, &res).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
+    let body = err.to_string();
     assert!(
-        err.contains("expired"),
-        "expected 'expired' in error, got: {err}"
+        body.contains("expired"),
+        "expected 'expired' in error, got: {body}"
     );
+    // Typed error sweep [I28]: the SQL function raises P0001 with the
+    // structured "signature expired" message; init_session promotes it
+    // to a ValidationFailed with a stable `.code`.
+    match err {
+        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            assert_eq!(code, "session_signature_expired");
+        }
+        other => panic!("expected ValidationFailed, got: {other:?}"),
+    }
 }
 
 #[compio::test]
@@ -3631,10 +3641,19 @@ async fn b8c_init_session_rejects_replay_nonce() {
     let result = zeroship_plugin_db::auth::init_session(&*client, &token).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
+    let body = err.to_string();
     assert!(
-        err.contains("replay"),
-        "expected 'replay' in error, got: {err}"
+        body.contains("replay"),
+        "expected 'replay' in error, got: {body}"
     );
+    // Typed error sweep [I28]: init_session promotes the nonce-replay
+    // SQL refusal to a ValidationFailed with a stable `.code`.
+    match err {
+        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            assert_eq!(code, "session_nonce_replay");
+        }
+        other => panic!("expected ValidationFailed, got: {other:?}"),
+    }
 }
 
 #[compio::test]
@@ -3662,10 +3681,20 @@ async fn b8c_init_session_rejects_tampered_signature() {
     let result = zeroship_plugin_db::auth::init_session(&*client, &token).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
+    let body = err.to_string();
     assert!(
-        err.contains("invalid signature") || err.contains("invalid"),
-        "expected invalid-signature error, got: {err}"
+        body.contains("invalid signature") || body.contains("invalid"),
+        "expected invalid-signature error, got: {body}"
     );
+    // Typed error sweep [I28]: tampered signatures surface a stable
+    // ValidationFailed code so the SDK can branch without substring
+    // matching.
+    match err {
+        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            assert_eq!(code, "session_invalid_signature");
+        }
+        other => panic!("expected ValidationFailed, got: {other:?}"),
+    }
 }
 
 #[compio::test]

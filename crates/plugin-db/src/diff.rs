@@ -28,6 +28,30 @@
 use compio_postgres::Pool;
 use serde_json::Value;
 
+use crate::error::DbError;
+
+/// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
+/// so operators see *what* the diff layer was doing when the SQL
+/// failed. The SQLSTATE classification still drives the `.code`. Mirrors
+/// the `coded_sql` shape in `crate::audit`.
+fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
+    let mut err: DbError = e.into();
+    match &mut err {
+        DbError::UniqueViolation { message }
+        | DbError::FkViolation { message }
+        | DbError::NotNullViolation { message }
+        | DbError::CheckViolation { message }
+        | DbError::Serialization { message }
+        | DbError::LockContention { message }
+        | DbError::Transient { message }
+        | DbError::Internal { message } => {
+            *message = format!("diff: {context}: {message}");
+        }
+        _ => {}
+    }
+    err
+}
+
 /// Classification per the proposal A2 three-bucket split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeClass {
@@ -181,7 +205,7 @@ pub struct ForeignKeyInfo {
 /// `pg_namespace -> pg_class -> pg_attribute / pg_index` and pulls
 /// `pg_get_expr(adbin, adrelid)` for default expressions along with
 /// `provolatile` for any function the default invokes.
-pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, String> {
+pub async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, DbError> {
     let mut out = LiveSchema::default();
     let app_param = app_id.to_string();
     let params: Vec<&str> = vec![app_param.as_str()];
@@ -212,7 +236,7 @@ SELECT c.relname AS table_name,
     let rows = pool
         .query_text_params(col_sql, &params)
         .await
-        .map_err(|e| format!("diff: read columns failed: {e}"))?;
+        .map_err(|e| coded_sql("read columns failed", e))?;
     for row in &rows {
         let table: String = row.try_get("table_name").unwrap_or_default();
         let column: String = row.try_get("column_name").unwrap_or_default();
@@ -259,7 +283,7 @@ SELECT con.conname AS constraint_name,
     let rows = pool
         .query_text_params(fk_sql, &params)
         .await
-        .map_err(|e| format!("diff: read foreign_keys failed: {e}"))?;
+        .map_err(|e| coded_sql("read foreign_keys failed", e))?;
     for row in &rows {
         let table: String = row.try_get("table_name").unwrap_or_default();
         let constraint_name: String = row.try_get("constraint_name").unwrap_or_default();
@@ -308,7 +332,7 @@ SELECT c.relname AS table_name,
     let rows = pool
         .query_text_params(idx_sql, &params)
         .await
-        .map_err(|e| format!("diff: read indexes failed: {e}"))?;
+        .map_err(|e| coded_sql("read indexes failed", e))?;
     for row in &rows {
         let table: String = row.try_get("table_name").unwrap_or_default();
         let index_name: String = row.try_get("index_name").unwrap_or_default();
@@ -352,7 +376,7 @@ fn decode_fk_action(code: &str) -> &'static str {
 /// estimation when the table is large; the cold-start orchestrator
 /// already holds the advisory lock so an estimate is good enough for the
 /// "empty vs. non-empty" decision.
-pub async fn estimate_row_count(pool: &Pool, app_id: &str, collection: &str) -> Result<i64, String> {
+pub async fn estimate_row_count(pool: &Pool, app_id: &str, collection: &str) -> Result<i64, DbError> {
     let sql = r#"
 SELECT COALESCE(c.reltuples::bigint, 0) AS rows
   FROM pg_class c
@@ -363,7 +387,7 @@ SELECT COALESCE(c.reltuples::bigint, 0) AS rows
     let rows = pool
         .query_text_params(sql, &params)
         .await
-        .map_err(|e| format!("diff: estimate_row_count failed: {e}"))?;
+        .map_err(|e| coded_sql("estimate_row_count failed", e))?;
     let n: i64 = rows.first().map(|r| r.get::<_, i64>("rows")).unwrap_or(0);
     Ok(n)
 }
@@ -377,7 +401,7 @@ pub async fn count_violating_not_null(
     app_id: &str,
     collection: &str,
     field: &str,
-) -> Result<(i64, Vec<i64>), String> {
+) -> Result<(i64, Vec<i64>), DbError> {
     let sql = format!(
         r#"SELECT id FROM "{app_id}"."{collection}" WHERE "{field}" IS NULL LIMIT 5"#
     );
@@ -385,7 +409,7 @@ pub async fn count_violating_not_null(
     let sample_rows = pool
         .query_text_params(&sql, &empty)
         .await
-        .map_err(|e| format!("diff: count_violating_not_null sample failed: {e}"))?;
+        .map_err(|e| coded_sql("count_violating_not_null sample failed", e))?;
     let samples: Vec<i64> = sample_rows
         .iter()
         .filter_map(|r| r.try_get::<_, i32>("id").ok().map(i64::from))
@@ -397,7 +421,7 @@ pub async fn count_violating_not_null(
     let cnt_rows = pool
         .query_text_params(&count_sql, &empty)
         .await
-        .map_err(|e| format!("diff: count_violating_not_null count failed: {e}"))?;
+        .map_err(|e| coded_sql("count_violating_not_null count failed", e))?;
     let n: i64 = cnt_rows.first().map(|r| r.get::<_, i64>("n")).unwrap_or(0);
     Ok((n, samples))
 }

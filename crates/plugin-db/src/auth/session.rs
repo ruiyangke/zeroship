@@ -23,6 +23,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use compio_postgres::{Client, Pool};
 
 use super::{ADMIN_SCHEMA, DEFAULT_TOKEN_TTL_SECS};
+use crate::error::DbError;
+
+/// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
+/// so operators see *what* the session layer was doing when the SQL
+/// failed. The SQLSTATE classification still drives the `.code`. Mirrors
+/// the helper in `super::bootstrap`.
+fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
+    let mut err: DbError = e.into();
+    match &mut err {
+        DbError::UniqueViolation { message }
+        | DbError::FkViolation { message }
+        | DbError::NotNullViolation { message }
+        | DbError::CheckViolation { message }
+        | DbError::Serialization { message }
+        | DbError::LockContention { message }
+        | DbError::Transient { message }
+        | DbError::Internal { message } => {
+            *message = format!("auth/session: {context}: {message}");
+        }
+        _ => {}
+    }
+    err
+}
 
 /// A token minted by the platform — the signature + the canonical
 /// `(actor_kind, actor_id, nonce, expires_at)` tuple the SECURITY
@@ -72,7 +95,7 @@ pub async fn mint_session_token(
     client: &Client,
     init: SessionInit,
     ttl_secs: Option<i64>,
-) -> Result<MintedToken, String> {
+) -> Result<MintedToken, DbError> {
     // Caller-supplied TTL is taken verbatim — including negative
     // values, which produce a deliberately-expired token for tests.
     // In production the runtime calls with `None` (default 5 min) or
@@ -94,14 +117,14 @@ pub async fn mint_session_token(
     let pid_row = client
         .query_text_params("SELECT pg_backend_pid()::text AS pid", &[])
         .await
-        .map_err(|e| format!("auth/session: pg_backend_pid: {e}"))?;
+        .map_err(|e| coded_sql("pg_backend_pid", e))?;
     let pid_str: String = pid_row
         .first()
         .and_then(|r| r.try_get::<_, String>("pid").ok())
-        .ok_or_else(|| "auth/session: pg_backend_pid returned no row".to_string())?;
+        .ok_or_else(|| DbError::internal("auth/session: pg_backend_pid returned no row"))?;
     let pid: i32 = pid_str
         .parse()
-        .map_err(|e| format!("auth/session: parse pid {pid_str:?}: {e}"))?;
+        .map_err(|e| DbError::internal(format!("auth/session: parse pid {pid_str:?}: {e}")))?;
 
     let expires_at_iso = iso_timestamp_after(ttl);
 
@@ -126,13 +149,16 @@ pub async fn mint_session_token(
             ],
         )
         .await
-        .map_err(|e| format!("auth/session: sign_session: {e}"))?;
+        .map_err(|e| coded_sql("sign_session", e))?;
 
     let sig_hex: String = row
         .first()
         .and_then(|r| r.try_get::<_, String>("sig").ok())
-        .ok_or_else(|| "auth/session: sign_session returned no signature".to_string())?;
-    let signature = hex_decode(&sig_hex).map_err(|e| format!("auth/session: decode sig: {e}"))?;
+        .ok_or_else(|| {
+            DbError::internal("auth/session: sign_session returned no signature")
+        })?;
+    let signature = hex_decode(&sig_hex)
+        .map_err(|e| DbError::internal(format!("auth/session: decode sig: {e}")))?;
 
     Ok(MintedToken {
         app_id: init.app_id,
@@ -149,7 +175,7 @@ pub async fn mint_session_token(
 /// called on the same backend PID the token was minted for — the
 /// SECURITY DEFINER function uses `pg_backend_pid()` to re-derive the
 /// payload and re-verify the HMAC.
-pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), String> {
+pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), DbError> {
     let nonce_hex = hex_encode(&token.nonce);
     let sig_hex = hex_encode(&token.signature);
     client
@@ -181,16 +207,31 @@ pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), St
                 msg.push_str(&format!("{src}"));
                 cur = src;
             }
-            // Promote the structured RAISE messages to the surface
-            // so callers can match on them.
+            // Promote the structured RAISE messages to typed
+            // ValidationFailed variants with stable `.code`s the SDK
+            // can branch on. The SECURITY DEFINER function raises
+            // SQLSTATE P0001 with these messages — they are
+            // user-input-shaped refusals, not server bugs.
             if msg.contains("nonce replay detected") {
-                "auth/session: nonce replay detected".to_string()
+                DbError::validation(
+                    "session_nonce_replay",
+                    "auth/session: nonce replay detected",
+                )
             } else if msg.contains("signature expired") {
-                "auth/session: signature expired".to_string()
+                DbError::validation(
+                    "session_signature_expired",
+                    "auth/session: signature expired",
+                )
             } else if msg.contains("invalid session-init signature") {
-                "auth/session: invalid signature".to_string()
+                DbError::validation(
+                    "session_invalid_signature",
+                    "auth/session: invalid signature",
+                )
             } else {
-                format!("auth/session: init_session: {msg}")
+                // Anything else — SQLSTATE class 23, transient
+                // connection failures, etc. — flows through SQLSTATE
+                // classification verbatim.
+                coded_sql("init_session", e)
             }
         })
 }
@@ -203,7 +244,7 @@ pub async fn mint_and_init(
     client: &Client,
     init: SessionInit,
     ttl_secs: Option<i64>,
-) -> Result<MintedToken, String> {
+) -> Result<MintedToken, DbError> {
     let token = mint_session_token(client, init, ttl_secs).await?;
     init_session(client, &token).await?;
     Ok(token)
@@ -216,11 +257,11 @@ pub async fn mint_and_init_via_pool(
     pool: &Pool,
     init: SessionInit,
     ttl_secs: Option<i64>,
-) -> Result<MintedToken, String> {
+) -> Result<MintedToken, DbError> {
     let client = pool
         .get()
         .await
-        .map_err(|e| format!("auth/session: pool get: {e}"))?;
+        .map_err(|e| coded_sql("pool get", e))?;
     mint_and_init(&*client, init, ttl_secs).await
 }
 
@@ -403,5 +444,71 @@ mod tests {
         };
         assert_eq!(t.backend_pid, 1234);
         assert_eq!(t.nonce.len(), 3);
+    }
+
+    // -----------------------------------------------------------------
+    // Typed-error sweep [I28]
+    //
+    // The signature of `mint_session_token` / `init_session` is now
+    // `Result<_, DbError>`. The wire-shape promotion (`P0001` RAISE →
+    // `ValidationFailed { code: "session_*"}`) happens inside
+    // `init_session` and is exercised end-to-end by
+    // `tests/integration.rs::b8c_init_session_rejects_*`. Here we pin
+    // the *signature* (type-level contract) so a future refactor that
+    // accidentally flattens back to `Result<_, String>` fails compile.
+    // -----------------------------------------------------------------
+
+    /// Type-level guard: `mint_session_token` / `init_session` /
+    /// `mint_and_init` / `mint_and_init_via_pool` all return
+    /// `Result<_, DbError>`. If any of them regresses to
+    /// `Result<_, String>` the assignment below stops compiling.
+    #[test]
+    fn session_helpers_signatures_are_typed() {
+        use compio_postgres::{Client, Pool};
+        fn _mint(c: &Client) -> impl std::future::Future<Output = Result<MintedToken, DbError>> + '_
+        {
+            mint_session_token(
+                c,
+                SessionInit {
+                    app_id: "x".into(),
+                    actor_kind: "platform".into(),
+                    actor_id: None,
+                },
+                None,
+            )
+        }
+        fn _init<'a>(
+            c: &'a Client,
+            t: &'a MintedToken,
+        ) -> impl std::future::Future<Output = Result<(), DbError>> + 'a {
+            init_session(c, t)
+        }
+        fn _mi(c: &Client) -> impl std::future::Future<Output = Result<MintedToken, DbError>> + '_ {
+            mint_and_init(
+                c,
+                SessionInit {
+                    app_id: "x".into(),
+                    actor_kind: "platform".into(),
+                    actor_id: None,
+                },
+                None,
+            )
+        }
+        fn _mip(
+            p: &Pool,
+        ) -> impl std::future::Future<Output = Result<MintedToken, DbError>> + '_ {
+            mint_and_init_via_pool(
+                p,
+                SessionInit {
+                    app_id: "x".into(),
+                    actor_kind: "platform".into(),
+                    actor_id: None,
+                },
+                None,
+            )
+        }
+        // No actual call — just instantiating the futures proves the
+        // signatures are typed.
+        let _ = (_mint as fn(_) -> _, _init as fn(_, _) -> _, _mi as fn(_) -> _, _mip as fn(_) -> _);
     }
 }

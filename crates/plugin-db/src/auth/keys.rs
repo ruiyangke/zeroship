@@ -29,6 +29,29 @@
 use compio_postgres::Pool;
 
 use super::ADMIN_SCHEMA;
+use crate::error::DbError;
+
+/// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
+/// so operators see *what* the keys layer was doing when the SQL
+/// failed. The SQLSTATE classification still drives the `.code`. Mirrors
+/// the helper in `super::bootstrap`.
+fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
+    let mut err: DbError = e.into();
+    match &mut err {
+        DbError::UniqueViolation { message }
+        | DbError::FkViolation { message }
+        | DbError::NotNullViolation { message }
+        | DbError::CheckViolation { message }
+        | DbError::Serialization { message }
+        | DbError::LockContention { message }
+        | DbError::Transient { message }
+        | DbError::Internal { message } => {
+            *message = format!("auth/keys: {context}: {message}");
+        }
+        _ => {}
+    }
+    err
+}
 
 /// Result of a rotation. `previous_key_id` is the key that was retired
 /// (or `None` if there was no previous current — initial bootstrap).
@@ -51,7 +74,7 @@ impl RotationOutcome {
 /// Run a key rotation. Idempotent in the sense that repeated calls
 /// produce distinct keys but never leave the cluster in an
 /// unverifiable state — each call's outcome stands alone.
-pub async fn rotate_session_keys(pool: &Pool) -> Result<RotationOutcome, String> {
+pub async fn rotate_session_keys(pool: &Pool) -> Result<RotationOutcome, DbError> {
     // Capture the current key id before rotation so we can return it
     // as `previous_key_id`.
     let prev = current_key_id(pool).await?;
@@ -64,15 +87,19 @@ pub async fn rotate_session_keys(pool: &Pool) -> Result<RotationOutcome, String>
             &[],
         )
         .await
-        .map_err(|e| format!("auth/keys: rotate_session_keys: {e}"))?;
+        .map_err(|e| coded_sql("rotate_session_keys", e))?;
 
     let new_id_str: String = rows
         .first()
         .and_then(|r| r.try_get::<_, String>("new_id").ok())
-        .ok_or_else(|| "auth/keys: rotate_session_keys returned no row".to_string())?;
-    let new_id: i64 = new_id_str
-        .parse()
-        .map_err(|e| format!("auth/keys: parse new_id {new_id_str:?}: {e}"))?;
+        .ok_or_else(|| {
+            DbError::internal("auth/keys: rotate_session_keys returned no row")
+        })?;
+    let new_id: i64 = new_id_str.parse().map_err(|e| {
+        DbError::internal(format!(
+            "auth/keys: parse new_id {new_id_str:?}: {e}"
+        ))
+    })?;
 
     Ok(RotationOutcome {
         new_key_id: new_id,
@@ -83,7 +110,7 @@ pub async fn rotate_session_keys(pool: &Pool) -> Result<RotationOutcome, String>
 /// The currently active key id — the one new tokens will be signed
 /// with. `None` if no active key exists (only possible before
 /// bootstrap or in a misconfigured cluster).
-pub async fn current_key_id(pool: &Pool) -> Result<Option<i64>, String> {
+pub async fn current_key_id(pool: &Pool) -> Result<Option<i64>, DbError> {
     let rows = pool
         .query_text_params(
             &format!(
@@ -95,22 +122,22 @@ pub async fn current_key_id(pool: &Pool) -> Result<Option<i64>, String> {
             &[],
         )
         .await
-        .map_err(|e| format!("auth/keys: current_key_id: {e}"))?;
+        .map_err(|e| coded_sql("current_key_id", e))?;
     let row = match rows.first() {
         Some(r) => r,
         None => return Ok(None),
     };
     let s: String = row
         .try_get::<_, String>("id")
-        .map_err(|e| format!("auth/keys: parse current id: {e}"))?;
+        .map_err(|e| coded_sql("parse current id", e))?;
     s.parse::<i64>()
         .map(Some)
-        .map_err(|e| format!("auth/keys: parse current id: {e}"))
+        .map_err(|e| DbError::internal(format!("auth/keys: parse current id: {e}")))
 }
 
 /// The most-recently-retired key id (still inside the grace window).
 /// `None` if no retired key exists.
-pub async fn previous_key_id(pool: &Pool) -> Result<Option<i64>, String> {
+pub async fn previous_key_id(pool: &Pool) -> Result<Option<i64>, DbError> {
     let rows = pool
         .query_text_params(
             &format!(
@@ -123,17 +150,17 @@ pub async fn previous_key_id(pool: &Pool) -> Result<Option<i64>, String> {
             &[],
         )
         .await
-        .map_err(|e| format!("auth/keys: previous_key_id: {e}"))?;
+        .map_err(|e| coded_sql("previous_key_id", e))?;
     let row = match rows.first() {
         Some(r) => r,
         None => return Ok(None),
     };
     let s: String = row
         .try_get::<_, String>("id")
-        .map_err(|e| format!("auth/keys: parse previous id: {e}"))?;
+        .map_err(|e| coded_sql("parse previous id", e))?;
     s.parse::<i64>()
         .map(Some)
-        .map_err(|e| format!("auth/keys: parse previous id: {e}"))
+        .map_err(|e| DbError::internal(format!("auth/keys: parse previous id: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -164,5 +191,52 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
         assert_eq!(v["newKeyId"], 1);
         assert!(v["previousKeyId"].is_null());
+    }
+
+    // -----------------------------------------------------------------
+    // Typed-error sweep [I28]
+    //
+    // The end-to-end SQLSTATE → DbError promotion is exercised by the
+    // `tests/integration.rs::b8c_*_key_*` tests against pg-test. The
+    // unit-level guard below pins the *signature* — a future regression
+    // that accidentally flattens `rotate_session_keys` /
+    // `current_key_id` / `previous_key_id` back to `Result<_, String>`
+    // fails compile here.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn keys_helpers_signatures_are_typed() {
+        use compio_postgres::Pool;
+        fn _rot(p: &Pool) -> impl std::future::Future<Output = Result<RotationOutcome, DbError>> + '_ {
+            rotate_session_keys(p)
+        }
+        fn _cur(p: &Pool) -> impl std::future::Future<Output = Result<Option<i64>, DbError>> + '_ {
+            current_key_id(p)
+        }
+        fn _prev(p: &Pool) -> impl std::future::Future<Output = Result<Option<i64>, DbError>> + '_ {
+            previous_key_id(p)
+        }
+        // Existence of the function pointers proves the typed signature.
+        let _ = (
+            _rot as fn(_) -> _,
+            _cur as fn(_) -> _,
+            _prev as fn(_) -> _,
+        );
+    }
+
+    /// `DbError::internal("…")` is the catch-all path used by
+    /// `current_key_id` / `previous_key_id` when parse fails. It must
+    /// stamp the canonical `.code = "internal"` so the SDK has a stable
+    /// branch (vs. an unstable substring match).
+    #[test]
+    fn keys_internal_parse_error_stamps_internal_code() {
+        let err = DbError::internal("auth/keys: parse current id: invalid digit found");
+        let op = err.to_op_error();
+        match op.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "internal");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
     }
 }

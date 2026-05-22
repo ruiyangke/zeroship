@@ -324,10 +324,16 @@ impl WalConsumer {
     /// Build a consumer descriptor. Spinning up the connection
     /// happens in [`Self::run`].
     pub fn new(app_id: &str, db_url: &str) -> Result<Self, ConsumerError> {
+        // `slot_name` / `publication_name` now return `DbError` — we
+        // flatten through `to_string()` so the consumer's wire surface
+        // (a `ConsumerError::NotProvisioned(String)`) stays unchanged.
+        // The `DbError`'s `.code` is preserved at the V8 dispatch
+        // boundary (`replication_ops::start_replication_consumer_dispatch`)
+        // which inspects the inner DbError before this call.
         let slot_name = crate::replication::slot_name(app_id)
-            .map_err(ConsumerError::NotProvisioned)?;
+            .map_err(|e| ConsumerError::NotProvisioned(e.to_string()))?;
         let publication_name = crate::replication::publication_name(app_id)
-            .map_err(ConsumerError::NotProvisioned)?;
+            .map_err(|e| ConsumerError::NotProvisioned(e.to_string()))?;
         Ok(Self {
             app_id: app_id.to_string(),
             db_url: db_url.to_string(),

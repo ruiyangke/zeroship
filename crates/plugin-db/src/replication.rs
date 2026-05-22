@@ -58,6 +58,31 @@ use crate::v8_bridge::row_to_json;
 /// 63-character `NAMEDATALEN` budget alongside even a long app_id.
 pub const OBJECT_PREFIX: &str = "__zs_";
 
+/// Prepend a contextual phrase to the human-readable body of `err` while
+/// keeping its variant (and therefore its `.code`) intact. Mirrors the
+/// `coded_sql` pattern in `crate::audit` — operators see "what we were
+/// doing when the SQL failed" without losing the SQLSTATE-driven
+/// classification at the V8 boundary.
+fn prefix_message(err: &mut DbError, prefix: &str) {
+    match err {
+        DbError::UniqueViolation { message }
+        | DbError::FkViolation { message }
+        | DbError::NotNullViolation { message }
+        | DbError::CheckViolation { message }
+        | DbError::Serialization { message }
+        | DbError::LockContention { message }
+        | DbError::Transient { message }
+        | DbError::Internal { message } => {
+            *message = format!("{prefix}{message}");
+        }
+        // ValidationFailed / Configuration / Coded / SchemaRefused carry
+        // their own structured messages (and codes the SDK already
+        // branches on) — leaving them alone keeps the wire format
+        // verbatim.
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Naming
 // ---------------------------------------------------------------------------
@@ -77,17 +102,23 @@ pub const OBJECT_PREFIX: &str = "__zs_";
 /// 2. Even if Postgres accepted it, the LIKE predicate the watchdog
 ///    uses would no longer be a safe prefix match.
 ///
-/// On reject, returns the offending character so the error surface
-/// (the V8 callback) can report something actionable.
-pub fn sanitise_app_id(app_id: &str) -> Result<String, String> {
+/// On reject, returns a typed [`DbError::ValidationFailed`] with a
+/// stable `.code` (`invalid_app_id`) the SDK can branch on.
+pub fn sanitise_app_id(app_id: &str) -> Result<String, DbError> {
     if app_id.is_empty() {
-        return Err("replication: app_id must not be empty".to_string());
+        return Err(DbError::validation(
+            "invalid_app_id",
+            "replication: app_id must not be empty",
+        ));
     }
     for c in app_id.chars() {
         if !(c.is_ascii_alphanumeric() || c == '_') {
-            return Err(format!(
-                "replication: app_id contains invalid character {c:?} \
-                 — only [A-Za-z0-9_] permitted"
+            return Err(DbError::validation(
+                "invalid_app_id",
+                format!(
+                    "replication: app_id contains invalid character {c:?} \
+                     — only [A-Za-z0-9_] permitted"
+                ),
             ));
         }
     }
@@ -95,12 +126,12 @@ pub fn sanitise_app_id(app_id: &str) -> Result<String, String> {
 }
 
 /// Compose the per-app publication name. Wraps [`sanitise_app_id`].
-pub fn publication_name(app_id: &str) -> Result<String, String> {
+pub fn publication_name(app_id: &str) -> Result<String, DbError> {
     Ok(format!("{OBJECT_PREFIX}pub_{}", sanitise_app_id(app_id)?))
 }
 
 /// Compose the per-app replication-slot name.
-pub fn slot_name(app_id: &str) -> Result<String, String> {
+pub fn slot_name(app_id: &str) -> Result<String, DbError> {
     Ok(format!("{OBJECT_PREFIX}slot_{}", sanitise_app_id(app_id)?))
 }
 
@@ -145,7 +176,7 @@ pub fn slot_name(app_id: &str) -> Result<String, String> {
 pub async fn ensure_publication_and_slot(
     pool: &Pool,
     app_id: &str,
-) -> Result<SetupOutcome, String> {
+) -> Result<SetupOutcome, DbError> {
     let pub_name = publication_name(app_id)?;
     let slot = slot_name(app_id)?;
     // `sanitise_app_id` lowercases (required for slot/publication object names —
@@ -176,7 +207,11 @@ pub async fn ensure_publication_and_slot(
             &[&pub_name],
         )
         .await
-        .map_err(|e| format!("replication: probe pg_publication: {e}"))?
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: probe pg_publication: ");
+            err
+        })?
         .is_empty();
     if !exists {
         // Tolerate 42710 (duplicate_object) and 42704 (undefined_object
@@ -185,7 +220,9 @@ pub async fn ensure_publication_and_slot(
         if let Err(e) = pool.execute(&pub_sql, &[]).await {
             let msg = format!("{e:#}");
             if !msg.contains("42710") {
-                return Err(format!("replication: CREATE PUBLICATION: {msg}"));
+                let mut err = DbError::from_pg(&e);
+                prefix_message(&mut err, "replication: CREATE PUBLICATION: ");
+                return Err(err);
             }
         }
     }
@@ -198,7 +235,11 @@ pub async fn ensure_publication_and_slot(
             &[&slot],
         )
         .await
-        .map_err(|e| format!("replication: probe pg_replication_slots: {e}"))?;
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: probe pg_replication_slots: ");
+            err
+        })?;
 
     let created;
     let lsn: String;
@@ -218,17 +259,26 @@ pub async fn ensure_publication_and_slot(
             .map_err(|e| {
                 // 55000 (object_not_in_prerequisite_state) is the
                 // canonical SQLSTATE when wal_level != logical. Surface
-                // it as a config error so the operator sees the fix
-                // instead of a generic "server error".
+                // it as a `Configuration` error so the operator sees the
+                // fix (and the SDK does NOT retry it) instead of a
+                // generic "server error".
                 let msg = format!("{e:#}");
                 if msg.contains("55000") || msg.to_lowercase().contains("wal_level") {
-                    format!(
-                        "replication: server is not configured for logical \
-                         decoding — set wal_level=logical in postgresql.conf \
-                         and restart (underlying: {msg})"
-                    )
+                    DbError::Configuration {
+                        code: "wal_level_not_logical",
+                        message: format!(
+                            "replication: server is not configured for logical \
+                             decoding — set wal_level=logical in postgresql.conf \
+                             and restart (underlying: {msg})"
+                        ),
+                    }
                 } else {
-                    format!("replication: pg_create_logical_replication_slot: {msg}")
+                    let mut err = DbError::from_pg(&e);
+                    prefix_message(
+                        &mut err,
+                        "replication: pg_create_logical_replication_slot: ",
+                    );
+                    err
                 }
             })?;
         // Defensive: an empty RETURNING set used to silently produce
@@ -324,7 +374,7 @@ pub struct SlotHealth {
 /// The query is in the proposal verbatim (R3) — kept as a single SQL
 /// string here so a code reader can compare it to the proposal text
 /// without translating from a query-builder DSL.
-pub async fn watchdog_query(pool: &Pool) -> Result<Vec<SlotHealth>, String> {
+pub async fn watchdog_query(pool: &Pool) -> Result<Vec<SlotHealth>, DbError> {
     let sql = format!(
         r"SELECT
             slot_name,
@@ -341,7 +391,11 @@ pub async fn watchdog_query(pool: &Pool) -> Result<Vec<SlotHealth>, String> {
     let rows = pool
         .query_text_params(&sql, &[])
         .await
-        .map_err(|e| format!("replication: watchdog query: {e}"))?;
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: watchdog query: ");
+            err
+        })?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -421,7 +475,7 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 pub async fn drop_abandoned_slots(
     pool: &Pool,
     inactive_seconds: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, DbError> {
     // We can't easily express "slot has been inactive for N seconds"
     // because `pg_replication_slots` doesn't carry a "last became
     // inactive" timestamp. The next best proxy is
@@ -462,7 +516,11 @@ pub async fn drop_abandoned_slots(
     let rows = pool
         .query_text_params(&candidates_sql, &[&floor_bytes.to_string()])
         .await
-        .map_err(|e| format!("replication: enumerate abandoned slots: {e}"))?;
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: enumerate abandoned slots: ");
+            err
+        })?;
 
     let mut dropped = Vec::new();
     for row in &rows {
@@ -481,15 +539,20 @@ pub async fn drop_abandoned_slots(
         {
             Ok(_) => dropped.push(name),
             Err(e) => {
-                let msg = format!("{e:#}");
-                // 55006 (object_in_use) — a subscriber raced to attach
-                // between SELECT and DROP. Benign; the next sweep will
-                // catch it.
-                if !msg.contains("55006") {
-                    return Err(format!(
-                        "replication: pg_drop_replication_slot({name}): {msg}"
-                    ));
+                // 55006 (object_in_use) is mapped to
+                // `DbError::LockContention` via `from_pg`. A subscriber
+                // raced to attach between SELECT and DROP — benign; the
+                // next sweep will catch it.
+                let err = DbError::from_pg(&e);
+                if matches!(err, DbError::LockContention { .. }) {
+                    continue;
                 }
+                let mut err = err;
+                prefix_message(
+                    &mut err,
+                    &format!("replication: pg_drop_replication_slot({name}): "),
+                );
+                return Err(err);
             }
         }
     }
@@ -506,7 +569,7 @@ pub async fn drop_abandoned_slots(
 pub async fn slot_status(
     pool: &Pool,
     app_id: &str,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<Option<serde_json::Value>, DbError> {
     let slot = slot_name(app_id)?;
     let rows = pool
         .query_text_params(
@@ -515,7 +578,11 @@ pub async fn slot_status(
             &[&slot],
         )
         .await
-        .map_err(|e| format!("replication: slot_status: {e}"))?;
+        .map_err(|e| {
+            let mut err = DbError::from_pg(&e);
+            prefix_message(&mut err, "replication: slot_status: ");
+            err
+        })?;
     Ok(rows.first().map(row_to_json))
 }
 
@@ -687,5 +754,144 @@ mod tests {
         assert_eq!(arr[0]["active"], false);
         assert_eq!(arr[0]["lagBytes"], 42);
         assert_eq!(arr[0]["walStatus"], "reserved");
+    }
+
+    // -----------------------------------------------------------------
+    // Typed-error sweep [I28]
+    //
+    // These pin the `.code` the SDK branches on for the validation paths
+    // through `sanitise_app_id`, `publication_name`, and `slot_name`.
+    // The pool-bound helpers (`ensure_publication_and_slot`,
+    // `watchdog_query`, `drop_abandoned_slots`) can only be reached via
+    // a live Postgres connection; their typed-error mapping is exercised
+    // by `tests/integration.rs::b8c_*` against pg-test.
+    // -----------------------------------------------------------------
+
+    /// `sanitise_app_id("")` must surface a `ValidationFailed` carrying
+    /// the stable `.code = "invalid_app_id"` so the SDK can refuse the
+    /// request without parsing the message body.
+    #[test]
+    fn sanitise_app_id_empty_returns_validation_failed() {
+        let err = sanitise_app_id("").unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "invalid_app_id");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    /// Bad characters take the same `.code` path as the empty input —
+    /// one branch for all input refusals so the SDK has a single
+    /// constant to branch on.
+    #[test]
+    fn sanitise_app_id_invalid_char_returns_validation_failed_with_code() {
+        let err = sanitise_app_id("bad-app").unwrap_err();
+        let op = err.to_op_error();
+        match op.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "invalid_app_id");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+    }
+
+    /// `publication_name` / `slot_name` are thin wrappers around
+    /// `sanitise_app_id` — they MUST preserve the variant + code rather
+    /// than collapse to `Internal` (regression guard for the original
+    /// `Result<_, String>` → `DbError::Internal` flattening at the
+    /// dispatch boundary).
+    #[test]
+    fn publication_and_slot_name_propagate_typed_error_code() {
+        for app in ["", "has space"] {
+            let pub_err = publication_name(app).unwrap_err();
+            assert!(
+                matches!(
+                    &pub_err,
+                    DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"
+                ),
+                "publication_name({app:?}) — wrong variant: {pub_err:?}"
+            );
+            let slot_err = slot_name(app).unwrap_err();
+            assert!(
+                matches!(
+                    &slot_err,
+                    DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"
+                ),
+                "slot_name({app:?}) — wrong variant: {slot_err:?}"
+            );
+        }
+    }
+
+    /// The `prefix_message` helper must leave the variant intact so the
+    /// SQLSTATE classification still drives the wire `.code` at the V8
+    /// boundary; it only prepends the context phrase to the human body.
+    /// Without this guarantee, prefixing in `replication.rs` would
+    /// silently re-flatten everything to `Internal`.
+    #[test]
+    fn prefix_message_preserves_variant_and_code() {
+        let cases = [
+            (
+                DbError::Transient {
+                    message: "x".into(),
+                },
+                "transient",
+            ),
+            (
+                DbError::LockContention {
+                    message: "x".into(),
+                },
+                "lock_not_available",
+            ),
+            (
+                DbError::UniqueViolation {
+                    message: "x".into(),
+                },
+                "unique_violation",
+            ),
+            (
+                DbError::Internal {
+                    message: "x".into(),
+                },
+                "internal",
+            ),
+        ];
+        for (mut variant, expected_code) in cases {
+            prefix_message(&mut variant, "replication: ctx: ");
+            // Body must have been prefixed.
+            assert!(
+                variant.to_string().starts_with("replication: ctx: "),
+                "missing prefix in body: {variant:?}"
+            );
+            // Variant -> wire code unchanged.
+            let op = variant.to_op_error();
+            match op.kind {
+                zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                    assert_eq!(code, expected_code);
+                }
+                other => panic!("expected CodedError, got {other:?}"),
+            }
+        }
+    }
+
+    /// `prefix_message` is a no-op for the structured variants whose
+    /// `.code` is part of the SDK contract (Configuration, Coded,
+    /// ValidationFailed, SchemaRefused). Their messages already carry
+    /// their semantic; prefixing would distort the wire payload.
+    #[test]
+    fn prefix_message_leaves_structured_variants_alone() {
+        let mut cfg = DbError::Configuration {
+            code: "wal_level_not_logical",
+            message: "needs logical".into(),
+        };
+        prefix_message(&mut cfg, "replication: ctx: ");
+        assert_eq!(cfg.to_string(), "needs logical");
+        let op = cfg.to_op_error();
+        match op.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "wal_level_not_logical");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
     }
 }
