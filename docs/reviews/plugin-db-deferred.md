@@ -8,7 +8,21 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 14:17.
 
 **Cycle 13:47 closures (1)**: [I16] (`f6adb68b` — privatize 11 `IsolateDbContext` fields; api-surface r11 confirmed +2 ceiling step). 3 reviewers returned: **api-surface r11 = 92 (+1, NEW-R10-1 closed)**, **migration-pipeline r12 = 86 (±0, r11's clarification — I35 narrower than predicted)**, **performance r12 = 81 (±0, harness can't see I35; recommends `Row::new_for_test` cross-crate constructor + `bench_row_to_json`)**. Total +1 across 3 lenses.
 
-**Next-cycle forcing function (perf r12)**: add `#[cfg(feature = "test-utils")] pub fn Row::new_for_test(columns, values)` to `compio-postgres::row`, then a `bench_row_to_json` dimension in `crates/plugin-db/benches/` with narrow (3-col), medium (10-col), wide (50-col) synthesised rows. This is cross-crate (compio-postgres) but in-workspace; reasonable scope for a focused commit.
+**Cycle-14:17 perf forcing function — LANDED**:
+- `bf75e866 compio-postgres: add test-utils feature + Row/Statement/Column builders` — cross-crate enabler. `test_utils.rs` (+134 LOC) gated behind `test-utils` Cargo feature; `row_for_test` synthesises a real DataRow wire-format message and feeds it through `postgres_protocol::Message::parse`, so the resulting Row exercises the same `RowIndex` + decode paths as live traffic. Production builds never see the module.
+- `75d9ae5c plugin-db: add bench_row_to_json measuring [I35] index-lookup fix` — Criterion harness over narrow (3-col) / medium (10-col) / wide (50-col) shapes via the new `row_to_json_for_bench` `#[doc(hidden)]` wrapper.
+
+**Measured [I35] win** (pre vs post `251d53b4`; criterion defaults; Intel Xeon @ 2.80 GHz):
+
+| shape         | pre-I35  | post-I35 | delta   |
+|---------------|----------|----------|---------|
+| narrow_3cols  | 218.34 ns| 216.80 ns|  -0.7%  |
+| medium_10cols | 1332.5 ns| 1273.1 ns|  -4.3%  |
+| wide_50cols   | 8951.3 ns| 7762.0 ns| -13.0%  |
+
+The wide-row delta (p < 0.05) is the ground-truth size of the [I35] win. Earlier "speculative ~5×" was over-stated — the realistic win is single-digit-% at typical column counts; double-digit at 50-col. JSON decode + serde dominate; the per-column linear-scan was real but not the bottleneck.
+
+**Next-cycle forcing function (perf r13)**: with row-decode now benchable, the carrier shifts to [C3] (`first_row_or_null` serde round-trip in `crates/plugin-db/src/crud.rs:107`). Wide-row `row_to_json` at 7.77 µs is now visibly smaller than the JSON-string + V8 `JSON.parse` tail it feeds. Add a `bench_first_row_or_null` sibling that includes the `.to_string()` boundary cost; if it lands above ~3 µs at 50-col, [C3] graduates from "deferred" to a typed-`Value` resolver redesign (the runtime-crate boundary change the deferred entry currently blocks on).
 
 **Cycle 13:17 closures (3)**: [I35] (`251d53b4` — `row_to_json` O(N²) → O(N) via index lookup) + NEW-R12-2 (`18aee490` — finalise_backfill warn-shape drift caught by test-coverage r12 in my own 7c6bd2ec commit) + NEW-R10-1 (`bac64c0e` — 5 mig_lock accessor visibility demotions, 2-cycle carry from r9 NEW-R9-3). 3 reviewers returned: **api-surface r10 = 91 (+2, closed 2 of r9's NEW findings)**, **test-coverage r12 = 86 (+1, GAP-2 closed, found my drift)**, **concurrency r11 = 89 (+1, plateau broken by F1 warn-half forcing function)**. Total +4 across 3 lenses. New LOW findings: NEW-R12-1 (no tests for I6's new Err arms) + r12 recommends `tracing-subscriber` test pattern for the 9 emission sites accumulated over cycles 10:47–12:47.
 
@@ -305,9 +319,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### ~~[I35] row_to_json O(N²) per row in column count~~ — CLOSED cycle 13:17
+### ~~[I35] row_to_json O(N²) per row in column count~~ — CLOSED cycle 13:17 + MEASURED cycle 14:17
 - **Closed by**: `251d53b4 plugin-db/v8_bridge: row_to_json O(N²) → O(N) via index lookup (I35)`
-- `row_to_json` now enumerates `(idx, col)` and threads `idx: usize` into `column_to_json`. compio-postgres's `RowIndex for usize` is O(1) (bounds check + return) vs `RowIndex for str` which does a linear `position` scan with case-insensitive retry on miss. Affects every CRUD read path. No bench delta measured (perf r11 noted no forcing function; would need a wide-row bench to surface). 352 lib tests pass.
+- **Measured by**: `bf75e866` (compio-postgres test-utils) + `75d9ae5c` (bench_row_to_json) — see header table for narrow/medium/wide deltas. Wide-row (50-col) win: **-13.0%** (8.95 µs → 7.76 µs, p < 0.05). Narrow (3-col): noise. Medium (10-col): -4.3%. The change is real but smaller than the pre-measurement guess — JSON decode + serde dominate the wide-row budget; the per-column linear-scan was second-order. Affects every CRUD read path.
 
 ---
 
