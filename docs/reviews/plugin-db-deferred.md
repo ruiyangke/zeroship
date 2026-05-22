@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 07:30.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 08:00.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +594,18 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S64] MINOR (architecture r8 M11; cycle 08:00) — migrations::coded_db inline variant-walk
+- **Closed by**: `deeefe18 plugin-db/migrations: route coded_db through the shared prefix_message`
+- Last remaining inline copy of the variant-walk pattern after cbbc9059's dedup wave. `migrations::coded_db` now delegates to `crate::error::prefix_message` with the `"<context>: "` prefix; preserves double-prefix-avoidance rationale.
+
+### [S65] MEDIUM (test-coverage r8 NEW; cycle 08:00) — classify_p0001_detail had zero direct unit tests
+- **Closed by**: `f6043126 plugin-db: SQLSTATE-typed checks + classify_detail tests`
+- Extracted pure DETAIL→(code, message) map into `classify_detail_token(&str)`; 7 new unit tests cover all 5 codes + unknown-token fall-through + codes-are-distinct invariant. SDK contract pinned at unit-test level.
+
+### [S66] MINOR (error-ux r7 + code-critique r7 MIN-R7-1; cycle 08:00) — replication.rs substring-matches SQLSTATE
+- **Closed by**: `f6043126 plugin-db: SQLSTATE-typed checks + classify_detail tests`
+- `replication.rs:213` (`msg.contains("42710")`) and `:257` (`msg.contains("55000") || msg.to_lowercase().contains("wal_level")`) replaced with `e.as_db_error()?.code() == &SqlState::DUPLICATE_OBJECT` / `&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE`. Locale- and formatter-independent. Same fragility class MAJOR-R5-1 closed for auth/session.rs.
+
 ### [S61] HIGH (test-coverage r7 2-round carry; cycle 07:30) — [I42] release-flag ordering structural test
 - **Closed by**: `386f9bf5 plugin-db: add structural test for [I42] + lifecycle tests for ConsumerRunningGuard`
 - New `release_flips_flag_after_unlock_await_structural` test in lock_guard::tests. Pins bd1e7ce1's invariant via byte-offset search through `include_str!('lock_guard.rs')`. A future revert of the await/flag order trips this test at unit-test time without needing a live PG fixture. Mirrors `mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure` pattern.
@@ -708,19 +720,20 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **06:00** closed R5-M7, docs-audit r4 lock_guard hardening, MAJOR-R6-1
 - **06:55** closed MAJOR-R5-1, MAJOR-R5-4, concurrency-r7 race, docs-audit r5 CRITICAL
 - **07:30** closed [I42] structural test, ConsumerRunningGuard lifecycle tests (+ LATENT BUG caught), 3× api-surface r6 MAJORs, perf r7 N7-M0
+- **08:00** closed M11 coded_db dedup, classify_detail unit tests (+ test-coverage r8 NEW gap), MIN-R7-1 replication SQLSTATE substring-match
 
-**Net since pilot started**: ~42 closures, ~26 new findings.
+**Net since pilot started**: ~45 closures, ~27 new findings.
 
-### Pick #1 (next cycle): **Migration-pipeline F1 + F2 (long-deferred, design needed)**
+### Pick #1 (next cycle): **Migration-pipeline F1 + F2 (5+ cycle carry, design needed)**
 - **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` (F1) + `validate.rs:67-87` (F2)
-- **Fix sketch**: F1 needs owner_session_id + heartbeat column on `__zeroship_migrations` + a sweeper. F2 needs `validation_refused` added to the status CHECK constraint + transition in validate.rs.
-- **Why next**: both flagged since migration-pipeline r2 (cycle 00:47), still unmoved 5+ cycles later. Schema migration + sweeper task = medium effort.
-- **Caveat**: schema migration to `__zeroship_migrations` requires careful rollout; needs a deployment story.
+- **Fix sketch**: F1 needs owner_session_id + heartbeat column on `__zeroship_migrations` + a sweeper. F2 needs `validation_refused` added to status CHECK + transition in validate.rs.
+- **Caveat**: schema migration to `__zeroship_migrations` requires careful rollout; needs deployment story.
 
-### Pick #2 (next cycle): **Code-critique r5 MAJOR-R5-1 carry — `migrations::coded_db` inline prefix re-implementation**
-- **File**: `crates/plugin-db/src/migrations.rs::coded_db`
-- **Fix sketch**: migrations.rs has its own `coded_db` with inline variant-walk that re-implements `crate::error::prefix_message`. Route through the shared helper.
-- **Why**: architecture r8 M11. Last per-file copy of the variant-walk pattern after cbbc9059's dedup wave.
+### Pick #2 (next cycle): **error-ux r7 hint discipline gap — `DbError::Configuration` lacks `hint` field**
+- **File**: `crates/plugin-db/src/error.rs::DbError::Configuration`
+- **Fix sketch**: add a `hint: Option<String>` field to `Configuration`, mirroring `ValidationFailed`. Operator-remediation prose belongs in hint, not message body.
+- **Why next**: small surgical change; error-ux r7 INFO finding; `Configuration` is the variant most needing remediation text.
+- **Caveat**: enum variant change → may need updating ~6 construction sites in replication.rs, wal_consumer.rs.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - Status unchanged; needs retry/backoff policy decision.
