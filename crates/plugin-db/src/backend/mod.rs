@@ -325,6 +325,30 @@ pub trait Backend: 'static {
         app_id: &str,
         id: i64,
     ) -> Result<(), DbError>;
+
+    // ----- create-index recovery -------------------------------------
+
+    /// Idempotent `CREATE INDEX CONCURRENTLY` with retry + audit.
+    /// SQLSTATE-driven: unique/not-null/fk/check violations are fatal;
+    /// deadlock / disk-full / OOM retry up to a small budget.
+    ///
+    /// This is the second pass of `register_model::apply` — Postgres-
+    /// specific because CIC is a Postgres feature (the trait keeps the
+    /// signature; alternate backends would have to map to whatever
+    /// online-index primitive they provide).
+    ///
+    /// Returns `Ok(())` on success; structured error envelopes
+    /// (JSON-encoded as the message) on terminal failures so the SDK's
+    /// `validation_refused` / `unique_violation` paths render cleanly.
+    #[allow(async_fn_in_trait)]
+    async fn create_index_with_recovery(
+        &self,
+        app_id: &str,
+        collection: &str,
+        spec: &crate::query::IndexSpec,
+        deploy_id: &str,
+        schema_version: i32,
+    ) -> Result<(), String>;
 }
 
 /// Opaque trait-object handle that the per-isolate context stores.
