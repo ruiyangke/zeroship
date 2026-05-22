@@ -484,7 +484,7 @@ async fn create_index_with_recovery_audited(
                 // INVALID index — audit the retry, drop, and loop.
                 let row = log_retry("invalid_index_landed", attempt, None, None);
                 if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                    if let Err(e) = crate::audit::update_audit_status(
+                    if let Err(audit_err) = crate::audit::update_audit_status(
                         pool,
                         app_id,
                         id,
@@ -493,16 +493,13 @@ async fn create_index_with_recovery_audited(
                     )
                     .await
                     {
-                        // Migration-pipeline F1 warn-half: audit row
-                        // stays in 'running' on failure; logging here
-                        // surfaces the secondary failure without
-                        // changing the retry-loop semantics.
                         tracing::warn!(
-                            app_id,
+                            app_id = %app_id,
                             audit_id = id,
+                            transition = "Failed/invalid_index",
                             attempt,
-                            error = ?e,
-                            "update_audit_status(Failed/invalid_index) failed",
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
                         );
                     }
                 }
@@ -539,7 +536,7 @@ async fn create_index_with_recovery_audited(
                         Some(fmt_db_err(&e)),
                     );
                     if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                        if let Err(upd_err) = crate::audit::update_audit_status(
+                        if let Err(audit_err) = crate::audit::update_audit_status(
                             pool,
                             app_id,
                             id,
@@ -548,16 +545,13 @@ async fn create_index_with_recovery_audited(
                         )
                         .await
                         {
-                            // F1 warn-half — the data-violation error
-                            // still propagates via `refuse(...)`; the
-                            // warn surfaces only the audit-write
-                            // secondary failure.
                             tracing::warn!(
-                                app_id,
+                                app_id = %app_id,
                                 audit_id = id,
+                                transition = "Failed/data_violation",
                                 sqlstate = code_str,
-                                error = ?upd_err,
-                                "update_audit_status(Failed/data_violation) failed",
+                                audit_err = %audit_err,
+                                "update_audit_status failed; row stays in 'running' until reset",
                             );
                         }
                     }
@@ -591,7 +585,7 @@ async fn create_index_with_recovery_audited(
                     Some(fmt_db_err(&e)),
                 );
                 if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                    if let Err(upd_err) = crate::audit::update_audit_status(
+                    if let Err(audit_err) = crate::audit::update_audit_status(
                         pool,
                         app_id,
                         id,
@@ -600,16 +594,14 @@ async fn create_index_with_recovery_audited(
                     )
                     .await
                     {
-                        // F1 warn-half — surfaces the audit-write
-                        // failure without changing the retry-loop
-                        // decision below.
                         tracing::warn!(
-                            app_id,
+                            app_id = %app_id,
                             audit_id = id,
+                            transition = "Failed/index_build",
                             attempt,
                             transient,
-                            error = ?upd_err,
-                            "update_audit_status(Failed/index_build) failed",
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
                         );
                     }
                 }

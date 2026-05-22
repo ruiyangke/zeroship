@@ -646,6 +646,8 @@ pub async fn exec_commit_batch(
         {
             tracing::warn!(
                 app_id = %app_id,
+                name = %name,
+                collection = %collection,
                 audit_id = audit_id,
                 terminal = ?terminal,
                 error = %e,

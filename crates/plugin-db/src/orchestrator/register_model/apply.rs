@@ -160,7 +160,7 @@ pub(crate) async fn apply<'p, B: Backend>(
         if let Some(id) = audit_id {
             match &result {
                 Ok(_) => {
-                    if let Err(e) = backend
+                    if let Err(audit_err) = backend
                         .update_audit_status(
                             &app_id,
                             id,
@@ -169,15 +169,18 @@ pub(crate) async fn apply<'p, B: Backend>(
                         )
                         .await
                     {
-                        // Migration-pipeline F1 warn-half: the audit
-                        // row stays in `Running` until the next reset
-                        // sweeps it. Logging here gives operators a
-                        // signal to investigate stuck rows.
+                        // F1 warn-half: the audit row stays in
+                        // `Running` until the next reset sweeps it.
+                        // Logging gives operators a signal to
+                        // investigate stuck rows. Field shape pinned
+                        // by code-critique r11 MINOR-R11-1 (unified
+                        // across all 5 F1 sites).
                         tracing::warn!(
                             app_id = %app_id,
                             audit_id = id,
-                            error = ?e,
-                            "update_audit_status(Applied) failed; row stays in 'running' until reset",
+                            transition = "Applied",
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
                         );
                     }
                 }
@@ -187,7 +190,7 @@ pub(crate) async fn apply<'p, B: Backend>(
                     // strips for JS are recoverable here only as the
                     // message body.
                     let msg = e.clone().into_string();
-                    if let Err(upd_err) = backend
+                    if let Err(audit_err) = backend
                         .update_audit_status(
                             &app_id,
                             id,
@@ -199,13 +202,17 @@ pub(crate) async fn apply<'p, B: Backend>(
                         // Same F1 warn-half: the underlying DDL error
                         // still propagates via `result`, so JS still
                         // sees the failure — the warn surfaces the
-                        // audit-write secondary failure.
+                        // audit-write secondary failure. Both errors
+                        // are emitted because they have different
+                        // root causes (primary DDL vs secondary
+                        // audit-write).
                         tracing::warn!(
                             app_id = %app_id,
                             audit_id = id,
-                            ddl_error = %msg,
-                            audit_error = ?upd_err,
-                            "update_audit_status(Failed) failed; row stays in 'running' until reset",
+                            transition = "Failed",
+                            ddl_err = %msg,
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'running' until reset",
                         );
                     }
                 }
