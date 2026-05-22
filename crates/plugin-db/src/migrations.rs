@@ -76,28 +76,22 @@ fn coded(code: &str, message: &str, hint: Option<&str>) -> OpError {
 /// the lifecycle context AND the SQLSTATE message; the `.code` stays
 /// the SQLSTATE classification.
 /// Stamp a `DbError` with a context phrase and convert to `OpError`.
-/// Replaces the previous `coded_sql(context, compio_postgres::Error)`
-/// helper — Backend methods already classify Postgres errors into
-/// `DbError`, so we just take the typed error here.
+///
+/// Thin wrapper around [`crate::error::prefix_message`] — kept as a
+/// migrations-local helper so the call sites read naturally
+/// (`coded_db("migration row UPDATE", e)`). The variant-walk logic
+/// lives in `crate::error` (architecture r8 M11; previously this
+/// function open-coded the same match arms found in audit.rs,
+/// auth/*.rs, diff.rs, replication.rs — all consolidated at
+/// cbbc9059).
 fn coded_db(context: &str, e: crate::error::DbError) -> OpError {
     let mut db_err = e;
-    match &mut db_err {
-        crate::error::DbError::UniqueViolation { message }
-        | crate::error::DbError::FkViolation { message }
-        | crate::error::DbError::NotNullViolation { message }
-        | crate::error::DbError::CheckViolation { message }
-        | crate::error::DbError::Serialization { message }
-        | crate::error::DbError::LockContention { message }
-        | crate::error::DbError::Transient { message }
-        | crate::error::DbError::Internal { message } => {
-            // `message` already starts with "db: " from `walk_pg_chain`;
-            // prepend only the lifecycle context phrase to avoid the
-            // doubly-prefixed "db: {context} failed: db: ..." output.
-            // Restored from 60ca1ad6 — silently reverted by ed697c45.
-            *message = format!("{context}: {message}");
-        }
-        _ => {}
-    }
+    // `message` already starts with "db: " from walk_pg_chain;
+    // prepend only the lifecycle context phrase to avoid the
+    // doubly-prefixed "db: {context} failed: db: ..." output
+    // (restored from 60ca1ad6, silently reverted by ed697c45,
+    // re-restored by dec2bd42).
+    crate::error::prefix_message(&mut db_err, &format!("{context}: "));
     db_err.to_op_error()
 }
 
