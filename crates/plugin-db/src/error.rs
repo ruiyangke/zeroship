@@ -37,6 +37,7 @@ use zeroship_runtime::state::OpError;
 /// Postgres-shaped errors (preserves SQLSTATE + walks the source chain
 /// so the cause reaches the JS console).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DbError {
     /// DDL deploy refused before any rows changed — typically a
     /// `validation_refused` envelope from
@@ -181,13 +182,15 @@ impl DbError {
     /// directly.
     pub fn to_op_error(self) -> OpError {
         match self {
-            DbError::SchemaRefused { envelope_json, .. } => {
-                // SchemaRefused already carries a JSON envelope the SDK
-                // parses verbatim. We stamp the inner `code` field so
-                // the runtime path is uniform, but the envelope itself
-                // stays the wire payload (callers may need to JSON.parse
-                // err.message). See `register_model_dispatch`.
-                OpError::error(envelope_json)
+            DbError::SchemaRefused { code, envelope_json } => {
+                // SchemaRefused carries a JSON envelope the SDK parses
+                // verbatim. We stamp the static `code` so SDK callers
+                // can branch on `e.code === "validation_refused"` without
+                // resorting to JSON.parse(e.message). The envelope JSON
+                // stays the message body so existing callers that
+                // serde_json::from_str(&err.to_string()) continue to
+                // parse the envelope correctly. See `register_model_dispatch`.
+                OpError::coded(code, envelope_json, None::<String>)
             }
             DbError::ValidationFailed { code, message, hint } => {
                 OpError::coded(code, message, hint)
@@ -209,9 +212,11 @@ impl DbError {
                 message,
                 Some("retry the transaction; Postgres SSI / deadlock detector aborted it".to_string()),
             ),
-            DbError::LockContention { message } => {
-                OpError::coded("lock_not_available", message, None::<String>)
-            }
+            DbError::LockContention { message } => OpError::coded(
+                "lock_not_available",
+                message,
+                Some("Retry after a short backoff; another worker holds the lock briefly.".to_string()),
+            ),
             DbError::Transient { message } => OpError::coded(
                 "transient",
                 message,
@@ -401,6 +406,33 @@ mod tests {
         assert_eq!(s, envelope);
     }
 
+    /// `SchemaRefused` must stamp `.code = "validation_refused"` on the
+    /// JS exception so SDK callers can branch on `e.code` without
+    /// JSON.parse'ing the message. The message body must still be the
+    /// raw envelope JSON so existing callers that
+    /// `serde_json::from_str(&err.to_string())` continue to parse it.
+    #[test]
+    fn schema_refused_stamps_code_and_preserves_envelope_as_message() {
+        let envelope = r#"{"code":"validation_refused","violations":[]}"#;
+        let op = DbError::SchemaRefused {
+            code: "validation_refused",
+            envelope_json: envelope.to_string(),
+        }
+        .to_op_error();
+        match &op.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(code, "validation_refused");
+                assert!(hint.is_none());
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        // Message must be the raw envelope so existing JSON.parse callers work.
+        assert_eq!(op.message, envelope);
+        // Verify it round-trips as valid JSON (the serde_json::from_str path).
+        serde_json::from_str::<serde_json::Value>(&op.message)
+            .expect("message must be valid JSON envelope");
+    }
+
     #[test]
     fn coded_passthrough_preserves_code() {
         let e = DbError::Coded {
@@ -473,11 +505,10 @@ mod tests {
         }
     }
 
-    /// Retryable variants (Serialization, Transient) must carry a
-    /// human-facing `hint` so the SDK can surface "retry the
-    /// transaction" / "retry after backoff" without re-deriving it.
-    /// Non-retryable ones (UniqueViolation, etc.) must NOT — the SDK
-    /// treats a hinted error as recoverable advice.
+    /// Retryable variants (Serialization, Transient, LockContention) must
+    /// carry a human-facing `hint` so the SDK can surface recovery advice
+    /// without re-deriving it. Non-retryable ones (UniqueViolation, etc.)
+    /// must NOT — the SDK treats a hinted error as recoverable advice.
     #[test]
     fn retryable_variants_carry_hint() {
         fn op_hint(e: DbError) -> Option<String> {
@@ -488,6 +519,8 @@ mod tests {
         }
         assert!(op_hint(DbError::Serialization { message: "x".into() }).is_some());
         assert!(op_hint(DbError::Transient { message: "x".into() }).is_some());
+        // LockContention is retriable — must also carry a hint.
+        assert!(op_hint(DbError::LockContention { message: "x".into() }).is_some());
         // Non-retryable violations must not advise a retry.
         assert!(op_hint(DbError::UniqueViolation { message: "x".into() }).is_none());
         assert!(op_hint(DbError::FkViolation { message: "x".into() }).is_none());
