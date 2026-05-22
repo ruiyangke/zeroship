@@ -290,12 +290,9 @@ pub async fn ensure_publication_and_slot(
         lsn = rows
             .first()
             .map(|r| r.get::<_, String>("lsn"))
-            .ok_or_else(|| {
-                DbError::Internal {
-                    message: "replication: pg_create_logical_replication_slot returned no row"
-                        .to_string(),
-                }
-                .into_string()
+            .ok_or_else(|| DbError::Internal {
+                message: "replication: pg_create_logical_replication_slot returned no row"
+                    .to_string(),
             })?;
         created = true;
     } else {
