@@ -160,14 +160,26 @@ pub(crate) async fn apply<'p, B: Backend>(
         if let Some(id) = audit_id {
             match &result {
                 Ok(_) => {
-                    let _ = backend
+                    if let Err(e) = backend
                         .update_audit_status(
                             &app_id,
                             id,
                             crate::audit::TerminalStatus::Applied,
                             None,
                         )
-                        .await;
+                        .await
+                    {
+                        // Migration-pipeline F1 warn-half: the audit
+                        // row stays in `Running` until the next reset
+                        // sweeps it. Logging here gives operators a
+                        // signal to investigate stuck rows.
+                        tracing::warn!(
+                            app_id = %app_id,
+                            audit_id = id,
+                            error = ?e,
+                            "update_audit_status(Applied) failed; row stays in 'running' until reset",
+                        );
+                    }
                 }
                 Err(e) => {
                     // Render the typed error to a flat string for the
@@ -175,14 +187,27 @@ pub(crate) async fn apply<'p, B: Backend>(
                     // strips for JS are recoverable here only as the
                     // message body.
                     let msg = e.clone().into_string();
-                    let _ = backend
+                    if let Err(upd_err) = backend
                         .update_audit_status(
                             &app_id,
                             id,
                             crate::audit::TerminalStatus::Failed,
                             Some(msg.as_str()),
                         )
-                        .await;
+                        .await
+                    {
+                        // Same F1 warn-half: the underlying DDL error
+                        // still propagates via `result`, so JS still
+                        // sees the failure — the warn surfaces the
+                        // audit-write secondary failure.
+                        tracing::warn!(
+                            app_id = %app_id,
+                            audit_id = id,
+                            ddl_error = %msg,
+                            audit_error = ?upd_err,
+                            "update_audit_status(Failed) failed; row stays in 'running' until reset",
+                        );
+                    }
                 }
             }
         }

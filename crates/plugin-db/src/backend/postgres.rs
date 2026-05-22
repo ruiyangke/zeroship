@@ -484,14 +484,27 @@ async fn create_index_with_recovery_audited(
                 // INVALID index — audit the retry, drop, and loop.
                 let row = log_retry("invalid_index_landed", attempt, None, None);
                 if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                    let _ = crate::audit::update_audit_status(
+                    if let Err(e) = crate::audit::update_audit_status(
                         pool,
                         app_id,
                         id,
                         crate::audit::TerminalStatus::Failed,
                         Some("index landed INVALID"),
                     )
-                    .await;
+                    .await
+                    {
+                        // Migration-pipeline F1 warn-half: audit row
+                        // stays in 'running' on failure; logging here
+                        // surfaces the secondary failure without
+                        // changing the retry-loop semantics.
+                        tracing::warn!(
+                            app_id,
+                            audit_id = id,
+                            attempt,
+                            error = ?e,
+                            "update_audit_status(Failed/invalid_index) failed",
+                        );
+                    }
                 }
                 let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
                 if attempt == MAX_RETRIES {
@@ -526,14 +539,27 @@ async fn create_index_with_recovery_audited(
                         Some(fmt_db_err(&e)),
                     );
                     if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                        let _ = crate::audit::update_audit_status(
+                        if let Err(upd_err) = crate::audit::update_audit_status(
                             pool,
                             app_id,
                             id,
                             crate::audit::TerminalStatus::Failed,
                             Some("data violates constraint"),
                         )
-                        .await;
+                        .await
+                        {
+                            // F1 warn-half — the data-violation error
+                            // still propagates via `refuse(...)`; the
+                            // warn surfaces only the audit-write
+                            // secondary failure.
+                            tracing::warn!(
+                                app_id,
+                                audit_id = id,
+                                sqlstate = code_str,
+                                error = ?upd_err,
+                                "update_audit_status(Failed/data_violation) failed",
+                            );
+                        }
                     }
                     let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
                     return Err(refuse(serde_json::json!({
@@ -565,14 +591,27 @@ async fn create_index_with_recovery_audited(
                     Some(fmt_db_err(&e)),
                 );
                 if let Ok(id) = crate::audit::write_audit_row(pool, app_id, &row).await {
-                    let _ = crate::audit::update_audit_status(
+                    if let Err(upd_err) = crate::audit::update_audit_status(
                         pool,
                         app_id,
                         id,
                         crate::audit::TerminalStatus::Failed,
                         Some("index build failed"),
                     )
-                    .await;
+                    .await
+                    {
+                        // F1 warn-half — surfaces the audit-write
+                        // failure without changing the retry-loop
+                        // decision below.
+                        tracing::warn!(
+                            app_id,
+                            audit_id = id,
+                            attempt,
+                            transient,
+                            error = ?upd_err,
+                            "update_audit_status(Failed/index_build) failed",
+                        );
+                    }
                 }
 
                 let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
