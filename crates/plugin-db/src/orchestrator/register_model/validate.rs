@@ -64,8 +64,29 @@ pub(crate) async fn validate<B: Backend>(
         .collect();
 
     if !destructive.is_empty() && ctx.strictness != "off" {
-        // Audit each destructive op as pending so operators can see what
-        // was refused. Then return a validation_refused envelope.
+        // F2 resolution (migration-pipeline r2 §F2; 4+ cycle carry):
+        // every audit row must reach a terminal status. Previously the
+        // destructive-op Pending row was written here and then ORPHANED —
+        // strict mode short-circuited via the envelope without touching
+        // the row, and lenient mode let `apply` skip the destructive op
+        // without terminalising it. Operators querying
+        // `status = 'pending'` saw phantom in-flight work that never
+        // resolved.
+        //
+        // The fix writes the Pending row AND immediately drives it to
+        // `Failed` with `validation_refused` as the error message
+        // marker. We use `Failed` (not a new `ValidationRefused`
+        // terminal) because the audit table's status CHECK constraint
+        // (`audit.rs:218-220`) doesn't include `validation_refused`,
+        // and rolling a new terminal across existing tables would need
+        // a CHECK ALTER on every app's `__zeroship_migrations` — out
+        // of scope for a refactor-safe pickup. The error_message
+        // marker is the distinguishable token (`validation_refused`)
+        // operators grep on, the change_class column carries
+        // `destructive`, and the deploy_id ties the row to the rejected
+        // deploy. The design doc's "new ValidationRefused terminal"
+        // recommendation is preserved as future work gated on a
+        // coordinated CHECK rewrite.
         for op in &destructive {
             let row = crate::audit::AuditRow {
                 collection: op.collection.clone(),
@@ -82,8 +103,33 @@ pub(crate) async fn validate<B: Backend>(
             // Best-effort: a failure to write the audit row should not
             // mask the envelope — tracing::warn so it shows in worker
             // logs but the user-facing error stays clean.
-            if let Err(e) = backend.write_audit_row(&ctx.app_id, &row).await {
-                tracing::warn!(error = ?e, "audit: failed to log destructive op");
+            match backend.write_audit_row(&ctx.app_id, &row).await {
+                Ok(audit_id) => {
+                    // Terminalise immediately to close the orphan-Pending
+                    // window (F2). Field shape matches the F1 warn-half
+                    // family (`audit_err`, `transition`) so operators
+                    // grep the same emissions.
+                    if let Err(audit_err) = backend
+                        .update_audit_status(
+                            &ctx.app_id,
+                            audit_id,
+                            crate::audit::TerminalStatus::Failed,
+                            Some("validation_refused"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            app_id = %ctx.app_id,
+                            audit_id = audit_id,
+                            transition = "Failed/validation_refused",
+                            audit_err = %audit_err,
+                            "update_audit_status failed; row stays in 'pending' until reset",
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = ?e, "audit: failed to log destructive op");
+                }
             }
         }
 
