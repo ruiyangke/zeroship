@@ -980,4 +980,72 @@ mod tests {
             "audit bootstrap failed: some unclassified failure"
         );
     }
+
+    // ----- [I6] release_advisory_lock warn-shape documentation ---------
+    //
+    // Two `release_advisory_lock` callers in this file (lines 291 and
+    // 670 at HEAD) emit `tracing::warn!` with the same field shape:
+    // `{app_id, name, error}` + a message identifying the call site
+    // (cancelled-refusal vs backfill-finalise). Pin the shape so a
+    // future refactor of the unlock-SQL retry path doesn't drop a
+    // field that the runbook greps on. test-coverage r13 NEW-R13-2.
+    //
+    // Same caveat as the F1 documentation snapshot in
+    // `orchestrator/register_model/apply.rs`: this test re-emits the
+    // SAME `tracing::warn!` syntax, so it does NOT drive the live
+    // unlock-SQL path — it only documents the shape contributors
+    // must keep aligned across the two sites. End-to-end coverage
+    // lives in `tests/integration.rs`.
+
+    #[test]
+    fn i6_release_advisory_lock_warn_shape_documentation_snapshot() {
+        use crate::test_support::capture;
+        use tracing::Level;
+
+        // The exact syntax from line 291 (cancelled-refusal path).
+        let app_id = "app_t";
+        let name = "mig_2026_01";
+        let e = "lock release failed: connection dropped";
+        let ((), events) = capture(|| {
+            tracing::warn!(
+                app_id,
+                name,
+                error = %e,
+                "release_advisory_lock failed on cancelled-refusal path (lock auto-releases on session end)",
+            );
+        });
+
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.level, Level::WARN);
+
+        // Three-field contract — operator runbooks grep these names.
+        for n in &["app_id", "name", "error"] {
+            assert!(
+                ev.fields.contains_key(*n),
+                "[I6] warn-shape contract: field `{n}` MUST be present \
+                 on both release_advisory_lock sites in migrations.rs. \
+                 Fields: {:?}",
+                ev.fields,
+            );
+        }
+        assert_eq!(
+            ev.fields.get("app_id").map(String::as_str),
+            Some("app_t"),
+        );
+        assert_eq!(
+            ev.fields.get("name").map(String::as_str),
+            Some("mig_2026_01"),
+        );
+        assert!(
+            ev.message.contains("release_advisory_lock failed"),
+            "message must name the failed operation for log-grep: {}",
+            ev.message,
+        );
+        assert!(
+            ev.message.contains("lock auto-releases on session end"),
+            "message must inform operators of the auto-release fallback: {}",
+            ev.message,
+        );
+    }
 }

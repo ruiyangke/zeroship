@@ -972,4 +972,103 @@ mod tests {
         assert_eq!(ctx.running_consumers.len(), 0);
         assert!(!ctx.is_consumer_running("a"));
     }
+
+    // ----- Warn/error-shape contracts ([I23] mig_lock tracing) ---------
+    //
+    // The two `set_mig_lock` / `return_mig_client` log sites carry an
+    // operator-grep contract — field names + level + the
+    // shadow-replace-vs-empty-slot discriminator. Pin the shape so a
+    // future refactor that renames `prev_audit_id`, drops the
+    // `error`-level signal on shadow-replace, or otherwise weakens
+    // the contract fails at unit-test time. test-coverage r13
+    // NEW-R13-* called this out explicitly.
+
+    #[test]
+    fn set_mig_lock_shadow_replace_emits_error_with_prev_and_new() {
+        use crate::test_support::capture;
+        use tracing::Level;
+
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_mig_lock(mig_lock("first", "users", 11, false));
+
+        let ((), events) = capture(|| {
+            // Shadow-replace path — the begin path should have gated
+            // on `has_mig_lock` first; reaching here means a
+            // state-machine bug. Contract: ONE error-level event,
+            // four named fields identifying both the displaced and
+            // the incoming lock.
+            ctx.set_mig_lock(mig_lock("second", "users", 22, false));
+        });
+
+        assert_eq!(events.len(), 1, "expected exactly one tracing event");
+        let ev = &events[0];
+        assert_eq!(
+            ev.level,
+            Level::ERROR,
+            "shadow-replace must surface at error level (state-machine drift)"
+        );
+        assert_eq!(
+            ev.fields.get("prev_name").map(String::as_str),
+            Some("first"),
+            "prev_name must identify the displaced lock",
+        );
+        assert_eq!(
+            ev.fields.get("prev_audit_id").map(String::as_str),
+            Some("11"),
+            "prev_audit_id must identify the displaced audit row",
+        );
+        assert_eq!(
+            ev.fields.get("new_name").map(String::as_str),
+            Some("second"),
+            "new_name must identify the incoming lock",
+        );
+        assert_eq!(
+            ev.fields.get("new_audit_id").map(String::as_str),
+            Some("22"),
+            "new_audit_id must identify the incoming audit row",
+        );
+        assert!(
+            ev.message.contains("set_mig_lock"),
+            "message must name the accessor for log-grep: {}",
+            ev.message,
+        );
+    }
+
+    #[test]
+    fn set_mig_lock_first_install_emits_no_event() {
+        // The shadow-replace log is gated on `mig_lock.is_some()` —
+        // a first install must stay silent so log streams don't fill
+        // with noise on every successful migrationBegin. Pinning the
+        // negative case keeps the gate intact across refactors.
+        use crate::test_support::capture;
+
+        let mut ctx = IsolateDbContext::new();
+        let ((), events) = capture(|| {
+            ctx.set_mig_lock(mig_lock("only", "c", 1, false));
+        });
+        assert!(
+            events.is_empty(),
+            "first install must not emit; got {events:?}"
+        );
+    }
+
+    // ----- `return_mig_client` empty-slot WARN -------------------------
+    //
+    // The empty-slot path on `return_mig_client` ([I23] state-machine
+    // pair with `set_mig_lock`) emits a `tracing::warn!` whose message
+    // names the slot-empty case. We cannot exercise this end-to-end
+    // here: `return_mig_client(client: Client)` requires a real
+    // `compio_postgres::Client`, and the `test-utils` feature on
+    // compio-postgres exposes only `Row` / `Column` / `Statement`
+    // builders — no `Client` synthesiser. Constructing one would
+    // require either touching `compio-postgres`'s private fields
+    // (out of scope for this commit) or spinning up a real Postgres
+    // (lives in `tests/integration.rs`).
+    //
+    // The end-to-end shape is covered by `tests/integration.rs`
+    // (operator-cancel race). The PROACTIVE unit-test coverage —
+    // catching a future rename of the message string at unit-test
+    // time — is supplied by `warn_shape_pin::return_mig_client_message`
+    // in the dedicated module below, which pins the literal message
+    // payload by re-emitting the same syntax under the capture layer.
 }

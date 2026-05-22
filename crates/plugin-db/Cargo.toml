@@ -33,6 +33,15 @@ compio-postgres = { workspace = true, features = ["test-utils"] }
 # Initial bench target is `build_find` / `build_insert` (see
 # `benches/bench_query_build.rs` for the rationale).
 criterion = { workspace = true }
+# Test-coverage r12 NEW-R11-1 + NEW-R12-1: the F1 warn-half (5d9acab8
+# / fcf7ce3c / 7c6bd2ec / 18aee490) and the [I6] release_advisory_lock
+# typed-error caller paths emit 9+ structured `tracing::warn!` /
+# `tracing::error!` events whose field shape is operator-grep-contract.
+# `tracing-subscriber`'s test layer captures emissions so unit tests
+# can pin the field set + transition discriminator. Caught my own
+# 7c6bd2ec drift in cycle 13:17 — a snapshot test would have caught
+# it pre-commit.
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"

@@ -110,6 +110,25 @@ pub(crate) mod wal_consumer;
 #[cfg(feature = "test-helpers")]
 pub mod wal_consumer;
 
+// Test-only: `tracing-subscriber` capture layer for warn/error-shape
+// contract tests (test-coverage r11 NEW-R11-1 + r12 NEW-R12-1 + r13
+// NEW-R13-*). See `test_support/mod.rs` for the module preamble.
+//
+// Gate note: `cfg(test)` only (NOT `any(test, feature = "test-helpers")`)
+// because `tracing-subscriber` is a `[dev-dependencies]` entry — it
+// is unavailable when downstream crates compile the lib with
+// `--features test-helpers` (which is non-test compilation from the
+// integration target's perspective). Moving `tracing-subscriber` out
+// of dev-deps would pollute the release dependency graph. The
+// `test_support` surface is therefore reachable from in-crate unit
+// tests (`#[cfg(test)] mod tests { use crate::test_support; }`) but
+// not from `crates/plugin-db/tests/integration.rs`. End-to-end
+// warn-shape coverage from integration tests would need a separate
+// helper rebuilt off `tracing_subscriber` re-exposed elsewhere; not
+// in scope for NEW-R11-1.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // ---------------------------------------------------------------------------
 // Per-isolate state
 // ---------------------------------------------------------------------------

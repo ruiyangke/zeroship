@@ -5912,6 +5912,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "v8",
  "zeroship-runtime",

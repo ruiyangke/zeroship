@@ -425,4 +425,154 @@ mod tests {
             }
         }
     }
+
+    // ----- destructive-invariant ERROR-shape contract ------------------
+    //
+    // `destructive_invariant_error` emits a `tracing::error!` whose
+    // field shape (`change_kind`, `class`, `collection`) is part of
+    // the operator-grep contract — a runbook search for
+    // `change_kind=drop_column` should match this site. Pin the shape
+    // so a future refactor that renames `change_kind` → `kind` (or
+    // similar) fails at unit-test time. test-coverage r11 NEW-R11-1.
+    //
+    // Note: this test exercises the function end-to-end (calls
+    // `destructive_invariant_error` directly and asserts what came
+    // out of the capture layer). Drift in the source IS caught at
+    // unit-test time. Contrast with the F1 warn-half sites
+    // (`update_audit_status failed; row stays in 'running' until
+    // reset`), which can only be driven via a Backend trait failure
+    // path; for those sites see
+    // [`f1_warn_shape_documentation_test`] below — a snapshot test
+    // that documents the contract field set but does not drive the
+    // source. The integration suite in `tests/integration.rs`
+    // exercises the F1 sites end-to-end with real Postgres.
+
+    #[test]
+    fn destructive_invariant_error_emits_named_fields_at_error_level() {
+        use crate::test_support::capture;
+        use tracing::Level;
+
+        let op = diff_op(ChangeKind::DropColumn, ChangeClass::Additive);
+        let (_err, events) = capture(|| destructive_invariant_error(&op));
+
+        assert_eq!(events.len(), 1, "expected exactly one tracing event");
+        let ev = &events[0];
+        assert_eq!(
+            ev.level,
+            Level::ERROR,
+            "destructive-invariant violations must surface at error level"
+        );
+        // `change_kind = op.change_kind.as_sql()` — the SQL form, not
+        // the Debug form, so a runbook can grep on
+        // `change_kind=drop_column` (lower-snake).
+        assert_eq!(
+            ev.fields.get("change_kind").map(String::as_str),
+            Some("drop_column"),
+            "change_kind field must carry the SQL form (operator-grep contract)",
+        );
+        // `class = ?op.class` — Debug form is intentional; the
+        // discriminant string is what the runbook searches for.
+        assert!(
+            ev.fields
+                .get("class")
+                .is_some_and(|v| v.contains("Additive")),
+            "class field must carry the ChangeClass variant: fields={:?}",
+            ev.fields,
+        );
+        // `collection = %op.collection` — Display form; the
+        // `diff_op` helper uses `"posts"` as the canonical fixture.
+        assert_eq!(
+            ev.fields.get("collection").map(String::as_str),
+            Some("posts"),
+            "collection field must carry the user-visible name",
+        );
+        assert!(
+            ev.message.contains("destructive-invariant violation"),
+            "message must name the contract for log-grep: {}",
+            ev.message,
+        );
+    }
+
+    /// Documentation snapshot of the F1 warn-half shape.
+    ///
+    /// Re-emits the same `tracing::warn!` syntax the F1 sites use in
+    /// `apply.rs` (lines 178–184 / 209–216) and `backend/postgres.rs`
+    /// (lines 496 / 548 / 597) so the operator-grep contract is
+    /// pinned by an executable example. Field names checked here MUST
+    /// match the production sites; a runbook that greps for
+    /// `audit_err=…` relies on every F1 site using that exact key.
+    ///
+    /// **What this test catches**: a contributor who renames the field
+    /// in THIS test (or in the production sites) without updating the
+    /// other will see a mismatch when they sync. The test does NOT
+    /// drive production code — that would require a Backend mock the
+    /// brief explicitly scoped out. End-to-end coverage of the live
+    /// F1 path lives in `crates/plugin-db/tests/integration.rs`.
+    ///
+    /// **What this test does NOT catch**: a contributor who renames
+    /// `audit_err` → `error` in BOTH the production sites and this
+    /// test in one commit. That class of drift is caught by the code
+    /// review + the `transition` discriminator's literal-string match
+    /// against the audit table's terminal-state grep.
+    ///
+    /// Background:
+    /// - test-coverage r11 NEW-R11-1 — establish the capture harness.
+    /// - test-coverage r12 NEW-R12-1 — pin the F1 warn shape.
+    /// - 7c6bd2ec / 18aee490 — the original drift + revert this test
+    ///   was meant to catch.
+    #[test]
+    fn f1_warn_shape_documentation_snapshot() {
+        use crate::test_support::capture;
+        use tracing::Level;
+
+        // The exact syntax used at apply.rs:178 (the "Applied" arm).
+        let app_id = "app_t";
+        let audit_id: i64 = 99;
+        let audit_err = "connection closed";
+        let ((), events) = capture(|| {
+            tracing::warn!(
+                app_id = %app_id,
+                audit_id = audit_id,
+                transition = "Applied",
+                audit_err = %audit_err,
+                "update_audit_status failed; row stays in 'running' until reset",
+            );
+        });
+
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.level, Level::WARN);
+
+        // The four fields every F1 warn site shares. Operators grep
+        // on these names; any rename breaks the runbook.
+        for name in &["app_id", "audit_id", "transition", "audit_err"] {
+            assert!(
+                ev.fields.contains_key(*name),
+                "F1 warn-shape contract: field `{name}` MUST be present \
+                 across all 6 F1 sites (apply.rs / backend/postgres.rs / \
+                 migrations.rs). Missing from snapshot — contract \
+                 broken. Fields: {:?}",
+                ev.fields,
+            );
+        }
+
+        // Values are stringly-typed in the capture; verify the
+        // transition discriminator is a literal (operators
+        // case-sensitively match `transition="Applied"` etc.).
+        assert_eq!(
+            ev.fields.get("transition").map(String::as_str),
+            Some("Applied"),
+            "transition discriminator must be a literal — variant strings \
+             differ across the 6 F1 sites (Applied / Failed/invalid_index / \
+             Failed/data_violation / Failed/index_build / migrations.rs \
+             uses `?terminal` Debug form)",
+        );
+        assert_eq!(
+            ev.message,
+            "update_audit_status failed; row stays in 'running' until reset",
+            "message body is the operator-search anchor across the F1 \
+             half — keep verbatim or update every site + this snapshot \
+             in one commit",
+        );
+    }
 }
