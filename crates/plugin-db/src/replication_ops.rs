@@ -229,19 +229,21 @@ pub fn start_replication_consumer_dispatch<'s>(
         };
 
         // Step 2: build the consumer descriptor.
+        //
+        // WalConsumer::new now returns Result<_, DbError> (post r5-r7
+        // MAJOR-R5-4 fix). Two failure classes flow through verbatim:
+        // - DbError::ValidationFailed { code: "invalid_app_id" } for
+        //   developer/deploy errors (sanitise failure).
+        // - DbError::Configuration { code: "not_provisioned" } for
+        //   operator/configuration errors (missing db_url).
+        // The dispatch boundary no longer re-stamps the error.
         let url = crate::context::with(|c| c.db_url()).unwrap_or_default();
         let consumer = match crate::wal_consumer::WalConsumer::new(&app_id, &url) {
             Ok(c) => c.with_start_lsn(setup.confirmed_flush_lsn.clone()),
             Err(e) => {
                 return OpResult::JsValue {
                     resolver,
-                    value: ResolveValue::RejectError(
-                        DbError::Configuration {
-                            code: "not_provisioned",
-                            message: e.to_string(),
-                        }
-                        .to_op_error(),
-                    ),
+                    value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 };
             }

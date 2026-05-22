@@ -79,6 +79,7 @@ use compio_postgres::replication::{
 };
 
 use crate::broker::{has_subscribers, publish, ChangeEvent, ChangeOp};
+use crate::error::DbError;
 
 // ---------------------------------------------------------------------------
 // Per-app emit-suppression
@@ -232,13 +233,15 @@ pub fn emit_local(
 // ---------------------------------------------------------------------------
 
 /// Errors raised by [`WalConsumer::run`].
+///
+/// Note: pre-flight failures from [`WalConsumer::new`] do NOT flow
+/// through this enum — they are surfaced as [`crate::error::DbError`]
+/// directly so the SDK can branch on `.code` (e.g. `invalid_app_id`
+/// vs `not_provisioned`). See the doc comment on `WalConsumer::new`.
 #[derive(Debug)]
 pub enum ConsumerError {
     /// Establishing the replication connection failed.
     Connect(String),
-    /// The publication or slot was missing — the caller should run
-    /// [`crate::replication::ensure_publication_and_slot`] first.
-    NotProvisioned(String),
     /// An I/O error on the wire (the supervising task should
     /// reconnect with backoff).
     Io(String),
@@ -251,7 +254,6 @@ impl std::fmt::Display for ConsumerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConsumerError::Connect(s) => write!(f, "wal consumer: connect: {s}"),
-            ConsumerError::NotProvisioned(s) => write!(f, "wal consumer: not provisioned: {s}"),
             ConsumerError::Io(s) => write!(f, "wal consumer: io: {s}"),
             ConsumerError::Decode(s) => write!(f, "wal consumer: decode: {s}"),
         }
@@ -323,17 +325,39 @@ pub struct WalConsumer {
 impl WalConsumer {
     /// Build a consumer descriptor. Spinning up the connection
     /// happens in [`Self::run`].
-    pub fn new(app_id: &str, db_url: &str) -> Result<Self, ConsumerError> {
-        // `slot_name` / `publication_name` now return `DbError` — we
-        // flatten through `to_string()` so the consumer's wire surface
-        // (a `ConsumerError::NotProvisioned(String)`) stays unchanged.
-        // The `DbError`'s `.code` is preserved at the V8 dispatch
-        // boundary (`replication_ops::start_replication_consumer_dispatch`)
-        // which inspects the inner DbError before this call.
-        let slot_name = crate::replication::slot_name(app_id)
-            .map_err(|e| ConsumerError::NotProvisioned(e.to_string()))?;
-        let publication_name = crate::replication::publication_name(app_id)
-            .map_err(|e| ConsumerError::NotProvisioned(e.to_string()))?;
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`crate::error::DbError`] so the SDK can
+    /// distinguish failure classes by `.code`:
+    ///
+    /// - [`DbError::ValidationFailed`] with `code = "invalid_app_id"` —
+    ///   the `app_id` failed [`crate::replication::sanitise_app_id`]
+    ///   (empty, non-alphanumeric, …). Restarting won't help; the
+    ///   deploy needs a valid id.
+    /// - [`DbError::Configuration`] with `code = "not_provisioned"` —
+    ///   the runtime context has no `db_url` configured. Operator
+    ///   must set `DB_URL` (or equivalent) before replication can run.
+    ///
+    /// The two classes are kept distinct on purpose: an
+    /// `invalid_app_id` is a developer/deploy error; a missing
+    /// `db_url` is an operator/configuration error. The SDK branches
+    /// on `.code` to surface the right remediation.
+    pub fn new(app_id: &str, db_url: &str) -> Result<Self, DbError> {
+        if db_url.is_empty() {
+            return Err(DbError::Configuration {
+                code: "not_provisioned",
+                message: "wal consumer: db_url not configured \
+                          (replication requires a connected runtime context)"
+                    .to_string(),
+            });
+        }
+        // slot_name / publication_name already return Result<String,
+        // DbError> after the [I28] sweep — propagate the typed error
+        // so the SDK sees `.code = "invalid_app_id"` for sanitise
+        // failures and not an opaque `"not_provisioned"` re-stamp.
+        let slot_name = crate::replication::slot_name(app_id)?;
+        let publication_name = crate::replication::publication_name(app_id)?;
         Ok(Self {
             app_id: app_id.to_string(),
             db_url: db_url.to_string(),
@@ -668,16 +692,16 @@ pub(crate) const STABILITY_THRESHOLD: Duration = Duration::from_secs(30);
 ///
 /// The kinds we treat as fatal are the ones where retrying is
 /// guaranteed not to help:
-///   - `NotProvisioned`: the slot/publication name is malformed (an
-///     `app_id` validation failure). Restarting won't fix that — the
-///     deploy needs to drop+recreate with a valid id.
 ///   - `Decode` errors carrying SQLSTATE 58P01 ("undefined_object" =
 ///     slot dropped). That's a watchdog signal — the slot was
 ///     externally invalidated and the supervisor should let the
 ///     reconciler reprovision before a fresh run.
+///
+/// (Pre-flight `invalid_app_id` validation failures do not flow
+/// through this function — they are caught at construction time in
+/// [`WalConsumer::new`] as a typed [`DbError`].)
 pub fn is_fatal(err: &ConsumerError) -> bool {
     match err {
-        ConsumerError::NotProvisioned(_) => true,
         ConsumerError::Io(s) | ConsumerError::Connect(s) | ConsumerError::Decode(s) => {
             // SQLSTATE 58P01 (undefined_object) — slot/pub dropped.
             // Postgres surfaces this from START_REPLICATION when the
@@ -910,7 +934,53 @@ mod tests {
     #[test]
     fn wal_consumer_rejects_invalid_app_id() {
         let err = WalConsumer::new("has space", "postgres://localhost/db").unwrap_err();
-        assert!(matches!(err, ConsumerError::NotProvisioned(_)));
+        assert!(matches!(
+            err,
+            DbError::ValidationFailed { code: "invalid_app_id", .. }
+        ));
+    }
+
+    /// MAJOR-R5-4: invalid app ids must surface a typed
+    /// `ValidationFailed { code: "invalid_app_id" }` so the SDK can
+    /// distinguish "developer passed a bad app_id" from "operator
+    /// hasn't configured the database". Prior code collapsed both
+    /// into a single opaque `Configuration { code: "not_provisioned" }`.
+    #[test]
+    fn wal_consumer_new_invalid_app_id_returns_typed_error() {
+        // A '%' character fails [`crate::replication::sanitise_app_id`]
+        // — only `[A-Za-z0-9_]` is permitted.
+        let err = WalConsumer::new("bad%id", "postgres://localhost/db").unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, message, hint } => {
+                assert_eq!(code, "invalid_app_id");
+                assert!(
+                    message.contains("invalid character"),
+                    "message must explain the rejection: {message}"
+                );
+                assert!(hint.is_none(), "validation errors from sanitise_app_id carry no hint");
+            }
+            other => panic!("expected ValidationFailed/invalid_app_id, got {other:?}"),
+        }
+    }
+
+    /// The genuine "operator forgot to set DB_URL" path must still
+    /// surface as `Configuration { code: "not_provisioned" }` — that
+    /// `.code` is what the SDK branches on to surface the right
+    /// remediation. This pins the second leg of the
+    /// MAJOR-R5-4 split.
+    #[test]
+    fn wal_consumer_new_missing_db_url_returns_configuration() {
+        let err = WalConsumer::new("alpha", "").unwrap_err();
+        match err {
+            DbError::Configuration { code, message } => {
+                assert_eq!(code, "not_provisioned");
+                assert!(
+                    message.contains("db_url"),
+                    "message must mention db_url: {message}"
+                );
+            }
+            other => panic!("expected Configuration/not_provisioned, got {other:?}"),
+        }
     }
 
     // -------- dispatch (pure logic, no I/O) --------
@@ -1193,13 +1263,11 @@ mod tests {
     }
 
     // -------- is_fatal classification --------
-
-    #[test]
-    fn is_fatal_not_provisioned_is_fatal() {
-        assert!(is_fatal(&ConsumerError::NotProvisioned(
-            "app_id rejected".into()
-        )));
-    }
+    //
+    // (Pre-flight `invalid_app_id` errors no longer flow through
+    // `ConsumerError::is_fatal` — they're caught at construction time
+    // as typed `DbError::ValidationFailed`. See
+    // `wal_consumer_new_invalid_app_id_returns_typed_error`.)
 
     #[test]
     fn is_fatal_io_error_default_is_retryable() {
