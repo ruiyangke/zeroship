@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 02:05.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 02:50.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -411,33 +411,43 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I36] query.rs:77 name.to_ascii_lowercase() on every CRUD call (performance r4 N4-I4)
-- **Source**: `plugin-db-performance-2026-05-22-r4.md` §"N4-I4"
-- **File**: `crates/plugin-db/src/query.rs:77`
-- **Description**: Every CRUD dispatch allocates a fresh String to lower-case `name` just to test against two short reserved prefixes. Use `eq_ignore_ascii_case` or check prefixes case-insensitively without allocating.
-- **Status as of 2026-05-22 02:05**: actionable; one-line fix.
-- **Effort**: tiny
-- **Pickable this cycle**: rolled forward.
-
----
-
 ### [I37] api-surface r3: replication.rs Result<_, String> wrapped as DbError::Internal at boundary (api-surface r3 I4)
 - **Source**: `plugin-db-api-surface-2026-05-22-r3.md` §"I4 NEW"
 - **File**: `crates/plugin-db/src/replication_ops.rs:82-86, 116-120, 153-157` — three dispatch boundary sites
-- **Description**: `replication_ops.rs` re-wraps the `Result<_, String>` returned by `replication.rs` as `DbError::Internal { message: e }`. Every replication operation surfaces to JS as `err.code = "internal"` — SDK loses retry discrimination. This is the same bug class as [S33] (broker key alloc) but for the error rail.
-- **Status as of 2026-05-22 02:05**: actionable; depends on [I28] (replication.rs typed-error sweep). Pre-[I28] partial fix: change `replication_ops.rs` to call `from_pg(e)` or pattern-match on the string for known prefixes (ugly but unblocks SDK retry).
+- **Description**: `replication_ops.rs` re-wraps the `Result<_, String>` returned by `replication.rs` as `DbError::Internal { message: e }`. Every replication operation surfaces to JS as `err.code = "internal"` — SDK loses retry discrimination.
+- **Status as of 2026-05-22 02:50**: actionable; depends on [I28] (replication.rs typed-error sweep).
 - **Effort**: small-medium (depends on whether [I28] lands first)
 - **Pickable this cycle**: rolled forward.
 
 ---
 
-### [I38] wal_consumer.rs legacy `pub fn` shims ungated in release builds (api-surface r3 I3)
-- **Source**: `plugin-db-api-surface-2026-05-22-r3.md` §"I3 carried"
-- **File**: `crates/plugin-db/src/wal_consumer.rs` — `any_app_suppressed`, `set_local_emit_suppressed`, `local_emit_suppressed` (3 fns, all `#[doc(hidden)] pub fn`)
-- **Description**: Three legacy shim functions are `pub fn` without `cfg(any(test, feature = "test-helpers"))` gating. They ship as dead code in release builds. Build emits dead-code warnings.
-- **Status as of 2026-05-22 02:05**: actionable; add `#[cfg(any(test, feature = "test-helpers"))]`.
-- **Effort**: tiny (3 cfg attrs)
+### [I39] OrchestratorLockGuard::Drop leaks session-scoped advisory lock (code-critique r4 M-NEW-1)
+- **Source**: `plugin-db-code-critique-2026-05-22-r4.md` §"M-NEW-1"
+- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:159-182`
+- **Description**: Drop only logs `tracing::error!` — the still-locked `PooledClient` returns to the pool. Session-scoped advisory lock leaks across tenants if a code path drops the guard without `release().await`. Fundamental: Drop can't await. Mitigations: (a) document the consequence more loudly; (b) detect Drop-with-unreleased earlier (compile-time `must_use`?); (c) spawn a fire-and-forget unlock task from Drop (requires runtime handle).
+- **Status as of 2026-05-22 02:50**: design needed; pure docs/warnings work + maybe a `#[must_use]` annotation.
+- **Effort**: small (docs) to medium (compile-time enforcement)
+- **Pickable this cycle**: rolled forward as part of code-critique follow-up.
+
+---
+
+### [I40] mint_subscription leaks broker entry on V8 allocation failure (code-critique r4 M-NEW-2)
+- **Source**: `plugin-db-code-critique-2026-05-22-r4.md` §"M-NEW-2"
+- **File**: `crates/plugin-db/src/v8_classes/subscription.rs:157-208`
+- **Description**: Subscribes to the broker (line ~166) BEFORE the fallible V8 allocation chain (lines 167-192). Any `?` propagation in that chain leaks the broker entry — `subs.retain(|s| !s.is_closed())` never prunes it because the JS-side Subscription wrapper that would set `is_closed` was never created. The doc comment is exactly backwards on this point. Fix: defer broker subscription until V8 allocation succeeds, OR add an explicit cleanup path that calls `subscription.close()` on Err.
+- **Status as of 2026-05-22 02:50**: actionable; small refactor.
+- **Effort**: small (move subscribe call after V8 alloc succeeds, or wrap in scope-guard)
 - **Pickable this cycle**: rolled forward.
+
+---
+
+### [I41] Migration-pipeline R3-I3: update_backfill_progress race with operator reset (migration-pipeline r3)
+- **Source**: `plugin-db-migration-pipeline-2026-05-22-r3.md` §"R3-I3"
+- **File**: `crates/plugin-db/src/migrations.rs:577,585-598`; `audit.rs:725-754`
+- **Description**: `update_backfill_progress` runs UNLOCKED after the COMMIT, no `audit_generation` predicate. Operator `migrations.reset(...)` between COMMIT and progress-write is silently clobbered — fresh runs resume from stale cursor. Smallest fix: move the progress UPDATE BEFORE the COMMIT (2-line move). Better fix: add `audit_generation` column + WHERE predicate.
+- **Status as of 2026-05-22 02:50**: pickable; 2-line move-before-COMMIT is the fast fix.
+- **Effort**: tiny (2 lines) or small (add column)
+- **Pickable this cycle**: rolled forward as high-leverage.
 
 ---
 
@@ -598,7 +608,19 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ### [S36] IMPORTANT [I30] (cycle 02:05) — auto_tx flattened typed DbError to OpResult::Failed { String }
 - **Closed by**: `8ff1b2de plugin-db/auto_tx: preserve typed DbError code through OpResult::Failed`
-- `orchestrator/auto_tx.rs::auto_begin_transaction` and `auto_end_transaction` switched from `OpResult::Failed { error: String }` to `OpResult::JsValue { ... ResolveValue::RejectError(OpError) ... }` mirroring `transaction.rs`. JS surfaces now receive `e.code` and `e.hint` properties on COMMIT-path errors. 4 new unit tests (Transient + LockContention code preservation, plus 2 Ok-path guards against arm-swap regression). No cross-crate change needed — `setup_js_promise` already existed in the runtime.
+- `orchestrator/auto_tx.rs::auto_begin_transaction` and `auto_end_transaction` switched from `OpResult::Failed { error: String }` to `OpResult::JsValue { ... ResolveValue::RejectError(OpError) ... }` mirroring `transaction.rs`. JS surfaces now receive `e.code` and `e.hint` properties on COMMIT-path errors. 4 new unit tests. No cross-crate change needed — `setup_js_promise` already existed in the runtime.
+
+### [S37] IMPORTANT [I36] (cycle 02:50) — query.rs per-CRUD ascii_lowercase alloc
+- **Closed by**: `5ceb6daa plugin-db: drop per-CRUD lowercase alloc + tighten wal_consumer shim visibility`
+- `validate_collection` previously allocated a fresh `String` to lower-case `name` for two prefix checks. Replaced with byte-slice `eq_ignore_ascii_case` against literal prefix bytes. Removes one alloc per CRUD dispatch.
+
+### [S38] IMPORTANT [I38] (cycle 02:50) — wal_consumer.rs legacy shims demoted pub → pub(crate)
+- **Closed by**: `5ceb6daa plugin-db: drop per-CRUD lowercase alloc + tighten wal_consumer shim visibility`
+- The api-surface r3 finding's "dead code in release" claim was partially wrong — `local_emit_suppressed()` is called from `emit_change()` at line 223. So cfg-gating would have broken the build. Right fix: demote `pub` → `pub(crate)` on all three legacy shims (`any_app_suppressed`, `set_local_emit_suppressed`, `local_emit_suppressed`). Removes them from the release `pub` surface without breaking internal consumers.
+
+### [S39] HIGH (error-ux r3; cycle 02:50) — recover 60ca1ad6 silently reverted by ed697c45
+- **Closed by**: `dec2bd42 plugin-db/migrations: restore 60ca1ad6 fixes silently reverted by ed697c45`
+- The cycle 01:10 [I1] audit-rail refactor (ed697c45) silently reverted two unrelated fixes from `60ca1ad6`: (a) line 258 `tx_connect_failed` was routed through `to_op_error()` to preserve SQLSTATE; reverted to flat string. (b) `coded_db` prefix was changed from `"db: {context} failed: {message}"` to `"{context}: {message}"` because the message already carries `"db: "`; reverted, causing doubled prefix. Both restored. Pilot-discipline lesson: a fixer's diff can be wider than its commit message claims; verify by running a follow-up review on the SAME paths.
 
 ### [S34] CRITICAL × 2 (docs-audit r2; cycle 01:35) — error.rs lone-holdout claim + db.md broken path
 - **Closed by**: `e37b188f plugin-db/error + docs/db: fix docs CRITICALs from docs-audit r2`
@@ -614,27 +636,28 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ## Pilot Pick
 
 **Cycle history:**
-- **00:17** closed [I1] + 3 new CRITICALs (bootstrap lock leak, cross-app appId × 2, test-helpers visibility)
-- **00:47** closed [I11] docs, [I19] DropColumn, perf CRITICAL N3-C1 (exec_mutation_with_emit)
-- **01:10** closed [I29] silent-empty-RETURNING, [I34] broker key alloc, 2 docs CRITICALs
-- **01:35** closed [I27] OrchestratorLockGuard, [I30] auto_tx error flattening (this cycle)
+- **00:17** closed [I1] + 3 new CRITICALs
+- **00:47** closed [I11], [I19], perf CRITICAL N3-C1
+- **01:10** closed [I29], [I34], 2 docs CRITICALs
+- **01:35** closed [I27] OrchestratorLockGuard, [I30] auto_tx flattening
+- **02:50** closed [I36] CRUD lowercase alloc, [I38] wal_consumer shim visibility; recovered 60ca1ad6's silent reversion (dec2bd42)
 
-**Net since pilot started**: ~12 CRITICALs/IMPORTANTs closed; ~14 new findings surfaced. The architecture trajectory has been net-positive across all 5 lenses.
+**Net since pilot started**: ~14 closures, ~17 new findings (some are surfaced regressions). Score trajectory net-positive across all 6 lenses.
 
-### Pick #1 (next cycle): **[I38] cfg-gate wal_consumer.rs legacy shims**
-- **File**: `crates/plugin-db/src/wal_consumer.rs` — `any_app_suppressed`, `set_local_emit_suppressed`, `local_emit_suppressed`
-- **Fix sketch**: Wrap each `pub fn` in `#[cfg(any(test, feature = "test-helpers"))]`. Build will lose 3 dead-code warnings.
-- **Why next**: tiny (3 cfg attrs), api-surface tightening.
-- **Verification gate**: build clean + `cargo test --lib` green.
+### Pick #1 (next cycle): **[I41] migrations.rs update_backfill_progress race (2-line move)**
+- **File**: `crates/plugin-db/src/migrations.rs:577,585-598`
+- **Fix sketch**: Move `update_backfill_progress` call BEFORE the COMMIT — eliminates the reset-clobber race window where operator `migrations.reset(...)` between COMMIT and progress-write is silently lost.
+- **Why next**: 2-line move, eliminates data-loss race, migration-pipeline r3 top recommendation.
+- **Verification gate**: build clean + lib tests green; add an integration test if reset-during-backfill is feasible.
 
-### Pick #2 (next cycle): **[I36] query.rs:77 to_ascii_lowercase per CRUD call**
-- **File**: `crates/plugin-db/src/query.rs:77`
-- **Fix sketch**: Replace `name.to_ascii_lowercase()` allocation with `eq_ignore_ascii_case` or prefix-check via `as_bytes()`. One-line.
-- **Why next**: tiny + every CRUD call's hot path.
-- **Verification gate**: build clean + lib tests green.
+### Pick #2 (next cycle): **[I40] subscription.rs broker-entry leak on V8 alloc failure**
+- **File**: `crates/plugin-db/src/v8_classes/subscription.rs:157-208`
+- **Fix sketch**: Defer the `broker.subscribe()` call until after V8 wrapper allocation succeeds, OR add explicit cleanup via scope-guard on Err.
+- **Why next**: small refactor; concurrency-class bug (silent broker entry leak); code-critique r4 MAJOR finding.
+- **Verification gate**: unit test exercising the V8-alloc-failure path; existing tests green.
 
-### Pick #3 (next cycle, larger): **[I28] ~50 Result<_, String> sites in replication.rs + auth/bootstrap.rs**
-- **File** (multi): `crates/plugin-db/src/replication.rs` (7 sites), `crates/plugin-db/src/auth/*` (~15 sites), plus tail-end stragglers in `diff.rs`.
-- **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant. `replication_ops.rs` wraps with `DbError::Internal { message: e }` (see [I37]) — convert wrapping to typed passthrough.
-- **Why**: every replication op currently surfaces as `.code = "internal"`. Closes [I37] (api-surface r3) once landed.
-- **Caveat**: medium-to-large; needs careful triage of which error variant fits each site. Worktree isolation strongly recommended.
+### Pick #3 (next cycle, larger): **[I28] ~45 Result<_, String> sweep in replication.rs + auth/bootstrap.rs**
+- **File** (multi): `crates/plugin-db/src/auth/bootstrap.rs` (13 sites), `crates/plugin-db/src/replication.rs` (8 sites), `crates/plugin-db/src/auth/session.rs` (6 sites), plus stragglers.
+- **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant.
+- **Why**: every replication/auth op currently surfaces as `.code = "internal"`. Closes [I37] once landed.
+- **Caveat**: medium-large; worktree isolation strongly recommended; each site needs typed-variant triage.
