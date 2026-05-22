@@ -82,10 +82,40 @@ If a test suite is known-flaky (e.g., integration tests with intermittent timing
 
 ### Agent conflict on file scope
 
-If multiple agents touch the same file simultaneously, merge conflicts can happen. Strategy:
-1. **Dispatch in waves** when overlap is known — wait for the first wave to land, then dispatch the second.
-2. **Group by file** — if 3 findings all touch `apply.rs`, give them to ONE agent.
-3. **Stagger by 30s** if waves aren't viable.
+If multiple agents touch the same file simultaneously, merge conflicts can happen. Strategy (in priority order):
+
+1. **`isolation: "worktree"` for any non-trivial multi-file fixer.** This is now the default for complex work. Each agent gets its own checkout; commits land in the worktree's branch; pilot fast-forwards / cherry-picks back. Eliminates the `git stash` interleaving cascade we observed (5+ stashes accumulating when 5 agents ran concurrently on plugin-db; one agent stashing the prior's WIP just to do its own edits; test builds breaking transiently mid-coordination).
+
+   Use worktree isolation when the fixer:
+   - Touches 2+ files, OR
+   - Is non-trivial (refactor, type sweep, pipeline split), OR
+   - Will run for >5 minutes, OR
+   - Depends on a known-shared file (`audit.rs`, `register_model/*`, etc.)
+
+   Skip worktree isolation only for:
+   - Single-file single-line mechanical edits
+   - Read-only reviewers (no writes)
+   - Test additions in isolated test files
+
+   Pattern:
+   ```
+   Agent({
+     description: "...",
+     subagent_type: "general-purpose",
+     model: "opus",
+     isolation: "worktree",       // ← the key flag
+     run_in_background: true,
+     prompt: "...",
+   })
+   ```
+
+   On return: if changes landed, the result names the worktree path + branch. Pilot then fast-forwards or cherry-picks. If no changes, the tool auto-cleans the worktree directory and branch.
+
+2. **Dispatch in waves** when worktree isn't appropriate. Wait for the first wave to land, then dispatch the second.
+
+3. **Group by file** — if 3 findings all touch `apply.rs`, give them to ONE agent.
+
+4. **Stagger by 30s** only as a last resort.
 
 ## Push authority
 
