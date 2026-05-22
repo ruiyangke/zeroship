@@ -22,6 +22,16 @@ sha2 = { workspace = true }
 [dev-dependencies]
 compio = { workspace = true }
 serde_json = { workspace = true }
+# Performance r9 (cycle 09:30) forcing-function: a `cargo bench` harness
+# must exist under `crates/plugin-db/benches/` so future perf reviews can
+# quote real numbers instead of being blocked by the anti-fabrication rule.
+# Initial bench target is `build_find` / `build_insert` (see
+# `benches/bench_query_build.rs` for the rationale).
+criterion = { workspace = true }
+
+[[bench]]
+name = "bench_query_build"
+harness = false
 
 [features]
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
