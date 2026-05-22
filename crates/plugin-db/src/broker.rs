@@ -204,9 +204,15 @@ struct SubscriptionInner {
 
 /// A single message the iterator yields. `Resync` is special — see
 /// the proposal's backpressure section.
+///
+/// `Change` carries the event behind an `Rc` so the broker can fan
+/// the same payload out to N subscribers without deep-cloning the
+/// `new_tuple` HashMap (and the rest of the event) per subscriber.
+/// The broker is per-isolate / single-threaded compio, so `Rc` is the
+/// correct primitive — no `Arc` synchronisation cost.
 #[derive(Debug, Clone)]
 pub enum SubscriptionMessage {
-    Change(ChangeEvent),
+    Change(Rc<ChangeEvent>),
     /// Bounded queue overflowed; client should refetch and drop
     /// any cached results.
     Resync,
@@ -429,22 +435,37 @@ impl Broker {
         let Some(subs) = self.by_key.get_mut(&key) else {
             return;
         };
-        // Two-pass: clone live subs (cheap — Rc), then push outside
-        // the &mut borrow so a panic-on-push can't poison the table.
-        let alive: Vec<Subscription> = subs.iter().filter(|s| !s.is_closed()).cloned().collect();
-        // Prune dead entries.
-        if alive.len() != subs.len() {
-            subs.retain(|s| !s.is_closed());
-        }
-        // Empty key — drop the bucket so iteration stays bounded.
-        if subs.is_empty() {
-            self.by_key.remove(&key);
-        }
-        for s in alive {
-            if !s.accepts(event) {
-                continue;
+        // Prune dead entries in-place so the bucket stays bounded.
+        subs.retain(|s| !s.is_closed());
+        let is_empty = subs.is_empty();
+        if !is_empty {
+            // Share the event payload across all live subscribers via
+            // Rc — `Subscription::push` clones the SubscriptionMessage
+            // into each per-subscriber queue, but each clone is now a
+            // single refcount bump on the Rc, NOT a deep clone of the
+            // ChangeEvent (and especially not of the `new_tuple`
+            // HashMap, which on a busy collection dominated the
+            // publish cost). The broker is per-isolate / single-
+            // threaded, so Rc is sound here — no cross-thread
+            // sharing, no Arc atomic cost.
+            let shared = Rc::new(event.clone());
+            // Iterate the live bucket directly — no intermediate
+            // `Vec<Subscription>` allocation. `Subscription::push`
+            // borrows the subscription's inner `RefCell` but does NOT
+            // re-enter the broker (no recursive `publish`), so it's
+            // safe to hold a `&` borrow of `subs` for the loop.
+            for s in subs.iter() {
+                if !s.accepts(&shared) {
+                    continue;
+                }
+                s.push(SubscriptionMessage::Change(Rc::clone(&shared)));
             }
-            s.push(SubscriptionMessage::Change(event.clone()));
+        }
+        // Drop the bucket if pruning emptied it, so iteration stays
+        // bounded. Done AFTER the loop so the `&mut subs` borrow
+        // has been released by the time we touch `self.by_key`.
+        if is_empty {
+            self.by_key.remove(&key);
         }
     }
 
@@ -778,24 +799,24 @@ mod tests {
     fn overflow_collapses_to_resync() {
         // Tiny queue so we can overflow it in the test.
         let s = Subscription::new(1, "a".into(), "m".into(), 2);
-        s.push(SubscriptionMessage::Change(ev(
+        s.push(SubscriptionMessage::Change(Rc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
             Some(1),
-        )));
-        s.push(SubscriptionMessage::Change(ev(
+        ))));
+        s.push(SubscriptionMessage::Change(Rc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
             Some(2),
-        )));
-        s.push(SubscriptionMessage::Change(ev(
+        ))));
+        s.push(SubscriptionMessage::Change(Rc::new(ev(
             "a",
             "m",
             ChangeOp::Insert,
             Some(3),
-        ))); // overflow
+        )))); // overflow
         // Queue now contains a single Resync.
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
         assert!(s.pop().is_none());
@@ -803,7 +824,7 @@ mod tests {
 
     #[test]
     fn message_to_json_change_shape() {
-        let m = SubscriptionMessage::Change(ChangeEvent {
+        let m = SubscriptionMessage::Change(Rc::new(ChangeEvent {
             app_id: "a".into(),
             collection: "messages".into(),
             op: ChangeOp::Insert,
@@ -811,7 +832,7 @@ mod tests {
             changed_columns: vec!["title".into(), "body".into()],
             new_tuple: HashMap::new(),
             old_tuple: None,
-        });
+        }));
         let v: serde_json::Value = serde_json::from_str(&message_to_json(&m)).unwrap();
         assert_eq!(v["kind"], "change");
         assert_eq!(v["op"], "insert");
