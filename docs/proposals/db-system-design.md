@@ -5,15 +5,21 @@
 **Closes** (from `docs/reviews/plugin-db-deferred.md`): [C1] (Backend trait
 half-applied, §7); [I20] (WAL replication cross-tenant isolation, §17 +
 §19 P6); [I31]/F1 (§10 + §18); [I32]/F2 (§10 + §18).
-**Last updated**: 2026-05-22 (round 6 — round-1..5 critiques under
-`docs/reviews/db-system-design-critique-round-*.md`; round 5 closed
-intra-tx outbox ordering, deterministic-encryption naming, backfill ×
-CDC broker pause, schema-pending decoder spec, per-app PG role ×
-slot-owner invariant, and re-affirmed column-key rotation as
-deferred to §19 P6; round 6 pins outbox-rowid table flags, replaces
-the AWS-DDB attribution with the Rogaway-Shrimpton prior art,
-specifies new-subscriber policy + PG decoder error path during a
-schema-pending window, and cross-anchors §17.5/§19 P6).
+**Last updated**: 2026-05-22 (amended for native CDC via preupdate_hook).
+
+<!-- preupdate_hook amendment -->
+**Changelog — 2026-05-22 amendment.** Swapped trigger+outbox SQLite
+CDC for `sqlite3_preupdate_hook` (rusqlite `preupdate_hook` feature
+flag, `bundled` SQLite compiled with `SQLITE_ENABLE_PREUPDATE_HOOK`).
+Strict simplification: §6.5 drops the `__zeroship_pre_image` system
+table; §11.5 simplifies substantively (no triggers, no outbox, no
+`_seq` allocator, no AUTOINCREMENT-rowid invariant, no outbox GC);
+§13.5 MV/CDC storm concern partially evaporates (filter is now a
+Rust callback predicate, not a DDL allow-list); §17.7 drop-namespace
+loses its DDL teardown step; §19 P2 loses two implementation steps.
+All round 1–9 review-loop findings about the outbox approach
+collapse to "use the native hook." Prior-round narrative remains in
+`docs/reviews/db-system-design-critique-round-*.md`.
 
 **Reading order.** §1 overview · §4 25-capability PG/SQLite split · §7
 capability trait redesign · §8 SQLite mechanism · §19 engineering
@@ -45,8 +51,13 @@ currently PITR — return a typed `pitr_pg_only` envelope on SQLite; the
 dashboard hides the control in dev so this surfaces only to operator
 tooling. Inventory in §15.7 and §16.
 
-**Native SQLite (rusqlite), not Turso.** Bundled — no system
-`libsqlite3` dependency. Async via `compio::runtime::spawn_blocking`.
+<!-- preupdate_hook amendment -->
+**Native SQLite (rusqlite), not Turso.** `rusqlite` with the
+`bundled` + `preupdate_hook` Cargo features — the `bundled` feature
+ships the SQLite amalgamation compiled with
+`SQLITE_ENABLE_PREUPDATE_HOOK`, no system `libsqlite3` at any
+deployment. CDC is the native `sqlite3_preupdate_hook` callback
+(§11.5). Async via `compio::runtime::spawn_blocking`.
 
 ---
 
@@ -100,7 +111,7 @@ subscriptions + optimistic concurrency); analytics (MV); AI/RAG (vector
 
 | # | Capability | PG | SQLite |
 |---|---|---|---|
-| 1 | Reactive queries | logical-decoding slot + pgoutput WAL consumer → broker (requires `REPLICA IDENTITY FULL` for pre-image; §9.1) | symmetric BEFORE INSERT/UPDATE/DELETE triggers + per-app outbox (outbox is `INTEGER PRIMARY KEY AUTOINCREMENT`; rowid → `lsn_seq` projection is the per-tx event sequence); drain just before COMMIT (§11.5) |
+| 1 | Reactive queries | logical-decoding slot + pgoutput WAL consumer → broker (requires `REPLICA IDENTITY FULL` for pre-image; §9.1) | native `sqlite3_preupdate_hook` callback in-process; per-tx event buffer flushed on COMMIT (§11.5) <!-- preupdate_hook amendment --> |
 | 2 | Rich CRUD | shared filter→SQL lowering; `RETURNING`; `ON CONFLICT DO UPDATE` | identical (SDK is dialect-neutral) |
 | 3 | Transactions + savepoints + isolation | `BEGIN ISOLATION LEVEL`; SAVEPOINT/RELEASE/ROLLBACK TO | `BEGIN DEFERRED \| IMMEDIATE`; SAVEPOINT native; `EXCLUSIVE` not used (§8.5) |
 | 4 | Pessimistic locking | `SELECT … FOR UPDATE` | `BEGIN IMMEDIATE` for the whole tx (coarser; §8.5) |
@@ -114,7 +125,7 @@ subscriptions + optimistic concurrency); analytics (MV); AI/RAG (vector
 | 12 | Window functions | native | native (≥3.25) |
 | 13 | Materialised views | `MATERIALIZED VIEW` + `REFRESH CONCURRENTLY` | shadow table + Rust scheduler (per-min default) |
 | 14 | Soft delete + restore | nullable `deletedAt` | identical |
-| 15 | Audit log of data changes | trigger → `__zeroship_audit_<coll>` | identical |
+| 15 | Audit log of data changes | orchestrator-emitted (post-RETURNING, pre-COMMIT) → `__zeroship_audit_<coll>` (§10.7) | identical |
 | 16 | Bulk import/export | `COPY FROM STDIN` | row-by-row INSERT in a single tx (materially slower at large N; acceptable at dev scale) |
 | 17 | Counters / denorm helpers | `UPDATE … SET col = col + ?` | identical |
 | 18 | Outbox / webhooks / background tasks | backend-agnostic processor in `crates/control` consumes `ChangeEvent`s | identical |
@@ -175,12 +186,15 @@ CRUD+DDL, and a replication-sub-protocol client for the WAL consumer
 pgoutput via `CopyBothResponse`). Driver-side support in
 `crates/compio-postgres/`; §9.1.
 
+<!-- preupdate_hook amendment -->
 **CDC layer.** PG: WAL consumer streams pgoutput; pre-image arrives
 in the frame **only under `REPLICA IDENTITY FULL`** (PG default
 carries PK only), asserted by the Apply step (§9.1). SQLite:
-symmetric BEFORE INSERT/UPDATE/DELETE triggers populate a per-app
-outbox `(rel_id, pk, op, tuple_json, lsn_seq, ts)` — rowid is the
-intra-tx ordering oracle (§11.5). Both feed the same `broker.rs`.
+`Connection::preupdate_hook` registered once per session; the hook
+fires BEFORE every row mutation inside the writer tx with native
+OLD + NEW row data; the writer-actor appends to a per-tx event
+buffer; on COMMIT the buffer flushes to the broker; on ROLLBACK the
+buffer is dropped (§11.5). Both feed the same `broker.rs`.
 
 **Broker** (`broker.rs`). Subscription registry; server-side predicate
 evaluation; bounded per-subscriber queue; `resync` event for
@@ -254,21 +268,19 @@ same; requires `PRAGMA foreign_keys = ON` per connection (set by
 `SqliteBackend` on every client acquire).
 
 <!-- Round 8: CRITICAL — promote system-tables paragraph to §6.5 anchor referenced by §11.5 -->
+<!-- preupdate_hook amendment -->
 ### 6.5 System tables per app
 
 `__zeroship_migrations` — DDL/validation/backfill audit (both
-backends; schema in §10.7). `__zeroship_pre_image` — CDC outbox
-carrying INSERT/UPDATE/DELETE rows from symmetric BEFORE triggers
-(SQLite only; PG carries pre-image in pgoutput frames natively;
-§11.5); declared `INTEGER PRIMARY KEY AUTOINCREMENT` (load-bearing
-for GC-safe rowid monotonicity — §11.5 ordering proof depends on
-it). `__zeroship_pre_image_seq` — single-row counter for `lsn_seq`
-allocation inside the drain (SQLite only; durability in §11.5).
-`__zeroship_audit_<collection>` — optional per-row data audit
-(schema in §10.7). `__zeroship_mv_<name>` — shadow tables backing
-SQLite `MaterializedView`; EXCLUDED from CDC trigger install
-(§13.5). `__zeroship_admin.*` — PG hardening only. This roster
-anchors §11.5, §10, §13.5, §17.5.
+backends; schema in §10.7). `__zeroship_audit_<collection>` —
+optional per-row data audit (schema in §10.7). `__zeroship_mv_<name>`
+— shadow tables backing SQLite `MaterializedView`; writes are
+filtered out by the SQLite CDC dispatcher's hook callback (§13.5).
+`__zeroship_admin.*` — PG hardening only. This roster anchors
+§10, §13.5, §17.5. SQLite CDC carries no system table of its own:
+`sqlite3_preupdate_hook` delivers OLD/NEW row images natively, so
+neither a pre-image outbox nor a sequence allocator is needed
+(§11.5).
 
 **Per-app metering storage.** Counters in the control-plane store, not in
 per-app tables. The `MeteredSqlExecutor` decorator (§13) maintains
@@ -331,13 +343,18 @@ makes no cross-process claim — §8.5. Audit: `register_model` →
 `GlobalApp { name: format!("mig:{}", spec.name) }`; auto-tx envelope:
 no lock (per-isolate state already serialises).
 
+<!-- preupdate_hook amendment -->
 **`ChangeStream`** — per-app CDC provisioning + consumer lifecycle.
 Ops: `provision`, `deprovision`, `spawn_consumer` (returns RAII
-`ConsumerHandle`). PG: publication + replication slot; consumer streams
-pgoutput, pre-image + post-image in the frame. SQLite: symmetric
-BEFORE INSERT / UPDATE / DELETE triggers + outbox table (§11.5);
-"consumer" is a synchronous drain inside the writer task, not a
-spawned background task.
+`ConsumerHandle`). PG: publication + replication slot; consumer
+streams pgoutput, pre-image + post-image in the frame. SQLite:
+in-process CDC via `Connection::preupdate_hook` — fires BEFORE every
+row mutation inside the writer transaction with native OLD/NEW row
+data from `sqlite3_preupdate_old()` / `sqlite3_preupdate_new()`;
+broker publish happens post-COMMIT to preserve transactional
+consistency (ROLLBACK loses both the data and the hook callback's
+intended publish). "Consumer" on SQLite is the writer-actor itself,
+not a spawned background task.
 
 **`SchemaIntrospect`** — read live DB state into `LiveSchema`
 (`diff.rs`). PG: walks `pg_catalog`. SQLite: `sqlite_master` +
@@ -364,23 +381,29 @@ exposes `record`/`check_quota`/`flush`. Decorator-not-subtrait:
 metering arithmetic is backend-agnostic and a sub-trait would force
 each backend to re-implement and entangle policy.
 
+<!-- preupdate_hook amendment -->
 **`VectorIndex`, `FullTextIndex`, `SpatialIndex`** — parallel shape:
 per-collection index creation + search. PG wraps pgvector / tsvector /
 PostGIS; SQLite wraps sqlite-vec / FTS5 / R-tree+Haversine. Search
 accepts the same filter object as `find` (`near(point) AND status =
-"open"`). SQLite caveat: `Connection::update_hook` does NOT fire on
-vtable updates; the change-event path uses the trigger boundary on the
-main row, so vtables stay behind that abstraction.
+"open"`). SQLite caveat: `sqlite3_preupdate_hook` fires on rowid
+tables only, not vtables (FTS5, R-tree, sqlite-vec). Acceptable —
+the change-event path keys off mutations to the **base** collection;
+side-index vtable updates are an implementation detail driven by
+AFTER triggers (FTS5) or the orchestrator's own writes (sqlite-vec,
+R-tree), neither of which user code subscribes to.
 
+<!-- preupdate_hook amendment -->
 **`MaterializedView`** — ensure-and-refresh of cached aggregates. PG:
 `MATERIALIZED VIEW` + `REFRESH CONCURRENTLY`; the MV relation is never
 added to the publication so pgoutput emits nothing for refresh (base
 tables drive subscribers; MV is a broker-invisible cache). SQLite:
 per-MV shadow table `__zeroship_mv_<name>`; refresh is a delete-then-
 insert under `BEGIN IMMEDIATE`. **Critical:** shadow tables are NOT
-registered collections — `ChangeStream::provision` MUST NOT install
-pre-image triggers on `__zeroship_mv_*`. Policy in §13.5, install
-allow-list in §11.5. Default cadence per minute; SDK override.
+registered collections — the SQLite CDC dispatcher's
+`preupdate_hook` callback filters writes to `__zeroship_mv_*` (along
+with `__zeroship_audit_*` and `__zeroship_migrations`); see §13.5.
+Default cadence per minute; SDK override.
 
 
 <!-- Round 4: CRITICAL #1 (SIV-style nonce) + IMPORTANT #1 (scan-cost metering) -->
@@ -519,13 +542,16 @@ drafts and is NOT used (in WAL mode it attempts an exclusive
 second OS process racing on the protected op sees `SQLITE_BUSY`, mapped
 to `LockContention { retryable: true }`.
 
+<!-- preupdate_hook amendment -->
 ### 8.7 Reactive queries / CDC (summary)
-Full description in §11.5. Key load-bearing details: symmetric BEFORE
-INSERT / UPDATE / DELETE triggers writing one row per mutation to the
-per-app outbox in SDK call order (writer-lock-serialised, outbox rowid
-is the per-tx event sequence); UPDATE post-image reconstructed by the
-drain from `RETURNING`; orchestrator drains the outbox inside the
-writer's tx just before COMMIT and publishes post-commit.
+Full description in §11.5. Key load-bearing details:
+`Connection::preupdate_hook` registered once at `SqliteSession` open
+time; the hook receives `(action, db_name, table_name, rowid,
+old_row?, new_row?)` BEFORE every row mutation; the writer-actor
+appends to a per-tx event buffer in DB-execution order (Vec index =
+intra-tx sequence); on COMMIT the buffer flushes to the broker
+post-commit; on ROLLBACK the buffer is dropped. No triggers, no
+outbox, no DDL emitted at registration.
 
 ### 8.12 Schema-per-app
 Open or create `${db_dir}/zs-${app_id}.sqlite` and ATTACH it as
@@ -639,18 +665,20 @@ per-batch tx. Resume via `migrations.run(spec, { reset: true })`; state
 in `__zeroship_migrations` with `phase = 'backfill'`.
 
 <!-- Round 5: IMPORTANT #5 — backfill × CDC broker pause -->
+<!-- preupdate_hook amendment: SQLite side fires preupdate_hook, not triggers -->
 **Backfill × CDC interaction.** Each batch mutates user data, so each
-batch fires BEFORE triggers (SQLite) or emits pgoutput frames (PG) —
-a million-row backfill would shove a million events through the
+batch fires the preupdate hook (SQLite) or emits pgoutput frames (PG)
+— a million-row backfill would shove a million events through the
 broker. The orchestrator therefore **pauses the per-app broker** for
 the duration of `migrations.run` via the same
 `Broker::suppress_app(app_id, true)` rail §11.6 uses for
 `register_model` (called at backfill `exec_begin`, cleared at exit
 including failure / reset). Subscribers see one `resync` at resume.
-Backfill mutations still pass through triggers / pgoutput — the pause
-drops at the fan-out boundary, not at the source — keeping SQLite
-outbox GC (§11.5 step (4)) consistent and avoiding a parallel
-backfill-bypass codepath.
+Backfill mutations still pass through the hook / pgoutput — the pause
+drops at the fan-out boundary, not at the source — and the SQLite
+writer-actor still appends to its per-tx event buffer, which the
+suppress check drains at COMMIT-flush time without invoking the
+broker. Avoids a parallel backfill-bypass codepath.
 
 **Open backlog.** F1 (orphan Running rows): warn-half closed; sweeper-half
 open (§18 Q4). F2 (orphan Pending rows): write-and-terminate to
@@ -705,122 +733,61 @@ replication connection, streams pgoutput (pre-image + post-image under
 `REPLICA IDENTITY FULL`), decodes into `ChangeEvent`, calls
 `broker::publish`.
 
+<!-- preupdate_hook amendment -->
 ### 11.5 SQLite implementation
-`SqliteCdcConsumer` in `backend/sqlite_cdc.rs`. **Install allow-list**
-(load-bearing — see §13.5): `ChangeStream::provision` installs one
-BEFORE UPDATE and one BEFORE DELETE trigger per **user-declared**
-collection only. All `__zeroship_*` internal tables — including
-`__zeroship_mv_*` MV shadows, `__zeroship_audit_*`, the pre-image
-outbox, and the migrations table — are EXCLUDED. Without this, an MV
-refresh's delete-then-insert would fire BEFORE-DELETE triggers, flood
-the outbox, and emit a ChangeEvent storm or recurse the drain. The
-exclusion lives next to the install routine in `backend/sqlite_cdc.rs`;
-asserted by `mv_refresh_does_not_emit_change_events` (§19 P2 gate).
+`SqliteCdcDispatcher` in `backend/sqlite_cdc.rs`. CDC rides the
+native `sqlite3_preupdate_hook` API (SQLite ≥ 3.16, 2017), exposed
+by rusqlite under the `preupdate_hook` Cargo feature and compiled
+into the `bundled` amalgamation via `SQLITE_ENABLE_PREUPDATE_HOOK`.
+No triggers, no outbox table, no `lsn_seq` allocator, no DDL emitted
+at registration.
 
-<!-- Round 4: CRITICAL #2 + IMPORTANT #2 + IMPORTANT #3 — unified outbox lifecycle -->
-<!-- Round 5: CRITICAL #1 — symmetric BEFORE-trigger across INSERT/UPDATE/DELETE; IMPORTANT #2 — pre_image_seq consumer pinned -->
-**Symmetric BEFORE triggers, all three op kinds.**
-`ChangeStream::provision` installs BEFORE INSERT, BEFORE UPDATE, and
-BEFORE DELETE per user-declared collection. Each writes one row to
-`__zeroship_pre_image`: op kind, pk, relation id, UNIX-ms ts, tuple
-JSON (`json_object(...)`; `Bytes`/`Vector` base64-inline; `Json`
-wrapped to avoid double-encoding). INSERT writes the new tuple (no
-pre-image); UPDATE/DELETE write the old tuple. The UPDATE post-image
-is reconstructed by the drain from `RETURNING`, matched by pk;
-INSERT and DELETE are self-contained from the outbox row.
+**Hook registration.** `Connection::preupdate_hook` is set once at
+`SqliteSession` open time on the writer actor's connection. The
+callback runs synchronously in the writer's C-stack frame before
+every row mutation, transaction still open. Rusqlite callback shape:
+`(action, db_name, table_name, rowid, old_row?, new_row?)` where
+`old_row?`/`new_row?` are accessors over `sqlite3_preupdate_old()` /
+`sqlite3_preupdate_new()` returning typed column values.
 
-<!-- Round 6: IMPORTANT #1 — pin AUTOINCREMENT for rowid monotonicity across GC -->
-**Outbox table flags (load-bearing).** `__zeroship_pre_image` is
-declared with `INTEGER PRIMARY KEY AUTOINCREMENT` (normal-rowid
-table — **not** `WITHOUT ROWID`, **not** plain `INTEGER PRIMARY KEY`).
-`AUTOINCREMENT` is required so rowid monotonicity holds across the
-per-tx GC DELETE + subsequent INSERT in a long-running session: on
-a plain rowid table SQLite is free to re-use the slot freed by the
-drain's step (4), breaking the "outbox rowid = per-tx event
-sequence" invariant the §11.5 ordering proof depends on.
-`AUTOINCREMENT` enforces strict monotonicity via `sqlite_sequence`,
-so the pre-COMMIT GC cannot race rowid reuse. Cross-references
-§6.5 (system-tables roster) and §10 (audit row state machine
-ordering). Startup truncate (step (a) below) clears the user-table
-data; `sqlite_sequence` continues forward across boots — no semantic
-dependency on its value (the in-process `last_seen_lsn_seq` cursor
-starts at 0).
-<!-- Round 8: MINOR #4 — note the 2^63 ceiling as theoretical -->
-`sqlite_sequence` is signed 64-bit; counter caps at 2^63 − 1
-(INSERT fails `SQLITE_FULL` after exhaustion). Not load-bearing at
-dev-tier rates (§14): 10^9 ev/s sustained for 292 years to reach
-the ceiling. Noted to forestall a future reviewer flagging an
-unbounded counter.
+**Per-tx event buffer.** Each writer transaction owns a `Vec` of
+events on the `SqliteSession` actor. On hook fire: the callback
+filters the relation (§13.5), materialises OLD/NEW into a
+`ChangeEvent`, pushes onto the buffer. On COMMIT (writer actor):
+flush to the broker post-commit. On ROLLBACK: drop the buffer
+(actor owns the allocation outright — single drop, free).
 
-*Why symmetric.* Routing all three op kinds through BEFORE triggers
-makes the SQLite writer lock the natural serialiser; the outbox
-rowid (monotonic under the writer lock + AUTOINCREMENT) is the per-
-tx event sequence. One mechanism, one allocator, no orchestrator-
-side ordering state. `update_hook` is NOT a delivery channel
-(`(action, db, table, rowid)`; misses vtables); diagnostic only.
-<!-- Round 6: MINOR #3 — prior-revision narrative moved to critique files -->
-(Round-4's asymmetric INSERT-via-drain-`RETURNING` design was
-rejected for the merge-of-two-populations problem; see
-`docs/reviews/db-system-design-critique-round-5.md` for the
-prior-revision narrative.)
+**Pre-image (OLD) / post-image (NEW).** Both native. INSERT carries
+NEW only; UPDATE carries OLD + NEW; DELETE carries OLD only. No
+`RETURNING` join, no SELECT-by-pk, no JSON encoding pass, no
+orchestrator-side reconstruction.
 
-**`lsn_seq` and commit ordering.** `lsn_seq` orders events within
-one drain (its sole consumer). Immediately before COMMIT: (1)
-`UPDATE __zeroship_pre_image_seq SET v = v + N RETURNING v` claims
-a contiguous range of size N = outbox row count. SQLite's `RETURNING`
-clause on `UPDATE` returns the **post-update** column value, so the
-single returned `v` is the range **end** (highest `lsn_seq` in the
-range); the range is `[v - N + 1, v]` and the caller computes the
-start. <!-- Round 6: MINOR #5 — disambiguate RETURNING v -->
-(2) stamp the range onto outbox rows in **rowid order** (= trigger
-fire order = SDK call order), with the lowest rowid receiving
-`v - N + 1` and the highest receiving `v`; (3) SELECT the stamped
-rows, build `ChangeEvent`s in `(commit_id, lsn_seq)` order —
-`commit_id` is a per-tx monotonic stamped at drain entry, matching
-pgoutput "all-at-commit-LSN" on PG; (4) DELETE consumed rows;
-(5) COMMIT; on success, publish. ROLLBACK → outbox rows vanish, no
-events publish. In-process only.
-<!-- Round 8: MINOR #3 — pin commit_id allocation site -->
-**`commit_id` allocation.** SQLite: in-process `AtomicU64` on the
-`SqliteSession` actor, allocated at drain entry (step (1) above,
-immediately before the `_seq` range claim). Persistence is
-unnecessary — SQLite CDC is in-process (§11.3), subscribers
-observe only the broker-side `(commit_id, lsn_seq)` ordering, and
-the counter resets to 0 on session boot alongside
-`last_seen_lsn_seq` (subscribers crossing restart receive
-`resync`). Only per-session monotonicity is required. PG:
-`commit_id` is the pgoutput commit-LSN (durable in the WAL); the
-two backends meet at the broker contract despite divergent
-allocators.
+**Ordering within a tx.** The hook fires in DB-execution order (the
+order the writer's SQL hits the b-tree); the per-tx `Vec`'s index
+*is* the intra-tx sequence — no allocator, no `_seq` table, no
+rowid-monotonicity proof, no AUTOINCREMENT invariant. §6.5 shrinks
+accordingly.
 
-**`__zeroship_pre_image_seq` scope.** Sole consumer: the drain, to
-project rowid ordering into the published stream (the column lets
-the drain SELECT-by-`lsn_seq` rather than rejoin by rowid at
-fan-out). Subscribers observe broker-side `(commit_id, lsn_seq)`
-only; the persistent column is never read across restarts. The
-companion cursor `last_seen_lsn_seq` is process-local; SQLite CDC
-is in-process only, so restart resets it to 0. The `_seq` row
-persists only to avoid re-creating it on every boot; numerical
-continuity across restart is not required (startup truncate clears
-the outbox). Uncommitted rows vanish with the data;
-committed-but-not-yet-published rows lose ≤1 tx of notifications.
-Active subscribers receive `resync` on reconnect.
+**`(commit_id, lsn_seq)` tuple.** Still the broker contract.
+`commit_id` is an in-process `AtomicU64` on the `SqliteSession`
+actor, stamped at COMMIT-flush time (after SQLite COMMIT succeeds,
+before the buffer publishes). `lsn_seq` is the buffer's `Vec` index
+(0..N). Subscribers observe broker-side `(commit_id, lsn_seq)`
+identical in shape to the PG side's `(commit_LSN, frame_index)`.
+Per-session monotonicity is the only invariant; counter resets to 0
+on session boot, subscribers crossing restart receive `resync`
+(§11.6).
 
-**Outbox GC.** (a) Startup truncate: on `SqliteSession` open,
-`DELETE FROM __zeroship_pre_image` — safe because any row from the
-previous boot is unpublishable. (b) Steady-state: the drain's
-step (4) deletes its consumed rows pre-COMMIT, so committed normal
-operation leaves no residue. Together (a)+(b) bound outbox storage
-to one tx of in-flight rows.
+**Rollback / GC.** Free. No outbox table → no GC subsystem → no
+startup truncate, no pre-COMMIT DELETE, no `db_pre_image_outbox_rows`
+gauge (§16.3 drops it). Rollback drops the buffer.
 
-**FTS trigger ordering.** `FullTextIndex` installs AFTER
-INSERT/UPDATE/DELETE triggers on the same base collection. Pre-image
-in BEFORE bucket; FTS in AFTER bucket; different timing buckets, no
-interleave. The drain runs after all AFTER triggers, capturing both
-FTS5 vtable update and the outbox in the same COMMIT. Intra-bucket
-firing order is undefined by SQLite documentation and this design
-does not rely on it (round-3 prose mentioning "lex-name order" was
-wrong and is removed).
+**FTS interaction.** `FullTextIndex` still installs AFTER triggers
+on the base collection to maintain the FTS5 vtable; those fire after
+the preupdate hook (preupdate is BEFORE), so the broker observes the
+base-row event with the FTS update pending in the same tx. The hook
+is on rowid tables only; FTS5 vtable updates do not re-enter it
+(vtable mutations bypass `preupdate_hook` by design).
 
 ### 11.6 Pause/resume during DDL and backfill
 `register_model` calls `Broker::suppress_app(app_id, true)` before Pass
@@ -935,21 +902,28 @@ fail-closed timer lives per worker off the local TTL clock; control
 plane stays stateless w.r.t. failure-mode policy.
 
 <!-- Round 4: IMPORTANT #5 — MV is not broker-visible, full stop -->
+<!-- preupdate_hook amendment -->
 ### 13.5 MaterializedView × CDC interaction
 MV refresh is invisible to the broker. PG: the publication
 enumerates user-declared collections only; the `MATERIALIZED VIEW`
 relation is never added, so pgoutput emits nothing for `REFRESH
 MATERIALIZED VIEW` (CONCURRENTLY swaps and non-CONCURRENTLY
 TRUNCATE+INSERT are both filtered because the relation oid is not
-in the publication set). SQLite: writes to `__zeroship_mv_<name>`,
-**excluded** from `ChangeStream::provision`'s trigger-install allow-
-list (§11.5); refresh fires no pre-image triggers. **MV
-subscriptions are not exposed.** `Collection.subscribe` on an MV is
-rejected by the SDK (`ValidationFailed { code:
-"invalid_collection" }` — MV is read-only with per-minute refresh
-granularity). Subscribers wanting aggregate updates subscribe to the
-base collections and recompute, or poll the MV. The §7.2 "broker-
-invisible cache" characterisation is the contract. Asserted by
+in the publication set). SQLite: `sqlite3_preupdate_hook` is
+per-connection — it fires for ANY rowid-table mutation on the
+connection, including writes to `__zeroship_mv_<name>` shadow
+tables during refresh. A filter is therefore still required, but it
+lives in the hook callback (Rust-side) — not in a DDL allow-list.
+The SQLite CDC dispatcher's hook callback silently drops events
+whose `table_name` matches `__zeroship_mv_*`, `__zeroship_audit_*`,
+or `__zeroship_migrations`. No DDL gymnastics required — pure Rust
+dispatch. **MV subscriptions are not exposed.**
+`Collection.subscribe` on an MV is rejected by the SDK
+(`ValidationFailed { code: "invalid_collection" }` — MV is
+read-only with per-minute refresh granularity). Subscribers wanting
+aggregate updates subscribe to the base collections and recompute,
+or poll the MV. The §7.2 "broker-invisible cache" characterisation
+is the contract. Asserted by
 `mv_refresh_emits_no_change_events_on_base_or_shadow` and
 `mv_subscribe_rejected_at_sdk` (§19 P2).
 
@@ -1069,35 +1043,37 @@ destructive-with-strictness-off (operator owns consequences).
 
 ### 16.3 Observability
 Latency in milliseconds (`_ms` suffix; the earlier `_us` suffix on
-`db_sqlite_update_hook_latency` is renamed). Tracing spans on every
-backend call; slow-query log at >100ms; per-app query distribution.
+the SQLite hook latency metric is renamed; the metric itself is
+now `db_sqlite_preupdate_hook_latency_ms` — preupdate amendment).
+Tracing spans on every backend call; slow-query log at >100ms;
+per-app query distribution.
 Metrics: `db_pool_acquired`, `db_pool_idle` (PG);
 `db_sqlite_busy_retries`, `db_sqlite_attached_files`;
 `db_broker_subscribers`, `db_broker_fanout_latency_ms`;
 `db_pending_emit_queue_depth` (per (worker, app); high values =
-in-tx CDC drain backpressure or stuck commit);
-<!-- Round 5: missing concept — outbox + schema-pending gauges -->
-<!-- Round 6: missing concept #3 — sample after each COMMIT, not at idle -->
-`db_pre_image_outbox_rows` (per (worker, app); **sampled after each
-COMMIT in the writer actor** — not idle-driven, since a continuously-
-busy writer never idles; the post-COMMIT sample expects 0 because
-the drain's step (4) deleted the consumed rows pre-COMMIT and
-ROLLBACK paths invalidate the outbox rows entirely; sustained non-
-zero across consecutive COMMIT samples = stuck drain or unpaused
-backfill); `db_schema_pending_dropped_events`
+in-tx CDC buffer backpressure or stuck commit);
+<!-- Round 5: missing concept — schema-pending gauge -->
+<!-- preupdate_hook amendment: outbox gauge removed (no outbox) -->
+`db_sqlite_preupdate_buffer_depth` (per (worker, app); current
+writer-actor per-tx event buffer length; **sampled after each
+COMMIT** — expected 0 post-flush; sustained non-zero across
+consecutive COMMIT samples = stuck flush or unpaused backfill);
+`db_schema_pending_dropped_events`
 (per (worker, app); events dropped by §16.7 schema-pending decoder
 during a reload window; alert when `> 1000 over 5 min and
 schema_pending = true` for that app — distinguishes a wedged
 decoder from a normal deploy-window burst);
-`db_wal_consumer_lag_bytes` (PG), `db_sqlite_update_hook_latency_ms`;
+`db_wal_consumer_lag_bytes` (PG), `db_sqlite_preupdate_hook_latency_ms`;
 `db_migration_active_runs`; `db_replication_slots_in_use` (PG);
 `db_quota_failopen_active`. Alerting (control plane): WAL consumer lag
 >1 MiB sustained 30s → page; slot count >80% of
 `max_replication_slots` → warn; `db_migration_active_runs` >0 for >10
 min on one app → warn (F1 sweeper candidate); `db_pending_emit_queue_
-depth` >500 sustained 30s → warn; `db_pre_image_outbox_rows` >1000
-across consecutive post-COMMIT samples (sustained 30s) → warn (stuck
-drain or unpaused backfill); `db_schema_pending_dropped_events`
+depth` >500 sustained 30s → warn;
+<!-- preupdate_hook amendment: outbox-rows alert replaced by buffer-depth alert -->
+`db_sqlite_preupdate_buffer_depth` >1000 across consecutive
+post-COMMIT samples (sustained 30s) → warn (stuck flush or unpaused
+backfill); `db_schema_pending_dropped_events`
 >1000 over 5 min while `schema_pending = true` for that app → warn
 (wedged schema-pending decoder; normal deploy bursts clear within
 the §16.7 reload window). Runbooks under `docs/runbooks/`.
@@ -1141,18 +1117,23 @@ reload, publishing one synthetic `resync` at the end.
 <!-- Round 5: IMPORTANT #4 — schema-pending decoder definition -->
 <!-- Round 6: IMPORTANT #3 — new-subscriber policy + PG-side decoder error path -->
 <!-- Round 8: IMPORTANT — reconcile shim placement (upstream of ConsumerHandle, wrapping the decoder) -->
+<!-- preupdate_hook amendment: SQLite-side shim is trivially "in the dispatcher" Rust callback, no DDL/SQL primitive -->
 **Schema-pending decoder, defined.** Thin shim **upstream** of the
 worker's `ChangeStream::ConsumerHandle`, **wrapping the pgoutput
-decoder** (PG) / outbox-drain projector (SQLite), so it sees raw
-frames before they reach `ConsumerHandle`'s event sink. Engaged from
-`bundle_invalidated` until next bundle reload. Placement matters: a
-downstream shim (between `ConsumerHandle` output and the broker)
-would see only successfully decoded `ChangeEvent`s and could not
-intercept the `DecodeError` paths covered below. Behaviour:
-**drain-then-swap**. While active: (a) underlying decoder/drain
-advances its source cursor (never let WAL pile up against an
-inactive slot — §17.6); (b) every decoded `ChangeEvent` is dropped
-without invoking the broker; (c) records
+decoder** (PG) / preupdate-hook dispatcher (SQLite), so it sees raw
+events before they reach `ConsumerHandle`'s event sink. On SQLite
+the shim placement debate is moot — `preupdate_hook` is a Rust
+callback already running inside the dispatcher, so the schema-
+pending check is a single conditional in the same callback that
+filters MV/audit/migrations relations (§13.5). No SQL primitive
+wrapping required. Engaged from `bundle_invalidated` until next
+bundle reload. Placement matters on PG: a downstream shim
+(between `ConsumerHandle` output and the broker) would see only
+successfully decoded `ChangeEvent`s and could not intercept the
+`DecodeError` paths covered below. Behaviour: **drain-then-swap**.
+While active: (a) underlying decoder/dispatcher advances its source
+cursor (never let WAL pile up against an inactive slot — §17.6);
+(b) every event is dropped without invoking the broker; (c) records
 `db_schema_pending_dropped_events`. On next request the isolate
 reloads, `installSchema` attaches the new `LiveSchema`, shim
 disengages, broker emits synthetic `resync`s. Alternative —
@@ -1316,28 +1297,27 @@ CASCADE`. Retry from step 2 on partial failure; steps 3–5 idempotent.
 on the worker process (would lose unrelated apps).
 
 <!-- Round 4: CRITICAL #4 — reorder so DDL runs while writer is alive -->
+<!-- preupdate_hook amendment: DDL teardown step drops (no triggers, no outbox tables); hook unregisters at connection close -->
 **SQLite ordering** (revised). Orchestrator holds the per-app
 `register_model` lock for the drop. (1) **Subscription gate.** If
 any subscription is active, defer with `Conflict { code:
 "subscriptions_active", count: N }`; under `--force`, fire
 `subscription_app_dropped` to every active subscriber and proceed.
-Writer stays alive. (2) **DDL teardown while the writer is still
-alive.** Via the live `SqliteSession`, issue `DROP TRIGGER` for
-each pre-image trigger on each registered collection, `DROP TABLE
-__zeroship_pre_image`, `DROP TABLE __zeroship_pre_image_seq`. This
-is the only step that needs a writer; doing it now closes the
-round-3 hole where the DDL had no writer left. (3) **DETACH from
-peer isolates.** Control plane signals every other worker via the
-existing isolate-eviction control event (§16.6); each receiving
-worker's `IsolateDbContext::drop` closes its `rusqlite::Connection`
-on the doomed app, releasing the ATTACH alias it held. 5s ack
-grace. The orchestrator's own `SqliteSession` is **not** torn down
-yet. (4) **SqliteSession shutdown + mpsc drain.** Orchestrator
-sends `Shutdown` to its `SqliteSession`; the actor finishes the
-current in-flight tx, drops new commands, drains its mpsc receiver,
-closes the underlying `rusqlite::Connection`. (5) **POSIX unlink.**
-Unlink `${db_dir}/zs-${app_id}.sqlite` plus `-wal` / `-shm`. If a
-worker did not ack step 3 within the grace, unlink proceeds — POSIX
+Writer stays alive. (2) **DETACH from peer isolates.** Control
+plane signals every other worker via the existing isolate-eviction
+control event (§16.6); each receiving worker's
+`IsolateDbContext::drop` closes its `rusqlite::Connection` on the
+doomed app, releasing the ATTACH alias it held. 5s ack grace. The
+orchestrator's own `SqliteSession` is **not** torn down yet.
+(3) **SqliteSession shutdown + mpsc drain.** Orchestrator sends
+`Shutdown` to its `SqliteSession`; the actor finishes the current
+in-flight tx, drops new commands, drains its mpsc receiver, closes
+the underlying `rusqlite::Connection`. The preupdate hook
+unregisters automatically when the connection closes — no DDL
+teardown is needed (no triggers were ever installed; no outbox
+table exists). (4) **POSIX unlink.** Unlink
+`${db_dir}/zs-${app_id}.sqlite` plus `-wal` / `-shm`. If a worker
+did not ack step 2 within the grace, unlink proceeds — POSIX
 semantics let that worker continue writing into the freed inode
 until its FD closes; those writes discard with the inode at final
 close (acceptable: the app is being deleted). Idempotent: every
@@ -1410,24 +1390,23 @@ lands here (§18 Q1). Gate (`crates/plugin-db/tests/sqlite/`): every
 existing PG test runs identically under `sqlite`, with documented
 divergences `#[cfg]`-gated; new `cross_app_fk_rejected_at_parse`.
 
+<!-- preupdate_hook amendment: drop trigger-DDL + outbox-table steps; add hook-registration step -->
 **P2** — `SqliteBackend` reactive: `ChangeStream`. New `sqlite_cdc.rs`.
-BEFORE INSERT / UPDATE / DELETE triggers emitted at registration
-(symmetric across op kinds; §11.5); `__zeroship_pre_image` per app.
-Gate (`crates/plugin-db/tests/sqlite/cdc/`):
+Register `Connection::preupdate_hook` once per `SqliteSession` at
+open time (§11.5); hook callback owns the per-tx event buffer +
+relation filter (§13.5). Gate
+(`crates/plugin-db/tests/sqlite/cdc/`):
 `update_publishes_change_event_with_pre_image`,
 `rollback_does_not_publish`,
-`insert_publishes_via_before_insert_trigger`,
-`mixed_ops_in_one_tx_ordered_by_rowid_then_lsn_seq`
-(round-5 CRITICAL #1 fence — replaces round-4
-`mixed_ops_in_one_tx_ordered_by_commit_then_lsn_seq`),
-`outbox_truncated_on_session_open` (IMPORTANT #2 fence),
+`insert_publishes_via_preupdate_hook`,
+`mixed_ops_in_one_tx_ordered_by_buffer_index`,
 `subscription_fanout_under_load`,
 `mv_refresh_does_not_emit_change_events`,
 `mv_refresh_emits_no_change_events_on_base_or_shadow`,
 `mv_subscribe_rejected_at_sdk`,
 `backfill_run_pauses_broker_and_emits_one_resync` (round-5
 IMPORTANT #5 fence), `schema_pending_decoder_drops_then_resyncs`
-(round-5 IMPORTANT #4 fence). <!-- Round 5 -->
+(round-5 IMPORTANT #4 fence).
 
 **P3** — `SqliteBackend` auth: `SessionMinter`. PG rebinds existing
 `auth/session.rs` behind the trait without behavioural change. Gate:
@@ -1488,7 +1467,7 @@ P6a precedes P6b; both ship together at day-1 readiness.
 - **ATTACH database** (SQLite) — mounts the per-app file under an alias matching `app_id`; no `cache=shared`.
 - **SECURITY DEFINER** — PG function-runs-with-owner-privileges; HMAC wrappers callable without holding the secret.
 - **capability trait** — one of fifteen focused traits the `Backend` super-trait composes.
-- **WAL consumer** (PG) / **outbox drain** (SQLite) — long-running pgoutput streamer / orchestrator's in-tx SELECT against `__zeroship_pre_image` immediately before COMMIT.
+- **WAL consumer** (PG) / **preupdate-hook dispatcher** (SQLite) — long-running pgoutput streamer / writer-actor's per-tx event buffer flushed post-COMMIT via the `Connection::preupdate_hook` callback (§11.5). <!-- preupdate_hook amendment -->
 - **pending emit** — ChangeEvent queued during an active transaction; drained on commit, cleared on rollback.
 - **typed_id** — workspace-wide UUIDv7-base62 with entity prefix.
 - **strictness** — per-collection DDL policy (strict/lenient/off).
@@ -1504,10 +1483,11 @@ P6a precedes P6b; both ship together at day-1 readiness.
 - **REPLICA IDENTITY FULL** (PG) — table-level setting causing pgoutput to include the full pre-image in UPDATE/DELETE frames. Required for the §11.5 CDC pre-image promise; cost is WAL volume linear in row width.
 - **hashtext** (PG) — built-in 32-bit string hash used to derive `pg_advisory_lock(int4, int4)` keys (§7.2, §17.4).
 - **EncryptedColumn** — AEAD column; stored as `Bytes`/`BLOB`; per-row random nonce default; filter semantics in §7.2.
-- **MV shadow table** — `__zeroship_mv_<name>` backing SQLite MaterializedView; excluded from CDC trigger install (§11.5, §13.5).
+- **MV shadow table** — `__zeroship_mv_<name>` backing SQLite MaterializedView; writes are filtered out by the preupdate-hook dispatcher's relation filter (§13.5). <!-- preupdate_hook amendment -->
 - **schema-pending decoder** — drain-then-swap shim attached to a worker's `ChangeStream::ConsumerHandle` between `bundle_invalidated` and next-request reload; drops decoded `ChangeEvent`s on the floor, advances the source cursor, emits one synthetic `resync` per active subscription at disengage (§16.7). <!-- Round 5 -->
 - **backfill broker pause** — `Broker::suppress_app` engaged for the duration of `migrations.run` so a million-row backfill does not fan a million events to subscribers; one `resync` at resume (§10.6, §11.6). <!-- Round 5 -->
 - **Deterministic-IV-via-HMAC AEAD** — `nonce = HMAC-SHA256(k_siv, plaintext)[..12]` then AES-GCM under that nonce; follows the SIV-via-PRF paradigm described in Rogaway-Shrimpton 2006 §3.2 (with HMAC-SHA256 as PRF and AES-GCM as the AEAD primitive). **Not** an instantiation of RS06's concrete SIV construction (S2V + AES-CTR), **not** RFC 5297 AES-SIV, **not** RFC 8452 AES-GCM-SIV (POLYVAL), and **not** the AWS Database Encryption SDK beacon mechanism (separate HMAC-truncate index column over randomised AES-GCM); §7.2. <!-- Round 6; round-8 attribution narrowed -->
 - **slot-ownership-stays-platform** — invariant from §17.5: per-app PG roles never receive `REPLICATION`; the control-plane platform role is the sole creator/reader/dropper of every per-app replication slot. Tracked as a hard non-negotiable in the §19 P6 row. <!-- Round 5; round-6 P6-row cross-anchor -->
 - **schema_pending** — `.code` returned by `subscribe(...)` while a worker's schema-pending decoder is engaged (§16.7); SDK retries with bounded backoff. Also the tag attached to a pgoutput frame the PG-side decoder drops when a column rename arrives mid-drain. <!-- Round 6 -->
-- **`db_pre_image_outbox_rows`** — operational gauge sampled **after each COMMIT in the writer actor** (§16.3 — not idle-driven; a continuously-busy writer never idles); steady-state 0 across consecutive samples, alerting threshold for stuck drain. <!-- Round 5; round-6 sample-after-COMMIT correction -->
+- **preupdate_hook** — SQLite C API `sqlite3_preupdate_hook` (available since SQLite 3.16, 2017), exposed by rusqlite behind the `preupdate_hook` Cargo feature, compiled into the `bundled` amalgamation via `SQLITE_ENABLE_PREUPDATE_HOOK`. Fires synchronously BEFORE every rowid-table mutation with native OLD/NEW row accessors (`sqlite3_preupdate_old` / `sqlite3_preupdate_new`); the basis for SQLite CDC (§11.5). <!-- preupdate_hook amendment -->
+- **`db_sqlite_preupdate_buffer_depth`** — operational gauge sampled **after each COMMIT in the writer actor** (§16.3 — not idle-driven; a continuously-busy writer never idles); steady-state 0 across consecutive samples, alerting threshold for stuck flush. <!-- preupdate_hook amendment, replaces former db_pre_image_outbox_rows -->
