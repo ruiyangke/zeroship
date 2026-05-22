@@ -352,53 +352,61 @@ pub(crate) fn rows_to_json_value(rows: &[compio_postgres::Row]) -> Vec<Value> {
 /// - Everything else → string (via text representation)
 pub(crate) fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
-    for col in row.columns() {
+    // Enumerate by index — compio_postgres's `Row::try_get(&str)` and
+    // `Row::raw_value(&str)` resolve the name via a linear scan of
+    // `row.columns()` ([I35]: that made `row_to_json` O(N²) in the
+    // column count). Threading the index directly drops the per-column
+    // lookup to O(1).
+    for (idx, col) in row.columns().iter().enumerate() {
         let key = col.name().to_string();
-        let value = column_to_json(row, col.name(), col.type_().oid());
+        let value = column_to_json(row, idx, col.type_().oid());
         obj.insert(key, value);
     }
     Value::Object(obj)
 }
 
-/// Convert a single column value to JSON based on its OID.
-fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
+/// Convert a single column value to JSON based on its OID. Uses a
+/// numeric column index (not the name) so `Row::try_get` /
+/// `Row::raw_value` skip the linear name lookup — see the rationale
+/// on `row_to_json` above.
+fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
     // Try to get the value — if it's NULL, return null
     // OIDs from postgres_types::Type constants
     match oid {
         // BOOL = 16
-        16 => match row.try_get::<_, bool>(name) {
+        16 => match row.try_get::<_, bool>(idx) {
             Ok(v) => Value::Bool(v),
             Err(_) => Value::Null,
         },
         // INT2 = 21
-        21 => match row.try_get::<_, i16>(name) {
+        21 => match row.try_get::<_, i16>(idx) {
             Ok(v) => Value::Number(serde_json::Number::from(v)),
             Err(_) => Value::Null,
         },
         // INT4 = 23
-        23 => match row.try_get::<_, i32>(name) {
+        23 => match row.try_get::<_, i32>(idx) {
             Ok(v) => Value::Number(serde_json::Number::from(v)),
             Err(_) => Value::Null,
         },
         // INT8 = 20
-        20 => match row.try_get::<_, i64>(name) {
+        20 => match row.try_get::<_, i64>(idx) {
             Ok(v) => Value::Number(serde_json::Number::from(v)),
             Err(_) => Value::Null,
         },
         // FLOAT4 = 700
-        700 => match row.try_get::<_, f32>(name) {
+        700 => match row.try_get::<_, f32>(idx) {
             Ok(v) => serde_json::Number::from_f64(f64::from(v))
                 .map_or(Value::Null, Value::Number),
             Err(_) => Value::Null,
         },
         // FLOAT8 = 701
-        701 => match row.try_get::<_, f64>(name) {
+        701 => match row.try_get::<_, f64>(idx) {
             Ok(v) => serde_json::Number::from_f64(v)
                 .map_or(Value::Null, Value::Number),
             Err(_) => Value::Null,
         },
         // UUID = 2950
-        2950 => match row.try_get::<_, uuid::Uuid>(name) {
+        2950 => match row.try_get::<_, uuid::Uuid>(idx) {
             Ok(v) => Value::String(v.to_string()),
             Err(_) => Value::Null,
         },
@@ -409,7 +417,7 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
         // wrap arithmetic in `checked_*` so an overflowing sentinel becomes
         // `null` (the conceptual `DbError::Internal`) instead of panicking
         // the worker thread.
-        1114 | 1184 => match row.raw_value(name) {
+        1114 | 1184 => match row.raw_value(idx) {
             Some(bytes) if bytes.len() == 8 => {
                 let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
                 // 2000-01-01 = 946684800 seconds since Unix epoch
@@ -432,7 +440,7 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
         // Same overflow concern as TIMESTAMP: `infinity` arrives as
         // `i32::MAX`, which multiplies past `i64::MAX`. Checked math
         // turns the overflow into `null` rather than a panic.
-        1082 => match row.raw_value(name) {
+        1082 => match row.raw_value(idx) {
             Some(bytes) if bytes.len() == 4 => {
                 let pg_days = i32::from_be_bytes(bytes.try_into().unwrap());
                 let unix_ms = i64::from(pg_days)
@@ -453,7 +461,7 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
             _ => Value::Null,
         },
         // JSONB = 3802 — binary format has 1-byte version prefix, strip it
-        3802 => match row.raw_value(name) {
+        3802 => match row.raw_value(idx) {
             Some(bytes) if bytes.len() > 1 => {
                 let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
                 serde_json::from_str(json_str).unwrap_or(Value::Null)
@@ -461,7 +469,7 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
             _ => Value::Null,
         },
         // JSON = 114 — text format, no prefix
-        114 => match row.try_get::<_, String>(name) {
+        114 => match row.try_get::<_, String>(idx) {
             Ok(s) => {
                 let parsed = serde_json::from_str(&s).ok();
                 parsed.unwrap_or(Value::String(s))
@@ -474,7 +482,7 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
         // to NUMERIC, so user-facing `doc.field` should be a number, not
         // a string. Postgres serialises NUMERIC over the text protocol
         // as a decimal string; parse it.
-        1700 => match row.try_get::<_, String>(name) {
+        1700 => match row.try_get::<_, String>(idx) {
             Ok(s) => {
                 if let Ok(i) = s.parse::<i64>() {
                     Value::Number(serde_json::Number::from(i))
@@ -489,7 +497,7 @@ fn column_to_json(row: &compio_postgres::Row, name: &str, oid: u32) -> Value {
         },
         // TEXT = 25, VARCHAR = 1043, CHAR = 18, BPCHAR = 1042, NAME = 19
         // and everything else: treat as text
-        _ => match row.try_get::<_, String>(name) {
+        _ => match row.try_get::<_, String>(idx) {
             Ok(v) => Value::String(v),
             Err(_) => Value::Null,
         },
