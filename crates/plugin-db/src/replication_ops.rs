@@ -246,6 +246,7 @@ pub fn start_replication_consumer_dispatch<'s>(
 /// **Test-only**: probe whether the auto-spawn registry holds an entry
 /// for `app_id`. Used by `tests/integration.rs` to assert idempotency
 /// without reaching into private state.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn is_consumer_registered_for_tests(app_id: &str) -> bool {
     crate::context::with(|c| c.is_consumer_running(app_id))
@@ -253,6 +254,7 @@ pub fn is_consumer_registered_for_tests(app_id: &str) -> bool {
 
 /// **Test-only**: clear the auto-spawn registry. Used to reset state
 /// between integration tests that share a thread.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_consumer_registry_for_tests() {
     crate::context::with_mut(|c| c.clear_consumer_registry());

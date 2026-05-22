@@ -154,6 +154,7 @@ impl NativePlugin for DbPlugin {
 /// **Test-only**: set the per-thread `DB_URL` directly, bypassing the
 /// usual `DbPlugin::register()` path. Used by integration tests that
 /// drive `migrations::exec_*` without spinning up a full runtime.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_db_url_for_tests(url: &str) {
     ctx_mut(|c| {
@@ -163,6 +164,7 @@ pub fn set_db_url_for_tests(url: &str) {
 
 /// **Test-only**: clear `MIG_LOCK` for the current thread. Safe across
 /// test boundaries when an earlier test left the lock held.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_migration_lock_for_tests() {
     migrations::release_active_lock();
@@ -176,6 +178,7 @@ pub fn clear_migration_lock_for_tests() {
 /// Asynchronous because it has to open a fresh Postgres connection
 /// (the same shape the production `exec_begin` does). Pair with
 /// [`uninstall_tx_marker_for_tests`] to release the slot.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub async fn install_tx_marker_for_tests(url: &str) {
     let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
@@ -199,6 +202,7 @@ pub async fn install_tx_marker_for_tests(url: &str) {
 /// **Test-only**: drop the transaction-connection slot (rolls back the
 /// dummy tx server-side via connection close). Mirrors
 /// [`install_tx_marker_for_tests`].
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn uninstall_tx_marker_for_tests() {
     let client = ctx_mut(|c| c.take_tx_client());
@@ -209,6 +213,7 @@ pub fn uninstall_tx_marker_for_tests() {
 /// (the same path `exec_mutation_with_emit` takes when inside a tx).
 /// Used by the Gap B test to assert the drain/clear behavior without
 /// running real SQL.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
     ctx_mut(|c| c.push_pending_emit(ev));
@@ -217,6 +222,7 @@ pub fn push_pending_emit_for_tests(ev: broker::ChangeEvent) {
 /// **Test-only**: drain the pending-emits queue (fire all events
 /// through `emit_local`). Exposed so the Gap B tests can drive the
 /// transaction settle path's commit branch without standing up V8.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn drain_pending_emits_for_tests() {
     exec::drain_pending_emits_on_commit();
@@ -224,6 +230,7 @@ pub fn drain_pending_emits_for_tests() {
 
 /// **Test-only**: clear the pending-emits queue without firing
 /// (rollback branch).
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_pending_emits_for_tests() {
     exec::clear_pending_emits();

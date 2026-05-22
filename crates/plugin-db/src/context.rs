@@ -424,6 +424,7 @@ impl IsolateDbContext {
     /// Clear every entry from the consumer registry (test-only —
     /// production code should rely on the supervised task's exit path
     /// to call [`Self::unmark_consumer_running`]).
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn clear_consumer_registry(&mut self) {
         self.running_consumers.clear();
     }

@@ -23,5 +23,17 @@ sha2 = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+# `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
+# downstream test crates (integration tests in `tests/integration.rs`).
+# The same symbols are visible to the in-crate unit tests via
+# `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
+test-helpers = []
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true
