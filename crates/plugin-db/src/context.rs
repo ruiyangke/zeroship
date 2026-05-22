@@ -401,7 +401,8 @@ impl IsolateDbContext {
     /// cancel). The slot-empty case is observable but rare — log it
     /// at `warn` so we can distinguish a real cancel race from a
     /// state-machine bug that silently dropped the client (paired
-    /// with the `set_mig_lock` debug_asserts above).
+    /// with the `tracing::error!` on `set_mig_lock`'s shadow-replace
+    /// branch above).
     pub fn return_mig_client(&mut self, client: Client) {
         match self.mig_lock.as_mut() {
             Some(lock) => lock.client = Some(client),

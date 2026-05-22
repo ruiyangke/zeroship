@@ -603,10 +603,14 @@ pub async fn drop_abandoned_slots(
 // Misc — diagnostic helpers used by the V8 callback layer
 // ---------------------------------------------------------------------------
 
-/// Cheap probe used by the V8 `replicationStatus` callback to surface
-/// the current state of an app's slot without re-emitting the full
-/// SetupOutcome.
-pub async fn slot_status(
+/// Cheap probe over `pg_replication_slots` used by future callers that
+/// want the current state of an app's slot without re-emitting the
+/// full `SetupOutcome`. No production caller today (api-surface r9
+/// NEW-R9-1 noted the prior "V8 `replicationStatus` callback"
+/// docstring was aspirational); kept `pub(crate)` so a future
+/// `replicationStatus` v8_class method can adopt it without surface
+/// churn.
+pub(crate) async fn slot_status(
     pool: &Pool,
     app_id: &str,
 ) -> Result<Option<serde_json::Value>, DbError> {

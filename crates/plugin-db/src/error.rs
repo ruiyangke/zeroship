@@ -20,7 +20,11 @@
 //! 2. **Pure parsers** internal to `auth/session.rs`: `hex_decode` /
 //!    `hex_nibble` ASCII-only decoders that never cross an isolate
 //!    boundary; lifted into `DbError::internal(...)` at their
-//!    call sites.
+//!    call sites. The whole `auth/*` subtree is cfg-gated behind
+//!    `--features hardening` post-`2fa9472e`, so these holdouts are
+//!    invisible in default builds — but the hold-out class still
+//!    applies inside the SECURITY DEFINER bootstrap flow when the
+//!    feature is on.
 //!
 //! 3. **JS-input arg parsers** in `v8_classes/migration.rs` (`parse_commit_spec`,
 //!    `parse_spec`) and `v8_classes/migrations.rs` (`parse_name_and_collection`):
