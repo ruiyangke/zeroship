@@ -334,10 +334,11 @@ impl DbError {
 /// Prepend a contextual phrase to the human-readable body of `err`
 /// while keeping its variant (and therefore its wire `.code`) intact.
 ///
-/// This is the shared primitive every per-module `coded_sql` helper
-/// (in `audit`, `auth::bootstrap`, `auth::keys`, `auth::session`,
-/// `diff`, `replication`) routes through — operators see "what we were
-/// doing when the SQL failed" without losing the SQLSTATE-driven
+/// This is the shared primitive every per-module `coded_sql`-style
+/// helper routes through: `audit`, `auth::bootstrap`, `auth::keys`,
+/// `auth::session`, `diff`, `replication`, and `migrations::coded_db`
+/// (deeefe18 — last inline copy collapsed). Operators see "what we
+/// were doing when the SQL failed" without losing the SQLSTATE-driven
 /// classification at the V8 boundary.
 ///
 /// The set of "prefix-eligible" variants is the SQLSTATE-derived

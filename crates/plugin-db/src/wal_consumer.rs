@@ -46,10 +46,11 @@
 //!   for P8a.2; the dual-path optimisation is P8a.3.
 //! - **Boot-time auto-spawn** — the consumer struct is exposed and
 //!   tested, but the V8 callback that spawns it is opt-in:
-//!   apps call `db.replicationConsumerStart()` to enable cross-worker
-//!   propagation. Spawning automatically on isolate boot is one
-//!   `r.add("replicationConsumerStart", …)` + a callback away in
-//!   `replication_ops.rs`; left out so the first ship of this code doesn't
+//!   apps call `db.startReplicationConsumer()` (the `#[v8_method]`
+//!   on the `Db` v8_class — see `v8_classes/db.rs::start_replication_consumer`)
+//!   to enable cross-worker propagation. Spawning automatically on
+//!   isolate boot would just inline the same dispatch helper in the
+//!   isolate init path; left out so the first ship of this code doesn't
 //!   change the boot path for apps that have never enabled C1.
 //! - **Reconnection / fault-tolerance** — the consumer's `run` loop
 //!   returns on first I/O error. A supervising task (`watchdog.rs` in

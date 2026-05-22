@@ -64,26 +64,23 @@ fn coded(code: &str, message: &str, hint: Option<&str>) -> OpError {
     OpError::coded(code, message, hint.map(str::to_string))
 }
 
-/// SQL-error helper — classify the Postgres error through `DbError`
-/// (so the resulting `OpError` carries the SQLSTATE-derived `.code` —
-/// `unique_violation`, `serialization_failure`, `transient`, …)
-/// instead of getting flattened by `format!("db: …")`. Use for the
-/// many `map_err(|e| coded_sql("...", e))`-shaped sites where the
-/// only information added is a context phrase ("migration insert
-/// failed", etc.).
-///
-/// The phrase is prepended to the message so the operator sees both
-/// the lifecycle context AND the SQLSTATE message; the `.code` stays
-/// the SQLSTATE classification.
-/// Stamp a `DbError` with a context phrase and convert to `OpError`.
+/// Stamp a typed `DbError` with a lifecycle context phrase and
+/// convert to `OpError`. Used by the many `map_err(|e| coded_db(...,
+/// e))`-shaped sites in this file where the typed `DbError` came back
+/// from a Backend method (already SQLSTATE-classified) and we just
+/// want to prepend "migration insert failed: " etc. before crossing
+/// the V8 boundary.
 ///
 /// Thin wrapper around [`crate::error::prefix_message`] — kept as a
-/// migrations-local helper so the call sites read naturally
-/// (`coded_db("migration row UPDATE", e)`). The variant-walk logic
-/// lives in `crate::error` (architecture r8 M11; previously this
-/// function open-coded the same match arms found in audit.rs,
-/// auth/*.rs, diff.rs, replication.rs — all consolidated at
-/// cbbc9059).
+/// migrations-local helper so the call sites read naturally. The
+/// variant-walk logic lives in `crate::error` (architecture r8 M11;
+/// previously this function open-coded the same match arms found in
+/// audit.rs, auth/*.rs, diff.rs, replication.rs — all consolidated
+/// at cbbc9059, this file followed at deeefe18).
+///
+/// `.code` is preserved from the typed variant (`unique_violation`,
+/// `serialization_failure`, `transient`, …); the lifecycle phrase
+/// goes into the message body only.
 fn coded_db(context: &str, e: crate::error::DbError) -> OpError {
     let mut db_err = e;
     // `message` already starts with "db: " from walk_pg_chain;
