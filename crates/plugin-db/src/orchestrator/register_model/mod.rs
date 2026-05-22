@@ -128,11 +128,19 @@ async fn exec_register_model(
         message: "db: backend not initialized".to_string(),
         hint: None,
     })?;
+    // P0 PR 5: `BackendHandle` is the enum (no `dyn Backend`). The
+    // PG-only register-model pipeline pulls a `&PostgresBackend` out
+    // of the enum via `as_postgres()` for the duration of the
+    // `run_pipeline` await — async-friendly shape (closure-based
+    // `with_postgres` can't span `.await` ergonomically).
+    let pg = backend
+        .as_postgres()
+        .expect("PostgresBackend arm — register_model is PG-only in P0");
 
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
 
-    run_pipeline(backend.as_ref(), app_id, collection, schema, indexes, &deploy_id).await
+    run_pipeline(pg, app_id, collection, schema, indexes, &deploy_id).await
 }
 
 /// Backend-driven variant of `exec_register_model`. Public so

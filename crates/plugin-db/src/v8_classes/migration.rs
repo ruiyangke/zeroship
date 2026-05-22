@@ -28,7 +28,6 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::rc::Rc;
 
 use zeroship_runtime::state::{JsonValue, OpError};
 use zeroship_runtime_macros::v8_class;
@@ -118,8 +117,15 @@ impl Drop for Migration {
         // advisory lock release with the dying connection.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             compio::runtime::spawn(async move {
+                // P0 PR 5: `BackendHandle` enum (round-3 CRITICAL #3
+                // closure). Unwrap the PG arm via `as_postgres` so
+                // the trailing `.await` doesn't have to live inside
+                // a `with_postgres` closure.
+                let Some(pg) = backend.as_postgres() else {
+                    return;
+                };
                 let _ = crate::migrations::exec_cancel(
-                    backend.as_ref(),
+                    pg,
                     &owner.app_id,
                     &owner.name,
                     &owner.collection,
@@ -168,7 +174,10 @@ impl Migration {
                 .to_op_error()
             })?;
         let backend = ensure_backend().await?;
-        crate::migrations::exec_status(backend.as_ref(), &owner.app_id, &owner.name, &owner.collection)
+        let pg = backend
+            .as_postgres()
+            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        crate::migrations::exec_status(pg, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(JsonValue)
     }
@@ -188,7 +197,10 @@ impl Migration {
             .take()
             .ok_or_else(crate::migrations::err_not_active)?;
         let backend = ensure_backend().await?;
-        crate::migrations::exec_cancel(backend.as_ref(), &owner.app_id, &owner.name, &owner.collection)
+        let pg = backend
+            .as_postgres()
+            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        crate::migrations::exec_cancel(pg, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
     }
@@ -205,7 +217,10 @@ impl Migration {
             .take()
             .ok_or_else(crate::migrations::err_not_active)?;
         let backend = ensure_backend().await?;
-        crate::migrations::exec_reset(backend.as_ref(), &owner.app_id, &owner.name, &owner.collection)
+        let pg = backend
+            .as_postgres()
+            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        crate::migrations::exec_reset(pg, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
     }
@@ -260,10 +275,17 @@ impl Migration {
 /// [`crate::exec::ensure_pool`] (which constructs the
 /// [`crate::backend::PostgresBackend`] alongside the pool in
 /// `IsolateDbContext::set_pool`) and then returns the per-isolate
-/// backend handle. The `Migration` v8_async_methods route every
-/// migration RPC through this handle so they stay free of direct
-/// `compio_postgres` type references.
-async fn ensure_backend() -> Result<Rc<crate::backend::PostgresBackend>, OpError> {
+/// [`crate::backend::BackendHandle`] enum. The `Migration`
+/// v8_async_methods route every migration RPC through this handle so
+/// they stay free of direct `compio_postgres` type references.
+///
+/// **P0 PR 5**: returns the typed enum instead of an
+/// `Rc<PostgresBackend>` (round-3 critic CRITICAL #3 closure). Call
+/// sites unwrap the PG arm via [`crate::backend::BackendHandle::as_postgres`]
+/// — the async paths can't compose a closure-based `with_postgres`
+/// across the trailing `.await`, so the borrowed-reference shape
+/// wins out.
+async fn ensure_backend() -> Result<crate::backend::BackendHandle, OpError> {
     crate::exec::ensure_pool()
         .await
         .map_err(crate::error::DbError::to_op_error)?;
@@ -404,10 +426,13 @@ fn commit_batch_with_spec<'s>(
                 };
             }
         };
+        let pg = backend
+            .as_postgres()
+            .expect("PostgresBackend arm — commitBatch is PG-only in P0");
         let terminal_status_opt = spec.terminal_status.as_deref();
         let error_message_opt = spec.error_message.as_deref();
         let result = crate::migrations::exec_commit_batch(
-            backend.as_ref(),
+            pg,
             &owner.app_id,
             &spec.updates,
             &spec.dead_letter_pks,
@@ -673,8 +698,11 @@ pub(crate) fn migration_start_with_spec<'s>(
                 };
             }
         };
+        let pg = backend
+            .as_postgres()
+            .expect("PostgresBackend arm — migration.start is PG-only in P0");
         match crate::migrations::exec_begin(
-            backend.as_ref(), &app_id, &name, &collection, dry_run, reset,
+            pg, &app_id, &name, &collection, dry_run, reset,
         )
         .await
         {

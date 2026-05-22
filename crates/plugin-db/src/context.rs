@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 use compio_postgres::{Client, Pool};
 
-use crate::backend::PostgresBackend;
+use crate::backend::{BackendHandle, PostgresBackend};
 use crate::broker::ChangeEvent;
 
 /// Lock state for the in-flight migration. The `client` is held in
@@ -156,14 +156,23 @@ pub struct IsolateDbContext {
     /// consumer per app at a time).
     running_consumers: HashSet<String>,
 
-    /// Backend handle wrapping the pool — Stage 8e-R2. Created
-    /// alongside the pool by [`Self::set_pool`] so consumers can call
-    /// `ctx.backend()` to get a [`crate::backend::Backend`] facade
-    /// without naming `compio_postgres::Pool` directly.
+    /// Backend handle wrapping the pool — Stage 8e-R2; promoted to
+    /// the typed [`BackendHandle`] enum in P0 PR 5 (round-3 critic
+    /// CRITICAL #3 closure; see `docs/proposals/db-system-design.md`
+    /// §5.5 and `docs/proposals/p0-implementation-plan.md` §"PR 5").
+    /// Created alongside the pool by [`Self::set_pool`] so consumers
+    /// can call `ctx.backend()` to get a [`BackendHandle`] without
+    /// naming `compio_postgres::Pool` directly.
+    ///
+    /// **No `dyn Backend` here**: the enum carries the concrete arm
+    /// (`Postgres(Rc<PostgresBackend>)` today; `Sqlite(…)` gated on
+    /// the P1 `sqlite` feature) so every trait-method call still
+    /// monomorphises through the PG impl. The accessor cheaply
+    /// `.clone()`s the enum (which Rc-clones the inner pointer).
     ///
     /// `None` until the pool is initialised; same lifecycle as
     /// [`Self::pool`] (cleared whenever the pool is cleared).
-    backend: Option<Rc<PostgresBackend>>,
+    backend: Option<BackendHandle>,
 }
 
 impl IsolateDbContext {
@@ -203,10 +212,12 @@ impl IsolateDbContext {
 
     /// Install the pool — called by `init_pool_async` once Postgres
     /// `connect` succeeds. Constructs the [`PostgresBackend`] facade
-    /// in lockstep so the two never drift.
+    /// in lockstep so the two never drift, and wraps it in the
+    /// [`BackendHandle::Postgres`] arm (P0 PR 5).
     pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
-        self.backend = Some(Rc::new(PostgresBackend::new(Rc::clone(&pool), url)));
+        let backend = Rc::new(PostgresBackend::new(Rc::clone(&pool), url));
+        self.backend = Some(BackendHandle::Postgres(backend));
         self.pool = Some(pool);
     }
 
@@ -218,9 +229,14 @@ impl IsolateDbContext {
         self.backend = None;
     }
 
-    /// Snapshot the backend facade (cloned `Rc`).
-    pub(crate) fn backend(&self) -> Option<Rc<PostgresBackend>> {
-        self.backend.as_ref().map(Rc::clone)
+    /// Snapshot the backend facade (cloned enum — Rc-clone of the
+    /// inner arm, see [`BackendHandle`]). The `Clone` derive on
+    /// [`BackendHandle`] makes this cheap: the `Postgres` arm clones
+    /// an `Rc<PostgresBackend>` (refcount bump, no allocation), and
+    /// the eventual `Sqlite` arm under `--features sqlite` will be
+    /// the same shape.
+    pub(crate) fn backend(&self) -> Option<BackendHandle> {
+        self.backend.clone()
     }
 
     // ----- DB_URL -----------------------------------------------------

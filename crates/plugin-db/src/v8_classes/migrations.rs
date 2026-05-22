@@ -186,15 +186,22 @@ fn dispatch_by_spec<'s>(
                 };
             }
         };
+        // P0 PR 5: `BackendHandle` enum (round-3 CRITICAL #3 closure).
+        // Unwrap the PG arm via `as_postgres` so the per-op `.await`
+        // below doesn't have to live inside a `with_postgres`
+        // closure — every migration RPC is PG-only in P0.
+        let pg = backend
+            .as_postgres()
+            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
         let result = match op {
             MigrationOp::Status => {
-                crate::migrations::exec_status(backend.as_ref(), &app_id, &name, &collection).await
+                crate::migrations::exec_status(pg, &app_id, &name, &collection).await
             }
             MigrationOp::Cancel => {
-                crate::migrations::exec_cancel(backend.as_ref(), &app_id, &name, &collection).await
+                crate::migrations::exec_cancel(pg, &app_id, &name, &collection).await
             }
             MigrationOp::Reset => {
-                crate::migrations::exec_reset(backend.as_ref(), &app_id, &name, &collection).await
+                crate::migrations::exec_reset(pg, &app_id, &name, &collection).await
             }
         };
         let value = match result {

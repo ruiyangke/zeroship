@@ -67,6 +67,16 @@ name = "bench_first_row_or_null"
 harness = false
 
 [features]
+# Default backends — `pg` is the only backend implemented in P0. The
+# `sqlite` feature is reserved for P1 (see
+# `docs/proposals/p0-implementation-plan.md` §"PR 5", Open Q6
+# resolution). Adding the cfg gates now lets the SQLite arm of
+# `BackendHandle` (`backend/mod.rs`) compile-time-detect a stray
+# `--features sqlite` build before the `crate::backend::sqlite`
+# module exists, instead of silently miscompiling later.
+default = ["pg"]
+pg = []
+sqlite = []
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via
