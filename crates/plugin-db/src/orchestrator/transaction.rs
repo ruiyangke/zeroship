@@ -72,10 +72,10 @@ pub fn begin_transaction_dispatch<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         match exec_begin(isolation_level.as_deref()).await {
             Ok(()) => {
-                // Stamp ownership now that TX_CONN holds the client —
-                // the wrapper's commit / rollback / Drop all gate on
-                // this matching the wrapper's `token`.
-                crate::TX_TOKEN.with(|t| t.set(token));
+                // Stamp ownership now that the transaction-conn slot
+                // holds the client — the wrapper's commit / rollback /
+                // Drop all gate on this matching the wrapper's `token`.
+                crate::context::with_mut(|c| c.set_tx_token(token));
                 OpResult::JsValue {
                     resolver: resolver_global,
                     value: ResolveValue::JsGlobal(tx_global),
@@ -109,7 +109,7 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
 
 async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
     // Check: no nested transactions
-    let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    let has_tx = crate::context::with(|c| c.has_tx());
     if has_tx {
         return Err(DbError::validation(
             "tx_already_active",
@@ -158,8 +158,9 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
         .await
         .map_err(|e| DbError::from_pg(&e))?;
 
-    crate::TX_CONN.with(|tx| {
-        tx.borrow_mut().replace(client);
+    crate::context::with_mut(|c| {
+        let _previous = c.install_tx_client(client);
+        debug_assert!(_previous.is_none(), "exec_begin: tx_conn slot already occupied");
     });
     // Defensive: any residue from a prior tx that didn't drain cleanly
     // (shouldn't happen — every settle path clears) must NOT leak into

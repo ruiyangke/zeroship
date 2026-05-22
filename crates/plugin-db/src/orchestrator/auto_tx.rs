@@ -163,10 +163,10 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     };
 
     // Don't wrap when a user-driven `db.transaction(...)` already
-    // holds TX_CONN — that would be a nested-tx attempt the user
-    // already opted out of. Returning 0 keeps the auto-end callback
-    // off the user's tx entirely.
-    let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    // holds the tx-conn slot — that would be a nested-tx attempt the
+    // user already opted out of. Returning 0 keeps the auto-end
+    // callback off the user's tx entirely.
+    let has_tx = crate::context::with(|c| c.has_tx());
     if has_tx {
         return Ok(0);
     }
@@ -174,7 +174,7 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     // Open a dedicated connection (same pattern as user-driven
     // `begin_transaction`). compio-postgres splits the connection into
     // (Client, Connection); spawn the run loop on a detached task, hold
-    // the Client in TX_CONN.
+    // the Client in the per-isolate transaction slot.
     let url = crate::context::with(|c| c.db_url())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
@@ -194,8 +194,12 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
         .await
         .map_err(|e| DbError::from_pg(&e))?;
 
-    crate::TX_CONN.with(|tx| {
-        tx.borrow_mut().replace(client);
+    crate::context::with_mut(|c| {
+        let _previous = c.install_tx_client(client);
+        debug_assert!(
+            _previous.is_none(),
+            "exec_auto_begin: tx_conn slot already occupied"
+        );
     });
     crate::AUTO_TX_OWNED.with(|f| f.set(true));
     clear_pending_emits();
@@ -218,7 +222,7 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), DbError> {
     // Take the client. We MUST clear AUTO_TX_OWNED before any await so
     // a re-entrant call (shouldn't happen — V8 is single-threaded —
     // but cheap insurance) doesn't see stale ownership.
-    let client = crate::TX_CONN.with(|tx| tx.borrow_mut().take());
+    let client = crate::context::with_mut(|c| c.take_tx_client());
     crate::AUTO_TX_OWNED.with(|f| f.set(false));
 
     let Some(client) = client else {

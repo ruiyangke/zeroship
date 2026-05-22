@@ -112,15 +112,18 @@ impl Drop for Transaction {
         if token == 0 || self.settled.get() {
             return;
         }
-        let current = crate::TX_TOKEN.with(Cell::get);
+        let current = crate::context::with(|c| c.tx_token());
         if current != token {
             return;
         }
         // We are the live owner. Take and drop the Client; Postgres
-        // auto-rollbacks at connection close. Also clear TX_TOKEN so
+        // auto-rollbacks at connection close. Also clear `tx_token` so
         // run_sql / a future begin sees a clean slate.
-        let client: Option<Client> = crate::TX_CONN.with(|c| c.borrow_mut().take());
-        crate::TX_TOKEN.with(|t| t.set(0));
+        let client: Option<Client> = crate::context::with_mut(|c| {
+            let client = c.take_tx_client();
+            c.set_tx_token(0);
+            client
+        });
         drop(client);
         // GC-driven implicit rollback — drop any queued broker events
         // so subscribers never observe the now-aborted writes.
@@ -214,7 +217,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     if token == 0 || this.settled.get() {
         return Ok(());
     }
-    let current = crate::TX_TOKEN.with(Cell::get);
+    let current = crate::context::with(|c| c.tx_token());
     if current != token {
         this.settled.set(true);
         return Ok(());
@@ -224,12 +227,12 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     // drop it at the end of this scope; that lets the spawned
     // Connection task observe the closed sender and tear the conn
     // down cleanly.
-    let client_opt = crate::TX_CONN.with(|c| c.borrow_mut().take());
+    let client_opt = crate::context::with_mut(|c| c.take_tx_client());
     let Some(client) = client_opt else {
-        // TX_CONN already cleared by another path — treat as already
+        // tx_conn already cleared by another path — treat as already
         // settled rather than a fresh failure.
         this.settled.set(true);
-        crate::TX_TOKEN.with(|t| t.set(0));
+        crate::context::with_mut(|c| c.set_tx_token(0));
         return Ok(());
     };
 
@@ -237,7 +240,7 @@ async fn end(this: &Transaction, cmd: &str) -> Result<(), OpError> {
     // wrapper getting GC'd while the await is in flight) observes
     // "settled" and no-ops instead of running ROLLBACK on a connection
     // we already have in hand.
-    crate::TX_TOKEN.with(|t| t.set(0));
+    crate::context::with_mut(|c| c.set_tx_token(0));
     this.settled.set(true);
 
     let result = client

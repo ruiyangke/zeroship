@@ -26,7 +26,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use compio_postgres::{Client, Pool};
+use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 use crate::context::with_mut as ctx_mut;
@@ -54,17 +54,8 @@ pub mod wal_consumer;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// Active transaction connection. Only one transaction at a time per isolate
-    /// (V8 is single-threaded). If Some, all CRUD ops use this connection.
-    ///
-    /// We store a raw [`Client`] (not a [`compio_postgres::Transaction<'a>`])
-    /// because the lifetime of `Transaction<'a>` is tied to its parent
-    /// [`Client`] — which cannot live inside a thread-local. Instead we issue
-    /// `BEGIN`/`COMMIT`/`ROLLBACK` via `client.execute(...)` directly.
-    pub(crate) static TX_CONN: RefCell<Option<Client>> = const { RefCell::new(None) };
-
-    /// True when the active [`TX_CONN`] was opened by the auto-tx wrapper
-    /// (`__zsBeginAutoTx`) — defense-in-depth read-only/serializable
+    /// True when the active transaction connection was opened by the auto-tx
+    /// wrapper (`__zsBeginAutoTx`) — defense-in-depth read-only/serializable
     /// envelope around `query()`/`mutation()` handlers.
     ///
     /// User-driven `db.transaction(async tx => {...})` calls leave this
@@ -75,30 +66,10 @@ thread_local! {
     /// out at the "nested transactions not supported" check anyway.
     pub(crate) static AUTO_TX_OWNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
-    /// Ownership token for the active transaction connection.
-    ///
-    /// Stamped non-zero by `begin_transaction` on success and cleared
-    /// to zero by any path that drains [`TX_CONN`] (the `Transaction`
-    /// v8_class's `.commit()` / `.rollback()` methods, or its
-    /// Weak-finalizer-driven `Drop`).
-    ///
-    /// Each `Transaction` wrapper carries the token it was minted with;
-    /// commit / rollback / GC all compare against the live TX_TOKEN
-    /// before acting, so the wrapper never double-acts on a transaction
-    /// another path already settled (e.g. an explicit `.commit()`
-    /// followed by the finalizer running on GC).
-    pub(crate) static TX_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-
-    /// Monotonic counter feeding [`TX_TOKEN`]. Incremented inside
-    /// [`next_tx_token`]; never reset (a u64 at 1 GHz tx/s would take
-    /// ~584 years to wrap, so non-uniqueness within a worker lifetime
-    /// is a non-issue).
-    static TX_TOKEN_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-
     /// Broker events queued during an active transaction.
     ///
-    /// While [`TX_CONN`] is `Some`, every successful CRUD mutation
-    /// pushes its `ChangeEvent` here instead of calling
+    /// While a transaction connection is parked, every successful CRUD
+    /// mutation pushes its `ChangeEvent` here instead of calling
     /// [`crate::wal_consumer::emit_local`] directly. The transaction
     /// settle path (`Transaction::end` for user-driven tx;
     /// `exec_auto_end` for the auto-tx wrapper) drains the queue and
@@ -117,11 +88,7 @@ thread_local! {
 /// `orchestrator::transaction::begin_transaction_dispatch` right before
 /// stamping the token onto the freshly-minted `Transaction` wrapper.
 pub(crate) fn next_tx_token() -> u64 {
-    TX_TOKEN_COUNTER.with(|c| {
-        let n = c.get().wrapping_add(1);
-        c.set(n);
-        n
-    })
+    ctx_mut(|c| c.next_tx_token())
 }
 
 /// Check if a model is already registered for this app on this thread.
@@ -248,18 +215,21 @@ pub async fn install_tx_marker_for_tests(url: &str) {
     .detach();
     // Issue a real BEGIN so the dummy connection behaves like a real
     // tx — not strictly required (the queueing path keys off
-    // TX_CONN.is_some()), but matches the production state machine
-    // more honestly.
+    // `IsolateDbContext::has_tx`), but matches the production state
+    // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
-    TX_CONN.with(|tx| *tx.borrow_mut() = Some(client));
+    ctx_mut(|c| {
+        let _previous = c.install_tx_client(client);
+        debug_assert!(_previous.is_none(), "install_tx_marker_for_tests: slot already occupied");
+    });
 }
 
-/// **Test-only**: drop the `TX_CONN` slot (rolls back the dummy tx
-/// server-side via connection close). Mirrors
+/// **Test-only**: drop the transaction-connection slot (rolls back the
+/// dummy tx server-side via connection close). Mirrors
 /// [`install_tx_marker_for_tests`].
 #[doc(hidden)]
 pub fn uninstall_tx_marker_for_tests() {
-    let client = TX_CONN.with(|tx| tx.borrow_mut().take());
+    let client = ctx_mut(|c| c.take_tx_client());
     drop(client);
 }
 

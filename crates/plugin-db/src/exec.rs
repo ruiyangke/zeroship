@@ -42,17 +42,14 @@ pub(crate) async fn run_sql(
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
     // Check if there's an active transaction
-    let has_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    let has_tx = context::with(|c| c.has_tx());
     if has_tx {
         // Use transaction connection
-        let client = crate::TX_CONN
-            .with(|tx| tx.borrow_mut().take())
+        let client = context::with_mut(|c| c.take_tx_client())
             .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
         let result = client.query_text_params(sql, params).await;
         // Put it back
-        crate::TX_CONN.with(|tx| {
-            tx.borrow_mut().replace(client);
-        });
+        context::with_mut(|c| c.put_tx_client(client));
         return result.map_err(|e| DbError::from_pg(&e));
     }
 
@@ -196,7 +193,7 @@ fn queue_or_emit(
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    let in_tx = crate::TX_CONN.with(|tx| tx.borrow().is_some());
+    let in_tx = context::with(|c| c.has_tx());
     if !in_tx {
         crate::wal_consumer::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
