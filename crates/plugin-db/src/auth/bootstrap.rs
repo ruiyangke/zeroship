@@ -16,24 +16,13 @@ use crate::error::DbError;
 /// so operators see *what* the bootstrap layer was doing when the SQL
 /// failed. The SQLSTATE classification still drives the `.code`
 /// (`unique_violation`, `serialization_failure`, `transient`, …) — this
-/// helper only prepends `"auth/bootstrap: <ctx>: "` to the message
-/// body. Mirrors the `coded_sql` shape in `crate::audit`.
+/// helper only prepends `"auth/bootstrap: <ctx>: "` to the message body.
+///
+/// Variant-walking is shared with the other per-module helpers via
+/// [`crate::error::coded_sql`]; this is the `auth/bootstrap`-scoped
+/// thin wrapper.
 fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    let mut err: DbError = e.into();
-    match &mut err {
-        DbError::UniqueViolation { message }
-        | DbError::FkViolation { message }
-        | DbError::NotNullViolation { message }
-        | DbError::CheckViolation { message }
-        | DbError::Serialization { message }
-        | DbError::LockContention { message }
-        | DbError::Transient { message }
-        | DbError::Internal { message } => {
-            *message = format!("auth/bootstrap: {context}: {message}");
-        }
-        _ => {}
-    }
-    err
+    crate::error::coded_sql(&format!("auth/bootstrap: {context}"), e)
 }
 
 /// Result of running the bootstrap. The flags distinguish "this call

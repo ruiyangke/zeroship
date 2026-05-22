@@ -49,25 +49,14 @@ use crate::error::{first_row_or_internal, DbError};
 /// phrase so operators see *what* the audit layer was doing when the
 /// SQL failed. The SQLSTATE classification still drives the `.code`
 /// (`unique_violation`, `serialization_failure`, …) — this helper only
-/// prepends `"audit: <ctx>: "` to the message body. Mirrors the
-/// `coded_db` shape used in `crate::migrations` so the two layers
-/// produce the same error envelope.
+/// prepends `"audit: <ctx>: "` to the message body.
+///
+/// The variant-walking logic is shared with the per-module helpers in
+/// `auth::{bootstrap,keys,session}`, `diff`, and `replication` via
+/// [`crate::error::coded_sql`]. This thin wrapper just stamps the
+/// `audit` module prefix onto the context phrase.
 fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    let mut err: DbError = e.into();
-    match &mut err {
-        DbError::UniqueViolation { message }
-        | DbError::FkViolation { message }
-        | DbError::NotNullViolation { message }
-        | DbError::CheckViolation { message }
-        | DbError::Serialization { message }
-        | DbError::LockContention { message }
-        | DbError::Transient { message }
-        | DbError::Internal { message } => {
-            *message = format!("audit: {context}: {message}");
-        }
-        _ => {}
-    }
-    err
+    crate::error::coded_sql(&format!("audit: {context}"), e)
 }
 
 /// Actor categories accepted by the audit table.

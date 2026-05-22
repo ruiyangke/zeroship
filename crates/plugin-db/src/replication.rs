@@ -49,7 +49,7 @@
 
 use compio_postgres::Pool;
 
-use crate::error::{first_row_or_internal, DbError};
+use crate::error::{first_row_or_internal, prefix_message, DbError};
 use crate::v8_bridge::row_to_json;
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
@@ -57,31 +57,6 @@ use crate::v8_bridge::row_to_json;
 /// `LIKE '__zs_%'` stays selective and the names fit inside Postgres's
 /// 63-character `NAMEDATALEN` budget alongside even a long app_id.
 pub const OBJECT_PREFIX: &str = "__zs_";
-
-/// Prepend a contextual phrase to the human-readable body of `err` while
-/// keeping its variant (and therefore its `.code`) intact. Mirrors the
-/// `coded_sql` pattern in `crate::audit` — operators see "what we were
-/// doing when the SQL failed" without losing the SQLSTATE-driven
-/// classification at the V8 boundary.
-fn prefix_message(err: &mut DbError, prefix: &str) {
-    match err {
-        DbError::UniqueViolation { message }
-        | DbError::FkViolation { message }
-        | DbError::NotNullViolation { message }
-        | DbError::CheckViolation { message }
-        | DbError::Serialization { message }
-        | DbError::LockContention { message }
-        | DbError::Transient { message }
-        | DbError::Internal { message } => {
-            *message = format!("{prefix}{message}");
-        }
-        // ValidationFailed / Configuration / Coded / SchemaRefused carry
-        // their own structured messages (and codes the SDK already
-        // branches on) — leaving them alone keeps the wire format
-        // verbatim.
-        _ => {}
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Naming
@@ -867,56 +842,14 @@ mod tests {
         }
     }
 
-    /// The `prefix_message` helper must leave the variant intact so the
-    /// SQLSTATE classification still drives the wire `.code` at the V8
-    /// boundary; it only prepends the context phrase to the human body.
-    /// Without this guarantee, prefixing in `replication.rs` would
-    /// silently re-flatten everything to `Internal`.
-    #[test]
-    fn prefix_message_preserves_variant_and_code() {
-        let cases = [
-            (
-                DbError::Transient {
-                    message: "x".into(),
-                },
-                "transient",
-            ),
-            (
-                DbError::LockContention {
-                    message: "x".into(),
-                },
-                "lock_not_available",
-            ),
-            (
-                DbError::UniqueViolation {
-                    message: "x".into(),
-                },
-                "unique_violation",
-            ),
-            (
-                DbError::Internal {
-                    message: "x".into(),
-                },
-                "internal",
-            ),
-        ];
-        for (mut variant, expected_code) in cases {
-            prefix_message(&mut variant, "replication: ctx: ");
-            // Body must have been prefixed.
-            assert!(
-                variant.to_string().starts_with("replication: ctx: "),
-                "missing prefix in body: {variant:?}"
-            );
-            // Variant -> wire code unchanged.
-            let op = variant.to_op_error();
-            match op.kind {
-                zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
-                    assert_eq!(code, expected_code);
-                }
-                other => panic!("expected CodedError, got {other:?}"),
-            }
-        }
-    }
+    // The `prefix_message` helper's contract (variant preserved,
+    // structured variants left alone) is now pinned in
+    // `crate::error::tests::prefix_message_preserves_variant_and_code`
+    // and `prefix_message_leaves_structured_variants_alone` — the
+    // helper moved into `crate::error` when the per-file `coded_sql`
+    // duplicates were collapsed onto a single shared variant-walker.
+    // Test coverage of the contract did not move; only its home file
+    // did.
 
     // -----------------------------------------------------------------
     // Cross-tenant scoping regression guards (security review r5,
@@ -1001,24 +934,4 @@ mod tests {
         );
     }
 
-    /// `prefix_message` is a no-op for the structured variants whose
-    /// `.code` is part of the SDK contract (Configuration, Coded,
-    /// ValidationFailed, SchemaRefused). Their messages already carry
-    /// their semantic; prefixing would distort the wire payload.
-    #[test]
-    fn prefix_message_leaves_structured_variants_alone() {
-        let mut cfg = DbError::Configuration {
-            code: "wal_level_not_logical",
-            message: "needs logical".into(),
-        };
-        prefix_message(&mut cfg, "replication: ctx: ");
-        assert_eq!(cfg.to_string(), "needs logical");
-        let op = cfg.to_op_error();
-        match op.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
-                assert_eq!(code, "wal_level_not_logical");
-            }
-            other => panic!("expected CodedError, got {other:?}"),
-        }
-    }
 }

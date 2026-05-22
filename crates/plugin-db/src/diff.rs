@@ -32,24 +32,13 @@ use crate::error::DbError;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
 /// so operators see *what* the diff layer was doing when the SQL
-/// failed. The SQLSTATE classification still drives the `.code`. Mirrors
-/// the `coded_sql` shape in `crate::audit`.
+/// failed. The SQLSTATE classification still drives the `.code`.
+///
+/// Thin wrapper around the shared variant-walker
+/// [`crate::error::coded_sql`] — stamps the `diff` module prefix onto
+/// the context phrase.
 fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    let mut err: DbError = e.into();
-    match &mut err {
-        DbError::UniqueViolation { message }
-        | DbError::FkViolation { message }
-        | DbError::NotNullViolation { message }
-        | DbError::CheckViolation { message }
-        | DbError::Serialization { message }
-        | DbError::LockContention { message }
-        | DbError::Transient { message }
-        | DbError::Internal { message } => {
-            *message = format!("diff: {context}: {message}");
-        }
-        _ => {}
-    }
-    err
+    crate::error::coded_sql(&format!("diff: {context}"), e)
 }
 
 /// Classification per the proposal A2 three-bucket split.
