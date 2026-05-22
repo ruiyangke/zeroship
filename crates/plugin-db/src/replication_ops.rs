@@ -252,36 +252,28 @@ pub fn start_replication_consumer_dispatch<'s>(
         // nowhere to join it, and the supervisor exits cleanly on
         // CopyDone or a fatal error.
         //
-        // Mark the app as running BEFORE the spawn so a racing second
-        // call to startReplicationConsumer() short-circuits even if
-        // the consumer task hasn't yet entered its decode loop.
+        // Mark + unmark live on a ConsumerRunningGuard whose lifetime
+        // is bound to the spawned future. Both mark and unmark execute
+        // INSIDE the future (mark on guard construction via try_claim;
+        // unmark via Drop, on ANY exit — graceful, panic, future
+        // dropped before first poll). The outer is_consumer_running
+        // gate at line 195 short-circuits the common case (same-thread
+        // re-call); try_claim closes the tight race window where two
+        // rapid-succession dispatches both pass the outer gate before
+        // either has marked.
         //
-        // Code-critique r5 MAJOR-R5-2: if `run_supervised` panics
-        // before its terminal `unmark_consumer_running` line, the
-        // app stays "running" forever and a re-spawn is impossible.
-        // Move the unmark into a struct-Drop guard so panic-unwind
-        // also frees the slot.
-        // Code-critique r6 MAJOR-R6-1: a previous version called
-        // `mark_consumer_running` synchronously BEFORE the spawn so a
-        // racing second call would short-circuit. Problem: if the spawn
-        // or the future-first-poll failed, the mark stuck forever.
-        // Move both mark + unmark inside the guard so the lifecycle is
-        // atomic with the future's existence — `ConsumerRunningGuard::new`
-        // marks; `Drop` unmarks; ANY exit path (graceful, panic, future
-        // dropped without poll) hits Drop.
+        // History (each pass closed a specific failure mode):
+        // - e399eeea (cycle 05:25, MAJOR-R5-2): added Drop-based unmark
+        //   so panic in run_supervised doesn't leave the mark stuck.
+        // - 34d209b5 (cycle 06:00, MAJOR-R6-1): moved the mark INSIDE
+        //   the guard's constructor (was previously synchronous before
+        //   spawn) so future-dropped-pre-poll also fires Drop.
+        // - 70921112 (cycle 06:25, concurrency r7 NEW MINOR): replaced
+        //   bare mark with atomic try_mark so two concurrent dispatches
+        //   that race past the outer gate cannot both spawn — the loser
+        //   bails without provisioning, the winner runs run_supervised.
         //
-        // The brief race window between dispatch return and the future's
-        // first poll is acceptable: compio runs callbacks single-threaded
-        // per isolate; a second `startReplicationConsumer()` would
-        // already be queued behind this one on the same event loop.
-        // Concurrency r7 NEW MINOR: two rapid-succession
-        // startReplicationConsumer() calls from the same isolate can
-        // both pass the outer `is_consumer_running` gate at lines
-        // 195-207 before either marks. Result: two spawned tasks both
-        // attempt to provision the same slot and Postgres rejects the
-        // second with SQLSTATE 55006 in a tight retry loop.
-        //
-        // Defense: have the spawned task try-mark atomically. If
+        // Defense: spawned task try-marks atomically. If
         // another task won the race, the loser bails without
         // provisioning or marking. The winner constructs the guard,
         // ensuring Drop unmarks on every exit path.
