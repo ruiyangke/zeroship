@@ -842,6 +842,7 @@ mod tests {
             snapshot_use_gcs: false,
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
         };
         let backend = DockerBackend::new(cfg, None);
         let id = Uuid::now_v7();

@@ -161,6 +161,19 @@ pub struct SandboxConfig {
     /// 0o400 file containing the 32-byte key.
     /// `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` (default `None`).
     pub snapshot_root_kek_path: Option<PathBuf>,
+
+    /// Size of the per-sandbox `workspace.img` AND per-user
+    /// `home.img` virtio-blk images, in gigabytes. Set at create()
+    /// time via `truncate -s <N>G` so the on-disk file is sparse —
+    /// actual host bytes used grow with what the guest writes, not
+    /// the declared size. The same value caps both images for the
+    /// virtio-blk pivot (bug #11); we don't need separate workspace
+    /// and home ceilings because they share the same FS layer and
+    /// the host_state_dir overall is bounded by operator-level
+    /// quota anyway. `SANDBOX_WORKSPACE_IMAGE_SIZE_GB` (default 20).
+    /// Source-of-truth: `docs/proposals/sandbox-snapshot-restore.md`
+    /// virtio-blk pivot.
+    pub workspace_image_size_gb: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -677,6 +690,17 @@ impl SandboxConfig {
             );
         }
 
+        let workspace_image_size_gb =
+            parse_env("SANDBOX_WORKSPACE_IMAGE_SIZE_GB", 20u32)?;
+        if workspace_image_size_gb == 0 {
+            return Err(
+                "SANDBOX_WORKSPACE_IMAGE_SIZE_GB=0; refusing to start \
+                 (mkfs.ext4 against a 0-byte sparse file aborts). \
+                 Set to ≥ 1."
+                    .to_string(),
+            );
+        }
+
         Ok(Self {
             port, token, backend, image, workspace_root, network,
             memory_mb, cpus, idle_timeout_secs, max_lifetime_secs, auto_pull,
@@ -688,6 +712,7 @@ impl SandboxConfig {
             snapshot_use_gcs,
             snapshot_gcs_bucket,
             snapshot_root_kek_path,
+            workspace_image_size_gb,
         })
     }
 }

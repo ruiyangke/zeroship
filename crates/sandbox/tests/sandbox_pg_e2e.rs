@@ -2643,6 +2643,7 @@ fn sweep_test_cfg(snapshot_enabled: bool) -> SandboxConfig {
         snapshot_use_gcs: false,
         snapshot_gcs_bucket: None,
         snapshot_root_kek_path: None,
+        workspace_image_size_gb: 20,
     }
 }
 

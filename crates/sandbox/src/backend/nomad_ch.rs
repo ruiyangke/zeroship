@@ -4,15 +4,25 @@
 //! wrapper script (shipped at `crates/sandbox/scripts/nomad-vm-wrapper.sh`,
 //! installed on the host out-of-band) that spawns:
 //!
-//!   - 3 × `virtiofsd` processes (`keys`, `workspace`, `userhome` shares)
 //!   - 1 × `cloud-hypervisor` foreground process
 //!
+//! CH attaches three virtio-blk disks (rootfs + per-sandbox workspace
+//! image + per-user home image) and injects the controller's signing
+//! pubkey via the kernel cmdline (`zsbx_pubkey=<hex>`). The previous
+//! revision used virtio-fs with three host-side `virtiofsd` daemons;
+//! the pivot to virtio-blk eliminated the only userspace process
+//! whose vhost-user state had to survive snapshot/restore (closes
+//! bug #11). See `docs/proposals/sandbox-snapshot-restore.md` §
+//! virtio-blk pivot.
+//!
 //! The CH VM boots a tiny Linux kernel (CONFIG_IP_PNP=y) + raw ext4
-//! rootfs containing `/sbin/init` (a shell script that mounts the
-//! virtio-fs shares + execs `zeroship-sandbox-agent`). The agent's
-//! wire-protocol-v1 auth (Ed25519 signed requests, 5 s skew + 30 s
-//! nonce LRU) is **identical** to the K8s backend; only the runtime
-//! plumbing differs.
+//! rootfs containing `/sbin/init` (a shell script that parses the
+//! `zsbx_pubkey=` cmdline arg to /run/keys/controller-pubkey, formats
+//! + mounts /dev/vdb at /workspace and /dev/vdc at /home/u, then
+//! execs `zeroship-sandbox-agent`). The agent's wire-protocol-v1
+//! auth (Ed25519 signed requests, 5 s skew + 30 s nonce LRU) is
+//! **identical** to the K8s backend; only the runtime plumbing
+//! differs.
 //!
 //! ## Why this exists
 //!
@@ -28,11 +38,20 @@
 //! ```text
 //! /var/zeroship/ch/                                 # host_state_dir
 //!   <sandbox-id>/
-//!     keys/controller-pubkey                        # virtiofs tag=keys → /run/keys
-//!     workspace/                                    # virtiofs tag=workspace → /workspace
-//!   users/<user_id>/home/                           # virtiofs tag=userhome → /home/u
-//!                                                   # (persists across sandboxes)
+//!     workspace.img                                 # virtio-blk → /dev/vdb → /workspace
+//!                                                   # (per-sandbox, raw ext4, sparse)
+//!   users/<user_id>/
+//!     home.img                                      # virtio-blk → /dev/vdc → /home/u
+//!                                                   # (per-user, raw ext4, persists
+//!                                                   #  across this user's sandboxes)
 //! ```
+//!
+//! The controller's signing pubkey is no longer a file on the host —
+//! it's hex-encoded into `ZSBX_PUBKEY_HEX` and the wrapper injects
+//! it into the guest's kernel cmdline as `zsbx_pubkey=<hex>`. The
+//! guest's /sbin/init decodes it back into 32 raw bytes at
+//! `/run/keys/controller-pubkey`, which is the path the agent's
+//! `auth.rs::DEFAULT_PUBKEY_PATH` already points at.
 //!
 //! ## Network
 //!
@@ -87,18 +106,18 @@
 //!
 //! ## Note on rootfs init.sh
 //!
-//! The demo rootfs ships an `init.sh` that mounts only the `keys`
-//! and `workspace` shares. The 3-share design (`+userhome`) requires
-//! a re-baked rootfs whose init.sh also runs:
+//! Post virtio-blk pivot, the rootfs ships an `init.sh` (committed
+//! at `crates/sandbox/scripts/init.sh`) that:
 //!
-//! ```sh
-//! mkdir -p /home/u
-//! mount -t virtiofs userhome /home/u
-//! ```
+//!   1. Parses `zsbx_pubkey=<hex>` from /proc/cmdline, decodes hex,
+//!      writes `/run/keys/controller-pubkey` (tmpfs-backed /run).
+//!   2. Formats `/dev/vdb` + `/dev/vdc` if `blkid` reports no FS,
+//!      then mounts them at `/workspace` and `/home/u` respectively.
+//!   3. Execs `/usr/local/bin/sandbox-agent`.
 //!
-//! Until that lands, `vm_index` is allocated and the share is
-//! advertised, but the in-VM mount is a no-op — package caches
-//! reside on the per-alloc rootfs and don't persist.
+//! The rootfs must be re-baked (`bake-rootfs.sh`) before any cluster
+//! can run this code — the in-tree init.sh ships only when the
+//! operator rebakes + reuploads the rootfs image.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -119,8 +138,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// to the controller crate.
 const NOMAD_ALLOC_ROOT: &str = "/opt/nomad/data/alloc";
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 use zeroship_sandbox_agent::sig;
@@ -500,7 +517,15 @@ impl NomadCHBackend {
             .nomad_ch
             .host_state_dir
             .join(sandbox_id.simple().to_string());
-        let user_home_dir = self.cfg.nomad_ch.user_home_dir_root.join(user_id).join("home");
+        // virtio-blk pivot (bug #11): the per-user home is now a single
+        // raw ext4 image file rather than a directory. The file lives
+        // at `<user_home_dir_root>/<user_id>/home.img` and is reused
+        // across all of that user's sandboxes (package caches, dotfiles
+        // persist). The wrapper attaches it as the guest's /dev/vdc.
+        let user_home_img = user_home_image_path(
+            &self.cfg.nomad_ch.user_home_dir_root,
+            user_id,
+        );
 
         let mut guard = CreateGuard::new(
             self.vm_index_allocator.clone(),
@@ -517,7 +542,7 @@ impl NomadCHBackend {
                 project_id,
                 &job_id,
                 &host_dir,
-                &user_home_dir,
+                &user_home_img,
                 &mut guard,
             )
             .await;
@@ -547,7 +572,7 @@ impl NomadCHBackend {
         project_id: &str,
         job_id: &str,
         host_dir: &Path,
-        user_home_dir: &Path,
+        user_home_img: &Path,
         guard: &mut CreateGuard,
     ) -> Result<SandboxInfo, String> {
         let create_started = Instant::now();
@@ -563,7 +588,15 @@ impl NomadCHBackend {
         let sk_bytes = random_key32()?;
         let signing_key = Arc::new(SigningKey::from_bytes(&sk_bytes));
         let pubkey = signing_key.verifying_key();
-        let pubkey_b64 = B64.encode(pubkey.as_bytes());
+        // virtio-blk pivot (bug #11): the pubkey no longer travels
+        // through a virtiofs-mounted file; we hex-encode it and the
+        // wrapper injects it into the guest's kernel cmdline as
+        // `zsbx_pubkey=<hex>`. The guest's /sbin/init decodes the
+        // hex back to 32 raw bytes at /run/keys/controller-pubkey,
+        // which is the path the agent's auth loader reads. base64
+        // is no longer emitted here (the agent accepts either raw
+        // 32 bytes or base64, and the cmdline path produces raw).
+        let pubkey_hex = hex::encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
         tracing::info!(
             sandbox_id = %sandbox_id,
@@ -596,44 +629,52 @@ impl NomadCHBackend {
             "sandbox/nomad-ch vm_index allocated"
         );
 
-        // 3. Materialize host dirs. The wrapper script + virtiofsd
-        //    expect these to exist; per-sandbox dirs are unique
-        //    (sandbox_id), per-user is shared across all of this
-        //    user's sandboxes (and intentionally NOT cleaned up on
-        //    sandbox stop).
-        let keys_dir = host_dir.join("keys");
-        let workspace_dir = host_dir.join("workspace");
-        std::fs::create_dir_all(&keys_dir)
-            .map_err(|e| format!("mkdir {}: {}", keys_dir.display(), e))?;
-        std::fs::create_dir_all(&workspace_dir)
-            .map_err(|e| format!("mkdir {}: {}", workspace_dir.display(), e))?;
-        std::fs::create_dir_all(user_home_dir)
-            .map_err(|e| format!("mkdir {}: {}", user_home_dir.display(), e))?;
+        // 3. Materialize host disk images for the two virtio-blk
+        //    devices the wrapper attaches:
+        //      - `<host_dir>/workspace.img` — per-sandbox; freshly
+        //        created (sparse `truncate -s … + mkfs.ext4`).
+        //      - `<user_home_dir_root>/<user>/home.img` — per-user;
+        //        created once on the user's first sandbox, reused
+        //        across subsequent sandboxes (package caches +
+        //        dotfiles persist). The directory tree is mkdir'd
+        //        for the image's parent.
+        //
+        //    Idempotent: if the file already exists at the path we
+        //    skip both `truncate` and `mkfs.ext4`. This matters for
+        //    `home.img` (per-user reuse) and is harmless belt-and-
+        //    braces for `workspace.img` (per-sandbox dir is unique
+        //    by UUID).
+        //
+        //    Disk-image creation costs ~1–3s on first invocation
+        //    (mostly the mkfs.ext4 metadata write); per-user reuse
+        //    means the cost amortizes to ~0 after the user's first
+        //    sandbox.
+        std::fs::create_dir_all(host_dir)
+            .map_err(|e| format!("mkdir {}: {}", host_dir.display(), e))?;
+        if let Some(parent) = user_home_img.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+        }
         guard.host_dir_created = true;
 
-        // 4. Write public key. The agent's verifier loads this from
-        //    /run/keys/controller-pubkey at boot — which is the
-        //    virtiofs-mounted view of `keys_dir`.
-        //
-        //    create + write_all + chmod 0444 + fsync, in that order:
-        //    - 0444 because the file is a non-secret read-only
-        //      attestation; we'd rather not let a buggy in-VM uid
-        //      truncate it.
-        //    - fsync so a host crash between the write and CH boot
-        //      doesn't serve a 0-byte pubkey to the agent (which
-        //      would 401 every signed request forever).
-        let pubkey_path = keys_dir.join("controller-pubkey");
-        write_pubkey_file(&pubkey_path, pubkey_b64.as_bytes())
-            .map_err(|e| format!("write {}: {}", pubkey_path.display(), e))?;
+        let workspace_img = workspace_image_path(host_dir);
+        let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
+        create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
+            .map_err(|e| format!("workspace.img: {e}"))?;
+        create_ext4_image_if_missing(user_home_img, workspace_img_size_gb)
+            .map_err(|e| format!("home.img: {e}"))?;
+
+        // 4. (was: write pubkey file — now baked into the cmdline by
+        //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
 
         // 5. Build + submit the Nomad job spec.
         let job_json = build_nomad_job_json(
             job_id,
             &self.cfg,
             vm_index,
-            &keys_dir,
-            &workspace_dir,
-            user_home_dir,
+            &workspace_img,
+            user_home_img,
+            &pubkey_hex,
             user_id,
             project_id,
             &sandbox_id.to_string(),
@@ -1949,9 +1990,9 @@ pub(crate) fn build_nomad_job_json(
     job_id: &str,
     cfg: &SandboxConfig,
     vm_index: u16,
-    keys_dir: &Path,
-    workspace_dir: &Path,
-    user_home_dir: &Path,
+    workspace_img: &Path,
+    user_home_img: &Path,
+    pubkey_hex: &str,
     user_id: &str,
     project_id: &str,
     sandbox_id: &str,
@@ -2003,9 +2044,15 @@ pub(crate) fn build_nomad_job_json(
                         // expansion at our level. See
                         // https://developer.hashicorp.com/nomad/docs/runtime/environment
                         "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
-                        "ZSBX_KEYS_DIR": keys_dir.display().to_string(),
-                        "ZSBX_WORKSPACE_DIR": workspace_dir.display().to_string(),
-                        "ZSBX_USER_HOME_DIR": user_home_dir.display().to_string(),
+                        // virtio-blk pivot (bug #11): the three virtio-fs
+                        // share dirs are gone. We now pass full image
+                        // paths (per-sandbox workspace + per-user home)
+                        // and the controller pubkey as hex. The wrapper
+                        // attaches the images as /dev/vdb,/vdc and
+                        // injects the pubkey into the kernel cmdline.
+                        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
+                        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
+                        "ZSBX_PUBKEY_HEX": pubkey_hex,
                         // Memory / CPU. The wrapper substitutes these
                         // into CH's `--memory size=${N}M,shared=on` and
                         // `--cpus boot=${N}` flags. Without these the
@@ -2822,25 +2869,75 @@ async fn wait_for_agent_silent(
 
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
 
-/// Write `controller-pubkey`: create + write_all + chmod 0444 +
-/// sync_all. fsync so a host crash between write and CH boot doesn't
-/// serve a 0-byte pubkey to the agent.
-fn write_pubkey_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(body)?;
-    let mut perms = f.metadata()?.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o444);
+/// Derive the per-user home-image path from the configured root.
+/// Layout: `<user_home_dir_root>/<user_id>/home.img`. The path is
+/// reused across every sandbox the user creates so package caches
+/// and dotfiles persist (see `create_sandbox` step 3).
+pub(crate) fn user_home_image_path(
+    user_home_dir_root: &Path,
+    user_id: &str,
+) -> PathBuf {
+    user_home_dir_root.join(user_id).join("home.img")
+}
+
+/// Derive the per-sandbox workspace-image path inside a sandbox's
+/// host_dir. Per-sandbox, freshly created on cold-boot.
+pub(crate) fn workspace_image_path(host_dir: &Path) -> PathBuf {
+    host_dir.join("workspace.img")
+}
+
+/// Create a raw ext4 image at `path` of `size_gb` gigabytes if and
+/// only if the file does not already exist. Uses `truncate -s` to
+/// produce a sparse image (no zero-write up front, just metadata)
+/// and `mkfs.ext4 -q -F` to format. Idempotent: a second invocation
+/// against the same path is a no-op.
+///
+/// The `-F` flag on mkfs.ext4 is required to format a regular file
+/// that isn't a block device; without it mkfs prompts and aborts.
+///
+/// Returns `Err` with a String describing which subprocess failed.
+/// The caller maps that into a controller-side error log; the
+/// `CreateGuard` Drop on the calling path tears down the partial
+/// host_dir state.
+pub(crate) fn create_ext4_image_if_missing(
+    path: &Path,
+    size_gb: u32,
+) -> Result<(), String> {
+    if path.exists() {
+        return Ok(());
     }
-    #[cfg(not(unix))]
-    {
-        perms.set_readonly(true);
+    // truncate(1) is universally present on debian + bash; using it
+    // (rather than `std::fs::File::set_len`) keeps the path-and-size
+    // contract identical to the CLI an operator would type, which
+    // makes the failure mode easier to reproduce by hand.
+    let size = format!("{size_gb}G");
+    let truncate_status = std::process::Command::new("truncate")
+        .args(["-s", &size])
+        .arg(path)
+        .status()
+        .map_err(|e| format!("spawn truncate: {e}"))?;
+    if !truncate_status.success() {
+        return Err(format!(
+            "truncate -s {size} {} exited {}",
+            path.display(),
+            truncate_status,
+        ));
     }
-    std::fs::set_permissions(path, perms)?;
-    f.sync_all()?;
+    let mkfs_status = std::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F"])
+        .arg(path)
+        .status()
+        .map_err(|e| format!("spawn mkfs.ext4: {e}"))?;
+    if !mkfs_status.success() {
+        // Clean up the half-created image so a retry doesn't see
+        // an unformatted file at the same path and skip the mkfs.
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "mkfs.ext4 -q -F {} exited {}",
+            path.display(),
+            mkfs_status,
+        ));
+    }
     Ok(())
 }
 
@@ -3303,6 +3400,7 @@ mod tests {
             snapshot_use_gcs: false,
             snapshot_gcs_bucket: None,
             snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
         };
         cfg
     }
@@ -3336,13 +3434,19 @@ mod tests {
     #[test]
     fn nomad_job_json_basic_shape() {
         let cfg = make_cfg();
+        // virtio-blk pivot (bug #11): build_nomad_job_json now takes
+        // workspace.img + home.img paths + pubkey hex (not three
+        // share dirs). The wrapper attaches these as virtio-blk and
+        // injects the pubkey on the cmdline. The fixture pubkey is
+        // 64 hex chars (32 bytes); short enough to read in error
+        // messages but long enough to exercise the hex path.
         let v = build_nomad_job_json(
             "zsbx-abc",
             &cfg,
             7,
-            Path::new("/var/zeroship/ch/abc/keys"),
-            Path::new("/var/zeroship/ch/abc/workspace"),
-            Path::new("/var/zeroship/ch/users/alice/home"),
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "alice",
             "proj1",
             "abc",
@@ -3381,18 +3485,30 @@ mod tests {
             "ZSBX_HERE should be gone (renamed to ZSBX_ARTIFACT_DIR)"
         );
         assert_eq!(task["Env"]["ZSBX_RUNTIME"], "${NOMAD_TASK_DIR}");
+        // virtio-blk pivot (bug #11): the three virtio-fs share-dir
+        // env vars are gone; we now emit two image paths and the
+        // pubkey hex. Assert both the new names appear AND the old
+        // names do NOT — so a future ad-hoc deploy that references
+        // ZSBX_KEYS_DIR / ZSBX_WORKSPACE_DIR / ZSBX_USER_HOME_DIR
+        // fails fast instead of silently picking up nothing.
         assert_eq!(
-            task["Env"]["ZSBX_KEYS_DIR"],
-            "/var/zeroship/ch/abc/keys"
+            task["Env"]["ZSBX_WORKSPACE_IMG"],
+            "/var/zeroship/ch/abc/workspace.img"
         );
         assert_eq!(
-            task["Env"]["ZSBX_WORKSPACE_DIR"],
-            "/var/zeroship/ch/abc/workspace"
+            task["Env"]["ZSBX_USER_HOME_IMG"],
+            "/var/zeroship/ch/users/alice/home.img"
         );
         assert_eq!(
-            task["Env"]["ZSBX_USER_HOME_DIR"],
-            "/var/zeroship/ch/users/alice/home"
+            task["Env"]["ZSBX_PUBKEY_HEX"],
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
+        for legacy in ["ZSBX_KEYS_DIR", "ZSBX_WORKSPACE_DIR", "ZSBX_USER_HOME_DIR"] {
+            assert!(
+                task["Env"][legacy].is_null(),
+                "{legacy} should be gone (virtio-blk pivot)",
+            );
+        }
         // The wrapper reads memory + cpu count from these two env vars.
         // Resources.{CPU,MemoryMB} are advisory-only on raw_exec; the
         // wrapper would otherwise hardcode 1024M/2vCPU and lie to
@@ -3420,7 +3536,7 @@ mod tests {
         cfg.nomad_ch.subnet_second_octet = 50;
         let v = build_nomad_job_json(
             "zsbx-y", &cfg, 1,
-            Path::new("/k"), Path::new("/w"), Path::new("/u"),
+            Path::new("/w.img"), Path::new("/u.img"), "ab",
             "u", "p", "s",
         );
         assert_eq!(
@@ -3436,9 +3552,9 @@ mod tests {
             "zsbx-x",
             &cfg,
             1,
-            Path::new("/k"),
-            Path::new("/w"),
-            Path::new("/u"),
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
             "u",
             "p",
             "s",
