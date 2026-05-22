@@ -43,7 +43,7 @@
 use compio_postgres::{Client, Pool, Row};
 use serde_json::Value;
 
-use crate::error::DbError;
+use crate::error::{first_row_or_internal, DbError};
 
 /// Wrap a `compio_postgres::Error` in a [`DbError`] with a context
 /// phrase so operators see *what* the audit layer was doing when the
@@ -322,12 +322,7 @@ pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Resul
         .query_text_params(&sql, &params)
         .await
         .map_err(|e| coded_sql("insert", e))?;
-    let id: i64 = rows
-        .first()
-        .map(|r| r.get::<_, i64>("id"))
-        .ok_or_else(|| DbError::Internal {
-            message: "audit: INSERT returned no row".to_string(),
-        })?;
+    let id: i64 = first_row_or_internal(&rows, "audit: INSERT")?.get::<_, i64>("id");
     Ok(id)
 }
 
@@ -609,13 +604,11 @@ pub async fn insert_backfill_running(
     // 0` (via `.unwrap_or_default()`), which then aliased every
     // downstream `WHERE id = $1::bigint` write to a no-op. The
     // regression test in this module locks in the `DbError::Internal`
-    // path so RLS bypass / trigger interception surfaces loudly.
-    let id: i64 = rows
-        .first()
-        .map(|r| r.get::<_, i64>("id"))
-        .ok_or_else(|| DbError::Internal {
-            message: "audit: insert_backfill_running returned no row".to_string(),
-        })?;
+    // path so RLS bypass / trigger interception surfaces loudly. The
+    // predicate now lives in `crate::error::first_row_or_internal` so
+    // every empty-RETURNING site emits the same message shape.
+    let id: i64 =
+        first_row_or_internal(&rows, "audit: insert_backfill_running")?.get::<_, i64>("id");
     Ok(id)
 }
 
@@ -876,20 +869,16 @@ mod tests {
     /// and returns `DbError::Internal` instead.
     ///
     /// This test cannot drive a real Client, but it directly exercises
-    /// the `ok_or_else` error path at the value level to lock in the
-    /// intended behaviour.
+    /// the `first_row_or_internal` helper on an empty slice to lock in
+    /// the intended behaviour — the same predicate the production
+    /// site now calls.
     #[test]
     fn insert_backfill_running_empty_returning_is_internal_error() {
         let rows: Vec<()> = vec![];
-        let result: Result<i64, DbError> = rows
-            .first()
-            .map(|_| 42_i64)
-            .ok_or_else(|| DbError::Internal {
-                message: "audit: insert_backfill_running returned no row".to_string(),
-            });
+        let result = first_row_or_internal(&rows, "audit: insert_backfill_running");
         match result {
             Err(DbError::Internal { message }) => {
-                assert_eq!(message, "audit: insert_backfill_running returned no row");
+                assert_eq!(message, "audit: insert_backfill_running: returned no row");
             }
             other => panic!("expected Internal error, got {other:?}"),
         }

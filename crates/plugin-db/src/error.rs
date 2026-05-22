@@ -304,6 +304,30 @@ impl DbError {
     }
 }
 
+/// Return the first row from a query result slice, or surface a
+/// [`DbError::Internal`] naming the operation. Used to close the
+/// silent-empty-RETURNING bug class: callers that previously chained
+/// `.first().map(...).unwrap_or_default()` coerced an empty RETURNING
+/// set into a sentinel value (the audit-id=0 bug fixed in d7cfc089;
+/// the replication-slot empty-LSN twin fixed alongside it). The helper
+/// names the predicate in one place so every empty-RETURNING site
+/// emits the same `DbError::Internal { message: "<op>: returned no
+/// row" }` shape — preserving the regression test contract in
+/// `audit.rs::tests::insert_backfill_running_empty_returning_is_internal_error`.
+///
+/// Generic over the row type so test code can exercise the helper
+/// without constructing a `compio_postgres::Row` (whose constructors
+/// are crate-private). At the production call sites the type is
+/// always `&[compio_postgres::Row]`; tests pass `Vec<T>` for any `T`.
+pub(crate) fn first_row_or_internal<'a, R>(
+    rows: &'a [R],
+    op: &'static str,
+) -> Result<&'a R, DbError> {
+    rows.first().ok_or_else(|| DbError::Internal {
+        message: format!("{op}: returned no row"),
+    })
+}
+
 /// `Display` renders the same body that `into_string` returns — the
 /// message body for the variant (or the JSON envelope for
 /// `SchemaRefused`). The `.code` is NOT emitted because Display is
@@ -549,6 +573,43 @@ mod tests {
     fn from_pg_error_impl_is_wired() {
         fn assert_from<T: From<compio_postgres::Error>>() {}
         assert_from::<DbError>();
+    }
+
+    /// The helper returns the first element of a non-empty slice. The
+    /// test uses `Vec<i64>` rather than a real `compio_postgres::Row`
+    /// because the driver's `Row` constructors are crate-private; the
+    /// helper is generic over `R` precisely so this contract can be
+    /// pinned without a live DB.
+    #[test]
+    fn first_row_or_internal_returns_first_on_non_empty() {
+        let rows: Vec<i64> = vec![7, 8, 9];
+        let got = first_row_or_internal(&rows, "test op").expect("non-empty");
+        assert_eq!(*got, 7);
+    }
+
+    /// On an empty slice the helper must produce `DbError::Internal`
+    /// whose message names the operation. The audit-id=0 regression
+    /// (d7cfc089) is the canonical site this contract protects:
+    /// substring matching against the op name is how the in-tree
+    /// regression test in `audit.rs` verifies the contract.
+    #[test]
+    fn first_row_or_internal_returns_internal_err_on_empty() {
+        let rows: Vec<i64> = vec![];
+        let err = first_row_or_internal(&rows, "audit: INSERT")
+            .expect_err("empty slice must error");
+        match err {
+            DbError::Internal { message } => {
+                assert!(
+                    message.contains("audit: INSERT"),
+                    "message must name the op, got: {message}"
+                );
+                assert!(
+                    message.contains("returned no row"),
+                    "message must carry the canonical suffix, got: {message}"
+                );
+            }
+            other => panic!("expected DbError::Internal, got {other:?}"),
+        }
     }
 
     /// `From<QueryError>` collapses the builder's three error kinds

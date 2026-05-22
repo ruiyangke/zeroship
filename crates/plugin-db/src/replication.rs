@@ -49,7 +49,7 @@
 
 use compio_postgres::Pool;
 
-use crate::error::DbError;
+use crate::error::{first_row_or_internal, DbError};
 use crate::v8_bridge::row_to_json;
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
@@ -301,15 +301,12 @@ pub async fn ensure_publication_and_slot(
         // `lsn = ""` (via `.unwrap_or_default()`), which then propagated
         // into `SetupOutcome.confirmed_flush_lsn` and downstream broker
         // wiring as a sentinel LSN — the same silent-empty-RETURNING
-        // shape as the audit-id=0 bug closed by d7cfc089. Surface as
-        // `DbError::Internal` so a missing row is loud, not a sentinel.
-        lsn = rows
-            .first()
-            .map(|r| r.get::<_, String>("lsn"))
-            .ok_or_else(|| DbError::Internal {
-                message: "replication: pg_create_logical_replication_slot returned no row"
-                    .to_string(),
-            })?;
+        // shape as the audit-id=0 bug closed by d7cfc089. The helper
+        // unifies the N=4 cluster of this pattern across audit.rs,
+        // replication.rs, and migrations.rs.
+        lsn = first_row_or_internal(&rows, "replication: pg_create_logical_replication_slot")?
+            .get::<_, String>("lsn");
+
         created = true;
     } else {
         lsn = slot_row[0].get::<_, String>("confirmed_flush_lsn");
