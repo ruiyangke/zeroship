@@ -33,7 +33,9 @@ use crate::context::with_mut as ctx_mut;
 pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod backend;
-pub(crate) mod broker;
+// broker stays pub: tests/integration.rs + tests/subscription_finalizer.rs
+// (external test crates) reach in via zeroship_plugin_db::broker::*.
+pub mod broker;
 pub(crate) mod context;
 pub(crate) mod crud;
 pub(crate) mod diff;
@@ -47,7 +49,9 @@ pub(crate) mod read_set;
 pub(crate) mod replication;
 pub(crate) mod replication_ops;
 pub(crate) mod v8_bridge;
-pub(crate) mod v8_classes;
+// v8_classes stays pub: tests/db_v8_class.rs (external test crate)
+// imports Collection / mint_db / Db directly.
+pub mod v8_classes;
 pub(crate) mod wal_consumer;
 
 // ---------------------------------------------------------------------------
