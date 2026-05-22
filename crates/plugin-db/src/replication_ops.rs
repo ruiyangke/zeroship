@@ -20,7 +20,9 @@
 //!
 //! Idempotent — second call returns a JSON envelope with
 //! `{"alreadyRunning": true}` and short-circuits without spawning a
-//! second task. Tracked per-thread via [`RUNNING_CONSUMERS`] because
+//! second task. Tracked per-thread via the per-isolate context's
+//! `running_consumers` slot (see [`crate::context::IsolateDbContext`])
+//! because
 //! the consumer task is thread-bound (the compio runtime is one per
 //! worker, the broker is thread-local).
 //!
@@ -137,15 +139,6 @@ pub fn replication_drop_abandoned_dispatch<'s>(
     promise
 }
 
-thread_local! {
-    /// Per-thread "is the consumer already running for this app?"
-    /// guard. Keyed by app_id (a single worker may host multiple apps
-    /// over its lifetime via the LRU cache, but only one consumer per
-    /// app at a time).
-    static RUNNING_CONSUMERS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
 /// `zeroship.db.startReplicationConsumer()` → Promise<SetupOutcome JSON>
 ///
 /// Idempotent. The first call provisions the slot+publication, spawns
@@ -167,7 +160,7 @@ pub fn start_replication_consumer_dispatch<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         // Idempotent: if a consumer is already running for this app on
         // this thread, return a short-circuit envelope.
-        let already = RUNNING_CONSUMERS.with(|r| r.borrow().contains(&app_id));
+        let already = crate::context::with(|c| c.is_consumer_running(&app_id));
         if already {
             let value = serde_json::json!({
                 "alreadyRunning": true,
@@ -225,16 +218,12 @@ pub fn start_replication_consumer_dispatch<'s>(
         // call to startReplicationConsumer() short-circuits even if
         // the consumer task hasn't yet entered its decode loop.
         let app_for_task = app_id.clone();
-        RUNNING_CONSUMERS.with(|r| {
-            r.borrow_mut().insert(app_id.clone());
-        });
+        crate::context::with_mut(|c| c.mark_consumer_running(&app_id));
         compio::runtime::spawn(async move {
             crate::wal_consumer::run_supervised(consumer).await;
             // When the supervisor exits (graceful or fatal), free the
             // slot so a later opt-in re-spawn is allowed.
-            RUNNING_CONSUMERS.with(|r| {
-                r.borrow_mut().remove(&app_for_task);
-            });
+            crate::context::with_mut(|c| c.unmark_consumer_running(&app_for_task));
         })
         .detach();
 
@@ -259,12 +248,12 @@ pub fn start_replication_consumer_dispatch<'s>(
 /// without reaching into private state.
 #[doc(hidden)]
 pub fn is_consumer_registered_for_tests(app_id: &str) -> bool {
-    RUNNING_CONSUMERS.with(|r| r.borrow().contains(app_id))
+    crate::context::with(|c| c.is_consumer_running(app_id))
 }
 
 /// **Test-only**: clear the auto-spawn registry. Used to reset state
 /// between integration tests that share a thread.
 #[doc(hidden)]
 pub fn clear_consumer_registry_for_tests() {
-    RUNNING_CONSUMERS.with(|r| r.borrow_mut().clear());
+    crate::context::with_mut(|c| c.clear_consumer_registry());
 }
