@@ -1,6 +1,10 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 13:17.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 13:47.
+
+**Cycle 13:47 closures (1)**: [I16] (`f6adb68b` — privatize 11 `IsolateDbContext` fields; api-surface r11 confirmed +2 ceiling step). 3 reviewers returned: **api-surface r11 = 92 (+1, NEW-R10-1 closed)**, **migration-pipeline r12 = 86 (±0, r11's clarification — I35 narrower than predicted)**, **performance r12 = 81 (±0, harness can't see I35; recommends `Row::new_for_test` cross-crate constructor + `bench_row_to_json`)**. Total +1 across 3 lenses.
+
+**Next-cycle forcing function (perf r12)**: add `#[cfg(feature = "test-utils")] pub fn Row::new_for_test(columns, values)` to `compio-postgres::row`, then a `bench_row_to_json` dimension in `crates/plugin-db/benches/` with narrow (3-col), medium (10-col), wide (50-col) synthesised rows. This is cross-crate (compio-postgres) but in-workspace; reasonable scope for a focused commit.
 
 **Cycle 13:17 closures (3)**: [I35] (`251d53b4` — `row_to_json` O(N²) → O(N) via index lookup) + NEW-R12-2 (`18aee490` — finalise_backfill warn-shape drift caught by test-coverage r12 in my own 7c6bd2ec commit) + NEW-R10-1 (`bac64c0e` — 5 mig_lock accessor visibility demotions, 2-cycle carry from r9 NEW-R9-3). 3 reviewers returned: **api-surface r10 = 91 (+2, closed 2 of r9's NEW findings)**, **test-coverage r12 = 86 (+1, GAP-2 closed, found my drift)**, **concurrency r11 = 89 (+1, plateau broken by F1 warn-half forcing function)**. Total +4 across 3 lenses. New LOW findings: NEW-R12-1 (no tests for I6's new Err arms) + r12 recommends `tracing-subscriber` test pattern for the 9 emission sites accumulated over cycles 10:47–12:47.
 
@@ -12,7 +16,7 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 13:17.
 
 **Cycle 10:47 closures (2)**: MAJOR-R9-5 (auth/* hardening gate, commit `2fa9472e`) + [I23] (mig_lock state-drift tracing, commit `5d9acab8`). 4 reviewers returned: architecture r10 = 93 (+1, credited the hardening gate), security r9 = 83 (+1, same credit), error-ux r9 = 91 (±0), concurrency r10 = 88 (±0, surfaced one NEW MINOR-latent — Subscription::close at broker.rs:359-369 holds borrow_mut across w.wake).
 
-**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 15 IMPORTANT (was 16 pre-13:17; [I35] closed this cycle). [I31]/F1 is now half-closed (warn-half landed; sweeper-half still needs design).
+**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 14 IMPORTANT (was 15 pre-13:47; [I16] closed this cycle). [I31]/F1 is now half-closed (warn-half landed; sweeper-half still needs design).
 
 **STRONG PLATEAU SIGNAL (sustained through cycle 10:47)**: cycle 09:30's 4-of-4 ±0 movement has only marginally improved — cycle 10:47's +1/+1/0/0 came entirely from the hardening cfg-gate (a single forcing function), not from forward motion on lens-specific findings. Architecture reviewer recommends capping at r11 if the `query.rs` split lands; concurrency reviewer recommends skipping cycles until the two carried IMPORTANTs land. Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function".
 
@@ -205,15 +209,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I16] `IsolateDbContext` fields are `pub(crate)` rather than private; `tx_token_counter` advertises mutation path (api-surface I3; R3 M1+M2)
-- **Source**: `plugin-db-api-surface-2026-05-22-r1.md` §I3; `plugin-db-architecture-review-2026-05-22-r3.md` §4-MINOR-M1/M2
-- **File**: `crates/plugin-db/src/context.rs:70-158`
-- **Description**: `pool`, `db_url`, `tx_conn`, `registered_models`, `auto_tx_owned`, `tx_token`, `tx_token_counter`, `pending_emits`, `mig_lock`, `running_consumers`, `backend` are all `pub(crate)`. Accessors exist for all of them. Direct field mutation bypasses any future invariant checks. `tx_token_counter` is particularly egregious — only `next_tx_token()` should touch it.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — `context.rs:70-158` confirmed.
-  - Blocker: none.
-  - Already-superseded-by: N/A
-- **Effort**: small (visibility flips + a compile check)
+### ~~[I16] `IsolateDbContext` fields are `pub(crate)` rather than private~~ — CLOSED cycle 13:47
+- **Closed by**: `f6adb68b plugin-db/context: privatize IsolateDbContext fields (I16)`
+- All 11 data fields (pool, db_url, registered_models, tx_conn, auto_tx_owned, tx_token, tx_token_counter, pending_emits, mig_lock, running_consumers, backend) demoted from `pub(crate)` to private. api-surface r11 (the round that returned with this commit landed) confirmed zero direct-field consumers outside `context.rs` at HEAD; every external caller already used accessors. `tx_token_counter` mutation path now compile-time-enforced through `next_tx_token()`. Per api-surface r11's plateau math this was the +2 step to 96; the +1 to 92 had already landed via NEW-R10-1 (`bac64c0e`). Six `MigrationLock` fields stay `pub(crate)` since `set_mig_lock` constructs them from outside the impl — follow-up sweep could add a `MigrationLock::new(...)` ctor.
 - **Pickable this cycle**: yes — but requires confirming no test crate reaches in (the `pub` modules `broker`, `query`, `v8_classes` allowance suggests external tests may touch fields).
 
 ---
