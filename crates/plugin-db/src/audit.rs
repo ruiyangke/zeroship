@@ -366,9 +366,13 @@ pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Resul
 }
 
 /// Drive an audit row from its current state to a terminal status. The
-/// allowed transitions mirror the proposal A3 state machine: `running ->
-/// applied | failed`. Returns `Ok(true)` if the row transitioned, `false`
-/// if the UPDATE matched nothing (e.g. row already terminal).
+/// allowed transitions mirror the proposal A3 state machine:
+/// `running -> applied | applied_with_dead_letter | failed | cancelled |
+/// validation_refused`. Returns `Ok(true)` if the row transitioned,
+/// `false` if the UPDATE matched nothing (e.g. row already terminal).
+/// Note: `validation_refused` is normally written INSERT-direct from
+/// `validate.rs` (since cycle-15:17 `6afab751`); this method accepts it
+/// as a terminal for symmetry with `InitialStatus::ValidationRefused`.
 pub async fn update_audit_status(
     pool: &Pool,
     app_id: &str,

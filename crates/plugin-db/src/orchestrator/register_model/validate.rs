@@ -94,9 +94,18 @@ pub(crate) async fn validate<B: Backend>(
             };
             // Best-effort: a failure to write the audit row should not
             // mask the envelope — tracing::warn so it shows in worker
-            // logs but the user-facing error stays clean.
-            if let Err(e) = backend.write_audit_row(&ctx.app_id, &row).await {
-                tracing::warn!(error = ?e, "audit: failed to log destructive op");
+            // logs but the user-facing error stays clean. Field shape
+            // matches the F1 warn-half family (`app_id` + `audit_err`)
+            // pinned at cycle 12:47 `7c6bd2ec` — closes the
+            // NEW-R14-2 drift test-coverage r14 caught.
+            if let Err(audit_err) = backend.write_audit_row(&ctx.app_id, &row).await {
+                tracing::warn!(
+                    app_id = %ctx.app_id,
+                    collection = %op.collection,
+                    transition = "ValidationRefused/insert_failed",
+                    audit_err = %audit_err,
+                    "audit: failed to log destructive op",
+                );
             }
         }
 
