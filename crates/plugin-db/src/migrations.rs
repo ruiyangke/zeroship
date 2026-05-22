@@ -581,15 +581,16 @@ pub async fn exec_commit_batch(
         }
     }
 
-    // Commit or rollback.
-    let final_sql = if dry_run { "ROLLBACK" } else { "COMMIT" };
-    if let Err(e) = backend.client_exec(&client, final_sql, &[]).await {
-        return_lock_client(client);
-        return Err(coded_db(&format!("migration {final_sql}"), e));
-    }
-
     // Audit row update — only persist cursor/dead_letter/processed on a
     // real run. Dry runs explicitly do NOT advance state (B1.6).
+    //
+    // Issued BEFORE COMMIT (migration-pipeline r3 R3-I3 / backlog [I41]):
+    // the row lock acquired by `lock_audit_row_for_update` is held until
+    // COMMIT, so any operator `migrations.reset(...)` that races between
+    // the data UPDATEs and the progress write blocks. Issuing the
+    // progress UPDATE after COMMIT released the lock first, creating a
+    // window where reset clobbered the cursor we were about to write —
+    // fresh runs then resumed from the stale pre-clobber cursor.
     if !dry_run {
         if let Err(e) = backend
             .update_backfill_progress(
@@ -602,9 +603,19 @@ pub async fn exec_commit_batch(
             )
             .await
         {
-            return_lock_client(client);
+            rollback_and_return(backend, client).await;
             return Err(coded_db("audit row update", e));
         }
+    }
+
+    // Commit or rollback. The audit progress UPDATE above is now part of
+    // this transaction; if COMMIT fails, neither data UPDATEs nor cursor
+    // advance — fresh attempts resume from the prior cursor without the
+    // reset-clobber race.
+    let final_sql = if dry_run { "ROLLBACK" } else { "COMMIT" };
+    if let Err(e) = backend.client_exec(&client, final_sql, &[]).await {
+        return_lock_client(client);
+        return Err(coded_db(&format!("migration {final_sql}"), e));
     }
 
     // Terminal handling — if isDone, drive the row to a terminal status
