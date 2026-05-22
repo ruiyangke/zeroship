@@ -1,12 +1,24 @@
-//! RAII-ish guard for the orchestrator's per-app advisory lock.
+//! RAII-ish guard returned by [`crate::backend::LockManager`] for
+//! session-scoped advisory locks.
+//!
+//! **P0 PR 6** (`docs/proposals/p0-implementation-plan.md` §"PR 6"):
+//! renamed from the prior orchestrator-internal guard type and
+//! moved out of `orchestrator/` into `backend/` — the guard is the
+//! canonical RAII return shape for the
+//! [`crate::backend::LockManager`] capability, not an
+//! orchestrator-internal detail. Construction goes through
+//! [`LockGuard::acquire`] taking a [`crate::backend::LockScope`] (the
+//! typed classifier introduced by the same PR).
 //!
 //! The four-phase register-model pipeline holds a session-scoped
-//! `pg_advisory_lock(hashtext('zs_reg:<app>'), hashtext('register_model'))`
-//! on a single pooled client. The invariant is: *every* exit path from
-//! the locked region — Ok, Err, panic — must either explicitly issue
-//! `pg_advisory_unlock` before parking the `PooledClient` back into the
-//! pool, OR transfer ownership of the still-locked client to the next
-//! stage that will release it.
+//! `pg_advisory_lock(hashtext('<app_id>:register_model'),
+//!  hashtext('register_model'))` on a single pooled client (key
+//! derivation via [`crate::backend::LockScope::to_keys`]). The
+//! invariant is: *every* exit path from the locked region — Ok, Err,
+//! panic — must either explicitly issue `pg_advisory_unlock` before
+//! parking the `PooledClient` back into the pool, OR transfer
+//! ownership of the still-locked client to the next stage that will
+//! release it.
 //!
 //! Before this guard, three commits in two days (`b4e533e2`,
 //! `37a0ef76`, `3bb41fa1`) plugged that invariant inline at three
@@ -70,7 +82,7 @@
 
 use compio_postgres::PooledClient;
 
-use crate::backend::LockManager;
+use crate::backend::{LockManager, LockScope};
 use crate::error::DbError;
 
 /// Session-scoped advisory-lock guard for the register-model
@@ -83,29 +95,31 @@ use crate::error::DbError;
 /// connection — could be tens of seconds to minutes). The
 /// `#[must_use]` annotation surfaces accidental drops as compile-time
 /// warnings on common patterns (e.g. `let _ = acquire(...).await`).
-#[must_use = "OrchestratorLockGuard must be released via .release().await or .into_held(); \
+#[must_use = "LockGuard must be released via .release().await or .into_held(); \
               dropping it leaks the session-scoped advisory lock"]
-pub(crate) struct OrchestratorLockGuard<'p> {
+pub(crate) struct LockGuard<'p> {
     /// The pooled client that holds the advisory lock at session
     /// scope. `None` after `release()` or `into_held()` has moved it
     /// out; `Drop` then becomes a no-op.
     client: Option<PooledClient<'p>>,
-    /// First key passed to `pg_advisory_lock(hashtext($1), hashtext($2))`
-    /// (the per-app namespace, e.g. `"zs_reg:<app_id>"`). Stored so
-    /// `release()` can issue the matching `pg_advisory_unlock` without
-    /// the caller threading the key through again.
+    /// First key passed to `pg_advisory_lock(hashtext($1), hashtext($2))`,
+    /// derived from the [`LockScope`] via [`LockScope::to_keys`]
+    /// (`"{app_id}:{name}"`). Stored so `release()` can issue the
+    /// matching `pg_advisory_unlock` without the caller threading the
+    /// key through again.
     key: String,
-    /// Second key — the constant stage tag (currently `"register_model"`).
-    tag: &'static str,
+    /// Second key — also derived from the [`LockScope`] (the `name`
+    /// field). Stored for symmetry with `release()`'s unlock SQL.
+    tag: String,
     /// `true` once the lock has been released or its ownership handed
     /// off. Suppresses the `Drop` warning and short-circuits a second
     /// `release()`.
     released: bool,
 }
 
-impl<'p> OrchestratorLockGuard<'p> {
-    /// Acquire the advisory lock on `(key, tag)` against `client` via
-    /// the backend and wrap the result in a guard.
+impl<'p> LockGuard<'p> {
+    /// Acquire the advisory lock for the given [`LockScope`] against
+    /// `client` via the backend and wrap the result in a guard.
     ///
     /// On Ok the lock is held by the returned guard's pooled client.
     /// On Err the lock was never acquired and the client is returned
@@ -114,13 +128,21 @@ impl<'p> OrchestratorLockGuard<'p> {
     /// The caller chooses how to release: `release().await` (normal
     /// exit) or `into_held()` (hand off to a downstream stage that
     /// will release later).
+    ///
+    /// **P0 PR 6**: takes a [`LockScope`] instead of the previous
+    /// `(key: String, tag: &'static str)` pair. The
+    /// [`LockManager::acquire`] default impl derives the underlying
+    /// `(key1, key2)` strings via [`LockScope::to_keys`] (§7.2 /
+    /// §10.5); we cache the derived pair locally so `release()`'s
+    /// `pg_advisory_unlock` matches the acquisition exactly even if
+    /// `LockScope::to_keys` ever changed shape.
     pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::Client>>(
         backend: &B,
         client: PooledClient<'p>,
-        key: String,
-        tag: &'static str,
+        scope: LockScope,
     ) -> Result<Self, DbError> {
-        backend.acquire_advisory_lock(&client, &key, tag).await?;
+        let (key, tag) = scope.to_keys();
+        backend.acquire_advisory_lock(&client, &key, &tag).await?;
         Ok(Self {
             client: Some(client),
             key,
@@ -166,7 +188,7 @@ impl<'p> OrchestratorLockGuard<'p> {
             // Log warnings on error so a leak is visible; the lock
             // also auto-releases when the PG session ends.
             if let Err(e) = client
-                .query_text_params(unlock_sql, &[self.key.as_str(), self.tag])
+                .query_text_params(unlock_sql, &[self.key.as_str(), self.tag.as_str()])
                 .await
             {
                 tracing::warn!(
@@ -205,11 +227,11 @@ impl<'p> OrchestratorLockGuard<'p> {
         // contract.
         self.client
             .take()
-            .expect("OrchestratorLockGuard::into_held called on guard with no client")
+            .expect("LockGuard::into_held called on guard with no client")
     }
 }
 
-impl Drop for OrchestratorLockGuard<'_> {
+impl Drop for LockGuard<'_> {
     fn drop(&mut self) {
         if !self.released {
             // We can't run `pg_advisory_unlock` here — the call is
@@ -227,7 +249,7 @@ impl Drop for OrchestratorLockGuard<'_> {
             tracing::error!(
                 key = %self.key,
                 tag = %self.tag,
-                "leak: OrchestratorLockGuard dropped without release()/into_held(); \
+                "leak: LockGuard dropped without release()/into_held(); \
                  session-scoped pg_advisory_lock will stay held until the pooled \
                  client's PG session closes (typically on pool recycle). \
                  Concurrent register_model callers for this app will stall in \
@@ -246,12 +268,12 @@ mod tests {
     /// Test-only constructor that bypasses `acquire()` so we can
     /// inspect the lifecycle invariants (`released` flag, Drop
     /// behaviour, idempotency) without a live pool.
-    impl<'p> OrchestratorLockGuard<'p> {
-        fn for_test_no_client(key: impl Into<String>, tag: &'static str) -> Self {
+    impl<'p> LockGuard<'p> {
+        fn for_test_no_client(key: impl Into<String>, tag: impl Into<String>) -> Self {
             Self {
                 client: None,
                 key: key.into(),
-                tag,
+                tag: tag.into(),
                 released: false,
             }
         }
@@ -262,7 +284,7 @@ mod tests {
         // Build a guard with no client (test helper). Calling
         // `release()` should flip `released` and return `Ok(None)`
         // rather than panicking.
-        let guard = OrchestratorLockGuard::for_test_no_client("zs_reg:app_42", "register_model");
+        let guard = LockGuard::for_test_no_client("zs_reg:app_42", "register_model");
         assert!(!guard.released);
         // Use compio's local runtime to drive the async release.
         let out = compio::runtime::Runtime::new()
@@ -283,7 +305,7 @@ mod tests {
         // This test pins the *flag transition* that suppresses
         // Drop's warning.
         let mut guard =
-            OrchestratorLockGuard::for_test_no_client("zs_reg:app_43", "register_model");
+            LockGuard::for_test_no_client("zs_reg:app_43", "register_model");
         assert!(!guard.released);
         // Manually mirror the prefix of `into_held`'s body:
         guard.released = true;
@@ -302,7 +324,7 @@ mod tests {
         // test instead verifies the field state transition that
         // *gates* the warning.
         let mut guard =
-            OrchestratorLockGuard::for_test_no_client("zs_reg:app_44", "register_model");
+            LockGuard::for_test_no_client("zs_reg:app_44", "register_model");
         // Simulate a successful release: flip the flag manually
         // (the async path does this under the hood).
         guard.released = true;
@@ -316,14 +338,14 @@ mod tests {
         // (the tracing::error path doesn't panic). We can't capture
         // the log line without a tracing subscriber, but exercising
         // the branch ensures the message format compiles and runs.
-        let guard = OrchestratorLockGuard::for_test_no_client("zs_reg:app_45", "register_model");
+        let guard = LockGuard::for_test_no_client("zs_reg:app_45", "register_model");
         assert!(!guard.released);
         drop(guard);
     }
 
     #[test]
     fn released_flag_starts_false() {
-        let guard = OrchestratorLockGuard::for_test_no_client("zs_reg:app_46", "register_model");
+        let guard = LockGuard::for_test_no_client("zs_reg:app_46", "register_model");
         assert!(!guard.released);
         assert!(guard.client.is_none());
         assert_eq!(guard.key, "zs_reg:app_46");

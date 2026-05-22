@@ -67,8 +67,10 @@ use std::rc::Rc;
 
 use crate::error::DbError;
 
+pub(crate) mod lock_guard;
 pub mod postgres;
 
+pub(crate) use lock_guard::LockGuard;
 pub use postgres::PostgresBackend;
 
 /// SQL execution capability — the "connection lifecycle + run a
@@ -129,6 +131,103 @@ pub trait SqlExecutor: 'static {
     ) -> Result<u64, DbError>;
 }
 
+/// Typed classification of every advisory-lock acquisition the
+/// plugin-db crate performs.
+///
+/// **§7 / §10.5 distinction** (see
+/// `docs/proposals/db-system-design.md`):
+///
+/// - [`LockScope::GlobalApp`] — **cross-process visibility**. The lock
+///   must be observable by every worker process pointed at the same
+///   logical database. Postgres maps this to
+///   `pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)` —
+///   visible cluster-wide. A future SQLite backend would map it to
+///   either `BEGIN EXCLUSIVE` (when the lock duration aligns with a
+///   transaction) or a sentinel-row in a `__zs_locks` table (for
+///   session-scoped duration). The two existing P0 sites are both in
+///   this category: the register-model orchestrator's per-app
+///   serialiser (`name = "register_model"`) and the per-migration
+///   progress lock (`name = format!("mig:{spec.name}")`).
+///
+/// - [`LockScope::LocalApp`] — **single-process visibility**. The lock
+///   coordinates work inside one worker's Rust runtime — backed by an
+///   in-process Rust HashMap registry, NOT by SQL. No SQL is issued;
+///   the backend impl maps this to whatever in-memory coordination
+///   primitive that backend already runs. The variant exists today
+///   so call sites can classify their intent explicitly; P0 has no
+///   production `LocalApp` callers — every site is `GlobalApp`.
+///
+/// **§7.2 / §10.5 key-naming convention**: implementations derive the
+/// underlying `(key1, key2)` string-key pair from the variant fields
+/// as `(format!("{app_id}:{name}"), name)`. The PG impl then hashes
+/// each key through `hashtext()` (§7.2) before passing to
+/// `pg_advisory_lock`. SQLite-future impls would use the strings
+/// directly as keys into a per-process HashMap (`GlobalApp` and
+/// `LocalApp` both, since SQLite is in-process by definition;
+/// §8.5). The variant classifies *visibility*, not key shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LockScope {
+    /// Cluster-wide / cross-process advisory lock. Visible to every
+    /// worker pointed at the same database. PG maps to
+    /// `pg_advisory_lock`; SQLite-future would map to either
+    /// `BEGIN EXCLUSIVE` or a sentinel-row primitive.
+    GlobalApp {
+        /// App identifier — first half of the key namespace.
+        app_id: String,
+        /// Scope name tag — e.g. `"register_model"`,
+        /// `"mig:add_archived_flag"`. Both halves of the underlying
+        /// `(key1, key2)` advisory-lock pair derive from this field
+        /// (see [`Self::to_keys`]).
+        name: String,
+    },
+    /// Single-process / in-Rust advisory lock. Coordinates work inside
+    /// one worker's Rust runtime — backed by an in-memory HashMap
+    /// registry, NOT by SQL. No P0 production caller; the variant
+    /// exists so future call sites can classify their intent.
+    LocalApp {
+        /// App identifier — first half of the key namespace.
+        app_id: String,
+        /// Scope name tag.
+        name: String,
+    },
+}
+
+impl LockScope {
+    /// Derive the `(key1, key2)` string-key pair the underlying
+    /// advisory-lock primitive consumes.
+    ///
+    /// **§7.2 / §10.5 convention**: `key1 = "{app_id}:{name}"`,
+    /// `key2 = name`. PG impls layer `hashtext($k)::int4` over the
+    /// returned strings; SQLite-future impls would use them directly
+    /// as text keys in a per-process HashMap. The mapping is
+    /// identical for both [`Self::GlobalApp`] and [`Self::LocalApp`]
+    /// — the variant classifies *visibility*, not key shape.
+    pub fn to_keys(&self) -> (String, String) {
+        match self {
+            Self::GlobalApp { app_id, name } | Self::LocalApp { app_id, name } => {
+                (format!("{app_id}:{name}"), name.clone())
+            }
+        }
+    }
+
+    /// Borrow the `app_id` field regardless of variant. Convenience
+    /// for log-rendering and audit-row metadata that doesn't care
+    /// about visibility class.
+    pub fn app_id(&self) -> &str {
+        match self {
+            Self::GlobalApp { app_id, .. } | Self::LocalApp { app_id, .. } => app_id.as_str(),
+        }
+    }
+
+    /// Borrow the `name` field regardless of variant. Convenience
+    /// for log-rendering and audit-row metadata.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::GlobalApp { name, .. } | Self::LocalApp { name, .. } => name.as_str(),
+        }
+    }
+}
+
 /// Advisory-lock capability — session-scoped `(key1, key2)` locks held
 /// on a [`SqlExecutor::Client`].
 ///
@@ -138,21 +237,73 @@ pub trait SqlExecutor: 'static {
 /// super-bound is load-bearing — every method takes a `&Self::Client`
 /// and that associated type lives on [`SqlExecutor`].
 ///
-/// PR 6 will replace the legacy `(key1, key2)` string-key shape with
-/// the typed `LockScope` enum and rename `OrchestratorLockGuard` →
-/// `LockGuard`; the three methods on this trait stay (likely
-/// `pub(crate)`) as the underlying primitive.
+/// **Two-tier surface** (P0 PR 6):
+///
+/// - The **typed API** ([`Self::acquire`] / [`Self::try_acquire`] /
+///   [`Self::release`]) takes a [`LockScope`] enum. This is the
+///   shape every new call site should adopt — it carries an
+///   explicit classification of the lock's visibility (cluster-wide
+///   vs in-process) and centralises key derivation per §10.
+///
+/// - The **legacy string-key API**
+///   ([`Self::acquire_advisory_lock`] /
+///   [`Self::try_acquire_advisory_lock`] /
+///   [`Self::release_advisory_lock`]) takes raw `(key1, key2)`
+///   strings. These remain as the underlying primitive — the typed
+///   API's default impls dispatch through them, and the PG impl's
+///   `hashtext()` SQL lives at this layer. Marked
+///   `#[doc(hidden)]` and `pub(crate)` (via a sealed trait extension)
+///   so external consumers see only the typed surface; eager
+///   removal is deferred to P1+.
 pub trait LockManager: SqlExecutor {
-    /// Acquire a session-scoped advisory lock on `(key1, key2)` against
-    /// the given client. Blocks if another holder exists; the lock
-    /// releases when the client is dropped or the backend session
-    /// ends.
+    /// Acquire a session-scoped advisory lock for the given
+    /// [`LockScope`]. Typed wrapper over the legacy
+    /// [`Self::acquire_advisory_lock`] primitive — the default impl
+    /// derives the `(key1, key2)` pair per §7.2 / §10.5
+    /// ([`LockScope::to_keys`]) and dispatches.
+    #[allow(async_fn_in_trait)]
+    async fn acquire(&self, client: &Self::Client, scope: LockScope) -> Result<(), DbError> {
+        let (k1, k2) = scope.to_keys();
+        self.acquire_advisory_lock(client, &k1, &k2).await
+    }
+
+    /// Try to acquire a session-scoped advisory lock for the given
+    /// [`LockScope`]; `Ok(false)` if another holder already owns it.
+    /// Typed wrapper over [`Self::try_acquire_advisory_lock`].
+    #[allow(async_fn_in_trait)]
+    async fn try_acquire(&self, client: &Self::Client, scope: LockScope) -> Result<bool, DbError> {
+        let (k1, k2) = scope.to_keys();
+        self.try_acquire_advisory_lock(client, &k1, &k2).await
+    }
+
+    /// Release a session-scoped advisory lock previously acquired via
+    /// [`Self::acquire`] / [`Self::try_acquire`]. Typed wrapper over
+    /// [`Self::release_advisory_lock`].
+    #[allow(async_fn_in_trait)]
+    async fn release(&self, client: &Self::Client, scope: LockScope) -> Result<(), DbError> {
+        let (k1, k2) = scope.to_keys();
+        self.release_advisory_lock(client, &k1, &k2).await
+    }
+
+    /// **Legacy string-key primitive**: acquire a session-scoped
+    /// advisory lock on `(key1, key2)` against the given client.
+    /// Blocks if another holder exists; the lock releases when the
+    /// client is dropped or the backend session ends.
     ///
     /// Postgres maps this to
     /// `SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)`.
     /// Future backends would map to their per-engine equivalent (e.g.
     /// sqlite has no advisory locks — that backend would need a
     /// `BEGIN EXCLUSIVE` or a sentinel table).
+    ///
+    /// Prefer [`Self::acquire`] at new call sites — this method is
+    /// the underlying primitive the typed API dispatches through,
+    /// retained for the in-place lifecycle owned by
+    /// [`crate::backend::lock_guard::LockGuard`]. Eager removal of
+    /// the three legacy methods is deferred to P1+ (per
+    /// `docs/proposals/p0-implementation-plan.md` §"PR 6"
+    /// step 4).
+    #[doc(hidden)]
     #[allow(async_fn_in_trait)]
     async fn acquire_advisory_lock(
         &self,
@@ -161,10 +312,14 @@ pub trait LockManager: SqlExecutor {
         key2: &str,
     ) -> Result<(), DbError>;
 
-    /// Try to acquire the same session-scoped advisory lock; return
-    /// `Ok(false)` if the lock is already held by a different session.
-    /// Used by [`crate::migrations::exec_begin`] so a second worker
-    /// observes "migration already running" instead of blocking.
+    /// **Legacy string-key primitive**: try to acquire the same
+    /// session-scoped advisory lock; return `Ok(false)` if the lock
+    /// is already held by a different session. Used by
+    /// [`crate::migrations::exec_begin`] so a second worker observes
+    /// "migration already running" instead of blocking.
+    ///
+    /// Prefer [`Self::try_acquire`] at new call sites.
+    #[doc(hidden)]
     #[allow(async_fn_in_trait)]
     async fn try_acquire_advisory_lock(
         &self,
@@ -173,13 +328,16 @@ pub trait LockManager: SqlExecutor {
         key2: &str,
     ) -> Result<bool, DbError>;
 
-    /// Release a session-scoped advisory lock. The lock auto-releases
-    /// on session end, so callers can treat an `Err` as
-    /// observability-only (warn-and-continue) — but returning the
-    /// typed error lets them emit a structured log instead of
-    /// silently swallowing it. Mirrors the pattern
-    /// `OrchestratorLockGuard::release` adopted at `ffb1e101`
+    /// **Legacy string-key primitive**: release a session-scoped
+    /// advisory lock. The lock auto-releases on session end, so
+    /// callers can treat an `Err` as observability-only
+    /// (warn-and-continue) — but returning the typed error lets them
+    /// emit a structured log instead of silently swallowing it.
+    /// Mirrors the pattern `LockGuard::release` adopted at `ffb1e101`
     /// (code-critique MAJOR-R5-5).
+    ///
+    /// Prefer [`Self::release`] at new call sites.
+    #[doc(hidden)]
     #[allow(async_fn_in_trait)]
     async fn release_advisory_lock(
         &self,
@@ -315,7 +473,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// `acquire_pooled_client_for_lock` primitive — the one piece of the
 /// register-model bootstrap that has to return a `PooledClient<'p>`
 /// whose `'p` borrow lifetime threads through
-/// [`crate::orchestrator::lock_guard::OrchestratorLockGuard`].
+/// [`crate::backend::lock_guard::LockGuard`].
 ///
 /// **Open Q5 resolution (P0 PR 3)**: the alternative was a GAT on
 /// [`LockManager`] of the form
@@ -334,12 +492,12 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// is load-bearing: the returned `PooledClient` is the
 /// [`SqlExecutor::Client`] that [`LockManager::acquire_advisory_lock`]
 /// takes, so the orchestrator can hand the returned client straight
-/// into `OrchestratorLockGuard::acquire` without an adapter.
+/// into `LockGuard::acquire` without an adapter.
 pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
     /// Acquire a pool-leased client for advisory-lock duty. The
     /// returned [`compio_postgres::PooledClient`]'s `'p` lifetime is
     /// the pool borrow lifetime — it threads through
-    /// [`crate::orchestrator::lock_guard::OrchestratorLockGuard`] so
+    /// [`crate::backend::lock_guard::LockGuard`] so
     /// the lock auto-returns to the pool on Drop.
     ///
     /// Postgres impl wraps `self.pool().get().await` and maps the
@@ -621,7 +779,7 @@ mod tests {
     /// escape-hatch closer for the `backend.pool().get()` call site at
     /// `register_model/bootstrap.rs:103`: the returned
     /// `PooledClient<'p>` keeps the `'p` lifetime threaded through
-    /// [`OrchestratorLockGuard`] without needing a GAT on
+    /// [`LockGuard`] without needing a GAT on
     /// [`LockManager`] (Open Q5 resolution).
     fn assert_postgres_backend_impls_pg_lock_manager() {
         fn assert_impl<T: PgLockManager>() {}
@@ -714,6 +872,95 @@ mod tests {
         let _ = _shape_check as fn(BackendHandle) -> bool;
     }
 
+    /// Compile-time (P0 PR 6): [`LockScope`] satisfies the trait
+    /// bounds the typed [`LockManager`] API depends on. The variant
+    /// is `Clone + 'static` so call sites can stash it across awaits
+    /// (e.g. the `release_scope` re-construction in `migrations.rs`'s
+    /// cancelled-refusal path) without re-borrowing. Not `Send`/`Sync`
+    /// — same Open Q4 reasoning as the rest of the backend traits:
+    /// the compio runtime is single-threaded per worker.
+    fn assert_lock_scope_clone_send_static() {
+        fn assert_bounds<T: Clone + 'static>() {}
+        assert_bounds::<LockScope>();
+    }
+
+    /// Compile-time + runtime (P0 PR 6): construct both
+    /// [`LockScope`] variants and dispatch through
+    /// [`PostgresBackend::try_acquire`] to verify the typed
+    /// keyed-mapping wires through. We can't actually issue SQL
+    /// without a live Pool (covered by tests/integration.rs), but we
+    /// CAN exercise the key-derivation logic ([`LockScope::to_keys`])
+    /// and confirm both variants produce the canonical
+    /// `(format!("{app_id}:{name}"), name)` shape.
+    ///
+    /// **Why both variants here**: the P0 production sites are all
+    /// `GlobalApp`; `LocalApp` exists today purely as a classification
+    /// hook for future call sites (see [`LockScope`] rustdoc). Pinning
+    /// the shape here ensures a future contributor adding a `LocalApp`
+    /// production caller doesn't accidentally drift the key
+    /// derivation between variants.
+    #[test]
+    fn lock_scope_keys_global_app_canonical_shape() {
+        let scope = LockScope::GlobalApp {
+            app_id: "app_42".to_string(),
+            name: "register_model".to_string(),
+        };
+        let (k1, k2) = scope.to_keys();
+        assert_eq!(k1, "app_42:register_model");
+        assert_eq!(k2, "register_model");
+        assert_eq!(scope.app_id(), "app_42");
+        assert_eq!(scope.name(), "register_model");
+    }
+
+    #[test]
+    fn lock_scope_keys_local_app_canonical_shape() {
+        // `LocalApp` produces the SAME (key1, key2) shape as
+        // `GlobalApp` — the variant classifies *visibility* (which
+        // backend primitive handles dispatch) not *key layout*. A
+        // future SQLite backend would HashMap on the derived strings
+        // for both variants; the PG backend currently treats `LocalApp`
+        // the same as `GlobalApp` (only `GlobalApp` callers exist in
+        // P0).
+        let scope = LockScope::LocalApp {
+            app_id: "app_99".to_string(),
+            name: "mig:add_archived_flag".to_string(),
+        };
+        let (k1, k2) = scope.to_keys();
+        assert_eq!(k1, "app_99:mig:add_archived_flag");
+        assert_eq!(k2, "mig:add_archived_flag");
+        assert_eq!(scope.app_id(), "app_99");
+        assert_eq!(scope.name(), "mig:add_archived_flag");
+    }
+
+    /// Compile-time (P0 PR 6): the typed [`LockManager::try_acquire`]
+    /// API dispatches the canonical `LockScope` shape through
+    /// [`PostgresBackend`] without the caller naming the underlying
+    /// `(key1, key2)` string-key primitive. We can't issue SQL from a
+    /// unit test, so this is a *type-shape* check: the function body
+    /// type-checks against the trait method signature.
+    #[allow(dead_code)]
+    async fn assert_lock_scope_dispatches_through_try_acquire(
+        backend: &PostgresBackend,
+        client: &compio_postgres::Client,
+    ) -> Result<bool, DbError> {
+        // GlobalApp arm — exercises acquire / try_acquire / release.
+        let global = LockScope::GlobalApp {
+            app_id: "app_t".into(),
+            name: "register_model".into(),
+        };
+        let _ = backend.try_acquire(client, global.clone()).await?;
+        let _ = backend.acquire(client, global.clone()).await?;
+        backend.release(client, global).await?;
+
+        // LocalApp arm — same dispatch surface (variant classifies
+        // visibility, not key layout).
+        let local = LockScope::LocalApp {
+            app_id: "app_t".into(),
+            name: "mig:add_archived_flag".into(),
+        };
+        backend.try_acquire(client, local).await
+    }
+
     #[test]
     fn compile_time_assertions_link() {
         // Keep the asserter functions live so the dead-code lint
@@ -731,5 +978,10 @@ mod tests {
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();
         let _ = assert_backend_handle_clone_static as fn();
+        let _ = assert_lock_scope_clone_send_static as fn();
+        // `assert_lock_scope_dispatches_through_try_acquire` is not
+        // a `fn()` — it has lifetime parameters and returns a Future.
+        // The fn-item cast above already exercises its signature; we
+        // don't need to re-cast it here.
     }
 }

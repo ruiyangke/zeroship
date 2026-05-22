@@ -7,9 +7,9 @@
 //!    [`bootstrap`](super::bootstrap) is still held. These serialise
 //!    per-app.
 //! 2. **Pass 2** — `CREATE INDEX CONCURRENTLY` ops run AFTER the
-//!    advisory lock is released ([`OrchestratorLockGuard::release`]
-//!    issues `pg_advisory_unlock` then returns the client). Holding
-//!    the lock through CIC would deadlock: a second waiter blocked on
+//!    advisory lock is released ([`LockGuard::release`] issues
+//!    `pg_advisory_unlock` then returns the client). Holding the lock
+//!    through CIC would deadlock: a second waiter blocked on
 //!    `pg_advisory_lock` pins a snapshot that CIC waits on. CIC is
 //!    idempotent via `IF NOT EXISTS` so it's safe to run unlocked.
 //!
@@ -21,18 +21,17 @@
 
 use serde_json::Value;
 
-use super::super::lock_guard::OrchestratorLockGuard;
 use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
-use crate::backend::{IndexBuilder, PgSqlExecutor};
+use crate::backend::{IndexBuilder, LockGuard, PgSqlExecutor};
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
 use crate::error::DbError;
 
 /// Run stage 4.
 ///
-/// Takes the [`OrchestratorLockGuard`] separately so the lock can be
-/// released between passes without dragging the `'p` borrow through
-/// every upstream type. The guard is consumed by the explicit
+/// Takes the [`LockGuard`] separately so the lock can be released
+/// between passes without dragging the `'p` borrow through every
+/// upstream type. The guard is consumed by the explicit
 /// `release().await` between Pass 1 and Pass 2.
 ///
 /// **P0 PR 2**: bound narrowed to [`PgSqlExecutor`] + [`IndexBuilder`]
@@ -45,7 +44,7 @@ use crate::error::DbError;
 pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder>(
     backend: &B,
     ctx: RegisterContext,
-    lock_guard: OrchestratorLockGuard<'p>,
+    lock_guard: LockGuard<'p>,
     approved: ApprovedPlan,
 ) -> Result<(), DbError> {
     let RegisterContext {

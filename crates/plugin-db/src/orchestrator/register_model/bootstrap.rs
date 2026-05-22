@@ -17,14 +17,13 @@
 //!    snapshot.
 //!
 //! Returns a [`RegisterContext`] the later stages thread through, plus
-//! a separate [`OrchestratorLockGuard`] carrying the advisory lock. The
-//! two are split so `RegisterContext` can be passed by value without
-//! dragging the pool's borrow lifetime through the type.
+//! a separate [`LockGuard`] carrying the advisory lock. The two are
+//! split so `RegisterContext` can be passed by value without dragging
+//! the pool's borrow lifetime through the type.
 
 use serde_json::Value;
 
-use super::super::lock_guard::OrchestratorLockGuard;
-use crate::backend::RegisterBackend;
+use crate::backend::{LockGuard, LockScope, RegisterBackend};
 use crate::error::DbError;
 use crate::query;
 
@@ -51,15 +50,12 @@ pub(crate) struct RegisterContext {
     pub declared_indexes: Vec<query::IndexSpec>,
 }
 
-/// Advisory-lock key namespacing — matches the Postgres
-/// `pg_advisory_lock(hashtext('zs_reg:' || $1)::int4,
-/// hashtext('register_model')::int4)` pair the pre-Stage-8e code
-/// emitted inline. `pub(crate)` so `apply()` uses the same key when
-/// releasing.
-pub(crate) fn lock_key(app_id: &str) -> String {
-    format!("zs_reg:{app_id}")
-}
-
+/// Stage tag for the per-app register-model advisory lock. Used as
+/// the `name` field of the canonical
+/// [`LockScope::GlobalApp`](crate::backend::LockScope::GlobalApp)
+/// — `LockScope::to_keys` then derives the underlying
+/// `(format!("{app_id}:register_model"), "register_model")` pair the
+/// PG impl hashes through `hashtext()` (§7.2 / §10.5).
 pub(crate) const LOCK_TAG: &str = "register_model";
 
 /// Run stage 1.
@@ -82,9 +78,15 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 /// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
 /// method closes the `backend.pool().get()` escape hatch while
 /// preserving the borrow-lifetime `'p` that threads through
-/// [`OrchestratorLockGuard`] (Open Q5 resolution; see
+/// [`LockGuard`] (Open Q5 resolution; see
 /// `docs/proposals/p0-implementation-plan.md` §"PR 3" + §3 Q5 and
 /// `docs/proposals/db-system-design.md` §7).
+///
+/// **P0 PR 6**: the lock site is classified as
+/// `LockScope::GlobalApp { app_id, name: "register_model" }` — the
+/// canonical §10.5 shape. `LockScope::to_keys` then yields
+/// `(format!("{app_id}:register_model"), "register_model")`, which
+/// the PG impl's `hashtext()` SQL consumes verbatim.
 pub(crate) async fn bootstrap<'p, B: RegisterBackend>(
     backend: &'p B,
     app_id: &str,
@@ -92,7 +94,7 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend>(
     schema: &Value,
     indexes: &Value,
     deploy_id: &str,
-) -> Result<(RegisterContext, OrchestratorLockGuard<'p>), DbError> {
+) -> Result<(RegisterContext, LockGuard<'p>), DbError> {
     // Strictness — proposal A2 line 122. Read from schema._meta.strictness
     // if present; default is 'strict'.
     let strictness = schema
@@ -108,17 +110,26 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend>(
     // Two-key advisory lock keyed on (app_id, register_model). Held at
     // session scope on a dedicated pool client so the lock survives
     // the CREATE INDEX CONCURRENTLY phases (which can't run in a
-    // transaction). Released when `apply` calls
-    // [`OrchestratorLockGuard::release`] at the end of pass 1.
+    // transaction). Released when `apply` calls [`LockGuard::release`]
+    // at the end of pass 1.
+    //
     // P0 PR 3: closes the `backend.pool().get()` escape hatch — the
     // PG-only `PgLockManager::acquire_pooled_client_for_lock` returns
     // the same `PooledClient<'p>` shape so `'p` still threads through
-    // `OrchestratorLockGuard<'p>` exactly as before. The error mapping
+    // `LockGuard<'p>` exactly as before. The error mapping
     // (`DbError::Transient` with the same operator-facing prefix)
     // lives in the PG impl now. Open Q5 resolution.
+    //
+    // P0 PR 6: typed [`LockScope::GlobalApp`] classifies this site as
+    // cluster-wide (visible to every worker pointed at the same DB);
+    // `LockScope::to_keys` derives the `(key1, key2)` pair the
+    // underlying `LockManager` primitive consumes.
     let lock_client = backend.acquire_pooled_client_for_lock().await?;
-    let key = lock_key(app_id);
-    let guard = OrchestratorLockGuard::acquire(backend, lock_client, key, LOCK_TAG)
+    let scope = LockScope::GlobalApp {
+        app_id: app_id.to_string(),
+        name: LOCK_TAG.to_string(),
+    };
+    let guard = LockGuard::acquire(backend, lock_client, scope)
         .await
         .map_err(|e| match e {
             // Preserve the operator-facing prefix when the lock attempt

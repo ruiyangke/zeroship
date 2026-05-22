@@ -35,17 +35,21 @@
 //!
 //! ## Lock lifetime
 //!
-//! `pg_try_advisory_lock(hashtext('zs_mig:<app>')::int4,
-//! hashtext(<name>)::int4)` is session-scoped, held on a dedicated
-//! `Backend::Client` stashed in the per-isolate context's
-//! `mig_lock` slot. The same client runs every SELECT/UPDATE in the
-//! run because advisory locks are invisible across connections.
+//! Session-scoped advisory lock classified as
+//! [`crate::backend::LockScope::GlobalApp`] with
+//! `name = format!("mig:{name}")` (P0 PR 6). The PG impl maps this to
+//! `pg_try_advisory_lock(hashtext("{app_id}:mig:{name}")::int4,
+//! hashtext("mig:{name}")::int4)` (§7.2 / §10.5 key derivation).
+//! Held on a dedicated `Backend::Client` stashed in the per-isolate
+//! context's `mig_lock` slot. The same client runs every
+//! SELECT/UPDATE in the run because advisory locks are invisible
+//! across connections.
 
 use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
-use crate::backend::{LockManager, NamespaceManager, PgSqlExecutor, SqlExecutor};
+use crate::backend::{LockManager, LockScope, NamespaceManager, PgSqlExecutor, SqlExecutor};
 use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
 
@@ -217,16 +221,20 @@ fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
 /// The compound bound is the narrowest set this function actually
 /// uses: [`PgSqlExecutor`] (transitively [`SqlExecutor`]) for
 /// `acquire_dedicated_client` + `pool_handle()`; [`LockManager`] with
-/// `Client = compio_postgres::Client` for
-/// `try_acquire_advisory_lock` / `release_advisory_lock` on the lock
-/// client that gets parked into [`MigrationLock::client`]; and
-/// [`NamespaceManager`] for `ensure_app_schema`. The
+/// `Client = compio_postgres::Client` for `try_acquire` / `release` on
+/// the lock client that gets parked into [`MigrationLock::client`];
+/// and [`NamespaceManager`] for `ensure_app_schema`. The
 /// [`crate::backend::RegisterBackend`] marker is a superset of these
 /// (it additionally requires `SchemaIntrospect` + `IndexBuilder` +
 /// `PgLockManager` for the register-model pipeline), so we keep the
 /// narrower compound bound here rather than reusing `RegisterBackend`
 /// — `migrations.rs` doesn't need the introspection or index-build
 /// capabilities.
+///
+/// **P0 PR 6**: lock site classified as `LockScope::GlobalApp` with
+/// `name = format!("mig:{name}")`. Dispatch goes through the typed
+/// [`LockManager::try_acquire`] / [`LockManager::release`] surface
+/// (§7.2 / §10.5 key derivation lives in [`LockScope::to_keys`]).
 pub async fn exec_begin<B>(
     backend: &B,
     app_id: &str,
@@ -289,9 +297,17 @@ where
         // the audit-rail refactor; caught by error-ux r3.
         .map_err(|e| e.to_op_error())?;
 
-    let lock_key = format!("zs_mig:{app_id}");
+    // P0 PR 6: classify this site as `LockScope::GlobalApp` with
+    // `name = format!("mig:{name}")` — the canonical §10.5 shape.
+    // `LockScope::to_keys` derives the underlying `(key1, key2)`
+    // pair from those fields; the PG impl hashes through
+    // `hashtext()` as before.
+    let scope = LockScope::GlobalApp {
+        app_id: app_id.to_string(),
+        name: format!("mig:{name}"),
+    };
     let got = backend
-        .try_acquire_advisory_lock(&client, &lock_key, name)
+        .try_acquire(&client, scope)
         .await
         .map_err(|e| coded_db("advisory_lock query", e))?;
     if !got {
@@ -314,10 +330,14 @@ where
     let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing {
         if row.status == "cancelled" {
             // Refuse — operator must reset to clear state.
-            if let Err(e) = backend
-                .release_advisory_lock(&client, &lock_key, name)
-                .await
-            {
+            // P0 PR 6: re-construct the typed `LockScope` (the prior
+            // `try_acquire` moved the original by value); the derived
+            // `(key1, key2)` pair is identical.
+            let release_scope = LockScope::GlobalApp {
+                app_id: app_id.to_string(),
+                name: format!("mig:{name}"),
+            };
+            if let Err(e) = backend.release(&client, release_scope).await {
                 tracing::warn!(
                     app_id,
                     name,
@@ -697,11 +717,14 @@ where
             );
         }
 
-        let lock_key = format!("zs_mig:{app_id}");
-        if let Err(e) = backend
-            .release_advisory_lock(&client, &lock_key, &name)
-            .await
-        {
+        // P0 PR 6: classified via `LockScope::GlobalApp` mirroring the
+        // `exec_begin`-side acquisition; `LockScope::to_keys` produces
+        // the matching `(key1, key2)` pair.
+        let release_scope = LockScope::GlobalApp {
+            app_id: app_id.to_string(),
+            name: format!("mig:{name}"),
+        };
+        if let Err(e) = backend.release(&client, release_scope).await {
             tracing::warn!(
                 app_id,
                 name,

@@ -19,14 +19,16 @@
 //!   `query()` / `mutation()` handlers in a per-kind isolation
 //!   envelope; commits or rolls back at the end of the handler.
 //!
-//! Three of the four submodules (`auto_tx`, `register_model`,
-//! `transaction`) are `pub` so the v8_class layer (`v8_classes/*.rs`)
-//! can name their dispatch helpers; `lock_guard` is `pub(crate)`
-//! since the RAII guard never crosses the crate boundary. There is
-//! no aggregating re-export — `crate::callbacks` was deleted in
-//! Stage 8b once each consumer moved to its canonical import.
+//! Three submodules (`auto_tx`, `register_model`, `transaction`) are
+//! `pub` so the v8_class layer (`v8_classes/*.rs`) can name their
+//! dispatch helpers. The session-scoped advisory-lock RAII guard
+//! that used to live here as `lock_guard` moved to
+//! [`crate::backend::lock_guard`] in P0 PR 6 — it's the canonical
+//! return shape for the [`crate::backend::LockManager`] capability,
+//! not an orchestrator-internal detail. There is no aggregating
+//! re-export — `crate::callbacks` was deleted in Stage 8b once each
+//! consumer moved to its canonical import.
 
 pub mod auto_tx;
-pub(crate) mod lock_guard;
 pub mod register_model;
 pub mod transaction;
