@@ -301,13 +301,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I35] row_to_json O(N²) per row in column count (performance r4 N4-I3)
-- **Source**: `plugin-db-performance-2026-05-22-r4.md` §"N4-I3"
-- **File**: `crates/plugin-db/src/v8_bridge.rs:357` (`column_to_json`); `compio-postgres/src/row.rs:65-82` (`row.try_get` linear scan)
-- **Description**: Each `column_to_json(row, col.name(), ...)` call does `row.try_get::<_, T>(name)` which linear-scans `columns()` to find the index. For a 20-column row: 400 string compares per row. Hot on every `findOne` and large `find`.
-- **Status as of 2026-05-22 02:05**: actionable; fix is index-by-position. Either change `row_to_json` to iterate by `enumerate()` index, or cache the column→index map once at the start.
-- **Effort**: small (single function refactor; compio-postgres may need a position-aware accessor exposed)
-- **Pickable this cycle**: rolled forward.
+### ~~[I35] row_to_json O(N²) per row in column count~~ — CLOSED cycle 13:17
+- **Closed by**: `251d53b4 plugin-db/v8_bridge: row_to_json O(N²) → O(N) via index lookup (I35)`
+- `row_to_json` now enumerates `(idx, col)` and threads `idx: usize` into `column_to_json`. compio-postgres's `RowIndex for usize` is O(1) (bounds check + return) vs `RowIndex for str` which does a linear `position` scan with case-insensitive retry on miss. Affects every CRUD read path. No bench delta measured (perf r11 noted no forcing function; would need a wide-row bench to surface). 352 lib tests pass.
 
 ---
 
@@ -322,6 +318,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ---
 
 ## SUPERSEDED (already fixed; remove next cycle)
+
+### [S88] IMPORTANT (performance r4 N4-I3; cycle 13:17) — [I35] row_to_json O(N²) per row in column count
+- **Closed by**: `251d53b4 plugin-db/v8_bridge: row_to_json O(N²) → O(N) via index lookup (I35)`
+- Switched `row_to_json` to enumerate `(idx, col)` and thread `idx: usize` into `column_to_json` (renamed from `name: &str`). All 9 internal `try_get` / `raw_value` call sites updated. compio-postgres's `RowIndex for usize` is O(1) bounds-check; `RowIndex for str` is linear-scan with case-insensitive retry. Affects every CRUD read path. No bench delta this commit (no forcing function per perf r11). 352 lib tests pass.
+
+### [S87] IMPORTANT (error-ux r10 + code-critique r11 MINOR-R11-1; cycle 12:47) — F1 warn-shape unification + finalise_backfill name/collection
+- **Closed by**: `7c6bd2ec plugin-db: unify F1 warn-half shape + add name/collection to finalise_backfill warn`
+- Pinned the F1 warn shape across 6 sites (5 from `fcf7ce3c` + the cycle-06:00 finalise_backfill warn) to identical field names: `app_id = %app_id`, `audit_id`, `transition = "..."`, `audit_err = %audit_err`. Added `name` + `collection` to the finalise_backfill warn (6th-cycle error-ux carry — they were already in lexical scope via `lock_snapshot()`).
 
 ### [S86] IMPORTANT (docs-audit r7 NEW × 2; cycle 12:17) — auth/mod.rs + lib.rs preambles after hardening cargo gate
 - **Closed by**: `71a457a1 plugin-db: doc-drift cleanup after hardening cargo gate (docs-audit r7)`

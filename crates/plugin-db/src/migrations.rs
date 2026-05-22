@@ -640,17 +640,22 @@ pub async fn exec_commit_batch(
         // F1 family). Log via tracing::warn so operators see the
         // stall; we still continue with lock release because the row
         // state is already as-good-as-it-gets at this point.
-        if let Err(e) = backend
+        if let Err(audit_err) = backend
             .finalise_backfill(&client, app_id, audit_id, terminal, error_message)
             .await
         {
+            // Field shape pinned by code-critique r11 MINOR-R11-1
+            // (unified across the 6 F1 warn sites). `transition` is
+            // the discriminator operators grep on — quote the terminal
+            // status string so it lines up with the other 5 sites'
+            // string-literal discriminators ("Applied" / "Failed/...").
             tracing::warn!(
                 app_id = %app_id,
                 name = %name,
                 collection = %collection,
                 audit_id = audit_id,
-                terminal = ?terminal,
-                error = %e,
+                transition = ?terminal,
+                audit_err = %audit_err,
                 "finalise_backfill failed; audit row may stay in 'running' \
                  status until next reset() — investigate if the operator \
                  sees stuck migrations"
