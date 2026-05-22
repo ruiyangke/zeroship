@@ -61,7 +61,7 @@ pub(crate) async fn run_sql(
     if !has_pool {
         crate::init_pool_async()
             .await
-            .map_err(|e| DbError::config("not_configured", format!("db: lazy init failed: {e}")))?;
+            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
     }
     let pool = context::with(|c| c.pool());
     let pool = pool.ok_or_else(|| {
@@ -314,7 +314,7 @@ pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> 
     if !has_pool {
         crate::init_pool_async()
             .await
-            .map_err(|e| DbError::config("not_configured", format!("db: lazy init failed: {e}")))?;
+            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
     }
     context::with(|c| c.pool())
         .ok_or_else(|| {
