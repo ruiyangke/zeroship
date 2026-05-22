@@ -242,7 +242,15 @@ impl IsolateDbContext {
 
     /// Stamp the live ownership token. Called by the begin path after
     /// the BEGIN SQL succeeds; cleared to zero by every settle path.
+    ///
+    /// Invariant: a non-zero token implies the tx_conn slot is
+    /// occupied — every settle path drains the client BEFORE
+    /// clearing the token.
     pub fn set_tx_token(&mut self, token: u64) {
+        debug_assert!(
+            token == 0 || self.tx_conn.is_some(),
+            "set_tx_token: non-zero token without an active tx_conn",
+        );
         self.tx_token = token;
     }
 
@@ -263,7 +271,17 @@ impl IsolateDbContext {
 
     /// Mark the live transaction as auto-tx-owned (or clear the
     /// flag).
+    ///
+    /// Invariant: flipping `owned = true` requires an active
+    /// transaction connection. The `false` path is always allowed —
+    /// `exec_auto_end` clears the flag right after taking the client
+    /// out, so the slot is briefly `None` while the flag is also
+    /// being cleared.
     pub fn set_auto_tx_owned(&mut self, owned: bool) {
+        debug_assert!(
+            !owned || self.tx_conn.is_some(),
+            "set_auto_tx_owned(true) called without an active tx_conn",
+        );
         self.auto_tx_owned = owned;
     }
 
