@@ -19,14 +19,17 @@
 //!     its own kernel.
 //!
 //!   - **`nomad-ch`** — Nomad `raw_exec` job per sandbox; the job
-//!     invokes a wrapper script that spawns 3 × `virtiofsd` plus a
-//!     `cloud-hypervisor` microVM. The same in-VM
+//!     invokes a wrapper script that launches a `cloud-hypervisor`
+//!     microVM with three virtio-blk disks (rootfs + per-sandbox
+//!     workspace.img + per-user home.img) and the controller's
+//!     signing pubkey hex on the kernel cmdline. The same in-VM
 //!     `zeroship-sandbox-agent` runs as PID 1 (signed-request
 //!     contract identical to `k8s`). No Kubernetes — no kubelet,
 //!     no CNI, no CSI — just `nomad agent` + a shell wrapper.
 //!     Best for single-node / small-cluster operators who already
 //!     run Nomad and want libkrun-equivalent isolation without the
-//!     k8s control-plane overhead.
+//!     k8s control-plane overhead. (Pre virtio-blk pivot the wrapper
+//!     spawned virtiofsd × 3; that's gone, see bug #11 closure.)
 //!
 //! ## Why an enum, not a `dyn Trait`
 //!

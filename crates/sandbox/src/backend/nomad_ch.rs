@@ -3565,6 +3565,82 @@ mod tests {
             serde_json::from_str(&s).expect("round-trip parse");
     }
 
+    // ─── virtio-blk disk-image helpers (bug #11 pivot) ───────
+
+    /// `workspace_image_path` derivation: per-sandbox image lives
+    /// inside the sandbox's host_dir, always named `workspace.img`.
+    /// The wrapper attaches this as /dev/vdb.
+    #[test]
+    fn workspace_image_path_is_host_dir_join_workspace_img() {
+        let host_dir = Path::new("/var/zeroship/ch/abc123");
+        assert_eq!(
+            workspace_image_path(host_dir),
+            PathBuf::from("/var/zeroship/ch/abc123/workspace.img"),
+        );
+    }
+
+    /// `user_home_image_path` derivation: per-user image lives
+    /// under <user_home_dir_root>/<user_id>/home.img. The wrapper
+    /// attaches this as /dev/vdc. The path is reused across the
+    /// user's sandboxes; the controller idempotently mkfs's it
+    /// on first use only.
+    #[test]
+    fn user_home_image_path_is_root_user_home_img() {
+        let root = Path::new("/var/zeroship/ch/users");
+        assert_eq!(
+            user_home_image_path(root, "alice"),
+            PathBuf::from("/var/zeroship/ch/users/alice/home.img"),
+        );
+        // typed-id-shaped user ids round-trip identically.
+        assert_eq!(
+            user_home_image_path(root, "usr_01h5x2"),
+            PathBuf::from("/var/zeroship/ch/users/usr_01h5x2/home.img"),
+        );
+    }
+
+    /// Idempotent ext4 image creation: a second invocation against
+    /// the same path is a no-op (file already exists, helper
+    /// returns Ok without re-running truncate or mkfs). This is the
+    /// invariant per-user home.img depends on (every sandbox after
+    /// the user's first must NOT clobber their package caches).
+    ///
+    /// We can't exercise the success path of mkfs.ext4 in a unit
+    /// test (it needs root, requires e2fsprogs, and writes ~MiBs of
+    /// metadata). We can exercise the idempotency path: pre-create
+    /// the file, then call the helper and assert the file content
+    /// is unchanged.
+    #[test]
+    fn create_ext4_image_if_missing_skips_when_file_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-img-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("home.img");
+
+        // Pre-stamp a file with known contents that NEITHER truncate
+        // NOR mkfs.ext4 would leave intact. If the helper short-
+        // circuits on "exists", these bytes survive.
+        let sentinel = b"i-am-a-pre-existing-image-do-not-touch";
+        std::fs::write(&img, sentinel).unwrap();
+        let stat_before = std::fs::metadata(&img).unwrap();
+        let len_before = stat_before.len();
+
+        create_ext4_image_if_missing(&img, 20)
+            .expect("idempotent path must succeed");
+
+        let stat_after = std::fs::metadata(&img).unwrap();
+        assert_eq!(stat_after.len(), len_before, "len must not change");
+        assert_eq!(
+            std::fs::read(&img).unwrap(),
+            sentinel,
+            "contents must survive the idempotent call",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ─── path / id sanitizers (mirror k8s.rs unit tests) ────
 
     #[test]
