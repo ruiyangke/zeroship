@@ -6,12 +6,17 @@
 //! — the SDK can then branch on `err.code` instead of substring-matching
 //! opaque messages.
 //!
-//! The lone hold-out is the `validate` stage in
-//! `crate::orchestrator::register_model`, which still returns
-//! `Result<_, String>` because its `Err` is the `validation_refused`
-//! JSON envelope (a documented SDK wire contract). `run_pipeline` wraps
-//! that envelope in [`DbError::SchemaRefused`] at the boundary, so the
-//! typed-error invariant still holds at every public surface.
+//! `Result<_, String>` is not yet fully eliminated below the JS
+//! boundary. Known remaining sites (see backlog [I28]): replication.rs
+//! (~7 sites), the `auth/*` bootstrap helpers (~15 sites), parts of
+//! `diff.rs`, plus the `validate` stage in
+//! `crate::orchestrator::register_model` whose `Err` is the
+//! `validation_refused` JSON envelope (a documented SDK wire contract).
+//! `run_pipeline` and the orchestrator dispatchers wrap those strings
+//! in typed [`DbError`] variants at the boundary, so the typed-error
+//! invariant still holds at every JS-visible surface — but the SDK
+//! loses `.code` discrimination on the wrapped paths and a mechanical
+//! sweep is pending.
 //!
 //! The wire format JS sees is unchanged: still a JS `Error` with
 //! `message` + `code` (+ `hint` when present). All this layer does is

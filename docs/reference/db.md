@@ -87,7 +87,8 @@ import schema from "./schema.ts";
 export default { schema };
 ```
 
-The runtime's bootstrap (`crates/runtime/src/bootstrap/db_init.js`)
+The runtime's bootstrap (`sdks/bootstrap/src/runtime-entry.ts`, embedded
+into the runtime crate at compile time via `crates/runtime/src/core/init.rs::DB_INIT_JS`)
 reads `default.schema` directly off the loaded entry. There is no
 manifest-injected schema path — Stage 5c of the ZS-standard refactor
 dropped that and the SDK now has exactly one discovery surface: the
