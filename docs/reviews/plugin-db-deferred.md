@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 05:25.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 06:00.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +594,18 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S54] IMPORTANT (migration-pipeline r5 R5-M7; cycle 06:00) — finalise_backfill let _ on terminal update
+- **Closed by**: `51ced4a0 plugin-db: warn on finalise_backfill errors + document lock_guard hardening history`
+- Replaced silent `let _ =` on the `finalise_backfill` await with `if let Err(e)` + `tracing::warn!` capturing app_id, audit_id, terminal state, and error. F1-family discipline regression closed.
+
+### [S55] IMPORTANT (docs-audit r4; cycle 06:00) — lock_guard.rs preamble lacked hardening history
+- **Closed by**: `51ced4a0 plugin-db: warn on finalise_backfill errors + document lock_guard hardening history`
+- Added a "Hardening history" block to the lock_guard preamble naming the four design-pass commits: cbd12944 (extract), bd1e7ce1 [I42] (await-order), 808a32af [I39] (must_use+log), ffb1e101 [I44] (unlock-SQL warn). Future readers can trace the design.
+
+### [S56] MAJOR (code-critique r6 MAJOR-R6-1; cycle 06:00) — mark_consumer_running synchronously before spawn
+- **Closed by**: `34d209b5 plugin-db/replication_ops: move consumer-running mark inside ConsumerRunningGuard::new`
+- The earlier e399eeea fix moved unmark into Drop but kept the mark BEFORE the spawn. Moved mark into `ConsumerRunningGuard::new()` so it fires inside the spawned future. Atomic lifecycle: any exit path (graceful, panic-mid-loop, dropped-pre-poll) hits Drop. Single-threaded per-isolate event loop makes the brief race window acceptable.
+
 ### [S50] MAJOR (code-critique r5 MAJOR-R5-2; cycle 05:25) — mark_consumer_running spawn-panic race
 - **Closed by**: `e399eeea plugin-db/replication_ops: clear consumer-running marker on panic via Drop guard`
 - Wrapped the spawned `run_supervised` task in a `ConsumerRunningGuard` struct with `Drop` impl that calls `unmark_consumer_running`. Fires on graceful exit AND panic-unwind — app no longer permanently marked "running" if the supervisor panics.
@@ -660,21 +672,20 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **03:25** closed [I40], [I41], 5 mint_* demote, validate.rs doc CRITICAL
 - **04:00** closed [I28] ~70-site sweep, [I42] lock_guard await order
 - **04:35** closed [I39], [I44], NEW CRITICAL (watchdog cross-app), first_row_or_internal
-- **05:25** closed MAJOR-R5-2 (consumer-running Drop guard), MAJOR-R5-3 (coded_sql dedup), CRITICAL (c0590506 test-helpers build break), CRITICAL (error.rs preamble drift)
+- **05:25** closed MAJOR-R5-2, MAJOR-R5-3, 2 CRITICALs (test-helpers build break + error preamble drift)
+- **06:00** closed R5-M7 (finalise_backfill warn), docs-audit r4 (lock_guard hardening-history), MAJOR-R6-1 (mark_consumer_running inside guard)
 
-**Net since pilot started**: ~30 closures, ~23 new findings.
+**Net since pilot started**: ~33 closures, ~24 new findings.
 
-### Pick #1 (next cycle): **Migration-pipeline r5 R5-M7 — finalise_backfill let _ on terminal update**
-- **File**: `crates/plugin-db/src/migrations.rs:639-641`
-- **Fix sketch**: Same `let _ = ` discipline regression as F1 family — `finalise_backfill`'s terminal audit-row UPDATE error is discarded. Either `tracing::warn` on Err (cheap) or surface via the function's Result (more invasive).
-- **Why next**: small, mirrors recent F1-class hardening; closes a regression-prone pattern.
+### Pick #1 (next cycle): **MAJOR-R5-1 — auth/session.rs P0001 substring matching**
+- **File**: `crates/plugin-db/src/auth/session.rs:188-225`
+- **Fix sketch**: Replace `msg.contains("…")` substring matches on rendered RAISE messages with a SQLSTATE + DETAIL machine-readable token (`RAISE EXCEPTION ... USING ERRCODE = 'P0001', DETAIL = 'session_signature_expired'`). Read `e.code()` + `e.detail()` instead of free-text.
+- **Why next**: code-critique r5 + security r5 both flagged. Fragile against future RAISE additions or compio-postgres formatter changes. SDK retry contract could silently change.
 
-### Pick #2 (next cycle): **Docs-audit r4 — lock_guard.rs preamble incomplete after 3-pass hardening**
-- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:1-50`
-- **Fix sketch**: Append a "Hardening history" block naming `[I42]` (bd1e7ce1 await-order), `[I39]` (808a32af must_use+log), `[I44]` (ffb1e101 unlock-SQL warn) so a future reader can trace the design.
-- **Why**: docs-audit r4 IMPORTANT; recurring drift pattern after multi-pass hardening; doc-only.
+### Pick #2 (next cycle): **MAJOR-R5-4 — WalConsumer::new flattens DbError to String**
+- **File**: `crates/plugin-db/src/wal_consumer.rs:333-336`; dispatch boundary at `crates/plugin-db/src/replication_ops.rs:239-241`
+- **Fix sketch**: Replace `ConsumerError::NotProvisioned(String)` with `ConsumerError::NotProvisioned(DbError)` or have WalConsumer::new return `Result<_, DbError>`. Dispatch site at replication_ops.rs:239 then routes the typed error rather than re-stamping `"not_provisioned"`.
+- **Why next**: code-critique r5 + r6 both carry this. Currently SDK gets `"not_provisioned"` for what could be `invalid_app_id` (replication.rs sanitisation) or `wal_level_not_logical` (configuration) — observability gap.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
-- **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
-- **Fix sketch**: Switch from blocking `pg_advisory_lock` to `try_acquire_advisory_lock` with a backoff loop and a per-app cap.
-- **Caveat**: needs design decision on retry/backoff policy + max-wait semantics.
+- Status unchanged; needs retry/backoff policy decision.
