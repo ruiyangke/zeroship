@@ -34,6 +34,7 @@ use std::rc::Rc;
 
 use compio_postgres::{Client, Pool};
 
+use crate::backend::PostgresBackend;
 use crate::broker::ChangeEvent;
 use crate::migrations::MigrationLock;
 
@@ -122,6 +123,15 @@ pub struct IsolateDbContext {
     /// apps over its lifetime via the LRU cache, but only one
     /// consumer per app at a time).
     pub(crate) running_consumers: HashSet<String>,
+
+    /// Backend handle wrapping the pool — Stage 8e-R2. Created
+    /// alongside the pool by [`Self::set_pool`] so consumers can call
+    /// `ctx.backend()` to get a [`crate::backend::Backend`] facade
+    /// without naming `compio_postgres::Pool` directly.
+    ///
+    /// `None` until the pool is initialised; same lifecycle as
+    /// [`Self::pool`] (cleared whenever the pool is cleared).
+    pub(crate) backend: Option<Rc<PostgresBackend>>,
 }
 
 impl IsolateDbContext {
@@ -143,6 +153,7 @@ impl IsolateDbContext {
             pending_emits: None,
             mig_lock: None,
             running_consumers: HashSet::new(),
+            backend: None,
         }
     }
 
@@ -159,8 +170,11 @@ impl IsolateDbContext {
     }
 
     /// Install the pool — called by `init_pool_async` once Postgres
-    /// `connect` succeeds.
+    /// `connect` succeeds. Constructs the [`PostgresBackend`] facade
+    /// in lockstep so the two never drift.
     pub fn set_pool(&mut self, pool: Rc<Pool>) {
+        let url = self.db_url.clone().unwrap_or_default();
+        self.backend = Some(Rc::new(PostgresBackend::new(Rc::clone(&pool), url)));
         self.pool = Some(pool);
     }
 
@@ -169,6 +183,12 @@ impl IsolateDbContext {
     /// against the new URL.
     pub fn clear_pool(&mut self) {
         self.pool = None;
+        self.backend = None;
+    }
+
+    /// Snapshot the backend facade (cloned `Rc`).
+    pub fn backend(&self) -> Option<Rc<PostgresBackend>> {
+        self.backend.as_ref().map(Rc::clone)
     }
 
     // ----- DB_URL -----------------------------------------------------

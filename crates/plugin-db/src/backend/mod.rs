@@ -1,0 +1,336 @@
+//! Backend abstraction — "the data store boundary".
+//!
+//! Stage 8e — R2 of the plugin-db architecture review
+//! (`docs/reviews/plugin-db-architecture-review-2026-05-21.md`).
+//!
+//! ## What this is
+//!
+//! A single trait, [`Backend`], that captures everything the
+//! orchestrator and audit-row layer ask of "the database" — connection
+//! lifecycle, advisory locks, schema introspection, and audit-table
+//! reads/writes. Today the only impl is [`PostgresBackend`]; the goal
+//! is to name the seams BEFORE a second backend lands so we don't
+//! accidentally bake `compio_postgres::Pool` / `Client` into every
+//! consumer file.
+//!
+//! ## What this is NOT
+//!
+//! - **Not a query-IR layer.** [`crate::query`] still emits Postgres
+//!   DDL/DML directly via `quote_ident`, `ON CONFLICT`, `RETURNING`,
+//!   etc. The architecture critic explicitly scoped that out — see
+//!   `query.rs` (4099 LOC) and the review's R2 recommendation: "wait
+//!   until a real sqlite or planetscale prototype is in motion." This
+//!   trait fixes the *non-builder* surface (orchestrator + audit).
+//! - **Not a leakage-free abstraction.** [`crate::replication`] and
+//!   [`crate::wal_consumer`] talk raw `pg_replication_slots` and the
+//!   streaming WAL protocol; those stay Postgres-only behind their own
+//!   files. The `auth/*` SECURITY DEFINER bootstrap is likewise PG-only.
+//! - **Not async-trait-Boxed.** `compio-postgres` is single-threaded
+//!   io_uring; we use `async fn` directly in trait position
+//!   (`async_fn_in_trait` is stable) so the orchestrator's hot paths
+//!   don't allocate a `Box<dyn Future>` per call.
+//!
+//! ## Trait shape
+//!
+//! Associated types `Client` / `LiveSchema` keep the consumer files
+//! free of `compio_postgres::Client` / `crate::diff::LiveSchema`
+//! direct references — they go through `B::Client` instead. The PG
+//! impl ties them to the concrete types in
+//! [`postgres::PostgresBackend`].
+
+use std::rc::Rc;
+
+use serde_json::Value;
+
+use crate::audit::{AuditRow, BackfillLookup, LockedAuditRow, TerminalStatus};
+use crate::error::DbError;
+
+pub mod postgres;
+
+pub use postgres::PostgresBackend;
+
+/// The data-store boundary. One impl per storage backend; today only
+/// Postgres ([`PostgresBackend`]).
+///
+/// `Send + Sync` so the trait object can live behind an `Rc` shared
+/// across the per-isolate context's borrow surface (compio is
+/// single-threaded but the bound is cheap to satisfy).
+///
+/// Lifetime invariants:
+///
+/// - Methods that take `&Self::Client` use it borrow-only; the caller
+///   owns the client (e.g. the migration lock holds it across awaits,
+///   the audit helpers borrow it for one operation).
+/// - [`Backend::acquire_dedicated_client`] returns an owned `Client`
+///   detached from any pool lifetime — the caller is free to park it
+///   in a thread-local (e.g. `MigrationLock::client`, `tx_conn`) for
+///   the duration of a session-scoped lock.
+pub trait Backend: 'static {
+    /// Concrete connection / client handle. The orchestrator threads
+    /// this through audit helpers and advisory-lock acquisition without
+    /// naming the underlying SQL driver.
+    type Client;
+
+    /// Concrete live-schema snapshot returned by
+    /// [`Self::introspect_schema`]. The Postgres impl uses
+    /// [`crate::diff::LiveSchema`]; alternate backends would produce
+    /// the same shape from their own catalog tables.
+    type LiveSchema;
+
+    // ----- connection lifecycle ---------------------------------------
+
+    /// Acquire a dedicated (non-pooled) connection. Caller owns the
+    /// lifetime — used by the migration lock and the user-driven
+    /// `db.beginTransaction()` path, which need a connection that
+    /// survives across pool-return points.
+    ///
+    /// For Postgres this opens a fresh `compio_postgres::connect(...)`
+    /// against the configured URL and spawns the connection task; for
+    /// future backends this maps to whatever "long-lived session"
+    /// primitive that backend exposes.
+    #[allow(async_fn_in_trait)]
+    async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError>;
+
+    /// Execute a SQL statement against the pool with text-encoded
+    /// parameters. Returns the count of affected rows (read paths
+    /// usually ignore the return).
+    ///
+    /// Implementations free to fan out to a connection pool internally
+    /// — this is the "no transaction, no lock client, just run it"
+    /// path. The orchestrator and audit helpers do not park clients
+    /// across awaits when they use this.
+    #[allow(async_fn_in_trait)]
+    async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError>;
+
+    /// Execute a SQL statement against a specific client.
+    ///
+    /// Used by the migration lock + apply-pass paths that need every
+    /// statement to land on the same backend session as the advisory
+    /// lock. Returns the count of affected rows.
+    #[allow(async_fn_in_trait)]
+    async fn client_exec(
+        &self,
+        client: &Self::Client,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<u64, DbError>;
+
+    // ----- advisory locks ---------------------------------------------
+
+    /// Acquire a session-scoped advisory lock on `(key1, key2)` against
+    /// the given client. Blocks if another holder exists; the lock
+    /// releases when the client is dropped or the backend session
+    /// ends.
+    ///
+    /// Postgres maps this to
+    /// `SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)`.
+    /// Future backends would map to their per-engine equivalent (e.g.
+    /// sqlite has no advisory locks — that backend would need a
+    /// `BEGIN EXCLUSIVE` or a sentinel table).
+    #[allow(async_fn_in_trait)]
+    async fn acquire_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<(), DbError>;
+
+    /// Try to acquire the same session-scoped advisory lock; return
+    /// `Ok(false)` if the lock is already held by a different session.
+    /// Used by [`crate::migrations::exec_begin`] so a second worker
+    /// observes "migration already running" instead of blocking.
+    #[allow(async_fn_in_trait)]
+    async fn try_acquire_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<bool, DbError>;
+
+    /// Best-effort release of a session-scoped advisory lock. Always
+    /// succeeds at the trait level — call sites already swallow the
+    /// underlying error (the lock auto-releases on session end).
+    #[allow(async_fn_in_trait)]
+    async fn release_advisory_lock(&self, client: &Self::Client, key1: &str, key2: &str);
+
+    // ----- schema bootstrap + introspection ---------------------------
+
+    /// Idempotently create the per-app schema namespace.
+    #[allow(async_fn_in_trait)]
+    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError>;
+
+    /// Introspect the live schema for an app. Returns the typed
+    /// snapshot the diff engine consumes via
+    /// [`crate::diff::compute_diff`].
+    #[allow(async_fn_in_trait)]
+    async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError>;
+
+    /// Estimate the row count for a single collection. Used by the
+    /// classifier to decide "ADD NOT NULL on empty table" — cheap
+    /// `reltuples`-style estimate is fine.
+    #[allow(async_fn_in_trait)]
+    async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError>;
+
+    // ----- audit table reads/writes -----------------------------------
+
+    /// Create `__zeroship_migrations` for an app if it doesn't exist.
+    /// Idempotent.
+    #[allow(async_fn_in_trait)]
+    async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError>;
+
+    /// Compute the next monotonic `schema_version` for a deploy.
+    #[allow(async_fn_in_trait)]
+    async fn next_schema_version(&self, app_id: &str) -> Result<i32, DbError>;
+
+    /// Insert a single row into the audit table, returning its PK.
+    #[allow(async_fn_in_trait)]
+    async fn write_audit_row(&self, app_id: &str, row: &AuditRow) -> Result<i64, DbError>;
+
+    /// Drive an audit row to a terminal status. Returns `true` if the
+    /// row transitioned, `false` if the UPDATE matched nothing (row
+    /// was already terminal).
+    #[allow(async_fn_in_trait)]
+    async fn update_audit_status(
+        &self,
+        app_id: &str,
+        id: i64,
+        new_status: TerminalStatus,
+        error: Option<&str>,
+    ) -> Result<bool, DbError>;
+
+    /// SELECT the latest backfill row for `(collection, name)`.
+    #[allow(async_fn_in_trait)]
+    async fn find_latest_backfill_row(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+    ) -> Result<Option<BackfillLookup>, DbError>;
+
+    /// Pool-driven variant of [`Self::find_latest_backfill_row`] — used
+    /// by the `migrations.status({name, collection})` observation API
+    /// which has no dedicated client.
+    #[allow(async_fn_in_trait)]
+    async fn find_latest_backfill_row_pool(
+        &self,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+    ) -> Result<Option<BackfillLookup>, DbError>;
+
+    /// Mark a backfill row as `running` — used when an existing row is
+    /// being resumed by this worker.
+    #[allow(async_fn_in_trait)]
+    async fn set_backfill_running(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        id: i64,
+    ) -> Result<(), DbError>;
+
+    /// Insert a fresh `running` backfill row.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(async_fn_in_trait)]
+    async fn insert_backfill_running(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+        dry_run: bool,
+        deploy_id: &str,
+        schema_version: i32,
+    ) -> Result<i64, DbError>;
+
+    /// Bump `audit_generation` + reset progress columns. Pool-driven
+    /// variant (called from `migrations.reset({name, collection})`).
+    #[allow(async_fn_in_trait)]
+    async fn reset_backfill_row_pool(
+        &self,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+    ) -> Result<(), DbError>;
+
+    /// Client-driven variant of [`Self::reset_backfill_row_pool`] —
+    /// called from `exec_begin` when `reset: true` is passed.
+    #[allow(async_fn_in_trait)]
+    async fn reset_backfill_row_client(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+    ) -> Result<(), DbError>;
+
+    /// Peek the latest backfill row's status without locking. Used by
+    /// `fetchBatch` to short-circuit on cancel.
+    #[allow(async_fn_in_trait)]
+    async fn peek_latest_backfill_status(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+    ) -> Result<Option<String>, DbError>;
+
+    /// Best-effort heartbeat write on the backfill row.
+    #[allow(async_fn_in_trait)]
+    async fn heartbeat_backfill(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        collection: &str,
+        name: &str,
+    ) -> Result<(), DbError>;
+
+    /// `SELECT status, audit_generation ... FOR UPDATE` — acquires the
+    /// row lock inside the current transaction.
+    #[allow(async_fn_in_trait)]
+    async fn lock_audit_row_for_update(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        id: i64,
+    ) -> Result<Option<LockedAuditRow>, DbError>;
+
+    /// Advance a backfill row's progress columns.
+    #[allow(async_fn_in_trait)]
+    async fn update_backfill_progress(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        id: i64,
+        next_cursor: i64,
+        dead_letter_pks: &Value,
+        processed_total: i64,
+    ) -> Result<(), DbError>;
+
+    /// Drive a backfill row to its terminal status.
+    #[allow(async_fn_in_trait)]
+    async fn finalise_backfill(
+        &self,
+        client: &Self::Client,
+        app_id: &str,
+        id: i64,
+        terminal: TerminalStatus,
+        error_message: Option<&str>,
+    ) -> Result<(), DbError>;
+
+    /// Operator-driven cancel of a backfill row.
+    #[allow(async_fn_in_trait)]
+    async fn cancel_backfill_row_pool(
+        &self,
+        app_id: &str,
+        id: i64,
+    ) -> Result<(), DbError>;
+}
+
+/// Opaque trait-object handle that the per-isolate context stores.
+///
+/// We expose the *concrete* PG impl through this Rc so the consumer
+/// code can stay `B: Backend`-generic where it cares; the runtime
+/// stash is type-erased to avoid threading a parameter through
+/// `IsolateDbContext`.
+pub type BackendHandle = Rc<PostgresBackend>;
