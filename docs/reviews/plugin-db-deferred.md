@@ -1,10 +1,12 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 10:30 (backlog audit).
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 10:47.
 
-**Backlog audit performed cycle 10:30**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 21 IMPORTANT (mix actionable / judgment-call / cross-crate).
+**Cycle 10:47 closures (2)**: MAJOR-R9-5 (auth/* hardening gate, commit `2fa9472e`) + [I23] (mig_lock state-drift tracing, commit `5d9acab8`). 4 reviewers returned: architecture r10 = 93 (+1, credited the hardening gate), security r9 = 83 (+1, same credit), error-ux r9 = 91 (±0), concurrency r10 = 88 (±0, surfaced one NEW MINOR-latent — Subscription::close at broker.rs:359-369 holds borrow_mut across w.wake).
 
-**STRONG PLATEAU SIGNAL (cycle 09:30)**: 4 of 4 reviewers this cycle returned ZERO net score movement (error-ux 91, test-coverage 84, performance 78, migration-pipeline 85). Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function". Cycle delivered only one small inline fix (R8-2 code-name unification at 7d0bc4c5). Per-cycle yield is collapsing.
+**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 20 IMPORTANT (mix actionable / judgment-call / cross-crate; was 21 pre-10:47).
+
+**STRONG PLATEAU SIGNAL (sustained through cycle 10:47)**: cycle 09:30's 4-of-4 ±0 movement has only marginally improved — cycle 10:47's +1/+1/0/0 came entirely from the hardening cfg-gate (a single forcing function), not from forward motion on lens-specific findings. Architecture reviewer recommends capping at r11 if the `query.rs` split lands; concurrency reviewer recommends skipping cycles until the two carried IMPORTANTs land. Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function".
 
 **Recommended next actions** (for user attention):
 1. **Cross-crate I5** — auth/* `--harden` wire-up in `crates/control/`. Requires scope grant; not in plugin-db pilot scope.
@@ -12,20 +14,24 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 10:30 (backlog 
 3. **F1+F2 schema migration** (orphan Running + Pending audit rows) — needs deployment story.
 4. **Downshift cadence**: reduce cron from `:17/:47` to once per hour or longer until a forcing function lands.
 
-Source reviews triaged (14 total):
+Source reviews triaged (18 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
 - `plugin-db-architecture-review-2026-05-21.md`
 - `plugin-db-architecture-review-2026-05-21-round2.md`
 - `plugin-db-architecture-review-2026-05-22-r3.md`
+- `plugin-db-architecture-review-2026-05-22-r10.md`
 - `plugin-db-code-critique-2026-05-21.md`
 - `plugin-db-code-critique-2026-05-22-r2.md`
 - `plugin-db-concurrency-2026-05-22-r2.md`
+- `plugin-db-concurrency-2026-05-22-r10.md`
 - `plugin-db-docs-audit-2026-05-22-r1.md`
 - `plugin-db-error-ux-2026-05-22-r1.md`
+- `plugin-db-error-ux-2026-05-22-r9.md`
 - `plugin-db-migration-pipeline-2026-05-22-r1.md`
 - `plugin-db-performance-2026-05-22-r1.md`
 - `plugin-db-performance-2026-05-22-r2.md`
 - `plugin-db-security-2026-05-22-r1.md`
+- `plugin-db-security-2026-05-22-r9.md`
 - `plugin-db-test-coverage-2026-05-22-r2.md`
 
 HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `5be3c1a1`, `cac3e542`, `b4e533e2`, `37a0ef76`, `d7cfc089`, plus `2fe9e9f0`, `b2496364`, `ff220fce`, `60ca1ad6`, `967a7362`, `78a95d3b`, `c54a9f15`, `cc7fff89`, `a0fec06a`, `d2aeada6`, `e8463ef0`, `b94fbdeb`, `f1c475f5`, `de01b3a0`, `d27ea71e`, `0816feb0`, `29b8a013`, `a3561ae4`, `81345420`, `10fe0b82`, `094261e1`, `52ff1c83`.
@@ -270,16 +276,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I23] `unmark` no-op when `return_mig_client` slot is empty masks state bugs (code-critique I7)
-- **Source**: `plugin-db-code-critique-2026-05-21.md` §I7
-- **File**: `crates/plugin-db/src/context.rs:365` (set_mig_lock missing debug_assert); `crates/plugin-db/src/context.rs:385-389` (return_mig_client silent no-op)
-- **Description**: `set_mig_lock` constructs `MigrationLock` and relies on convention. `return_mig_client` silently no-ops when slot empty — masks state-machine bugs. Asymmetric with `set_tx_token` / `tx_conn` which carry debug_asserts.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes (reviewed code unchanged).
-  - Blocker: none. Add `debug_assert!(lock.client.is_some())` on `set_mig_lock`; `tracing::warn!` on empty `return_mig_client`.
-  - Already-superseded-by: N/A
-- **Effort**: small (~5 lines)
-- **Pickable this cycle**: yes.
+### ~~[I23] `unmark` no-op when `return_mig_client` slot is empty masks state bugs (code-critique I7)~~ — CLOSED cycle 10:47
+- **Closed by**: `5d9acab8 plugin-db/context: surface mig_lock state drift via tracing (I23)`.
+- `set_mig_lock` now logs at `error` with prev/new lock identity if the slot was occupied (shadow), then proceeds with `replace` so the worker stays recoverable. `return_mig_client` now logs at `warn` (with rationale "expected only on operator-cancel race") instead of silently dropping the client. Same operator-visibility intent as the deferred entry's debug_assert proposal; converted to tracing so the slot's unit tests (which deliberately exercise the swap-on-replace shape with `MigrationLock { client: None }`) keep passing.
 
 ---
 
@@ -337,6 +336,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ---
 
 ## SUPERSEDED (already fixed; remove next cycle)
+
+### [S78] MAJOR (code-critique r9 MAJOR-R9-5; cycle 10:47) — auth/* subtree pollutes default builds with 58 dead-code warnings
+- **Closed by**: `2fa9472e plugin-db/auth: gate dormant auth subtree behind hardening feature`
+- Added a `hardening = []` Cargo feature; the entire `auth/*` subtree (`crates/plugin-db/src/auth/{mod,bootstrap,keys,session}.rs`, ~2,860 LOC, ~76 KB) is now `#[cfg(all(feature = "hardening", …))]`-gated. Default `cargo build -p zeroship-plugin-db --lib` drops from 74 → 12 plugin-db warnings (58% reduction in noise floor per architecture r10). Integration tests still probe the auth surface — `[[test]] integration` now requires `["test-helpers", "hardening"]`. Security r9 verified zero in-code production callers of `crate::auth::` (only doc-comment refs + integration tests); credited +1 to score. The eventual control-plane wire-up (per the auth-r1 design) flips the feature on.
+
+### [S79] IMPORTANT [I23] (code-critique r9 I7; cycle 10:47) — return_mig_client silent no-op + set_mig_lock missing state-machine assertions
+- **Closed by**: `5d9acab8 plugin-db/context: surface mig_lock state drift via tracing (I23)`
+- `set_mig_lock` now `tracing::error!`s with prev/new lock identity on a shadow-replace (the begin path should have gated on `has_mig_lock`); release builds still proceed with `replace` to keep workers recoverable rather than panicking. `return_mig_client` switched from a silent `if let Some` to a `match` with `tracing::warn!` on the empty-slot arm (expected only on operator-cancel race). Same operator-visibility intent as the deferred entry's debug_assert proposal; converted to tracing so the slot's unit tests (which deliberately exercise the swap-on-replace shape with `MigrationLock { client: None }`) keep passing. 347 lib tests pass.
 
 ### [S1] CRITICAL C1 — `audit.rs` returns `Result<_, String>` (api-surface)
 - **Source**: `plugin-db-api-surface-2026-05-22-r1.md` §C1
