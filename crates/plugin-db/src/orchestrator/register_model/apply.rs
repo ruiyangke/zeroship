@@ -586,4 +586,69 @@ mod tests {
              in one commit",
         );
     }
+
+    /// Pin the `collection`-slot variant of the F1 warn-shape family.
+    ///
+    /// The 8-site F1 family splits into two identifier-slot variants:
+    /// 5 sites carry `audit_id` (the existing `update_audit_status`
+    /// failure cluster); 3 sites carry `collection` instead (the
+    /// `write_audit_row` insert-failure cluster at `validate.rs:101`
+    /// + `apply.rs:84` + the corresponding running-row insert path
+    /// added by cycle-16:17 `cbd21112`).
+    ///
+    /// Error-ux r12 LOW (cycle 16:17 finding): the original
+    /// `f1_warn_shape_documentation_snapshot` above pinned only the
+    /// `audit_id` variant — operator grep on `collection=audit_err=`
+    /// against the insert-failure sites wasn't backed by a test. This
+    /// test closes that gap: any rename of `collection` /
+    /// `transition` / `audit_err` on the insert-failure cluster fails
+    /// here at unit-test time.
+    #[test]
+    fn f1_warn_shape_collection_slot_documentation_snapshot() {
+        use crate::test_support::capture;
+        use tracing::Level;
+
+        // The exact syntax used at apply.rs:84 (the "Running/insert_failed"
+        // arm landed at cycle-16:17 `cbd21112`). Mirrors the validate.rs:101
+        // shape (transition = "ValidationRefused/insert_failed").
+        let app_id = "app_t";
+        let collection = "messages";
+        let audit_err = "duplicate key violates unique constraint";
+        let ((), events) = capture(|| {
+            tracing::warn!(
+                app_id = %app_id,
+                collection = %collection,
+                transition = "Running/insert_failed",
+                audit_err = %audit_err,
+                "audit: failed to insert running row",
+            );
+        });
+
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.level, Level::WARN);
+
+        // Four-field contract for the collection-slot variant.
+        for name in &["app_id", "collection", "transition", "audit_err"] {
+            assert!(
+                ev.fields.contains_key(*name),
+                "F1 warn-shape contract (collection slot): field `{name}` \
+                 MUST be present across all 3 insert-failure sites \
+                 (validate.rs:101, apply.rs:84, and the matching \
+                 secondary-failure paths). Missing — contract broken. \
+                 Fields: {:?}",
+                ev.fields,
+            );
+        }
+
+        // `transition` discriminator literal-match (operators grep
+        // `transition="Running/insert_failed"`).
+        assert_eq!(
+            ev.fields.get("transition").map(String::as_str),
+            Some("Running/insert_failed"),
+            "transition discriminator must be literal — `Running/insert_failed` \
+             is the running-row INSERT failure variant; \
+             `ValidationRefused/insert_failed` is the validate-time variant",
+        );
+    }
 }
