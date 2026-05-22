@@ -863,9 +863,16 @@ fn validate_app_id(name: &str) -> Result<(), DbError> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
+        // Name the allowed alphabet inline so SDK-facing error messages
+        // tell creators what's permitted. Mirrors the `validate_field_name`
+        // shape landed at `403b3891` (cycle 11:17 [I12]) and the twin
+        // alphabet-naming pattern in `replication.rs:91-97`. Closes the
+        // 5-cycle error-ux carry on audit.rs:818.
         return Err(DbError::validation(
             "invalid_app_id",
-            format!("audit: invalid app_id: {name}"),
+            format!(
+                "audit: invalid app_id: {name} (allowed: ASCII alphanumeric + underscore + hyphen)"
+            ),
         ));
     }
     Ok(())
