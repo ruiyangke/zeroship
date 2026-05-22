@@ -1,6 +1,12 @@
 //! HMAC-signed session-init plumbing — the Rust side of the trust
 //! anchor.
 //!
+//! **Cargo gate**: this module compiles only under `--features hardening`
+//! (cycle 10:47, commit `2fa9472e`); default builds skip the entire
+//! `auth/*` subtree. See `docs/proposals/db-system-design.md` §12 for
+//! the threat-model discussion of the PG-side SECURITY DEFINER design
+//! vs the SQLite-side Rust HMAC alternative.
+//!
 //! Two operations matter to the runtime:
 //!
 //! 1. **Mint a token** (`mint_session_token`).

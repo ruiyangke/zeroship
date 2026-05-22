@@ -2,6 +2,11 @@
 //! roles, key table, nonce table, and every SECURITY DEFINER function
 //! the C1 hardening relies on.
 //!
+//! **Cargo gate**: this module compiles only under `--features hardening`
+//! (cycle 10:47, commit `2fa9472e`). Default builds skip the entire
+//! `auth/*` subtree — see the `lib.rs` mod declarations and the
+//! converged design at `docs/proposals/db-system-design.md` §12.
+//!
 //! Designed so re-running `ensure_admin_schema` on a fully-set-up
 //! cluster is a cheap no-op: every `CREATE ROLE` is wrapped in a
 //! DO-block existence probe; every `CREATE TABLE` uses

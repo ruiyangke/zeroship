@@ -1,5 +1,9 @@
 //! Key rotation primitives.
 //!
+//! **Cargo gate**: this module compiles only under `--features hardening`
+//! (cycle 10:47, commit `2fa9472e`); default builds skip the entire
+//! `auth/*` subtree.
+//!
 //! The platform's HMAC secret is rotated periodically — daily by
 //! default, per the proposal — by inserting a fresh `gen_random_bytes(32)`
 //! row into `__zeroship_admin.hmac_keys` and marking the previous
