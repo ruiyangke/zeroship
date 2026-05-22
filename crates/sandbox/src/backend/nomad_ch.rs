@@ -2026,8 +2026,21 @@ pub(crate) fn build_nomad_job_json(
                         // CPU MHz is advisory under raw_exec + CH —
                         // see `NOMAD_CPU_MHZ_ADVISORY`. Memory is the
                         // real bin-packing input.
+                        //
+                        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix,
+                        // 2026-05-22 cluster validation). CH v51.1
+                        // mmap-faults the full guest RAM during
+                        // snapshot/restore which gets accounted to
+                        // the task's memcg; without slack the cgroup
+                        // OOM-killer fires when CH approaches the
+                        // hard limit. Matches the proposal's § 2
+                        // architectural recommendation. MemoryMB
+                        // stays as the bin-packing input;
+                        // MemoryMaxMB is the oversubscription
+                        // ceiling Nomad enforces via memory.high.
                         "CPU": NOMAD_CPU_MHZ_ADVISORY,
                         "MemoryMB": cfg.memory_mb as u32,
+                        "MemoryMaxMB": (cfg.memory_mb * 2) as u32,
                     },
                     "KillTimeout": 10_000_000_000u64,  // 10s, ns
                 }],

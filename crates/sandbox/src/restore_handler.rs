@@ -904,8 +904,17 @@ fn build_restore_nomad_job_json(
                         // Match nomad_ch.rs: CPU MHz advisory under
                         // raw_exec + CH; memory comes from the
                         // snapshot's saved config.
+                        //
+                        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix,
+                        // 2026-05-22). CH v51.1 mmap-faults full
+                        // guest RAM during restore which gets
+                        // memcg-accounted; without 2× slack the
+                        // cgroup OOM-kills CH at ~t=30s before
+                        // /livez is reachable. Mirrors cold-boot's
+                        // jobspec in nomad_ch.rs.
                         "CPU": 500,
                         "MemoryMB": memory_mb,
+                        "MemoryMaxMB": memory_mb * 2,
                     },
                     "KillTimeout": 10_000_000_000u64,
                 }],
