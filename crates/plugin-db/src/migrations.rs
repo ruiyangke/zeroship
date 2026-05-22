@@ -645,10 +645,13 @@ pub async fn exec_commit_batch(
             .await
         {
             // Field shape pinned by code-critique r11 MINOR-R11-1
-            // (unified across the 6 F1 warn sites). `transition` is
-            // the discriminator operators grep on — quote the terminal
-            // status string so it lines up with the other 5 sites'
-            // string-literal discriminators ("Applied" / "Failed/...").
+            // (unified across the F1 warn family — now 8 sites total at
+            // HEAD: 6 audit_id-slot + 2 collection-slot). This site is
+            // the hybrid: audit_id-slot primary + name/collection for
+            // operator context. `transition` is the discriminator
+            // operators grep on — `?terminal` Debug-formats here while
+            // the other 5 audit_id-slot sites use string literals
+            // ("Applied" / "Failed/...").
             tracing::warn!(
                 app_id = %app_id,
                 name = %name,

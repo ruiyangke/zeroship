@@ -82,10 +82,11 @@ pub(crate) async fn apply<'p, B: Backend>(
             Ok(id) => Some(id),
             Err(audit_err) => {
                 // F1 warn-half family: same write_audit_row secondary-
-                // failure shape as validate.rs:101 / migrations.rs (6+
-                // sites pinned at cycle-12:47 `7c6bd2ec`). Closes
-                // code-critique r12 MINOR-R12-1 cousin drift the prior
-                // unification missed.
+                // failure shape as validate.rs:101 (8th F1 site across
+                // the family at HEAD: 6 audit_id-slot + 2 collection-slot
+                // — this one is collection-slot). Closes code-critique
+                // r12 MINOR-R12-1 cousin drift the prior unification
+                // (cycle-12:47 `7c6bd2ec`) missed.
                 tracing::warn!(
                     app_id = %app_id,
                     collection = %op.collection,
@@ -185,7 +186,8 @@ pub(crate) async fn apply<'p, B: Backend>(
                         // Logging gives operators a signal to
                         // investigate stuck rows. Field shape pinned
                         // by code-critique r11 MINOR-R11-1 (unified
-                        // across all 5 F1 sites).
+                        // across all 8 F1 sites — 6 audit_id-slot +
+                        // 2 collection-slot variants).
                         tracing::warn!(
                             app_id = %app_id,
                             audit_id = id,
@@ -559,10 +561,10 @@ mod tests {
         for name in &["app_id", "audit_id", "transition", "audit_err"] {
             assert!(
                 ev.fields.contains_key(*name),
-                "F1 warn-shape contract: field `{name}` MUST be present \
-                 across all 6 F1 sites (apply.rs / backend/postgres.rs / \
-                 migrations.rs). Missing from snapshot — contract \
-                 broken. Fields: {:?}",
+                "F1 warn-shape contract (audit_id slot): field `{name}` MUST \
+                 be present across all 6 audit_id-slot sites (apply.rs / \
+                 backend/postgres.rs / migrations.rs). Missing from \
+                 snapshot — contract broken. Fields: {:?}",
                 ev.fields,
             );
         }
@@ -574,9 +576,11 @@ mod tests {
             ev.fields.get("transition").map(String::as_str),
             Some("Applied"),
             "transition discriminator must be a literal — variant strings \
-             differ across the 6 F1 sites (Applied / Failed/invalid_index / \
-             Failed/data_violation / Failed/index_build / migrations.rs \
-             uses `?terminal` Debug form)",
+             differ across the 6 audit_id-slot F1 sites (Applied / Failed / \
+             Failed/invalid_index / Failed/data_violation / \
+             Failed/index_build / migrations.rs finalise_backfill uses \
+             `?terminal` Debug form). Collection-slot sites pinned by the \
+             sibling test.",
         );
         assert_eq!(
             ev.message,
@@ -590,10 +594,11 @@ mod tests {
     /// Pin the `collection`-slot variant of the F1 warn-shape family.
     ///
     /// The 8-site F1 family splits into two identifier-slot variants:
-    /// 5 sites carry `audit_id` (the existing `update_audit_status`
-    /// failure cluster); 3 sites carry `collection` instead (the
-    /// `write_audit_row` insert-failure cluster at `validate.rs:101`
-    /// + `apply.rs:84` + the corresponding running-row insert path
+    /// 6 sites carry `audit_id` (the `update_audit_status` failure
+    /// cluster — 5 strict + 1 hybrid `finalise_backfill` carrying both
+    /// `audit_id` and `name`/`collection`); 2 sites carry `collection`
+    /// only (the `write_audit_row` insert-failure cluster:
+    /// `validate.rs:101` + `apply.rs:84` running-row insert path
     /// added by cycle-16:17 `cbd21112`).
     ///
     /// Error-ux r12 LOW (cycle 16:17 finding): the original
@@ -633,10 +638,9 @@ mod tests {
             assert!(
                 ev.fields.contains_key(*name),
                 "F1 warn-shape contract (collection slot): field `{name}` \
-                 MUST be present across all 3 insert-failure sites \
-                 (validate.rs:101, apply.rs:84, and the matching \
-                 secondary-failure paths). Missing — contract broken. \
-                 Fields: {:?}",
+                 MUST be present across both insert-failure sites \
+                 (validate.rs:101 + apply.rs:84). Missing — contract \
+                 broken. Fields: {:?}",
                 ev.fields,
             );
         }
