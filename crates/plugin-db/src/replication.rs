@@ -277,9 +277,11 @@ pub async fn ensure_publication_and_slot(
                     DbError::Configuration {
                         code: "wal_level_not_logical",
                         message: format!(
-                            "replication: server is not configured for logical \
-                             decoding — set wal_level=logical in postgresql.conf \
-                             and restart (underlying: {msg})"
+                            "replication: server is not configured for logical decoding (underlying: {msg})"
+                        ),
+                        hint: Some(
+                            "set wal_level=logical in postgresql.conf and restart"
+                                .to_string(),
                         ),
                     }
                 } else {

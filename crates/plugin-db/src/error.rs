@@ -117,10 +117,15 @@ pub enum DbError {
     },
 
     /// Plugin mis-configured at runtime (`DB_URL` missing, advisory
-    /// lock unavailable, etc.). Not a user error and not retriable.
+    /// lock unavailable, `wal_level != logical`, etc.). Not a user
+    /// error and not retriable — the SDK should surface the `.hint`
+    /// to the operator since this typically requires a config edit +
+    /// restart (error-ux r7 INFO: this is the variant most needing
+    /// remediation prose).
     Configuration {
         code: &'static str,
         message: String,
+        hint: Option<String>,
     },
 
     /// A code already chosen by another subsystem (e.g. the
@@ -237,8 +242,8 @@ impl DbError {
                 message,
                 Some("transient backend failure; retry after a short backoff".to_string()),
             ),
-            DbError::Configuration { code, message } => {
-                OpError::coded(code, message, None::<String>)
+            DbError::Configuration { code, message, hint } => {
+                OpError::coded(code, message, hint)
             }
             DbError::Coded { code, message, hint } => OpError::coded(code, message, hint),
             DbError::Internal { message } => {
@@ -270,11 +275,29 @@ impl DbError {
         }
     }
 
-    /// Convenience: configuration error with a static `code`.
+    /// Convenience: configuration error with a static `code` and no
+    /// hint. For configs that ship with operator-remediation text,
+    /// use [`DbError::config_hinted`].
     pub fn config(code: &'static str, message: impl Into<String>) -> Self {
         DbError::Configuration {
             code,
             message: message.into(),
+            hint: None,
+        }
+    }
+
+    /// Configuration error with a remediation hint the SDK can
+    /// surface verbatim (e.g. "set wal_level=logical in
+    /// postgresql.conf and restart").
+    pub fn config_hinted(
+        code: &'static str,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
+        DbError::Configuration {
+            code,
+            message: message.into(),
+            hint: Some(hint.into()),
         }
     }
 
@@ -745,6 +768,7 @@ mod tests {
         let mut cfg = DbError::Configuration {
             code: "wal_level_not_logical",
             message: "needs logical".into(),
+            hint: None,
         };
         prefix_message(&mut cfg, "replication: ctx: ");
         assert_eq!(cfg.to_string(), "needs logical");

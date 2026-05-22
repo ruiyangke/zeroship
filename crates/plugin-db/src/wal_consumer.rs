@@ -347,9 +347,13 @@ impl WalConsumer {
         if db_url.is_empty() {
             return Err(DbError::Configuration {
                 code: "not_provisioned",
-                message: "wal consumer: db_url not configured \
-                          (replication requires a connected runtime context)"
-                    .to_string(),
+                message: "wal consumer: db_url not configured".to_string(),
+                hint: Some(
+                    "replication requires a connected runtime context — set \
+                     DATABASE_URL or pass --db-url so the runtime can mint a \
+                     replication=database connection"
+                        .to_string(),
+                ),
             });
         }
         // slot_name / publication_name already return Result<String,
@@ -972,8 +976,9 @@ mod tests {
     fn wal_consumer_new_missing_db_url_returns_configuration() {
         let err = WalConsumer::new("alpha", "").unwrap_err();
         match err {
-            DbError::Configuration { code, message } => {
+            DbError::Configuration { code, message, hint } => {
                 assert_eq!(code, "not_provisioned");
+                assert!(hint.is_some(), "configuration error should carry a remediation hint");
                 assert!(
                     message.contains("db_url"),
                     "message must mention db_url: {message}"

@@ -119,12 +119,14 @@ async fn exec_register_model(
             .map_err(|e| DbError::Configuration {
                 code: "lazy_init_failed",
                 message: format!("db: lazy init failed: {e}"),
+                hint: None,
             })?;
     }
 
     let backend = context::with(|c| c.backend()).ok_or_else(|| DbError::Configuration {
         code: "backend_not_initialized",
         message: "db: backend not initialized".to_string(),
+        hint: None,
     })?;
 
     let deploy_id =

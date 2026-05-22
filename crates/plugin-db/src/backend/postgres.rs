@@ -596,6 +596,7 @@ async fn create_index_with_recovery_audited(
             "db: create index '{}' exhausted retry budget without a terminal result",
             spec.name
         ),
+        hint: None,
     })
 }
 
