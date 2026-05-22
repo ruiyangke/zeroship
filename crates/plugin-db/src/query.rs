@@ -49,11 +49,41 @@ pub struct BuiltQuery {
 }
 
 /// Validate a collection name: alphanumeric + underscores only.
+///
+/// Additional security constraints (beyond character allowlist):
+/// - Must not be empty.
+/// - Must not exceed 63 bytes (Postgres `NAMEDATALEN` limit).
+/// - Must not contain a null byte.
+/// - Must not start with `pg_` (case-insensitive) — reserved for Postgres
+///   system catalogs.
+/// - Must not start with `__zeroship` (case-insensitive) — reserved for the
+///   platform's own internal tables (e.g. `__zeroship_migrations`).
 pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
             "collection name cannot be empty".to_string(),
         ));
+    }
+    if name.contains('\0') {
+        return Err(QueryError::InvalidCollection(
+            "collection name must not contain null bytes".to_string(),
+        ));
+    }
+    if name.len() > 63 {
+        return Err(QueryError::InvalidCollection(format!(
+            "collection name exceeds 63-byte Postgres identifier limit: {name}"
+        )));
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("pg_") {
+        return Err(QueryError::InvalidCollection(format!(
+            "collection name '{name}' uses reserved prefix 'pg_' (Postgres system catalog)"
+        )));
+    }
+    if lower.starts_with("__zeroship") {
+        return Err(QueryError::InvalidCollection(format!(
+            "collection name '{name}' uses reserved prefix '__zeroship' (platform internal)"
+        )));
     }
     if !name
         .chars()
@@ -61,6 +91,30 @@ pub(crate) fn validate_collection(name: &str) -> Result<(), QueryError> {
     {
         return Err(QueryError::InvalidCollection(format!(
             "invalid collection name: {name}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a field (column) name used in DDL.
+///
+/// Postgres silently truncates identifiers longer than 63 bytes (NAMEDATALEN),
+/// which would alias two distinct fields to the same column. Injection is
+/// already blocked by `quote_ident`.
+pub(crate) fn validate_field_name(name: &str) -> Result<(), QueryError> {
+    if name.is_empty() {
+        return Err(QueryError::InvalidIdent(
+            "field name cannot be empty".to_string(),
+        ));
+    }
+    if name.contains('\0') {
+        return Err(QueryError::InvalidIdent(
+            "field name must not contain null bytes".to_string(),
+        ));
+    }
+    if name.len() > 63 {
+        return Err(QueryError::InvalidIdent(format!(
+            "field name exceeds 63-byte Postgres identifier limit: {name}"
         )));
     }
     Ok(())
@@ -147,7 +201,7 @@ pub fn build_create_table_with_fks(
 
     if let Some(obj) = schema.as_object() {
         for (field, def) in obj {
-            let col_def = field_to_column(field, def);
+            let col_def = field_to_column(field, def)?;
             columns.push(col_def);
 
             // B2 — append FOREIGN KEY clause when this is a ref. Inline
@@ -643,10 +697,13 @@ fn short_hash_base32(input: &str) -> String {
 }
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
-fn field_to_column(field: &str, def: &serde_json::Value) -> String {
+///
+/// Validates the field name via [`validate_field_name`] before emitting DDL.
+fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, QueryError> {
+    validate_field_name(field)?;
     let pg_type = def_to_pg_type(def);
     let constraints = def_to_constraints(field, def);
-    format!("{} {} {}", quote_ident(field), pg_type, constraints).trim().to_string()
+    Ok(format!("{} {} {}", quote_ident(field), pg_type, constraints).trim().to_string())
 }
 
 /// C2 — emit per-variant CHECK constraints for a flat-expanded
@@ -4095,5 +4152,127 @@ mod tests {
         // Literal still rendered correctly inside the CHECK body.
         assert!(sql.contains("'page.view'"), "{sql}");
         assert!(sql.contains("'click-out'"), "{sql}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Security IMPORTANT #1 — validate_collection reserved-name checks
+    // -----------------------------------------------------------------------
+
+    /// Valid collection names must still pass — no regression.
+    #[test]
+    fn validate_collection_accepts_valid_names() {
+        for name in &["users", "todos", "order_items", "a", "A1_b"] {
+            assert!(validate_collection(name).is_ok(), "expected '{name}' to be valid");
+        }
+    }
+
+    /// Empty string must be rejected.
+    #[test]
+    fn validate_collection_rejects_empty() {
+        let err = validate_collection("").unwrap_err();
+        match err {
+            QueryError::InvalidCollection(msg) => assert!(msg.contains("empty"), "{msg}"),
+            other => panic!("expected InvalidCollection, got {other:?}"),
+        }
+    }
+
+    /// Names starting with `pg_` (any case) must be rejected.
+    #[test]
+    fn validate_collection_rejects_pg_prefix() {
+        for name in &["pg_indexes", "PG_stat", "Pg_Class"] {
+            let err = validate_collection(name).unwrap_err();
+            match err {
+                QueryError::InvalidCollection(msg) => assert!(
+                    msg.contains("pg_") || msg.contains("reserved"),
+                    "for '{name}': {msg}"
+                ),
+                other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
+            }
+        }
+    }
+
+    /// Names starting with `__zeroship` (any case) must be rejected.
+    #[test]
+    fn validate_collection_rejects_zeroship_prefix() {
+        for name in &["__zeroship_migrations", "__ZEROSHIP_audit", "__zeroship"] {
+            let err = validate_collection(name).unwrap_err();
+            match err {
+                QueryError::InvalidCollection(msg) => assert!(
+                    msg.contains("__zeroship") || msg.contains("reserved"),
+                    "for '{name}': {msg}"
+                ),
+                other => panic!("expected InvalidCollection for '{name}', got {other:?}"),
+            }
+        }
+    }
+
+    /// Names longer than 63 bytes must be rejected.
+    #[test]
+    fn validate_collection_rejects_name_exceeding_63_bytes() {
+        let name = "a".repeat(64);
+        let err = validate_collection(&name).unwrap_err();
+        match err {
+            QueryError::InvalidCollection(msg) => {
+                assert!(msg.contains("63") || msg.contains("limit"), "{msg}");
+            }
+            other => panic!("expected InvalidCollection, got {other:?}"),
+        }
+        // 63 bytes is exactly the limit — must pass.
+        assert!(validate_collection(&"a".repeat(63)).is_ok(), "63-byte name should pass");
+    }
+
+    /// Null bytes must be rejected defensively.
+    #[test]
+    fn validate_collection_rejects_null_byte() {
+        let name = "users\0evil";
+        let err = validate_collection(name).unwrap_err();
+        match err {
+            QueryError::InvalidCollection(msg) => {
+                assert!(msg.contains("null"), "unexpected message: {msg}");
+            }
+            other => panic!("expected InvalidCollection, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Security IMPORTANT #1 — validate_field_name length check
+    // -----------------------------------------------------------------------
+
+    /// Field names within the 63-byte limit must pass.
+    #[test]
+    fn validate_field_name_accepts_valid_names() {
+        let long_ok = "f".repeat(63);
+        for name in &["id", "user_id", "createdAt", long_ok.as_str()] {
+            assert!(validate_field_name(name).is_ok(), "field name should be valid");
+        }
+    }
+
+    /// Field names longer than 63 bytes must be rejected.
+    #[test]
+    fn validate_field_name_rejects_name_exceeding_63_bytes() {
+        let name = "f".repeat(64);
+        let err = validate_field_name(&name).unwrap_err();
+        match err {
+            QueryError::InvalidIdent(msg) => {
+                assert!(msg.contains("63") || msg.contains("limit"), "{msg}");
+            }
+            other => panic!("expected InvalidIdent, got {other:?}"),
+        }
+    }
+
+    /// Field names with null bytes must be rejected.
+    #[test]
+    fn validate_field_name_rejects_null_byte() {
+        let err = validate_field_name("col\0name").unwrap_err();
+        assert!(matches!(err, QueryError::InvalidIdent(_)), "expected InvalidIdent");
+    }
+
+    /// build_create_table_with_fks must propagate field-name validation errors.
+    #[test]
+    fn build_create_table_rejects_oversized_field_name() {
+        let long_field = "f".repeat(64);
+        let schema = serde_json::json!({ long_field: { "type": "string" } });
+        let result = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline);
+        assert!(result.is_err(), "expected error for 64-byte field name");
     }
 }
