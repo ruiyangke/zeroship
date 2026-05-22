@@ -13,7 +13,8 @@
 //!   `.status / .cancel / .reset({name, collection})` operate on the
 //!   audit row by coordinates).
 //! - `db.replication` — the [`v8_classes::replication::Replication`]
-//!   operator namespace (`.setup`, `.watchdog`, `.dropAbandoned`).
+//!   namespace (`.setup`, `.watchdog`, `.dropAbandoned`), always scoped
+//!   to the calling app — no JS-supplied app-id override.
 //!
 //! Each wrapper carries a `v8::Weak` guaranteed finalizer that
 //! releases its backing resource on GC (broker handle, transaction

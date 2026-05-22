@@ -1,9 +1,14 @@
 //! `Replication` — `#[v8_class]` namespace backing `env.db.replication`.
 //!
-//! Three operator-only methods, mirroring the legacy flat callbacks
-//! `replicationSetup` / `replicationWatchdog` /
-//! `replicationDropAbandoned`. Apps don't call these directly; the
-//! deploy orchestrator / control plane does.
+//! Three methods scoped to the calling app, mirroring the legacy flat
+//! callbacks `replicationSetup` / `replicationWatchdog` /
+//! `replicationDropAbandoned`. The app scope is always the `app_id`
+//! stamped on the wrapper at mint time — it cannot be overridden from
+//! JS. The v8_class runs inside the tenant isolate; there is no
+//! reliable operator-vs-tenant distinction at this layer, so an
+//! `opts.appId` override would be a cross-app hijack vector (App A
+//! provisioning slots/publications for victim App B). Operator-shaped
+//! provisioning belongs in the control plane, not here.
 
 #![allow(unsafe_code)]
 
@@ -40,20 +45,25 @@ impl Replication {
     }
 
     /// `db.replication.setup(opts?)` → `Promise<SetupOutcome JSON>`.
-    /// Provisions the per-app publication + logical replication slot.
-    /// `opts.appId` overrides the current app context (operator path).
+    /// Provisions the per-app publication + logical replication slot
+    /// for the calling app. The app scope is always `self.app_id` (the
+    /// id stamped on the wrapper at mint time, sourced from the
+    /// isolate's `APP_ID` env var). `opts` is reserved for forward
+    /// compatibility — any `appId` field is intentionally ignored to
+    /// prevent cross-app provisioning from tenant JS.
     #[v8_method]
     fn setup<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
+        // Parse `opts` so any future fields can be plumbed through, but
+        // route through `resolve_setup_app_id` which deliberately
+        // discards any caller-supplied `appId` (see module docs for the
+        // cross-app hijack rationale, and the `setup_app_id_*` unit
+        // tests for the regression guard).
         let opts_v = read_json_arg(scope, Some(opts));
-        let app_id = opts_v
-            .get("appId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| self.app_id.clone());
+        let app_id = resolve_setup_app_id(&self.app_id, &opts_v);
         replication_setup_dispatch(scope, app_id).into()
     }
 
@@ -83,6 +93,22 @@ impl Replication {
             .unwrap_or(3600);
         replication_drop_abandoned_dispatch(scope, inactive_seconds).into()
     }
+}
+
+/// Resolve the app_id used by `Replication::setup` for dispatch.
+///
+/// Returns `stamped` verbatim, ignoring any `appId` field in the
+/// JS-supplied `opts` object. Lifted out of the `#[v8_method]` body
+/// (a) so the security-critical resolution policy is unit-testable
+/// without V8 plumbing and (b) so a future contributor restoring
+/// caller-controlled overrides has to delete this helper (and its
+/// tests) — making the regression visible in review.
+#[inline]
+fn resolve_setup_app_id(stamped: &str, _opts: &Value) -> String {
+    // INVARIANT: never read app-id-shaped fields from `_opts`. The
+    // v8_class executes inside the tenant isolate; any caller-supplied
+    // override is a cross-app hijack vector. See module docs.
+    stamped.to_string()
 }
 
 /// Mint a `Replication` v8_class instance with `app_id` stamped from
@@ -126,4 +152,62 @@ pub fn mint_replication<'s>(
     std::mem::forget(weak);
 
     Ok(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression guards for the cross-app replication hijack fix
+    //! (security review r2, 2026-05-22). Prior to the fix,
+    //! `Replication::setup` honoured an `opts.appId` override from JS,
+    //! letting App A provision a publication/slot for any victim app
+    //! on the same worker. The fix routes app-id resolution through
+    //! [`super::resolve_setup_app_id`], which always returns the
+    //! mint-time `self.app_id`.
+
+    use super::resolve_setup_app_id;
+    use serde_json::json;
+
+    #[test]
+    fn setup_app_id_ignores_string_override() {
+        // App A's wrapper is stamped with "app_a". A malicious JS
+        // caller supplies `{appId: "victim_app"}`. The dispatch MUST
+        // still target "app_a".
+        let opts = json!({"appId": "victim_app"});
+        assert_eq!(resolve_setup_app_id("app_a", &opts), "app_a");
+    }
+
+    #[test]
+    fn setup_app_id_ignores_non_string_override() {
+        // Defence in depth: numbers, booleans, nested objects, arrays,
+        // null — none of these should ever produce a different app_id
+        // from the stamped one.
+        for shape in [
+            json!({"appId": 123}),
+            json!({"appId": true}),
+            json!({"appId": null}),
+            json!({"appId": ["app_b"]}),
+            json!({"appId": {"name": "app_b"}}),
+        ] {
+            assert_eq!(
+                resolve_setup_app_id("app_a", &shape),
+                "app_a",
+                "override shape leaked through: {shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_app_id_empty_opts_uses_stamped() {
+        // Common case: no opts supplied at all.
+        assert_eq!(resolve_setup_app_id("app_a", &json!({})), "app_a");
+        assert_eq!(resolve_setup_app_id("app_a", &json!(null)), "app_a");
+    }
+
+    #[test]
+    fn setup_app_id_preserves_unicode_stamped_id() {
+        // Stamped id is taken verbatim — no normalisation, no
+        // sanitisation at this layer. Callers above already vetted it.
+        let stamped = "app_测试_🛡";
+        assert_eq!(resolve_setup_app_id(stamped, &json!({"appId": "x"})), stamped);
+    }
 }
