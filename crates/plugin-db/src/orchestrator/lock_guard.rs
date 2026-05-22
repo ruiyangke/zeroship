@@ -140,9 +140,23 @@ impl<'p> OrchestratorLockGuard<'p> {
         if let Some(client) = self.client.as_ref() {
             let unlock_sql =
                 "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
-            let _ = client
+            // [I44] (code-critique r5 MAJOR-R5-5): a bare `let _ =`
+            // silently swallows runtime errors from the unlock SQL —
+            // operator never sees that the lock might still be held.
+            // Log warnings on error so a leak is visible; the lock
+            // also auto-releases when the PG session ends.
+            if let Err(e) = client
                 .query_text_params(unlock_sql, &[self.key.as_str(), self.tag])
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    key = %self.key,
+                    tag = %self.tag,
+                    error = %e,
+                    "pg_advisory_unlock failed; session-scoped lock may stay \
+                     held until the pool recycles the connection"
+                );
+            }
         }
         self.released = true;
         Ok(self.client.take())
