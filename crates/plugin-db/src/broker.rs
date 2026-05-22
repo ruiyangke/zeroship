@@ -469,6 +469,26 @@ impl Broker {
         }
     }
 
+    /// Cheap predicate: is there at least one (possibly-still-closed)
+    /// subscriber bucket entry for `(app_id, collection)`?
+    ///
+    /// Used by hot publish callers (notably the WAL consumer, which
+    /// otherwise allocates two `HashMap<String, String>` per pgoutput
+    /// frame BEFORE the broker would discard the event for lack of
+    /// subscribers) to short-circuit tuple construction.
+    ///
+    /// Conservative-true: an entry whose subscribers have all been
+    /// closed but not yet pruned counts as "has subscribers" — the
+    /// next `publish` will GC them and the following call will return
+    /// `false`. This is the cheaper of the two failure modes: at worst
+    /// the caller builds one extra tuple after a subscriber drop, which
+    /// `publish` then discards harmlessly.
+    pub(crate) fn has_subscribers(&self, app_id: &str, collection: &str) -> bool {
+        self.by_key
+            .get(&(app_id.to_string(), collection.to_string()))
+            .is_some_and(|v| !v.is_empty())
+    }
+
     /// Number of registered (not-yet-closed) subscriptions across all
     /// keys. Used by tests + the maintenance cron for metrics.
     pub fn subscription_count(&self) -> usize {
@@ -530,6 +550,13 @@ thread_local! {
 /// Convenience accessor — publish without locating the broker manually.
 pub fn publish(event: &ChangeEvent) {
     BROKER.with(|b| b.borrow_mut().publish(event));
+}
+
+/// Convenience accessor — query the thread-local broker for whether
+/// any subscriber is registered on `(app_id, collection)`. See
+/// [`Broker::has_subscribers`] for the conservative-true semantics.
+pub(crate) fn has_subscribers(app_id: &str, collection: &str) -> bool {
+    BROKER.with(|b| b.borrow().has_subscribers(app_id, collection))
 }
 
 /// Convenience accessor — subscribe without locating the broker
@@ -1105,6 +1132,26 @@ mod tests {
         let f: serde_json::Value = serde_json::from_str(&alice_frames[0]).unwrap();
         assert_eq!(f["handle"], "alice");
         assert_eq!(f["event"]["row"]["userId"], "1");
+    }
+
+    #[test]
+    fn has_subscribers_lifecycle() {
+        // No registration → false.
+        let mut b = Broker::new();
+        assert!(!b.has_subscribers("a", "messages"));
+
+        // After subscribe → true.
+        let s = b.subscribe("a", "messages");
+        assert!(b.has_subscribers("a", "messages"));
+        // Isolation: other app / other collection still false.
+        assert!(!b.has_subscribers("b", "messages"));
+        assert!(!b.has_subscribers("a", "channels"));
+
+        // Close the only subscriber → publish prunes the bucket →
+        // has_subscribers returns false.
+        s.close();
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        assert!(!b.has_subscribers("a", "messages"));
     }
 
     #[test]
