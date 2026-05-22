@@ -1,8 +1,14 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 09:00.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 09:30.
 
-**Plateau signal (cycle 09:00)**: architecture r9 + code-critique r8 both explicitly flag that the trajectory has plateaued (architecture R3→R4 +5 to R8→R9 +1; code-critique recommends "stop at 95"). Further pilot work has diminishing per-LOC value. Remaining IMPORTANTs are mostly judgment-call (cfg-fork visibility, Backend trait shape, auto_tx/transaction parallelism) rather than correctness gaps. Future cycles should either: (1) land cross-crate I5 (auth/* `--harden` wire-up in `crates/control/`), (2) close I1+I2+I3+I4 as judgment-landed, or (3) downshift the review cadence.
+**STRONG PLATEAU SIGNAL (cycle 09:30)**: 4 of 4 reviewers this cycle returned ZERO net score movement (error-ux 91, test-coverage 84, performance 78, migration-pipeline 85). Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function". Cycle delivered only one small inline fix (R8-2 code-name unification at 7d0bc4c5). Per-cycle yield is collapsing.
+
+**Recommended next actions** (for user attention):
+1. **Cross-crate I5** — auth/* `--harden` wire-up in `crates/control/`. Requires scope grant; not in plugin-db pilot scope.
+2. **Land a `cargo bench` harness** at `crates/plugin-db/benches/` — would unblock performance review's anti-fabrication block (currently every perf finding is annotated "unknown — needs measurement"). Bench-driven r10 could re-enable forward motion on perf.
+3. **F1+F2 schema migration** (orphan Running + Pending audit rows) — needs deployment story.
+4. **Downshift cadence**: reduce cron from `:17/:47` to once per hour or longer until a forcing function lands.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -595,6 +601,10 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ### [S44] IMPORTANT [I28] (cycle 04:00) — Result<_, String> sweep in auth/* + replication.rs
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
+
+### [S72] MAJOR (code-critique r8 R8-2; cycle 09:30) — init_pool_async code-name drift unified
+- **Closed by**: `7d0bc4c5 plugin-db/exec: unify cold-init failure code to lazy_init_failed (R8-2)`
+- Same underlying `init_pool_async()` failure was surfacing as two different SDK codes: `lazy_init_failed` (orchestrator/register_model) vs `not_configured` (exec.rs). Unified the exec.rs sites to `lazy_init_failed`. The remaining `not_configured` uses in exec.rs are for the distinct "pool not initialized" invariant breach.
 
 ### [S69] IMPORTANT (docs-audit r4/r5/r6 4-round hold-out; cycle 09:00) — TX_CONN/TX_TOKEN/MIG_LOCK drift sweep
 - **Closed by**: `09e32998 plugin-db: scrub stale TX_CONN/TX_TOKEN/MIG_LOCK refs + demote OBJECT_PREFIX`
