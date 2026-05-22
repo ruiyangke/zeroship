@@ -2,11 +2,11 @@
 
 Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 11:17.
 
-**Cycle 11:17 closures (2)**: [I12] (validate_field_name ASCII tightening, commit `403b3891`) + [I25] (OBJECT_PREFIX LIKE param-bind, retro-closed via cycle 04:35's `c0590506`). 4 reviewers dispatched (code-critique r10, performance r11, test-coverage r11, api-surface r9) — results pending at the time of this update.
+**Cycle 11:17 closures (4)**: [I12] ASCII tightening (`403b3891`) + [I25] retro-closed via `c0590506` + 3 doc/vis cleanups (`4cab871a` — slot_status visibility, context.rs:404 docstring, error.rs preamble) + [I13] testable subset (`ae5570dc`). 4 reviewers returned: **code-critique r10 = 95 (+1)**, **api-surface r9 = 89 (+7)**, **test-coverage r11 = 85 (+1)**, **performance r11 = 81 (±0, no forcing function)**. Total +9 score-points across 4 lenses — significantly above cycle 10:47's +2.
 
 **Cycle 10:47 closures (2)**: MAJOR-R9-5 (auth/* hardening gate, commit `2fa9472e`) + [I23] (mig_lock state-drift tracing, commit `5d9acab8`). 4 reviewers returned: architecture r10 = 93 (+1, credited the hardening gate), security r9 = 83 (+1, same credit), error-ux r9 = 91 (±0), concurrency r10 = 88 (±0, surfaced one NEW MINOR-latent — Subscription::close at broker.rs:359-369 holds borrow_mut across w.wake).
 
-**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 18 IMPORTANT (mix actionable / judgment-call / cross-crate; was 20 pre-11:17).
+**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 17 IMPORTANT (mix actionable / judgment-call / cross-crate; was 20 pre-11:17, dropped 3 via [I12]/[I25]/[I13]).
 
 **STRONG PLATEAU SIGNAL (sustained through cycle 10:47)**: cycle 09:30's 4-of-4 ±0 movement has only marginally improved — cycle 10:47's +1/+1/0/0 came entirely from the hardening cfg-gate (a single forcing function), not from forward motion on lens-specific findings. Architecture reviewer recommends capping at r11 if the `query.rs` split lands; concurrency reviewer recommends skipping cycles until the two carried IMPORTANTs land. Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function".
 
@@ -16,14 +16,16 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 11:17.
 3. **F1+F2 schema migration** (orphan Running + Pending audit rows) — needs deployment story.
 4. **Downshift cadence**: reduce cron from `:17/:47` to once per hour or longer until a forcing function lands.
 
-Source reviews triaged (18 total):
+Source reviews triaged (22 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
+- `plugin-db-api-surface-2026-05-22-r9.md`
 - `plugin-db-architecture-review-2026-05-21.md`
 - `plugin-db-architecture-review-2026-05-21-round2.md`
 - `plugin-db-architecture-review-2026-05-22-r3.md`
 - `plugin-db-architecture-review-2026-05-22-r10.md`
 - `plugin-db-code-critique-2026-05-21.md`
 - `plugin-db-code-critique-2026-05-22-r2.md`
+- `plugin-db-code-critique-2026-05-22-r10.md`
 - `plugin-db-concurrency-2026-05-22-r2.md`
 - `plugin-db-concurrency-2026-05-22-r10.md`
 - `plugin-db-docs-audit-2026-05-22-r1.md`
@@ -32,9 +34,11 @@ Source reviews triaged (18 total):
 - `plugin-db-migration-pipeline-2026-05-22-r1.md`
 - `plugin-db-performance-2026-05-22-r1.md`
 - `plugin-db-performance-2026-05-22-r2.md`
+- `plugin-db-performance-2026-05-22-r11.md`
 - `plugin-db-security-2026-05-22-r1.md`
 - `plugin-db-security-2026-05-22-r9.md`
 - `plugin-db-test-coverage-2026-05-22-r2.md`
+- `plugin-db-test-coverage-2026-05-22-r11.md`
 
 HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `5be3c1a1`, `cac3e542`, `b4e533e2`, `37a0ef76`, `d7cfc089`, plus `2fe9e9f0`, `b2496364`, `ff220fce`, `60ca1ad6`, `967a7362`, `78a95d3b`, `c54a9f15`, `cc7fff89`, `a0fec06a`, `d2aeada6`, `e8463ef0`, `b94fbdeb`, `f1c475f5`, `de01b3a0`, `d27ea71e`, `0816feb0`, `29b8a013`, `a3561ae4`, `81345420`, `10fe0b82`, `094261e1`, `52ff1c83`.
 
@@ -167,16 +171,9 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I13] Missing unit tests for `queue_or_emit` / `drain_pending_emits_on_commit` (test-coverage GAP-2)
-- **Source**: `plugin-db-test-coverage-2026-05-22-r2.md` §3 GAP-2 (priority HIGH)
-- **File**: `crates/plugin-db/src/exec.rs:205-254` (queue_or_emit, drain_pending_emits_on_commit, clear_pending_emits)
-- **Description**: Subscription event delivery gates have no unit tests; both paths exercise only thread-local context and the `IsolateDbContext` has `cfg(test)` helpers. A misfired branch silently drops or double-delivers subscriber events. Two-test pair: one with tx active → events queue; one without tx → events emit immediately.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes — `exec.rs:205-254` confirmed; no `#[cfg(test)] mod tests` in `exec.rs`.
-  - Blocker: none. Pure test addition.
-  - Already-superseded-by: N/A
-- **Effort**: small (~30 lines of test code, no code change)
-- **Pickable this cycle**: yes — pure test.
+### ~~[I13] Missing unit tests for `queue_or_emit` / `drain_pending_emits_on_commit` (test-coverage GAP-2)~~ — CLOSED (testable subset) cycle 11:17
+- **Closed by**: `ae5570dc plugin-db/exec: unit tests for queue_or_emit / drain / clear (I13)`
+- Three new unit tests in `exec::tests` cover three of the four branches: (a) `queue_or_emit` autocommit → immediate `emit_local`; (b) `drain_pending_emits_on_commit` publishes every queued event + 2nd drain is no-op; (c) `clear_pending_emits` drops queue without firing. The fourth branch (`queue_or_emit` with a real tx parked) requires a `compio_postgres::Client` that isn't constructible outside the driver crate — that branch is covered by `gap_b_subscriber_does_not_observe_pre_commit_state` in `tests/integration.rs`. 352 lib tests pass (was 349, +3).
 
 ---
 
@@ -324,6 +321,16 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ---
 
 ## SUPERSEDED (already fixed; remove next cycle)
+
+### [S82] HIGH (test-coverage r2 GAP-2 + r11 carry; cycle 11:17) — [I13] queue_or_emit / drain / clear unit-test gap
+- **Closed by**: `ae5570dc plugin-db/exec: unit tests for queue_or_emit / drain / clear (I13)`
+- Three new unit tests cover the autocommit-emit, the COMMIT drain (with second-drain no-op assertion), and the ROLLBACK clear paths. The 4th branch (in-tx queue) needs a `compio_postgres::Client` which isn't constructible in unit tests; covered by `gap_b_subscriber_does_not_observe_pre_commit_state` in `tests/integration.rs`. 352 lib tests pass (was 349).
+
+### [S83] IMPORTANT (code-critique r10 + api-surface r9 NEW-R9-1/NEW-R9-2; cycle 11:17) — 3 doc/visibility cleanups
+- **Closed by**: `4cab871a plugin-db: 3 doc/visibility cleanups from cycle 11:17 reviewers`
+- (a) `replication::slot_status` demoted `pub` → `pub(crate)`; no production caller, prior docstring referenced a "V8 `replicationStatus` callback" that doesn't exist (api-surface r9 NEW-R9-1).
+- (b) `context.rs:404` docstring on `return_mig_client` referenced "`set_mig_lock` debug_asserts above" — but cycle 10:47's `5d9acab8` explicitly used `tracing::error!` instead (code-critique r10 + api-surface r9 NEW-R9-2). Updated to cite the actual tracing branch.
+- (c) `error.rs` §2 preamble framed `hex_decode`/`hex_nibble` as "internal to auth/session.rs" — but the whole subtree is cfg-gated behind `--features hardening` post-`2fa9472e` (code-critique r10 IMPORTANT). Added a one-clause note.
 
 ### [S80] MINOR (security r1 + test-coverage r2 GAP-1; cycle 11:17) — [I12] validate_field_name unicode aliasing
 - **Closed by**: `403b3891 plugin-db/query: validate_field_name rejects non-ASCII (I12)`
