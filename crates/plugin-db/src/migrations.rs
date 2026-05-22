@@ -90,7 +90,11 @@ fn coded_db(context: &str, e: crate::error::DbError) -> OpError {
         | crate::error::DbError::LockContention { message }
         | crate::error::DbError::Transient { message }
         | crate::error::DbError::Internal { message } => {
-            *message = format!("db: {context} failed: {message}");
+            // `message` already starts with "db: " from `walk_pg_chain`;
+            // prepend only the lifecycle context phrase to avoid the
+            // doubly-prefixed "db: {context} failed: db: ..." output.
+            // Restored from 60ca1ad6 — silently reverted by ed697c45.
+            *message = format!("{context}: {message}");
         }
         _ => {}
     }
@@ -255,7 +259,12 @@ pub async fn exec_begin(
     let client = backend
         .acquire_dedicated_client()
         .await
-        .map_err(|e| coded("tx_connect_failed", &e.into_string(), None))?;
+        // Route through `to_op_error()` so the SQLSTATE-derived code
+        // (`transient`, etc.) and its retry hint reach the SDK, rather
+        // than collapsing every connection failure to `tx_connect_failed`.
+        // Restored from 60ca1ad6 — silently reverted by ed697c45 during
+        // the audit-rail refactor; caught by error-ux r3.
+        .map_err(|e| e.to_op_error())?;
 
     let lock_key = format!("zs_mig:{app_id}");
     let got = backend
