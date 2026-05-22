@@ -182,7 +182,7 @@ fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
 
 /// Begin a migration run. Routes connection / SQL execution through
 /// the [`Backend`] facade (Stage 8e-R2).
-pub async fn exec_begin(
+pub(crate) async fn exec_begin(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -329,7 +329,7 @@ pub async fn exec_begin(
 }
 
 /// Fetch a batch of rows after `cursor`.
-pub async fn exec_fetch_batch(
+pub(crate) async fn exec_fetch_batch(
     backend: &PostgresBackend,
     app_id: &str,
     cursor: i64,
@@ -414,7 +414,7 @@ pub async fn exec_fetch_batch(
 /// SDK requested (via `terminal_status` — see the `AuditTerminal` enum). The
 /// advisory lock is released and the per-isolate `mig_lock` slot is cleared.
 #[allow(clippy::too_many_arguments)]
-pub async fn exec_commit_batch(
+pub(crate) async fn exec_commit_batch(
     backend: &PostgresBackend,
     app_id: &str,
     updates: &Value,
@@ -526,7 +526,7 @@ pub async fn exec_commit_batch(
             if col == "id" {
                 continue;
             }
-            params.push(crate::query::value_to_param_pub(val));
+            params.push(crate::query::value_to_param(val));
             assignments.push(format!(
                 "{} = ${}",
                 crate::query::quote_ident(col),
@@ -612,7 +612,7 @@ pub async fn exec_commit_batch(
 
 /// Read the current audit row state for a (collection, name) pair.
 /// Returns a JSON object the SDK can shape into the `status` API.
-pub async fn exec_status(
+pub(crate) async fn exec_status(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -653,7 +653,7 @@ pub async fn exec_status(
 /// Cancel a migration. Allowed only when status is `pending` or
 /// `running` (proposal B1, "Cancel happens-before the next batch").
 /// Returns `{ ok: true }` on transition, structured error otherwise.
-pub async fn exec_cancel(
+pub(crate) async fn exec_cancel(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -686,7 +686,7 @@ pub async fn exec_cancel(
 /// Reset a migration's state (status='pending', cursor=0, processed=0,
 /// dead_letter_pks=null). Used when an operator wants to retry from
 /// scratch after a `cancelled` or `failed` run.
-pub async fn exec_reset(
+pub(crate) async fn exec_reset(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -710,7 +710,7 @@ pub async fn exec_reset(
 /// Internal helper for the worker shutdown path — drop any active
 /// migration lock so the connection is released. Safe to call when no
 /// migration is active.
-pub fn release_active_lock() {
+pub(crate) fn release_active_lock() {
     crate::context::with_mut(|c| c.clear_mig_lock());
 }
 

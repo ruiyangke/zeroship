@@ -30,24 +30,25 @@ use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 use crate::context::with_mut as ctx_mut;
 
-pub mod audit;
-pub mod auth;
-pub mod backend;
-pub mod broker;
+pub(crate) mod audit;
+pub(crate) mod auth;
+pub(crate) mod backend;
+pub(crate) mod broker;
 pub(crate) mod context;
-pub mod crud;
-pub mod diff;
+pub(crate) mod crud;
+pub(crate) mod diff;
 pub mod error;
-pub mod exec;
-pub mod migrations;
-pub mod orchestrator;
+pub(crate) mod exec;
+pub(crate) mod migrations;
+pub(crate) mod orchestrator;
+// query stays pub: tests/integration.rs (external test crate) imports via use zeroship_plugin_db::query::*
 pub mod query;
-pub mod read_set;
-pub mod replication;
-pub mod replication_ops;
-pub mod v8_bridge;
-pub mod v8_classes;
-pub mod wal_consumer;
+pub(crate) mod read_set;
+pub(crate) mod replication;
+pub(crate) mod replication_ops;
+pub(crate) mod v8_bridge;
+pub(crate) mod v8_classes;
+pub(crate) mod wal_consumer;
 
 // ---------------------------------------------------------------------------
 // Per-isolate state
