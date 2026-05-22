@@ -178,7 +178,20 @@ fn classify_p0001_detail(
     if db_err.code() != &compio_postgres::error::SqlState::RAISE_EXCEPTION {
         return None;
     }
-    match db_err.detail()? {
+    classify_detail_token(db_err.detail()?)
+}
+
+/// Pure DETAIL-token → (code, operator-facing message) map.
+///
+/// Extracted from [`classify_p0001_detail`] so the
+/// SDK-contract surface (the 5 session refusal codes) is
+/// unit-testable without standing up a real `compio_postgres::Error`
+/// fixture. Any change to one of these tokens MUST be paired with the
+/// matching `USING DETAIL = '<token>'` literal in
+/// [`crate::auth::bootstrap`]'s CREATE FUNCTION body — the
+/// `classify_detail_*` test cluster pins the contract.
+fn classify_detail_token(detail: &str) -> Option<(&'static str, &'static str)> {
+    match detail {
         "session_signature_expired" => {
             Some(("session_signature_expired", "auth/session: signature expired"))
         }
@@ -523,5 +536,72 @@ mod tests {
         // No actual call — just instantiating the futures proves the
         // signatures are typed.
         let _ = (_mint as fn(_) -> _, _init as fn(_, _) -> _, _mi as fn(_) -> _, _mip as fn(_) -> _);
+    }
+
+    // ----- classify_detail_token contract (MAJOR-R5-1; test-coverage r8) -----
+    //
+    // The 5 DETAIL tokens are the SDK-facing contract. Any change to
+    // a token name on the PG side (auth/bootstrap.rs's CREATE
+    // FUNCTION body) MUST be matched here or the SDK silently loses
+    // its `.code` discrimination on that refusal class.
+
+    #[test]
+    fn classify_detail_signature_expired() {
+        let (code, msg) = classify_detail_token("session_signature_expired").unwrap();
+        assert_eq!(code, "session_signature_expired");
+        assert!(msg.contains("signature expired"));
+    }
+
+    #[test]
+    fn classify_detail_nonce_replay() {
+        let (code, msg) = classify_detail_token("session_nonce_replay").unwrap();
+        assert_eq!(code, "session_nonce_replay");
+        assert!(msg.contains("nonce replay"));
+    }
+
+    #[test]
+    fn classify_detail_invalid_signature() {
+        let (code, msg) = classify_detail_token("session_invalid_signature").unwrap();
+        assert_eq!(code, "session_invalid_signature");
+        assert!(msg.contains("invalid signature"));
+    }
+
+    #[test]
+    fn classify_detail_invalid_actor_kind() {
+        let (code, msg) = classify_detail_token("session_invalid_actor_kind").unwrap();
+        assert_eq!(code, "session_invalid_actor_kind");
+        assert!(msg.contains("actor_kind"));
+    }
+
+    #[test]
+    fn classify_detail_nonce_too_short() {
+        let (code, msg) = classify_detail_token("session_nonce_too_short").unwrap();
+        assert_eq!(code, "session_nonce_too_short");
+        assert!(msg.contains(">=16"));
+    }
+
+    #[test]
+    fn classify_detail_unknown_token_returns_none() {
+        // Critical SDK-contract property: unknown DETAIL must NOT
+        // bucket into one of the known codes — caller falls through
+        // to generic SQLSTATE classification.
+        assert!(classify_detail_token("session_unknown_future_token").is_none());
+        assert!(classify_detail_token("").is_none());
+        assert!(classify_detail_token("nonce_replay").is_none()); // missing prefix
+    }
+
+    #[test]
+    fn classify_detail_codes_are_distinct() {
+        let codes: std::collections::HashSet<&str> = [
+            "session_signature_expired",
+            "session_nonce_replay",
+            "session_invalid_signature",
+            "session_invalid_actor_kind",
+            "session_nonce_too_short",
+        ]
+        .iter()
+        .map(|t| classify_detail_token(t).unwrap().0)
+        .collect();
+        assert_eq!(codes.len(), 5, "all 5 detail tokens must map to distinct codes");
     }
 }

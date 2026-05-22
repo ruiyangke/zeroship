@@ -205,12 +205,21 @@ pub async fn ensure_publication_and_slot(
         })?
         .is_empty();
     if !exists {
-        // Tolerate 42710 (duplicate_object) and 42704 (undefined_object
-        // when schema is missing — surfaces a clearer error message
-        // than the bare CREATE failure).
+        // Tolerate 42710 (duplicate_object) — benign race with another
+        // worker creating the same publication. Surface anything else
+        // with the operator-facing prefix. Reads the SQLSTATE via
+        // `as_db_error()?.code()` against `SqlState::DUPLICATE_OBJECT`;
+        // substring-matching the message body was the same fragility
+        // class fixed in `auth/session.rs::classify_p0001_detail`
+        // (MAJOR-R5-1, cycle 06:55) — locale- and formatter-agnostic.
         if let Err(e) = pool.execute(&pub_sql, &[]).await {
-            let msg = format!("{e:#}");
-            if !msg.contains("42710") {
+            let is_duplicate_object = e
+                .as_db_error()
+                .map(|db| {
+                    db.code() == &compio_postgres::error::SqlState::DUPLICATE_OBJECT
+                })
+                .unwrap_or(false);
+            if !is_duplicate_object {
                 let mut err = DbError::from_pg(&e);
                 prefix_message(&mut err, "replication: CREATE PUBLICATION: ");
                 return Err(err);
@@ -252,9 +261,19 @@ pub async fn ensure_publication_and_slot(
                 // canonical SQLSTATE when wal_level != logical. Surface
                 // it as a `Configuration` error so the operator sees the
                 // fix (and the SDK does NOT retry it) instead of a
-                // generic "server error".
+                // generic "server error". Reads SQLSTATE via
+                // `as_db_error()?.code()` rather than substring-matching
+                // the message body (locale-independent; same shape as
+                // `auth/session.rs::classify_p0001_detail`).
+                let is_wal_level_misconfig = e
+                    .as_db_error()
+                    .map(|db| {
+                        db.code()
+                            == &compio_postgres::error::SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE
+                    })
+                    .unwrap_or(false);
                 let msg = format!("{e:#}");
-                if msg.contains("55000") || msg.to_lowercase().contains("wal_level") {
+                if is_wal_level_misconfig {
                     DbError::Configuration {
                         code: "wal_level_not_logical",
                         message: format!(
