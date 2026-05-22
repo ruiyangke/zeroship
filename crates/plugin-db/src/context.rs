@@ -64,18 +64,26 @@ pub(crate) struct MigrationLock {
 
 /// Per-isolate DB plug-in state. One instance per worker thread, held
 /// by the [`ISOLATE_CTX`] thread-local.
+///
+/// All fields are private. Every consumer goes through an accessor
+/// method on this `impl` — [`Self::pool`], [`Self::tx_token`],
+/// [`Self::set_mig_lock`], etc. Direct field access from inside the
+/// crate is rejected at compile time. This closes deferred [I16]
+/// (api-surface r3 M1+M2; r9 ceiling step "privatise context fields")
+/// and the `tx_token_counter`-specific advert that "only
+/// `next_tx_token` should touch it".
 #[allow(missing_debug_implementations)]
 pub struct IsolateDbContext {
     /// Connection pool — created lazily on first DB operation.
-    pub(crate) pool: Option<Rc<Pool>>,
+    pool: Option<Rc<Pool>>,
 
     /// Database URL — poisoned during `register()`, consumed on first
     /// pool creation.
-    pub(crate) db_url: Option<String>,
+    db_url: Option<String>,
 
     /// Registered models — keyed by "app_id:collection". Prevents
     /// redundant DDL on subsequent cold starts within the same deploy.
-    pub(crate) registered_models: HashSet<String>,
+    registered_models: HashSet<String>,
 
     /// Active transaction connection. Only one transaction at a time
     /// per isolate (V8 is single-threaded). If `Some`, all CRUD ops
@@ -86,7 +94,7 @@ pub struct IsolateDbContext {
     /// `Client` — which cannot live inside a thread-local. Instead we
     /// issue `BEGIN`/`COMMIT`/`ROLLBACK` via `client.execute(...)`
     /// directly.
-    pub(crate) tx_conn: Option<Client>,
+    tx_conn: Option<Client>,
 
     /// True when the active [`Self::tx_conn`] was opened by the
     /// auto-tx wrapper (`__zsBeginAutoTx`) — defense-in-depth
@@ -96,7 +104,7 @@ pub struct IsolateDbContext {
     /// User-driven `db.transaction(async tx => {...})` calls leave
     /// this `false`, so the auto-tx end callback never touches a
     /// user-owned tx.
-    pub(crate) auto_tx_owned: bool,
+    auto_tx_owned: bool,
 
     /// Ownership token for the active transaction connection.
     ///
@@ -110,13 +118,13 @@ pub struct IsolateDbContext {
     /// `tx_token` before acting, so the wrapper never double-acts on
     /// a transaction another path already settled (e.g. an explicit
     /// `.commit()` followed by the finalizer running on GC).
-    pub(crate) tx_token: u64,
+    tx_token: u64,
 
     /// Monotonic counter feeding [`Self::tx_token`]. Incremented
     /// inside [`Self::next_tx_token`]; never reset (a u64 at 1 GHz
     /// tx/s would take ~584 years to wrap, so non-uniqueness within a
     /// worker lifetime is a non-issue).
-    pub(crate) tx_token_counter: u64,
+    tx_token_counter: u64,
 
     /// Broker events queued during an active transaction.
     ///
@@ -133,20 +141,20 @@ pub struct IsolateDbContext {
     ///
     /// `None` outside a transaction; non-empty `Some(Vec<_>)` only
     /// while a tx is active. Drained atomically by `Vec::take`.
-    pub(crate) pending_emits: Option<Vec<ChangeEvent>>,
+    pending_emits: Option<Vec<ChangeEvent>>,
 
     /// Active migration owner state. `Some` after a successful
     /// `migrationBegin`; `None` once `migrationCommitBatch` with
     /// `isDone=true` (or `migrationCancel` on the owner thread)
     /// clears it. Single-isolate invariant — only one migration may
     /// be active per V8 thread at a time (mirrors [`Self::tx_conn`]).
-    pub(crate) mig_lock: Option<MigrationLock>,
+    mig_lock: Option<MigrationLock>,
 
     /// Per-thread "is the consumer already running for this app?"
     /// guard. Keyed by app_id (a single worker may host multiple
     /// apps over its lifetime via the LRU cache, but only one
     /// consumer per app at a time).
-    pub(crate) running_consumers: HashSet<String>,
+    running_consumers: HashSet<String>,
 
     /// Backend handle wrapping the pool — Stage 8e-R2. Created
     /// alongside the pool by [`Self::set_pool`] so consumers can call
@@ -155,7 +163,7 @@ pub struct IsolateDbContext {
     ///
     /// `None` until the pool is initialised; same lifecycle as
     /// [`Self::pool`] (cleared whenever the pool is cleared).
-    pub(crate) backend: Option<Rc<PostgresBackend>>,
+    backend: Option<Rc<PostgresBackend>>,
 }
 
 impl IsolateDbContext {
