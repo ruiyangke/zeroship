@@ -1,8 +1,8 @@
 //! `Collection` — native V8 wrapper for a single named collection.
 //!
-//! A `Collection` instance is returned by [`super::db::Db::collection`].
+//! A `Collection` instance is returned by `Db::collection`.
 //! Each CRUD method on it decodes its V8 arguments directly into a
-//! `serde_json::Value` (via [`crate::v8_bridge::v8_value_to_serde_json`])
+//! `serde_json::Value` (via `v8_value_to_serde_json`)
 //! and calls the shared `dispatch_*` helper in [`crate::crud`] — no
 //! JSON.stringify / parse round-trip on the CRUD hot path.
 

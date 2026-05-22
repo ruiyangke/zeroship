@@ -3,19 +3,19 @@
 //!
 //! Proposal A2 (docs/proposals/zeroship-db.md) defines the contract:
 //!
-//! 1. **Bootstrap** ([`bootstrap`]) — create the per-app schema, the
+//! 1. **Bootstrap** (`bootstrap`) — create the per-app schema, the
 //!    `__zeroship_migrations` audit table (idempotent), acquire the
 //!    session-scoped advisory lock, compute the deploy's `schema_version`,
-//!    expand declared + named indexes. Returns a [`RegisterContext`] the
+//!    expand declared + named indexes. Returns a `RegisterContext` the
 //!    later stages thread through.
-//! 2. **Plan** ([`plan`]) — introspect the live schema, diff against the
+//! 2. **Plan** (`plan`) — introspect the live schema, diff against the
 //!    declared schema, classify each change as additive / compatible /
-//!    destructive. Returns a [`Plan`].
-//! 3. **Validate** ([`validate`]) — apply safety rules. Destructive ops
+//!    destructive. Returns a `Plan`.
+//! 3. **Validate** (`validate`) — apply safety rules. Destructive ops
 //!    under `strictness=strict` produce a `validation_refused` envelope
 //!    the SDK consumes verbatim. Lenient deploys log + skip; off
 //!    proceeds.
-//! 4. **Apply** ([`apply`]) — two-pass DDL execution under the advisory
+//! 4. **Apply** (`apply`) — two-pass DDL execution under the advisory
 //!    lock (transactional ops first; `CREATE INDEX CONCURRENTLY` after
 //!    releasing the lock). Every op writes an audit row through the
 //!    [`crate::backend::Backend`] facade.
@@ -36,7 +36,7 @@ pub(crate) mod bootstrap;
 pub(crate) mod plan;
 pub(crate) mod validate;
 
-/// `zeroship.db.registerModel(collection, schemaJson)` → Promise<void>
+/// `zeroship.db.registerModel(collection, schemaJson)` → `Promise<void>`
 ///
 /// Creates the table and any missing columns. Idempotent — safe to call
 /// on every cold start. Skips DDL if the model was already registered

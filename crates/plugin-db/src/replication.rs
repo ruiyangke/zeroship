@@ -12,7 +12,7 @@
 //!
 //! The streaming-protocol WAL consumer (CopyBoth, XLogData, pgoutput
 //! frame parser) is **deferred** to P8a.2 — it requires
-//! [`compio-postgres`] to learn the streaming-replication protocol
+//! `compio-postgres` to learn the streaming-replication protocol
 //! handshake (`replication=database` startup parameter,
 //! `START_REPLICATION` command, CopyBoth message framing). See the
 //! module-level docs in [`crate::wal_consumer`] for the blocker

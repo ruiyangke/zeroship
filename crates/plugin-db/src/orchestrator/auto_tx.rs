@@ -1,28 +1,24 @@
 //! Auto-tx wrappers — defense-in-depth around `query()` / `mutation()`
 //! handlers.
 //!
-//! `__zsBeginAutoTx(kindStr): Promise<number>`
-//!   Resolves with a numeric token the JS shim hands back to
-//!   `__zsEndAutoTx(token, success)`.
+//! `__zsBeginAutoTx(kindStr)` resolves with a numeric token the JS shim
+//! hands back to `__zsEndAutoTx(token, success)`.
 //!
-//!     token = 0  → no auto-tx opened (kind is not "query"/"mutation",
-//!                  or a user-driven `db.transaction(...)` is already
-//!                  active, or the DB plugin is configured with a
-//!                  never-dialed dummy URL — capability gate fired
-//!                  before we got here).
-//!     token = 1  → auto-tx opened successfully; commit/rollback owed.
+//! Token semantics: `0` means no auto-tx opened (kind is not
+//! `"query"`/`"mutation"`, or a user-driven `db.transaction(...)` is
+//! already active, or the DB plugin is configured with a never-dialed
+//! dummy URL — capability gate fired before we got here). `1` means
+//! auto-tx opened successfully; commit/rollback owed.
 //!
-//! `__zsEndAutoTx(token, success): Promise<void>`
-//!   Token 0 → resolved promise, no-op. Token 1 → COMMIT on success,
-//!   ROLLBACK on failure. Errors during commit/rollback are surfaced
-//!   verbatim to JS; the SSR shim still re-throws the underlying
-//!   handler error so callers don't see commit failures mask handler
-//!   errors.
+//! `__zsEndAutoTx(token, success)`: token `0` → resolved promise, no-op.
+//! Token `1` → COMMIT on success, ROLLBACK on failure. Errors during
+//! commit/rollback are surfaced verbatim to JS; the SSR shim still
+//! re-throws the underlying handler error so callers don't see commit
+//! failures mask handler errors.
 //!
-//! Picks isolation level by kind:
-//!   query    → BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY
-//!   mutation → BEGIN ISOLATION LEVEL <override or READ COMMITTED>
-//!              READ WRITE
+//! Isolation level by kind:
+//! - `query`    → `BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY`
+//! - `mutation` → `BEGIN ISOLATION LEVEL {override or READ COMMITTED} READ WRITE`
 //!
 //! The mutation default is READ COMMITTED — same as Postgres's default
 //! for explicit BEGIN. Apps that need write-skew protection bump to
@@ -32,10 +28,10 @@
 //! retries) and is opt-in by design.
 //!
 //! `action`, `stream`, `subscription` and unknown kinds are not wrapped:
-//!   actions can hold open external IO, streams/subscriptions are
-//!   long-lived; both would starve the connection pool. The capability
-//!   gate (B3 runtime layer) is the primary enforcement; auto-tx is a
-//!   second line of defense at the Postgres level.
+//! actions can hold open external IO, streams/subscriptions are
+//! long-lived; both would starve the connection pool. The capability
+//! gate (B3 runtime layer) is the primary enforcement; auto-tx is a
+//! second line of defense at the Postgres level.
 
 use zeroship_runtime::state::{OpResult, SharedState};
 
@@ -43,8 +39,7 @@ use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::v8_bridge::{get_i64_arg, get_string_arg, setup_promise};
 
-/// `globalThis.__zsBeginAutoTx(kindStr): Promise<number>` — see module
-/// comment above.
+/// `globalThis.__zsBeginAutoTx(kindStr)` — see module comment above.
 pub fn auto_begin_transaction(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -80,8 +75,7 @@ pub fn auto_begin_transaction(
     rv.set(promise.into());
 }
 
-/// `globalThis.__zsEndAutoTx(token, success): Promise<void>` — see
-/// module comment above.
+/// `globalThis.__zsEndAutoTx(token, success)` — see module comment above.
 pub fn auto_end_transaction(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,

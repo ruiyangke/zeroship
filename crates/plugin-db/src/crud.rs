@@ -7,9 +7,9 @@
 //! 1. Grab the runtime state slot.
 //! 2. Optionally record into the active read-set ([`crate::read_set`])
 //!    for P8b subscription narrowing.
-//! 3. [`setup_js_promise`] — allocate the promise + resolver.
-//! 4. Build the SQL via [`crate::query::build_*`].
-//! 5. Hand off to [`run_op`] — the async tail that drives the exec
+//! 3. `setup_js_promise` — allocate the promise + resolver.
+//! 4. Build the SQL via `crate::query::build_*`.
+//! 5. Hand off to `run_op` — the async tail that drives the exec
 //!    helper, resolves the promise with the appropriate `ResolveValue`,
 //!    or rejects via `DbError::to_op_error` (carries `.code` for the
 //!    SDK).

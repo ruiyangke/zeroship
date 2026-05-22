@@ -43,7 +43,7 @@
 //! - It doesn't open a subscription. The capture buffer is a passive
 //!   thread-local; the layer that opens subscriptions
 //!   (`@zeroship/db`'s reactive-query helper) snapshots it into a
-//!   [`Subscription`] when the handler returns.
+//!   `Subscription` when the handler returns.
 //! - It doesn't talk to V8. All the V8-facing surface lives in
 //!   `crud.rs` (capture sites: dispatch_find / dispatch_find_one /
 //!   dispatch_count) and the broker's v8_class wrapper.
@@ -80,7 +80,7 @@ pub struct Conjunct {
     pub op: PredicateOp,
     /// Serialised value. The WAL consumer emits column values as text
     /// (pgoutput proto v1 default), so we compare against the JSON
-    /// scalar's canonical text form. See [`Conjunct::matches_text`].
+    /// scalar's canonical text form. See `Conjunct::matches_text`.
     pub value: Value,
 }
 

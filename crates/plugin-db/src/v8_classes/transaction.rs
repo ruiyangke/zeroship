@@ -1,13 +1,13 @@
 //! `Transaction` — native V8 wrapper for an open DB transaction.
 //!
 //! Returned by `env.db.beginTransaction(isolationLevel?)`. The wrapper
-//! owns the per-isolate [`crate::TX_CONN`] for the lifetime of the
-//! transaction; `.commit()` / `.rollback()` drain TX_CONN and run the
-//! matching SQL, and a `v8::Weak` guaranteed finalizer reclaims the
-//! wrapper's `Box<Transaction>` on GC. If user code drops the wrapper
-//! without explicit `.commit()` / `.rollback()`, the `Drop` impl
-//! takes the still-active `Client` out of TX_CONN, and Postgres
-//! observes the connection close and auto-rollbacks server-side.
+//! owns the per-isolate `tx_conn` slot (`IsolateDbContext::tx_conn`)
+//! for the lifetime of the transaction; `.commit()` / `.rollback()`
+//! drain it and run the matching SQL, and a `v8::Weak` guaranteed
+//! finalizer reclaims the wrapper's `Box<Transaction>` on GC. If user
+//! code drops the wrapper without explicit `.commit()` / `.rollback()`,
+//! the `Drop` impl takes the still-active `Client` out of the slot, and
+//! Postgres observes the connection close and auto-rollbacks server-side.
 //!
 //! ## JS surface
 //!
@@ -20,20 +20,20 @@
 //! ```
 //!
 //! `.collection(name)` returns a [`super::collection::Collection`]
-//! v8_class instance bound to this Transaction. Because TX_CONN is
+//! v8_class instance bound to this Transaction. Because `tx_conn` is
 //! set while the transaction is active, every CRUD method on that
 //! Collection (which calls `crate::crud::dispatch_*` → `run_sql`)
 //! automatically routes through the transaction connection.
 //!
 //! ## Ownership token
 //!
-//! TX_CONN is a single per-isolate slot; an explicit `.commit()` and
+//! `tx_conn` is a single per-isolate slot; an explicit `.commit()` and
 //! the wrapper's `Drop` finalizer can race (commit succeeds, GC
 //! finalizer wakes up afterwards). To make the race safe, every
-//! successful BEGIN bumps [`TX_TOKEN`] and stamps the same value
-//! onto the wrapper. Commit / rollback / Drop all check
-//! `self.token == TX_TOKEN` before touching the connection — once
-//! one path settles the tx and clears TX_TOKEN, the others no-op.
+//! successful BEGIN bumps `tx_token` (`IsolateDbContext::tx_token`) and
+//! stamps the same value onto the wrapper. Commit / rollback / Drop all
+//! check `self.token == tx_token` before touching the connection — once
+//! one path settles the tx and clears the slot, the others no-op.
 
 #![allow(unsafe_code)]
 

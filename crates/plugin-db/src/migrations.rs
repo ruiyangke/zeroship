@@ -405,7 +405,7 @@ pub async fn exec_fetch_batch(
 /// in this batch (so the next fetch picks up after it).
 ///
 /// If `is_done=true`, the audit row is driven to the terminal status the
-/// SDK requested (via `terminal_status` — see [`AuditTerminal`]). The
+/// SDK requested (via `terminal_status` — see the `AuditTerminal` enum). The
 /// advisory lock is released and the per-isolate `mig_lock` slot is cleared.
 #[allow(clippy::too_many_arguments)]
 pub async fn exec_commit_batch(

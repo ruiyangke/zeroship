@@ -419,7 +419,7 @@ impl Broker {
     /// receive it; closed subscribers are pruned in the same pass.
     ///
     /// P8b: filtering happens per-subscriber via
-    /// [`Subscription::accepts`]. The bucket index by `(app_id,
+    /// `Subscription::accepts`. The bucket index by `(app_id,
     /// collection)` is still the primary fan-in — subscribers on
     /// unrelated collections never enter the predicate-eval path. The
     /// hot inner check is `O(entries_in_read_set)` per event per

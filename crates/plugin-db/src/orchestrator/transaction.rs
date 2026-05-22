@@ -1,16 +1,17 @@
 //! Explicit transaction lifecycle — `db.beginTransaction(opts?)`.
 //!
 //! V8 is single-threaded per isolate, so only one transaction can be
-//! active at a time. We store the transaction connection in `TX_CONN`
-//! thread-local. All CRUD callbacks ([`crate::exec::run_sql`]) use
-//! `TX_CONN` when it's set, falling through to the pool otherwise.
+//! active at a time. The transaction connection lives in the per-isolate
+//! context (`IsolateDbContext::tx_conn`). All CRUD callbacks
+//! (`crate::exec::run_sql`) use that slot when it's set, falling
+//! through to the pool otherwise.
 //!
 //! The dedicated `Transaction` v8_class
 //! ([`crate::v8_classes::transaction`]) is minted *synchronously* by
 //! [`begin_transaction_dispatch`] (we need a V8 scope for the
-//! allocation). The wrapper carries a `TX_TOKEN` minted by
-//! [`crate::next_tx_token`]; commit/rollback/Drop all fence on the
-//! token so no two paths settle the same transaction.
+//! allocation). The wrapper carries a token minted by
+//! `IsolateDbContext::next_tx_token`; commit/rollback/Drop all fence on
+//! the token so no two paths settle the same transaction.
 
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
@@ -18,13 +19,14 @@ use crate::error::DbError;
 use crate::exec::clear_pending_emits;
 use crate::v8_bridge::runtime_state;
 
-/// `zeroship.db.beginTransaction(isolationLevel?)` → Promise<Transaction>
+/// `zeroship.db.beginTransaction(isolationLevel?)` → `Promise<Transaction>`
 ///
-/// Opens a dedicated connection, runs BEGIN, stores it in TX_CONN, and
-/// resolves with a fresh [`crate::v8_classes::transaction::Transaction`]
-/// v8_class instance. The wrapper's Weak finalizer auto-rollbacks if
-/// the handle is dropped without `.commit()` / `.rollback()` — closes
-/// the connection-leak footgun the pre-wrapper API had.
+/// Opens a dedicated connection, runs BEGIN, stores it in the
+/// per-isolate context's `tx_conn` slot, and resolves with a fresh
+/// [`crate::v8_classes::transaction::Transaction`] v8_class instance.
+/// The wrapper's Weak finalizer auto-rollbacks if the handle is dropped
+/// without `.commit()` / `.rollback()` — closes the connection-leak
+/// footgun the pre-wrapper API had.
 ///
 /// All subsequent CRUD ops use the transaction connection until
 /// the wrapper's `.commit()` or `.rollback()` runs (or the wrapper's
@@ -32,10 +34,11 @@ use crate::v8_bridge::runtime_state;
 ///
 /// The Transaction wrapper is minted *synchronously* before the BEGIN
 /// future runs (we need a V8 scope to allocate it). On BEGIN success
-/// the future stamps the wrapper's pre-allocated `token` onto
-/// [`crate::TX_TOKEN`] and resolves the promise with the wrapper; on
-/// failure the wrapper is left with a token that never matches
-/// TX_TOKEN, so its `Drop` is a no-op when V8 eventually collects it.
+/// the future stamps the wrapper's pre-allocated `token` onto the
+/// per-isolate context's `tx_token` slot and resolves the promise with
+/// the wrapper; on failure the wrapper is left with a token that never
+/// matches the live slot, so its `Drop` is a no-op when V8 eventually
+/// collects it.
 pub fn begin_transaction_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     isolation_level: Option<String>,

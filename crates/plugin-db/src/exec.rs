@@ -4,15 +4,15 @@
 //! Every CRUD dispatch helper (in `crate::crud`) lowers its
 //! `BuiltQuery` through one of:
 //!
-//! - [`exec_query`] — read path, returns rows as a JSON array string.
-//! - [`exec_count`] — read path that extracts a single `count` column.
-//! - [`exec_mutation`] — write path, returns RETURNING rows as JSON.
-//! - [`exec_mutation_with_emit`] — write path + broker emit (or queue
+//! - `exec_query` — read path, returns rows as a JSON array string.
+//! - `exec_count` — read path that extracts a single `count` column.
+//! - `exec_mutation` — write path, returns RETURNING rows as JSON.
+//! - `exec_mutation_with_emit` — write path + broker emit (or queue
 //!   when inside a transaction).
 //!
-//! All four route through [`run_sql`], which transparently uses
-//! [`crate::TX_CONN`] when an explicit `Transaction` / auto-tx is
-//! active and the pool otherwise.
+//! All four route through `run_sql`, which transparently uses the
+//! per-isolate TX client (`IsolateDbContext::tx_conn`) when an explicit
+//! `Transaction` / auto-tx is active and the pool otherwise.
 //!
 //! ## Error rail
 //!
@@ -23,9 +23,9 @@
 //! pre-stage-8b `Result<_, String>` rail).
 //!
 //! The transaction-emit deferral (Gap B closure) lives here:
-//! [`queue_or_emit`] decides between immediate emit and TX-pending
-//! queueing; [`drain_pending_emits_on_commit`] fires the queue on
-//! COMMIT; [`clear_pending_emits`] discards it on ROLLBACK.
+//! `queue_or_emit` decides between immediate emit and TX-pending
+//! queueing; `drain_pending_emits_on_commit` fires the queue on
+//! COMMIT; `clear_pending_emits` discards it on ROLLBACK.
 
 use std::rc::Rc;
 

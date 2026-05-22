@@ -7,20 +7,20 @@
 //!
 //! Contents:
 //!
-//! - **Promise plumbing**: [`setup_promise`] for the `OpResult::Completed`
-//!   path (string-typed value), [`setup_js_promise`] for the
+//! - **Promise plumbing**: `setup_promise` for the `OpResult::Completed`
+//!   path (string-typed value), `setup_js_promise` for the
 //!   `OpResult::JsValue` path (real JS values via `ResolveValue::Json` /
 //!   `ResolveValue::F64` / `ResolveValue::JsGlobal`).
-//! - **Argument decoders**: [`get_string_arg`], [`get_i64_arg`],
-//!   [`read_json_arg`], [`v8_value_to_serde_json`] (the hot-path walker
+//! - **Argument decoders**: `get_string_arg`, `get_i64_arg`,
+//!   `read_json_arg`, `v8_value_to_serde_json` (the hot-path walker
 //!   that avoids a `JSON.stringify` round-trip).
-//! - **State accessors**: [`runtime_state`] (read the `SharedState` off
-//!   the isolate slot), [`get_app_id_pub`] (read APP_ID out of env_vars).
-//! - **Capability gate**: [`refuse_if_query_capability`] — the B3 gate
+//! - **State accessors**: `runtime_state` (read the `SharedState` off
+//!   the isolate slot), `get_app_id_pub` (read APP_ID out of env_vars).
+//! - **Capability gate**: `refuse_if_query_capability` — the B3 gate
 //!   that rejects writes from inside a `query()` handler.
-//! - **Row decoding**: [`row_to_json`], [`column_to_json`],
-//!   [`rows_to_json`] — Postgres OID → JSON conversion, used by every
-//!   exec path. [`fmt_db_err`] walks the source chain so DbError
+//! - **Row decoding**: `row_to_json`, `column_to_json`,
+//!   `rows_to_json` — Postgres OID → JSON conversion, used by every
+//!   exec path. `fmt_db_err` walks the source chain so DbError
 //!   messages reach JS instead of bare wrapper kinds; this is a thin
 //!   shim over [`crate::error::DbError::from_pg`] that returns the
 //!   flattened message string for callers still on the `Result<_,

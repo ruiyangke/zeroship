@@ -22,9 +22,9 @@
 //!    [`compio_postgres::replication::connect_replication`]), issues
 //!    `START_REPLICATION SLOT ... LOGICAL ...`, decodes pgoutput
 //!    frames, and publishes [`ChangeEvent`]s into the broker.
-//! 2. [`emit_local`] gains an [`EmitMode`] selector. When the
+//! 2. [`emit_local`] gains an `EmitMode` selector. When the
 //!    consumer is active on this thread the mode is
-//!    [`EmitMode::Suppressed`] and local-emit becomes a no-op; the
+//!    `EmitMode::Suppressed` and local-emit becomes a no-op; the
 //!    WAL path is the sole source of truth. Otherwise (no consumer
 //!    yet started, or the consumer crashed and the watchdog hasn't
 //!    re-spawned) local-emit fires as before.
@@ -45,7 +45,7 @@
 //!   The proposal accepts the cleaner-but-slower (WAL-only) semantics
 //!   for P8a.2; the dual-path optimisation is P8a.3.
 //! - **Boot-time auto-spawn** — the consumer struct is exposed and
-//!   tested, but the V8 callback that spawns it ([`spawn`]) is opt-in:
+//!   tested, but the V8 callback that spawns it is opt-in:
 //!   apps call `db.replicationConsumerStart()` to enable cross-worker
 //!   propagation. Spawning automatically on isolate boot is one
 //!   `r.add("replicationConsumerStart", …)` + a callback away in
@@ -322,7 +322,7 @@ pub struct WalConsumer {
 
 impl WalConsumer {
     /// Build a consumer descriptor. Spinning up the connection
-    /// happens in [`run`].
+    /// happens in [`Self::run`].
     pub fn new(app_id: &str, db_url: &str) -> Result<Self, ConsumerError> {
         let slot_name = crate::replication::slot_name(app_id)
             .map_err(ConsumerError::NotProvisioned)?;
@@ -337,7 +337,7 @@ impl WalConsumer {
         })
     }
 
-    /// Resume from a specific LSN on next [`run`]. Pass the value
+    /// Resume from a specific LSN on next [`Self::run`]. Pass the value
     /// returned by [`crate::replication::ensure_publication_and_slot`].
     pub fn with_start_lsn(mut self, lsn: impl Into<String>) -> Self {
         self.start_lsn = lsn.into();
@@ -680,8 +680,8 @@ pub fn is_fatal(err: &ConsumerError) -> bool {
 ///
 /// Schedule: 1s → 2s → 4s → 8s → 16s → 30s (cap). The cap holds for
 /// every subsequent attempt until the consumer stays connected for
-/// [`STABILITY_THRESHOLD`] — then the next failure resets the backoff
-/// to [`INITIAL_BACKOFF`].
+/// `STABILITY_THRESHOLD` — then the next failure resets the backoff
+/// to `INITIAL_BACKOFF`.
 ///
 /// Exits when:
 ///   - The consumer returns `Ok(())` (graceful CopyDone — server

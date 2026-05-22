@@ -8,7 +8,7 @@
 //!
 //! ## What this class adds
 //!
-//! - `collection(name)` — `#[v8_method]` returning a [`Collection`]
+//! - `collection(name)` — `#[v8_method]` returning a `Collection`
 //!   v8_class instance for the given collection name. Cached by
 //!   `name`: subsequent calls for the same `name` return the same
 //!   `Collection` JS object (`env.db.collection("users") ===

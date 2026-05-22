@@ -4,8 +4,8 @@
 //! The operator dispatchers ([`replication_setup_dispatch`],
 //! [`replication_watchdog_dispatch`],
 //! [`replication_drop_abandoned_dispatch`]) are thin wrappers that
-//! grab the pool via [`crate::exec::ensure_pool`] and forward to the
-//! pool-driven helpers in [`crate::replication`].
+//! grab the pool via `ensure_pool` and forward to the pool-driven
+//! helpers in [`crate::replication`].
 //!
 //! [`start_replication_consumer_dispatch`] is the opt-in entry point
 //! apps call from module init to wire up reactive queries. It:
@@ -21,10 +21,9 @@
 //! Idempotent — second call returns a JSON envelope with
 //! `{"alreadyRunning": true}` and short-circuits without spawning a
 //! second task. Tracked per-thread via the per-isolate context's
-//! `running_consumers` slot (see [`crate::context::IsolateDbContext`])
-//! because
-//! the consumer task is thread-bound (the compio runtime is one per
-//! worker, the broker is thread-local).
+//! `running_consumers` slot (`IsolateDbContext::running_consumers`)
+//! because the consumer task is thread-bound (the compio runtime is
+//! one per worker, the broker is thread-local).
 //!
 //! We chose explicit opt-in (a) over implicit spawn-on-first-subscribe
 //! (b): the failure surfaces at the call site, not deep inside a
@@ -139,7 +138,7 @@ pub fn replication_drop_abandoned_dispatch<'s>(
     promise
 }
 
-/// `zeroship.db.startReplicationConsumer()` → Promise<SetupOutcome JSON>
+/// `zeroship.db.startReplicationConsumer()` → `Promise<SetupOutcome JSON>`
 ///
 /// Idempotent. The first call provisions the slot+publication, spawns
 /// a supervised WAL consumer for the current app, and resolves once
