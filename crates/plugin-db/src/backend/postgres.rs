@@ -354,7 +354,7 @@ impl Backend for PostgresBackend {
         spec: &crate::query::IndexSpec,
         deploy_id: &str,
         schema_version: i32,
-    ) -> Result<(), String> {
+    ) -> Result<(), DbError> {
         create_index_with_recovery_audited(
             &self.pool,
             app_id,
@@ -391,7 +391,7 @@ async fn create_index_with_recovery_audited(
     spec: &crate::query::IndexSpec,
     deploy_id: &str,
     schema_version: i32,
-) -> Result<(), String> {
+) -> Result<(), DbError> {
     use crate::v8_bridge::fmt_db_err;
     use compio_postgres::error::SqlState;
 
@@ -402,6 +402,26 @@ async fn create_index_with_recovery_audited(
         "DROP INDEX CONCURRENTLY IF EXISTS \"{}\".\"{}\"",
         app_id, spec.name
     );
+
+    // Helper: wrap a JSON envelope `Value` into a `DbError::SchemaRefused`
+    // tagged `cic_failed`. `serde_json::to_string` is the single source of
+    // truth for escaping — newlines, tabs, or unicode control chars in a
+    // Postgres error message stay inside the envelope's `message` field as
+    // properly-escaped JSON, and the SDK's `JSON.parse` never sees
+    // malformed input (hand-rolled `.replace('"', "\\\"")` did not cover
+    // those cases).
+    let refuse = |value: serde_json::Value| -> DbError {
+        // `to_string` of a `Value` is infallible in practice (the input is
+        // already a tree of JSON-representable nodes); the fallback below
+        // keeps the function total without resorting to `unwrap`.
+        let envelope_json = serde_json::to_string(&value).unwrap_or_else(|_| {
+            String::from("{\"code\":\"cic_failed\",\"reason\":\"envelope serialisation failed\"}")
+        });
+        DbError::SchemaRefused {
+            code: "cic_failed",
+            envelope_json,
+        }
+    };
 
     let log_retry = |reason: &'static str,
                      attempt: u32,
@@ -442,16 +462,10 @@ async fn create_index_with_recovery_audited(
                     "SELECT indisvalid FROM pg_index WHERE indexrelid = '{}'::regclass",
                     qualified_idx.replace('\'', "''")
                 );
-                let rows = pool
-                    .query_text_params(&check_sql, &empty)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "db: failed to verify index '{}' validity: {}",
-                            spec.name,
-                            fmt_db_err(&e)
-                        )
-                    })?;
+                // Postgres errors flow through the typed `From<pg::Error>`
+                // impl so SQLSTATE classification (UniqueViolation,
+                // Transient, …) lives in one place — `DbError::from_pg`.
+                let rows = pool.query_text_params(&check_sql, &empty).await?;
                 let valid = rows
                     .first()
                     .map(|r| r.try_get::<_, bool>("indisvalid").unwrap_or(false))
@@ -474,12 +488,16 @@ async fn create_index_with_recovery_audited(
                 }
                 let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
                 if attempt == MAX_RETRIES {
-                    return Err(format!(
-                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
-                        \"collection\":\"{}\",\"index\":\"{}\",\
-                        \"reason\":\"index repeatedly landed INVALID after {} retries\"}}",
-                        collection, spec.name, MAX_RETRIES
-                    ));
+                    return Err(refuse(serde_json::json!({
+                        "code": "validation_refused",
+                        "change_kind": "index_retry",
+                        "collection": collection,
+                        "index": spec.name,
+                        "reason": format!(
+                            "index repeatedly landed INVALID after {} retries",
+                            MAX_RETRIES
+                        ),
+                    })));
                 }
             }
             Err(e) => {
@@ -511,18 +529,15 @@ async fn create_index_with_recovery_audited(
                         .await;
                     }
                     let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
-                    return Err(format!(
-                        "{{\"code\":\"unique_violation\",\"sqlstate\":\"{}\",\
-                        \"collection\":\"{}\",\"constraint\":\"{}\",\
-                        \"index\":\"{}\",\"columns\":{:?},\
-                        \"message\":\"{}\"}}",
-                        code_str,
-                        collection,
-                        constraint_kind,
-                        spec.name,
-                        spec.columns,
-                        fmt_db_err(&e).replace('"', "\\\"")
-                    ));
+                    return Err(refuse(serde_json::json!({
+                        "code": "unique_violation",
+                        "sqlstate": code_str,
+                        "collection": collection,
+                        "constraint": constraint_kind,
+                        "index": spec.name,
+                        "columns": spec.columns,
+                        "message": fmt_db_err(&e),
+                    })));
                 }
 
                 let transient = matches!(
@@ -555,26 +570,35 @@ async fn create_index_with_recovery_audited(
 
                 let _ = pool.query_text_params(&drop_idx_sql, &empty).await;
                 if !transient || attempt == MAX_RETRIES {
-                    return Err(format!(
-                        "{{\"code\":\"validation_refused\",\"change_kind\":\"index_retry\",\
-                        \"collection\":\"{}\",\"index\":\"{}\",\
-                        \"sqlstate\":\"{}\",\"attempts\":{},\
-                        \"message\":\"{}\"}}",
-                        collection,
-                        spec.name,
-                        code.as_ref().map(|c| c.code()).unwrap_or("unknown"),
-                        attempt + 1,
-                        fmt_db_err(&e).replace('"', "\\\"")
-                    ));
+                    return Err(refuse(serde_json::json!({
+                        "code": "validation_refused",
+                        "change_kind": "index_retry",
+                        "collection": collection,
+                        "index": spec.name,
+                        "sqlstate": code
+                            .as_ref()
+                            .map(|c| c.code())
+                            .unwrap_or("unknown"),
+                        "attempts": attempt + 1,
+                        "message": fmt_db_err(&e),
+                    })));
                 }
             }
         }
     }
 
-    Err(format!(
-        "db: create index '{}' exhausted retry budget without a terminal result",
-        spec.name
-    ))
+    // Loop exited without a terminal `return` — the retry budget is
+    // exhausted yet the last iteration produced neither a success nor a
+    // classified failure. That's an invariant breach, not user input;
+    // surface it as a configuration-class error so the operator log can
+    // tell it apart from a validation refusal.
+    Err(DbError::Configuration {
+        code: "cic_configuration",
+        message: format!(
+            "db: create index '{}' exhausted retry budget without a terminal result",
+            spec.name
+        ),
+    })
 }
 
 #[cfg(test)]

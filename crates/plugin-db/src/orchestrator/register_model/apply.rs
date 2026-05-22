@@ -113,13 +113,13 @@ pub(crate) async fn apply<'p, B: Backend>(
                     })
                     .cloned();
                 if let Some(spec) = spec_owned {
-                    // create_index_with_recovery still returns
-                    // `Result<(), String>` — its String body may carry a
-                    // structured envelope (UNIQUE-conflict during CIC).
-                    // Wrap as DbError::Internal so the body reaches JS
-                    // verbatim while the SDK gets a uniform `.code`
-                    // surface. Refining this surface is tracked in the
-                    // Backend trait sweep.
+                    // `create_index_with_recovery` returns a typed
+                    // `DbError`. `SchemaRefused` carries the JSON
+                    // envelope the SDK already consumes via
+                    // `JSON.parse`, `UniqueViolation`/`Transient`/…
+                    // flow through the standard SQLSTATE classification,
+                    // and `Configuration` surfaces invariant breaches.
+                    // No wrapping or string-rail bridging required.
                     backend
                         .create_index_with_recovery(
                             &app_id,
@@ -129,7 +129,6 @@ pub(crate) async fn apply<'p, B: Backend>(
                             schema_version,
                         )
                         .await
-                        .map_err(|message| DbError::Internal { message })
                 } else {
                     Ok(())
                 }

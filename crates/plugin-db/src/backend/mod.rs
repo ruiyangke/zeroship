@@ -337,9 +337,13 @@ pub trait Backend: 'static {
     /// signature; alternate backends would have to map to whatever
     /// online-index primitive they provide).
     ///
-    /// Returns `Ok(())` on success; structured error envelopes
-    /// (JSON-encoded as the message) on terminal failures so the SDK's
-    /// `validation_refused` / `unique_violation` paths render cleanly.
+    /// Returns `Ok(())` on success; on terminal retry-loop failures
+    /// the returned [`DbError::SchemaRefused`] carries a JSON envelope
+    /// the SDK consumes verbatim (`validation_refused` /
+    /// `unique_violation` shapes). Postgres errors during CIC flow
+    /// through the normal `from_pg` path (`UniqueViolation` etc.);
+    /// configuration / invariant breaches surface as
+    /// [`DbError::Configuration`].
     #[allow(async_fn_in_trait)]
     async fn create_index_with_recovery(
         &self,
@@ -348,7 +352,7 @@ pub trait Backend: 'static {
         spec: &crate::query::IndexSpec,
         deploy_id: &str,
         schema_version: i32,
-    ) -> Result<(), String>;
+    ) -> Result<(), DbError>;
 }
 
 /// Opaque trait-object handle that the per-isolate context stores.
