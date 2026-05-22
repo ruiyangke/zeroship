@@ -7,20 +7,39 @@
 //! opaque messages.
 //!
 //! `Result<_, String>` is now (post-[I28] sweep, commit `0049d9be`)
-//! confined to a small set of deliberate hold-outs:
+//! confined to a small set of deliberate hold-outs across three
+//! categories:
 //!
-//! - The `validate` stage in `crate::orchestrator::register_model`
-//!   whose `Err` IS the `validation_refused` JSON envelope (a documented
-//!   SDK wire contract — `JSON.parse(err.message)` recovers the payload).
-//!   `run_pipeline` wraps it in [`DbError::SchemaRefused`] at the
-//!   boundary; the static `.code` is stamped from the variant.
-//! - Two ASCII-only `hex_decode` / `hex_nibble` pure-function helpers
-//!   in `auth/session.rs` — internal parsers, never crosses an isolate
-//!   boundary.
+//! 1. **Wire-contract envelopes**: `crate::orchestrator::register_model::validate`
+//!    whose `Err` IS the `validation_refused` JSON envelope (a
+//!    documented SDK wire contract — `JSON.parse(err.message)`
+//!    recovers the payload). `run_pipeline` wraps it in
+//!    [`DbError::SchemaRefused`] at the boundary; the static `.code`
+//!    is stamped from the variant.
 //!
-//! Every fallible helper that touches Postgres or the V8 boundary now
-//! returns `Result<_, DbError>` — SDK callers can branch on `err.code`
-//! end-to-end on the production code path.
+//! 2. **Pure parsers** internal to `auth/session.rs`: `hex_decode` /
+//!    `hex_nibble` ASCII-only decoders that never cross an isolate
+//!    boundary; lifted into `DbError::internal(...)` at their
+//!    call sites.
+//!
+//! 3. **JS-input arg parsers** in `v8_classes/migration.rs` (`parse_commit_spec`,
+//!    `parse_spec`) and `v8_classes/migrations.rs` (`parse_name_and_collection`):
+//!    return free-text rejection messages converted to `OpError::type_error`
+//!    at the V8 boundary (these are TypeError-class, never need `.code`).
+//!
+//! 4. **Cold-init**: `lib.rs::init_pool_async` returns `Result<_, String>`;
+//!    the two call sites at `orchestrator/register_model/mod.rs:120` and
+//!    `exec.rs::ensure_pool` synthesise `DbError::Configuration` with a
+//!    static `code` (`lazy_init_failed` and `not_configured` respectively
+//!    — names drift; tracked separately as a follow-up).
+//!
+//! 5. **Test helpers** (`exec.rs::exec_query_with_pool_for_tests`,
+//!    similar): `#[cfg(any(test, feature = "test-helpers"))]`-gated;
+//!    never reach the V8 boundary.
+//!
+//! Every fallible helper that touches Postgres or the V8 boundary in a
+//! production path now returns `Result<_, DbError>` — SDK callers can
+//! branch on `err.code` end-to-end on the production code path.
 //!
 //! The wire format JS sees is unchanged: still a JS `Error` with
 //! `message` + `code` (+ `hint` when present). All this layer does is
