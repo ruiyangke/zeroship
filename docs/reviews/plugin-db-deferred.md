@@ -1,6 +1,12 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 16:17.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 16:47.
+
+**Cycle 16:47 closures (2)**: F1 warn-shape collection-slot snapshot test (`f173ed40` — closes error-ux r12 LOW; 364 lib tests pass) + F1 site-count drift sweep (`145e93c7` — closes docs-audit r10 + test-coverage r15 drift findings; corrected my own f173ed40 5+3 claim to the actual 6+2 at HEAD). 3 reviewers returned: **test-coverage r15 = 88 (+1)** (NEW-R14-1 partially closed; F1 family contract now backed by 2 snapshot tests); **docs-audit r10 = 91 (-1, first negative)** (caught the F1 site-count drift across 7 places — all closed by `145e93c7`); **performance r14 = 82 (±0)** (5th consecutive cycle without the `bench_v8_json_parse` forcing function; no regressions from cycle 15:17/15:47/16:17 commits).
+
+**Design-loop CONVERGED at round 9 (cycle 16:47)**: score **90.7** (+1.0). 0 CRITICAL, 0 IMPORTANT, 4 editorial MINORs that don't block. Final progression: 62 → 77 → 85 → 87 → 89 → 89 → 89.7 → 89 → 90.7 (9 critic rounds + 8 reviser rounds, ~17h of agent time). Per-dimension: Completeness 94, Correctness 90, Extensibility 89, Operational 92, Security 89, DX 91, Industry Alignment 90. Doc at 1513 lines in worktree `proposal/db-system-design`; NOT committed per `feedback_proposal_workflow.md`. Reviewer recommends landing as stable; 4 residual MINORs fold into the P0 implementation PR's doc-polish pass.
+
+
 
 **Cycle 16:17 closures (2)**: NEW-R14-1 CHECK ALTER upgrade-path integration test (`7506bd73` — integration suite now 73 pass / 1 ignored; verified `pg_get_constraintdef` post-ALTER) + MINOR-R12-1 F1 warn-shape unification on apply.rs:84 running-row insert failure (`cbd21112` — 8th F1 family site). 3 reviewers returned: **error-ux r12 = 95.5 (+1.5)** (audit.rs:818 5-cycle carry CLOSED; F1 family now 7 sites with uniform shape; `validation_refused` SDK surface cross-checked clean); **code-critique r12 = 95 (±0)** (plateau confirmed; MINOR-R12-1 already closed inline); **migration-pipeline r14 = 89 (+2)** (F2 verified closed verbatim per r13's recommendation). Design-loop **round 4 critic = 87 (+2)**; round-4 reviser in flight (1 CRITICAL + 5 IMPORTANT to address).
 
