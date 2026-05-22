@@ -54,11 +54,6 @@ pub mod wal_consumer;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// Registered models — keyed by "app_id:collection". Prevents redundant DDL
-    /// on subsequent cold starts within the same deploy.
-    static REGISTERED_MODELS: RefCell<std::collections::HashSet<String>> =
-        RefCell::new(std::collections::HashSet::new());
-
     /// Active transaction connection. Only one transaction at a time per isolate
     /// (V8 is single-threaded). If Some, all CRUD ops use this connection.
     ///
@@ -131,14 +126,12 @@ pub(crate) fn next_tx_token() -> u64 {
 
 /// Check if a model is already registered for this app on this thread.
 pub(crate) fn is_model_registered(app_id: &str, collection: &str) -> bool {
-    let key = format!("{app_id}:{collection}");
-    REGISTERED_MODELS.with(|r| r.borrow().contains(&key))
+    context::with(|c| c.is_model_registered(app_id, collection))
 }
 
 /// Mark a model as registered.
 pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
-    let key = format!("{app_id}:{collection}");
-    REGISTERED_MODELS.with(|r| { r.borrow_mut().insert(key); });
+    ctx_mut(|c| c.mark_model_registered(app_id, collection));
 }
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
