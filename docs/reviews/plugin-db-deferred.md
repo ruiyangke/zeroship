@@ -1,6 +1,10 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 14:47.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 15:17.
+
+**Cycle 15:17 closures (2 + design-loop round 2)**: **F2** resolved via two commits — `14d7608f` (initial Failed+marker pattern) then `6afab751` (upgrade to dedicated `ValidationRefused` terminal per migration-pipeline r13's recommendation; INSERT-direct, no orphan window). 3 reviewers returned: **performance r13 = 82 (+1)** with honest correction (V8 half of [C3] still unmeasured; r14 needs `bench_v8_json_parse`); **concurrency r12 = 89 (±0)** (3rd-round plateau; capture-layer audit clean); **migration-pipeline r13 = 87 (+1)** (caught the Failed-marker semantic regression and recommended the upgrade). Design-loop **round 2 critic = 77/100 (+15)** — all 7 round-1 CRITICALs CLOSED; abstraction-level 38→86; 3 new CRITICALs from round-1 revision (MV/CDC storm; SQLite drop-namespace ordering; PG WAL sub-protocol support unstated). Round-2 reviser in flight.
+
+**[C3] actionability correction**: performance r13's honest read — the Rust-side residual (4.24 µs at 50-col) IS real, but the V8 `JSON.parse` half (which is what `ResolveValue::JsonValue` would actually buy back) isn't measured by either bench. [C3] is actionable for design work, not yet for sizing the win. r14 forcing function: V8-side bench measuring `serde_json::Value` → V8 boundary.
 
 **Active filter (cycle 14:47 onward — design redesign in progress)**: the full system redesign in worktree `proposal/db-system-design` will reshape the `Backend` trait surface and `IsolateDbContext` shape. Backlog picks during the redesign window MUST be **refactor-safe** — i.e., they survive the capability-trait split unchanged. Skip the rest until the design lands.
 
