@@ -165,30 +165,28 @@ pub async fn run_pipeline(
     deploy_id: &str,
 ) -> Result<(), DbError> {
     // 1. Bootstrap — schema, audit table, advisory lock, schema_version,
-    //    expanded index specs. The returned lock_client carries the
-    //    pool borrow lifetime; we thread it through to apply where the
-    //    advisory unlock + drop happens between passes.
-    let (ctx, lock_client) =
+    //    expanded index specs. The returned guard carries the pool
+    //    borrow lifetime; we thread it through to apply where the
+    //    advisory unlock happens between passes.
+    let (ctx, lock_guard) =
         bootstrap::bootstrap(backend, app_id, collection, schema, indexes, deploy_id).await?;
 
     // 2 + 3. Plan / validate. These two stages happen BEFORE the
     // apply-side advisory-unlock. If either returns Err we must still
-    // release the advisory lock — otherwise the `PooledClient` returns
-    // to the pool with the session-scoped lock held, and every later
-    // caller hangs on `pg_advisory_lock(zs_reg:<app>, register_model)`.
+    // release the advisory lock via the guard — otherwise the held
+    // PooledClient returns to the pool with the session-scoped lock
+    // alive, and every later caller hangs on
+    // `pg_advisory_lock(zs_reg:<app>, register_model)`.
     //
-    // The original code propagated plan/validate errors via `?`,
+    // The pre-guard code propagated plan/validate errors via `?`,
     // dropping `lock_client` back into the pool without an explicit
     // unlock. The advisory lock leak cascades into the p8a2 ordering
     // hang: tests that `expect_err` on a destructive deploy (strict
     // refusal at validate) leave the orchestrator lock stuck, the next
     // register_model in another test waits forever, and the
     // `pg_create_logical_replication_slot()` in p8a2_auto_spawn
-    // ultimately blocks behind that chain.
-    //
-    // Run the two stages and, on Err, explicitly release the lock
-    // before propagating. Success cases keep the lock held — apply()
-    // releases it between Pass 1 and Pass 2 as before.
+    // ultimately blocks behind that chain. The guard centralises the
+    // unlock so any future stage added here inherits the invariant.
     //
     // Validate's `Err` branch is always the `validation_refused` JSON
     // envelope (the only fallible call inside it is a best-effort
@@ -216,21 +214,15 @@ pub async fn run_pipeline(
             // the unlock SQL may itself error if the connection was
             // already torn down, but the more important guarantee is
             // that we don't leak a held lock back into the pool.
-            let unlock_sql =
-                "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
-            let key = bootstrap::lock_key(app_id);
-            let _ = lock_client
-                .query_text_params(unlock_sql, &[key.as_str(), bootstrap::LOCK_TAG])
-                .await;
-            drop(lock_client);
+            let _ = lock_guard.release().await;
             return Err(e);
         }
     };
 
     // 4. Apply — execute the validated ops under the lock (pass 1) then
     //    release and run CIC unlocked (pass 2). Each op writes an audit
-    //    row.
-    apply::apply(backend, ctx, lock_client, approved).await
+    //    row. The guard's release lives inside apply().
+    apply::apply(backend, ctx, lock_guard, approved).await
 }
 
 /// Pool-driven entry retained for integration tests that hand in a

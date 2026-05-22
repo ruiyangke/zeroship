@@ -26,5 +26,6 @@
 //! import.
 
 pub mod auto_tx;
+pub(crate) mod lock_guard;
 pub mod register_model;
 pub mod transaction;

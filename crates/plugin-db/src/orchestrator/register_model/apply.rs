@@ -7,10 +7,9 @@
 //!    [`bootstrap`](super::bootstrap) is still held. These serialise
 //!    per-app.
 //! 2. **Pass 2** — `CREATE INDEX CONCURRENTLY` ops run AFTER the
-//!    advisory lock is released (the pooled `lock_client` is dropped
-//!    between passes, returning the connection to the pool after we
-//!    issue an explicit `pg_advisory_unlock`). Holding the lock
-//!    through CIC would deadlock: a second waiter blocked on
+//!    advisory lock is released ([`OrchestratorLockGuard::release`]
+//!    issues `pg_advisory_unlock` then returns the client). Holding
+//!    the lock through CIC would deadlock: a second waiter blocked on
 //!    `pg_advisory_lock` pins a snapshot that CIC waits on. CIC is
 //!    idempotent via `IF NOT EXISTS` so it's safe to run unlocked.
 //!
@@ -20,10 +19,10 @@
 //! data-violation paths) lives in
 //! [`crate::backend::Backend::create_index_with_recovery`].
 
-use compio_postgres::PooledClient;
 use serde_json::Value;
 
-use super::bootstrap::{lock_key, RegisterContext, LOCK_TAG};
+use super::super::lock_guard::OrchestratorLockGuard;
+use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
 use crate::backend::Backend;
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
@@ -31,13 +30,14 @@ use crate::error::DbError;
 
 /// Run stage 4.
 ///
-/// Takes the `lock_client` separately so the lock can be released
-/// between passes without dragging the `'p` borrow through every
-/// upstream type.
+/// Takes the [`OrchestratorLockGuard`] separately so the lock can be
+/// released between passes without dragging the `'p` borrow through
+/// every upstream type. The guard is consumed by the explicit
+/// `release().await` between Pass 1 and Pass 2.
 pub(crate) async fn apply<'p, B: Backend>(
     backend: &B,
     ctx: RegisterContext,
-    lock_client: PooledClient<'p>,
+    lock_guard: OrchestratorLockGuard<'p>,
     approved: ApprovedPlan,
 ) -> Result<(), DbError> {
     let RegisterContext {
@@ -219,15 +219,11 @@ pub(crate) async fn apply<'p, B: Backend>(
     // errored, we MUST still unlock — otherwise the pooled connection
     // returns to the pool with the session-scoped lock held.
     //
-    // Issue `pg_advisory_unlock` explicitly so the lock count
-    // decrements while the connection is still parked.
-    let unlock_sql =
-        "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
-    let key = lock_key(&app_id);
-    let _ = lock_client
-        .query_text_params(unlock_sql, &[key.as_str(), LOCK_TAG])
-        .await;
-    drop(lock_client);
+    // The guard's `release()` issues `pg_advisory_unlock` then returns
+    // the now-unlocked client back to the pool on drop. Best-effort:
+    // any SQL error is swallowed inside the guard (matches the
+    // pre-refactor inline behaviour).
+    let _ = lock_guard.release().await;
 
     // Propagate Pass 1 error after the lock has been released.
     pass1?;
