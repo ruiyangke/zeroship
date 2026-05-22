@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 06:55.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 07:30.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -594,6 +594,22 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
 - ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
 
+### [S61] HIGH (test-coverage r7 2-round carry; cycle 07:30) — [I42] release-flag ordering structural test
+- **Closed by**: `386f9bf5 plugin-db: add structural test for [I42] + lifecycle tests for ConsumerRunningGuard`
+- New `release_flips_flag_after_unlock_await_structural` test in lock_guard::tests. Pins bd1e7ce1's invariant via byte-offset search through `include_str!('lock_guard.rs')`. A future revert of the await/flag order trips this test at unit-test time without needing a live PG fixture. Mirrors `mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure` pattern.
+
+### [S62] MEDIUM (test-coverage r7; cycle 07:30) — ConsumerRunningGuard lifecycle tests + LATENT BUG FIX
+- **Closed by**: `386f9bf5` (test commit)
+- Lifted `ConsumerRunningGuard` from local function scope to module scope (still `pub(crate)`) so 4 lifecycle tests can directly exercise it: mark, drop-unmark, drop-unmark-on-panic, try_claim-lose-when-already-marked.
+- **CRITICAL latent bug caught**: the original `try_claim` used `won.then_some(Self { app_id })` which evaluates `Self { app_id }` eagerly. On the lost-race path, the temporary Self constructed-then-dropped fired the custom Drop impl, UNMARKING the winner's claim. 70921112's atomic semantics were silently broken — both racing tasks would have ended with no consumer running. Fixed via lazy `won.then(|| Self { app_id })`.
+
+### [S63] MINOR + 3× api-surface r6 MAJORs (cycle 07:30) — dead-code + docstring cleanup
+- **Closed by**: `e5315083 plugin-db: dead-code + docstring cleanups`
+- perf r7 N7-M0: session.rs::init_session map_err no longer builds dead `format!("{e}")` + source-chain walk after the DETAIL fix.
+- api-surface r6 MAJOR-R6-1: `mark_consumer_running` (non-atomic) gated to test/test-helpers only; production builds no longer expose the footgun.
+- api-surface r6 MAJOR-R6-2: replication_ops module docstring updated — `WalConsumer::new` documents both `ValidationFailed { code: "invalid_app_id" }` and `Configuration { code: "not_provisioned" }`.
+- api-surface r6 MAJOR-R6-3: dropped unused `use crate::error::DbError;` import.
+
 ### [S57] MAJOR (code-critique r5 MAJOR-R5-1; cycle 06:55) — auth/session.rs P0001 substring matching
 - **Closed by**: `a272d1af plugin-db/auth: classify P0001 RAISE via DETAIL token instead of substring`
 - PG side: 5 RAISE EXCEPTION statements in the SECURITY DEFINER `init_session` function now carry `USING DETAIL = '<token>'`. Rust side: new `classify_p0001_detail()` helper reads `e.as_db_error()?.detail()` and maps to `DbError::ValidationFailed { code }`. Locale- and formatter-independent.
@@ -690,19 +706,21 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **04:35** closed [I39], [I44], NEW CRITICAL (watchdog cross-app), first_row_or_internal
 - **05:25** closed MAJOR-R5-2, MAJOR-R5-3, 2 CRITICALs (test-helpers build break + error preamble drift)
 - **06:00** closed R5-M7, docs-audit r4 lock_guard hardening, MAJOR-R6-1
-- **06:55** closed MAJOR-R5-1 (P0001 DETAIL), MAJOR-R5-4 (WalConsumer typed), concurrency-r7 race, docs-audit r5 CRITICAL
+- **06:55** closed MAJOR-R5-1, MAJOR-R5-4, concurrency-r7 race, docs-audit r5 CRITICAL
+- **07:30** closed [I42] structural test, ConsumerRunningGuard lifecycle tests (+ LATENT BUG caught), 3× api-surface r6 MAJORs, perf r7 N7-M0
 
-**Net since pilot started**: ~37 closures, ~25 new findings.
+**Net since pilot started**: ~42 closures, ~26 new findings.
 
-### Pick #1 (next cycle): **Test-coverage r7 HIGH — [I42] release-flag ordering branch unverified (2-round carry-over)**
-- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:160-183`
-- **Fix sketch**: Add either (a) integration test that constructs the guard with a live PooledClient, drops the future mid-await, captures the Drop log via `tracing-subscriber` test layer; or (b) a source-text invariant test (analogous to `mint_subscription_does_not_leak`) that pins `self.released = true` AFTER the `unlock_sql.await` call in the function source.
-- **Why next**: bd1e7ce1's defining behaviour has gone two rounds unverified; a silent revert (move `released = true` back before await) would have no failing test.
+### Pick #1 (next cycle): **Migration-pipeline F1 + F2 (long-deferred, design needed)**
+- **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` (F1) + `validate.rs:67-87` (F2)
+- **Fix sketch**: F1 needs owner_session_id + heartbeat column on `__zeroship_migrations` + a sweeper. F2 needs `validation_refused` added to the status CHECK constraint + transition in validate.rs.
+- **Why next**: both flagged since migration-pipeline r2 (cycle 00:47), still unmoved 5+ cycles later. Schema migration + sweeper task = medium effort.
+- **Caveat**: schema migration to `__zeroship_migrations` requires careful rollout; needs a deployment story.
 
-### Pick #2 (next cycle): **Test-coverage r7 MEDIUM — ConsumerRunningGuard mark/unmark lifecycle**
-- **File**: `crates/plugin-db/src/replication_ops.rs:277-294` (now with `try_claim` after 70921112)
-- **Fix sketch**: Lift `ConsumerRunningGuard` out of the local function scope OR expose via `#[cfg(test)]` re-export. Add 3 tests: `guard_new_marks`, `guard_drop_unmarks`, `guard_drop_unmarks_on_panic_unwind` (mirror `wal_consumer.rs::p8a2_per_app_emit_suppression_drop_guard_restores_on_panic`).
-- **Why next**: 3 commits (e399eeea, 34d209b5, 70921112) touched both `new()` and `Drop`; only context.rs primitives have direct tests.
+### Pick #2 (next cycle): **Code-critique r5 MAJOR-R5-1 carry — `migrations::coded_db` inline prefix re-implementation**
+- **File**: `crates/plugin-db/src/migrations.rs::coded_db`
+- **Fix sketch**: migrations.rs has its own `coded_db` with inline variant-walk that re-implements `crate::error::prefix_message`. Route through the shared helper.
+- **Why**: architecture r8 M11. Last per-file copy of the variant-walk pattern after cbbc9059's dedup wave.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - Status unchanged; needs retry/backoff policy decision.
