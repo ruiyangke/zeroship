@@ -107,12 +107,19 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Source**: `plugin-db-performance-2026-05-22-r1.md` §2-C1; `plugin-db-performance-2026-05-22-r2.md` §2 "STILL IN FLIGHT"
 - **File**: `crates/plugin-db/src/exec.rs:83-87`, `crates/plugin-db/src/crud.rs:105-108`, `crates/plugin-db/src/v8_bridge.rs` (`rows_to_json_value`)
 - **Description**: Original perf C1 flagged `findOne` paying ~4 serde parse/serialise round-trips. Partial closure: `cc7fff89` ("thread Vec<Value> end-to-end") landed and `exec_query` now returns `Vec<Value>` (`exec.rs:83`); `crud::first_row_or_null` (line 105) does one `.to_string()` followed by V8 `JSON.parse`. **The triple-round-trip is gone — net 2 operations, down from 4.** What remains is the final `to_string`→`JSON.parse` boundary cost, which is structural for `ResolveValue::Json`.
-- **Status as of 2026-05-22 00:17**:
+- **Status as of 2026-05-22 (perf r13 measurement)**:
   - Code still exists? The original 4-parse chain is closed. `exec.rs:83-87` returns `Vec<Value>` directly; `crud.rs:105-108` does one serialise; `ResolveValue::Json` parses once in V8.
-  - Blocker: Further reduction requires plumbing `Vec<Value>` directly to V8 (new `ResolveValue::JsonValue` shape) — design change in `zeroship-runtime::state`.
+  - **`bench_first_row_or_null` measurements** (the r12 forcing function for this entry; harness lives at `crates/plugin-db/benches/bench_first_row_or_null.rs`; covers `&[Row] → rows_to_json_value → first_row_or_null` lowering, i.e. the Rust-side half of the `findOne` resolve path; the V8 `JSON.parse` tail is downstream and not in this number):
+    | shape         | bench time |
+    |---------------|------------|
+    | narrow_3cols  | ~560.61 ns |
+    | medium_10cols | ~2.625 µs  |
+    | wide_50cols   | ~11.66 µs  |
+  - **Graduation verdict: ACTIONABLE-NOW.** The 50-col point at 11.66 µs is ~3.9× the r12-defined 3 µs threshold; medium at 2.6 µs is just under, narrow comfortably below. The wide-row residual is large enough that the cross-crate `ResolveValue::JsonValue` redesign is no longer "speculative tail" — it is the dominant cost on the wide-row read path (`row_to_json` was 7.76 µs at 50-col per cycle 14:17; the additional ~3.9 µs here is the `.to_string()` boundary on top of the decode work).
+  - Blocker: Further reduction requires plumbing `Vec<Value>` directly to V8 (new `ResolveValue::JsonValue` shape) — design change in `zeroship-runtime::state`. The bench now quantifies the win envelope (up to ~3.9 µs at 50-col; less at narrow/medium).
   - Already-superseded-by: `cc7fff89 plugin-db: thread Vec<Value> end-to-end (drop serde round-trip)` — most of the win is in.
 - **Effort**: medium (multi-crate; requires a new `ResolveValue` shape)
-- **Pickable this cycle**: no — the residual is structural (Rust value → V8 value at the boundary) and crosses the runtime crate boundary.
+- **Pickable this cycle**: yes — graduated from "deferred" to "actionable-now" by the bench above. The cross-runtime-crate refactor is now justified by a measured 50-col cost above the threshold the r12 forcing function set.
 
 ---
 

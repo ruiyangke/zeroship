@@ -231,6 +231,42 @@ pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
     v8_bridge::row_to_json(row)
 }
 
+/// **Bench-only**: the full `&[Row] → JSON-string` path the SDK sees on
+/// a `findOne` (or any other `first_row_or_null`-resolving) call. Runs
+/// both halves the dispatcher executes between Postgres and V8:
+///
+/// 1. `v8_bridge::rows_to_json_value` — decode every `Row` into a
+///    `serde_json::Value` (the same work `bench_row_to_json` covers
+///    for a single row).
+/// 2. `crud::first_row_or_null` — take the first element, fall back
+///    to `Value::Null`, and serialise once for `ResolveValue::Json`.
+///
+/// Performance r12 identified this composed path as the next bottleneck
+/// after the [I35] index-lookup fix: at wide rows (50 columns) the JSON
+/// string + V8 `JSON.parse` tail dominates the read budget. The matching
+/// Criterion harness is `crates/plugin-db/benches/bench_first_row_or_null.rs`
+/// (perf r13 forcing function for the deferred [C3] redesign — see
+/// `docs/reviews/plugin-db-deferred.md`).
+///
+/// Returns the raw JSON string (without going through `ResolveValue`) so
+/// the bench measures the Rust-side cost in isolation. The remaining V8
+/// `JSON.parse` cost is structural and lives in `zeroship-runtime`; it
+/// is not part of this microbench.
+///
+/// Same visibility rationale as [`row_to_json_for_bench`]: `pub` so the
+/// external bench target can link against it, `#[doc(hidden)]` so it
+/// does not leak into the public surface.
+#[doc(hidden)]
+#[must_use]
+pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
+    let values = v8_bridge::rows_to_json_value(rows);
+    values
+        .into_iter()
+        .next()
+        .unwrap_or(serde_json::Value::Null)
+        .to_string()
+}
+
 /// **Test-only**: set the per-thread `DB_URL` directly, bypassing the
 /// usual `DbPlugin::register()` path. Used by integration tests that
 /// drive `migrations::exec_*` without spinning up a full runtime.
