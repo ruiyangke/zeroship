@@ -1,6 +1,12 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 15:17.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 15:47.
+
+**Cycle 15:47 closures (3)**: 5-cycle error-ux carry on `audit.rs:818` alphabet-naming (`02ead3f4`) + NEW-R14-2 F1 warn-shape drift in `validate.rs:100` (folded into `d07616a2`) + NEW-R9 `update_audit_status` docstring terminal-status enumeration (same commit). 3 reviewers returned: **security r12 = 86 (+1)** (F2 upgrade audit clean — ALTER race-free under PG semantics); **docs-audit r9 = 92 (+1)** (F2 docs exemplary; one new NIT closed inline); **test-coverage r14 = 87 (+1)** (capture-layer NEW-R11-1+R12-1 CLOSED at `0bf71f27`; surfaced NEW-R14-1 = MEDIUM CHECK-ALTER upgrade-path untested; NEW-R14-2 = drift just closed).
+
+**Design-loop round 2 closed**: reviser landed all 3 round-2 CRITICALs + 10 IMPORTANT + 11 MINOR + 7 newly-visible missing concepts. Doc now 1141 lines (9% over 1050 target band; reviser explained — 7 new missing-concept paragraphs required dense additions). Round 3 critic in flight.
+
+
 
 **Cycle 15:17 closures (2 + design-loop round 2)**: **F2** resolved via two commits — `14d7608f` (initial Failed+marker pattern) then `6afab751` (upgrade to dedicated `ValidationRefused` terminal per migration-pipeline r13's recommendation; INSERT-direct, no orphan window). 3 reviewers returned: **performance r13 = 82 (+1)** with honest correction (V8 half of [C3] still unmeasured; r14 needs `bench_v8_json_parse`); **concurrency r12 = 89 (±0)** (3rd-round plateau; capture-layer audit clean); **migration-pipeline r13 = 87 (+1)** (caught the Failed-marker semantic regression and recommended the upgrade). Design-loop **round 2 critic = 77/100 (+15)** — all 7 round-1 CRITICALs CLOSED; abstraction-level 38→86; 3 new CRITICALs from round-1 revision (MV/CDC storm; SQLite drop-namespace ordering; PG WAL sub-protocol support unstated). Round-2 reviser in flight.
 
