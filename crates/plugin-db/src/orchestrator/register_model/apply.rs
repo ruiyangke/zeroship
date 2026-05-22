@@ -49,6 +49,18 @@ pub(crate) async fn apply<'p, B: Backend>(
     } = ctx;
 
     let run_op = async |op: &DiffOp| -> Result<(), DbError> {
+        // Contract gate — see `check_destructive_invariant`.
+        //
+        // The pass1/pass2 loops filter `ChangeClass::Destructive` out
+        // BEFORE calling `run_op`, so any `DropColumn`/`DropIndex` that
+        // reaches here has lost (or never had) its destructive tag.
+        // Surface that as `DbError::Internal` instead of silently
+        // succeeding — the previous catch-all `Ok(())` would write a
+        // bogus `Applied` audit row for a no-op. We perform the check
+        // BEFORE the `write_audit_row` call so no orphan `Running`
+        // row is emitted for a contract violation.
+        check_destructive_invariant(op)?;
+
         let audit_id = match backend
             .write_audit_row(
                 &app_id,
@@ -133,7 +145,16 @@ pub(crate) async fn apply<'p, B: Backend>(
                     Ok(())
                 }
             }
-            ChangeKind::DropColumn | ChangeKind::DropIndex => Ok(()),
+            // Unreachable in practice — `check_destructive_invariant`
+            // above turns any `DropColumn`/`DropIndex` that survives
+            // the upstream destructive-class filter into an error
+            // BEFORE we reach this match. The arm is kept (returning
+            // the same error) so the compiler enforces exhaustive
+            // matching: a future variant added to `ChangeKind` will
+            // fail to compile here, forcing an explicit decision.
+            ChangeKind::DropColumn | ChangeKind::DropIndex => {
+                Err(destructive_invariant_error(op))
+            }
         };
 
         if let Some(id) = audit_id {
@@ -223,4 +244,157 @@ pub(crate) async fn apply<'p, B: Backend>(
     }
 
     Ok(())
+}
+
+/// Enforce the contract that any `DropColumn` / `DropIndex` op reaching
+/// the apply layer must carry `ChangeClass::Destructive` — the upstream
+/// pass1 / pass2 loops filter destructive ops out before they ever
+/// reach `run_op`, so a `Drop*` op that gets here has slipped past
+/// that filter (or never had its class set correctly by the diff
+/// engine).
+///
+/// Silently returning `Ok(())` for this case — as the pre-fix code
+/// did — would write a bogus `Applied` audit row, masking a real bug
+/// in either the diff classifier or the destructive-skip loop. The
+/// fix surfaces an `Internal` error naming the breached contract so
+/// the operator sees the issue at the next deploy instead of
+/// discovering a silently-skipped drop weeks later.
+///
+/// Non-`Drop*` change kinds pass through with `Ok(())` — they have
+/// their own SQL paths in the `match` block above and don't share
+/// this contract.
+fn check_destructive_invariant(op: &DiffOp) -> Result<(), DbError> {
+    if matches!(
+        op.change_kind,
+        ChangeKind::DropColumn | ChangeKind::DropIndex
+    ) && op.class != ChangeClass::Destructive
+    {
+        return Err(destructive_invariant_error(op));
+    }
+    Ok(())
+}
+
+/// Build the diagnostic message for a destructive-invariant violation.
+/// Named so the unreachable `DropColumn | DropIndex` arm inside the
+/// `match` block can produce an identical error without duplicating
+/// the message string.
+fn destructive_invariant_error(op: &DiffOp) -> DbError {
+    let msg = format!(
+        "db: apply received a {} op outside ChangeClass::Destructive \
+         (class={:?}); upstream destructive-class filter \
+         (register_model::apply pass1/pass2) should have skipped it. \
+         This is a contract violation — refusing to silently no-op.",
+        op.change_kind.as_sql(),
+        op.class,
+    );
+    tracing::error!(
+        change_kind = op.change_kind.as_sql(),
+        class = ?op.class,
+        collection = %op.collection,
+        "apply: destructive-invariant violation"
+    );
+    DbError::Internal { message: msg }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the destructive-invariant contract gate.
+    //!
+    //! These exercise `check_destructive_invariant` directly rather than
+    //! the full `apply()` function — `apply` takes a
+    //! `compio_postgres::PooledClient<'p>` and issues a
+    //! `pg_advisory_unlock` against it, so end-to-end coverage requires
+    //! a live Postgres listener and lives in
+    //! `crates/plugin-db/tests/integration.rs`. The gate itself is a
+    //! pure predicate over `DiffOp`, which is what these tests pin.
+    use super::*;
+    use crate::diff::{ChangeClass, ChangeKind, DiffOp};
+
+    fn diff_op(kind: ChangeKind, class: ChangeClass) -> DiffOp {
+        DiffOp {
+            collection: "posts".into(),
+            change_kind: kind,
+            class,
+            sql: None,
+            details: serde_json::json!({}),
+            field: Some("legacy_col".into()),
+        }
+    }
+
+    /// A `DropColumn` op reaching apply without `ChangeClass::Destructive`
+    /// means the destructive-class filter above failed (or the diff
+    /// engine emitted a misclassified op). The gate MUST return
+    /// `DbError::Internal` so the failure is visible — silent `Ok(())`
+    /// would write a fake `Applied` audit row.
+    #[test]
+    fn drop_column_without_destructive_class_returns_internal_error() {
+        let op = diff_op(ChangeKind::DropColumn, ChangeClass::Additive);
+        let result = check_destructive_invariant(&op);
+        match result {
+            Err(DbError::Internal { message }) => {
+                // The message must name the contract that was breached
+                // so the operator can locate the upstream regression.
+                assert!(
+                    message.contains("drop_column"),
+                    "message should name the change_kind: {message}"
+                );
+                assert!(
+                    message.contains("Destructive"),
+                    "message should name the breached invariant: {message}"
+                );
+                assert!(
+                    message.contains("contract violation"),
+                    "message should mark this as a contract violation: {message}"
+                );
+            }
+            other => panic!("expected DbError::Internal, got {other:?}"),
+        }
+    }
+
+    /// A `DropColumn` op tagged `ChangeClass::Destructive` is the
+    /// canonical path — the pass1/pass2 loops in `apply()` skip it
+    /// BEFORE `run_op` is invoked, so the gate never sees it during
+    /// real applies. We assert the gate is permissive here so a future
+    /// refactor that routes destructive ops THROUGH the gate (e.g.
+    /// for an audited "refused" trail) doesn't get mis-flagged. No
+    /// audit row, no error.
+    #[test]
+    fn drop_column_with_destructive_class_is_skipped_cleanly() {
+        let op = diff_op(ChangeKind::DropColumn, ChangeClass::Destructive);
+        assert!(
+            check_destructive_invariant(&op).is_ok(),
+            "destructive-class drops must pass the gate (the upstream filter \
+             is the canonical skip; the gate only fires on misclassified ops)"
+        );
+
+        // Same for DropIndex — the gate is shape-symmetric.
+        let op = diff_op(ChangeKind::DropIndex, ChangeClass::Destructive);
+        assert!(check_destructive_invariant(&op).is_ok());
+    }
+
+    /// Non-`Drop*` change kinds are out of scope for this invariant —
+    /// they have their own SQL paths in `run_op`'s match block. The
+    /// gate must not interfere.
+    #[test]
+    fn non_drop_change_kinds_pass_the_gate_regardless_of_class() {
+        for kind in [
+            ChangeKind::CreateTable,
+            ChangeKind::AddColumn,
+            ChangeKind::AddIndex,
+            ChangeKind::AddForeignKey,
+            ChangeKind::DropForeignKey,
+        ] {
+            for class in [
+                ChangeClass::Additive,
+                ChangeClass::Compatible,
+                ChangeClass::Destructive,
+            ] {
+                let op = diff_op(kind.clone(), class);
+                assert!(
+                    check_destructive_invariant(&op).is_ok(),
+                    "gate must not fire on {kind:?} / {class:?}",
+                );
+            }
+        }
+    }
 }
