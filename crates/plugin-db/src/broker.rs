@@ -380,16 +380,32 @@ impl Subscription {
 
 /// The routing table.
 ///
-/// Indexed by `(app_id, collection)`. P8b will add a second-level
-/// index by `ReadSet` fingerprint; for P8a the per-collection list is
-/// scanned linearly on each publish (`O(subscribers_on_this_collection)`).
+/// Indexed as a two-level map: `app_id → collection → Vec<Subscription>`.
+/// P8b will add a third-level index by `ReadSet` fingerprint; for
+/// P8a/P8b the per-collection list is scanned linearly on each publish
+/// (`O(subscribers_on_this_collection)`).
+///
+/// ## Why two levels (not a single `(String, String)` tuple key)
+///
+/// The hot path is the WAL-frame fan-out: every replicated mutation
+/// asks "are there any subscribers on `(app_id, collection)`?" before
+/// doing the more expensive event-shape work. With a tuple key, that
+/// question requires allocating a temporary `(String, String)` per
+/// call — two String heaps per WAL frame, multiplied by the number of
+/// rows per frame, on every multi-tenant worker.
+///
+/// The two-level layout lets the lookup go through `&str` borrows
+/// directly: `self.by_key.get(app)?.get(collection)?` — zero
+/// allocations on the read path. Owned Strings are still produced
+/// exactly once at subscribe-time (for `HashMap::entry`), which is
+/// the rare/cold path.
 pub struct Broker {
     /// Counter for [`Subscription::id`].
     next_id: u64,
-    /// Subscribers per (app_id, collection). Insertion-order list so
-    /// publish iterates in subscribe order — keeps test output
-    /// deterministic.
-    by_key: HashMap<(String, String), Vec<Subscription>>,
+    /// Subscribers indexed by app, then collection. Insertion-order
+    /// `Vec` so publish iterates in subscribe order — keeps test
+    /// output deterministic.
+    by_key: HashMap<String, HashMap<String, Vec<Subscription>>>,
 }
 
 impl Broker {
@@ -413,11 +429,42 @@ impl Broker {
             collection.to_string(),
             DEFAULT_QUEUE_DEPTH,
         );
+        // `entry` requires owned keys; that's fine — subscribe is the
+        // cold path (one call per `db.subscribe(...)`), and the inner
+        // HashMap is allocated lazily on first subscription for a
+        // given app.
         self.by_key
-            .entry((app_id.to_string(), collection.to_string()))
+            .entry(app_id.to_string())
+            .or_default()
+            .entry(collection.to_string())
             .or_default()
             .push(sub.clone());
         sub
+    }
+
+    /// Fast probe: does any subscriber exist for `(app_id, collection)`?
+    ///
+    /// Zero allocations on the lookup path — both arguments are `&str`
+    /// and the two-level `HashMap` uses native `Borrow<str>` lookups.
+    /// Designed for callers on the WAL fan-out path that want to skip
+    /// the more expensive event-shape work when nothing is subscribed.
+    ///
+    /// Returns `false` if the app has no subscribers, or the app has
+    /// subscribers on other collections but not this one, or the
+    /// `Vec<Subscription>` exists but contains only closed entries.
+    /// Closed entries are NOT pruned here — that happens lazily in
+    /// [`Self::publish`] — so a probe between `close()` and the next
+    /// publish on the same key may still return `true`. This is a
+    /// safe over-approximation: callers that act on `true` will fall
+    /// through to `publish`, which is the canonical drop point.
+    pub fn has_subscribers(&self, app_id: &str, collection: &str) -> bool {
+        let Some(by_collection) = self.by_key.get(app_id) else {
+            return false;
+        };
+        let Some(subs) = by_collection.get(collection) else {
+            return false;
+        };
+        !subs.is_empty()
     }
 
     /// Publish a change event. All subscribers on the matching
@@ -431,8 +478,14 @@ impl Broker {
     /// hot inner check is `O(entries_in_read_set)` per event per
     /// matching subscriber and short-circuits on the first match.
     pub fn publish(&mut self, event: &ChangeEvent) {
-        let key = (event.app_id.clone(), event.collection.clone());
-        let Some(subs) = self.by_key.get_mut(&key) else {
+        // Two-level lookup via `&str` — no `(String, String)`
+        // allocation per call. Borrow-based `HashMap::get_mut` lookup
+        // (`Borrow<str>` impl on the `String` key) keeps the hot path
+        // alloc-free.
+        let Some(by_collection) = self.by_key.get_mut(event.app_id.as_str()) else {
+            return;
+        };
+        let Some(subs) = by_collection.get_mut(event.collection.as_str()) else {
             return;
         };
         // Prune dead entries in-place so the bucket stays bounded.
@@ -463,9 +516,15 @@ impl Broker {
         }
         // Drop the bucket if pruning emptied it, so iteration stays
         // bounded. Done AFTER the loop so the `&mut subs` borrow
-        // has been released by the time we touch `self.by_key`.
+        // has been released by the time we touch `self.by_key`. If
+        // the per-app map empties out as a result, drop it too — keeps
+        // `has_subscribers` cheap on apps that churn through ephemeral
+        // collections.
         if is_empty {
-            self.by_key.remove(&key);
+            by_collection.remove(event.collection.as_str());
+            if by_collection.is_empty() {
+                self.by_key.remove(event.app_id.as_str());
+            }
         }
     }
 
@@ -494,6 +553,7 @@ impl Broker {
     pub fn subscription_count(&self) -> usize {
         self.by_key
             .values()
+            .flat_map(|by_collection| by_collection.values())
             .map(|v| v.iter().filter(|s| !s.is_closed()).count())
             .sum()
     }
@@ -502,17 +562,12 @@ impl Broker {
     /// when the app is deleted. Each affected subscription is sent a
     /// `Closed` message.
     pub fn drop_app(&mut self, app_id: &str) {
-        let keys: Vec<_> = self
-            .by_key
-            .keys()
-            .filter(|(a, _)| a == app_id)
-            .cloned()
-            .collect();
-        for k in keys {
-            if let Some(subs) = self.by_key.remove(&k) {
-                for s in subs {
-                    s.close();
-                }
+        let Some(by_collection) = self.by_key.remove(app_id) else {
+            return;
+        };
+        for (_collection, subs) in by_collection {
+            for s in subs {
+                s.close();
             }
         }
     }
@@ -526,9 +581,13 @@ impl Default for Broker {
 
 impl std::fmt::Debug for Broker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `buckets` matches the prior single-level meaning: total
+        // `(app, collection)` pairs, NOT the number of distinct apps.
+        let buckets: usize = self.by_key.values().map(|m| m.len()).sum();
         f.debug_struct("Broker")
             .field("next_id", &self.next_id)
-            .field("buckets", &self.by_key.len())
+            .field("apps", &self.by_key.len())
+            .field("buckets", &buckets)
             .field("subscriptions", &self.subscription_count())
             .finish()
     }
@@ -581,10 +640,12 @@ pub fn drop_app(app_id: Option<&str>) {
         if let Some(id) = app_id {
             br.drop_app(id);
         } else {
-            // Drop everything — used by the "test cleanup" path.
-            let keys: Vec<_> = br.by_key.keys().cloned().collect();
-            for k in keys {
-                if let Some(subs) = br.by_key.remove(&k) {
+            // Drop everything — used by the "test cleanup" path. Take
+            // the whole map out in one shot; iterating after means we
+            // don't borrow `br.by_key` while also mutating it.
+            let drained = std::mem::take(&mut br.by_key);
+            for (_app, by_collection) in drained {
+                for (_collection, subs) in by_collection {
                     for s in subs {
                         s.close();
                     }
@@ -1164,5 +1225,93 @@ mod tests {
         assert!(s1.is_closed());
         assert!(s2.is_closed());
         assert!(!s3.is_closed());
+    }
+
+    // ---------- has_subscribers gate (alloc-free WAL fan-out probe) ----------
+
+    #[test]
+    fn has_subscribers_false_when_app_unknown() {
+        let mut b = Broker::new();
+        // Subscribe on a different app so the broker is non-empty —
+        // we want to assert the negative result is NOT "broker is empty".
+        let _s = b.subscribe("other_app", "messages");
+        assert!(!b.has_subscribers("missing_app", "messages"));
+    }
+
+    #[test]
+    fn has_subscribers_false_when_collection_unknown() {
+        let mut b = Broker::new();
+        let _s = b.subscribe("a", "messages");
+        // Same app, different collection — must not bleed across.
+        assert!(!b.has_subscribers("a", "channels"));
+    }
+
+    #[test]
+    fn has_subscribers_true_for_registered_pair() {
+        let mut b = Broker::new();
+        let _s = b.subscribe("a", "messages");
+        assert!(b.has_subscribers("a", "messages"));
+    }
+
+    #[test]
+    fn has_subscribers_false_after_publish_prunes_closed() {
+        // close() doesn't prune the bucket itself; only publish does.
+        // The probe is allowed to return `true` between close() and the
+        // next publish (documented behaviour — safe over-approximation).
+        // After publish drains the closed entry the bucket is removed
+        // and the probe must return false.
+        let mut b = Broker::new();
+        let s = b.subscribe("a", "messages");
+        assert!(b.has_subscribers("a", "messages"));
+        s.close();
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        assert!(!b.has_subscribers("a", "messages"));
+        // The per-app bucket was emptied — probing other collections on
+        // the same app also returns false (no stale inner HashMap).
+        assert!(!b.has_subscribers("a", "channels"));
+    }
+
+    #[test]
+    fn has_subscribers_takes_str_no_string_alloc_at_call_site() {
+        // Compile-time check: the API accepts `&str` arguments so
+        // callers on the WAL fan-out path can probe without
+        // constructing owned `String`s. If this signature ever
+        // regresses to `&String` or `String` the test will fail to
+        // compile.
+        let mut b = Broker::new();
+        let _s = b.subscribe("a", "messages");
+        let app: &str = "a";
+        let collection: &str = "messages";
+        assert!(b.has_subscribers(app, collection));
+        // Also exercise the public free-function thread-local accessor
+        // pattern: lookup with literal `&'static str`s.
+        assert!(b.has_subscribers("a", "messages"));
+    }
+
+    #[test]
+    fn has_subscribers_isolated_across_apps_and_collections() {
+        let mut b = Broker::new();
+        let _s1 = b.subscribe("app_a", "messages");
+        let _s2 = b.subscribe("app_b", "channels");
+        assert!(b.has_subscribers("app_a", "messages"));
+        assert!(b.has_subscribers("app_b", "channels"));
+        // Cross-product entries do not exist.
+        assert!(!b.has_subscribers("app_a", "channels"));
+        assert!(!b.has_subscribers("app_b", "messages"));
+        assert!(!b.has_subscribers("app_c", "anything"));
+    }
+
+    #[test]
+    fn publish_drops_per_app_map_when_last_collection_empties() {
+        // Whitebox-ish: confirms the per-app inner HashMap is dropped
+        // once it has no live collections — keeps `has_subscribers` /
+        // `publish` cheap on apps that churn ephemeral collections.
+        let mut b = Broker::new();
+        let s = b.subscribe("a", "messages");
+        assert_eq!(b.by_key.len(), 1);
+        s.close();
+        b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
+        // Per-app entry collapsed away — no leaked inner HashMap.
+        assert_eq!(b.by_key.len(), 0);
     }
 }
