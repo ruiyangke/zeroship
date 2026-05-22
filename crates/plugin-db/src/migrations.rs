@@ -90,14 +90,39 @@ fn coded_db(context: &str, e: crate::error::DbError) -> OpError {
         | crate::error::DbError::LockContention { message }
         | crate::error::DbError::Transient { message }
         | crate::error::DbError::Internal { message } => {
-            // `message` already starts with "db: " from `walk_pg_chain`;
-            // prepend only the lifecycle context phrase to avoid the
-            // doubly-prefixed "db: {context} failed: db: ..." output.
-            *message = format!("{context}: {message}");
+            *message = format!("db: {context} failed: {message}");
         }
         _ => {}
     }
     db_err.to_op_error()
+}
+
+/// Map an `ensure_audit_table` failure to an `OpError` while preserving
+/// the SDK-facing `.code` discipline.
+///
+/// SQLSTATE-coded variants (`Transient`, `LockContention`,
+/// `UniqueViolation`, …) and pre-coded ones (`SchemaRefused`,
+/// `ValidationFailed`, …) flow through `to_op_error()` verbatim so the
+/// SDK can branch on `.code` (e.g. retry on `transient`,
+/// surface-and-back-off on `lock_not_available`).
+///
+/// Only the catch-all `Internal` arm gets re-wrapped with the
+/// operator-facing `audit_bootstrap_failed` code — that's the bucket
+/// where there is no SQLSTATE to preserve and the operator wants to
+/// know *which* lifecycle step bootstrapped the audit table.
+///
+/// Mirrors the apply.rs:87-101 discipline so every migrations-lifecycle
+/// surface (`begin`, `status`, `cancel`, `reset`) maps audit-bootstrap
+/// failures the same way.
+fn map_audit_bootstrap_err(e: crate::error::DbError) -> OpError {
+    match e {
+        crate::error::DbError::Internal { message } => coded(
+            "audit_bootstrap_failed",
+            &format!("audit bootstrap failed: {message}"),
+            None,
+        ),
+        other => other.to_op_error(),
+    }
 }
 
 fn err_already_running() -> OpError {
@@ -182,7 +207,7 @@ fn lock_snapshot() -> Option<(String, String, i64, bool, i64)> {
 
 /// Begin a migration run. Routes connection / SQL execution through
 /// the [`Backend`] facade (Stage 8e-R2).
-pub(crate) async fn exec_begin(
+pub async fn exec_begin(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -225,15 +250,12 @@ pub(crate) async fn exec_begin(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
+        .map_err(map_audit_bootstrap_err)?;
 
     let client = backend
         .acquire_dedicated_client()
         .await
-        // Route through `to_op_error()` so the SQLSTATE-derived code
-        // (`transient`, etc.) and its retry hint reach the SDK, rather
-        // than being discarded by `into_string()`.
-        .map_err(|e| e.to_op_error())?;
+        .map_err(|e| coded("tx_connect_failed", &e.into_string(), None))?;
 
     let lock_key = format!("zs_mig:{app_id}");
     let got = backend
@@ -329,7 +351,7 @@ pub(crate) async fn exec_begin(
 }
 
 /// Fetch a batch of rows after `cursor`.
-pub(crate) async fn exec_fetch_batch(
+pub async fn exec_fetch_batch(
     backend: &PostgresBackend,
     app_id: &str,
     cursor: i64,
@@ -414,7 +436,7 @@ pub(crate) async fn exec_fetch_batch(
 /// SDK requested (via `terminal_status` — see the `AuditTerminal` enum). The
 /// advisory lock is released and the per-isolate `mig_lock` slot is cleared.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn exec_commit_batch(
+pub async fn exec_commit_batch(
     backend: &PostgresBackend,
     app_id: &str,
     updates: &Value,
@@ -526,7 +548,7 @@ pub(crate) async fn exec_commit_batch(
             if col == "id" {
                 continue;
             }
-            params.push(crate::query::value_to_param(val));
+            params.push(crate::query::value_to_param_pub(val));
             assignments.push(format!(
                 "{} = ${}",
                 crate::query::quote_ident(col),
@@ -612,7 +634,7 @@ pub(crate) async fn exec_commit_batch(
 
 /// Read the current audit row state for a (collection, name) pair.
 /// Returns a JSON object the SDK can shape into the `status` API.
-pub(crate) async fn exec_status(
+pub async fn exec_status(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -621,7 +643,7 @@ pub(crate) async fn exec_status(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
+        .map_err(map_audit_bootstrap_err)?;
     let row = backend
         .find_latest_backfill_row_pool(app_id, collection, name)
         .await
@@ -653,7 +675,7 @@ pub(crate) async fn exec_status(
 /// Cancel a migration. Allowed only when status is `pending` or
 /// `running` (proposal B1, "Cancel happens-before the next batch").
 /// Returns `{ ok: true }` on transition, structured error otherwise.
-pub(crate) async fn exec_cancel(
+pub async fn exec_cancel(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -662,7 +684,7 @@ pub(crate) async fn exec_cancel(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
+        .map_err(map_audit_bootstrap_err)?;
     // Read current status.
     let row = backend
         .find_latest_backfill_row_pool(app_id, collection, name)
@@ -686,7 +708,7 @@ pub(crate) async fn exec_cancel(
 /// Reset a migration's state (status='pending', cursor=0, processed=0,
 /// dead_letter_pks=null). Used when an operator wants to retry from
 /// scratch after a `cancelled` or `failed` run.
-pub(crate) async fn exec_reset(
+pub async fn exec_reset(
     backend: &PostgresBackend,
     app_id: &str,
     name: &str,
@@ -695,7 +717,7 @@ pub(crate) async fn exec_reset(
     backend
         .ensure_audit_table(app_id)
         .await
-        .map_err(|e| coded("audit_bootstrap_failed", &format!("{e}"), None))?;
+        .map_err(map_audit_bootstrap_err)?;
     // Gap X: bump `audit_generation` so any in-flight worker holding
     // the old generation aborts its next `commit_batch` with
     // `migration_reset_externally` instead of overwriting the cursor
@@ -710,7 +732,7 @@ pub(crate) async fn exec_reset(
 /// Internal helper for the worker shutdown path — drop any active
 /// migration lock so the connection is released. Safe to call when no
 /// migration is active.
-pub(crate) fn release_active_lock() {
+pub fn release_active_lock() {
     crate::context::with_mut(|c| c.clear_mig_lock());
 }
 
@@ -827,4 +849,83 @@ fn make_test_backend(
 ) -> crate::backend::PostgresBackend {
     let url = crate::context::with(|c| c.db_url()).unwrap_or_default();
     crate::backend::PostgresBackend::new(pool, url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::DbError;
+    use zeroship_runtime::state::OpErrorKind;
+
+    /// Regression: an `ensure_audit_table` failure that classifies as
+    /// `DbError::Transient` (Postgres class 08 — connection drop, etc.)
+    /// must reach JS as `.code = "transient"` with the retry hint, NOT
+    /// as `.code = "audit_bootstrap_failed"`. Pre-fix the four
+    /// audit_bootstrap_failed sites in this file flattened the typed
+    /// `DbError` via `format!("{e:?}")`, stripping the SQLSTATE-derived
+    /// classification — the SDK saw `audit_bootstrap_failed` for what
+    /// is actually a transient backend failure and could not retry.
+    #[test]
+    fn map_audit_bootstrap_err_preserves_transient_code() {
+        let e = DbError::Transient {
+            message: "connection refused".into(),
+        };
+        let op = map_audit_bootstrap_err(e);
+        match &op.kind {
+            OpErrorKind::CodedError { code, hint } => {
+                assert_eq!(
+                    code, "transient",
+                    "Transient SQLSTATE variant must reach JS as `.code = transient`, \
+                     not get flattened to `audit_bootstrap_failed`"
+                );
+                assert!(
+                    hint.is_some(),
+                    "Transient must carry the retry-after-backoff hint so the SDK can act"
+                );
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        assert_eq!(op.message, "connection refused");
+    }
+
+    /// Companion: `LockContention` (Postgres 55P03 — lock not
+    /// available) must reach JS as `.code = "lock_not_available"`. This
+    /// surfaces on `pg_try_advisory_lock` contention paths the SDK
+    /// branches on to retry-with-backoff or surface "another worker
+    /// holds the lock".
+    #[test]
+    fn map_audit_bootstrap_err_preserves_lock_contention_code() {
+        let e = DbError::LockContention {
+            message: "lock not available".into(),
+        };
+        let op = map_audit_bootstrap_err(e);
+        match &op.kind {
+            OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "lock_not_available");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+    }
+
+    /// Catch-all: `Internal` (no SQLSTATE — unclassified) IS the one
+    /// arm that should still be wrapped with the `audit_bootstrap_failed`
+    /// code + operator-facing prefix, because there's no SDK-actionable
+    /// classification to preserve.
+    #[test]
+    fn map_audit_bootstrap_err_wraps_internal_with_prefix() {
+        let e = DbError::Internal {
+            message: "some unclassified failure".into(),
+        };
+        let op = map_audit_bootstrap_err(e);
+        match &op.kind {
+            OpErrorKind::CodedError { code, .. } => {
+                assert_eq!(code, "audit_bootstrap_failed");
+            }
+            other => panic!("expected CodedError, got {other:?}"),
+        }
+        assert_eq!(
+            op.message,
+            "audit bootstrap failed: some unclassified failure"
+        );
+    }
 }
