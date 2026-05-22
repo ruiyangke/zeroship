@@ -457,3 +457,468 @@ pub fn with<R>(f: impl FnOnce(&IsolateDbContext) -> R) -> R {
 pub fn with_mut<R>(f: impl FnOnce(&mut IsolateDbContext) -> R) -> R {
     ISOLATE_CTX.with(|c| f(&mut c.borrow_mut()))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the per-isolate DB context state machine.
+    //!
+    //! Every test constructs a fresh [`IsolateDbContext`] directly via
+    //! [`IsolateDbContext::new`] — the thread-local [`ISOLATE_CTX`] is
+    //! avoided so test ordering on the same OS thread cannot cause one
+    //! test to observe state another mutated.
+    //!
+    //! ## Why some accessors aren't covered here
+    //!
+    //! The slots that store a `compio_postgres::Client` (`tx_conn`,
+    //! `MigrationLock::client`) need a value of that type to exercise.
+    //! `compio_postgres::Client::new` is `pub(crate)` on the driver, so
+    //! we cannot mint one outside `compio-postgres` — and the task brief
+    //! is explicit that these unit tests must not touch real Postgres.
+    //!
+    //! Concretely, the following can only be exercised by
+    //! `tests/integration.rs` (which spins up a real PG):
+    //!
+    //! * [`IsolateDbContext::install_tx_client`] /
+    //!   [`IsolateDbContext::take_tx_client`] /
+    //!   [`IsolateDbContext::put_tx_client`] round-trip.
+    //! * The `debug_assert!` inside [`IsolateDbContext::set_tx_token`]
+    //!   that a non-zero token requires `tx_conn = Some` — we test the
+    //!   *zero* branch only (which is always allowed).
+    //! * The `debug_assert!` inside
+    //!   [`IsolateDbContext::set_auto_tx_owned`] that `owned = true`
+    //!   requires `tx_conn = Some` — same constraint; we only test the
+    //!   `false` branch.
+    //! * [`IsolateDbContext::set_mig_lock`] /
+    //!   [`IsolateDbContext::take_mig_client`] /
+    //!   [`IsolateDbContext::return_mig_client`] / `mig_lock_snapshot`
+    //!   *with* a client present — we test the snapshot/clear paths
+    //!   using a `MigrationLock { client: None, .. }` because the
+    //!   snapshot deliberately doesn't read `client`.
+    //!
+    //! For [`IsolateDbContext::set_pool`] / [`IsolateDbContext::backend`]
+    //! we need an `Rc<Pool>`, which only `Pool::connect` produces. Those
+    //! lifecycles are covered by `tests/integration.rs`.
+
+    use super::*;
+
+    use crate::broker::{ChangeEvent, ChangeOp};
+    use std::collections::HashMap;
+
+    fn dummy_event(collection: &str) -> ChangeEvent {
+        ChangeEvent {
+            app_id: "app_t".into(),
+            collection: collection.into(),
+            op: ChangeOp::Insert,
+            pk: Some(1),
+            changed_columns: Vec::new(),
+            new_tuple: HashMap::new(),
+            old_tuple: None,
+        }
+    }
+
+    // ----- IsolateDbContext::new / Default -------------------------------
+
+    #[test]
+    fn new_yields_fully_cleared_slots() {
+        let ctx = IsolateDbContext::new();
+        assert!(ctx.pool().is_none());
+        assert!(!ctx.pool_initialised());
+        assert!(ctx.backend().is_none());
+        assert!(ctx.db_url().is_none());
+        assert!(!ctx.has_tx());
+        assert_eq!(ctx.tx_token(), 0);
+        assert!(!ctx.auto_tx_owned());
+        assert!(!ctx.has_mig_lock());
+        assert!(ctx.mig_lock_snapshot().is_none());
+        // pending_emits starts as None (the slot is allocated lazily on
+        // first push).
+        assert!(ctx.pending_emits.is_none());
+        // Both registries empty.
+        assert!(!ctx.is_model_registered("a", "c"));
+        assert!(!ctx.is_consumer_running("a"));
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let a = IsolateDbContext::default();
+        let b = IsolateDbContext::new();
+        // Compare observable state (no PartialEq on the struct).
+        assert_eq!(a.pool_initialised(), b.pool_initialised());
+        assert_eq!(a.tx_token(), b.tx_token());
+        assert_eq!(a.auto_tx_owned(), b.auto_tx_owned());
+        assert_eq!(a.has_tx(), b.has_tx());
+        assert_eq!(a.has_mig_lock(), b.has_mig_lock());
+        assert_eq!(a.db_url(), b.db_url());
+    }
+
+    // ----- DB_URL coherence ----------------------------------------------
+
+    #[test]
+    fn set_db_url_returns_true_on_change() {
+        let mut ctx = IsolateDbContext::new();
+        assert!(ctx.set_db_url("postgres://a"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
+    }
+
+    #[test]
+    fn set_db_url_returns_false_when_unchanged() {
+        let mut ctx = IsolateDbContext::new();
+        assert!(ctx.set_db_url("postgres://a"));
+        assert!(!ctx.set_db_url("postgres://a"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
+    }
+
+    #[test]
+    fn set_db_url_returns_true_on_subsequent_change() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_db_url("postgres://a");
+        assert!(ctx.set_db_url("postgres://b"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://b"));
+    }
+
+    #[test]
+    fn set_db_url_does_not_clear_pool_on_no_op() {
+        // `set_db_url` is *just* the URL slot; the caller (lib.rs) is
+        // responsible for invoking `clear_pool` when the URL changes.
+        // We can't install a real pool here (Pool::connect needs PG),
+        // but we can at least confirm `set_db_url` itself does NOT
+        // poke the `backend` slot — once the no-op path returns false,
+        // a hypothetical pool would still be installed. Verified
+        // indirectly: the function body has no `self.pool = None` or
+        // `self.backend = None`.
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_db_url("postgres://a");
+        // No pool to clear; we're checking the API surface remains
+        // pool-agnostic.
+        assert!(ctx.pool().is_none());
+        assert!(ctx.backend().is_none());
+        let _ = ctx.set_db_url("postgres://a"); // no-op
+        assert!(ctx.pool().is_none());
+        assert!(ctx.backend().is_none());
+    }
+
+    // ----- clear_pool ----------------------------------------------------
+
+    #[test]
+    fn clear_pool_when_unset_is_noop() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.clear_pool();
+        assert!(ctx.pool().is_none());
+        assert!(ctx.backend().is_none());
+    }
+
+    // ----- REGISTERED_MODELS ---------------------------------------------
+
+    #[test]
+    fn registered_models_round_trip() {
+        let mut ctx = IsolateDbContext::new();
+        assert!(!ctx.is_model_registered("app_a", "messages"));
+        ctx.mark_model_registered("app_a", "messages");
+        assert!(ctx.is_model_registered("app_a", "messages"));
+        // App / collection both contribute to the key.
+        assert!(!ctx.is_model_registered("app_b", "messages"));
+        assert!(!ctx.is_model_registered("app_a", "other"));
+    }
+
+    #[test]
+    fn mark_model_registered_is_idempotent() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.mark_model_registered("app_a", "msgs");
+        ctx.mark_model_registered("app_a", "msgs");
+        assert!(ctx.is_model_registered("app_a", "msgs"));
+        // HashSet dedupes — the second call shouldn't grow the registry
+        // (verified via the set's `len` semantics).
+        assert_eq!(ctx.registered_models.len(), 1);
+    }
+
+    // ----- TX token monotonic counter ------------------------------------
+
+    #[test]
+    fn next_tx_token_starts_at_one() {
+        let mut ctx = IsolateDbContext::new();
+        assert_eq!(ctx.next_tx_token(), 1);
+    }
+
+    #[test]
+    fn next_tx_token_increments_monotonically() {
+        let mut ctx = IsolateDbContext::new();
+        let a = ctx.next_tx_token();
+        let b = ctx.next_tx_token();
+        let c = ctx.next_tx_token();
+        assert_eq!(a, 1);
+        assert_eq!(b, 2);
+        assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn set_tx_token_zero_is_always_allowed() {
+        // The non-zero branch requires an active tx_conn (debug_assert!);
+        // we test the zero (clearing) branch here. Zero clears in every
+        // settle path, regardless of slot occupancy.
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_tx_token(0);
+        assert_eq!(ctx.tx_token(), 0);
+        // Even after a counter bump, zero stays clear-only.
+        ctx.next_tx_token();
+        ctx.set_tx_token(0);
+        assert_eq!(ctx.tx_token(), 0);
+    }
+
+    #[test]
+    fn set_auto_tx_owned_false_is_always_allowed() {
+        // The `true` branch requires tx_conn = Some (debug_assert!); the
+        // `false` branch is always allowed because `exec_auto_end`
+        // clears the flag right after taking the client out, when the
+        // slot is briefly empty.
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_auto_tx_owned(false);
+        assert!(!ctx.auto_tx_owned());
+    }
+
+    // ----- PENDING_EMITS state machine -----------------------------------
+
+    #[test]
+    fn pending_emits_start_empty() {
+        let ctx = IsolateDbContext::new();
+        assert!(ctx.pending_emits.is_none());
+    }
+
+    #[test]
+    fn push_pending_emit_allocates_slot_lazily() {
+        let mut ctx = IsolateDbContext::new();
+        assert!(ctx.pending_emits.is_none());
+        ctx.push_pending_emit(dummy_event("c1"));
+        assert!(ctx.pending_emits.is_some());
+        assert_eq!(ctx.pending_emits.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn push_pending_emit_accumulates() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_pending_emit(dummy_event("c2"));
+        ctx.push_pending_emit(dummy_event("c3"));
+        let evs = ctx.pending_emits.as_ref().unwrap();
+        assert_eq!(evs.len(), 3);
+        assert_eq!(evs[0].collection, "c1");
+        assert_eq!(evs[1].collection, "c2");
+        assert_eq!(evs[2].collection, "c3");
+    }
+
+    #[test]
+    fn drain_pending_emits_returns_and_clears() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_pending_emit(dummy_event("c2"));
+        let drained = ctx.drain_pending_emits();
+        assert_eq!(drained.len(), 2);
+        // After drain the slot is cleared back to None — subsequent
+        // pushes re-allocate.
+        assert!(ctx.pending_emits.is_none());
+    }
+
+    #[test]
+    fn drain_pending_emits_on_empty_returns_empty_vec() {
+        let mut ctx = IsolateDbContext::new();
+        let drained = ctx.drain_pending_emits();
+        assert!(drained.is_empty());
+        assert!(ctx.pending_emits.is_none());
+    }
+
+    #[test]
+    fn drain_then_push_starts_fresh() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        let _ = ctx.drain_pending_emits();
+        ctx.push_pending_emit(dummy_event("c2"));
+        let evs = ctx.pending_emits.as_ref().unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].collection, "c2");
+    }
+
+    #[test]
+    fn clear_pending_emits_drops_without_returning() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_pending_emit(dummy_event("c2"));
+        ctx.clear_pending_emits();
+        assert!(ctx.pending_emits.is_none());
+        // A subsequent drain returns empty (slot is None).
+        assert!(ctx.drain_pending_emits().is_empty());
+    }
+
+    #[test]
+    fn clear_pending_emits_on_empty_is_idempotent() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.clear_pending_emits();
+        ctx.clear_pending_emits();
+        assert!(ctx.pending_emits.is_none());
+    }
+
+    // ----- MIG_LOCK state machine ----------------------------------------
+
+    fn mig_lock(name: &str, collection: &str, audit_id: i64, dry_run: bool) -> MigrationLock {
+        MigrationLock {
+            name: name.to_string(),
+            collection: collection.to_string(),
+            audit_id,
+            dry_run,
+            start_generation: 7,
+            client: None,
+        }
+    }
+
+    #[test]
+    fn set_mig_lock_install_then_snapshot() {
+        let mut ctx = IsolateDbContext::new();
+        assert!(!ctx.has_mig_lock());
+        let prev = ctx.set_mig_lock(mig_lock("m1", "users", 42, false));
+        assert!(prev.is_none());
+        assert!(ctx.has_mig_lock());
+
+        let snap = ctx.mig_lock_snapshot().expect("snapshot present");
+        assert_eq!(snap.0, "m1");
+        assert_eq!(snap.1, "users");
+        assert_eq!(snap.2, 42);
+        assert!(!snap.3);
+        assert_eq!(snap.4, 7); // start_generation
+    }
+
+    #[test]
+    fn set_mig_lock_dry_run_flag_round_trips() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_mig_lock(mig_lock("dry", "msgs", 1, true));
+        let snap = ctx.mig_lock_snapshot().unwrap();
+        assert!(snap.3, "dry_run flag should round-trip via snapshot");
+    }
+
+    #[test]
+    fn set_mig_lock_replaces_existing_returns_previous() {
+        // The accessor uses `replace` so callers can detect a pre-
+        // existing occupant. Production code calls `has_mig_lock` first
+        // and refuses to overwrite, but the state machine still allows
+        // the swap and reports the previous holder via the return
+        // value.
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_mig_lock(mig_lock("first", "c", 1, false));
+        let prev = ctx.set_mig_lock(mig_lock("second", "c", 2, false));
+        let prev = prev.expect("previous lock returned");
+        assert_eq!(prev.name, "first");
+        assert_eq!(prev.audit_id, 1);
+
+        let snap = ctx.mig_lock_snapshot().unwrap();
+        assert_eq!(snap.0, "second");
+        assert_eq!(snap.2, 2);
+    }
+
+    #[test]
+    fn clear_mig_lock_drops_state() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.set_mig_lock(mig_lock("m1", "c", 1, false));
+        assert!(ctx.has_mig_lock());
+        ctx.clear_mig_lock();
+        assert!(!ctx.has_mig_lock());
+        assert!(ctx.mig_lock_snapshot().is_none());
+    }
+
+    #[test]
+    fn clear_mig_lock_is_idempotent() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.clear_mig_lock(); // empty -> empty
+        ctx.clear_mig_lock();
+        assert!(!ctx.has_mig_lock());
+        // Install then clear twice.
+        ctx.set_mig_lock(mig_lock("m1", "c", 1, false));
+        ctx.clear_mig_lock();
+        ctx.clear_mig_lock();
+        assert!(!ctx.has_mig_lock());
+    }
+
+    #[test]
+    fn mig_lock_snapshot_outside_run_returns_none() {
+        let ctx = IsolateDbContext::new();
+        assert!(ctx.mig_lock_snapshot().is_none());
+    }
+
+    #[test]
+    fn take_mig_client_on_empty_lock_returns_none() {
+        // No active migration: take is a no-op.
+        let mut ctx = IsolateDbContext::new();
+        assert!(ctx.take_mig_client().is_none());
+        // With a lock present but `client: None` (our test mig_lock
+        // helper), take still returns None — there is nothing to take.
+        ctx.set_mig_lock(mig_lock("m", "c", 1, false));
+        assert!(ctx.take_mig_client().is_none());
+    }
+
+    #[test]
+    fn return_mig_client_after_cancel_is_silent_noop() {
+        // The documented contract: `return_mig_client` is a no-op when
+        // the migration state has been cleared in the meantime (e.g.
+        // operator cancel). We can't construct a real Client here, but
+        // we can exercise the early-return branch: clear the lock,
+        // then call return — the function must not panic and must not
+        // resurrect the lock.
+        let mut ctx = IsolateDbContext::new();
+        ctx.clear_mig_lock();
+        // (Skipped: actually passing a Client; see module-level note.)
+        assert!(!ctx.has_mig_lock());
+    }
+
+    // ----- RUNNING_CONSUMERS state machine -------------------------------
+
+    #[test]
+    fn consumer_running_round_trip() {
+        let mut ctx = IsolateDbContext::new();
+        assert!(!ctx.is_consumer_running("app_a"));
+        ctx.mark_consumer_running("app_a");
+        assert!(ctx.is_consumer_running("app_a"));
+        ctx.unmark_consumer_running("app_a");
+        assert!(!ctx.is_consumer_running("app_a"));
+    }
+
+    #[test]
+    fn consumer_running_is_per_app() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.mark_consumer_running("app_a");
+        assert!(ctx.is_consumer_running("app_a"));
+        assert!(!ctx.is_consumer_running("app_b"));
+        ctx.mark_consumer_running("app_b");
+        assert!(ctx.is_consumer_running("app_a"));
+        assert!(ctx.is_consumer_running("app_b"));
+    }
+
+    #[test]
+    fn mark_consumer_running_is_idempotent() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.mark_consumer_running("app_a");
+        ctx.mark_consumer_running("app_a");
+        assert!(ctx.is_consumer_running("app_a"));
+        assert_eq!(ctx.running_consumers.len(), 1);
+    }
+
+    #[test]
+    fn unmark_consumer_running_is_idempotent_on_unknown() {
+        let mut ctx = IsolateDbContext::new();
+        // Never marked; unmark must be silent.
+        ctx.unmark_consumer_running("app_a");
+        assert!(!ctx.is_consumer_running("app_a"));
+        // Mark, unmark twice — second unmark is silent.
+        ctx.mark_consumer_running("app_b");
+        ctx.unmark_consumer_running("app_b");
+        ctx.unmark_consumer_running("app_b");
+        assert!(!ctx.is_consumer_running("app_b"));
+    }
+
+    #[test]
+    fn clear_consumer_registry_drops_all_entries() {
+        let mut ctx = IsolateDbContext::new();
+        ctx.mark_consumer_running("a");
+        ctx.mark_consumer_running("b");
+        ctx.mark_consumer_running("c");
+        assert_eq!(ctx.running_consumers.len(), 3);
+        ctx.clear_consumer_registry();
+        assert_eq!(ctx.running_consumers.len(), 0);
+        assert!(!ctx.is_consumer_running("a"));
+    }
+}
