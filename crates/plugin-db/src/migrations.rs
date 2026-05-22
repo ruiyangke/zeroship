@@ -45,16 +45,19 @@ use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
-use crate::backend::{Backend, PostgresBackend};
+use crate::backend::{Backend, LockManager, PostgresBackend, SqlExecutor};
 use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
 
 /// Convenience alias — the migration loop holds a backend-owned
-/// client across awaits. `<PostgresBackend as Backend>::Client` is
-/// the concrete `compio_postgres::Client` today; future backends
+/// client across awaits. `<PostgresBackend as SqlExecutor>::Client`
+/// is the concrete `compio_postgres::Client` today; future backends
 /// can swap in their own session type without rewriting every site
-/// that pulls the lock client out of the per-isolate context.
-type LockClient = <PostgresBackend as Backend>::Client;
+/// that pulls the lock client out of the per-isolate context. The
+/// associated type lives on the carved [`SqlExecutor`] capability
+/// trait (P0 PR 1), but [`Backend: SqlExecutor<Client = compio_postgres::Client>`]
+/// keeps the constraint pinned end-to-end.
+type LockClient = <PostgresBackend as SqlExecutor>::Client;
 
 /// Build a coded `OpError` for a migration lifecycle failure. The
 /// runtime pump materialises a JS `Error` with `e.code` (and optional

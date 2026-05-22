@@ -20,7 +20,7 @@ use crate::audit::{
 use crate::diff::LiveSchema;
 use crate::error::DbError;
 
-use super::Backend;
+use super::{Backend, LockManager, SqlExecutor};
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
 ///
@@ -61,11 +61,24 @@ impl PostgresBackend {
     }
 }
 
-impl Backend for PostgresBackend {
-    type Client = compio_postgres::Client;
-    type LiveSchema = LiveSchema;
+// ---------------------------------------------------------------------------
+// Capability impls — three blocks (P0 PR 1):
+//
+//   1. `impl SqlExecutor for PostgresBackend` — connection lifecycle
+//      (3 methods).
+//   2. `impl LockManager for PostgresBackend` — advisory locks
+//      (3 methods).
+//   3. `impl Backend for PostgresBackend` — the remaining 16 methods
+//      that have not yet been carved into focused capability traits
+//      (P0 PR 2 will carve `NamespaceManager` / `SchemaIntrospect` /
+//      `IndexBuilder` off this block).
+//
+// Method bodies are unchanged from the pre-PR-1 monolithic
+// `impl Backend for PostgresBackend` block — pure cut-and-paste.
+// ---------------------------------------------------------------------------
 
-    // ----- connection lifecycle ---------------------------------------
+impl SqlExecutor for PostgresBackend {
+    type Client = compio_postgres::Client;
 
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
         let (client, connection) = compio_postgres::connect(&self.url, compio_postgres::NoTls)
@@ -103,9 +116,9 @@ impl Backend for PostgresBackend {
             .map_err(|e| DbError::from_pg(&e))?;
         Ok(rows.len() as u64)
     }
+}
 
-    // ----- advisory locks ---------------------------------------------
-
+impl LockManager for PostgresBackend {
     async fn acquire_advisory_lock(
         &self,
         client: &Self::Client,
@@ -167,6 +180,10 @@ impl Backend for PostgresBackend {
             .map_err(|e| DbError::from_pg(&e))?;
         Ok(())
     }
+}
+
+impl Backend for PostgresBackend {
+    type LiveSchema = LiveSchema;
 
     // ----- schema bootstrap + introspection ---------------------------
 

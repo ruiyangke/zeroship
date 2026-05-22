@@ -49,36 +49,26 @@ pub mod postgres;
 
 pub use postgres::PostgresBackend;
 
-/// The data-store boundary. One impl per storage backend; today only
-/// Postgres ([`PostgresBackend`]).
+/// SQL execution capability — the "connection lifecycle + run a
+/// statement" slice of the data-store boundary.
 ///
-/// `Send + Sync` so the trait object can live behind an `Rc` shared
-/// across the per-isolate context's borrow surface (compio is
-/// single-threaded but the bound is cheap to satisfy).
+/// Carved out of the monolithic [`Backend`] trait in P0 PR 1 (see
+/// `docs/proposals/p0-implementation-plan.md` §"PR 1" and the
+/// converged design at `docs/proposals/db-system-design.md` §7).
+/// Future P0 PRs will narrow consumer bounds onto this trait (and
+/// [`LockManager`]) instead of the omnibus [`Backend`] super-trait;
+/// see the deferred-backlog [C1] entry in
+/// `docs/reviews/plugin-db-deferred.md`.
 ///
-/// Lifetime invariants:
-///
-/// - Methods that take `&Self::Client` use it borrow-only; the caller
-///   owns the client (e.g. the migration lock holds it across awaits,
-///   the audit helpers borrow it for one operation).
-/// - [`Backend::acquire_dedicated_client`] returns an owned `Client`
-///   detached from any pool lifetime — the caller is free to park it
-///   on the per-isolate context (e.g. `MigrationLock::client`,
-///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
-///   of a session-scoped lock.
-pub trait Backend: 'static {
+/// Not `Send + Sync` on purpose — the compio runtime is
+/// single-threaded per worker, so we don't pay for atomics or
+/// thread-safety bounds we don't use (Open Q4 in the implementation
+/// plan).
+pub trait SqlExecutor: 'static {
     /// Concrete connection / client handle. The orchestrator threads
     /// this through audit helpers and advisory-lock acquisition without
     /// naming the underlying SQL driver.
     type Client;
-
-    /// Concrete live-schema snapshot returned by
-    /// [`Self::introspect_schema`]. The Postgres impl uses
-    /// [`crate::diff::LiveSchema`]; alternate backends would produce
-    /// the same shape from their own catalog tables.
-    type LiveSchema;
-
-    // ----- connection lifecycle ---------------------------------------
 
     /// Acquire a dedicated (non-pooled) connection. Caller owns the
     /// lifetime — used by the migration lock and the user-driven
@@ -115,9 +105,22 @@ pub trait Backend: 'static {
         sql: &str,
         params: &[&str],
     ) -> Result<u64, DbError>;
+}
 
-    // ----- advisory locks ---------------------------------------------
-
+/// Advisory-lock capability — session-scoped `(key1, key2)` locks held
+/// on a [`SqlExecutor::Client`].
+///
+/// Carved out of the monolithic [`Backend`] trait in P0 PR 1 (see
+/// `docs/proposals/p0-implementation-plan.md` §"PR 1" and
+/// `docs/proposals/db-system-design.md` §7). The `: SqlExecutor`
+/// super-bound is load-bearing — every method takes a `&Self::Client`
+/// and that associated type lives on [`SqlExecutor`].
+///
+/// PR 6 will replace the legacy `(key1, key2)` string-key shape with
+/// the typed `LockScope` enum and rename `OrchestratorLockGuard` →
+/// `LockGuard`; the three methods on this trait stay (likely
+/// `pub(crate)`) as the underlying primitive.
+pub trait LockManager: SqlExecutor {
     /// Acquire a session-scoped advisory lock on `(key1, key2)` against
     /// the given client. Blocks if another holder exists; the lock
     /// releases when the client is dropped or the backend session
@@ -162,6 +165,37 @@ pub trait Backend: 'static {
         key1: &str,
         key2: &str,
     ) -> Result<(), DbError>;
+}
+
+/// The data-store boundary. One impl per storage backend; today only
+/// Postgres ([`PostgresBackend`]).
+///
+/// `Send + Sync` so the trait object can live behind an `Rc` shared
+/// across the per-isolate context's borrow surface (compio is
+/// single-threaded but the bound is cheap to satisfy).
+///
+/// Lifetime invariants:
+///
+/// - Methods that take `&Self::Client` use it borrow-only; the caller
+///   owns the client (e.g. the migration lock holds it across awaits,
+///   the audit helpers borrow it for one operation).
+/// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
+///   detached from any pool lifetime — the caller is free to park it
+///   on the per-isolate context (e.g. `MigrationLock::client`,
+///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
+///   of a session-scoped lock.
+#[doc = "`Backend` is now a super-trait composition of \
+[`SqlExecutor`] + [`LockManager`] (P0 PR 1) plus the remaining 16 \
+methods that have not yet been carved into focused capability traits. \
+P0 PR 2 carves `NamespaceManager` / `SchemaIntrospect` / \
+`IndexBuilder` off the 16; the asymmetry is intentional and tracked \
+in `docs/proposals/p0-implementation-plan.md` §\"PR 2\"."]
+pub trait Backend: SqlExecutor<Client = compio_postgres::Client> + LockManager + 'static {
+    /// Concrete live-schema snapshot returned by
+    /// [`Self::introspect_schema`]. The Postgres impl uses
+    /// [`crate::diff::LiveSchema`]; alternate backends would produce
+    /// the same shape from their own catalog tables.
+    type LiveSchema;
 
     // ----- schema bootstrap + introspection ---------------------------
 
@@ -403,6 +437,27 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
+    /// Compile-time: [`PostgresBackend`] satisfies the carved
+    /// [`SqlExecutor`] capability super-trait (P0 PR 1). If a future
+    /// refactor accidentally pulls a `SqlExecutor` method back onto
+    /// the omnibus `Backend` trait — or detaches the impl block from
+    /// the `PostgresBackend` type — this stops compiling.
+    fn assert_postgres_backend_impls_sql_executor() {
+        fn assert_impl<T: SqlExecutor<Client = compio_postgres::Client>>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: [`PostgresBackend`] satisfies the carved
+    /// [`LockManager`] capability super-trait (P0 PR 1). The
+    /// `: SqlExecutor` super-bound on `LockManager` plus the
+    /// `Client = compio_postgres::Client` constraint here pin the
+    /// shape end-to-end — a regression in either direction fails
+    /// compilation in this module.
+    fn assert_postgres_backend_impls_lock_manager() {
+        fn assert_impl<T: LockManager<Client = compio_postgres::Client>>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
     /// Compile-time: the associated types stay anchored to the concrete
     /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A
     /// regression here would silently change every `B::Client` /
@@ -448,6 +503,8 @@ mod tests {
         // doesn't fire. The type-check still runs even if these
         // weren't called, but the explicit cast documents intent.
         let _ = assert_postgres_backend_impls_backend as fn();
+        let _ = assert_postgres_backend_impls_sql_executor as fn();
+        let _ = assert_postgres_backend_impls_lock_manager as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();
         let _ = assert_backend_handle_alias as fn();

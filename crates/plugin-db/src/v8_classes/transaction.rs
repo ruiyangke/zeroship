@@ -47,7 +47,7 @@ use zeroship_runtime::state::OpError;
 // today) but consumer files name it through the type alias so the
 // `compio_postgres` crate stays scoped to `backend/postgres.rs` and
 // `context.rs`.
-type Client = <crate::backend::PostgresBackend as crate::backend::Backend>::Client;
+type Client = <crate::backend::PostgresBackend as crate::backend::SqlExecutor>::Client;
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};
