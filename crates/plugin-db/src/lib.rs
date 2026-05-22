@@ -65,9 +65,9 @@ pub(crate) mod audit;
 #[cfg(feature = "test-helpers")]
 pub mod audit;
 
-#[cfg(not(feature = "test-helpers"))]
+#[cfg(all(feature = "hardening", not(feature = "test-helpers")))]
 pub(crate) mod auth;
-#[cfg(feature = "test-helpers")]
+#[cfg(all(feature = "hardening", feature = "test-helpers"))]
 pub mod auth;
 
 #[cfg(not(feature = "test-helpers"))]
