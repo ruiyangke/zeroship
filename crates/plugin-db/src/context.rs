@@ -36,7 +36,31 @@ use compio_postgres::{Client, Pool};
 
 use crate::backend::PostgresBackend;
 use crate::broker::ChangeEvent;
-use crate::migrations::MigrationLock;
+
+/// Lock state for the in-flight migration. The `client` is held in
+/// an `Option` so callers can `take()` it across an await and
+/// `replace()` it back — the same pattern the transaction slot uses.
+///
+/// Defined here (not in `crate::migrations`) so `compio_postgres::Client`
+/// stays out of consumer modules — the Backend abstraction (Stage 8e-R2)
+/// allows only `context.rs` and `backend/postgres.rs` to name the
+/// underlying driver type.
+pub(crate) struct MigrationLock {
+    pub(crate) name: String,
+    pub(crate) collection: String,
+    pub(crate) audit_id: i64,
+    /// Dry-run runs do not persist `validate_cursor`, dead_letter_pks,
+    /// or processed updates (proposal B1.6).
+    pub(crate) dry_run: bool,
+    /// `audit_generation` snapshot captured at `exec_begin`. The
+    /// audit row's generation is bumped by `exec_reset`; any
+    /// subsequent `commit_batch` whose stored generation no longer
+    /// matches the row's must ROLLBACK and surface
+    /// `migration_reset_externally` (Gap X). Lives in the lock so
+    /// `exec_commit_batch` reads it without an extra round-trip.
+    pub(crate) start_generation: i64,
+    pub(crate) client: Option<Client>,
+}
 
 /// Per-isolate DB plug-in state. One instance per worker thread, held
 /// by the [`ISOLATE_CTX`] thread-local.
