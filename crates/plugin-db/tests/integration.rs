@@ -1004,6 +1004,173 @@ async fn a3_audit_table_created_and_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
+// 23b. F2 (NEW-R14-1) — pre-existing audit table with the OLD 7-status
+// CHECK constraint (pre-`6afab751`, no `validation_refused`) gets widened
+// by `ensure_audit_table_exists`. The "fresh-table" branch was covered by
+// the test above; this closes the **upgrade path** every existing-app
+// deploy hits.
+//
+// Pre-cycle 15:47 r14 surfaced this as a MEDIUM untested gap: the prior
+// "two consecutive ensure_audit_table_exists calls" check only exercises
+// the no-op rewrite branch (table created with the NEW CHECK, then
+// re-ALTERed to the same body). This test forces the DROP-old / ADD-new
+// path and asserts the post-state accepts `'validation_refused'`.
+// ---------------------------------------------------------------------------
+
+/// F2 CHECK ALTER upgrade path — closes NEW-R14-1 (MEDIUM).
+///
+/// Seeds the audit table with the pre-`6afab751` OLD CHECK constraint
+/// (7 statuses, no `validation_refused`), runs `ensure_audit_table_exists`,
+/// and asserts the constraint was widened and now accepts the new value.
+#[compio::test]
+async fn a3_audit_table_check_alter_upgrades_existing_constraint() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "a3_audit_alter_upgrade";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&zeroship_plugin_db::query::build_create_schema(app), &[])
+        .await
+        .unwrap();
+
+    // Seed the table with the OLD CHECK body — the pre-`6afab751`
+    // 7-status list without `validation_refused`. The DDL otherwise
+    // matches the current shape so `ensure_audit_table_exists`'s
+    // CREATE-IF-NOT-EXISTS is a no-op and only the DROP+ADD path runs.
+    let old_create = format!(
+        r#"CREATE TABLE "{app}"."__zeroship_migrations" (
+  id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  collection          TEXT NOT NULL,
+  phase               TEXT NOT NULL,
+  change_class        TEXT NOT NULL,
+  change_kind         TEXT NOT NULL,
+  details             JSONB NOT NULL,
+  ddl_sql             TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  applied_at          TIMESTAMPTZ,
+  applied_by_kind     TEXT NOT NULL,
+  applied_by_id       TEXT,
+  deploy_id           TEXT NOT NULL,
+  parent_id           BIGINT REFERENCES "{app}"."__zeroship_migrations"(id),
+  schema_version      INTEGER NOT NULL,
+  status              TEXT NOT NULL,
+  error               TEXT,
+  duration_ms         INTEGER,
+  validate_cursor     BIGINT,
+  owner_session_id    TEXT,
+  last_heartbeat_at   TIMESTAMPTZ,
+  dead_letter_pks     JSONB,
+  audit_generation    BIGINT NOT NULL DEFAULT 0,
+  CONSTRAINT __zeroship_migrations_phase_chk CHECK (
+    phase IN ('ddl','validation','backfill','audit')
+  ),
+  CONSTRAINT __zeroship_migrations_class_chk CHECK (
+    change_class IN ('additive','compatible','destructive')
+  ),
+  CONSTRAINT __zeroship_migrations_status_chk CHECK (
+    status IN ('pending','running','applied','applied_with_dead_letter','failed','cancelled','rolled_back')
+  )
+)"#
+    );
+    pool.execute(&old_create, &[]).await.unwrap();
+
+    // Sanity-check the seed: the OLD constraint must refuse
+    // `validation_refused` before the migration runs. If this insert
+    // somehow succeeds we'd be testing nothing.
+    let pre_insert = format!(
+        r#"INSERT INTO "{app}"."__zeroship_migrations"
+            (collection, phase, change_class, change_kind, details,
+             applied_by_kind, deploy_id, schema_version, status)
+           VALUES ('c','ddl','additive','create_table','{{}}'::jsonb,
+                   'system','seed_pre',1,'validation_refused')"#
+    );
+    let pre_err = pool
+        .query_text_params(&pre_insert, &[])
+        .await
+        .expect_err("seed CHECK must refuse 'validation_refused' before ALTER");
+    let pre_code = pre_err
+        .code()
+        .map(|c| c.code().to_string())
+        .unwrap_or_default();
+    assert_eq!(
+        pre_code, "23514",
+        "pre-ALTER insert must fail with check_violation (23514), got: {pre_err}"
+    );
+
+    // Run the migration — DROP-old / ADD-new on the named constraint.
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .unwrap();
+
+    // Verify the constraint body literally contains 'validation_refused'.
+    // `pg_get_constraintdef` returns the canonicalised SQL Postgres stored,
+    // which is the most reliable thing to grep — names alone could match
+    // a stale leftover.
+    let def_rows = pool
+        .query_text_params(
+            "SELECT pg_get_constraintdef(c.oid) AS def \
+             FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = $1 \
+               AND t.relname = '__zeroship_migrations' \
+               AND c.conname = '__zeroship_migrations_status_chk'",
+            &[app],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        def_rows.len(),
+        1,
+        "expected exactly one status_chk row, got {}",
+        def_rows.len()
+    );
+    let def: String = def_rows[0].get("def");
+    assert!(
+        def.contains("validation_refused"),
+        "post-ALTER status_chk should include validation_refused, got: {def}"
+    );
+
+    // Insert with `status = 'validation_refused'` — must now succeed.
+    let post_insert = format!(
+        r#"INSERT INTO "{app}"."__zeroship_migrations"
+            (collection, phase, change_class, change_kind, details,
+             applied_by_kind, deploy_id, schema_version, status)
+           VALUES ('c','ddl','destructive','drop_column','{{}}'::jsonb,
+                   'system','seed_post',1,'validation_refused')"#
+    );
+    pool.execute(&post_insert, &[])
+        .await
+        .expect("post-ALTER insert of 'validation_refused' must succeed");
+
+    // The constraint is still active — an unknown status must be rejected
+    // with SQLSTATE 23514 (check_violation), proving the widening didn't
+    // accidentally drop the constraint without re-adding it.
+    let bad_insert = format!(
+        r#"INSERT INTO "{app}"."__zeroship_migrations"
+            (collection, phase, change_class, change_kind, details,
+             applied_by_kind, deploy_id, schema_version, status)
+           VALUES ('c','ddl','additive','create_table','{{}}'::jsonb,
+                   'system','seed_bad',2,'invalid_unknown_status')"#
+    );
+    let bad_err = pool
+        .query_text_params(&bad_insert, &[])
+        .await
+        .expect_err("post-ALTER CHECK must still refuse unknown statuses");
+    let bad_code = bad_err
+        .code()
+        .map(|c| c.code().to_string())
+        .unwrap_or_default();
+    assert_eq!(
+        bad_code, "23514",
+        "unknown status must fail with check_violation (23514), got: {bad_err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 24. A2/A3 — first-deploy registerModel writes audit rows for table +
 // index creation. The four-phase orchestrator drives every change
 // through __zeroship_migrations.
