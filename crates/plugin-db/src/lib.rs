@@ -54,18 +54,6 @@ pub mod wal_consumer;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    /// True when the active transaction connection was opened by the auto-tx
-    /// wrapper (`__zsBeginAutoTx`) — defense-in-depth read-only/serializable
-    /// envelope around `query()`/`mutation()` handlers.
-    ///
-    /// User-driven `db.transaction(async tx => {...})` calls leave this
-    /// `false`, so the auto-tx end callback never touches a user-owned tx.
-    /// Conversely, if the auto-tx began the transaction, user-level
-    /// `commitTransaction`/`rollbackTransaction` are NOT expected to fire
-    /// — the auto-tx is opaque to user code; user-driven tx ops short
-    /// out at the "nested transactions not supported" check anyway.
-    pub(crate) static AUTO_TX_OWNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
     /// Broker events queued during an active transaction.
     ///
     /// While a transaction connection is parked, every successful CRUD

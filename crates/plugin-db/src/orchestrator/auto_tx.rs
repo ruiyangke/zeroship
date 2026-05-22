@@ -200,8 +200,8 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
             _previous.is_none(),
             "exec_auto_begin: tx_conn slot already occupied"
         );
+        c.set_auto_tx_owned(true);
     });
-    crate::AUTO_TX_OWNED.with(|f| f.set(true));
     clear_pending_emits();
     Ok(1)
 }
@@ -212,18 +212,21 @@ async fn exec_auto_end(token: i64, success: bool) -> Result<(), DbError> {
         return Ok(());
     }
 
-    // Defensive ownership check: if AUTO_TX_OWNED is false the tx is
-    // either gone or owned by user code. Either way leave it alone.
-    let owned = crate::AUTO_TX_OWNED.with(|f| f.get());
+    // Defensive ownership check: if `auto_tx_owned` is false the tx
+    // is either gone or owned by user code. Either way leave it alone.
+    let owned = crate::context::with(|c| c.auto_tx_owned());
     if !owned {
         return Ok(());
     }
 
-    // Take the client. We MUST clear AUTO_TX_OWNED before any await so
-    // a re-entrant call (shouldn't happen — V8 is single-threaded —
-    // but cheap insurance) doesn't see stale ownership.
-    let client = crate::context::with_mut(|c| c.take_tx_client());
-    crate::AUTO_TX_OWNED.with(|f| f.set(false));
+    // Take the client. We MUST clear `auto_tx_owned` before any await
+    // so a re-entrant call (shouldn't happen — V8 is single-threaded
+    // — but cheap insurance) doesn't see stale ownership.
+    let client = crate::context::with_mut(|c| {
+        let client = c.take_tx_client();
+        c.set_auto_tx_owned(false);
+        client
+    });
 
     let Some(client) = client else {
         // Ownership flag said yes, conn slot is empty: state is
