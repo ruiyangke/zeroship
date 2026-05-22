@@ -1,6 +1,6 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 03:25.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 04:00.
 
 Source reviews triaged (14 total):
 - `plugin-db-api-surface-2026-05-22-r1.md`
@@ -361,16 +361,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I28] ~50 Result<_, String> sites in replication.rs + auth/bootstrap.rs (architecture r4 I3; code-critique r3 I2)
-- **Source**: `plugin-db-architecture-review-2026-05-22-r4.md` §I3; `plugin-db-code-critique-2026-05-22-r3.md` §I2
-- **File**: `crates/plugin-db/src/replication.rs` (7 sites); `crates/plugin-db/src/auth/bootstrap.rs` and related (~15 sites). `replication_ops.rs` wraps the returned String as `DbError::Internal { message: e }` at the dispatch boundary, collapsing every replication op to `.code = "internal"` — SDK loses retry discrimination.
-- **Description**: Same mechanical-sweep pattern that the prior cycle closed for `audit.rs`. Replication ops should return typed `Result<_, DbError>`; auth/bootstrap likewise.
-- **Status as of 2026-05-22 01:10**: actionable; mechanical sweep ~2 files.
-- **Effort**: medium (~22 sites across 2 files; need to map each error site to a typed variant)
-- **Pickable this cycle**: rolled forward.
-
----
-
 ### [I31] Migration-pipeline: orphan `Running` DDL audit rows have no heartbeat/sweeper (migration-pipeline r2 F1)
 - **Source**: `plugin-db-migration-pipeline-2026-05-22-r2.md` §F1
 - **File**: `crates/plugin-db/src/orchestrator/register_model/apply.rs:163-186` — `update_audit_status` errors silently discarded via `let _ = …`
@@ -411,16 +401,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I37] api-surface r3: replication.rs Result<_, String> wrapped as DbError::Internal at boundary (api-surface r3 I4)
-- **Source**: `plugin-db-api-surface-2026-05-22-r3.md` §"I4 NEW"
-- **File**: `crates/plugin-db/src/replication_ops.rs:82-86, 116-120, 153-157` — three dispatch boundary sites
-- **Description**: `replication_ops.rs` re-wraps the `Result<_, String>` returned by `replication.rs` as `DbError::Internal { message: e }`. Every replication operation surfaces to JS as `err.code = "internal"` — SDK loses retry discrimination.
-- **Status as of 2026-05-22 02:50**: actionable; depends on [I28] (replication.rs typed-error sweep).
-- **Effort**: small-medium (depends on whether [I28] lands first)
-- **Pickable this cycle**: rolled forward.
-
----
-
 ### [I39] OrchestratorLockGuard::Drop leaks session-scoped advisory lock (code-critique r4 M-NEW-1)
 - **Source**: `plugin-db-code-critique-2026-05-22-r4.md` §"M-NEW-1"
 - **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:159-182`
@@ -428,16 +408,6 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Status as of 2026-05-22 02:50**: design needed; pure docs/warnings work + maybe a `#[must_use]` annotation.
 - **Effort**: small (docs) to medium (compile-time enforcement)
 - **Pickable this cycle**: rolled forward as part of code-critique follow-up.
-
----
-
-### [I42] OrchestratorLockGuard::release flips state before await (concurrency r5 M-NEW-r5-1)
-- **Source**: `plugin-db-concurrency-2026-05-22-r5.md` §"new MINOR"
-- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs::release()`
-- **Description**: `release()` sets `self.released = true` and `self.client.take()` BEFORE the unlock-SQL await. If the await is cancelled or panics, the lock leaks silently — Drop's catastrophic-path log doesn't fire because `released = true`. Fix: take the client only after the await completes successfully (move the `released = true` assignment after the await).
-- **Status as of 2026-05-22 03:25**: actionable; small.
-- **Effort**: tiny (reorder 2 statements + add a unit test for the cancellation path if feasible)
-- **Pickable this cycle**: rolled forward.
 
 ---
 
@@ -630,6 +600,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **Closed by**: `07205e54 plugin-db: demote 5 mint_* helpers + fix validate.rs SchemaRefused doc lie`
 - The persistent r2→r3→r4 finding finally closed. `mint_collection`, `mint_migrations`, `mint_replication`, `mint_transaction`, `migration_start_with_spec` are all `pub(crate)` now; external test crates only need `mint_db` + `mint_subscription` (verified by grep).
 
+### [S44] IMPORTANT [I28] (cycle 04:00) — Result<_, String> sweep in auth/* + replication.rs
+- **Closed by**: `0049d9be plugin-db: sweep Result<_, String> sites in auth/* + replication.rs` + `91830cca plugin-db/replication: drop stale .into_string() after [I28] sweep`
+- ~30 function signatures converted across `auth/bootstrap.rs`, `auth/keys.rs`, `auth/session.rs`, `replication.rs`, `diff.rs`. ~70 `.map_err(|e| format!(...))` sites converted to typed `DbError` variants (Transient, LockContention, Internal, Configuration, ValidationFailed). 4 dispatch boundary sites in `replication_ops.rs` no longer wrap as `DbError::Internal` — typed errors flow through. 3 P0001 RAISE messages in `init_session` promoted to typed `ValidationFailed { code: "session_signature_expired" | "session_nonce_replay" | "session_invalid_signature" }`. SDK can now branch on retryable codes for replication and auth failures. 10 new unit tests pin `.code` preservation. Site count 48→22 (remaining are intentional: trait sigs, wire-contract holdouts, internal pure decoders).
+
+### [S45] IMPORTANT [I42] (cycle 04:00) — lock_guard.release flipped state before await
+- **Closed by**: `bd1e7ce1 plugin-db/orchestrator/lock_guard: defer released-flag flip to AFTER unlock await`
+- `release()` previously set `self.released = true` and took the client out of self BEFORE the unlock-SQL await. A cancellation/panic mid-await silently leaked the lock — Drop's catastrophic-log path was suppressed because `released = true`. Reordered: unlock SQL via `&`-borrow, await completes, then flip `released` and take the client. On cancellation: `released = false`, `client = Some(_)`, Drop fires its log; client drops back to pool with lock held until the underlying PG session ends.
+
 ### [S43] CRITICAL (docs-audit r3 NEW; cycle 03:25) — validate.rs preamble lied about SchemaRefused .code
 - **Closed by**: `07205e54 plugin-db: demote 5 mint_* helpers + fix validate.rs SchemaRefused doc lie`
 - `validate.rs:25-30` claimed SchemaRefused's `to_op_error()` arm does NOT stamp `.code`; verified in `error.rs::to_op_error()` that it DOES stamp from the static discriminator. SDK CAN branch on `err.code === "validation_refused"` directly. Rewrote the preamble.
@@ -655,26 +633,26 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 - **00:17** closed [I1] + 3 new CRITICALs
 - **00:47** closed [I11], [I19], perf CRITICAL N3-C1
 - **01:10** closed [I29], [I34], 2 docs CRITICALs
-- **01:35** closed [I27] OrchestratorLockGuard, [I30] auto_tx flattening
+- **01:35** closed [I27], [I30]
 - **02:50** closed [I36], [I38]; recovered 60ca1ad6 silent reversion
-- **03:25** closed [I40] subscription leak, [I41] backfill race, [I42] 5 mint_* demote, [I43] validate.rs doc CRITICAL
+- **03:25** closed [I40], [I41], 5 mint_* demote, validate.rs doc CRITICAL
+- **04:00** closed [I28] ~70-site Result<_,String> sweep, [I42] lock_guard await order
 
-**Net since pilot started**: ~18 closures, ~19 new findings. Score trajectory net-positive across all 6 lenses.
+**Net since pilot started**: ~22 closures, ~21 new findings. Score trajectory net-positive across all lenses.
 
-### Pick #1 (next cycle): **[I42] OrchestratorLockGuard::release flips state before await**
-- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs::release()`
-- **Fix sketch**: Reorder the function — perform the await first, then set `self.released = true` only on success. Drop's catastrophic-path log will fire if the await cancels/panics.
-- **Why next**: tiny (2-line reorder); concurrency r5 new MINOR; silent-lock-leak class bug.
-- **Verification gate**: lib tests green; if feasible, add a cancellation-path unit test (drop the future before await completes; assert lock would re-release on next acquire).
+### Pick #1 (next cycle): **[I39] OrchestratorLockGuard::Drop semantics + `#[must_use]`**
+- **File**: `crates/plugin-db/src/orchestrator/lock_guard.rs:159-182`
+- **Fix sketch**: Annotate the struct with `#[must_use]` so any code path that drops the guard without `release().await` or `into_held()` gets a compile-time warning. Strengthen the Drop log to include the full key + a "session-scoped lock leaked" phrasing. Document that PG auto-release on session close is the safety net.
+- **Why next**: small (annotation + doc); raises the floor on the residual silent-lock-leak class beyond what [I42] addressed.
+- **Verification gate**: build clean; verify any test that drops a guard without release triggers the warning (or document the limitation if the type pattern doesn't support it cleanly).
 
-### Pick #2 (next cycle): **[I28] ~45 Result<_, String> sweep in replication.rs + auth/**
-- **File** (multi): `crates/plugin-db/src/auth/bootstrap.rs` (13 sites), `crates/plugin-db/src/replication.rs` (8 sites), `crates/plugin-db/src/auth/session.rs` (6 sites), plus stragglers.
-- **Fix sketch**: Mechanical sweep mirroring the audit.rs closure pattern. Replace `String` Err with appropriate `DbError` variant.
-- **Why**: every replication/auth op surfaces as `.code = "internal"`. Closes [I37] once landed.
-- **Caveat**: medium-large; worktree isolation strongly recommended; each site needs typed-variant triage.
+### Pick #2 (next cycle): **architecture r6 follow-up — `first_row_or_internal()` helper**
+- **File** (multi): `audit.rs:325-330, 613-618`, `replication.rs:240-249`, `migrations.rs:326-332`
+- **Fix sketch**: Extract a generic helper `fn first_row_or_internal<T>(rows: &[Row], op: &str) -> Result<&Row, DbError>` (or similar) that absorbs the 4-site cluster of "empty RETURNING is silent". Call sites become `let r = first_row_or_internal(&rows, "...")?;`.
+- **Why**: architecture r6 top recommendation; cluster grew from N=2 to N=4 since the pattern was first identified, validating it as a real abstraction.
+- **Verification gate**: all 4 call sites converted + new helper has its own unit tests.
 
 ### Pick #3 (next cycle, design needed): **[I43] bootstrap.rs blocking pg_advisory_lock**
 - **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
-- **Fix sketch**: Switch from blocking `pg_advisory_lock` to `try_acquire_advisory_lock` with a backoff loop and a per-app cap, like `migrations.rs` does. Cross-tenant pool starvation risk.
-- **Why**: security r4 sharpened IMPORTANT.
+- **Fix sketch**: Switch from blocking `pg_advisory_lock` to `try_acquire_advisory_lock` with a backoff loop and a per-app cap.
 - **Caveat**: needs design decision on retry/backoff policy + max-wait semantics.
