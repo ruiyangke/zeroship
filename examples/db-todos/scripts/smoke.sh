@@ -227,6 +227,69 @@ AUDIT=$(curl -sS "${URL}/_zs/db/audit/todos" 2>/dev/null || echo '[]')
 check "audit endpoint reachable" bash -c "[ -n '$AUDIT' ]"
 
 # ---------------------------------------------------------------------------
+# Check 7: E2E subscription smoke — WAL / broker path
+#
+# This exercises the full reactive path:
+#   1. Open `/_zs/v1/subscribeTodos` as an SSE stream (GET with base64url
+#      input envelope).
+#   2. While the stream is open, POST a createTodo mutation from the SAME
+#      isolate — the local-emit path (exec_mutation_with_emit → broker::publish)
+#      delivers a ChangeEvent to the subscription's queue.
+#   3. Assert the SSE output contains a `2:` object line whose JSON carries
+#      `"collection":"todos"` and `"op":"insert"`.
+#
+# Transport: text/event-stream over HTTP, NOT WebSocket. The platform encodes
+# AsyncIterator yields as AI-SDK lines: `2:[<json>]\n` for objects, `d:{}\n`
+# for the terminal done frame.
+#
+# Negative-control: if local-emit is broken (broker never receives the event)
+# the curl --max-time will expire with no `2:` line, and the check fails.
+# ---------------------------------------------------------------------------
+
+echo "[check 7] E2E subscribe → mutation → broker delivery"
+
+SSE_FILE=$(mktemp)
+trap 'rm -f "$SSE_FILE"' EXIT
+
+# Input for subscribeTodos: base64url-encode {"json":{}}
+SUB_INPUT=$(printf '{"json":{}}' | base64 | tr '+/' '-_' | tr -d '=\n')
+
+# Open the SSE stream in the background, capturing output to a temp file.
+# --max-time 10: give the subscription at most 10 s total; we kill it
+# after we see the first event. --no-buffer: flush lines as they arrive.
+curl -sS --no-buffer --max-time 10 \
+  -H "Accept: text/event-stream" \
+  "${RPC}/subscribeTodos?input=${SUB_INPUT}" \
+  > "$SSE_FILE" 2>&1 &
+SUB_PID=$!
+
+# Allow the SSE connection to be established before writing.
+sleep 0.5
+
+# Write from the same isolate — exercises the local-emit → broker path.
+rpc createTodo "{\"userId\":${ALICE_ID},\"title\":\"sub-smoke-$(date +%s)\",\"priority\":\"low\"}" > /dev/null
+
+# Wait up to 5 s for the `2:` line to appear in the SSE stream.
+DEADLINE=$(( $(date +%s) + 5 ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  grep -q '^2:' "$SSE_FILE" 2>/dev/null && break
+  sleep 0.2
+done
+
+kill "$SUB_PID" 2>/dev/null || true
+wait "$SUB_PID" 2>/dev/null || true
+
+# Grep directly from the file — avoids quoting hazards with JSON in shell vars.
+check "subscribeTodos SSE delivered a 2: frame within 5s" \
+  grep -q '^2:' "$SSE_FILE"
+
+check "2: frame carries collection=todos" \
+  grep -q '"collection":"todos"' "$SSE_FILE"
+
+check "2: frame carries op=insert" \
+  grep -q '"op":"insert"' "$SSE_FILE"
+
+# ---------------------------------------------------------------------------
 # Result
 # ---------------------------------------------------------------------------
 

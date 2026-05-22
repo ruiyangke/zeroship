@@ -17,9 +17,9 @@
 // Wire conventions match the existing examples (hono-demo etc.):
 //   exports become RPC procedures at /_zs/v1/<name>.
 
-import { t, schema, type InferRowInput } from "@zeroship/db";
+import { t, schema, type InferRowInput, subscribe } from "@zeroship/db";
 import { env } from "zeroship";
-import { query, mutation, action, runQuery } from "@zeroship/server";
+import { query, mutation, action, runQuery, stream } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
 // Schema — the `export default { schema }` convention
@@ -149,6 +149,25 @@ export const listTodosWithUser = query(
     );
     if (error) throw error;
     return data ?? [];
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Subscriptions — long-lived streams; capability maps to action (no auto-tx).
+// The handler yields a SubscriptionEvent on every change to the "todos"
+// collection. Clients open `/_zs/v1/subscribeTodos` as an SSE stream;
+// the platform encodes each yielded value as `2:[value]\n` (AI-SDK object
+// lane). The stream terminates when the client closes or a "closed" event
+// arrives from the broker.
+// ---------------------------------------------------------------------------
+
+export const subscribeTodos = stream(
+  async function* (_input: Record<string, never>) {
+    for await (const event of subscribe("todos")) {
+      if (event.kind === "closed") return;
+      // Yield the event directly so the smoke can assert collection + op.
+      yield event;
+    }
   },
 );
 
