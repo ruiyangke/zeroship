@@ -213,6 +213,24 @@ impl NativePlugin for DbPlugin {
     }
 }
 
+/// **Bench-only**: thin wrapper around `v8_bridge::row_to_json` so the
+/// `bench_row_to_json` Criterion harness in `benches/` can measure the
+/// [I35] index-lookup fix (commit `251d53b4`) without the bench having
+/// to live inside `v8_bridge` itself.
+///
+/// `#[doc(hidden)]` keeps this off the public docs surface; the function
+/// is still `pub` because Criterion benches link against the crate as an
+/// external dependency and cannot reach `pub(crate)` items.
+/// `compio_postgres::test_utils::row_for_test` (gated behind
+/// `compio-postgres`'s `test-utils` feature, enabled here under
+/// `[dev-dependencies]`) is the matching `Row` synthesiser — see
+/// `crates/plugin-db/benches/bench_row_to_json.rs` for the wiring.
+#[doc(hidden)]
+#[must_use]
+pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
+    v8_bridge::row_to_json(row)
+}
+
 /// **Test-only**: set the per-thread `DB_URL` directly, bypassing the
 /// usual `DbPlugin::register()` path. Used by integration tests that
 /// drive `migrations::exec_*` without spinning up a full runtime.

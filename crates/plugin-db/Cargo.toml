@@ -22,6 +22,11 @@ sha2 = { workspace = true }
 [dev-dependencies]
 compio = { workspace = true }
 serde_json = { workspace = true }
+# Test-only constructors (`row_for_test` / `column_for_test`) for the
+# `bench_row_to_json` harness — enables synthesising a `Row` without
+# hitting Postgres. Production builds of `compio-postgres` do not see
+# this feature. See `crates/plugin-db/benches/bench_row_to_json.rs`.
+compio-postgres = { workspace = true, features = ["test-utils"] }
 # Performance r9 (cycle 09:30) forcing-function: a `cargo bench` harness
 # must exist under `crates/plugin-db/benches/` so future perf reviews can
 # quote real numbers instead of being blocked by the anti-fabrication rule.
@@ -31,6 +36,14 @@ criterion = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"
+harness = false
+
+# Row-decoding microbench — landed as the [I35] forcing function
+# (performance r12). Synthesises `compio_postgres::Row` values via the
+# `test-utils` feature on `compio-postgres` (dev-dep above) and runs
+# `row_to_json_for_bench` against narrow / medium / wide column shapes.
+[[bench]]
+name = "bench_row_to_json"
 harness = false
 
 [features]
