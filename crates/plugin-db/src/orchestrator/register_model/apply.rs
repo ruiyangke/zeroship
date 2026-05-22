@@ -80,8 +80,19 @@ pub(crate) async fn apply<'p, B: Backend>(
             .await
         {
             Ok(id) => Some(id),
-            Err(e) => {
-                tracing::warn!(error = ?e, "audit: failed to insert running row");
+            Err(audit_err) => {
+                // F1 warn-half family: same write_audit_row secondary-
+                // failure shape as validate.rs:101 / migrations.rs (6+
+                // sites pinned at cycle-12:47 `7c6bd2ec`). Closes
+                // code-critique r12 MINOR-R12-1 cousin drift the prior
+                // unification missed.
+                tracing::warn!(
+                    app_id = %app_id,
+                    collection = %op.collection,
+                    transition = "Running/insert_failed",
+                    audit_err = %audit_err,
+                    "audit: failed to insert running row",
+                );
                 None
             }
         };
