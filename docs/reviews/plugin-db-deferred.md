@@ -1,6 +1,8 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 12:47.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 13:17.
+
+**Cycle 13:17 closures (3)**: [I35] (`251d53b4` — `row_to_json` O(N²) → O(N) via index lookup) + NEW-R12-2 (`18aee490` — finalise_backfill warn-shape drift caught by test-coverage r12 in my own 7c6bd2ec commit) + NEW-R10-1 (`bac64c0e` — 5 mig_lock accessor visibility demotions, 2-cycle carry from r9 NEW-R9-3). 3 reviewers returned: **api-surface r10 = 91 (+2, closed 2 of r9's NEW findings)**, **test-coverage r12 = 86 (+1, GAP-2 closed, found my drift)**, **concurrency r11 = 89 (+1, plateau broken by F1 warn-half forcing function)**. Total +4 across 3 lenses. New LOW findings: NEW-R12-1 (no tests for I6's new Err arms) + r12 recommends `tracing-subscriber` test pattern for the 9 emission sites accumulated over cycles 10:47–12:47.
 
 **Cycle 12:47 closures (2)**: F1 warn-half style unification (`7c6bd2ec` — pinned 6-site shape per code-critique r11 MINOR-R11-1) + `finalise_backfill` name/collection (6th cycle error-ux carry, folded into same commit). 3 reviewers returned: **migration-pipeline r11 = 86 (+1)** plateau broken by warn-half forcing function; **error-ux r10 = 92.5 (+1.5)** plateau broken across all 3 prior commits; **code-critique r11 = 95 (±0)** plateau held but cycle audit clean.
 
@@ -10,7 +12,7 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 12:47.
 
 **Cycle 10:47 closures (2)**: MAJOR-R9-5 (auth/* hardening gate, commit `2fa9472e`) + [I23] (mig_lock state-drift tracing, commit `5d9acab8`). 4 reviewers returned: architecture r10 = 93 (+1, credited the hardening gate), security r9 = 83 (+1, same credit), error-ux r9 = 91 (±0), concurrency r10 = 88 (±0, surfaced one NEW MINOR-latent — Subscription::close at broker.rs:359-369 holds borrow_mut across w.wake).
 
-**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 16 IMPORTANT (was 17 pre-12:17; [I6] closed this cycle). [I31]/F1 is now half-closed (warn-half landed; sweeper-half still needs design).
+**Cycle 10:30 backlog audit**: 7 IMPORTANTs were carrying stale status; closures verified in code and moved to SUPERSEDED. Remaining open: 3 CRITICAL (all blocked) + 15 IMPORTANT (was 16 pre-13:17; [I35] closed this cycle). [I31]/F1 is now half-closed (warn-half landed; sweeper-half still needs design).
 
 **STRONG PLATEAU SIGNAL (sustained through cycle 10:47)**: cycle 09:30's 4-of-4 ±0 movement has only marginally improved — cycle 10:47's +1/+1/0/0 came entirely from the hardening cfg-gate (a single forcing function), not from forward motion on lens-specific findings. Architecture reviewer recommends capping at r11 if the `query.rs` split lands; concurrency reviewer recommends skipping cycles until the two carried IMPORTANTs land. Migration-pipeline reviewer notes "first non-positive movement since r2"; performance reviewer "explicitly recommends NOT running r10 without a forcing function".
 
