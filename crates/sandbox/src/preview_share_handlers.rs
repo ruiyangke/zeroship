@@ -34,6 +34,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::error_envelope::{error_response, ErrorEnvelope};
 use crate::preview_share::{
     fresh_token_id, is_known_scope, mint, TokenClaims, MINT_TTL_MAX_SECS,
     MINT_TTL_MIN_SECS,
@@ -96,21 +97,19 @@ pub struct MintBody {
 }
 
 fn unauthorized() -> HttpResponse {
-    HttpResponse::Unauthorized().json(&json!({
-        "error": "unauthorized",
-        "code": "auth_required",
-    }))
+    error_response(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "authentication required",
+    )
 }
 
 fn not_found() -> HttpResponse {
-    HttpResponse::NotFound().json(&json!({
-        "error": "not found",
-        "code": "not_found",
-    }))
+    error_response(StatusCode::NOT_FOUND, "not_found", "not found")
 }
 
 fn bad_request(code: &'static str, msg: &str) -> HttpResponse {
-    HttpResponse::BadRequest().json(&json!({"error": msg, "code": code}))
+    error_response(StatusCode::BAD_REQUEST, code, msg.to_string())
 }
 
 fn unix_now() -> u64 {
@@ -208,11 +207,15 @@ pub async fn mint_share(
         .as_ref()
         .expect("mint_rate_limiter wired in AppState");
     if !rl.take(id, now) {
-        return HttpResponse::TooManyRequests().json(&json!({
-            "error": "rate limited",
-            "code": "rate_limited",
+        return ErrorEnvelope::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "share token mint rate limit exceeded (100 per sandbox per day)",
+        )
+        .with_extra(json!({
             "retry_after_secs": 86_400 - (now % 86_400),
-        }));
+        }))
+        .into_response();
     }
 
     // Mint a secret ring on first use; idempotent for the rest.
@@ -472,12 +475,16 @@ pub async fn revoke_one_share(
     if let Err(r) = authorize_owner(&req, &state, &sandbox_id_str, port) {
         return r;
     }
-    HttpResponse::build(StatusCode::NOT_IMPLEMENTED).json(&json!({
-        "error": "per-token revoke not implemented in v1",
-        "code": "deferred-to-phase-5",
+    ErrorEnvelope::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "deferred_to_phase_5",
+        "per-token revoke not implemented in v1",
+    )
+    .with_extra(json!({
         "note": "use DELETE /sandboxes/{id}/preview/{port}/share to rotate the \
                  whole secret; this rotates ALL tokens at once.",
     }))
+    .into_response()
 }
 
 /// Render a sandbox slug for the public preview hostname. Mirrors
