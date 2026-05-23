@@ -16,8 +16,8 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    Backend, IndexBuilder, LockManager, NamespaceManager, PgLockManager, PgSqlExecutor,
-    SchemaIntrospect, SqlExecutor,
+    Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager, PgLockManager,
+    PgSqlExecutor, SchemaIntrospect, SqlExecutor,
 };
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
@@ -188,7 +188,18 @@ impl LockManager for PostgresBackend {
 
 impl NamespaceManager for PostgresBackend {
     async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError> {
-        let create_schema = crate::query::build_create_schema(app_id);
+        // P1 PR 3: the create-schema SQL now flows through the
+        // `DialectBuilder::build_ensure_app_schema` hook instead of
+        // the free function `crate::query::build_create_schema`. The
+        // SQL text is byte-identical to the previous form
+        // (`CREATE SCHEMA IF NOT EXISTS "<app>"`) — the structural
+        // change is the routing seam, not the statement. Verified by
+        // grep audit (PR-3 commit message): no other callers of
+        // `query::build_create_schema` exist, so the free function
+        // could be removed in a follow-up; we keep it for now as the
+        // dialect's `build_ensure_app_schema` impl delegates to the
+        // same quoting primitive.
+        let create_schema = self.build_ensure_app_schema(app_id);
         let empty: Vec<&str> = Vec::new();
         self.pool
             .query_text_params(&create_schema, &empty)
@@ -249,6 +260,130 @@ impl PgLockManager for PostgresBackend {
         self.pool.get().await.map_err(|e| DbError::Transient {
             message: format!("db: failed to acquire orchestrator client: {e}"),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PgDialect — the Postgres flavour of `DialectBuilder`. P1 PR 3 lands
+// the trait impl on both backends so `query.rs`'s free-function string
+// builders can be retargeted onto a dialect-typed entry point in a
+// later PR without re-shaping their call sites.
+//
+// The hooks are pure functions of their inputs (ZST has no state). We
+// `impl DialectBuilder for PostgresBackend` directly — there is no
+// reason to carry a `PgDialect` field on the backend struct because
+// the ZST has nothing to store. The `PgDialect` type is kept around
+// only as the documentation anchor; consumers reach the impl through
+// `&PostgresBackend`.
+// ---------------------------------------------------------------------------
+
+/// Postgres-flavoured dialect. Zero-sized — every method is pure.
+///
+/// Not instantiated by production code today; the matching trait
+/// behaviour lives on `impl DialectBuilder for PostgresBackend` below.
+/// Kept as a documentation anchor + so the test module can name the
+/// ZST when asserting per-hook output without holding a `Pool`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PgDialect;
+
+impl DialectBuilder for PgDialect {
+    /// Double-quote with embedded-quote escape. Matches the existing
+    /// `crate::query::quote_ident` helper byte-for-byte.
+    fn quote_ident(&self, name: &str) -> String {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+
+    /// `CREATE SCHEMA IF NOT EXISTS "<app_id>"` — the canonical PG
+    /// shape. Byte-identical to the pre-PR-3
+    /// `crate::query::build_create_schema(app_id)` output, so the
+    /// `NamespaceManager::ensure_app_schema` impl can swap without
+    /// changing the on-wire SQL.
+    fn build_ensure_app_schema(&self, app_id: &str) -> String {
+        format!("CREATE SCHEMA IF NOT EXISTS {}", self.quote_ident(app_id))
+    }
+
+    /// Return the `IndexSpec::sql` field verbatim. The spec is built
+    /// by `crate::query::build_create_indexes` against the PG dialect
+    /// already (`CREATE [UNIQUE] INDEX CONCURRENTLY …`); the `online`
+    /// flag has no separate consumer at PR 3. PR 5 may reshape this
+    /// when SQLite's `IndexBuilder` lands.
+    fn build_create_index(
+        &self,
+        spec: &crate::query::IndexSpec,
+        _online: bool,
+    ) -> String {
+        spec.sql.clone()
+    }
+
+    /// PG mapping for the P1 type vocabulary. Each branch is a single
+    /// `&'static str` — matches the column-type names PG accepts in a
+    /// `CREATE TABLE` DDL.
+    fn map_zs_type(&self, zs_type: &str, _opts: &serde_json::Value) -> String {
+        match zs_type {
+            "text" => "TEXT",
+            "bigint" | "int8" => "BIGINT",
+            "integer" | "int4" | "int" => "INTEGER",
+            "double" => "DOUBLE PRECISION",
+            "real" => "REAL",
+            "bytes" | "blob" => "BYTEA",
+            "numeric" | "decimal" => "NUMERIC",
+            "boolean" | "bool" => "BOOLEAN",
+            "timestamp" => "TIMESTAMP",
+            "timestamptz" => "TIMESTAMPTZ",
+            "json" => "JSON",
+            "jsonb" => "JSONB",
+            other => {
+                tracing::debug!(
+                    zs_type = other,
+                    "PgDialect::map_zs_type: unknown type — defaulting to TEXT"
+                );
+                "TEXT"
+            }
+        }
+        .to_string()
+    }
+
+    /// PG's "now" function. PG also accepts `CURRENT_TIMESTAMP`, but
+    /// `NOW()` is the idiomatic form used elsewhere in the codebase.
+    fn now_fn(&self) -> &'static str {
+        "NOW()"
+    }
+
+    // `last_insert_rowid_sql` defaults to `None` on the trait — PG
+    // routes through `RETURNING id` instead. No override needed.
+}
+
+/// Direct `DialectBuilder` impl on `PostgresBackend` so consumers can
+/// hold an `&PostgresBackend` and reach the dialect without naming a
+/// separate field. The bodies delegate to the `PgDialect` ZST; rustc
+/// inlines the value away because every method is `&self`.
+impl DialectBuilder for PostgresBackend {
+    fn quote_ident(&self, name: &str) -> String {
+        PgDialect.quote_ident(name)
+    }
+
+    fn build_ensure_app_schema(&self, app_id: &str) -> String {
+        PgDialect.build_ensure_app_schema(app_id)
+    }
+
+    fn build_create_index(
+        &self,
+        spec: &crate::query::IndexSpec,
+        online: bool,
+    ) -> String {
+        PgDialect.build_create_index(spec, online)
+    }
+
+    fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String {
+        PgDialect.map_zs_type(zs_type, opts)
+    }
+
+    fn now_fn(&self) -> &'static str {
+        PgDialect.now_fn()
+    }
+
+    fn last_insert_rowid_sql(&self) -> Option<&'static str> {
+        PgDialect.last_insert_rowid_sql()
     }
 }
 
@@ -567,8 +702,8 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        Backend, IndexBuilder, LockManager, NamespaceManager, PgLockManager, PgSqlExecutor,
-        RegisterBackend, SchemaIntrospect, SqlExecutor,
+        Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager, PgLockManager,
+        PgSqlExecutor, RegisterBackend, SchemaIntrospect, SqlExecutor,
     };
 
     /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
@@ -602,6 +737,71 @@ mod tests {
         impls_pg_sql_executor::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();
         impls_register_backend::<PostgresBackend>();
+
+        // P1 PR 3: `DialectBuilder` impl lands directly on the backend
+        // (not on the `Backend` super-trait — the trait composition
+        // stays unchanged). The bound here pins the impl so a future
+        // refactor that detaches the impl block fails at type-check.
+        fn impls_dialect_builder<T: DialectBuilder>() {}
+        impls_dialect_builder::<PostgresBackend>();
+    }
+
+    // ---------------------------------------------------------------------
+    // P1 PR 3: PgDialect hook unit tests. ZST has no I/O — each test
+    // is a string-compare against the expected SQL fragment.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn pg_dialect_quote_ident_doubles_embedded_quote() {
+        let d = PgDialect;
+        assert_eq!(d.quote_ident("plain"), "\"plain\"");
+        assert_eq!(d.quote_ident("with\"quote"), "\"with\"\"quote\"");
+    }
+
+    #[test]
+    fn pg_dialect_build_ensure_app_schema_matches_legacy_helper() {
+        let d = PgDialect;
+        // The dialect output MUST equal the legacy
+        // `crate::query::build_create_schema` output byte-for-byte —
+        // PR-3 rewires `NamespaceManager::ensure_app_schema` through
+        // the dialect, and any divergence here changes the wire SQL.
+        let legacy = crate::query::build_create_schema("app_demo");
+        let dialect = d.build_ensure_app_schema("app_demo");
+        assert_eq!(legacy, dialect, "dialect SQL must match legacy helper");
+        assert_eq!(dialect, "CREATE SCHEMA IF NOT EXISTS \"app_demo\"");
+    }
+
+    #[test]
+    fn pg_dialect_map_zs_type_covers_p1_vocabulary() {
+        let d = PgDialect;
+        let no_opts = serde_json::json!({});
+        assert_eq!(d.map_zs_type("text", &no_opts), "TEXT");
+        assert_eq!(d.map_zs_type("bigint", &no_opts), "BIGINT");
+        assert_eq!(d.map_zs_type("int8", &no_opts), "BIGINT");
+        assert_eq!(d.map_zs_type("integer", &no_opts), "INTEGER");
+        assert_eq!(d.map_zs_type("int4", &no_opts), "INTEGER");
+        assert_eq!(d.map_zs_type("double", &no_opts), "DOUBLE PRECISION");
+        assert_eq!(d.map_zs_type("real", &no_opts), "REAL");
+        assert_eq!(d.map_zs_type("bytes", &no_opts), "BYTEA");
+        assert_eq!(d.map_zs_type("blob", &no_opts), "BYTEA");
+        assert_eq!(d.map_zs_type("numeric", &no_opts), "NUMERIC");
+        assert_eq!(d.map_zs_type("decimal", &no_opts), "NUMERIC");
+        assert_eq!(d.map_zs_type("boolean", &no_opts), "BOOLEAN");
+        assert_eq!(d.map_zs_type("timestamp", &no_opts), "TIMESTAMP");
+        assert_eq!(d.map_zs_type("timestamptz", &no_opts), "TIMESTAMPTZ");
+        assert_eq!(d.map_zs_type("json", &no_opts), "JSON");
+        assert_eq!(d.map_zs_type("jsonb", &no_opts), "JSONB");
+        // Unknown types fall through to TEXT.
+        assert_eq!(d.map_zs_type("nonsense_type", &no_opts), "TEXT");
+    }
+
+    #[test]
+    fn pg_dialect_now_fn_and_last_insert_rowid() {
+        let d = PgDialect;
+        assert_eq!(d.now_fn(), "NOW()");
+        // PG routes through `RETURNING id` for last-inserted rowid —
+        // the trait default of `None` is the correct PG shape.
+        assert_eq!(d.last_insert_rowid_sql(), None);
     }
 
     /// Compile-time: the associated types must remain wired to the

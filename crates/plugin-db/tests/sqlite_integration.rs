@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
-use zeroship_plugin_db::backend::SqlExecutor;
+use zeroship_plugin_db::backend::{NamespaceManager, SqlExecutor};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -140,5 +140,129 @@ fn client_exec_round_trip() {
             .await
             .expect("INSERT via pool sees client-DDL'd table");
         assert_eq!(n2, 1);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P1 PR 3 — NamespaceManager (ATTACH) integration tests.
+//
+// Each test exercises a behaviour the SqliteBackend's
+// `ensure_app_schema` impl is responsible for:
+//
+// 1. The ATTACH lands and the per-app file exists on disk; the alias
+//    is queryable via the SQLite catalog.
+// 2. A second `ensure_app_schema` call for the same app_id is a no-op
+//    (idempotent guard via `app_id_cache` — without it, SQLite errors
+//    on the duplicate ATTACH).
+// 3. Two attached app aliases are visible as separate namespaces — a
+//    table created in `app_a` is NOT visible from `app_b`, which is
+//    the per-app isolation property `ensure_app_schema` exists to
+//    establish.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ensure_app_schema_attaches_file() {
+    run(async {
+        let (backend, dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        // The per-app file should now exist on disk.
+        let expected = dir.path().join("zs-app_demo.sqlite");
+        assert!(
+            expected.exists(),
+            "per-app sqlite file should exist: {expected:?}"
+        );
+
+        // The alias should be queryable. `SELECT name FROM
+        // "app_demo".sqlite_master` returns the (empty) catalog of
+        // the freshly-attached database — the SELECT itself
+        // succeeding is the assertion (a missing alias surfaces as
+        // `no such database: app_demo`).
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query("SELECT name FROM \"app_demo\".sqlite_master", &[])
+            .await
+            .expect("query attached sqlite_master");
+        // Freshly attached database has no user tables yet.
+        assert!(
+            rows.is_empty(),
+            "freshly attached db should have no sqlite_master rows; got {rows:?}"
+        );
+    });
+}
+
+#[test]
+fn ensure_app_schema_idempotent() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        // First call attaches.
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("first ensure_app_schema");
+        // Second call must NOT surface "database app_demo is already
+        // in use" — the cache (or the error-suppression fallback)
+        // should short-circuit it to Ok.
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("second ensure_app_schema must be idempotent");
+    });
+}
+
+#[test]
+fn ensure_app_schema_isolates_per_app() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_a")
+            .await
+            .expect("attach app_a");
+        backend
+            .ensure_app_schema("app_b")
+            .await
+            .expect("attach app_b");
+
+        // Create a table inside the `app_a` namespace.
+        backend
+            .pool_exec("CREATE TABLE \"app_a\".\"t\" (x INTEGER)", &[])
+            .await
+            .expect("CREATE TABLE in app_a");
+
+        // The table must be visible in `app_a`'s catalog.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows_a = client
+            .query(
+                "SELECT name FROM \"app_a\".sqlite_master WHERE type = 'table'",
+                &[],
+            )
+            .await
+            .expect("query app_a sqlite_master");
+        assert_eq!(rows_a.len(), 1, "app_a should see exactly one table");
+        assert_eq!(rows_a[0][0].as_deref(), Some("t"));
+
+        // The table must NOT be visible in `app_b`'s catalog —
+        // per-file isolation is the entire point of the ATTACH
+        // layout. Each app's `sqlite_master` is its own namespace.
+        let rows_b = client
+            .query(
+                "SELECT name FROM \"app_b\".sqlite_master WHERE type = 'table'",
+                &[],
+            )
+            .await
+            .expect("query app_b sqlite_master");
+        assert!(
+            rows_b.is_empty(),
+            "app_b must not see app_a's tables; got {rows_b:?}"
+        );
     });
 }

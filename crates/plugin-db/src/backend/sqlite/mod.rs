@@ -48,6 +48,14 @@ use dialect::SqliteDialect;
 use lock::InProcessLockRegistry;
 use session::{SqliteSession, SqliteSessionHandle};
 
+// The `SqliteDialect` ZST carries the canonical hook bodies; the
+// backend's `impl DialectBuilder` delegates to the ZST so the
+// trait-impl source-of-truth stays in one file (`dialect.rs`). No
+// `dialect: SqliteDialect` field on the backend — the ZST has no
+// state, so storing it would be a 0-byte field carrying no
+// information. The delegation pattern below constructs the ZST
+// inline (`SqliteDialect`) per call; rustc inlines the value away.
+
 /// Sentinel returned by every capability-impl method body in PR 1.
 /// PR 2-5 replace the body call with the real implementation.
 fn pr_stub(method: &'static str) -> DbError {
@@ -64,9 +72,6 @@ fn pr_stub(method: &'static str) -> DbError {
 /// - `session`: the writer-actor handle. Owns the single
 ///   `rusqlite::Connection` for this backend and serialises all DDL
 ///   / DML / DQL through a `flume` mpsc queue. Stubbed in PR 1.
-/// - `dialect`: zero-sized SQL-dialect strategy. PR 1 wires the
-///   trivial hooks (`now_fn`, `last_insert_rowid_sql`); PR 3 fills
-///   in the rest.
 /// - `lock_registry`: in-process advisory-lock map. Empty in PR 1;
 ///   PR 4 wires the `LockManager` impl through it.
 /// - `db_dir`: filesystem directory holding per-app SQLite files
@@ -75,10 +80,14 @@ fn pr_stub(method: &'static str) -> DbError {
 /// - `app_id_cache`: dedup set for the `NamespaceManager::ensure_app_schema`
 ///   path — SQLite errors on a second ATTACH of the same alias, so
 ///   we filter the second call site in Rust.
+///
+/// **P1 PR 3 simplification**: the previous PR-1 field set carried a
+/// `dialect: SqliteDialect` ZST. The ZST has no state, so the field
+/// was 0 bytes carrying no information; the trait-method delegation
+/// now constructs the ZST inline. See the impl block below.
 #[allow(dead_code)]
 pub struct SqliteBackend {
     session: Rc<SqliteSession>,
-    dialect: SqliteDialect,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
@@ -110,7 +119,6 @@ impl SqliteBackend {
         let session = Rc::new(SqliteSession::open(&session_path)?);
         Ok(Self {
             session,
-            dialect: SqliteDialect,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
@@ -199,11 +207,78 @@ impl LockManager for SqliteBackend {
 }
 
 impl NamespaceManager for SqliteBackend {
-    async fn ensure_app_schema(&self, _app_id: &str) -> Result<(), DbError> {
-        // PR 3: `ATTACH DATABASE 'file:{db_dir}/zs-{app_id}.sqlite' AS "<app_id>"`,
-        // guarded by `app_id_cache` (SQLite errors on double-ATTACH;
-        // PG's `IF NOT EXISTS` is idempotent natively).
-        Err(pr_stub("ensure_app_schema"))
+    /// Idempotently provision the per-app SQLite namespace.
+    ///
+    /// Constructs the per-app file path
+    /// `<db_dir>/zs-<app_id>.sqlite` and routes an `ATTACH DATABASE
+    /// 'file:<path>' AS "<app_id>"` through the session actor. The
+    /// `app_id_cache` guards re-entry — SQLite errors on a second
+    /// `ATTACH` of the same alias, so we filter the duplicate call
+    /// in Rust before reaching the engine.
+    ///
+    /// **Lossy `PathBuf::to_string_lossy` rationale**: the per-app file
+    /// path is built from `db_dir` (operator-controlled, typically a
+    /// UTF-8 absolute path) joined with `zs-<app_id>.sqlite`. The
+    /// `app_id` is constrained to ASCII alphanumeric + `_` + `-` by
+    /// [`crate::audit::validate_app_id`] before any consumer reaches
+    /// `ensure_app_schema`, so the suffix is always UTF-8 safe. If
+    /// `db_dir` itself contains non-UTF-8 bytes (rare on the Linux
+    /// targets we ship to), `to_string_lossy` substitutes U+FFFD —
+    /// SQLite then fails to open the resulting path and surfaces a
+    /// typed `DbError` on the next call. The lossy conversion is
+    /// load-bearing for the actor's `String`-typed `db_path`
+    /// parameter; round-tripping through OsStr would mean carrying
+    /// raw bytes across an `async` boundary the actor's reply channel
+    /// already serialises as `String`.
+    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError> {
+        // Idempotent guard. The cache must be checked before the
+        // ATTACH because SQLite hard-errors on a duplicate ATTACH of
+        // the same alias ("database <alias> is already in use"); the
+        // PG side gets idempotency for free via `IF NOT EXISTS`.
+        if self.app_id_cache.borrow().contains(app_id) {
+            return Ok(());
+        }
+
+        // Compute the per-app file path. `to_string_lossy` is safe in
+        // practice — see the rustdoc note above.
+        let file_path = self.db_dir.join(format!("zs-{app_id}.sqlite"));
+        let path_str = file_path.to_string_lossy().into_owned();
+
+        // Route through the session actor's `attach` helper. The
+        // actor's `run_attach` constructs the formatted ATTACH SQL
+        // inline (the alias is double-quote-escaped — matches the
+        // dialect's `quote_ident` byte-for-byte — and the path's
+        // single quotes are doubled). The dialect's
+        // `build_ensure_app_schema` is a template that pairs with
+        // this helper; no PR-3 consumer routes through the template
+        // path because the actor needs the file_path substituted
+        // upstream anyway.
+        match self.session.attach(app_id, &path_str).await {
+            Ok(()) => {
+                self.app_id_cache
+                    .borrow_mut()
+                    .insert(app_id.to_string());
+                Ok(())
+            }
+            Err(e) => {
+                // SQLite surfaces "database <alias> is already in use"
+                // when an ATTACH alias collides — possible if a
+                // different SqliteBackend instance attached the alias,
+                // or if the cache was bypassed (test harness, future
+                // pre-warm). Treat as idempotent: insert the alias
+                // into the cache so subsequent calls short-circuit,
+                // then return Ok. Other errors propagate verbatim.
+                let msg = format!("{e}");
+                if msg.contains("already in use") || msg.contains("already attached") {
+                    self.app_id_cache
+                        .borrow_mut()
+                        .insert(app_id.to_string());
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
@@ -254,32 +329,34 @@ impl IndexBuilder for SqliteBackend {
 }
 
 impl DialectBuilder for SqliteBackend {
-    // The backend forwards every dialect call to its inner
-    // `SqliteDialect` ZST so consumers can hold an `&SqliteBackend`
-    // and reach the dialect without naming the inner type.
+    // The backend forwards every dialect call to the `SqliteDialect`
+    // ZST so consumers can hold an `&SqliteBackend` and reach the
+    // dialect without naming the inner type. The ZST is instantiated
+    // per call — rustc inlines the value away because every method on
+    // `SqliteDialect` is `&self` and side-effect-free.
 
     fn quote_ident(&self, name: &str) -> String {
-        self.dialect.quote_ident(name)
+        SqliteDialect.quote_ident(name)
     }
 
     fn build_ensure_app_schema(&self, app_id: &str) -> String {
-        self.dialect.build_ensure_app_schema(app_id)
+        SqliteDialect.build_ensure_app_schema(app_id)
     }
 
     fn build_create_index(&self, spec: &IndexSpec, online: bool) -> String {
-        self.dialect.build_create_index(spec, online)
+        SqliteDialect.build_create_index(spec, online)
     }
 
     fn map_zs_type(&self, zs_type: &str, opts: &Value) -> String {
-        self.dialect.map_zs_type(zs_type, opts)
+        SqliteDialect.map_zs_type(zs_type, opts)
     }
 
     fn now_fn(&self) -> &'static str {
-        self.dialect.now_fn()
+        SqliteDialect.now_fn()
     }
 
     fn last_insert_rowid_sql(&self) -> Option<&'static str> {
-        self.dialect.last_insert_rowid_sql()
+        SqliteDialect.last_insert_rowid_sql()
     }
 }
 
