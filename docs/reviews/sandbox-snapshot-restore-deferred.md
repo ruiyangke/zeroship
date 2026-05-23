@@ -72,7 +72,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Captured, not fixed** per brief constraint (NEW bug → capture verbatim).
 - **Blocked**: B-SLO empirical validation at c=20 scale (deferred until #23 is fixed).
 
-### [A1] AEAD never wraps prod snapshot store (CRITICAL, security-r1)
+### [A1] (CLOSED at `18e2034b`) AeadSnapshotStore now wraps prod store when SANDBOX_SNAPSHOT_ROOT_KEK_PATH provided. Follow-up: A1-FOLLOWUP (boot assertion vs warn when key missing in tiered+GCS mode — per arch-r9 fail-CLOSED gap)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)
 - **File**: `crates/sandbox/src/lib.rs:316-345`
 - **Symptom**: production builds bare `LocalDiskSnapshotStore` or `TieredSnapshotStore<LocalDisk, Gcs>`; `AeadSnapshotStore` never composed. `snapshot_handler.rs:358` still stamps `snapshot_aead_dek_id="v1"` into pg, so operators see "encrypted" in the audit trail while guest RAM hits GCS in plaintext.
@@ -102,19 +102,19 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: if the surrounding handler future drops between `submit_restore_job` success and final `update_sandbox_status(Running)` await, the sandbox row wedges in `Restoring` state with `vm_index` leaked. The only recovery path is the transient-takeover sweep — **which is dead code per C1** ([C1] in this file). Two open critical issues compound: cancel-unsafe restore + no recovery sweep = permanent wedge.
 - **Action**: wrap the post-`submit_restore_job` section in a `pin_project` / scope guard that, on drop without success, marks the row `RestoringAborted` (or rolls back to `Snapshotted`) before yielding. Compio's cancellation semantics + a defer/scope-guard pattern from `crates/sandbox/src/admin_handlers.rs::with_lease` (if it exists; otherwise introduce).
 
-### [A2b] `verify` re-stream is 1 GB GCS egress on L1 eviction (CRITICAL, performance-r2)
+### [A2b] (CLOSED at `b925ad0d`) `verify_metadata_only` fast-path lands; trait default delegates to deep `verify` for back-compat; sweep callers documented to use metadata-only
 - **Source**: 2026-05-24 performance-r2 (a side-effect of the A2 fix at `f32507ce`)
 - **File**: `crates/sandbox/src/snapshot_store_gcs.rs:586-611,920-930`
 - **Symptom**: A2 fix made `verify` re-stream the whole artifact and recompute SHA. Fine while L1 is warm. But `TieredSnapshotStore::verify` falls through to L2 the moment L1 is evicted, exposing operators to a sustained 1 GB GCS egress + a SHA-bound core whenever a periodic verify sweep lands on cold rows.
 - **Action**: add a `verify_metadata_only(&self, expected_sha256: &Hash)` fast-path that compares against the `x-goog-meta-sha256` header we set on put. The full re-stream stays as the "deep verify" mode. Periodic sweeps use fast-path; integrity audits (manual) use deep.
 
-### [W1] Wrapper unanchored `sed` rewrite of attacker-influenceable `config.json` (CRITICAL, security-r2 survived 2 rounds)
+### [W1] (CLOSED at `f0ebf783`) sed → python3 heredoc with anchored prefix + known-key restriction; metacharacters become JSON string bytes, not regex input
 - **Source**: 2026-05-24 security-r2 (also flagged in r1)
 - **File**: `crates/sandbox/scripts/nomad-vm-wrapper.sh:359`
 - **Symptom**: `sed -i "s|...|...|" config.json` where the substitution pattern includes user-influenceable fields. Unanchored, no escaping of `&`/`/`/`\`. With A1 still open (snapshot plaintext on GCS), an attacker with bucket-write could substitute a config.json whose sed-target field contains sed metacharacters, achieving code execution as raw_exec root. (Currently dormant because A1 is locally-mitigated by the worker-local L1 — but A1 will close to AEAD prod-wrap, which doesn't fix the wrapper sink.)
 - **Action**: replace `sed` with a Python or `jq`-based rewrite that validates each field is a JSON string (not metacharacter-bearing). If `jq` isn't in the rootfs (likely), use a small inline Python invocation (`/usr/bin/python3 -c '...'`). Or: switch to a Rust pre-stage step in the controller (the controller already does some path rewriting in `restore_handler::rewrite_config_json`).
 
-### [C1] Lease-takeover sweep is dead code (CRITICAL, concurrency-r1 + arch-r1)
+### [C1] (CLOSED at `de3523c4`) `update_sandbox_status_with_host` now sets `lessee_updated_at = now()` on transient entry, NULL on exit; 2 pg-gated regression tests added
 - **Source**: 2026-05-24 concurrency review (corroborates 2026-05-23 architecture-r1)
 - **Files**: `crates/sandbox/src/db.rs:2305` (`update_lessee` — zero callers); `crates/sandbox/src/db.rs:1712-1724` (`update_sandbox_status` never sets `lessee_updated_at`); `crates/sandbox/src/db.rs:2361` (sweep query filter `WHERE lessee_updated_at IS NOT NULL` excludes every real transient row)
 - **Symptom**: §6.1 crash recovery never fires. Under a controller crash mid-Snapshotting/Restoring, the sandbox row is stuck in transient state forever.
@@ -364,7 +364,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: **CLOSED**. Boot-time fail-CLOSED guard added to `AppState::from_config` via `assert_persist_required_when_snapshot_enabled(snapshot_enabled, persist_present, test_override)`. Controller now refuses to start with a clear remediation message when `SANDBOX_SNAPSHOT_ENABLED=true && persist.is_none()`. Test escape hatch `SANDBOX_PERSIST_NONE_OK=1` lets `StubRestoreBackend`-driven test fixtures bypass the assertion. 5 unit tests pin every cell of the truth table. Cluster c=4 confirms the assertion does NOT fire in the legal `snap=on, persist=on` config (controller boots active, livez 200).
 - **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix E (boot section).
 
-### [R5-S5] A3-partial hard_link aliases canonical L1 (CRITICAL, security-r5)
+### [R5-S5] (CLOSED at `e7ecbbd6`) chmod 0o444 on alloc-side hard links; CH verified read-only on memory-ranges (upstream `memory_manager.rs::fill_saved_regions` uses O_RDONLY + `read(2)`, not MAP_SHARED)
 - **File**: `crates/sandbox/src/snapshot_store.rs:259-273`
 - **Symptom**: hard_link aliases canonical L1 memory-ranges + state.json to writable alloc dir. CH `MAP_SHARED` writeback or alloc-dir chmod by raw_exec silently widens canonical L1 in place. config.json is safe (sed -i renames break the link); memory-ranges is the worst case.
 - **Action**: `chmod 0444` on the alloc-side hard links right after creation; or use reflink/CoW when available (`copy_file_range`); or accept that L1 is mutable and document the threat model in the L1 store's doc comment.
@@ -439,13 +439,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## NEW r8 ROUND FINDINGS (added by pilot cycle 2026-05-24)
 
-### [R8-DEPLOY1] `nomad-vm-wrapper.sh` does NOT inject `SANDBOX_AGENT_SANDBOX_ID` — cluster wakes BROKEN until landed (CRITICAL, security-r8)
+### [R8-DEPLOY1] (CLOSED at `f0ebf783`) kernel cmdline `SANDBOX_AGENT_SANDBOX_ID=${ZSBX_SANDBOX_ID}` injection; typed_id-shape validator; both cold-boot + restore branches handled (restore inherits from snapshot RAM)
 - **Source**: 2026-05-24 security-r8
 - **Files**: `crates/sandbox-agent/src/main.rs:97-102` (binds requirement) vs `crates/sandbox/scripts/nomad-vm-wrapper.sh` (does not write env or `/run/keys/sandbox-id`)
 - **Symptom**: R7-S1 added a fail-closed assertion that the agent must learn its sandbox_id at boot, but the wrapper that spawns the VM doesn't pass it. Boot exits 1; every cluster wake breaks.
 - **Action**: in the wrapper restore + cold-boot branches, after the tap-up sequence, add `--env "SANDBOX_AGENT_SANDBOX_ID=$ZSBX_SANDBOX_ID"` to the CH `--cmdline` (or write to `/run/keys/sandbox-id` via cloud-init). Upload updated wrapper to GCS. Rebake rootfs v5. Rebuild controller v18.
 
-### [R8-A4] Sandbox-agent has ~34 wire-emission sites, ZERO A4-compliant (CRITICAL, api-surface-r8)
+### [R8-A4] (CLOSED at `fc3e9972` + `ae5cc977`) sandbox-agent `error_envelope.rs` lands; 34 sites migrated; proxy.rs A4 field-order INVERSION fixed (was `{"error":<prose>,"code":<kind>}`); 13 new wire-shape tests pin contract
 - **Source**: 2026-05-24 api-surface-r8 (quantified)
 - **Files**: `crates/sandbox-agent/src/handlers.rs` (13× err, 11× unauthorized, 5× draining, 3× clock_resync from R7-S1), `crates/sandbox-agent/src/proxy.rs:98,115,194,201` (err + err_with_code, latter INVERTS A4 field order), `crates/sandbox-agent/src/main.rs:1×`
 - **Symptom**: A4 (§10.0 ErrorEnvelope) closed in sandbox crate at `2928d5ae` but never extended to sandbox-agent. All ~34 sites emit non-§10.0 shapes. R7-S1's `/_clock_resync` inherits the broken shape.
@@ -455,13 +455,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox-agent/src/handlers.rs:95` (`init_sandbox_id_from_env` — needed by `main.rs`, can stay pub if there's a reason, otherwise pub(crate)); `crates/sandbox-agent/src/sig.rs:119` (`ResyncBody` — used only inside `handlers::clock_resync`, can be pub(crate)). (Note R7-API1 was closed at `0a271d2f` for `verify_kind_skew_bypass`.)
 - **Action**: mechanical pub→pub(crate). Same anti-pattern carve-out as R4-S1/R5-API*/R7-API1.
 
-### [R8-A3-5] A3 slice 5: spawn_blocking on submit_restore_job + wait_for_livez (CRITICAL, performance-r8)
+### [R8-A3-5] (CLOSED at `64cbb447`) spawn_blocking wraps on submit_restore_job + wait_for_livez; restore_sandbox + do_restore_inner signature flip to `Arc<dyn RestoreBackend>`; 5 test sites migrated. Expected wake p50 reduction 5-8s/wake pending cluster smoke verification.
 - **Source**: 2026-05-24 performance-r8
 - **File**: `crates/sandbox/src/restore_handler.rs:460-467` (callers) + `:1378,1411` (the std::thread::sleep parking sites)
 - **Symptom**: `submit_restore_job` + `wait_for_livez` are sync internally (`std::thread::sleep` parking ntex worker 5-8s/wake). Single largest remaining wake-path target.
 - **Action**: wrap both in `compio::runtime::spawn_blocking`. Requires `Arc<dyn RestoreBackend: Send + Sync>` (or method-to-free-fn flip). Pattern: `cdd2e677` (R5-P1b). Estimated wake p50 reduction: **9235ms → 2500-4000ms**.
 
-### [R8-T1] `ChRemoteClient` trait missing `: Send + Sync` bound (IMPORTANT, performance-r8 + concurrency-r8)
+### [R8-T1] (NO-OP — already declared at trait birth in `70ba24db`) `ChRemoteClient: Send + Sync` bound was always present; reviewer read stale source
 - **File**: `crates/sandbox/src/snapshot_handler.rs:92-105`
 - **Symptom**: R7-P1's spawn_blocking correctness rests on incidental impl auto-derivation. A future `Rc<_>`-bearing impl would silently break the spawn_blocking call site without trait-level compile error.
 - **Action**: add `: Send + Sync` to the trait declaration. One-line change.
@@ -471,7 +471,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: snapshot path now has 4 awaits; drop after `ch.snapshot` Ok but before `store.put` wedges a paused VM + staged 2 GB artifact + `Snapshotting` pg row permanently (C1 sweep is dead).
 - **Action**: subsumed by R4-A2's `LeasedVmSlot` RAII guard (4 cycles open). The structural fix would close both snapshot-path AND restore-path C3 widenings.
 
-### [R8-CONC2] R7-S1 `RESYNC_CHALLENGE_CAPACITY = 4` fragile against future retry-on-transient (MINOR, concurrency-r8)
+### [R8-CONC2] (CLOSED at `f1bed99a`) `RESYNC_CHALLENGE_CAPACITY` 4→32 (sized for 12 vm_index × 2-3 retries ≈ 36 worst-case)
 - **File**: `crates/sandbox-agent/src/handlers.rs:76`
 - **Symptom**: LRU=4 not exploitable today (controller mints one challenge per restore), but any future retry-on-transient that pushes 3+ resyncs in seconds could evict the legit challenge.
 - **Action**: bump to 16-32. One-line const. Doc the chosen capacity.
