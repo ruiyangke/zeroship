@@ -500,7 +500,7 @@ async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
     Ok(())
 }
 
-/// `init_session(app_id, actor_kind, actor_id, signature, nonce, expires_at)`.
+/// `init_session(app_id, actor_kind, actor_id, signature, nonce, expires_at, p_pid)`.
 ///
 /// SECURITY DEFINER wrapper that:
 ///  1. Rejects expired tokens (the signed payload contains
@@ -510,7 +510,39 @@ async fn install_verify_signature_function(pool: &Pool) -> Result<(), DbError> {
 ///  4. Writes the session-context row keyed by `pg_backend_pid()`
 ///     (so it survives connection reuse correctly: the next checkout
 ///     overwrites the row).
+///
+/// **P3 PR 2 additive change**: `p_pid INTEGER DEFAULT NULL` is the
+/// PID the token was minted against. When `NULL` (every pre-P3
+/// caller — including the existing free-fn `init_session` wrapper —
+/// passes nothing), the function falls back to `pg_backend_pid()` —
+/// byte-for-byte today's behaviour. When non-NULL, the trait-impl
+/// path passes `token.backend_pid` so HMAC verification reproduces
+/// the mint-time payload even when init runs on a fresh pool client
+/// with a different `pg_backend_pid()`. See
+/// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §10
+/// (Q-P3-A — the riskiest decision).
+///
+/// `pg_backend_pid()` is also used as the `session_ctx.pid` key —
+/// it intentionally stays bound to the **current** backend (the row
+/// must be discoverable by audit-write SECURITY DEFINERs running on
+/// THIS connection). Only the HMAC verifier consults `p_pid`.
 async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
+    // `CREATE OR REPLACE FUNCTION` refuses to change a function's
+    // parameter list. P3 PR 2 widens `init_session` from a 6-arg to
+    // a 7-arg signature (additive `p_pid INTEGER DEFAULT NULL`); we
+    // DROP the legacy 6-arg signature first so the CREATE installs
+    // cleanly on a previously-bootstrapped cluster. `IF EXISTS`
+    // keeps fresh clusters happy.
+    pool.execute(
+        &format!(
+            r#"DROP FUNCTION IF EXISTS
+               "{ADMIN_SCHEMA}".init_session(TEXT,TEXT,TEXT,BYTEA,BYTEA,TIMESTAMPTZ)"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("DROP init_session(legacy 6-arg)", e))?;
+
     let sql = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".init_session(
               p_app_id     TEXT,
@@ -518,11 +550,14 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
               p_actor_id   TEXT,
               p_signature  BYTEA,
               p_nonce      BYTEA,
-              p_expires_at TIMESTAMPTZ
+              p_expires_at TIMESTAMPTZ,
+              p_pid        INTEGER DEFAULT NULL
            ) RETURNS VOID
            LANGUAGE plpgsql SECURITY DEFINER
            SET search_path = pg_catalog, public, pg_temp
            AS $$
+           DECLARE
+             v_verify_pid INTEGER := COALESCE(p_pid, pg_backend_pid());
            BEGIN
              IF p_expires_at < NOW() THEN
                RAISE EXCEPTION 'session-init signature expired'
@@ -555,14 +590,22 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
                        DETAIL = 'session_nonce_replay';
              END;
 
+             -- HMAC verifier uses the MINT-TIME pid (p_pid) when the
+             -- caller provided one; otherwise falls back to the
+             -- caller's pg_backend_pid() — byte-for-byte today's
+             -- behaviour. See header comment + Q-P3-A.
              IF NOT "{ADMIN_SCHEMA}".verify_signature(
-                    p_actor_kind, p_actor_id, pg_backend_pid(),
+                    p_actor_kind, p_actor_id, v_verify_pid,
                     p_nonce, p_expires_at, p_signature) THEN
                RAISE EXCEPTION 'invalid session-init signature'
                  USING ERRCODE = 'P0001',
                        DETAIL = 'session_invalid_signature';
              END IF;
 
+             -- session_ctx is keyed by the CURRENT backend's PID, not
+             -- the mint-time PID: downstream audit-write SECURITY
+             -- DEFINERs run on THIS connection and look up by
+             -- pg_backend_pid().
              INSERT INTO "{ADMIN_SCHEMA}".session_ctx
                (pid, app_id, actor_kind, actor_id, session_nonce)
              VALUES (pg_backend_pid(), p_app_id, p_actor_kind,
@@ -592,7 +635,7 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
     pool.execute(
         &format!(
             r#"REVOKE ALL ON FUNCTION
-               "{ADMIN_SCHEMA}".init_session(TEXT,TEXT,TEXT,BYTEA,BYTEA,TIMESTAMPTZ)
+               "{ADMIN_SCHEMA}".init_session(TEXT,TEXT,TEXT,BYTEA,BYTEA,TIMESTAMPTZ,INTEGER)
                FROM PUBLIC"#
         ),
         &[],
@@ -606,7 +649,7 @@ async fn install_init_session_function(pool: &Pool) -> Result<(), DbError> {
     pool.execute(
         &format!(
             r#"GRANT EXECUTE ON FUNCTION
-               "{ADMIN_SCHEMA}".init_session(TEXT,TEXT,TEXT,BYTEA,BYTEA,TIMESTAMPTZ)
+               "{ADMIN_SCHEMA}".init_session(TEXT,TEXT,TEXT,BYTEA,BYTEA,TIMESTAMPTZ,INTEGER)
                TO "{PLATFORM_ROLE}", "{APP_ROLE_TEMPLATE}""#
         ),
         &[],

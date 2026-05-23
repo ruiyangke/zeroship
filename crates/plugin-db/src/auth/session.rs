@@ -225,14 +225,60 @@ fn classify_detail_token(detail: &str) -> Option<(&'static str, &'static str)> {
 /// called on the same backend PID the token was minted for — the
 /// SECURITY DEFINER function uses `pg_backend_pid()` to re-derive the
 /// payload and re-verify the HMAC.
+///
+/// Thin wrapper around [`init_session_with_pid`] that passes
+/// `p_pid = None` — i.e. the SECURITY DEFINER falls back to
+/// `pg_backend_pid()`, byte-for-byte preserving today's behaviour
+/// for every legacy caller (every `b8c_*` integration test, the
+/// existing platform mint-and-init flow, etc.).
 pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), DbError> {
+    init_session_with_pid(client, token, None).await
+}
+
+/// Like [`init_session`], but lets the caller pass the explicit
+/// `p_pid` the SECURITY DEFINER uses for HMAC verification.
+///
+/// **Why this exists** (P3 PR 2, Q-P3-A — the riskiest decision in
+/// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §10): the
+/// new `SessionMinter` trait separates `mint_session_token` from
+/// `init_session`. Trait callers acquire a fresh pool client per
+/// call — the init-side `pg_backend_pid()` no longer matches the
+/// mint-side PID, so HMAC verification fails on every legitimate
+/// call. The trait impl threads the original `token.backend_pid`
+/// down to this fn, which passes it as the SECURITY DEFINER's new
+/// `p_pid` parameter; the verifier reproduces the mint-time payload
+/// even on a different connection.
+///
+/// `p_pid = None` → SECURITY DEFINER uses `pg_backend_pid()` (the
+/// legacy [`init_session`] wrapper takes this path). `Some(pid)` →
+/// SECURITY DEFINER uses the explicit value.
+///
+/// The cryptographic verify body itself is unchanged — only the
+/// PID-source-of-truth (PG `pg_backend_pid()` vs caller-supplied)
+/// changes. See `crate::auth::bootstrap::install_init_session_function`
+/// for the SQL diff.
+pub async fn init_session_with_pid(
+    client: &Client,
+    token: &MintedToken,
+    p_pid: Option<i32>,
+) -> Result<(), DbError> {
     let nonce_hex = hex_encode(&token.nonce);
     let sig_hex = hex_encode(&token.signature);
+    // The 7th argument is the new `p_pid INTEGER DEFAULT NULL`.
+    // `query_text_params` takes `&[&str]` — no Option/NULL path on
+    // the wire — so we emit the empty string when `p_pid = None`
+    // and unwrap it inside SQL via `NULLIF($7, '')::integer`. That
+    // produces a TRUE NULL the SECURITY DEFINER's `COALESCE(p_pid,
+    // pg_backend_pid())` falls through, byte-for-byte the legacy
+    // 6-arg behaviour. When `p_pid = Some(n)`, NULLIF returns the
+    // text, and `::integer` parses it.
+    let pid_text: String = p_pid.map(|p| p.to_string()).unwrap_or_default();
     client
         .query_text_params(
             &format!(
                 "SELECT \"{ADMIN_SCHEMA}\".init_session(
-                    $1, $2, $3, decode($4, 'hex'), decode($5, 'hex'), $6::timestamptz
+                    $1, $2, $3, decode($4, 'hex'), decode($5, 'hex'), $6::timestamptz,
+                    NULLIF($7, '')::integer
                  )"
             ),
             &[
@@ -242,6 +288,7 @@ pub async fn init_session(client: &Client, token: &MintedToken) -> Result<(), Db
                 &sig_hex,
                 &nonce_hex,
                 &token.expires_at_iso,
+                &pid_text,
             ],
         )
         .await
@@ -296,6 +343,115 @@ pub async fn mint_and_init_via_pool(
         .await
         .map_err(|e| coded_sql("pool get", e))?;
     mint_and_init(&*client, init, ttl_secs).await
+}
+
+// ---------------------------------------------------------------------------
+// PostgresBackend impl of the cross-backend `SessionMinter` trait
+// ---------------------------------------------------------------------------
+//
+// P3 PR 2: declares `impl crate::backend::SessionMinter for
+// crate::backend::PostgresBackend` so the PG arm of the
+// `BackendHandle::as_postgres()` / `as_sqlite()` accessors carries
+// the same surface the SQLite impl (PR 3) will. The impl bodies
+// translate the cross-backend `crate::backend::{SessionInit,
+// MintedToken}` shape (carries `pid: Option<String>`) into the
+// legacy local `auth::session::{SessionInit, MintedToken}` shape
+// (no `pid`), call the existing free fns, and translate back.
+//
+// **Behaviour preservation**: every existing PG caller of the free
+// fns (`mint_session_token`, `init_session`, `mint_and_init`,
+// `mint_and_init_via_pool`) continues to pass through unchanged —
+// they all route through `init_session(...)`, which is now a thin
+// wrapper around `init_session_with_pid(client, token, None)` that
+// makes the SECURITY DEFINER fall back to `pg_backend_pid()`. The
+// trait impl is the ONLY caller that passes `Some(token.backend_pid)`.
+//
+// **`pid` field — cross-backend vs PG-legacy**: the new
+// `SessionInit::pid` / `MintedToken::pid` (project-id per design
+// §12) is NOT yet consumed by the PG SECURITY DEFINER body — the PG
+// canonical payload still uses `pg_backend_pid()`. SQLite uses
+// `pid` verbatim from day one. Per the plan §4, enabling the new
+// payload format on PG is a follow-up PR. For now the PG impl
+// carries `pid` through `MintedToken` verbatim so SDK round-trips
+// don't lose data; the SECURITY DEFINER ignores it.
+//
+// **Gating**: this impl block is gated on `#[cfg(feature = "hardening")]`
+// indirectly — the entire `auth::session` module is reachable only
+// under that feature (see `auth/mod.rs`).
+
+impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
+    async fn mint_session_token(
+        &self,
+        init: crate::backend::SessionInit,
+        ttl_secs: Option<i64>,
+    ) -> Result<crate::backend::MintedToken, DbError> {
+        // Acquire a fresh client from the pool. mint_session_token
+        // takes `&Client` (so the SAME backend serves the
+        // pg_backend_pid() probe + the sign_session call); the
+        // client must outlive the await.
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| coded_sql("pool get (SessionMinter::mint_session_token)", e))?;
+
+        // Trait → legacy struct translation. The legacy SessionInit
+        // has no `pid` field — the PG free fn re-derives it from
+        // `pg_backend_pid()` inside the function body. The
+        // cross-backend `init.pid` is carried through into the
+        // returned MintedToken so the SDK round-trip preserves it.
+        let local_init = SessionInit {
+            app_id: init.app_id.clone(),
+            actor_kind: init.actor_kind.clone(),
+            actor_id: init.actor_id.clone(),
+        };
+        let local_token = mint_session_token(&*client, local_init, ttl_secs).await?;
+
+        // Legacy → trait struct translation. backend_pid is the
+        // mint-time `pg_backend_pid()` captured inside the free fn;
+        // the trait callsite (init_session below) re-presents it to
+        // the SECURITY DEFINER as `p_pid` so HMAC verification
+        // reproduces the mint-time payload even on a different
+        // pool client.
+        Ok(crate::backend::MintedToken {
+            app_id: local_token.app_id,
+            actor_kind: local_token.actor_kind,
+            actor_id: local_token.actor_id,
+            pid: init.pid,
+            backend_pid: local_token.backend_pid,
+            nonce: local_token.nonce,
+            expires_at_iso: local_token.expires_at_iso,
+            signature: local_token.signature,
+        })
+    }
+
+    async fn init_session(
+        &self,
+        token: &crate::backend::MintedToken,
+    ) -> Result<(), DbError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| coded_sql("pool get (SessionMinter::init_session)", e))?;
+
+        // Trait → legacy struct translation. We MUST pass
+        // `Some(token.backend_pid)` as `p_pid` — the new client's
+        // `pg_backend_pid()` doesn't match the mint-time PID, and
+        // without the explicit override the SECURITY DEFINER's HMAC
+        // verify would fail on every legitimate call. This is the
+        // crux of Q-P3-A (the riskiest decision).
+        let local_token = MintedToken {
+            app_id: token.app_id.clone(),
+            actor_kind: token.actor_kind.clone(),
+            actor_id: token.actor_id.clone(),
+            backend_pid: token.backend_pid,
+            nonce: token.nonce.clone(),
+            expires_at_iso: token.expires_at_iso.clone(),
+            signature: token.signature.clone(),
+        };
+        init_session_with_pid(&*client, &local_token, Some(token.backend_pid)).await
+    }
 }
 
 // ---------------------------------------------------------------------------

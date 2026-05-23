@@ -4236,6 +4236,191 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
     b8c_drop_role(&pool, role).await;
 }
 
+// -----------------------------------------------------------------------
+// P3 PR 2 — additive `p_pid` SECURITY DEFINER parameter + SessionMinter
+// trait impl on PostgresBackend.
+//
+// The two tests below exercise BOTH paths of the new `p_pid` parameter
+// per the plan §10 (Q-P3-A — the riskiest decision):
+//   - `b8c_init_session_p_pid_null_uses_pg_backend_pid` — p_pid = NULL
+//     path: the existing free fn `init_session` passes None, and the
+//     SECURITY DEFINER falls back to `pg_backend_pid()`. Byte-for-byte
+//     legacy behaviour.
+//   - `b8c_session_minter_trait_init_succeeds_on_different_pool_client`
+//     — p_pid = Some(token.backend_pid) path: the `SessionMinter` trait
+//     impl acquires a different pool client for init (so its
+//     `pg_backend_pid()` differs from the mint-time PID) and passes the
+//     mint-time PID explicitly. Without `p_pid` this would fail with
+//     `session_invalid_signature`; with it, init succeeds.
+// -----------------------------------------------------------------------
+
+#[compio::test]
+async fn b8c_init_session_p_pid_null_uses_pg_backend_pid() {
+    // p_pid = NULL path: the existing free fn `init_session` passes
+    // None implicitly via `init_session_with_pid(.., None)`, which
+    // renders an empty string for $7 and the SQL's
+    // `NULLIF($7, '')::integer` produces a true NULL → the SECURITY
+    // DEFINER's `COALESCE(p_pid, pg_backend_pid())` falls through to
+    // `pg_backend_pid()`. Byte-for-byte the legacy 6-arg behaviour
+    // every b8c_* test above already pins.
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+
+    let client = pool.get().await.unwrap();
+    let token = zeroship_plugin_db::auth::mint_session_token(
+        &*client,
+        zeroship_plugin_db::auth::SessionInit {
+            app_id: "b8c_p_pid_null_app".into(),
+            actor_kind: "platform".into(),
+            actor_id: None,
+        },
+        Some(60),
+    )
+    .await
+    .unwrap();
+
+    // Legacy free-fn `init_session` → passes p_pid = NULL → SECURITY
+    // DEFINER uses pg_backend_pid() (= token.backend_pid because mint
+    // + init share the same Client). Must succeed.
+    zeroship_plugin_db::auth::init_session(&*client, &token)
+        .await
+        .unwrap();
+
+    // session_ctx row exists keyed by the current pid.
+    let rows = client
+        .query_text_params(
+            "SELECT app_id FROM __zeroship_admin.session_ctx
+             WHERE pid = pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_p_pid_null_app");
+}
+
+#[compio::test]
+async fn b8c_session_minter_trait_init_succeeds_on_different_pool_client() {
+    // p_pid = Some(token.backend_pid) path: the `SessionMinter` trait
+    // impl on `PostgresBackend` acquires a fresh pool client for
+    // each method call. Mint runs on client A (pg_backend_pid = pid_A);
+    // init runs on client B (pg_backend_pid = pid_B ≠ pid_A in
+    // general). The impl passes `Some(token.backend_pid = pid_A)` so
+    // the SECURITY DEFINER's HMAC verification reproduces the
+    // mint-time payload even though the current backend's PID differs.
+    //
+    // Without the additive `p_pid` parameter, the SECURITY DEFINER
+    // would derive the payload using `pg_backend_pid() = pid_B`,
+    // signature verify would fail, and this test would error with
+    // `session_invalid_signature`.
+    use zeroship_plugin_db::backend::{PostgresBackend, SessionInit as BeSessionInit, SessionMinter};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+
+    // Sweep stale rows from prior runs — `session_ctx` is keyed by
+    // pg_backend_pid() and accumulates across the test process; we
+    // assert by app_id below, which would otherwise count old rows.
+    pool.execute(
+        "DELETE FROM __zeroship_admin.session_ctx WHERE app_id = $1",
+        &[&"b8c_minter_app"],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+
+    // Mint → acquires pool client A internally.
+    let token = SessionMinter::mint_session_token(
+        &backend,
+        BeSessionInit {
+            app_id: "b8c_minter_app".into(),
+            actor_kind: "platform".into(),
+            actor_id: None,
+            pid: None,
+        },
+        Some(60),
+    )
+    .await
+    .unwrap();
+
+    // Init → acquires pool client B internally. The mint client was
+    // dropped at the end of `mint_session_token`, so the pool may or
+    // may not hand us the same backend — either way the impl passes
+    // `Some(token.backend_pid)` as p_pid, so HMAC verifies correctly.
+    SessionMinter::init_session(&backend, &token).await.unwrap();
+
+    // Confirm: the session_ctx row was written keyed by the INIT-time
+    // backend pid (= the impl's pool-client-B pid), not by
+    // `token.backend_pid` — see the SECURITY DEFINER body's
+    // `INSERT INTO session_ctx ... (pid = pg_backend_pid())` line; the
+    // p_pid override applies ONLY to HMAC verification.
+    let probe = pool.get().await.unwrap();
+    let rows = probe
+        .query_text_params(
+            "SELECT app_id FROM __zeroship_admin.session_ctx
+             WHERE app_id = $1",
+            &[&"b8c_minter_app".to_string()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !rows.is_empty(),
+        "session_ctx row must be written for the trait-routed init (got 0 rows)"
+    );
+    assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_minter_app");
+}
+
+#[compio::test]
+async fn b8c_session_minter_trait_rejects_tampered_signature() {
+    // Defensive: even on the new `p_pid` path, the SECURITY DEFINER
+    // must still reject a tampered signature with the typed
+    // `session_invalid_signature` ValidationFailed code. Ensures the
+    // P3 PR 2 additive change didn't accidentally weaken the
+    // cryptographic verifier — only the PID-source-of-truth changed.
+    use zeroship_plugin_db::backend::{PostgresBackend, SessionInit as BeSessionInit, SessionMinter};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+
+    let mut token = SessionMinter::mint_session_token(
+        &backend,
+        BeSessionInit {
+            app_id: "b8c_minter_tamper_app".into(),
+            actor_kind: "platform".into(),
+            actor_id: None,
+            pid: None,
+        },
+        Some(60),
+    )
+    .await
+    .unwrap();
+
+    // Flip a signature byte. The SECURITY DEFINER's HMAC verify must
+    // reject — even though we're on the new `p_pid` path.
+    assert!(!token.signature.is_empty());
+    token.signature[0] ^= 0xff;
+
+    let err = SessionMinter::init_session(&backend, &token).await.unwrap_err();
+    match err {
+        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            assert_eq!(code, "session_invalid_signature");
+        }
+        other => panic!("expected ValidationFailed(session_invalid_signature), got: {other:?}"),
+    }
+}
+
 #[compio::test]
 async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     // The SECURITY DEFINER wrapper `__zeroship_admin.ensure_publication_and_slot`
