@@ -13,6 +13,7 @@ pub mod auth;
 pub mod backend;
 pub mod config;
 pub mod db;
+pub(crate) mod error_envelope;
 pub mod files;
 pub mod handlers;
 pub mod metrics;
