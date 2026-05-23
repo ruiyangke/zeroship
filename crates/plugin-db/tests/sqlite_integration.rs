@@ -1908,3 +1908,456 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P3 PR 4 — SessionMinter integration tests.
+//
+// These pin the design §19 P3 gates against the SQLite arm of the
+// `SessionMinter` trait (see `crates/plugin-db/src/backend/sqlite/mod.rs`,
+// `impl SessionMinter for SqliteBackend`). The trait + canonical
+// payload format are shared cross-backend; the PG arm exercises the
+// same gates via the `b8c_*` tests in `tests/integration.rs`.
+//
+// Every test below constructs `SqliteBackend::new_with_secrets(...)`
+// to bypass the env-var entry point — the secrets are deterministic
+// per test so a single `cargo test` invocation yields reproducible
+// HMAC signatures. The lone exception is `session_not_configured`,
+// which exercises the env-var-unset path via the plain `new(...)`
+// constructor; see the comment on that test for the isolation
+// rationale.
+//
+// Test count delta on this target: +8 (round-trip, replay, grace,
+// expired, invalid-sig, invalid-actor, nonce-too-short,
+// not-configured) plus +1 cross-backend payload-equivalence pin = +9.
+// ---------------------------------------------------------------------------
+
+use zeroship_plugin_db::backend::{MintedToken, SessionInit, SessionMinter};
+
+/// 32 bytes of deterministic key material — the same hex digit
+/// repeated. Each fixture uses a distinct nibble so two backends in
+/// the same test don't accidentally share a key.
+fn key_of(nibble: u8) -> Vec<u8> {
+    assert!(nibble < 16, "nibble must be 0..=15");
+    vec![nibble << 4 | nibble; 32]
+}
+
+/// Mint a fresh `SqliteBackend` with explicit minter secrets. The
+/// `TempDir` guard is returned alongside the backend so each test
+/// gets a clean per-app data directory.
+fn backend_with_secrets(
+    secret: Vec<u8>,
+    secret_prev: Option<Vec<u8>>,
+) -> (SqliteBackend, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let backend = SqliteBackend::new_with_secrets(
+        PathBuf::from(dir.path()),
+        secret,
+        secret_prev,
+    )
+    .expect("open SqliteBackend with secrets");
+    (backend, dir)
+}
+
+/// Shorthand constructor for a SessionInit fixture exercising the
+/// new P3 `pid` field end-to-end.
+fn fresh_init() -> SessionInit {
+    SessionInit {
+        app_id: "app_test".to_string(),
+        actor_kind: "user".to_string(),
+        actor_id: Some("usr_demo".to_string()),
+        pid: Some("prj_demo".to_string()),
+    }
+}
+
+/// Pattern-match a `DbError` into its typed code. Panics with the
+/// inspected variant on shape mismatch so the test message points at
+/// the actual failure rather than the assertion line.
+fn validation_code(err: &DbError) -> &str {
+    match err {
+        DbError::ValidationFailed { code, .. } => code,
+        other => panic!("expected DbError::ValidationFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn session_token_round_trip() {
+    // P3 design §19 gate #1: a mint-then-init pair round-trips on the
+    // SQLite arm with a deterministic secret. The token's nonce
+    // length (32), signature length (32 = HMAC-SHA256 output size),
+    // and non-empty ISO timestamp are also pinned — these are the
+    // cross-backend invariants the SDK contract relies on.
+    run(async {
+        let (backend, _dir) = backend_with_secrets(key_of(0xa), None);
+        let token = backend
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect("mint_session_token");
+
+        // Token shape invariants. `compute_signature` in
+        // `backend/sqlite/session_minter.rs` is HMAC-SHA256, so the
+        // signature is always 32 bytes; the nonce is 32 bytes from
+        // `getrandom_or_fallback`; `iso_timestamp_after` always
+        // emits a non-empty `YYYY-MM-DDTHH:MM:SS.mmm` string.
+        assert_eq!(
+            token.signature.len(),
+            32,
+            "HMAC-SHA256 signature must be 32 bytes; got {}",
+            token.signature.len()
+        );
+        assert_eq!(
+            token.nonce.len(),
+            32,
+            "session nonce must be 32 bytes; got {}",
+            token.nonce.len()
+        );
+        assert!(
+            !token.expires_at_iso.is_empty(),
+            "expires_at_iso must be populated"
+        );
+        // SQLite arm always reports backend_pid = 0 (no PG concept).
+        assert_eq!(token.backend_pid, 0);
+        // The mint must echo the `pid` field verbatim — it's part
+        // of the canonical signed payload.
+        assert_eq!(token.pid.as_deref(), Some("prj_demo"));
+
+        backend
+            .init_session(&token)
+            .await
+            .expect("init_session must accept a freshly-minted token");
+    });
+}
+
+#[test]
+fn session_replay_rejected() {
+    // P3 design §19 gate #2: presenting the same token twice
+    // surfaces `session_nonce_replay`. The nonce cache is
+    // `Rc<RefCell<NonceCache>>` on the backend; the second
+    // `init_session` call lands on the same cache, hits the
+    // membership check, and returns the typed error.
+    run(async {
+        let (backend, _dir) = backend_with_secrets(key_of(0xb), None);
+        let token = backend
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect("mint");
+
+        backend.init_session(&token).await.expect("first init ok");
+
+        let err = backend
+            .init_session(&token)
+            .await
+            .expect_err("second init must reject as replay");
+        assert_eq!(
+            validation_code(&err),
+            "session_nonce_replay",
+            "replay rejection must carry the typed code; got {err:?}"
+        );
+    });
+}
+
+#[test]
+fn session_grace_window() {
+    // P3 design §19 gate #3: a backend configured with
+    // `secret = K_new, secret_prev = Some(K_old)` accepts tokens
+    // signed under either key. A separate backend configured with
+    // only `secret = K_new` (no prev) rejects the K_old-signed token
+    // with `session_invalid_signature`.
+    //
+    // The artificial cross-backend test crosses the in-memory nonce
+    // cache boundary — the nonce cache is per-backend so the second
+    // backend sees an empty cache. This is correct: production runs
+    // one backend per worker; the test pins the `verify_signature`
+    // grace-key acceptance branch in isolation.
+    run(async {
+        let k_new = key_of(0xc);
+        let k_old = key_of(0xd);
+
+        // Old-key signer (mints tokens under K_old).
+        let (backend_old, _dir_old) =
+            backend_with_secrets(k_old.clone(), None);
+        // New-key + grace acceptor (verifies tokens under either K_new
+        // OR K_old).
+        let (backend_new, _dir_new) =
+            backend_with_secrets(k_new.clone(), Some(k_old.clone()));
+        // Strict new-key-only acceptor (no grace — must reject the
+        // K_old-signed token).
+        let (backend_strict, _dir_strict) =
+            backend_with_secrets(k_new.clone(), None);
+
+        // Mint under K_old; init under K_new+prev → accepted.
+        let token_a = backend_old
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect("mint under K_old");
+        backend_new
+            .init_session(&token_a)
+            .await
+            .expect("grace-window backend must accept K_old-signed token");
+
+        // Mint another K_old-signed token; init under strict K_new
+        // → rejected. Distinct nonce keeps replay-detection out of
+        // the way (the nonce is regenerated per mint).
+        let token_b = backend_old
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect("mint under K_old (second)");
+        let err = backend_strict
+            .init_session(&token_b)
+            .await
+            .expect_err("strict K_new-only backend must reject K_old-signed token");
+        assert_eq!(
+            validation_code(&err),
+            "session_invalid_signature",
+            "no-grace verify must surface invalid signature; got {err:?}"
+        );
+    });
+}
+
+#[test]
+fn session_signature_expired() {
+    // Edge case: a token minted with `ttl_secs = Some(-1)` is born
+    // expired (the `expires_at_iso` field is in the past at mint
+    // time). `init_session` checks expiry FIRST — before the HMAC
+    // verify — so the rejection is `session_signature_expired`,
+    // matching the PG SECURITY DEFINER `init_session`'s first
+    // gate.
+    run(async {
+        let (backend, _dir) = backend_with_secrets(key_of(0x1), None);
+        let token = backend
+            .mint_session_token(fresh_init(), Some(-1))
+            .await
+            .expect("mint with ttl=-1 still produces a token");
+
+        let err = backend
+            .init_session(&token)
+            .await
+            .expect_err("expired token must be rejected");
+        assert_eq!(
+            validation_code(&err),
+            "session_signature_expired",
+            "expired-token rejection must carry the typed code; got {err:?}"
+        );
+    });
+}
+
+#[test]
+fn session_invalid_signature() {
+    // Edge case: a valid token's signature is tampered by flipping
+    // one byte. `init_session` runs nonce-cache insertion BEFORE
+    // signature verify (matching the PG SECURITY DEFINER order), so
+    // we must use a fresh backend per attempt — the nonce we tamper
+    // around is consumed by the first init attempt's cache insert.
+    run(async {
+        let (backend, _dir) = backend_with_secrets(key_of(0x2), None);
+        let mut token = backend
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect("mint");
+        // Flip a bit in the middle of the signature. HMAC's avalanche
+        // property guarantees the verify fails — but we're pinning
+        // the typed error code, not the cryptography.
+        let target = token.signature.len() / 2;
+        token.signature[target] ^= 0x80;
+
+        let err = backend
+            .init_session(&token)
+            .await
+            .expect_err("tampered signature must be rejected");
+        assert_eq!(
+            validation_code(&err),
+            "session_invalid_signature",
+            "tampered-signature rejection must carry the typed code; got {err:?}"
+        );
+    });
+}
+
+#[test]
+fn session_invalid_actor_kind() {
+    // Edge case: an actor_kind outside the allowlist
+    // (`auto`/`user`/`operator`/`ai-builder`/`platform`) is rejected
+    // BEFORE signature verify, matching the PG SECURITY DEFINER
+    // allowlist check. The SQLite impl hand-codes the allowlist as
+    // a `const [&str; 5]`.
+    run(async {
+        let (backend, _dir) = backend_with_secrets(key_of(0x3), None);
+        let init = SessionInit {
+            app_id: "app_test".to_string(),
+            actor_kind: "evil".to_string(),
+            actor_id: Some("usr_attacker".to_string()),
+            pid: Some("prj_demo".to_string()),
+        };
+        let token = backend
+            .mint_session_token(init, None)
+            .await
+            .expect("mint accepts arbitrary actor_kind (validation lives in init)");
+
+        let err = backend
+            .init_session(&token)
+            .await
+            .expect_err("invalid actor_kind must be rejected on init");
+        assert_eq!(
+            validation_code(&err),
+            "session_invalid_actor_kind",
+            "invalid-actor-kind rejection must carry the typed code; got {err:?}"
+        );
+    });
+}
+
+#[test]
+fn session_nonce_too_short() {
+    // Edge case: a token whose nonce was truncated to 8 bytes (below
+    // the 16-byte floor) is rejected with `session_nonce_too_short`
+    // BEFORE the HMAC verify. The PG SECURITY DEFINER applies the
+    // same gate via `octet_length(p_nonce) < 16`.
+    run(async {
+        let (backend, _dir) = backend_with_secrets(key_of(0x4), None);
+        let mut token = backend
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect("mint");
+        token.nonce.truncate(8);
+
+        let err = backend
+            .init_session(&token)
+            .await
+            .expect_err("8-byte nonce must be rejected");
+        assert_eq!(
+            validation_code(&err),
+            "session_nonce_too_short",
+            "short-nonce rejection must carry the typed code; got {err:?}"
+        );
+    });
+}
+
+#[test]
+fn session_not_configured() {
+    // Plan §11 Q-P3-H: a backend constructed via the env-var entry
+    // point (`SqliteBackend::new(...)`) without
+    // `ZEROSHIP_SESSION_SECRET` set must defer the failure to first
+    // mint, surfacing `DbError::Configuration { code: "not_configured" }`.
+    //
+    // **Isolation strategy**: this test does NOT manipulate env
+    // vars. All other session_* tests use `new_with_secrets(...)`,
+    // which bypasses the env-var read entirely. The test process
+    // therefore observes `ZEROSHIP_SESSION_SECRET` unset (unless an
+    // operator sets it before invoking `cargo test`). A guard
+    // assertion below skips the test cleanly if that pre-condition
+    // doesn't hold — a defensive check rather than a hard failure,
+    // because a developer who has the env var set in their shell
+    // shouldn't see a spurious test failure.
+    //
+    // The cross-test concern (one test calls `set_var` mid-run and
+    // poisons the global) doesn't apply here because no other test
+    // in this integration target touches the env. The PG
+    // integration target also doesn't touch `ZEROSHIP_SESSION_SECRET`;
+    // the auth subsystem on PG uses pgcrypto.gen_random_bytes for
+    // its HMAC key and reads `ZEROSHIP_HMAC_*` instead.
+    if std::env::var("ZEROSHIP_SESSION_SECRET").is_ok() {
+        eprintln!(
+            "session_not_configured: skipping — ZEROSHIP_SESSION_SECRET is set in \
+             this test process; the lazy-failure path is unreachable. To exercise \
+             this test, unset the env var and re-run."
+        );
+        return;
+    }
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let err = backend
+            .mint_session_token(fresh_init(), None)
+            .await
+            .expect_err("missing secret must defer to mint-time failure");
+        match err {
+            DbError::Configuration { code, message, .. } => {
+                assert_eq!(code, "not_configured", "typed code on unconfigured mint");
+                assert!(
+                    message.contains("ZEROSHIP_SESSION_SECRET"),
+                    "message must name the missing env var so operators self-serve; got: {message}"
+                );
+            }
+            other => panic!("expected DbError::Configuration, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn session_canonical_payload_byte_pin() {
+    // Cross-backend payload-equivalence pin — the SQLite-side
+    // analogue to a live-PG byte equivalence assertion.
+    //
+    // The PG impl signs via `__zeroship_admin.sign_session`'s
+    // SECURITY DEFINER body, which constructs the canonical payload
+    // as SQL string concatenation:
+    //   actor_kind || '|' || COALESCE(actor_id,'') || '|' ||
+    //   COALESCE(pid::TEXT,'') || '|' || encode(nonce,'hex') || '|' ||
+    //   expires_at_iso
+    // and HMACs it via `pgcrypto.hmac(payload, key, 'sha256')`.
+    //
+    // The SQLite impl runs the equivalent helper
+    // (`session_minter::canonical_payload` +
+    // `session_minter::compute_signature`) in Rust. These are
+    // `pub(crate)` and unreachable from this integration target,
+    // so we recompute the HMAC ourselves over the formula in this
+    // file and assert byte-for-byte equality with `token.signature`.
+    // If anyone refactors the canonical_payload formula or swaps
+    // the HMAC variant, this test fails immediately.
+    //
+    // A live-PG byte equivalence test would replace this with a
+    // direct comparison against `__zeroship_admin.sign_session(...)`
+    // output. Per the plan §7 commentary the structural equivalence
+    // is only fully verifiable against a live PG; this test is the
+    // regression catch for the SQLite side.
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    fn hex_encode_local(b: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(b.len() * 2);
+        for &x in b {
+            out.push(HEX[(x >> 4) as usize] as char);
+            out.push(HEX[(x & 0xF) as usize] as char);
+        }
+        out
+    }
+
+    run(async {
+        let secret = key_of(0x5);
+        let (backend, _dir) = backend_with_secrets(secret.clone(), None);
+        let init = SessionInit {
+            app_id: "app_test".to_string(),
+            actor_kind: "platform".to_string(),
+            actor_id: Some("usr_pin".to_string()),
+            pid: Some("prj_pin".to_string()),
+        };
+        let token = backend
+            .mint_session_token(init.clone(), None)
+            .await
+            .expect("mint");
+
+        // Reconstruct the canonical payload by hand from the public
+        // token fields. This is the formula documented in
+        // `backend/sqlite/session_minter.rs::canonical_payload`:
+        //   actor_kind | actor_id | pid | hex(nonce) | expires_at
+        let payload = format!(
+            "{}|{}|{}|{}|{}",
+            init.actor_kind,
+            init.actor_id.as_deref().unwrap_or(""),
+            init.pid.as_deref().unwrap_or(""),
+            hex_encode_local(&token.nonce),
+            token.expires_at_iso,
+        );
+
+        // Independent HMAC-SHA256.
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(&secret)
+            .expect("HMAC-SHA256 accepts any key length");
+        mac.update(payload.as_bytes());
+        let expected = mac.finalize().into_bytes().to_vec();
+
+        assert_eq!(
+            token.signature, expected,
+            "SQLite-side canonical payload + HMAC must match the documented \
+             formula byte-for-byte (cross-backend equivalence pin)"
+        );
+        assert_eq!(expected.len(), 32, "HMAC-SHA256 is always 32 bytes");
+    });
+}

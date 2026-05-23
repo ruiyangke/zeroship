@@ -68,6 +68,20 @@ tracing-subscriber = { workspace = true }
 # `<db_dir>/zs-control.sqlite`; the dir auto-cleans on drop so the
 # tests leave no on-disk artefacts.
 tempfile = { workspace = true }
+# P3 PR 4: cross-backend session-payload equivalence test in
+# `tests/sqlite_integration.rs` needs to recompute HMAC-SHA256 over
+# the canonical payload independently of the production code path so
+# the assertion pins the SQLite-side byte format against a third
+# implementation (the canonical_payload + compute_signature helpers
+# are `pub(crate)` and unreachable from the integration target).
+# `sha2` is already declared as a non-optional `[dependencies]` entry
+# (line 20) so it's available to the test target without re-listing;
+# `hmac` is `optional = true` under the `sqlite` feature, which the
+# sqlite_integration target enables — so it transitively reaches dev
+# code, but for explicit clarity (and so a future Cargo change that
+# stops propagating optional deps to dev tests doesn't break us) we
+# also pin `hmac` here as an unconditional dev-dep.
+hmac = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"

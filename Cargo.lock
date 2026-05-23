@@ -5995,6 +5995,7 @@ dependencies = [
  "compio-postgres",
  "criterion",
  "flume 0.11.1",
+ "hmac 0.12.1",
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
