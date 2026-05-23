@@ -437,9 +437,22 @@ impl GcsSnapshotStore {
             .call();
         match resp {
             Ok(r) if r.status() == 200 => {
-                let mut f = std::fs::File::create(dest)?;
+                let f = std::fs::File::create(dest)?;
+                // R11-P2 (perf-r11, wake-path counterpart to R10-P5):
+                // std lib's io::copy uses an 8 KiB default buffer.
+                // A 1 GB memory-ranges download issues ≈131072
+                // write(2)s unbuffered; the 1 MiB BufWriter collapses
+                // that to ≈1024. We flush + drop before sync_all so
+                // the BufWriter's internal buffer is observed on disk.
+                let mut writer = std::io::BufWriter::with_capacity(1 << 20, f);
                 let mut reader = r.into_reader();
-                std::io::copy(&mut reader, &mut f)?;
+                std::io::copy(&mut reader, &mut writer)?;
+                let f = writer.into_inner().map_err(|e| {
+                    SnapshotError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("BufWriter flush: {}", e.error()),
+                    ))
+                })?;
                 f.sync_all()?;
                 Ok(())
             }
@@ -504,11 +517,16 @@ impl GcsSnapshotStore {
 /// L1 contract; per-file `x-goog-hash` is for GCS object-integrity
 /// during transfer.
 fn sha256_file(path: &Path) -> Result<[u8; 32], SnapshotError> {
-    let mut f = std::fs::File::open(path)?;
+    // R11-P3 (perf-r11, sibling of R5-P1 77ea717f): 1 MiB BufReader
+    // collapses the 16× syscall amplification of the unbuffered
+    // 64 KiB loop. On a 1 GB memory-ranges file the read(2) count
+    // drops 16384 → 1024. Sha256 still sees byte-identical chunks.
+    let f = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(1 << 20, f);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = f.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -977,10 +995,15 @@ fn canonical_artifact_sha256(dir: &Path) -> Result<([u8; 32], u64), SnapshotErro
         };
         hasher.update(name.as_bytes());
         hasher.update(len.to_be_bytes());
-        let mut f = std::fs::File::open(&path)?;
+        // R11-P3 (perf-r11, sibling of R5-P1 77ea717f): 1 MiB
+        // BufReader collapses the 16× syscall amplification of the
+        // unbuffered 64 KiB loop. Mirrors snapshot_store::compute_
+        // artifact_sha256 byte-for-byte (same canonical hash domain).
+        let f = std::fs::File::open(&path)?;
+        let mut reader = std::io::BufReader::with_capacity(1 << 20, f);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = f.read(&mut buf)?;
+            let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
