@@ -335,7 +335,14 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: cancel-unsafe restore window now includes 2 more awaits (Persistence::unseal + Backend::register_restored). Drop creates a new wedge state: live VM + missing state-map + `Restoring` pg row + leaked vm_index.
 - **Action**: same shape as C3 — scope-guard around the restore-Ok section. Covers all C3 widenings (r2 original + r4 `clear_snapshot_metadata` + r5 unseal/register).
 
-### [R5-P1] Next A3 slice: BufReader on SHA + spawn_blocking on store.get (IMPORTANT, perf-r5)
+### [R5-P1] (PARTIAL at `77ea717f` — BufReader landed; spawn_blocking deferred to R5-P1b) Next A3 slice: BufReader on SHA + spawn_blocking on store.get (IMPORTANT, perf-r5)
+
+### [R5-P1b] spawn_blocking on store.get requires `&dyn` → `Arc<dyn>` flip in restore_handler (IMPORTANT, R5-P1 carve-out)
+- **Source**: R5-P1 fixer at `77ea717f` documented the blocker.
+- **Files**: `crates/sandbox/src/restore_handler.rs:184,329` (`store: &dyn SnapshotStore` → needs `Arc<dyn SnapshotStore>`); `crates/sandbox/src/admin_handlers.rs:1355` (in-scope call site); `crates/sandbox/tests/sandbox_pg_e2e.rs:2504,2545,2570,2769,2882` (out-of-scope call sites that pass `&store`).
+- **Symptom**: `compio::runtime::spawn_blocking` requires `FnOnce + Send + 'static`. With `&dyn`, the borrow can't be moved into the closure. The trait shape (`fn get(&self, …)`) is fine — only the call-site borrow needs to flip to `Arc::clone` first.
+- **Pattern reference**: `persist.rs::unseal` at `crates/sandbox/src/persist.rs:677-687` — clones `Arc<key>` before `spawn_blocking(move || …)`.
+- **Action**: change `restore_sandbox` + `do_restore_inner` to take `Arc<dyn SnapshotStore>`; migrate the 5 call sites; wrap the `store.get` body in `spawn_blocking`. Lib test count delta: 0 (refactor); estimated wake p50 reduction: 1.5-2.5s c=1, 3-5s c=4.
 - **Files**: `crates/sandbox/src/snapshot_store.rs:153-185` (SHA loop) + `crates/sandbox/src/restore_handler.rs:365` (store.get await site)
 - **Symptom**: post-A3-partial (hard_link), the SHA loop reads at 64 KiB unbuffered (16× syscall amplification) and the whole store.get blocks the ntex worker.
 - **Action**: 2-line change: `BufReader::with_capacity(1 << 20, f)` at the SHA loop site + wrap `store.get` in `compio::runtime::spawn_blocking`. Estimated reduction: 1.5-2.5s on c=1 wake; 3-5s on c=4 wake.
