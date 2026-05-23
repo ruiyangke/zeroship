@@ -190,6 +190,14 @@ fn unauthorized() -> HttpResponse {
 }
 
 /// Render a §10.0-compliant error envelope for admin endpoints.
+///
+/// `msg` is the user-visible message; pass ONLY values that are safe
+/// to ship over the wire (typed-ids, fixed prose, structural status
+/// names). For raw driver-error strings — `compio_postgres::Error`
+/// renders host:port + schema + SQL fragments, `ch-remote` errors
+/// render binary paths — funnel through [`err_safe`] instead, which
+/// logs the raw error via `tracing::error!` and returns a sanitized
+/// envelope.
 fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse {
     let s = msg.into();
     if status >= 500 {
@@ -198,6 +206,42 @@ fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse 
     let sc = StatusCode::from_u16(status)
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     error_response(sc, code, s)
+}
+
+/// Sanitizing variant of [`err`]. Logs the raw error to operator
+/// observability (journald via `tracing::error!`) but renders a
+/// FIXED `public_msg` into the wire-visible `message` field.
+///
+/// Per security review r4 (S4): A4's uniform envelope migration
+/// funneled 30+ admin sites' `format!("query: {e}")` into the
+/// `message` field. `compio_postgres::Error` carries host:port,
+/// schema names, and sometimes SQL fragments / row values; the
+/// admin endpoint IS admin-token-gated, but admin-token holders
+/// shouldn't see internal infrastructure details either (defense
+/// in depth — the threat model is the leak surface, not the
+/// authorization gate). The `code` field is the stable contract;
+/// the `message` should be safe prose.
+///
+/// Operators recover the raw error from journald keyed by the
+/// `tracing::error!` line below. The `code` field on the wire is
+/// the stable client contract — clients still branch on it.
+fn err_safe(
+    status: u16,
+    code: &'static str,
+    public_msg: &'static str,
+    raw: impl std::fmt::Display,
+) -> HttpResponse {
+    if status >= 500 {
+        tracing::error!(
+            status,
+            code,
+            error = %raw,
+            "sandbox/admin: sanitized error (raw not on wire)"
+        );
+    }
+    let sc = StatusCode::from_u16(status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    error_response(sc, code, public_msg)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -242,7 +286,7 @@ async fn open_app_pool(state: &AppState) -> Result<Pool, HttpResponse> {
         return Err(err(503, "pg_disabled", "pg integration disabled"));
     };
     db.pool_app().await.map_err(|e| {
-        err(503, "pg_pool_unavailable", format!("admin api: pool_app: {e}"))
+        err_safe(503, "pg_pool_unavailable", "database unavailable", e)
     })
 }
 
@@ -293,7 +337,7 @@ pub async fn list_all_sandboxes(
 
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
 
     // Single SQL with three optional WHERE predicates; pg's planner
@@ -319,7 +363,7 @@ pub async fn list_all_sandboxes(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
 
     let mut out: Vec<AdminSandboxRow> = Vec::with_capacity(rows.len());
@@ -399,7 +443,7 @@ pub async fn get_sandbox_detail(
     let row = match db.get_sandbox_row(uuid).await {
         Ok(Some(r)) => r,
         Ok(None) => return err(404, "sandbox_not_found", "sandbox not found"),
-        Err(e) => return err(500, "pg_query_failed", format!("get_sandbox_row: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
 
     let in_memory_info = state.sandboxes.get(&uuid);
@@ -471,7 +515,7 @@ async fn list_all_sandboxes_inner(
     let offset = clamp_offset(q.offset);
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let rows = client
         .query(
@@ -493,7 +537,7 @@ async fn list_all_sandboxes_inner(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
     let mut out: Vec<AdminSandboxRow> = Vec::with_capacity(rows.len());
     for r in rows {
@@ -549,7 +593,7 @@ pub async fn list_user_shares(
     };
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let rows = client
         .query(
@@ -571,7 +615,7 @@ pub async fn list_user_shares(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
     let out: Vec<serde_json::Value> = rows
         .into_iter()
@@ -615,7 +659,7 @@ pub async fn list_hosts(
     };
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let rows = client
         .query(
@@ -632,7 +676,7 @@ pub async fn list_hosts(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
     let out: Vec<serde_json::Value> = rows
         .into_iter()
@@ -686,17 +730,17 @@ pub async fn export_user(
     };
     let mut client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let tx = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return err(500, "pg_tx_begin_failed", format!("begin tx: {e}")),
+        Err(e) => return err_safe(500, "pg_tx_begin_failed", "database error", e),
     };
     if let Err(e) = tx
         .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
     {
-        return err(500, "pg_tx_isolation_failed", format!("set tx isolation: {e}"));
+        return err_safe(500, "pg_tx_isolation_failed", "database error", e);
     }
 
     let sandboxes_json = match tx
@@ -708,7 +752,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, "export_sandboxes_failed", format!("export sandboxes: {e}")),
+        Err(e) => return err_safe(500, "export_sandboxes_failed", "database error", e),
     };
     let shares_json = match tx
         .query_one(
@@ -721,7 +765,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, "export_shares_failed", format!("export shares: {e}")),
+        Err(e) => return err_safe(500, "export_shares_failed", "database error", e),
     };
     // Cap events at 10k. Order by ts so the truncation is a tail-cut
     // (operator gets the most recent 10k).
@@ -755,7 +799,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, "export_events_failed", format!("export events: {e}")),
+        Err(e) => return err_safe(500, "export_events_failed", "database error", e),
     };
     let events_count: i64 = match tx
         .query_one(
@@ -767,7 +811,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get(0),
-        Err(e) => return err(500, "count_events_failed", format!("count events: {e}")),
+        Err(e) => return err_safe(500, "count_events_failed", "database error", e),
     };
     let deleted_json = match tx
         .query_one(
@@ -778,10 +822,10 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, "export_tombstones_failed", format!("export tombstones: {e}")),
+        Err(e) => return err_safe(500, "export_tombstones_failed", "database error", e),
     };
     if let Err(e) = tx.commit().await {
-        return err(500, "pg_commit_failed", format!("commit: {e}"));
+        return err_safe(500, "pg_commit_failed", "database error", e);
     }
 
     let exported_at_secs = std::time::SystemTime::now()
@@ -855,15 +899,15 @@ pub async fn delete_user(
     // Use the gdpr-role pool. Single connection — the cascade is one TX.
     let gdpr_pool = match db.pool_gdpr().await {
         Ok(p) => p,
-        Err(e) => return err(503, "pg_pool_gdpr_unavailable", format!("pool_gdpr: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_gdpr_unavailable", "database unavailable", e),
     };
     let mut client = match gdpr_pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(500, "pg_pool_gdpr_acquire_failed", format!("pool_gdpr acquire: {e}")),
+        Err(e) => return err_safe(500, "pg_pool_gdpr_acquire_failed", "database unavailable", e),
     };
     let tx = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return err(500, "pg_tx_begin_failed", format!("begin tx: {e}")),
+        Err(e) => return err_safe(500, "pg_tx_begin_failed", "database error", e),
     };
 
     // Cross-user-leak guard: the `WHERE user_id = $1` predicate is on
@@ -878,7 +922,7 @@ pub async fn delete_user(
         .await
     {
         Ok(rows) => rows.into_iter().map(|r| r.get::<_, String>(0)).collect(),
-        Err(e) => return err(500, "gdpr_collect_ids_failed", format!("collect ids: {e}")),
+        Err(e) => return err_safe(500, "gdpr_collect_ids_failed", "database error", e),
     };
 
     let events_deleted: i64 = match tx
@@ -889,7 +933,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, "gdpr_delete_events_failed", format!("delete events: {e}")),
+        Err(e) => return err_safe(500, "gdpr_delete_events_failed", "database error", e),
     };
     let shares_deleted: i64 = match tx
         .execute(
@@ -902,7 +946,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, "gdpr_delete_shares_failed", format!("delete shares: {e}")),
+        Err(e) => return err_safe(500, "gdpr_delete_shares_failed", "database error", e),
     };
     let tombstoned: i64 = match tx
         .execute(
@@ -916,7 +960,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, "gdpr_tombstone_failed", format!("tombstone: {e}")),
+        Err(e) => return err_safe(500, "gdpr_tombstone_failed", "database error", e),
     };
     let sandboxes_deleted: i64 = match tx
         .execute(
@@ -926,7 +970,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, "gdpr_delete_sandboxes_failed", format!("delete sandboxes: {e}")),
+        Err(e) => return err_safe(500, "gdpr_delete_sandboxes_failed", "database error", e),
     };
     // Audit row inside the same TX. The sandbox_gdpr role has INSERT
     // grant on events for exactly this audit row (§ 13.2).
@@ -964,11 +1008,11 @@ pub async fn delete_user(
         )
         .await
     {
-        return err(500, "audit_insert_failed", format!("audit insert: {e}"));
+        return err_safe(500, "audit_insert_failed", "database error", e);
     }
 
     if let Err(e) = tx.commit().await {
-        return err(500, "pg_commit_failed", format!("commit: {e}"));
+        return err_safe(500, "pg_commit_failed", "database error", e);
     }
 
     // Sealed-record cleanup outside the TX. Best-effort + idempotent —
@@ -1075,10 +1119,18 @@ fn map_snapshot_error(e: SnapshotHandlerError) -> HttpResponse {
         )
         .with_extra(serde_json::json!({"sandbox_id": id}))
         .into_response(),
-        SnapshotHandlerError::ChRemote(s) => err(500, "ch_remote_failed", format!("ch_remote: {s}")),
-        SnapshotHandlerError::Store(s) => err(500, "snapshot_store_failed", format!("snapshot_store: {s}")),
-        SnapshotHandlerError::Database(d) => err(500, "database_failed", format!("database: {d}")),
-        SnapshotHandlerError::Internal(s) => err(500, "internal_error", format!("internal: {s}")),
+        SnapshotHandlerError::ChRemote(s) => {
+            err_safe(500, "ch_remote_failed", "hypervisor error", s)
+        }
+        SnapshotHandlerError::Store(s) => {
+            err_safe(500, "snapshot_store_failed", "snapshot store error", s)
+        }
+        SnapshotHandlerError::Database(d) => {
+            err_safe(500, "database_failed", "database error", d)
+        }
+        SnapshotHandlerError::Internal(s) => {
+            err_safe(500, "internal_error", "internal error", s)
+        }
     }
 }
 
@@ -1112,11 +1164,21 @@ fn map_restore_error(e: RestoreHandlerError) -> HttpResponse {
         RestoreHandlerError::SnapshotCorrupt => {
             err(500, "snapshot_corrupt", "snapshot_corrupt: row marked snapshotted_suspect")
         }
-        RestoreHandlerError::Store(s) => err(500, "snapshot_store_failed", format!("snapshot_store: {s}")),
-        RestoreHandlerError::Backend(s) => err(500, "restore_backend_failed", format!("restore_backend: {s}")),
-        RestoreHandlerError::ConfigRewrite(s) => err(500, "config_rewrite_failed", format!("config_rewrite: {s}")),
-        RestoreHandlerError::Database(d) => err(500, "database_failed", format!("database: {d}")),
-        RestoreHandlerError::Internal(s) => err(500, "internal_error", format!("internal: {s}")),
+        RestoreHandlerError::Store(s) => {
+            err_safe(500, "snapshot_store_failed", "snapshot store error", s)
+        }
+        RestoreHandlerError::Backend(s) => {
+            err_safe(500, "restore_backend_failed", "restore backend error", s)
+        }
+        RestoreHandlerError::ConfigRewrite(s) => {
+            err_safe(500, "config_rewrite_failed", "config rewrite error", s)
+        }
+        RestoreHandlerError::Database(d) => {
+            err_safe(500, "database_failed", "database error", d)
+        }
+        RestoreHandlerError::Internal(s) => {
+            err_safe(500, "internal_error", "internal error", s)
+        }
     }
 }
 
@@ -1188,6 +1250,10 @@ pub async fn snapshot_sandbox(
     let handle = match state.backend.lookup_source_vm_ops(sandbox_id).await {
         Ok(h) => h,
         Err(e) => {
+            // Per security review r4 (S4): the raw error here can
+            // carry Nomad addresses / internal alloc ids; log it but
+            // return a fixed public message. The `code` field is the
+            // stable wire contract.
             tracing::warn!(
                 sandbox_id = %sandbox_id,
                 error = %e,
@@ -1196,7 +1262,7 @@ pub async fn snapshot_sandbox(
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "source_vm_unavailable",
-                e,
+                "source VM unavailable",
             );
         }
     };
@@ -1538,6 +1604,153 @@ mod tests {
         assert!(body["message"].is_string());
         assert_eq!(body["expected"], "snapshotted");
         assert_eq!(body["current"], "running");
+    }
+
+    // ─── S4: sanitization pins — raw driver text must never appear ──
+    //
+    // Per security review r4 (S4): A4's uniform-envelope migration
+    // funneled raw `compio_postgres::Error` / `ch-remote` error
+    // strings into the wire-visible `message` field. These tests pin
+    // the no-leak invariant: feed a Display impl whose string
+    // contains realistic pg-DSN / SQL-fragment / ch-remote-binary-path
+    // shrapnel; assert the response body does NOT contain it.
+
+    /// Mimics a `compio_postgres::Error` rendered via Display:
+    /// includes host:port, schema, and a SQL fragment.
+    const PG_DSN_LEAK_SAMPLE: &str =
+        "db error: connecting to host=pg-primary.internal port=5432 \
+         user=sandbox_admin schema=sandbox failed: FATAL \
+         password authentication failed for user \"sandbox_admin\" \
+         (SQLSTATE 28P01) while executing \
+         SELECT sandbox_id FROM sandbox.sandboxes WHERE user_id=$1";
+
+    /// Mimics a `ch-remote` failure: process arg-vec + a host fs path.
+    const CH_REMOTE_LEAK_SAMPLE: &str =
+        "ch-remote: /usr/local/libexec/cloud-hypervisor/ch-remote \
+         --api-socket /run/sandbox/alloc/abc123/api.sock snapshot \
+         file:///var/lib/sandbox/snapshots/sbx_xxx exited with status 1: \
+         Error: SnapshotReceive: Permission denied (os error 13)";
+
+    #[compio::test]
+    async fn admin_error_does_not_leak_pg_dsn_in_message() {
+        // err_safe sanitizes pg-style errors into "database error".
+        let resp = err_safe(
+            500,
+            "pg_query_failed",
+            "database error",
+            PG_DSN_LEAK_SAMPLE,
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "pg_query_failed", "code is the stable contract");
+        assert_eq!(body["message"], "database error", "message is fixed prose");
+        // Wire body must not carry host, schema, SQL fragment, or
+        // sqlstate from the raw pg error.
+        let body_str = body.to_string();
+        for needle in [
+            "pg-primary.internal",
+            "5432",
+            "sandbox_admin",
+            "SQLSTATE",
+            "28P01",
+            "FROM sandbox.sandboxes",
+            "WHERE user_id",
+        ] {
+            assert!(
+                !body_str.contains(needle),
+                "raw pg-error fragment `{needle}` leaked into wire body: {body_str}",
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn admin_error_does_not_leak_sql_fragment_in_message() {
+        // Whatever the code field, the message must not carry SQL
+        // text. Test all four "database error"-class codes.
+        for code in [
+            "pg_query_failed",
+            "pg_tx_begin_failed",
+            "gdpr_delete_sandboxes_failed",
+            "audit_insert_failed",
+        ] {
+            let resp = err_safe(500, code, "database error", PG_DSN_LEAK_SAMPLE);
+            let body = body_json(resp).await;
+            let body_str = body.to_string();
+            assert!(
+                !body_str.contains("SELECT") && !body_str.contains("FROM sandbox."),
+                "code={code} leaked SQL into body: {body_str}",
+            );
+            assert_eq!(body["message"], "database error");
+        }
+    }
+
+    #[compio::test]
+    async fn admin_error_does_not_leak_ch_remote_path_in_message() {
+        // Snapshot/restore handlers funnel ch-remote stderr into
+        // SnapshotHandlerError::ChRemote(String). The map_*_error
+        // path now routes through err_safe → "hypervisor error".
+        let resp = map_snapshot_error(SnapshotHandlerError::ChRemote(
+            CH_REMOTE_LEAK_SAMPLE.to_string(),
+        ));
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "ch_remote_failed");
+        assert_eq!(body["message"], "hypervisor error");
+        let body_str = body.to_string();
+        for needle in [
+            "/usr/local/libexec",
+            "ch-remote",
+            "/run/sandbox/alloc",
+            "/var/lib/sandbox",
+            "api.sock",
+            "Permission denied",
+            "os error 13",
+        ] {
+            assert!(
+                !body_str.contains(needle),
+                "raw ch-remote fragment `{needle}` leaked into wire body: {body_str}",
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn admin_error_internal_message_is_fixed_prose() {
+        // SnapshotHandlerError::Internal carries an arbitrary String
+        // from inner layers — could be a panic message, a backtrace,
+        // anything. The message field must collapse to fixed prose.
+        let resp = map_snapshot_error(SnapshotHandlerError::Internal(
+            "panicked at 'index out of bounds' in registry.rs:847".to_string(),
+        ));
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "internal_error");
+        assert_eq!(body["message"], "internal error");
+        let body_str = body.to_string();
+        assert!(
+            !body_str.contains("panicked") && !body_str.contains("registry.rs"),
+            "internal-error raw text leaked: {body_str}",
+        );
+    }
+
+    #[compio::test]
+    async fn admin_error_keeps_public_identifiers_in_envelope() {
+        // The threat model is internal infrastructure leaking. Public
+        // identifiers (sandbox_id, user_id, requested vm_index) that
+        // the client itself supplied are FINE to keep — operators
+        // need them for diagnostic clarity. This test pins that
+        // sanitization does NOT over-strip.
+        let resp = map_snapshot_error(SnapshotHandlerError::NotFound(
+            "sbx_abc123".to_string(),
+        ));
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(
+            body["sandbox_id"], "sbx_abc123",
+            "client-supplied identifier must survive sanitization",
+        );
+
+        let resp = map_restore_error(RestoreHandlerError::VmIndexUnavailable {
+            requested: 42,
+        });
+        let body = body_json(resp).await;
+        assert_eq!(body["requested"], 42, "structural extras must survive");
     }
 }
 
