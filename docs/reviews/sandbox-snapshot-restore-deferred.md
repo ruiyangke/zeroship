@@ -618,10 +618,18 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Source**: 2026-05-25 test-coverage-r9
 - **Action**: a unit test per spawn_blocking site that pre-poisons via `panic!()` inside the closure; assert the parent surfaces a clean Backend error envelope, not a panic.
 
-### [R9-T4] 4 AEAD header-validation guard arms untested (IMPORTANT, test-coverage-r9)
+### [R9-T4] (CLOSED at `88da7580`) AEAD header-validation guard arms untested
 - **Source**: 2026-05-25 test-coverage-r9
-- **File**: `crates/sandbox/src/snapshot_aead.rs` (header parse)
-- **Action**: 4 negative tests (bad magic, bad version, bad cipher-tag, bad nonce-prefix). Each asserts the specific error variant, not just "decrypt failed".
+- **File**: `crates/sandbox/src/snapshot_aead.rs` (header parse, `decrypt_to`)
+- **Resolution**: 7 negative tests added (4 from the original list + 3 additional arms surfaced while reading the parser). Each pins the specific error-message substring since every guard collapses to `SnapshotError::InvalidArtifact(String)` — a bare `is_err()` would conflate magic/version/cipher/nonce/chunk-bounds failures.
+  - `aead_decrypt_rejects_bad_magic` — flips byte 0 → "AEAD magic mismatch"
+  - `aead_decrypt_rejects_bad_version` — flips byte 8 → "AEAD version unsupported"
+  - `aead_decrypt_rejects_bad_cipher_tag` — flips byte 9 → "AEAD cipher tag unsupported"
+  - `aead_decrypt_rejects_bad_nonce_prefix` — flips byte 20 → "AEAD nonce-prefix mismatch" (defense-in-depth pre-check arm, not the chunk-decrypt arm)
+  - `aead_decrypt_rejects_truncated_header` — additional arm: truncates blob to 16B → "AEAD header read"
+  - `aead_decrypt_rejects_chunk_length_exceeds_cap` — additional arm: chunk_len > CHUNK_CIPHERTEXT_MAX → "exceeds cap"
+  - `aead_decrypt_rejects_chunk_length_below_tag_size` — additional arm: chunk_len < AEAD_TAG_LEN → "below tag size"
+- **Verification**: `cargo test -p zeroship-sandbox --lib` 289 → 296 (no regression).
 
 ### [R9-T5] `build_restore_nomad_job_json` has zero test callers — restore-side env block contracts untested (IMPORTANT, test-coverage-r9)
 - **Source**: 2026-05-25 test-coverage-r9

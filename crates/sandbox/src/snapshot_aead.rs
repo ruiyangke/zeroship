@@ -956,4 +956,241 @@ mod tests {
         // file set. CH would reject a renamed restore.
         assert_eq!(ARTIFACT_FILES, &["config.json", "memory-ranges", "state.json"]);
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Header-validation negative tests (R9-T4).
+    //
+    // `decrypt_to` collapses every guard arm into
+    // `SnapshotError::InvalidArtifact(String)`. The error variant is
+    // identical across arms, so these tests assert on the message
+    // substring so a CI failure pinpoints WHICH arm fired rather than
+    // just "decrypt failed".
+    //
+    // Setup: produce a real encrypted blob once via `encrypt_in_place`,
+    // then mutate a copy of the blob per-test and call `decrypt_to`
+    // directly. This bypasses the L1 SHA-256 verify so we exercise the
+    // AEAD layer in isolation.
+    // ────────────────────────────────────────────────────────────────
+
+    /// Sandbox-id used by every header-validation test. The DEK is
+    /// derived from (kek, sandbox_id, snapshot_taken_at) so we need
+    /// it stable across the helper + the test.
+    const HEADER_TEST_SANDBOX_ID: &str = "sbx_aead_hdr";
+
+    /// Build a valid wrapped `memory-ranges` blob and return:
+    ///   (root_tmp_dir, aead_store, blob_bytes)
+    /// The blob is what `encrypt_in_place` wrote to the source dir
+    /// (i.e. the on-disk wire format). Each negative test copies
+    /// `blob_bytes`, flips a byte, writes it to a fresh path, and
+    /// calls `aead.decrypt_to(...)` on it.
+    fn build_valid_wrapped_blob() -> (
+        PathBuf,
+        AeadSnapshotStore<LocalDiskSnapshotStore>,
+        Vec<u8>,
+    ) {
+        let root = fresh_root();
+        let inner = LocalDiskSnapshotStore::new(root.join("store"));
+        let kek = RootKek::from_bytes([0x42; ROOT_KEK_LEN]);
+        let aead = AeadSnapshotStore::new(inner, Some(kek));
+
+        // Small artifact: one full chunk + a partial; exercises the
+        // chunk-length-field path without bloating runtime.
+        let src = root.join("src");
+        write_fake_artifact(&src, CHUNK_PLAINTEXT_LEN + 4096);
+        let _ = aead.put(HEADER_TEST_SANDBOX_ID, &src, "v51.1").unwrap();
+
+        // The post-put memory-ranges in L1 is the wrapped form.
+        // Find it via the inner store's canonical path.
+        let l1_root = root.join("store");
+        // LocalDiskSnapshotStore lays out artifacts under
+        // <root>/<sandbox_id>/<artifact_files>. Walk to find ours.
+        let artifact_dir = find_artifact_dir(&l1_root, HEADER_TEST_SANDBOX_ID);
+        let blob = std::fs::read(artifact_dir.join("memory-ranges")).unwrap();
+        // Sanity: header is at least 32 bytes and starts with magic.
+        assert!(blob.len() > 32, "wrapped blob too short");
+        assert_eq!(&blob[0..8], FILE_MAGIC);
+        (root, aead, blob)
+    }
+
+    /// Locate the artifact dir for `sandbox_id` under the L1 root.
+    /// LocalDiskSnapshotStore stamps a single artifact dir per sandbox;
+    /// we don't depend on the exact layout — just find the dir that
+    /// contains `memory-ranges`.
+    fn find_artifact_dir(l1_root: &Path, sandbox_id: &str) -> PathBuf {
+        // Search recursively, capped — there's exactly one match.
+        fn walk(dir: &Path, sandbox_id: &str) -> Option<PathBuf> {
+            for entry in std::fs::read_dir(dir).ok()? {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().and_then(|s| s.to_str())
+                        == Some(sandbox_id)
+                        && path.join("memory-ranges").exists()
+                    {
+                        return Some(path);
+                    }
+                    if let Some(found) = walk(&path, sandbox_id) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        walk(l1_root, sandbox_id).expect("artifact dir not found")
+    }
+
+    /// Write `bytes` to `<root>/wrapped-N` and run `aead.decrypt_to`
+    /// against it. Returns the error message (panics if `Ok`).
+    fn decrypt_corrupted(
+        root: &Path,
+        aead: &AeadSnapshotStore<LocalDiskSnapshotStore>,
+        bytes: &[u8],
+        tag: &str,
+    ) -> String {
+        let wrapped_path = root.join(format!("wrapped-{tag}"));
+        let target_path = root.join(format!("target-{tag}"));
+        std::fs::write(&wrapped_path, bytes).unwrap();
+        let err = aead
+            .decrypt_to(&wrapped_path, &target_path, HEADER_TEST_SANDBOX_ID)
+            .expect_err("decrypt must reject corrupted blob");
+        match err {
+            SnapshotError::InvalidArtifact(msg) => msg,
+            other => panic!("expected InvalidArtifact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_bad_magic() {
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        let mut bad = blob.clone();
+        // Flip byte 0 of the magic.
+        bad[0] ^= 0xff;
+        let msg = decrypt_corrupted(&root, &aead, &bad, "bad-magic");
+        assert!(
+            msg.contains("AEAD magic mismatch"),
+            "bad-magic must report magic mismatch; got: {msg}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_bad_version() {
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        let mut bad = blob.clone();
+        // Version byte is offset 8 (right after the 8-byte magic).
+        // Magic must still match so we land in the version arm.
+        assert_eq!(&bad[0..8], FILE_MAGIC);
+        bad[8] = 0xee; // anything != FILE_VERSION (0x01)
+        let msg = decrypt_corrupted(&root, &aead, &bad, "bad-version");
+        assert!(
+            msg.contains("AEAD version unsupported"),
+            "bad-version must report version unsupported; got: {msg}"
+        );
+        // The reported byte should be the tampered value.
+        assert!(
+            msg.contains("238"), // 0xee
+            "bad-version must surface the offending byte; got: {msg}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_bad_cipher_tag() {
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        let mut bad = blob.clone();
+        // Cipher tag byte is offset 9. Magic + version must still match
+        // so we land in the cipher arm.
+        assert_eq!(&bad[0..8], FILE_MAGIC);
+        assert_eq!(bad[8], FILE_VERSION);
+        bad[9] = 0x7f; // anything != CIPHER_TAG_CHACHA20 (0x01)
+        let msg = decrypt_corrupted(&root, &aead, &bad, "bad-cipher");
+        assert!(
+            msg.contains("AEAD cipher tag unsupported"),
+            "bad-cipher-tag must report cipher unsupported; got: {msg}"
+        );
+        assert!(
+            msg.contains("127"), // 0x7f
+            "bad-cipher-tag must surface the offending byte; got: {msg}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_bad_nonce_prefix() {
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        let mut bad = blob.clone();
+        // Nonce-prefix occupies bytes 20..28. Flip one byte. Magic +
+        // version + cipher are still valid → land in nonce arm BEFORE
+        // any chunk decrypt is attempted.
+        assert_eq!(&bad[0..8], FILE_MAGIC);
+        assert_eq!(bad[8], FILE_VERSION);
+        assert_eq!(bad[9], CIPHER_TAG_CHACHA20);
+        bad[20] ^= 0xa5;
+        let msg = decrypt_corrupted(&root, &aead, &bad, "bad-nonce");
+        // The nonce-prefix is verified against a re-derived value — a
+        // flipped byte trips the explicit mismatch arm, NOT the
+        // chunk-decrypt arm (defense-in-depth pre-check).
+        assert!(
+            msg.contains("AEAD nonce-prefix mismatch"),
+            "bad-nonce-prefix must report nonce-prefix mismatch; got: {msg}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_truncated_header() {
+        // Additional arm beyond the 4 listed in R9-T4: the 32-byte
+        // header `read_exact` itself returns an io error wrapped as
+        // "AEAD header read: ...". Pin it so a future refactor that
+        // collapses this into a generic error gets caught.
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        // Truncate to 16 bytes — past the magic but well short of the
+        // 32-byte header. read_exact returns UnexpectedEof.
+        let bad = blob[..16].to_vec();
+        let msg = decrypt_corrupted(&root, &aead, &bad, "short-header");
+        assert!(
+            msg.contains("AEAD header read"),
+            "truncated header must report header read failure; got: {msg}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_chunk_length_exceeds_cap() {
+        // Additional arm beyond the 4 listed in R9-T4: the per-chunk
+        // length field is bounded by CHUNK_CIPHERTEXT_MAX. A bogus
+        // oversized length should fire the explicit "exceeds cap" arm,
+        // not propagate into an OOM allocation.
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        let mut bad = blob.clone();
+        // The first chunk-length u32 BE lives at byte offset 32 (right
+        // after the 32-byte header). Overwrite it with a value beyond
+        // the cap.
+        let oversize = (CHUNK_CIPHERTEXT_MAX as u32 + 1).to_be_bytes();
+        bad[32..36].copy_from_slice(&oversize);
+        let msg = decrypt_corrupted(&root, &aead, &bad, "chunk-too-big");
+        assert!(
+            msg.contains("exceeds cap"),
+            "oversized chunk length must report cap violation; got: {msg}"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn aead_decrypt_rejects_chunk_length_below_tag_size() {
+        // Additional arm: chunk_len < AEAD_TAG_LEN (16) is impossible
+        // for a real ciphertext (every chunk carries a 16-byte tag).
+        // Catch the case where the field underflows.
+        let (root, aead, blob) = build_valid_wrapped_blob();
+        let mut bad = blob.clone();
+        // Write chunk_len = 4 (< AEAD_TAG_LEN = 16).
+        let undersize = 4u32.to_be_bytes();
+        bad[32..36].copy_from_slice(&undersize);
+        let msg = decrypt_corrupted(&root, &aead, &bad, "chunk-too-small");
+        assert!(
+            msg.contains("below tag size"),
+            "undersized chunk length must report tag-size floor; got: {msg}"
+        );
+        cleanup(&root);
+    }
 }
