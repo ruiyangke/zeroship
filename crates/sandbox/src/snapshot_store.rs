@@ -279,6 +279,21 @@ impl SnapshotStore for LocalDiskSnapshotStore {
                 }
                 Err(e) => return Err(SnapshotError::Io(e)),
             }
+            // R5-S5: harden the alloc-side path to 0o444 so neither
+            // (a) CH writing back through a writable mmap nor (b) the
+            // raw_exec driver chmod'ing the alloc dir can mutate the
+            // canonical L1 inode through the hard-link alias. CH opens
+            // `memory-ranges` O_RDONLY on `--restore` and reads it via
+            // `read_volatile_from` (no MAP_SHARED writeback), so the
+            // restore path is unaffected. Because `to` is a hard link
+            // to the canonical inode, this also locks the L1 entry —
+            // which is correct: L1 entries are immutable after `put`
+            // (re-snapshot replaces the entire directory).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o444))?;
+            }
         }
         Ok(())
     }
@@ -559,4 +574,37 @@ mod tests {
     // mount + tmpfs), which CI runners don't reliably provide. The
     // branch is a small, type-checked tail; production-mode coverage
     // lives in the integration runbook (docs/runbooks/sandbox-nomad-ch.md).
+
+    /// R5-S5: after `get`, the alloc-side hard links must be 0o444 so
+    /// CH cannot write back through them and raw_exec cannot widen the
+    /// alloc dir to taint the canonical L1 inode. Because the link is
+    /// a hard link, the canonical L1 entry inherits the mode too —
+    /// that's the intent (L1 is immutable post-`put`).
+    #[cfg(unix)]
+    #[test]
+    fn local_disk_get_makes_alloc_side_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fresh_root();
+        let store = LocalDiskSnapshotStore::new(root.join("store"));
+
+        let src = root.join("src");
+        write_fake_artifact(&src);
+        let meta = store.put("sbx_ro", &src, "v51.1").unwrap();
+
+        let target = root.join("target");
+        store.get("sbx_ro", &target, &meta.sha256).unwrap();
+
+        for &name in ARTIFACT_FILES {
+            let md = std::fs::metadata(target.join(name)).unwrap();
+            // Mask off the file-type bits — `mode()` includes S_IFREG.
+            let perm = md.permissions().mode() & 0o777;
+            assert_eq!(
+                perm, 0o444,
+                "{name}: expected 0o444, got {perm:o}",
+            );
+        }
+
+        cleanup(&root);
+    }
 }
