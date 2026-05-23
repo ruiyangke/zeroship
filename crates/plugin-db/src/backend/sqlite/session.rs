@@ -204,6 +204,42 @@ pub(crate) enum Command {
         app_id: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
+    /// **P5 PR 5** — `VACUUM INTO '<dest_path>'`. Captures the source
+    /// database (or a per-app ATTACH alias if `app_id` is `Some`) to a
+    /// fresh SQLite file at `dest_path`. SQLite's VACUUM INTO takes an
+    /// implicit shared-snapshot read transaction on the source: writers
+    /// can keep appending to the WAL during the copy, and the dest file
+    /// matches the snapshot's read-mark commit point.
+    ///
+    /// The destination path is interpolated as a single-quoted SQL
+    /// literal (doubled `'`s); VACUUM INTO does not accept bound
+    /// parameters for the file path.
+    ///
+    /// When `app_id` is `Some(alias)`, the statement becomes
+    /// `VACUUM "<alias>" INTO '<dest>'` so the per-app ATTACH-ed
+    /// database is the source. When `None`, the unqualified `VACUUM INTO`
+    /// captures the main database (the control session's own file).
+    VacuumInto {
+        app_id: Option<String>,
+        dest_path: String,
+        reply: flume::Sender<Result<(), DbError>>,
+    },
+    /// **P5 PR 5** — atomic file-swap restore: DETACH the per-app alias,
+    /// `std::fs::rename(temp_file, live_file)`, ATTACH the alias back
+    /// against the same `live_file`. The three steps run sequentially
+    /// on the worker thread; if any step fails the reply carries the
+    /// typed `DbError` and the actor's state reflects whichever step
+    /// landed (best-effort recovery — operators must inspect).
+    ///
+    /// POSIX `rename` is atomic only on the same filesystem; the
+    /// integration plan documents this caveat — operator-driven snapshot
+    /// destinations must live on the same FS as the live per-app file.
+    ReattachFile {
+        app_id: String,
+        temp_path: String,
+        live_path: String,
+        reply: flume::Sender<Result<(), DbError>>,
+    },
     /// Drain the queue and exit the worker thread. Sent best-effort
     /// from [`SqliteSession`]'s `Drop` impl.
     Shutdown,
@@ -390,6 +426,14 @@ impl SqliteSession {
                         let result = run_detach(&conn, &app_id);
                         let _ = reply.send(result);
                     }
+                    Command::VacuumInto { app_id, dest_path, reply } => {
+                        let result = run_vacuum_into(&conn, app_id.as_deref(), &dest_path);
+                        let _ = reply.send(result);
+                    }
+                    Command::ReattachFile { app_id, temp_path, live_path, reply } => {
+                        let result = run_reattach_file(&conn, &app_id, &temp_path, &live_path);
+                        let _ = reply.send(result);
+                    }
                     Command::Shutdown => break,
                 }
             }
@@ -495,6 +539,52 @@ impl SqliteSession {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
         let cmd = Command::Detach {
             app_id: app_id.to_string(),
+            reply: reply_tx,
+        };
+        self.send(cmd).await?;
+        recv_reply(reply_rx).await?
+    }
+
+    /// **P5 PR 5** — send a `VacuumInto` command and await the reply.
+    /// Consumer is the SQLite `Backup::snapshot` impl. The
+    /// `#[allow(dead_code)]` mirrors the `attach`/`detach` helpers
+    /// above — rustc's dead-code analysis doesn't follow the
+    /// `pub(crate)` visibility into the sibling `backup_sqlite` inner
+    /// module under `cfg(feature = "sqlite")`. The compile-time
+    /// dispatch via [`Command::VacuumInto`] is the load-bearing wire.
+    #[allow(dead_code)]
+    pub(crate) async fn vacuum_into(
+        &self,
+        app_id: Option<&str>,
+        dest_path: &str,
+    ) -> Result<(), DbError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
+        let cmd = Command::VacuumInto {
+            app_id: app_id.map(|s| s.to_string()),
+            dest_path: dest_path.to_string(),
+            reply: reply_tx,
+        };
+        self.send(cmd).await?;
+        recv_reply(reply_rx).await?
+    }
+
+    /// **P5 PR 5** — send a `ReattachFile` command and await the reply.
+    /// Consumer is the SQLite `Backup::restore` impl. The actor body
+    /// DETACHes the alias, `std::fs::rename`s `temp_path → live_path`
+    /// on the same filesystem, and ATTACHes the alias back against
+    /// `live_path`. `#[allow(dead_code)]` matches `vacuum_into` above.
+    #[allow(dead_code)]
+    pub(crate) async fn reattach_file(
+        &self,
+        app_id: &str,
+        temp_path: &str,
+        live_path: &str,
+    ) -> Result<(), DbError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
+        let cmd = Command::ReattachFile {
+            app_id: app_id.to_string(),
+            temp_path: temp_path.to_string(),
+            live_path: live_path.to_string(),
             reply: reply_tx,
         };
         self.send(cmd).await?;
@@ -811,4 +901,354 @@ fn run_detach(conn: &Connection, app_id: &str) -> Result<(), DbError> {
     let escaped_alias = app_id.replace('"', "\"\"");
     let sql = format!("DETACH DATABASE \"{escaped_alias}\"");
     conn.execute_batch(&sql).map_err(from_sqlite)
+}
+
+/// **P5 PR 5** — worker body for [`Command::VacuumInto`].
+///
+/// `VACUUM INTO 'path'` (optionally prefixed with `"<alias>"`) instructs
+/// SQLite to write a fresh, consistent copy of the source database to
+/// `dest_path`. The engine opens an implicit shared-snapshot READ
+/// transaction on the source — concurrent writers can keep appending
+/// to the WAL during the copy, and the resulting file matches the
+/// read-mark commit point (the last commit visible when VACUUM INTO
+/// began). No exclusive lock is taken on the source; only a brief
+/// internal lock during the snapshot setup.
+///
+/// **String injection note**: VACUUM INTO does NOT accept bind
+/// parameters for the destination path. We construct the statement
+/// inline with SQLite's literal-string escape rule — single quotes are
+/// doubled inside the literal. The `app_id` alias is double-quoted
+/// using the same rule (`"` → `""`).
+///
+/// Both `app_id` (per-app file) and `None` (the control session's main
+/// database) are supported; today the snapshot impl always passes a
+/// `Some(app_id)` so the per-app file is captured. The `None` arm
+/// stays for symmetry with the future "snapshot of admin metadata"
+/// path that lands alongside the cross-process lock pivot.
+fn run_vacuum_into(
+    conn: &Connection,
+    app_id: Option<&str>,
+    dest_path: &str,
+) -> Result<(), DbError> {
+    let escaped_path = dest_path.replace('\'', "''");
+    let sql = match app_id {
+        Some(alias) => {
+            let escaped_alias = alias.replace('"', "\"\"");
+            format!("VACUUM \"{escaped_alias}\" INTO '{escaped_path}'")
+        }
+        None => format!("VACUUM INTO '{escaped_path}'"),
+    };
+    conn.execute_batch(&sql).map_err(from_sqlite)
+}
+
+/// **P5 PR 5** — worker body for [`Command::ReattachFile`].
+///
+/// Atomic-file-swap restore on the per-app alias:
+///
+/// 1. `DETACH DATABASE "<app_id>"` — close the connection to the
+///    current live file from this session's view.
+/// 2. `std::fs::rename(temp_path, live_path)` — POSIX rename is
+///    atomic on the same filesystem (the inode swap is a single
+///    directory-entry update). Cross-filesystem rename is NOT atomic;
+///    operators must keep snapshot destinations on the same FS as the
+///    live per-app DB. The plan documents this caveat as the operator
+///    contract.
+/// 3. `ATTACH DATABASE 'file:<live_path>' AS "<app_id>"` — reopen
+///    against the freshly-renamed file. The CDC hooks installed on
+///    this connection (commit/preupdate/rollback) remain armed for
+///    the new content because the hooks live on `sqlite3*` not the
+///    attached database.
+///
+/// If step 1 fails (e.g. the alias was never attached on this
+/// session), DETACH surfaces a typed error and the rename + ATTACH are
+/// skipped — the live file is untouched. If step 2 fails (rename
+/// error, ENOSPC, EXDEV cross-FS), the alias has been detached but no
+/// rename happened; we attempt to re-ATTACH the original live file so
+/// the session recovers to a consistent state. If step 3 fails after a
+/// successful rename, the live file IS the new content but the session
+/// has no alias attached — the caller's `restore` impl returns the
+/// typed error and the operator must re-ensure_app_schema.
+fn run_reattach_file(
+    conn: &Connection,
+    app_id: &str,
+    temp_path: &str,
+    live_path: &str,
+) -> Result<(), DbError> {
+    let escaped_alias = app_id.replace('"', "\"\"");
+
+    // Step 1 — DETACH the alias.
+    let detach_sql = format!("DETACH DATABASE \"{escaped_alias}\"");
+    conn.execute_batch(&detach_sql).map_err(|e| {
+        // DETACH-side failure: the alias was never attached or the
+        // engine refused the detach. Surface the typed error verbatim;
+        // the live file on disk is untouched at this point.
+        DbError::Internal {
+            message: format!(
+                "ReattachFile: DETACH \"{app_id}\" failed (live file untouched): {}",
+                from_sqlite(e)
+            ),
+        }
+    })?;
+
+    // Step 2 — atomic rename.
+    if let Err(e) = std::fs::rename(temp_path, live_path) {
+        // Rename failed — recovery attempt: re-ATTACH the original
+        // live file so the actor's view doesn't lose the alias. The
+        // outer `restore` returns the typed Internal error; the
+        // operator inspects the temp file and decides whether to
+        // re-run with a same-FS destination.
+        let escaped_live = live_path.replace('\'', "''");
+        let reattach_old_sql = format!(
+            "ATTACH DATABASE 'file:{escaped_live}' AS \"{escaped_alias}\""
+        );
+        let _ = conn.execute_batch(&reattach_old_sql);
+        return Err(DbError::Internal {
+            message: format!(
+                "ReattachFile: std::fs::rename({temp_path:?} -> {live_path:?}) failed: {e}; \
+                 attempted re-ATTACH of the original live file (live content unchanged on success). \
+                 NOTE: same-filesystem rename is the operator contract — cross-FS destinations \
+                 cannot complete an atomic restore"
+            ),
+        });
+    }
+
+    // Step 3 — ATTACH the new file under the original alias.
+    let escaped_path = live_path.replace('\'', "''");
+    let attach_sql =
+        format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
+    conn.execute_batch(&attach_sql).map_err(|e| {
+        DbError::Internal {
+            message: format!(
+                "ReattachFile: ATTACH new file as \"{app_id}\" failed AFTER rename — \
+                 the renamed snapshot is now the live file but the session has no alias \
+                 attached. Operator must call ensure_app_schema(app_id) to recover. \
+                 Underlying error: {}",
+                from_sqlite(e)
+            ),
+        }
+    })?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! **P5 PR 5** — direct unit-tests for the new `run_vacuum_into`
+    //! and `run_reattach_file` worker bodies. Each test exercises the
+    //! helper synchronously against a bare `rusqlite::Connection` (no
+    //! session actor, no compio runtime) — the goal is to pin the SQL
+    //! shape + the `std::fs::rename` swap + the DETACH/rename/ATTACH
+    //! ordering, not the end-to-end flow (the integration tests in
+    //! `tests/sqlite_integration.rs` cover the actor path).
+    //!
+    //! All tests run on a `tempfile::TempDir` so the on-disk artefacts
+    //! clean up on drop.
+    use super::*;
+    use rusqlite::Connection;
+
+    fn count_rows(conn: &Connection, alias_or_main: &str, table: &str) -> i64 {
+        // `alias_or_main` is either `"main"` (the main DB) or a quoted
+        // alias like `"my_app"`. We accept the caller-formatted form
+        // because the tests want to exercise both shapes.
+        let sql = format!("SELECT COUNT(*) FROM {alias_or_main}.{table}");
+        conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).unwrap()
+    }
+
+    #[test]
+    fn vacuum_into_main_db_snapshot_file_is_self_contained() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("src.sqlite");
+        let snap = dir.path().join("snap.sqlite");
+
+        // 1. Seed the live file with one row in WAL mode.
+        let conn = Connection::open(&live).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);",
+        )
+        .unwrap();
+
+        // 2. `VACUUM INTO` the main DB to `snap.sqlite`.
+        run_vacuum_into(&conn, None, snap.to_str().unwrap())
+            .expect("VACUUM INTO main db");
+
+        // 3. The snap file must exist and contain the same rows.
+        assert!(snap.exists(), "VACUUM INTO must produce the dest file");
+        let snap_conn = Connection::open(&snap).unwrap();
+        let count = snap_conn
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(count, 3, "snapshot must mirror live row count");
+    }
+
+    #[test]
+    fn vacuum_into_attached_alias_captures_only_that_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_a_path = dir.path().join("zs-a.sqlite");
+        let app_b_path = dir.path().join("zs-b.sqlite");
+        let snap = dir.path().join("snap.sqlite");
+
+        // Seed two per-app files independently first.
+        {
+            let a = Connection::open(&app_a_path).unwrap();
+            a.execute_batch(
+                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (10), (20);",
+            )
+            .unwrap();
+            let b = Connection::open(&app_b_path).unwrap();
+            b.execute_batch(
+                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1000);",
+            )
+            .unwrap();
+        }
+
+        // Open a fresh control connection and ATTACH both apps.
+        let conn = Connection::open_in_memory().unwrap();
+        let attach_a = format!(
+            "ATTACH DATABASE '{}' AS \"a\"",
+            app_a_path.to_str().unwrap().replace('\'', "''")
+        );
+        let attach_b = format!(
+            "ATTACH DATABASE '{}' AS \"b\"",
+            app_b_path.to_str().unwrap().replace('\'', "''")
+        );
+        conn.execute_batch(&attach_a).unwrap();
+        conn.execute_batch(&attach_b).unwrap();
+
+        // VACUUM "a" INTO snap — captures only app-a's content.
+        run_vacuum_into(&conn, Some("a"), snap.to_str().unwrap())
+            .expect("VACUUM 'a' INTO snap");
+
+        // Open the snap as a standalone DB and confirm: it sees t with
+        // 2 rows (a's content), NOT b's 1 row.
+        let snap_conn = Connection::open(&snap).unwrap();
+        let count = snap_conn
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(count, 2, "snap must capture only the named alias's content");
+    }
+
+    #[test]
+    fn vacuum_into_escapes_single_quote_in_path() {
+        // A path with an embedded `'` must be SQL-escaped to `''`. We
+        // can't actually create a file with a `'` in every test
+        // environment, but we CAN verify the SQL passes prepare —
+        // SQLite rejects an unescaped `'` with a syntax error at the
+        // statement boundary. Using a non-existent dir with a quoted
+        // path proves the escape; the engine then fails opening the
+        // file, which classifies as a different error class than
+        // syntax error.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (x);").unwrap();
+
+        // The path itself doesn't have to be writable for the SQL-
+        // shape assertion: an unescaped `'` would surface as a
+        // `near "x": syntax error` from rusqlite's prepare; an escape
+        // bug would also surface that same error class. We compare
+        // against the well-formed error class instead.
+        let bad_path = "/nonexistent/dir/x'y.sqlite";
+        let result = run_vacuum_into(&conn, None, bad_path);
+        // The path doesn't exist so the engine fails on open, NOT on
+        // syntax. The DbError variant returned is some Internal /
+        // Configuration variant carrying an "unable to open" message.
+        // Any other variant means the escape was wrong.
+        match result {
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(
+                    !msg.contains("syntax error"),
+                    "single-quote escape failed; SQL syntax error surfaced: {msg}"
+                );
+            }
+            Ok(()) => panic!(
+                "VACUUM INTO into a nonexistent directory must fail at open-time"
+            ),
+        }
+    }
+
+    #[test]
+    fn reattach_file_atomic_swap_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let live_path = dir.path().join("zs-app_demo.sqlite");
+        let temp_path = dir.path().join("snap-restore.sqlite");
+
+        // Build the LIVE per-app file with one row.
+        {
+            let live = Connection::open(&live_path).unwrap();
+            live.execute_batch(
+                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);",
+            )
+            .unwrap();
+        }
+        // Build the TEMP (snapshot-to-restore) file with THREE rows.
+        // Restore semantics: after `run_reattach_file`, the live file
+        // must contain the temp file's content.
+        {
+            let tmp = Connection::open(&temp_path).unwrap();
+            tmp.execute_batch(
+                "CREATE TABLE t (x INTEGER); \
+                 INSERT INTO t VALUES (10), (20), (30);",
+            )
+            .unwrap();
+        }
+
+        // Control session ATTACHes the live file under alias "app_demo".
+        let conn = Connection::open_in_memory().unwrap();
+        let attach_live = format!(
+            "ATTACH DATABASE '{}' AS \"app_demo\"",
+            live_path.to_str().unwrap().replace('\'', "''")
+        );
+        conn.execute_batch(&attach_live).unwrap();
+        // Pre-restore: live alias sees 1 row.
+        assert_eq!(count_rows(&conn, "\"app_demo\"", "t"), 1);
+
+        // Execute the swap.
+        run_reattach_file(
+            &conn,
+            "app_demo",
+            temp_path.to_str().unwrap(),
+            live_path.to_str().unwrap(),
+        )
+        .expect("reattach_file swap");
+
+        // Post-restore: live alias sees 3 rows (temp file's content).
+        assert_eq!(count_rows(&conn, "\"app_demo\"", "t"), 3);
+        // Temp path no longer exists — rename consumed it.
+        assert!(!temp_path.exists(), "rename must consume temp file");
+        // Live path still exists (now carries the new content).
+        assert!(live_path.exists(), "live path must exist post-restore");
+    }
+
+    #[test]
+    fn reattach_file_detach_failure_returns_internal_without_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite");
+        let temp = dir.path().join("temp.sqlite");
+        {
+            let l = Connection::open(&live).unwrap();
+            l.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1);")
+                .unwrap();
+            let t = Connection::open(&temp).unwrap();
+            t.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (99);")
+                .unwrap();
+        }
+
+        // Open an in-memory conn but DON'T attach any alias — DETACH
+        // will fail because the alias is unknown.
+        let conn = Connection::open_in_memory().unwrap();
+
+        let result = run_reattach_file(
+            &conn,
+            "never_attached",
+            temp.to_str().unwrap(),
+            live.to_str().unwrap(),
+        );
+        assert!(
+            matches!(result, Err(DbError::Internal { .. })),
+            "DETACH-side failure must surface as Internal; got {result:?}"
+        );
+        // Both files untouched.
+        assert!(temp.exists(), "temp must remain when DETACH fails");
+        assert!(live.exists(), "live must remain when DETACH fails");
+    }
 }
