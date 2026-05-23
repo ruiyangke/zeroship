@@ -277,6 +277,14 @@ echo "[wrapper] workspace_img=$ZSBX_WORKSPACE_IMG  userhome_img=$ZSBX_USER_HOME_
 # zombie window the host_fence has to ride out).
 cleanup() {
   echo "[wrapper] cleaning up (ch ${CH_PID:-already-exited})"
+  # R6-C1: reap the restore-resume background subshell (spawned at the
+  # `( ... ) &` block below). Usually it has already exited (the poll
+  # completes in <10s), in which case kill is a no-op and wait returns
+  # immediately; under Nomad SIGTERM mid-poll it would otherwise orphan.
+  if [ -n "${RESUME_PID:-}" ]; then
+    kill -TERM "$RESUME_PID" 2>/dev/null || true
+    wait "$RESUME_PID" 2>/dev/null || true
+  fi
   [ -n "${CH_PID-}" ] && kill -TERM "$CH_PID" 2>/dev/null || true
   sleep 0.2
   [ -n "${CH_PID-}" ] && kill -KILL "$CH_PID" 2>/dev/null || true
@@ -417,6 +425,7 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
       ip link set "$TAP" up 2>&1 | sed "s/^/[wrapper] restore: tap-up-retry@+${delay}s: /" >&2 || true
     done
   ) &
+  RESUME_PID=$!   # R6-C1: capture for cleanup trap reap
 else
   # Cold boot. The cmdline carries the controller pubkey as hex
   # (`zsbx_pubkey=<hex>`); /sbin/init in the guest decodes it and
