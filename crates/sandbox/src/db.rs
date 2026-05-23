@@ -447,6 +447,29 @@ impl Database {
         self.config.dsn_gdpr = gdpr;
     }
 
+    /// A6b (deferred backlog): synchronous, in-crate-only constructor
+    /// for unit tests that need an `Arc<Database>` *handle* but never
+    /// touch the pool. The DSN is stored verbatim — `dsn_scheme` is
+    /// NOT validated — because the only use today is the
+    /// `AppState::with_database` setter test in `lib.rs`, which only
+    /// asserts `Arc::ptr_eq` on the stored handle. Any test that
+    /// actually issues SQL must use `from_test_config` (async, real
+    /// pool) instead.
+    #[cfg(test)]
+    pub(crate) fn for_setter_test_only(dsn: String) -> Self {
+        Self {
+            config: DbConfig {
+                dsn: dsn.clone(),
+                dsn_audit: dsn.clone(),
+                dsn_gdpr: dsn,
+                host_id: Uuid::now_v7(),
+                run_migrations: false,
+                boot_timeout_secs: 60,
+                pool_max: 4,
+            },
+        }
+    }
+
     /// Cheap accessor for the controller's stable identity.
     pub fn host_id(&self) -> Uuid {
         self.config.host_id

@@ -48,7 +48,17 @@ use crate::snapshot_store_gcs::{GcsSnapshotStore, TieredSnapshotStore};
 /// Shared application state passed to every handler.
 #[allow(missing_debug_implementations)]
 pub struct AppState {
-    pub config: SandboxConfig,
+    /// A6b (deferred): restricted to `pub(crate)` because
+    /// `SandboxConfig.token: ApiToken` is the creator-side bearer that
+    /// authenticates every `/sandbox/*` request (see
+    /// `crates/sandbox/src/config.rs`). A `state.config = attacker_cfg`
+    /// swap could plant a known token or repoint
+    /// `nomad_addr`/`workspace_root` to an attacker-controlled host.
+    /// Out-of-crate callers use [`AppState::with_config`] to set the
+    /// field. Note: `SandboxConfig.token` itself is still a `pub` field
+    /// inside `config.rs` — narrowing that requires touching the
+    /// config-parse surface and is tracked separately (A7).
+    pub(crate) config: SandboxConfig,
     pub sandboxes: SandboxRegistry,
     pub backend: Backend,
     /// Phase-3 mint-side rate limiter. `Some` in production; `None`
@@ -62,7 +72,15 @@ pub struct AppState {
     /// it — Phase 1 wires `insert_sandbox` / `record_event` into
     /// the backends. The schema is brought to
     /// [`LATEST_MIGRATION_VERSION`] before this state ships.
-    pub database: Option<Arc<Database>>,
+    ///
+    /// A6b (deferred): restricted to `pub(crate)` because the DSN held
+    /// inside `Database` carries an embedded pg password. A
+    /// `state.database = attacker_db` swap could redirect every
+    /// sandbox INSERT / heartbeat / takeover UPDATE to an
+    /// attacker-controlled postgres (silently exfiltrating sandbox
+    /// metadata and host topology). Out-of-crate callers use
+    /// [`AppState::with_database`] to set the field.
+    pub(crate) database: Option<Arc<Database>>,
     /// Round-1 fixer / CRITICAL #4: shared sealed-record persistence
     /// handle, plumbed for the Phase-2.5 takeover-rehydrate path.
     /// `None` mirrors the pre-fix disabled shape — the handle exists
@@ -126,9 +144,19 @@ pub struct AppState {
     /// or none. Tests building `AppState` directly leave them
     /// `None` — admin handlers fall back to 501 `feature_disabled`
     /// in that case.
-    pub snapshot_store: Option<Arc<dyn SnapshotStore>>,
-    pub ch_remote: Option<Arc<dyn ChRemoteClient>>,
-    pub restore_backend: Option<Arc<dyn RestoreBackend>>,
+    ///
+    /// A6b (deferred): restricted to `pub(crate)` because each is an
+    /// `Arc<dyn …>` trait object whose impl can carry arbitrary
+    /// credentials (GCS SA keys in `GcsSnapshotStore`, the `ch-remote`
+    /// binary path in `RealChRemoteClient`, Nomad creds in
+    /// `RealRestoreBackend`). A `state.snapshot_store = attacker_impl`
+    /// swap could exfiltrate every subsequent snapshot blob to an
+    /// attacker bucket. Out-of-crate callers use the
+    /// `with_snapshot_store` / `with_ch_remote` / `with_restore_backend`
+    /// builders to set these.
+    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) ch_remote: Option<Arc<dyn ChRemoteClient>>,
+    pub(crate) restore_backend: Option<Arc<dyn RestoreBackend>>,
 }
 
 impl AppState {
@@ -267,15 +295,98 @@ impl AppState {
         self.persist.as_ref()
     }
 
+    // ────────────────────────────────────────────────────────────────
+    // A6b (deferred backlog) — pub(crate)-restrict-and-builder pattern
+    // applied to the 5 remaining credential-carrying AppState fields:
+    // `config`, `database`, `snapshot_store`, `ch_remote`,
+    // `restore_backend`. Each builder consumes `self` and returns
+    // `Self` (or `Arc<Self>` via the caller's own wrap) — mirrors the
+    // A5 `with_admin_token` / A6 `with_persistence` shape. None of
+    // these can be "empty" in the same way the admin-token string can,
+    // so the builders are thin wrappers that exist purely to be the
+    // single legal out-of-crate write path. Tests in
+    // `field_setter_tests` below exercise the replace-existing
+    // semantics for each.
+    // ────────────────────────────────────────────────────────────────
+
+    /// A6b: safe builder for `config`. See the field doc for the
+    /// threat model (creator-side bearer + `nomad_addr` pivot via
+    /// `SandboxConfig.token`). Replaces any prior value.
+    pub fn with_config(mut self, config: SandboxConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// A6b: safe builder for `database`. See the field doc for the
+    /// threat model (DSN-embedded pg password). Replaces any prior
+    /// value.
+    pub fn with_database(mut self, database: Arc<Database>) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    /// A6b: read-only accessor for the pg-backed `Database` handle.
+    /// `pub` (not `pub(crate)`) because out-of-crate integration tests
+    /// in `crates/sandbox/tests/sandbox_pg_e2e.rs` need to read sandbox
+    /// rows back through the same handle they wired in. Mirrors the
+    /// `pub fn admin_token()` accessor in shape; the borrow can be
+    /// cloned by callers via `Arc::clone` if they need ownership.
+    pub fn database(&self) -> Option<&Arc<Database>> {
+        self.database.as_ref()
+    }
+
+    /// A6b: read-only accessor for the active `SandboxConfig`. `pub`
+    /// for the same reason as [`AppState::database`] — out-of-crate
+    /// integration tests sometimes need to read back `config.port`,
+    /// `config.snapshot_enabled`, etc. when asserting on test fixtures.
+    pub fn config(&self) -> &SandboxConfig {
+        &self.config
+    }
+
+    /// A6b: safe builder for `snapshot_store`. See the field doc for
+    /// the threat model (trait-object impl can carry GCS SA creds).
+    /// Replaces any prior value.
+    pub fn with_snapshot_store(
+        mut self,
+        store: Arc<dyn SnapshotStore>,
+    ) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    /// A6b: safe builder for `ch_remote`. See the field doc for the
+    /// threat model (trait-object impl resolves `ch-remote` on PATH).
+    /// Replaces any prior value.
+    pub fn with_ch_remote(
+        mut self,
+        ch_remote: Arc<dyn ChRemoteClient>,
+    ) -> Self {
+        self.ch_remote = Some(ch_remote);
+        self
+    }
+
+    /// A6b: safe builder for `restore_backend`. See the field doc for
+    /// the threat model (trait-object impl holds Nomad creds).
+    /// Replaces any prior value.
+    pub fn with_restore_backend(
+        mut self,
+        restore_backend: Arc<dyn RestoreBackend>,
+    ) -> Self {
+        self.restore_backend = Some(restore_backend);
+        self
+    }
+
     /// A5 (api-surface-2026-05-24-r1): public fixture constructor
     /// for out-of-crate integration tests. Returns an `AppState`
     /// with `admin_token = None` and the other "wiring" fields at
     /// their disabled defaults (`database = None`, `persist = None`,
     /// snapshot trio all `None`, fresh registry, fresh shutdown
-    /// flag, fresh `MintRateLimiter`). Tests mutate the still-`pub`
-    /// fields directly and chain [`AppState::with_admin_token`] to
-    /// set the bearer (which rejects empty strings — that's the
-    /// whole point of A5).
+    /// flag, fresh `MintRateLimiter`). Tests chain the `with_*`
+    /// builders ([`AppState::with_admin_token`],
+    /// [`AppState::with_database`], [`AppState::with_snapshot_store`]
+    /// etc.) to populate the credential-carrying fields — direct
+    /// field assignment is blocked by the A5/A6/A6b `pub(crate)`
+    /// restrictions.
     ///
     /// Production code uses [`AppState::from_config`], not this.
     pub fn new_fixture(config: SandboxConfig, backend: Backend) -> Self {
@@ -1469,6 +1580,218 @@ mod persist_setter_tests {
             .with_persistence(second.clone())
             .expect("second call");
         let stored = state.persist().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A6b (deferred backlog) — builder semantics for the 5 remaining
+// credential-carrying fields. Each test follows the same shape as the
+// A5/A6 setter tests: build a fresh `min_state`, populate the field
+// twice with distinct values, assert the second wins. For the trait-
+// object fields (`snapshot_store`, `ch_remote`, `restore_backend`)
+// the test relies on `Arc::ptr_eq` against an upcast `Arc<dyn T>` —
+// the borrowed reference inside the field must point at the second
+// `Arc`. There is no empty-rejection test: `Arc<dyn T>` has no
+// "empty" shape, and `SandboxConfig` / `Arc<Database>` carry their
+// own construction invariants checked earlier in the boot chain.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod field_setter_tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+    use crate::db::Database;
+    use crate::restore_handler::StubRestoreBackend;
+    use crate::snapshot_handler::MockChRemoteClient;
+    use crate::snapshot_store::LocalDiskSnapshotStore;
+
+    /// Minimal config that satisfies `Backend::from_config` for the
+    /// nomad-ch backend WITHOUT touching the network. Duplicated from
+    /// the sibling test modules for self-containment (same rationale
+    /// as `persist_setter_tests::min_cfg`).
+    fn min_cfg() -> SandboxConfig {
+        SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: std::path::PathBuf::from(
+                    "/etc/zeroship/nomad-vm-wrapper.sh",
+                ),
+                runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: std::path::PathBuf::from(
+                    "/var/zeroship/ch/users",
+                ),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 60,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from(
+                "/var/zeroship/ch/snapshots",
+            ),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
+    fn min_state() -> AppState {
+        let cfg = min_cfg();
+        let backend = Backend::from_config(&cfg).expect("backend");
+        AppState::new_fixture(cfg, backend)
+    }
+
+    #[test]
+    fn with_config_replaces_existing() {
+        // The setter is the only legal out-of-crate write path to
+        // `config`; flip a discriminator (port number) to verify the
+        // new config landed.
+        let mut first = min_cfg();
+        first.port = 11111;
+        let backend = Backend::from_config(&first).expect("backend");
+        let state = AppState::new_fixture(first, backend);
+        assert_eq!(state.config.port, 11111, "fixture starts with first cfg");
+
+        let mut second = min_cfg();
+        second.port = 22222;
+        let state = state.with_config(second);
+        assert_eq!(
+            state.config.port, 22222,
+            "with_config must replace the prior SandboxConfig"
+        );
+    }
+
+    #[test]
+    fn with_database_replaces_existing() {
+        // `Arc::ptr_eq` proves the stored handle is the second Arc —
+        // not just an equal-by-value clone. `for_setter_test_only`
+        // is a sync, in-crate constructor that skips the pg pool
+        // (no live postgres required for this test).
+        let state = min_state();
+        assert!(
+            state.database.is_none(),
+            "fixture must start with database = None"
+        );
+        let first = Arc::new(Database::for_setter_test_only(
+            "postgres://first:nopass@localhost/sbx_a".into(),
+        ));
+        let second = Arc::new(Database::for_setter_test_only(
+            "postgres://second:nopass@localhost/sbx_b".into(),
+        ));
+        let state = state.with_database(first.clone());
+        let state = state.with_database(second.clone());
+        let stored = state.database.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+
+    #[test]
+    fn with_snapshot_store_replaces_existing() {
+        let state = min_state();
+        assert!(state.snapshot_store.is_none(), "fixture starts None");
+        let first: Arc<dyn SnapshotStore> = Arc::new(
+            LocalDiskSnapshotStore::new(std::path::PathBuf::from(
+                "/tmp/zsbx-snap-setter-first",
+            )),
+        );
+        let second: Arc<dyn SnapshotStore> = Arc::new(
+            LocalDiskSnapshotStore::new(std::path::PathBuf::from(
+                "/tmp/zsbx-snap-setter-second",
+            )),
+        );
+        let state = state.with_snapshot_store(first.clone());
+        let state = state.with_snapshot_store(second.clone());
+        let stored = state.snapshot_store.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+
+    #[test]
+    fn with_ch_remote_replaces_existing() {
+        let state = min_state();
+        assert!(state.ch_remote.is_none(), "fixture starts None");
+        let first: Arc<dyn ChRemoteClient> =
+            Arc::new(MockChRemoteClient::default());
+        let second: Arc<dyn ChRemoteClient> =
+            Arc::new(MockChRemoteClient::default());
+        let state = state.with_ch_remote(first.clone());
+        let state = state.with_ch_remote(second.clone());
+        let stored = state.ch_remote.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+
+    #[test]
+    fn with_restore_backend_replaces_existing() {
+        let state = min_state();
+        assert!(state.restore_backend.is_none(), "fixture starts None");
+        let first: Arc<dyn RestoreBackend> =
+            Arc::new(StubRestoreBackend::new(std::path::PathBuf::from(
+                "/tmp/zsbx-rb-setter-first",
+            )));
+        let second: Arc<dyn RestoreBackend> =
+            Arc::new(StubRestoreBackend::new(std::path::PathBuf::from(
+                "/tmp/zsbx-rb-setter-second",
+            )));
+        let state = state.with_restore_backend(first.clone());
+        let state = state.with_restore_backend(second.clone());
+        let stored = state.restore_backend.as_ref().expect("field populated");
         assert!(
             !Arc::ptr_eq(stored, &first),
             "second call must overwrite the first handle"

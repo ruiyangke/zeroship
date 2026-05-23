@@ -98,8 +98,13 @@ fn make_state_with_admin_token(
     // goes through `AppState::new_fixture` + the `with_admin_token`
     // builder (which rejects empty strings — the post-Round-4
     // footgun).
+    // A6b: `database` is `pub(crate)`; set via `with_database` instead
+    // of struct-field assignment. `None` skips the builder entirely
+    // so the field stays at its `new_fixture` default.
     let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
-    state.database = database;
+    if let Some(db) = database {
+        state = state.with_database(db);
+    }
     let state = state
         .with_admin_token(admin_token)
         .expect("admin_token must be non-empty when Some");
@@ -794,10 +799,13 @@ fn make_state_with_snapshot_wiring(
         ));
     // A5: out-of-crate construction goes through `new_fixture` +
     // `with_admin_token`.
-    let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
-    state.snapshot_store = Some(store);
-    state.ch_remote = Some(ch);
-    state.restore_backend = Some(rb);
+    // A6b: snapshot trio fields are `pub(crate)`; set via the
+    // `with_snapshot_store` / `with_ch_remote` / `with_restore_backend`
+    // builders instead of struct-field assignment.
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend)
+        .with_snapshot_store(store)
+        .with_ch_remote(ch)
+        .with_restore_backend(rb);
     let state = state
         .with_admin_token(admin_token)
         .expect("admin_token must be non-empty when Some");

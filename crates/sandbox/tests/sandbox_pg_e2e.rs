@@ -2654,8 +2654,10 @@ fn build_sweep_state(
     let backend = Backend::from_config(&cfg).expect("backend");
     // A5: `admin_token` is `pub(crate)`; out-of-crate construction
     // goes through `AppState::new_fixture` (admin_token = None).
-    let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
-    state.database = Some(std::sync::Arc::new(db));
+    // A6b: `database` is `pub(crate)`; set via `with_database`
+    // builder instead of struct-field assignment.
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend)
+        .with_database(std::sync::Arc::new(db));
     std::sync::Arc::new(state)
 }
 
@@ -2701,9 +2703,10 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
     assert!(recovered >= 1, "sweep should have recovered at least our row; recovered={recovered}");
 
     // Row must be in `snapshotting_aborted` per § 9.2.
+    // A6b: `database` field is `pub(crate)`; use the `database()`
+    // accessor instead of poking the field directly.
     let row = state
-        .database
-        .as_ref()
+        .database()
         .unwrap()
         .get_sandbox_row(sid)
         .await
