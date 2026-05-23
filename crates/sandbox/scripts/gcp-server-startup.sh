@@ -19,7 +19,12 @@
 # Instance metadata read (set by provision-gcp-cluster.sh):
 #   - role:               must be "server"
 #   - server-count:       integer, used for bootstrap_expect
-#   - server-ips:         comma-separated server private IPs for retry_join
+#   - server-ips:         newline-separated server private IPs for
+#                          retry_join. Delivered via --metadata-from-file
+#                          (NOT --metadata=key=value); the dict form
+#                          rejects comma-bearing values with "Bad syntax
+#                          for dict arg" once SERVER_COUNT>1. (Bug #23 /
+#                          B23.)
 #   - datacenter:         Nomad datacenter name (default: "zsbx-prod")
 #   - pg-host:            "1" on the host that runs postgres (server-1); ""/absent otherwise
 #   - pg-password:        password for the `postgres` superuser AND the app role
@@ -116,8 +121,10 @@ fi
 mkdir -p /etc/nomad.d /opt/nomad/data /var/log/nomad
 chown -R nomad:nomad /opt/nomad/data /var/log/nomad
 
-# Build retry_join list (one quoted IP per element).
-RETRY_JOIN=$(echo "$SERVER_IPS" | tr ',' '\n' | awk 'NF{printf "\"%s\",", $0}' | sed 's/,$//')
+# Build retry_join list (one quoted IP per element). server-ips arrives
+# newline-separated via --metadata-from-file (B23 fix); `tr ',\r' '\n\n'`
+# also accepts the legacy comma form / strips CR for resilience.
+RETRY_JOIN=$(echo "$SERVER_IPS" | tr ',\r' '\n\n' | awk 'NF{printf "\"%s\",", $0}' | sed 's/,$//')
 
 cat > /etc/nomad.d/nomad.hcl <<EOF
 # Nomad server config (rendered by gcp-server-startup.sh)

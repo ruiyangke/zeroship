@@ -205,8 +205,18 @@ for i in $(seq 1 "$SERVER_COUNT"); do
   fi
   SERVER_IPS+=("$addr_value")
 done
-SERVER_IPS_CSV=$(IFS=, ; echo "${SERVER_IPS[*]}")
-echo "[provision] server IPs: $SERVER_IPS_CSV"
+# Server IPs are delivered via --metadata-from-file (newline-separated)
+# instead of --metadata (comma-separated). gcloud parses --metadata as
+# a key=value,key=value,... dict — any value containing commas (e.g.,
+# the multi-IP list when SERVER_COUNT>1) is mis-parsed and the next
+# token is rejected with `Bad syntax for dict arg: [<ip>]`. The
+# file-backed form has no delimiter constraint. Both startup scripts
+# consume the value through `tr ',' '\n'` already, so they accept
+# newline-separated input unchanged. (Bug #23, B23 fix.)
+SERVER_IPS_FILE=/tmp/zsbx-nomad-server-ips.txt
+printf '%s\n' "${SERVER_IPS[@]}" > "$SERVER_IPS_FILE"
+SERVER_IPS_CSV=$(IFS=, ; echo "${SERVER_IPS[*]}")   # log-only
+echo "[provision] server IPs: $SERVER_IPS_CSV (file: $SERVER_IPS_FILE)"
 PG_HOST_IP="${SERVER_IPS[0]}"
 
 create_server() {
@@ -234,9 +244,9 @@ create_server() {
     --subnet "$SUBNET" \
     --private-network-ip "$addr_name" \
     --scopes=storage-ro,logging-write,monitoring-write \
-    --metadata-from-file "startup-script=$SERVER_STARTUP" \
+    --metadata-from-file "startup-script=$SERVER_STARTUP,server-ips=$SERVER_IPS_FILE" \
     --metadata \
-      "role=server,server-count=$SERVER_COUNT,server-ips=$SERVER_IPS_CSV,datacenter=$DATACENTER,pg-host=$pg_flag,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT" \
+      "role=server,server-count=$SERVER_COUNT,datacenter=$DATACENTER,pg-host=$pg_flag,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT" \
     --quiet >/dev/null
 }
 
@@ -265,9 +275,9 @@ create_worker() {
     --subnet "$SUBNET" \
     --enable-nested-virtualization \
     --scopes=storage-ro,logging-write,monitoring-write \
-    --metadata-from-file "startup-script=$WORKER_STARTUP" \
+    --metadata-from-file "startup-script=$WORKER_STARTUP,server-ips=$SERVER_IPS_FILE" \
     --metadata \
-      "role=worker,server-ips=$SERVER_IPS_CSV,datacenter=$DATACENTER,pg-host=$PG_HOST_IP,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT,vm-index-ceil=$VM_INDEX_CEIL,snapshot-bucket=$SNAPSHOT_BUCKET" \
+      "role=worker,datacenter=$DATACENTER,pg-host=$PG_HOST_IP,pg-password=$PG_PASSWORD,sandbox-token=$SANDBOX_TOKEN,sandbox-admin-token=$SANDBOX_ADMIN_TOKEN,artifact-bucket=$ARTIFACT_BUCKET,controller-object=$CONTROLLER_OBJECT,vm-index-ceil=$VM_INDEX_CEIL,snapshot-bucket=$SNAPSHOT_BUCKET" \
     --quiet >/dev/null
 }
 

@@ -28,7 +28,11 @@
 #
 # Instance metadata read (set by provision-gcp-cluster.sh):
 #   - role:                must be "worker"
-#   - server-ips:          comma-separated server private IPs
+#   - server-ips:          newline-separated server private IPs.
+#                          Delivered via --metadata-from-file (NOT
+#                          --metadata=key=value); the dict form rejects
+#                          comma-bearing values with "Bad syntax for
+#                          dict arg" once SERVER_COUNT>1. (Bug #23 / B23.)
 #   - datacenter:          Nomad datacenter (default zsbx-prod)
 #   - pg-host:             private IP of the postgres server (server-1)
 #   - pg-password:         postgres superuser password
@@ -240,7 +244,10 @@ systemctl enable --now zsbx-taps.service >/dev/null
 mkdir -p /etc/nomad.d /opt/nomad/data /var/log/nomad
 chown -R nomad:nomad /opt/nomad/data /var/log/nomad
 
-RETRY_JOIN=$(echo "$SERVER_IPS" | tr ',' '\n' | awk 'NF{printf "\"%s\",", $0}' | sed 's/,$//')
+# server-ips arrives newline-separated via --metadata-from-file (B23
+# fix). `tr ',\r' '\n\n'` also accepts the legacy comma form / strips
+# CR so older provisioners and copy-pasted values still work.
+RETRY_JOIN=$(echo "$SERVER_IPS" | tr ',\r' '\n\n' | awk 'NF{printf "\"%s\",", $0}' | sed 's/,$//')
 
 cat > /etc/nomad.d/nomad.hcl <<EOF
 datacenter = "$DATACENTER"
