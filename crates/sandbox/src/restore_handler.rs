@@ -195,7 +195,7 @@ pub trait RestoreBackend: Send + Sync {
 /// default `register_restored` impl is also a no-op).
 pub async fn restore_sandbox(
     db: &Database,
-    store: &dyn SnapshotStore,
+    store: Arc<dyn SnapshotStore>,
     backend: &dyn RestoreBackend,
     persist: Option<&crate::persist::Persistence>,
     sandbox_id: Uuid,
@@ -245,7 +245,7 @@ pub async fn restore_sandbox(
 
     // From here on use a closure + rollback semantics.
     let result =
-        do_restore_inner(db, store, backend, persist, sandbox_id, &snap, g1).await;
+        do_restore_inner(db, Arc::clone(&store), backend, persist, sandbox_id, &snap, g1).await;
 
     match result {
         Ok((vm_index, g2)) => Ok(RestoreOutcome { sandbox_id, vm_index, generation: g2 }),
@@ -340,7 +340,7 @@ async fn read_snapshot_row(
 
 async fn do_restore_inner(
     db: &Database,
-    store: &dyn SnapshotStore,
+    store: Arc<dyn SnapshotStore>,
     backend: &dyn RestoreBackend,
     persist: Option<&crate::persist::Persistence>,
     sandbox_id: Uuid,
@@ -376,7 +376,28 @@ async fn do_restore_inner(
     let _ = &snap.artifact_path; // pg-recorded path; the store may
     // ignore it (the LocalDiskSnapshotStore re-derives from
     // `<root>/<sandbox-id>/`). Surfaced here for tracing/logs.
-    let get_result = store.get(&sandbox_id_typed, &alloc_dir, &snap.sha256);
+    // R5-P1b: store.get is sync (sha256 + AEAD decrypt + GCS read on
+    // a ~1 GB blob) — run it on the blocking pool so the ntex worker
+    // thread can serve other restores while this one's I/O+crypto
+    // chews. Pattern mirrors `persist::Persistence::unseal` at
+    // `crates/sandbox/src/persist.rs:677-687`. Owned clones of the
+    // by-ref args are needed because spawn_blocking requires
+    // `'static + Send + FnOnce`.
+    let get_result = {
+        let store_clone = Arc::clone(&store);
+        let sid_clone = sandbox_id_typed.clone();
+        let alloc_dir_clone = alloc_dir.clone();
+        let sha_clone = snap.sha256;
+        compio::runtime::spawn_blocking(move || {
+            store_clone.get(&sid_clone, &alloc_dir_clone, &sha_clone)
+        })
+        .await
+        .unwrap_or_else(|p| {
+            Err(crate::snapshot_store::SnapshotError::Io(
+                std::io::Error::other(format!("spawn_blocking panic: {p:?}")),
+            ))
+        })
+    };
     // Bug-#14a diagnostic: surface what's on disk immediately after
     // store.get returns. Prior cluster smokes (2026-05-22) reported
     // the wake-time staging dir was empty despite a successful Ok

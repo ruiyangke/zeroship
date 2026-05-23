@@ -1377,7 +1377,7 @@ pub async fn wake_sandbox(
     };
     let outcome = restore_handler::restore_sandbox(
         db.as_ref(),
-        store.as_ref(),
+        std::sync::Arc::clone(store),
         rb.as_ref(),
         state.persist.as_deref(),
         sandbox_id,

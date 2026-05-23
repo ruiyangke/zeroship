@@ -2497,11 +2497,12 @@ async fn restore_handler_happy_path_drives_snapshotted_to_running() {
     let store_root = fresh_temp("rstore");
     let (_sha, _vm_index, _g2) = seed_snapshotted_row(&db, sid, &info, &store_root).await;
 
-    let store = LocalDiskSnapshotStore::new(&store_root);
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
     let backend_root = fresh_temp("rback");
     let backend = StubRestoreBackend::new(backend_root.clone());
 
-    let outcome = restore_sandbox(&db, &store, &backend, None, sid, true)
+    let outcome = restore_sandbox(&db, std::sync::Arc::clone(&store), &backend, None, sid, true)
         .await
         .expect("happy path restore");
     assert_eq!(outcome.vm_index, 7);
@@ -2538,11 +2539,12 @@ async fn restore_handler_checksum_mismatch_marks_suspect() {
     std::fs::write(&mr, b"tampered").unwrap();
     let _ = g2;
 
-    let store = LocalDiskSnapshotStore::new(&store_root);
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
     let backend_root = fresh_temp("rback_corrupt");
     let backend = StubRestoreBackend::new(backend_root.clone());
 
-    let err = restore_sandbox(&db, &store, &backend, None, sid, true)
+    let err = restore_sandbox(&db, std::sync::Arc::clone(&store), &backend, None, sid, true)
         .await
         .expect_err("must fail with corrupt artifact");
     assert!(matches!(err, RestoreHandlerError::SnapshotCorrupt), "{err:?}");
@@ -2562,12 +2564,13 @@ async fn restore_handler_vm_index_unavailable_when_cluster_exhausted() {
     let store_root = fresh_temp("rstore_busy");
     let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
 
-    let store = LocalDiskSnapshotStore::new(&store_root);
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
     let backend_root = fresh_temp("rback_busy");
     let mut backend = StubRestoreBackend::new(backend_root.clone());
     backend.fail_reserve = true;
 
-    let err = restore_sandbox(&db, &store, &backend, None, sid, true)
+    let err = restore_sandbox(&db, std::sync::Arc::clone(&store), &backend, None, sid, true)
         .await
         .expect_err("must fail with cluster-exhausted");
     assert!(
@@ -2762,11 +2765,12 @@ async fn restore_handler_returns_feature_disabled_when_flag_off() {
     let store_root = fresh_temp("rstore_flag");
     let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
 
-    let store = LocalDiskSnapshotStore::new(&store_root);
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
     let backend_root = fresh_temp("rback_flag");
     let backend = StubRestoreBackend::new(backend_root.clone());
 
-    let err = restore_sandbox(&db, &store, &backend, None, sid, false)
+    let err = restore_sandbox(&db, std::sync::Arc::clone(&store), &backend, None, sid, false)
         .await
         .expect_err("must refuse with flag off");
     assert!(matches!(err, RestoreHandlerError::FeatureDisabled), "{err:?}");
@@ -2879,7 +2883,9 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
         .await
         .unwrap();
 
-    let restore_outcome = restore_sandbox(&db, &store2, &restore_backend, None, sid, true)
+    let store2_arc: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(store2);
+    let restore_outcome = restore_sandbox(&db, store2_arc, &restore_backend, None, sid, true)
         .await
         .expect("phase 2 wake");
     assert_eq!(restore_outcome.vm_index, 7);
