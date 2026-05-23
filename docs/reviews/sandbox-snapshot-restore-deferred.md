@@ -485,12 +485,18 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## NEW r9 ROUND FINDINGS (added by pilot cycle 2026-05-25, post critical-fix sweep audit)
 
-### [C1-FOLLOWUP] C1 lessee writes wired, but sweep recovery CAS still doesn't fire (CRITICAL, concurrency-r9)
+### [C1-FOLLOWUP] (CLOSED at `0e71e5c4`) sweep query excludes self.host_id() and new claim_orphan_transient_for_recovery fences on the row's observed (host_id, generation) instead of self.host_id(); ownership atomically transferred to self.host_id() on hit; ABA-safe via `lessee_updated_at < now() - threshold` predicate; 1 updated + 3 new pg-gated regression tests
 - **Source**: 2026-05-25 concurrency-r9 audit of C1 (closed at `de3523c4`)
 - **Files**: `crates/sandbox/src/sweep.rs:167-169` + `crates/sandbox/src/db.rs:1690-1697,1773`
 - **Symptom**: C1 correctly sets `lessee_updated_at` on transient entry + clears on exit. BUT the recovery CAS uses `self.host_id()` (current controller's host_id) which by definition never equals the CRASHED controller's host_id stored on the row. So §6.1 sweep query finds rows but the CAS-UPDATE rejects every one of them.
-- **Action**: change the sweep's CAS predicate to "lessee != self.host_id() AND lessee_updated_at < threshold" (i.e. recover OTHER controllers' wedges, not your own). Or use a `lessee IS NULL OR lessee = $1` shape with an explicit transfer.
-- **A1 follow-up flag**: A1 fail-CLOSED gap from arch-r9 also still open (boot warns vs panics on missing kek+tiered_GCS). Track separately as A1-FOLLOWUP.
+- **Fix shape (landed)**: (1) `db.rs::transient_state_lease_expired_sandboxes` now also filters `host_id <> self.host_id()` at the SELECT level; (2) new `db.rs::claim_orphan_transient_for_recovery` does the recovery CAS with fences on the row's observed `(host_id, generation)` AND `lessee_updated_at < now() - threshold` (ABA-safe), then on hit transfers ownership to `self.host_id()`, bumps generation, flips to recovery target, clears lessee; (3) `sweep.rs::run_transient_takeover_once` calls the new fn instead of `update_sandbox_status`.
+- **A1 follow-up flag**: split out as its own [A1-FOLLOWUP] entry below — DO NOT lose track.
+
+### [A1-FOLLOWUP] Boot warns vs panics when `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` missing in tiered+GCS mode (CRITICAL, arch-r9 fail-CLOSED gap)
+- **Source**: 2026-05-25 (split from C1-FOLLOWUP's tracking note; originally arch-r9)
+- **File**: `crates/sandbox/src/lib.rs` (AppState boot path that composes the snapshot store stack — search for the wrap point closed in A1 commit `18e2034b`)
+- **Symptom**: A1 added the `AeadSnapshotStore` wrap when the KEK env var is set. But when `SANDBOX_SNAPSHOT_BACKEND=tiered` (L1 local + L2 GCS) and the operator FORGETS to set the KEK path, boot logs a warning and continues with bare plaintext-to-GCS — exactly the audit-trail-vs-reality gap A1 was meant to close. Per arch-r9's fail-CLOSED principle, a missing KEK in any mode that writes to remote object storage MUST panic at boot.
+- **Action**: in the boot composition site (lib.rs around the A1 wrap), if the backend stack includes a non-local L2 (GCS or any other remote) and `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` is unset, return a hard configuration error from `AppState::from_config` (boot panic, not log line). Local-only L1 is the only mode allowed to run without a KEK. Add a `SANDBOX_SNAPSHOT_ALLOW_UNENCRYPTED_REMOTE=1` escape hatch for non-production envs that explicitly opt in.
 
 ### [R9-C1] R8-A3-5 widened C3 a 6th time — cancel-unsafety window now 7 awaits (CRITICAL, concurrency-r9)
 - **Source**: 2026-05-25 concurrency-r9
