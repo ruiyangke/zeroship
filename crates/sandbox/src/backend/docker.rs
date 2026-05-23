@@ -829,7 +829,7 @@ mod tests {
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
                 vm_index_floor: 1,
                 vm_index_ceil: 155,
-                alloc_running_timeout_secs: 60,
+                alloc_running_timeout_secs: 120,
                 agent_livez_timeout_secs: 30,
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
