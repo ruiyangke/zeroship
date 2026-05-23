@@ -1731,13 +1731,43 @@ impl Database {
             }
             _ => "",
         };
+        // C1 (concurrency-r1 / arch-r1+r2): wire `lessee_updated_at`
+        // into every state transition so the §6.1 lease-takeover sweep
+        // can actually find abandoned transients. The host_id column
+        // already plays the lessee role (every CAS UPDATE fences on it
+        // — see D-14), so the only piece we need to maintain here is
+        // the timestamp:
+        //
+        //   target transient (snapshotting / restoring / restoring_cold)
+        //     → lessee_updated_at = now()   (mid-flight; sweep should
+        //                                    NOT reap unless this row
+        //                                    goes stale)
+        //   target non-transient (running / stopped / lost / aborted / …)
+        //     → lessee_updated_at = NULL   (lease released — the
+        //                                   partial index 0007
+        //                                   `sandboxes_status_lessee_idx`
+        //                                   only watches transient
+        //                                   rows anyway, but NULL is
+        //                                   the documented invariant).
+        //
+        // This is the single point of change (approach (a) per the
+        // C1 ticket): every transient-boundary crossing flows through
+        // this CAS — snapshot_handler, restore_handler, sweep,
+        // rollback paths — so they all get correct lessee bookkeeping
+        // for free.
+        let lessee_clause = if status.is_transient_snapshot_state() {
+            ", lessee_updated_at = now()"
+        } else {
+            ", lessee_updated_at = NULL"
+        };
         let expected_user_owned = expected_user_id.map(|s| s.to_string());
         let sql = format!(
             "UPDATE sandbox.sandboxes \
                 SET status = $1::TEXT, \
                     generation = generation + 1, \
                     last_used_at = now()\
-                    {stopped_at_clause} \
+                    {stopped_at_clause}\
+                    {lessee_clause} \
               WHERE sandbox_id = $2::TEXT \
                 AND generation = $3::BIGINT \
                 AND host_id = $5::TEXT \

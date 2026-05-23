@@ -2202,6 +2202,184 @@ async fn transient_state_lease_expired_filters_by_threshold() {
     );
 }
 
+// ────────────────────────────────────────────────────────────────────
+// C1 regression: update_sandbox_status must wire `lessee_updated_at`
+// per §6.1. A target transient state stamps now(); a target
+// non-transient state clears to NULL. Pre-fix, neither happened — the
+// sweep filter `WHERE lessee_updated_at IS NOT NULL` therefore
+// excluded every real transient row, and abandoned snapshotting /
+// restoring rows wedged forever.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; C1 regression"]
+async fn state_transition_to_snapshotting_sets_lessee() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Pre-condition: a fresh `running` row carries no lessee timestamp.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let pre: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(pre.is_none(), "fresh running row must have NULL lessee_updated_at");
+
+    // Cross the running → snapshotting transient boundary.
+    let _g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .expect("CAS to snapshotting");
+
+    // lessee_updated_at must be non-NULL now.
+    let post: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        post.is_some(),
+        "after CAS to snapshotting, lessee_updated_at must be set so the §6.1 sweep can find it"
+    );
+
+    // And the sweep query at a 0s threshold must surface it. This is
+    // the load-bearing assertion: pre-fix, the row was invisible.
+    let stale = db
+        .transient_state_lease_expired_sandboxes(0)
+        .await
+        .expect("sweep query");
+    assert!(
+        stale.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "transient row with set lessee must be findable by the lease-takeover sweep"
+    );
+
+    // Restoring (the other transient kind) must do the same. Drive
+    // snapshotting → snapshotted → restoring through the metadata
+    // writer first (CHECK constraint requires artifact-path).
+    let g_snap = db
+        .update_snapshot_metadata(
+            sid,
+            // generation post-CAS-to-snapshotting is 1.
+            1,
+            &dummy_meta("/p"),
+            1,
+            r#"{"keys":"x","userhome":"x","rootfs_overlay":"x"}"#,
+            None,
+        )
+        .await
+        .expect("snapshotted");
+    // update_snapshot_metadata clears lessee_updated_at (it already
+    // did so pre-fix); verify and then re-enter transient.
+    let after_snap: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(after_snap.is_none(), "snapshotted row must have NULL lessee");
+
+    let _g_rst = db
+        .update_sandbox_status(sid, SandboxStatus::Restoring, g_snap, None)
+        .await
+        .expect("CAS to restoring");
+    let after_rst: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        after_rst.is_some(),
+        "after CAS to restoring, lessee_updated_at must be set (sweep covers all three transient states)"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; C1 regression"]
+async fn state_transition_to_running_clears_lessee() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Drive into snapshotting → row carries a non-NULL lessee.
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let mid: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(mid.is_some(), "snapshotting row must carry lessee_updated_at");
+
+    // Roll back to running (snapshot_handler error path). lessee MUST
+    // clear — otherwise a subsequent failed-then-completed cycle could
+    // leak a stale timestamp into a future transient run.
+    let _g2 = db
+        .update_sandbox_status(sid, SandboxStatus::Running, g1, None)
+        .await
+        .expect("CAS to running");
+    let post: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        post.is_none(),
+        "after CAS back to running, lessee_updated_at must be NULL (§6.1 invariant)"
+    );
+
+    // And the sweep must not see this row anymore.
+    let stale = db
+        .transient_state_lease_expired_sandboxes(0)
+        .await
+        .expect("sweep query");
+    assert!(
+        !stale.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "running row must not appear in the transient-lease sweep"
+    );
+}
+
 #[compio::test]
 #[ignore = "needs Postgres; PR 3h idle sweep query"]
 async fn idle_eligible_sandboxes_respects_opt_in_and_threshold() {
