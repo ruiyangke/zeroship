@@ -271,7 +271,31 @@ pub async fn restore_sandbox(
                 _ => SandboxStatus::Snapshotted,
             };
             // Best-effort teardown of the partially-spawned alloc.
-            backend.teardown_restore(sandbox_id, snap.vm_index);
+            //
+            // **R10-C2 fix (concurrency-r10 2026-05-25)**: wrap the
+            // sync call in `spawn_blocking` so the ntex worker doesn't
+            // park for up to 10 s on the ureq DELETE inside
+            // `RealRestoreBackend::teardown_restore`. R8-A3-5 wrapped
+            // submit_restore_job + wait_for_livez but missed the
+            // rollback path. Under c=N concurrent restores all hitting
+            // rollback (e.g., GCS hiccup on `store.get`), pre-fix all
+            // ntex workers would park simultaneously → 10 s of no
+            // progress, surface-level p99 spike. Pattern mirrors
+            // `store.get` at lines ~397-411 and `clock_resync_post_restore`
+            // at lines ~1530-1616.
+            //
+            // (b2 choice: wrap at call site, keep callee sync. The
+            // `RestoreBackend` trait stays sync so the in-crate
+            // `StubRestoreBackend` test scaffolding stays simple; the
+            // only async caller is this rollback closure.)
+            let backend_for_teardown = Arc::clone(&backend);
+            let snap_vm_index = snap.vm_index;
+            let sandbox_id_for_teardown = sandbox_id;
+            let _ = compio::runtime::spawn_blocking(move || {
+                backend_for_teardown
+                    .teardown_restore(sandbox_id_for_teardown, snap_vm_index);
+            })
+            .await;
             if let Err(rb_err) = db
                 .update_sandbox_status(sandbox_id, target, g1, None)
                 .await
@@ -1144,6 +1168,34 @@ impl RestoreBackend for RealRestoreBackend {
                 error = %e,
                 "restore teardown: nomad DELETE failed (non-fatal)"
             );
+        }
+        // **R10-C1 fix (concurrency-r10 2026-05-25)**: drop the
+        // state-map entry that `register_restored` may have inserted.
+        // Pre-fix this was missed: if `register_restored` had run
+        // (success branch) and then a LATER step failed (e.g. the
+        // final `update_sandbox_status(Running)` returned CasLost,
+        // legitimate under a parallel admin stop), the rollback path
+        // released the vm_index BUT left the state-map entry behind.
+        // The next `create()` would then reserve the same vm_index
+        // (now free in the allocator) and end up with TWO state-map
+        // entries pointing at the same slot — and the older entry's
+        // eventual `stop_inner` would release the live tenant's slot.
+        //
+        // Mirroring `stop_inner`'s `state.write().remove(&sandbox_id)`,
+        // the call is idempotent: no-op if `register_restored` never
+        // ran on this `sandbox_id` (early-rollback path). The
+        // structural cure is R4-A2's `LeasedVmSlot` RAII; this 1-line
+        // interim is the cheap insurance until that lands.
+        if let Some(handle) = self.nomad_handle.as_ref() {
+            let removed = handle.unregister_restored(sandbox_id);
+            if removed {
+                tracing::info!(
+                    sandbox_id = %sandbox_id,
+                    vm_index,
+                    "restore teardown: removed nomad-ch state-map entry \
+                     (R10-C1 rollback path)"
+                );
+            }
         }
         // Always release the vm_index regardless of teardown outcome.
         self.release_vm_index(vm_index);
@@ -2109,6 +2161,201 @@ mod real_backend_tests {
         assert!(
             parsed["ts"].is_u64(),
             "R7-S1: body must carry a numeric ts; got {parsed:?}"
+        );
+    }
+
+    // ─── R10-C1 + R10-C2 regression (concurrency-r10 2026-05-25):
+    //     `teardown_restore` on the rollback path must
+    //       (a) remove the nomad-ch state-map entry that
+    //           `register_restored` inserted, and
+    //       (b) release the vm_index back into the shared allocator,
+    //     so that a subsequent `register_restored` at the same slot
+    //     can succeed. Without (a), a late-rollback (e.g.
+    //     `update_sandbox_status(Running) → CasLost`) leaves a ghost
+    //     state-map entry at a slot the next `create` would land on.
+    //     Source: docs/reviews/sandbox-snapshot-restore-concurrency-2026-05-25-r10.md
+    //     R10-C1 + R10-C2.
+
+    /// R10-C1: full integration over `RealRestoreBackend` +
+    /// `NomadCHBackend` wired via `with_nomad_handle`. Walks the
+    /// rollback shape: `register_restored` (success branch) → late
+    /// failure → `teardown_restore` must wipe the state-map entry +
+    /// release the vm_index. Then a second `register_restored` at the
+    /// same `sandbox_id` succeeds (Vacant slot).
+    #[ntex::test]
+    async fn r10_c1_teardown_restore_removes_state_map_entry() {
+        use crate::backend::nomad_ch::NomadCHBackend;
+        // Fake nomad that 200s the rollback DELETE.
+        let host_state = fresh_dir();
+        let (nomad_addr, _calls) =
+            spawn_fake_nomad(|_| (200, "{}".to_string()));
+        let mut sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        sandbox_cfg.nomad_ch.nomad_addr = nomad_addr.clone();
+        sandbox_cfg.nomad_ch.host_state_dir = host_state.clone();
+        sandbox_cfg.nomad_ch.vm_index_floor = 4;
+        sandbox_cfg.nomad_ch.vm_index_ceil = 6;
+        // Construct the real NomadCH backend so we can wire it as a
+        // shared handle into RealRestoreBackend.
+        let nomad_backend =
+            Arc::new(NomadCHBackend::new(sandbox_cfg.clone(), None).expect("nomad new"));
+        let allocator = nomad_backend.vm_index_allocator();
+
+        // Build the RealRestoreBackend with both the shared allocator
+        // (so release_vm_index lands in the right pool) AND the
+        // nomad_handle (so teardown_restore can call unregister_restored).
+        let restore_cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(restore_cfg, 1024, 2.0)
+            .with_shared_allocator(allocator.clone())
+            .with_nomad_handle(nomad_backend.clone());
+
+        let id = Uuid::now_v7();
+        let vm_index: i16 = 5;
+
+        // Reserve + register: mirrors the do_restore_inner success
+        // path up to (but not including) the final CAS.
+        backend
+            .reserve_vm_index(vm_index)
+            .expect("reserve must succeed");
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0xc1u8; 32],
+                "usr_r10c1_int",
+            )
+            .expect("register_restored must succeed");
+        // Sanity: the entry landed in the state map.
+        assert!(
+            nomad_backend.contains_for_test(id),
+            "test setup: register_restored must place an entry"
+        );
+
+        // Now drive the rollback path. Pre-R10-C1 fix this would have
+        // released the vm_index but left the state-map entry behind.
+        backend.teardown_restore(id, vm_index);
+
+        // (a) State-map empty for this id: the R10-C1 invariant.
+        assert!(
+            !nomad_backend.contains_for_test(id),
+            "R10-C1 regression: teardown_restore did NOT remove the \
+             nomad-ch state-map entry; ghost entry leaks past the rollback"
+        );
+
+        // (b) vm_index released: a follow-on alloc() hands out the
+        //     freed slot 5 (freed-set wins over `next` in the
+        //     VmIndexAllocator).
+        let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(
+            reclaimed, vm_index as u16,
+            "R10-C1: vm_index slot {vm_index} not returned to allocator \
+             after teardown_restore; got {reclaimed}"
+        );
+
+        // (c) After unregister, a subsequent register_restored at the
+        //     same `sandbox_id` succeeds — symmetric inverse closure.
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0xc2u8; 32],
+                "usr_r10c1_int_re",
+            )
+            .expect(
+                "R10-C1: post-teardown, register_restored at the same \
+                 sandbox_id must succeed (Vacant slot)",
+            );
+
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// R10-C1: early-rollback path (teardown_restore fires BEFORE
+    /// register_restored ever ran). The state-map remove must be a
+    /// no-op (idempotent — matches `stop_inner`'s tolerance) and the
+    /// vm_index release must still happen.
+    #[ntex::test]
+    async fn r10_c1_teardown_restore_early_rollback_is_idempotent() {
+        use crate::backend::nomad_ch::NomadCHBackend;
+        let host_state = fresh_dir();
+        let (nomad_addr, _calls) =
+            spawn_fake_nomad(|_| (200, "{}".to_string()));
+        let mut sandbox_cfg = crate::config::SandboxConfig::new_fixture();
+        sandbox_cfg.nomad_ch.nomad_addr = nomad_addr.clone();
+        sandbox_cfg.nomad_ch.host_state_dir = host_state.clone();
+        sandbox_cfg.nomad_ch.vm_index_floor = 10;
+        sandbox_cfg.nomad_ch.vm_index_ceil = 12;
+        let nomad_backend =
+            Arc::new(NomadCHBackend::new(sandbox_cfg, None).expect("nomad new"));
+        let allocator = nomad_backend.vm_index_allocator();
+
+        let restore_cfg = base_cfg(nomad_addr, host_state.clone());
+        let backend = RealRestoreBackend::new(restore_cfg, 1024, 2.0)
+            .with_shared_allocator(allocator.clone())
+            .with_nomad_handle(nomad_backend.clone());
+
+        let id = Uuid::now_v7();
+        let vm_index: i16 = 11;
+        backend
+            .reserve_vm_index(vm_index)
+            .expect("reserve must succeed");
+        // Note: we skip register_restored — this is the early-rollback
+        // shape (e.g. submit_restore_job Err).
+        assert!(
+            !nomad_backend.contains_for_test(id),
+            "test setup: no state-map entry before teardown"
+        );
+
+        // Must not panic; must release the slot.
+        backend.teardown_restore(id, vm_index);
+        let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(
+            reclaimed, vm_index as u16,
+            "R10-C1 early-rollback: vm_index slot not released"
+        );
+
+        let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    /// R10-C2: pin the structural shape of the rollback call. The
+    /// `do_restore_inner` rollback path MUST wrap `teardown_restore`
+    /// in `compio::runtime::spawn_blocking` so the ntex worker doesn't
+    /// park on the sync ureq DELETE (up to 10 s). A future contributor
+    /// who removes the wrap re-opens the worker-park; this test reads
+    /// the source via `include_str!` and asserts the wrap is present
+    /// near the rollback call site. Structural assertion because the
+    /// runtime behaviour is hard to unit-test deterministically.
+    #[test]
+    fn r10_c2_rollback_teardown_is_spawn_blocking_wrapped() {
+        const SRC: &str = include_str!("restore_handler.rs");
+        // Anchor the search at the rollback comment; require that
+        // `compio::runtime::spawn_blocking` AND the teardown call
+        // appear within the next ~2 KB and that spawn_blocking precedes
+        // the call (i.e., the call is INSIDE the wrap). We match on
+        // `.teardown_restore(` (call shape with the dot+paren) so the
+        // search ignores prose mentions of "teardown_restore" inside
+        // the comment block immediately after the anchor.
+        let anchor = "// Best-effort teardown of the partially-spawned alloc.";
+        let start = SRC
+            .find(anchor)
+            .expect("R10-C2 anchor comment moved; update the test");
+        let window = &SRC[start..start.saturating_add(2048)];
+        let sb_idx = window
+            .find("compio::runtime::spawn_blocking")
+            .unwrap_or_else(|| panic!(
+                "R10-C2 regression: rollback path no longer wraps \
+                 teardown_restore in compio::runtime::spawn_blocking; \
+                 the sync ureq DELETE will park the ntex worker for up \
+                 to 10 s."
+            ));
+        // Find the FIRST actual call (dot-form). The prose in the
+        // R10-C2 comment block mentions the bare identifier but never
+        // the `.teardown_restore(` call shape.
+        let td_idx = window.find(".teardown_restore(").unwrap_or_else(|| {
+            panic!("R10-C2: expected `.teardown_restore(` call in rollback window")
+        });
+        assert!(
+            sb_idx < td_idx,
+            "R10-C2 regression: spawn_blocking wrap must precede the \
+             teardown_restore call (got sb={sb_idx} td={td_idx})"
         );
     }
 }

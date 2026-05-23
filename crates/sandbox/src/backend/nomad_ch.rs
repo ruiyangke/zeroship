@@ -1689,6 +1689,41 @@ impl NomadCHBackend {
         }
     }
 
+    /// **R10-C1 fix (concurrency-r10 2026-05-25)**: the symmetric
+    /// inverse of [`Self::register_restored`]. Removes the state-map
+    /// entry the restore-success branch inserted. Called from
+    /// `RealRestoreBackend::teardown_restore` on the rollback path so
+    /// that, after a late failure (e.g. `update_sandbox_status(Running)`
+    /// returning CasLost), the vm_index release is matched by a
+    /// state-map remove — preventing a ghost entry at the released slot
+    /// that the next `create` would land on top of.
+    ///
+    /// Mirrors [`Self::stop_inner`]'s `state.write().remove(&sandbox_id)`
+    /// pattern (the idempotent-on-missing case). Returns `true` if an
+    /// entry was actually removed, `false` if there was nothing to
+    /// remove (early-rollback before `register_restored` ever ran — the
+    /// no-op branch matches stop_inner's tolerance).
+    pub(crate) fn unregister_restored(&self, sandbox_id: Uuid) -> bool {
+        self.state
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&sandbox_id)
+            .is_some()
+    }
+
+    /// Test-only helper: returns `true` iff the state map holds an
+    /// entry for `sandbox_id`. Used by the cross-module R10-C1
+    /// integration test in `restore_handler.rs` that needs to peek at
+    /// the state map after a `teardown_restore`. Kept `pub(crate)` so
+    /// it can't leak to out-of-crate callers.
+    #[cfg(test)]
+    pub(crate) fn contains_for_test(&self, sandbox_id: Uuid) -> bool {
+        self.state
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(&sandbox_id)
+    }
+
     /// Legacy v2-shape restore. Round-8 keeps this so existing tests
     /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
     /// through [`Self::restore_from_pg_and_sealed`].
@@ -4797,5 +4832,92 @@ mod tests {
 
         stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&host_state_parent);
+    }
+
+    // ─── R10-C1 regression (concurrency-r10 2026-05-25):
+    //     `unregister_restored` is the symmetric inverse of
+    //     `register_restored` used by the rollback path. Without it,
+    //     a CasLost on the final `update_sandbox_status(Running)` left
+    //     the state-map entry alive while vm_index went back into the
+    //     allocator pool — a ghost sandbox at a slot the next create
+    //     would land on top of. Source:
+    //     docs/reviews/sandbox-snapshot-restore-concurrency-2026-05-25-r10.md
+    //     R10-C1.
+
+    #[compio::test]
+    async fn unregister_restored_removes_state_map_entry() {
+        let cfg = make_cfg();
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let vm_index: u16 = 7;
+        let agent_url = backend.derive_agent_url(vm_index);
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0xa1; 32],
+                agent_url,
+                "usr_r10c1_unreg".into(),
+            )
+            .expect("register must succeed");
+
+        // Pre-condition: state map carries the entry.
+        assert!(
+            backend.state.read().unwrap().get(&id).is_some(),
+            "test setup: register_restored must place an entry"
+        );
+
+        let removed = backend.unregister_restored(id);
+        assert!(removed, "R10-C1: unregister_restored must report removal");
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "R10-C1 regression: unregister_restored did not remove the \
+             state-map entry"
+        );
+
+        // Idempotency: a second call is a no-op and returns false.
+        let removed_again = backend.unregister_restored(id);
+        assert!(
+            !removed_again,
+            "R10-C1: second unregister must be a no-op (no entry to remove)"
+        );
+    }
+
+    /// R10-C1 follow-on invariant: after `register_restored` +
+    /// `unregister_restored`, a subsequent `register_restored` at the
+    /// SAME `sandbox_id` must succeed (the Vacant slot is the inverse
+    /// of the rollback symmetry).
+    #[compio::test]
+    async fn unregister_restored_re_register_succeeds() {
+        let cfg = make_cfg();
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let vm_index: u16 = 9;
+        let agent_url = backend.derive_agent_url(vm_index);
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0x33; 32],
+                agent_url.clone(),
+                "usr_r10c1_rereg".into(),
+            )
+            .expect("first register");
+        assert!(backend.unregister_restored(id), "unregister returns true");
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                [0x33; 32],
+                agent_url,
+                "usr_r10c1_rereg".into(),
+            )
+            .expect(
+                "R10-C1: post-unregister, register_restored at the same \
+                 sandbox_id must succeed (Vacant slot)",
+            );
     }
 }
