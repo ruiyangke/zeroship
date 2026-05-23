@@ -877,6 +877,51 @@ impl NomadCHBackend {
     /// jobs that were holding them). The host_dir is left in place
     /// for the same reason — virtiofsd may still hold its socket open.
     pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
+        // The for-real stop: tear everything down INCLUDING the
+        // per-sandbox host_dir (which owns workspace.img). Callers
+        // who need to keep `workspace.img` alive across a snapshot →
+        // wake gap MUST use [`Self::stop_preserving_state`] instead.
+        self.stop_inner(sandbox_id, true).await
+    }
+
+    /// Snapshot-aware variant of [`Self::stop`] that runs steps 1-4
+    /// of the standard teardown (Nomad job purge + host-fence +
+    /// vm_index release + in-memory map removal) **but skips step
+    /// 5's `remove_dir_all(host_dir)`**. Symmetric with how
+    /// `home.img` is intentionally preserved across snapshot
+    /// lifetimes: the per-sandbox `workspace.img` (created under
+    /// `host_dir`) holds durable user state that the restored VM
+    /// re-mounts on wake. Wiping it would silently destroy that data.
+    ///
+    /// Used by the snapshot path's post-success teardown
+    /// ([`super::Backend::teardown_source_for_snapshot`]). The
+    /// host_dir is finally reaped by the next [`Self::stop`] call
+    /// (operator delete, or terminal-not-restorable transition).
+    ///
+    /// Bug #15 fix (`docs/reviews/sandbox-snapshot-restore-cluster-
+    /// 2026-05-23-r1.md`): the prior code called `stop` directly,
+    /// which deleted `host_dir/workspace.img`, and the next wake's
+    /// wrapper `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then tripped.
+    pub async fn stop_preserving_state(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<(), String> {
+        self.stop_inner(sandbox_id, false).await
+    }
+
+    /// Shared implementation of [`Self::stop`] /
+    /// [`Self::stop_preserving_state`]. The `remove_host_dir` bool
+    /// gates step 5: when `true` (the regular stop path), the
+    /// per-sandbox `host_dir` (which owns `workspace.img`) is
+    /// `rm -rf`'d after the Nomad job is confirmed gone + the
+    /// host_fence has cleared. When `false`, the dir survives across
+    /// the call — used by the snapshot teardown so `workspace.img`
+    /// stays on disk for the next wake.
+    async fn stop_inner(
+        &self,
+        sandbox_id: Uuid,
+        remove_host_dir: bool,
+    ) -> Result<(), String> {
         let sandbox = match self
             .state
             .write()
@@ -1066,31 +1111,45 @@ impl NomadCHBackend {
         //    virtiofsd may still hold the socket / share open, and
         //    pulling the dir from under it would just produce
         //    confusing logs.
-        let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
-        if host_dir_safe_to_rm && sandbox.host_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
-                errs.push(format!(
-                    "rm -rf {}: {}",
-                    sandbox.host_dir.display(),
-                    e
-                ));
-            }
-        } else if sandbox.host_dir.exists() {
-            // Either the Nomad purge didn't confirm or the host
-            // fence failed. Either way virtiofsd may still hold the
-            // share; leaking the dir for orphan-prune is the safer
-            // choice.
-            let reason = if !job_confirmed_gone {
-                "job not confirmed gone"
-            } else {
-                "host_fence timeout"
-            };
-            tracing::warn!(
+        //
+        //    `remove_host_dir == false` is the snapshot-teardown path
+        //    (bug #15): callers want the per-sandbox `workspace.img`
+        //    (and the dir holding it) to survive across the snapshot
+        //    → wake gap. The next regular `stop` reaps it.
+        if !remove_host_dir {
+            tracing::info!(
+                sandbox_id = %sandbox_id,
                 job = %sandbox.job_id,
                 host_dir = %sandbox.host_dir.display(),
-                reason,
-                "sandbox/nomad-ch stop: leaking host_dir"
+                "sandbox/nomad-ch stop_preserving_state: skipping host_dir rm (snapshot-aware teardown; workspace.img must survive to wake)"
             );
+        } else {
+            let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
+            if host_dir_safe_to_rm && sandbox.host_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
+                    errs.push(format!(
+                        "rm -rf {}: {}",
+                        sandbox.host_dir.display(),
+                        e
+                    ));
+                }
+            } else if sandbox.host_dir.exists() {
+                // Either the Nomad purge didn't confirm or the host
+                // fence failed. Either way virtiofsd may still hold
+                // the share; leaking the dir for orphan-prune is the
+                // safer choice.
+                let reason = if !job_confirmed_gone {
+                    "job not confirmed gone"
+                } else {
+                    "host_fence timeout"
+                };
+                tracing::warn!(
+                    job = %sandbox.job_id,
+                    host_dir = %sandbox.host_dir.display(),
+                    reason,
+                    "sandbox/nomad-ch stop: leaking host_dir"
+                );
+            }
         }
 
         // Delete the sealed record (preview-URL § II.0 §4). BEST-EFFORT:
@@ -4028,5 +4087,204 @@ mod tests {
             err.contains("not found"),
             "Err must mention not-found; got {err:?}"
         );
+    }
+
+    // ─── Bug #15: stop_preserving_state preserves host_dir ──────
+    //
+    // The snapshot teardown path (`teardown_source_for_snapshot` →
+    // `stop_preserving_state` → `stop_inner(.., false)`) MUST NOT
+    // remove the per-sandbox `host_dir`, because that directory owns
+    // `workspace.img` — the durable per-sandbox storage that the
+    // next wake's wrapper re-mounts. The wrapper's gate
+    // `[ ! -f $ZSBX_WORKSPACE_IMG ] && exit 1` (see
+    // `crates/sandbox/scripts/nomad-vm-wrapper.sh`) is what blew up
+    // empirically in the 2026-05-23 cluster smoke.
+    //
+    // This test exercises the full `stop_inner` path against a tiny
+    // TcpListener-backed Nomad mock that 404s every request — which
+    // both `stop_nomad_job` (DELETE accepts 200|404) and
+    // `wait_for_job_gone` (GET 404 → Ok) consume as "job is gone".
+    // `host_fence_timeout_secs = 0` bypasses the fence loop (the
+    // 500ms grace sleep is acceptable inside a #[compio::test]).
+    // We then assert: (1) the in-memory record is removed (steps
+    // 1-4 ran), and (2) the host_dir + its sentinel file survive
+    // (step 5 was skipped).
+
+    /// Spin up a TcpListener that responds 404 to every request
+    /// (with Content-Length: 0). Returns (port, stop_flag). The
+    /// thread exits when the flag flips. Reusing the existing
+    /// `spawn_mock_agent` style.
+    fn spawn_404_mock() -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf).unwrap_or(0);
+                        let resp =
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, stop)
+    }
+
+    /// Process-unique tempdir (mirrors the
+    /// `crates/sandbox/src/snapshot_store.rs::fresh_root` pattern —
+    /// avoids pulling in the `tempfile` crate for one test).
+    fn fresh_host_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "zsbx-b15-{}-{}-{}",
+            tag,
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[compio::test]
+    async fn stop_preserving_state_does_not_remove_host_dir() {
+        // 1. Spin up the 404-mock for Nomad. Every request → 404.
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        // 2. Build a cfg pointed at the mock + fence disabled.
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0; // skip /livez fence
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+
+        // 3. Hand-insert a sandbox record with a real on-disk host_dir
+        //    + sentinel file (stand-in for workspace.img).
+        let id = Uuid::now_v7();
+        let host_dir = fresh_host_dir("preserve");
+        let sentinel = host_dir.join("workspace.img");
+        std::fs::write(&sentinel, b"PRESERVE-ME").expect("write sentinel");
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_b15_preserve".into(),
+                job_id: "zsbx-b15-preserve".into(),
+                vm_index: 42,
+                host_dir: host_dir.clone(),
+                // agent_url 127.0.0.1:1 is unreachable; /shutdown
+                // errors but it's best-effort and ignored.
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+
+        // 4. Snapshot-teardown variant: MUST preserve host_dir.
+        let res = backend.stop_preserving_state(id).await;
+        // The /shutdown call to 127.0.0.1:1 errors → res is Err
+        // with a /shutdown blurb, but the post-conditions we care
+        // about are observed regardless.
+        let _ = res;
+
+        // 5a. In-memory state was reaped (step 4 ran).
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "stop_preserving_state must remove the in-memory record \
+             (step 4 of the teardown ran)"
+        );
+
+        // 5b. host_dir + sentinel file SURVIVE (step 5 was skipped —
+        //     this is the bug #15 invariant).
+        assert!(
+            host_dir.exists(),
+            "B15 regression: stop_preserving_state removed host_dir; \
+             the next wake's wrapper [ ! -f $ZSBX_WORKSPACE_IMG ] gate \
+             will exit 1"
+        );
+        assert!(
+            sentinel.exists(),
+            "B15 regression: stop_preserving_state removed \
+             host_dir/workspace.img; durable per-sandbox storage gone"
+        );
+        let contents = std::fs::read(&sentinel).expect("read sentinel");
+        assert_eq!(
+            contents,
+            b"PRESERVE-ME",
+            "B15 regression: workspace.img sentinel was modified"
+        );
+
+        // Cleanup.
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&host_dir);
+    }
+
+    #[compio::test]
+    async fn stop_for_real_removes_host_dir() {
+        // Mirror test: the existing `stop()` MUST still rm the
+        // host_dir under the same favourable conditions. This is the
+        // structural counterpart that proves the bool gate, not
+        // independent infra, is what makes the difference.
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0;
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let host_dir = fresh_host_dir("for-real");
+        let sentinel = host_dir.join("workspace.img");
+        std::fs::write(&sentinel, b"WIPE-ME").expect("write sentinel");
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_b15_forreal".into(),
+                job_id: "zsbx-b15-forreal".into(),
+                vm_index: 43,
+                host_dir: host_dir.clone(),
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+
+        let _ = backend.stop(id).await;
+
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "stop must remove the in-memory record"
+        );
+        // host_dir IS removed by the regular stop path under these
+        // favourable conditions (404-mock → job_confirmed_gone=true,
+        // fence_secs=0 → fence_passed=true).
+        assert!(
+            !host_dir.exists(),
+            "stop (the for-real variant) must remove host_dir when \
+             job_confirmed_gone && fence_passed; got dir still present"
+        );
+
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Safety net in case the assertion above changes: don't
+        // leak the dir.
+        let _ = std::fs::remove_dir_all(&host_dir);
     }
 }

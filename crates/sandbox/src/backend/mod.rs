@@ -401,15 +401,24 @@ impl Backend {
     /// caller path. Idempotent + best-effort: any error is logged but
     /// not propagated (the snapshot artifact is already authoritative).
     ///
-    /// Today this just invokes the regular `stop` path on the nomad-ch
-    /// backend. The pg row is left in `snapshotted` state; only the
-    /// runtime objects (Nomad alloc, vm_index, host_dir) are reaped.
+    /// Calls [`nomad_ch::NomadCHBackend::stop_preserving_state`] —
+    /// runs the Nomad-job purge + host-fence + vm_index release +
+    /// in-memory map removal, but **DOES NOT remove the per-sandbox
+    /// `host_dir`**. That dir holds `workspace.img`, which the next
+    /// wake re-mounts as durable per-sandbox storage; deleting it
+    /// here trips the wrapper's `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate
+    /// on the next wake (bug #15 — see
+    /// `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md`).
+    /// The host_dir is finally reaped by the next real [`Self::stop`]
+    /// call (operator delete, or terminal-not-restorable transition).
+    /// Symmetric with how `home.img` is intentionally preserved
+    /// across snapshot lifetimes.
     pub async fn teardown_source_for_snapshot(
         &self,
         sandbox_id: Uuid,
     ) -> Result<(), String> {
         match self {
-            Self::NomadCh(b) => b.stop(sandbox_id).await,
+            Self::NomadCh(b) => b.stop_preserving_state(sandbox_id).await,
             Self::Docker(_) | Self::K8s(_) => Err(format!(
                 "teardown_source_for_snapshot: backend {:?} doesn't support \
                  snapshot/restore (Phase B nomad-ch-only)",
