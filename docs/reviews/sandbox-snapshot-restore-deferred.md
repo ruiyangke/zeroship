@@ -65,12 +65,8 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: stalls a single-threaded compio worker for the full SHA-256 + AEAD + GCS roundtrip. Up to 90s blocking on ureq + Command + std::fs.
 - **Action**: wrap all `SnapshotStore::put`/`get` calls + `ChRemoteClient` calls in `compio::runtime::spawn_blocking` (pattern already used in `persist.rs:641,656,676`). Replace `std::thread::sleep` with `compio::time::sleep`.
 
-### [A4] HTTP error envelope §10.0 — PARTIAL (helper landed, 18 call sites pending)
-- **Source**: 2026-05-24 api-surface review; A4 fixer at `469e22c8` landed `crates/sandbox/src/error_envelope.rs` (scaffolding only, no call-site migration). The fixer was interrupted mid-task; handlers.rs draft was lost in a concurrent-stash race. 18 call sites still emit non-compliant shapes.
-- **Status**: HELPER LANDED, MIGRATION PENDING. Treat as a fresh fixer task next cycle.
-- **Files to migrate**: `crates/sandbox/src/admin_handlers.rs:179-192` + `handlers.rs:25-44` + `preview.rs:836-838` + `preview_share_handlers.rs:112-114` (only `admin_handlers.rs:1041-1044` matches spec)
-- **Spec**: `{"error":"<kind>","message":"<human>",...}` per proposal § 10.0
-- **Action**: read `crates/sandbox/src/error_envelope.rs` (already pub(crate) with `error_response(StatusCode, code, msg)` API), migrate 18 sites, add 1 unit test per file (4-5 total batched). Should be a clean ~30min task with the helper already in place.
+### [A4] (CLOSED 2026-05-23 cycle r4) HTTP error envelope §10.0 — fully migrated
+- **Status**: **CLOSED**. A4 fixer reconvened late and landed 4 more commits after the pilot's r4 artifacts commit: `64db0d30` admin_handlers, `c0296c76` preview, `5330acd9` preview-share, `2928d5ae` wire-shape tests. Adherence: **8/26 (31%) → 26/26 (100%)**. All wire error responses now funnel through `crates/sandbox/src/error_envelope.rs::ErrorEnvelope` / `error_response()`. 21 new tests pin the shape at HEAD `2928d5ae`. Test count: 238 → 266 (+28).
 
 ### [A7] `SandboxConfig.token` is `pub` — last credential field exposure (CRITICAL, A6b-fixer spotted)
 - **Source**: 2026-05-24 A6b-fixer report (`2380605e`)
