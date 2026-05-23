@@ -322,7 +322,14 @@ impl AeadKey {
     /// Read a 32-byte AEAD key from `path`. The file MUST be exactly
     /// 32 bytes. On Unix the file's mode is checked: anything other
     /// than `0400` is refused so a wider permission can't sneak past
-    /// review (round-6 H8).
+    /// review (round-6 H8). The file's owner uid is also checked:
+    /// only uid 0 (root) is accepted (R9-S4b) — mode 0o400 alone is
+    /// insufficient because a non-root attacker who pre-creates a
+    /// chmod-400 file at the path before systemd starts could supply
+    /// a known/attacker-controlled key, breaking confidentiality of
+    /// every future sealed record. The "uid == 0" invariant matches
+    /// systemd-style secret loading at `/etc/zeroship/`, where the
+    /// worker startup script creates the key as root.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path = path.as_ref();
         let meta = std::fs::metadata(path)
@@ -335,6 +342,7 @@ impl AeadKey {
         }
         #[cfg(unix)]
         {
+            use std::os::unix::fs::MetadataExt as _;
             use std::os::unix::fs::PermissionsExt as _;
             let mode = meta.permissions().mode() & 0o777;
             if mode != 0o400 {
@@ -342,6 +350,13 @@ impl AeadKey {
                     "AEAD key file {path:?} has mode {mode:#o}; expected 0o400 \
                      (owner read-only) — refuse to start. \
                      fix: chmod 0400 {path:?}",
+                ));
+            }
+            let uid = meta.uid();
+            if uid != 0 {
+                return Err(format!(
+                    "AEAD key file {path:?} has owner uid {uid} != 0 \
+                     (refusing to load; chown root:root the file)"
                 ));
             }
         }
@@ -1042,6 +1057,74 @@ mod tests {
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         let err = AeadKey::from_path(&p).expect_err("loose perms must fail");
         assert!(err.contains("0o400") || err.contains("400"), "got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R9-S4b: a 0o400 AEAD key file owned by a non-root uid (i.e.
+    /// the test-runner user, which is uid != 0 in CI/dev) MUST be
+    /// refused. Without the owner check, a non-root attacker who
+    /// pre-creates a chmod-400 file at `SANDBOX_AEAD_KEY_PATH` before
+    /// the controller starts can supply an attacker-known key,
+    /// breaking confidentiality of every future sealed record.
+    /// Sibling of the R9-S4 fix on `snapshot_aead.rs::RootKek`.
+    #[cfg(unix)]
+    #[test]
+    fn aead_key_from_path_rejects_non_root_owned_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = fresh_dir("aead-non-root-owner");
+        let p = dir.join("k");
+        std::fs::write(&p, [0xa5u8; AEAD_KEY_LEN]).unwrap();
+        // The file is created by the test-runner process, so its uid
+        // == effective uid of the runner. Detect "running as root" by
+        // reading that uid back: if it's 0 there's no non-root-owned
+        // file to materialise, so skip (the positive-arm test below
+        // covers that branch).
+        let runner_uid = std::fs::metadata(&p).unwrap().uid();
+        if runner_uid == 0 {
+            eprintln!(
+                "skipping aead_key_from_path_rejects_non_root_owned_file: \
+                 running as root, can't materialise a non-root-owned AEAD key file"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let err = AeadKey::from_path(&p)
+            .expect_err("non-root-owned AEAD key must be refused even at mode 0o400");
+        assert!(
+            err.contains("owner uid") && err.contains("!= 0"),
+            "error must mention owner uid != 0; got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R9-S4b positive arm: when the test runs as root, a 0o400 AEAD
+    /// key file owned by root loads OK. Skipped when not running as
+    /// root (the common case in CI/dev) — the negative arm above
+    /// already pins the bug-fix assertion in non-root environments.
+    #[cfg(unix)]
+    #[test]
+    fn aead_key_from_path_accepts_root_owned_file_when_running_as_root() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = fresh_dir("aead-root-owner");
+        let p = dir.join("k");
+        std::fs::write(&p, [0xa5u8; AEAD_KEY_LEN]).unwrap();
+        let runner_uid = std::fs::metadata(&p).unwrap().uid();
+        if runner_uid != 0 {
+            eprintln!(
+                "skipping aead_key_from_path_accepts_root_owned_file_when_running_as_root: \
+                 not running as root, can't create a root-owned AEAD key file"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let key = AeadKey::from_path(&p).expect("root-owned 0o400 AEAD key must load");
+        // Sanity-check the bytes round-trip — first byte of the key.
+        assert_eq!(key.bytes[0], 0xa5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

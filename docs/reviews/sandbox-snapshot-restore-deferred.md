@@ -550,7 +550,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: a non-root attacker who can pre-create a chmod-400 file at the KEK path before systemd starts can supply a known-key to the controller, breaking confidentiality of all future snapshots.
 - **Action**: add `metadata().uid() == 0` check; refuse to load otherwise. Cheap insurance.
 
-### [R9-S4b] Sibling: `persist.rs::AeadKey::from_path` has identical mode-only-no-uid bug (IMPORTANT, security-r9)
+### [R9-S4b] (CLOSED at <hash>) persist.rs AeadKey uid check landed (sibling of R9-S4)
 - **Source**: 2026-05-25 r2 sweep — found by R9-S4 fixer as a sibling instance that was OUT-OF-SCOPE for the R9-S4 commit (`cca1e74d`).
 - **File**: `crates/sandbox/src/persist.rs::AeadKey::from_path` (~line 326-354)
 - **Symptom**: same vulnerability shape as R9-S4 but on `SANDBOX_AEAD_KEY_PATH` (the sealed-records persistence AEAD key, distinct from the snapshot-store root KEK). Mode 0o400 checked but uid not — non-root attacker who pre-creates the file at the path before systemd starts can supply a known key for sealed-record encryption.
