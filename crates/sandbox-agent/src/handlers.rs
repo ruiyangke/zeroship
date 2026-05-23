@@ -98,7 +98,12 @@ const RESYNC_CHALLENGE_HEX_LEN: usize = 64;
 /// Idempotent: a second call after the OnceLock is set returns Ok
 /// without re-reading. Subsequent calls with a DIFFERENT id return Ok
 /// but do NOT overwrite — the OnceLock semantics are write-once.
-pub fn init_sandbox_id_from_env() -> Result<(), String> {
+///
+/// `pub(crate)` so the public surface stays narrow — the only intended
+/// caller is `main.rs`, which now goes through
+/// [`crate::boot_init_sandbox_id`] (the canonical, purposefully-named
+/// binary entry point).
+pub(crate) fn init_sandbox_id_from_env() -> Result<(), String> {
     if SANDBOX_ID.get().is_some() {
         return Ok(());
     }

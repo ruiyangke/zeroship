@@ -13,8 +13,8 @@ use ntex::web::{self};
 use tracing::{error, info};
 
 use zeroship_sandbox_agent::{
-    dropuser, handlers, proxy, proxy_ws, reap, state_from_env, version, DEFAULT_PORT,
-    DEFAULT_WORKSPACE,
+    boot_init_sandbox_id, dropuser, handlers, proxy, proxy_ws, reap, state_from_env, version,
+    DEFAULT_PORT, DEFAULT_WORKSPACE,
 };
 
 #[ntex::main]
@@ -94,7 +94,7 @@ async fn run() -> Result<(), String> {
     // restore path. The wrapper script must inject one of these
     // before launching the agent (rootfs v5 + controller v18 land
     // the wire change together).
-    handlers::init_sandbox_id_from_env().map_err(|e| {
+    boot_init_sandbox_id().map_err(|e| {
         format!(
             "R7-S1: cannot bind sandbox_id for /_clock_resync: {e}. \
              Set SANDBOX_AGENT_SANDBOX_ID env or mount /run/keys/sandbox-id."
