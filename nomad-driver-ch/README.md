@@ -38,6 +38,33 @@ make vet         # static analysis
 Go ≥ 1.25 (matches the Nomad SDK pin). CGO is disabled — the plugin is
 pure-Go and produces a fully static binary out of the box.
 
+## Development
+
+Use the Nix flake to enter a reproducible dev shell with the pinned Go
+toolchain (1.25.x), `delve`, `golangci-lint`, and `gopls`:
+
+```bash
+nix develop                                # spawn a shell with the toolchain on PATH
+nix develop -c go version                  # one-shot: confirm the toolchain (currently go1.25.10)
+nix develop -c go vet ./...                # lint
+nix develop -c go build ./cmd/nomad-driver-ch
+nix develop -c go test ./...
+```
+
+Or via `make` once inside the shell: `make vet test build`.
+
+If the flake fails to evaluate (e.g. offline machine, nixpkgs attribute
+renamed), the one-shot escape hatch is:
+
+```bash
+nix shell nixpkgs#go_1_25 -- go vet ./...
+nix shell nixpkgs#go_1_25 -- go build -o /tmp/nomad-driver-ch ./cmd/nomad-driver-ch
+nix shell nixpkgs#go_1_25 -- go test ./...
+```
+
+Pinned toolchain: `pkgs.go_1_25` from nixpkgs-unstable. Bumping the pin
+means re-running `nix flake update` and committing the lock change.
+
 ## Deployment
 
 (Placeholder — finalised once the controller-side feature flag and the
