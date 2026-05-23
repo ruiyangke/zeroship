@@ -3,8 +3,21 @@
 //! The controller calls `/version` at session-create time (and may
 //! cache for the lifetime of the session) to learn which protocol
 //! features the agent supports. Adding a new endpoint or wire change
-//! means **bumping `PROTOCOL_VERSION` and adding a capability string**
-//! — old controllers gracefully feature-detect.
+//! means **bumping `PROTOCOL_VERSION` and adding a capability string**.
+//!
+//! **Per-capability semantic is NOT uniform.** Some entries in
+//! [`CAPABILITIES`] are genuinely feature-detected by the controller
+//! (see [`crate::proxy_ws`] for `proxy.ws-v1`); others are listed for
+//! diagnostic / version-pin visibility only and are treated as
+//! mandatory by the controller. The current contract is: the
+//! controller assumes a compatible agent on the other end (validated
+//! at boot via the signed-probe handshake in
+//! `crates/sandbox/src/backend/nomad_ch.rs::wait_for_agent_livez`),
+//! and individual feature paths opt-in to actual negotiation when
+//! there's a real downgrade scenario worth supporting. Treat
+//! [`CAPABILITIES`] as a versioned implementation manifest, not a
+//! universal negotiation surface — read the per-entry comment to see
+//! which side it falls on.
 
 /// Wire-protocol version. Sent on every response as
 /// `X-Sbx-Protocol: <N>`.
@@ -25,13 +38,24 @@
 /// breaking-change tripwire so we can't drift silently.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Capability strings, stable identifiers. Controllers do feature
-/// detection by membership in this list, not by version comparison.
+/// Capability strings, stable identifiers.
 ///
 /// **Add new entries here when shipping new endpoints / behaviors.
 /// Never remove or rename an existing capability** — it's a stable
 /// contract. Deprecate by adding a successor and noting the old one
 /// is unmaintained in docs.
+///
+/// **Negotiation semantic — per entry, not uniform.** Some capabilities
+/// (`proxy.ws-v1`, `auth.ed25519-v1.1`) are genuinely feature-detected
+/// by the controller. Others are listed for diagnostic visibility but
+/// are mandatory in practice — the controller does NOT branch on their
+/// presence and would fail on the call path if a non-compliant agent
+/// answered. The deployment story is "agent ≥ pinned version always
+/// has the mandatory caps; older agents would fail elsewhere in the
+/// signed handshake / envelope layer before this list mattered." Per-
+/// entry comments below say which side each entry sits on. Adding a
+/// new entry does NOT automatically make the controller feature-detect
+/// it; the controller side has to be wired through deliberately.
 pub const CAPABILITIES: &[&str] = &[
     "exec",                  // POST /exec
     "exec.timeout-output",   // /exec preserves partial output on timeout
@@ -48,9 +72,20 @@ pub const CAPABILITIES: &[&str] = &[
     "proxy.ws-v1",           // WS Upgrade on the dedicated compio listener (Phase 2)
     // Bug #22 fix (cluster smoke 2026-05-23): POST /_clock_resync —
     // signed handshake the controller issues post-CH-`--restore` to
-    // repair the guest's frozen-at-snapshot CLOCK_REALTIME. The
-    // controller feature-detects via this string so older agents
-    // (no resync endpoint) gracefully fall back to the pre-fix path.
+    // repair the guest's frozen-at-snapshot CLOCK_REALTIME.
+    //
+    // **Mandatory (not feature-detected).** The controller at
+    // `crates/sandbox/src/restore_handler.rs` calls
+    // `clock_resync_post_restore` unconditionally on every wake — there
+    // is no skip-with-fallback path. Listed here for diagnostic /
+    // version-pin visibility. Pre-clock-resync agents would also lack
+    // R8-A4 envelope handling and R8-DEPLOY1 sandbox_id binding, so
+    // they'd fail upstream of this call anyway; making this
+    // negotiable would be YAGNI plumbing for a downgrade scenario
+    // that can't happen in practice. If a future agent ever needs
+    // this resync to be skippable (e.g., a fast-path that avoids
+    // CH-`--restore`'s clock freeze), wire feature-detection into
+    // the controller at the same time.
     "clock.resync-v1",
 ];
 
@@ -134,5 +169,23 @@ mod tests {
                 "missing baseline v1 capability: {e}"
             );
         }
+    }
+
+    #[test]
+    fn mandatory_clock_resync_v1_present() {
+        // R7-API2 regression guard. `clock.resync-v1` is documented
+        // as MANDATORY (not feature-detected) — the controller at
+        // `crates/sandbox/src/restore_handler.rs` calls
+        // `clock_resync_post_restore` unconditionally on every wake.
+        // If someone removes the capability without simultaneously
+        // wiring a feature-detect skip path on the controller side,
+        // wake will start failing in the field. This test catches
+        // the silent removal.
+        assert!(
+            CAPABILITIES.contains(&"clock.resync-v1"),
+            "clock.resync-v1 is a mandatory controller-side capability; \
+             removing it requires wiring controller feature-detection first \
+             (see restore_handler.rs `clock_resync_post_restore`)",
+        );
     }
 }

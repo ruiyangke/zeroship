@@ -420,9 +420,9 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: B22's skew-bypass verifier is public on a public module. Same anti-pattern R4-S1/R5-API1/R5-API2 just closed at `93348b91`, but this regressed across the crate boundary in sandbox-agent. Docstring asserts "only /_clock_resync uses it" but type system doesn't enforce.
 - **Action**: `pub(crate)`-restrict on sandbox-agent crate. Verify zero out-of-crate callers first.
 
-### [R7-API2] `clock.resync-v1` capability advertised but controller calls unconditionally (IMPORTANT, api-surface-r7)
-- **Files**: `crates/sandbox-agent/src/version.rs:49-52` (advertises capability) + `crates/sandbox/src/restore_handler.rs:485-498` (calls `clock_resync_post_restore` unconditionally — no version check)
-- **Symptom**: capability list says "feature-detectable for graceful fallback" but the consumer wires it as mandatory. Either wire the check in OR fix the misleading comment.
+### [R7-API2] (CLOSED — comment fix; clock.resync-v1 documented as mandatory; +1 regression test) capability list reframed as per-entry-semantic
+- **Files**: `crates/sandbox-agent/src/version.rs:1-90` (module + const doc + per-entry comment) + new test `mandatory_clock_resync_v1_present`
+- **Resolution**: chose option (b) — fix the misleading "feature-detectable for graceful fallback" framing. The deployment story is "agent v17+ always has clock.resync-v1; older agents fail elsewhere (R8-A4 envelope, R8-DEPLOY1 sandbox_id binding) before this call path is reached." Wiring feature-detection (option a) would require an extra HTTP call to `/_version` + capability cache + skip-with-log branch in restore_handler.rs — YAGNI plumbing for a downgrade scenario that can't happen. Updated module + const docs to call out that per-entry semantic is NOT uniform: some caps (`proxy.ws-v1`) are genuinely feature-detected, others are diagnostic / mandatory. Per-entry comment on `clock.resync-v1` now explicitly says **Mandatory (not feature-detected)** with the rationale and a pointer to wire feature-detection if the situation ever changes. Added `mandatory_clock_resync_v1_present` regression test (240 passing, +1 from 239 baseline) that catches silent removal of the cap without simultaneous controller-side feature-detect wiring.
 
 ### [R7-C1] R6-P1 `spawn(...).detach()` is unbounded — no cancellation/completion tracking (IMPORTANT, concurrency-r7)
 - **File**: `crates/sandbox/src/admin_handlers.rs:1310-1324`
