@@ -432,8 +432,20 @@ impl AppState {
         // See [`assert_persist_required_when_snapshot_enabled`] for the
         // full rationale; the function is factored out so tests can
         // exercise the assertion without spinning up a backend probe.
-        let persist_test_override =
-            matches!(std::env::var("SANDBOX_PERSIST_NONE_OK").as_deref(), Ok("1"));
+        //
+        // R6-A1: the escape hatch env var is read here on the prod boot
+        // path, so its NAME has to scream "test-only". The original
+        // SANDBOX_PERSIST_NONE_OK was indistinguishable from real prod
+        // env vars (SANDBOX_PERSIST_AUTH, SANDBOX_PERSIST_DIR), making
+        // operator misconfiguration a silent fail-OPEN re-enable of the
+        // exact bug R5-S1 closed. Renamed with an explicit
+        // ZEROSHIP_SANDBOX_TEST_ prefix so it cannot be confused for
+        // a production setting.
+        let persist_test_override = matches!(
+            std::env::var("ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION")
+                .as_deref(),
+            Ok("1")
+        );
         assert_persist_required_when_snapshot_enabled(
             config.snapshot_enabled,
             persist.is_some(),
@@ -800,12 +812,25 @@ impl AppState {
 /// **What this checks.** When `snapshot_enabled=true`:
 ///   - `persist=true` → `Ok(())` (the production-correct shape).
 ///   - `persist=false` + `test_override=true` → `Ok(())` (the
-///     `SANDBOX_PERSIST_NONE_OK=1` escape hatch for dev fixtures that
-///     drive `StubRestoreBackend` without persistence).
+///     `ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1` escape hatch
+///     for dev fixtures that drive `StubRestoreBackend` without
+///     persistence).
 ///   - `persist=false` + `test_override=false` → `Err(...)` (fail-CLOSED).
 ///
 /// When `snapshot_enabled=false`, the persistence layer is optional;
 /// returns `Ok(())` regardless.
+///
+/// **Why the override env var has a `ZEROSHIP_SANDBOX_TEST_` prefix**
+/// (R6-A1). The env var is read on the production boot path (no
+/// `#[cfg(test)]` gate — the assertion itself runs in prod, so tests
+/// must be able to set the override at runtime without
+/// `unsafe { std::env::set_var(...) }`). The earlier name
+/// `SANDBOX_PERSIST_NONE_OK` was visually indistinguishable from
+/// real prod env vars (`SANDBOX_PERSIST_AUTH`, `SANDBOX_PERSIST_DIR`),
+/// so an operator who set it would silently re-enable the R5-S1
+/// fail-OPEN shape that was B21 in prod. The explicit
+/// `TEST_DISABLE_PERSIST_ASSERTION` suffix makes operator misuse
+/// obvious from one glance at the unit file's environment block.
 pub(crate) fn assert_persist_required_when_snapshot_enabled(
     snapshot_enabled: bool,
     persist_present: bool,
@@ -818,7 +843,9 @@ pub(crate) fn assert_persist_required_when_snapshot_enabled(
              Restored sandboxes would silently fail to register in the \
              backend state map (R5-S1 / cluster bug #21). \
              Fix: set SANDBOX_PERSIST_AUTH=1 + SANDBOX_AEAD_KEY_PATH to a \
-             32-byte mode-0o400 file. Test override: SANDBOX_PERSIST_NONE_OK=1."
+             32-byte mode-0o400 file. \
+             Test-only override (NOT for production): \
+             ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1."
                 .to_string(),
         );
     }
@@ -2003,10 +2030,15 @@ mod persist_required_assertion_tests {
     #[test]
     fn snapshot_on_persist_off_with_test_override_is_ok() {
         // Dev/test fixtures that drive `StubRestoreBackend` without a
-        // persistence layer use the explicit `SANDBOX_PERSIST_NONE_OK=1`
-        // escape hatch. The override is intentional, named, and visible
-        // in the env block of any production unit it appears in.
-        check(true, false, true)
-            .expect("SANDBOX_PERSIST_NONE_OK=1 overrides the assertion");
+        // persistence layer use the explicit
+        // `ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1` escape
+        // hatch (R6-A1 renamed from the old `SANDBOX_PERSIST_NONE_OK`
+        // so operator misuse is obvious from a glance at a unit file).
+        // The override is intentional, named, and visible in the env
+        // block of any production unit it appears in.
+        check(true, false, true).expect(
+            "ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1 \
+             overrides the assertion",
+        );
     }
 }
