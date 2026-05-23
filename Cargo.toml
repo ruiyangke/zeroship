@@ -47,6 +47,14 @@ indexmap = { version = "2", features = ["serde"] }
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
+# **P5 PR 1** — column-encryption AEAD + key derivation. Promoted to
+# the workspace from `crates/core/Cargo.toml` (where it lived as a
+# crate-local pin for `crypto.rs`) so the plugin-db encryption module
+# and the existing core wrappers share one version. HKDF-SHA256
+# expands per-platform root keys into the (k_enc, k_siv) halves the
+# plugin-db `EncryptedColumn` impls consume.
+aes-gcm = "0.10"
+hkdf = "0.12"
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "zeroize"] }
 aws-lc-rs = "1"
 # XChaCha20-Poly1305 AEAD for sealed-record persistence

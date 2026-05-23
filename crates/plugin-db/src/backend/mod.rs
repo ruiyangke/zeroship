@@ -1311,6 +1311,226 @@ pub struct GeoPoint {
     pub lng: f64,
 }
 
+// ===========================================================================
+// P5 PR 1 — EncryptedColumn + Backup capability traits
+// ===========================================================================
+//
+// Two new capability traits land here per
+// `docs/proposals/p5-encryption-backup-implementation-plan.md` §2 + §9 PR 1.
+// Neither joins the [`Backend`] super-trait composition or the
+// [`RegisterBackend`] marker — they're admin-surface accessors routed
+// via dedicated `BackendHandle::as_encrypted_column_*` /
+// `as_backup_*` accessors (mirror of the `as_change_stream_*` shape
+// the [`ChangeStream`] capability adopted in P2 PR 1).
+//
+// PR 1 ships:
+//   - the trait declarations themselves;
+//   - the supporting [`EncryptionMode`] / [`BusyPolicy`] /
+//     [`SnapshotOpts`] / [`SnapshotHandle`] / [`PitrTarget`] types;
+//   - stub impls on `PostgresBackend` + `SqliteBackend` that return
+//     a typed `Configuration { code: "p5_pr2_stub" }` error;
+//   - compile-time trait-shape pins in the `tests` module.
+//
+// PR 2 (PG) and PR 3 (SQLite) backfill the real bodies. The encryption
+// module they delegate to is at `crate::encryption` and lands in this
+// same PR.
+
+/// AEAD encrypt/decrypt at the storage boundary.
+///
+/// **Why a capability trait** (not on the [`Backend`] super-trait):
+///
+/// - PG and SQLite share the same AEAD impl (`crate::encryption::aead`),
+///   so per-backend trait impls are thin delegations.
+/// - **Key sourcing differs**: PG uses `__zeroship_admin.column_keys`
+///   via SECURITY DEFINER (gated to the `hardening` feature); SQLite
+///   uses the `ZEROSHIP_COLUMN_KEY_<KEYID>` env var. The trait's
+///   [`Self::KeyHandle`] associated type lets each backend pick its
+///   own key-material container without forcing a common type on the
+///   read/write surface.
+/// - The 13 carved capability traits in P0-P4 set the pattern: focused
+///   trait per capability, accessor-routed dispatch through
+///   [`BackendHandle`], no boxed dyn in the hot path.
+///
+/// **Per-row AAD policy** (the riskiest decision, resolved Camp A in
+/// `docs/proposals/p5-encryption-backup-implementation-plan.md` §13):
+/// callers pass the row PK in AAD for `EncryptionMode::Randomised`
+/// (typed_id PKs are minted SDK-side so the PK is always available
+/// before INSERT — no chicken-and-egg). `EncryptionMode::Deterministic`
+/// omits the row PK so the B-tree-on-ciphertext equality index works.
+///
+/// **Not `Send + Sync`** — same Open Q4 reasoning as the rest of the
+/// backend traits: the compio runtime is single-threaded per worker.
+pub trait EncryptedColumn: 'static {
+    /// Backend-specific key handle. PG (in PR 2) uses
+    /// `crate::encryption::aead::AeadKey`; SQLite (PR 3) likely the
+    /// same. The associated type leaves room for a PG variant that
+    /// wraps an opaque KMS handle in the future.
+    type KeyHandle: 'static;
+
+    /// Resolve (cache or derive) the AEAD key for `(app_id, key_id)`.
+    /// PR 2 (PG) reads through the admin-schema SECURITY DEFINER
+    /// getter; PR 3 (SQLite) reads the env var; both pass the bytes
+    /// through `crate::encryption::keys::KeyStore::resolve` which
+    /// does the HKDF expansion. PR 1 stub returns `p5_pr2_stub`.
+    #[allow(async_fn_in_trait)]
+    async fn resolve_key(
+        &self,
+        app_id: &str,
+        key_id: &str,
+    ) -> Result<Self::KeyHandle, DbError>;
+
+    /// Encrypt `plaintext` under `key` and `aad`, returning the
+    /// packed wire blob produced by `crate::encryption::wire::pack`.
+    /// Mode chooses random vs synthetic nonce; the wire format is the
+    /// same.
+    fn encrypt(
+        &self,
+        key: &Self::KeyHandle,
+        mode: EncryptionMode,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, DbError>;
+
+    /// Decrypt a packed wire blob. Mode-agnostic on the read side —
+    /// the nonce is carried in the wire, AAD reconstruction by the
+    /// caller picks the mode-appropriate shape. Returns
+    /// `ValidationFailed { code: "encryption_aead_failed" }` on tag
+    /// mismatch.
+    fn decrypt(
+        &self,
+        key: &Self::KeyHandle,
+        mode: EncryptionMode,
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, DbError>;
+}
+
+/// Encryption mode — chooses nonce derivation + AAD shape.
+///
+/// Two-mode design from `docs/proposals/db-system-design.md` §7.2.
+/// The on-wire blob layout is identical between modes (the synthetic
+/// vs random distinction is fully internal to the encrypt side); the
+/// caller has to track the mode to reconstruct the right AAD on
+/// decrypt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionMode {
+    /// Per-row random nonce. AAD =
+    /// `(collection, column, row_pk_bytes)` — binds ciphertext to its
+    /// row position. Per the Camp A architecture
+    /// (`docs/proposals/p5-encryption-backup-implementation-plan.md`
+    /// §13): plugin-db mints typed_id PKs **SDK-side** before INSERT,
+    /// so `row_pk` is always available when `encrypt()` is called.
+    /// Single-phase INSERT — no chicken-and-egg vs Microsoft Always
+    /// Encrypted / MongoDB CSFLE. Defeats the ciphertext-oracle
+    /// attack on randomised columns. Default (fail-safe).
+    Randomised,
+
+    /// Synthetic nonce = HMAC-SHA256(k_siv, plaintext)[..12]. AAD =
+    /// `(collection, column)` only — `row_pk_bytes` intentionally
+    /// omitted because deterministic mode's defining property is
+    /// "same plaintext → same ciphertext under (collection, column)",
+    /// which the B-tree-on-ciphertext equality index depends on.
+    /// Inherits the standard deterministic-mode leak (equality
+    /// across rows is observable to anyone with column read access).
+    /// The SDK filter pre-flight refuses range / regex / `LIKE`
+    /// queries on deterministic columns regardless.
+    Deterministic,
+}
+
+/// Snapshot + restore + PITR for the per-app data store.
+///
+/// **Admin surface** — like [`ChangeStream`] / [`VectorIndex`], this
+/// trait is routed through the `BackendHandle::as_backup_*`
+/// accessors rather than joining the [`Backend`] super-trait. App
+/// code never reaches this; only the platform's backup orchestrator
+/// does. PR 4 (PG) and PR 5 (SQLite) backfill the real bodies; PR 1
+/// stubs return `p5_pr2_stub`.
+pub trait Backup: 'static {
+    /// Take a snapshot of the per-app data store and stream it to
+    /// `dest_uri`. Returns a handle with the content hash for
+    /// integrity verification on restore.
+    #[allow(async_fn_in_trait)]
+    async fn snapshot(
+        &self,
+        app_id: &str,
+        dest_uri: &str,
+        opts: SnapshotOpts,
+    ) -> Result<SnapshotHandle, DbError>;
+
+    /// Restore a snapshot taken by [`Self::snapshot`]. PR 4 (PG):
+    /// downloads + `pg_restore` + atomic schema swap. PR 5 (SQLite):
+    /// downloads + atomic rename + isolate evict.
+    #[allow(async_fn_in_trait)]
+    async fn restore(
+        &self,
+        app_id: &str,
+        snapshot: &SnapshotHandle,
+    ) -> Result<(), DbError>;
+
+    /// Replay WAL up to `target`. PR 4 (PG): records the target in
+    /// `__zeroship_admin.pitr_targets`; operator runs `recovery.conf`.
+    /// PR 5 (SQLite): returns `Configuration { code: "pitr_pg_only" }`
+    /// — SQLite has no WAL-archive PITR story.
+    #[allow(async_fn_in_trait)]
+    async fn pitr_replay(
+        &self,
+        app_id: &str,
+        target: PitrTarget,
+    ) -> Result<(), DbError>;
+}
+
+/// Options for [`Backup::snapshot`].
+///
+/// Today carries only [`Self::if_busy`]; reserved so future PRs can
+/// add compression / encryption-at-rest knobs without changing the
+/// trait method signature.
+#[derive(Debug, Clone)]
+pub struct SnapshotOpts {
+    pub if_busy: BusyPolicy,
+}
+
+/// Policy when a snapshot can't be taken immediately (e.g. SQLite
+/// `VACUUM INTO` hitting `SQLITE_BUSY` on a schema-change race).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyPolicy {
+    /// Surface a typed `Configuration { code: "backup_busy" }` error
+    /// to the caller immediately. The caller decides whether to retry.
+    Abort,
+    /// In-trait retry with a small backoff (PR 5: 3 × 1s).
+    Retry,
+}
+
+/// Handle returned by [`Backup::snapshot`] — the address + integrity
+/// metadata needed to restore.
+#[derive(Debug, Clone)]
+pub struct SnapshotHandle {
+    /// Where the snapshot lives. PR 4/5 conventions:
+    /// `s3://<bucket>/snapshots/<app>/<ts>-<hash>.<ext>` or
+    /// `file:///<path>`.
+    pub uri: String,
+    /// SHA-256 over the snapshot bytes, computed streamingly on the
+    /// way out. The restore path re-hashes the download and refuses
+    /// on mismatch.
+    pub content_hash: [u8; 32],
+    /// Wall-clock time of snapshot start, milliseconds since UNIX
+    /// epoch.
+    pub created_at_ms: u64,
+}
+
+/// Target for [`Backup::pitr_replay`].
+///
+/// PG accepts both forms; SQLite refuses both with `pitr_pg_only`
+/// (the SQLite arm has no WAL-archive PITR story — the placeholder
+/// exists so the trait surface is uniform).
+#[derive(Debug, Clone)]
+pub enum PitrTarget {
+    /// PG log-sequence-number, e.g. `"0/16B6300"`.
+    Lsn(String),
+    /// Wall-clock time, milliseconds since UNIX epoch. PG translates
+    /// to `recovery_target_time`.
+    TimeMillis(u64),
+}
+
 /// RAII guard returned by [`ChangeStream::engage_schema_pending`].
 /// Disengaging the schema-pending decoder (and emitting one `Resync`
 /// per active subscription) happens on `Drop`.
@@ -1670,6 +1890,85 @@ impl BackendHandle {
             Self::Sqlite(b) => Some(crate::backend::sqlite::cdc::SqliteChangeStream::new(b.clone())),
         }
     }
+
+    // -----------------------------------------------------------------
+    // P5 PR 1 — EncryptedColumn + Backup accessors
+    // -----------------------------------------------------------------
+    //
+    // Same shape as the `as_change_stream_*` accessors above: one
+    // accessor per (capability, backend arm) pair. PR 1 returns
+    // `Some(&PostgresBackend)` / `Some(&SqliteBackend)` (the PR-1
+    // stub impls return `Configuration { code: "p5_pr2_stub" }` for
+    // every method); PR 2-5 backfill the real bodies, and the
+    // accessor shapes never change so the orchestrator-side consumer
+    // sites stay stable across the PR sequence.
+
+    /// Borrow an [`EncryptedColumn`] capability over the PG arm.
+    ///
+    /// **P5 PR 1**: returns `Some(&PostgresBackend)` on the PG arm.
+    /// The `EncryptedColumn` impl is gated on `feature = "hardening"`
+    /// per the plan §5 — only buildable when the admin-schema
+    /// SECURITY DEFINER getter for `column_keys` is in play. PR 2
+    /// backfills the real body.
+    ///
+    /// Returns `Some` on the PG arm; `None` on the SQLite arm.
+    #[cfg(all(feature = "pg", feature = "hardening"))]
+    pub fn as_encrypted_column_pg(&self) -> Option<&PostgresBackend> {
+        match self {
+            Self::Postgres(b) => Some(b),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(_) => None,
+        }
+    }
+
+    /// Borrow an [`EncryptedColumn`] capability over the SQLite arm.
+    ///
+    /// **P5 PR 1**: returns `Some(&SqliteBackend)` on the SQLite
+    /// arm. The SQLite impl is gated only by `feature = "sqlite"`
+    /// (env-var key sourcing, no admin schema). PR 3 backfills the
+    /// real body.
+    ///
+    /// Returns `Some` on the SQLite arm; `None` on the PG arm.
+    #[cfg(feature = "sqlite")]
+    pub fn as_encrypted_column_sqlite(&self) -> Option<&SqliteBackend> {
+        match self {
+            #[cfg(feature = "pg")]
+            Self::Postgres(_) => None,
+            Self::Sqlite(b) => Some(b),
+        }
+    }
+
+    /// Borrow a [`Backup`] capability over the PG arm.
+    ///
+    /// **P5 PR 1**: returns `Some(&PostgresBackend)` on the PG arm.
+    /// PR 4 backfills the `pg_dump` / `pg_restore` shell-out + PITR
+    /// placeholder.
+    ///
+    /// Returns `Some` on the PG arm; `None` on the SQLite arm.
+    #[cfg(feature = "pg")]
+    pub fn as_backup_pg(&self) -> Option<&PostgresBackend> {
+        match self {
+            Self::Postgres(b) => Some(b),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(_) => None,
+        }
+    }
+
+    /// Borrow a [`Backup`] capability over the SQLite arm.
+    ///
+    /// **P5 PR 1**: returns `Some(&SqliteBackend)` on the SQLite
+    /// arm. PR 5 backfills `VACUUM INTO` snapshot + atomic-rename
+    /// restore + `pitr_pg_only` refusal.
+    ///
+    /// Returns `Some` on the SQLite arm; `None` on the PG arm.
+    #[cfg(feature = "sqlite")]
+    pub fn as_backup_sqlite(&self) -> Option<&SqliteBackend> {
+        match self {
+            #[cfg(feature = "pg")]
+            Self::Postgres(_) => None,
+            Self::Sqlite(b) => Some(b),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1826,6 +2125,63 @@ mod tests {
     /// backends.
     #[allow(dead_code)]
     fn _assert_spatial_index<T: SpatialIndex>() {}
+
+    /// Compile-time (P5 PR 1): the [`EncryptedColumn`] trait's shape
+    /// is pinned. PR 1 ships stub impls on both `PostgresBackend`
+    /// (under `hardening`) and `SqliteBackend` (under `sqlite`) — see
+    /// `_assert_encrypted_column_pg` / `_assert_encrypted_column_sqlite`
+    /// below for the per-backend instantiations. This unparameterised
+    /// pin checks that the trait itself compiles (associated type +
+    /// `async fn` placement + signature shape).
+    #[allow(dead_code)]
+    fn _assert_encrypted_column<T: EncryptedColumn>() {}
+
+    /// Compile-time (P5 PR 1): the [`Backup`] trait's shape is
+    /// pinned. PR 1 ships stub impls on both backends; the
+    /// per-backend instantiations are below.
+    #[allow(dead_code)]
+    fn _assert_backup<T: Backup>() {}
+
+    /// Compile-time (P5 PR 1): `PostgresBackend` satisfies
+    /// [`EncryptedColumn`] when the `hardening` feature is active
+    /// (PR 1 stub impl returns `p5_pr2_stub`; PR 2 backfills the
+    /// SECURITY DEFINER body). Gated on `hardening` to mirror the
+    /// auth/session subtree the PG impl reads from.
+    #[allow(dead_code)]
+    #[cfg(all(feature = "pg", feature = "hardening"))]
+    fn _assert_postgres_backend_impls_encrypted_column() {
+        fn assert_impl<T: EncryptedColumn>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time (P5 PR 1): `SqliteBackend` satisfies
+    /// [`EncryptedColumn`] under the `sqlite` feature. PR 1 stub
+    /// impl returns `p5_pr2_stub`; PR 3 backfills the real body
+    /// against env-var key sourcing.
+    #[allow(dead_code)]
+    #[cfg(feature = "sqlite")]
+    fn _assert_sqlite_backend_impls_encrypted_column() {
+        fn assert_impl<T: EncryptedColumn>() {}
+        assert_impl::<SqliteBackend>();
+    }
+
+    /// Compile-time (P5 PR 1): `PostgresBackend` satisfies [`Backup`].
+    /// PR 4 backfills the `pg_dump`/`pg_restore` shell-out body.
+    #[allow(dead_code)]
+    #[cfg(feature = "pg")]
+    fn _assert_postgres_backend_impls_backup() {
+        fn assert_impl<T: Backup>() {}
+        assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time (P5 PR 1): `SqliteBackend` satisfies [`Backup`].
+    /// PR 5 backfills the `VACUUM INTO` body.
+    #[allow(dead_code)]
+    #[cfg(feature = "sqlite")]
+    fn _assert_sqlite_backend_impls_backup() {
+        fn assert_impl<T: Backup>() {}
+        assert_impl::<SqliteBackend>();
+    }
 
     /// Compile-time: the associated types stay anchored to the concrete
     /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A

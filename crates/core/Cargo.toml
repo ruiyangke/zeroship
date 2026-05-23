@@ -13,7 +13,7 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
-aes-gcm = "0.10"
+aes-gcm = { workspace = true }
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }
 # Observability — tracing subscriber init shared across all binaries.

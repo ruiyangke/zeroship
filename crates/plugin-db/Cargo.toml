@@ -18,6 +18,16 @@ v8 = { workspace = true }
 # (Postgres NAMEDATALEN=64 minus headroom).
 tracing = { workspace = true }
 sha2 = { workspace = true }
+# **P5 PR 1** — column-encryption AEAD + key derivation. Both the PG
+# arm and the SQLite arm consume `crate::encryption`, so these deps are
+# unconditional (the encryption module compiles in every plugin-db
+# build). `hmac` is promoted from optional/sqlite-only to unconditional
+# below — deterministic mode HMAC-derives the synthetic nonce on both
+# backends, and the env-var key sourcing in `encryption::keys` is
+# pure-Rust.
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
 # SQLite backend dependencies — gated behind the `sqlite` Cargo feature
 # below. P1 PR 1 reintroduces these alongside the
 # `crate::backend::sqlite` module skeleton (the previous declarations
@@ -42,10 +52,13 @@ flume = { workspace = true, optional = true }
 sqlite-vec = { workspace = true, optional = true }
 # **P3 PR 3** — SQLite SessionMinter uses HMAC-SHA256. `sha2` is
 # already an unconditional dep (used for the auto-generated index
-# name suffix). `hmac` is sqlite-only — the PG arm signs via
-# `pgcrypto.hmac(...)` inside SECURITY DEFINER and never reaches
-# Rust HMAC at all.
-hmac = { workspace = true, optional = true }
+# name suffix). The previous `hmac = { ... optional = true }` line
+# was widened to unconditional in **P5 PR 1** (line ~27 above) —
+# deterministic-mode column encryption HMAC-derives the synthetic
+# nonce on both backends, so the dep is no longer sqlite-only. The
+# PG arm still signs sessions via `pgcrypto.hmac(...)` inside
+# SECURITY DEFINER (no Rust HMAC there); only `encryption::aead`
+# uses the Rust impl on the PG side.
 
 [dev-dependencies]
 compio = { workspace = true }
@@ -132,7 +145,7 @@ pg = []
 # `DbError::Internal { message: "P1 PR2+ stub" }` or `unimplemented!`);
 # real behaviour lands across PR 2-5 per
 # `docs/proposals/p1-sqlite-implementation-plan.md` §9.
-sqlite = ["dep:rusqlite", "dep:flume", "dep:hmac", "dep:sqlite-vec"]
+sqlite = ["dep:rusqlite", "dep:flume", "dep:sqlite-vec"]
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via

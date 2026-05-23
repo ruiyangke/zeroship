@@ -1165,6 +1165,98 @@ async fn create_index_with_recovery_audited(
     })
 }
 
+// ===========================================================================
+// P5 PR 1 — EncryptedColumn + Backup stub impls on PostgresBackend
+// ===========================================================================
+//
+// Stub bodies that return `DbError::Configuration { code: "p5_pr2_stub" }`.
+// The trait shapes + accessor wiring land in PR 1 so the orchestrator's
+// PR-2 consumer sites can write `backend.as_encrypted_column_pg()?` /
+// `.as_backup_pg()?` against a stable surface; PR 2 (EncryptedColumn) and
+// PR 4 (Backup) backfill the real bodies.
+//
+// The `EncryptedColumn` impl is gated on `hardening` per the plan §5 —
+// PG-prod key sourcing reads from `__zeroship_admin.column_keys` via a
+// SECURITY DEFINER getter, which only exists under that feature. PR 2
+// also wires an env-var fallback for `--features pg` dev parity; the
+// fallback lives behind the same `hardening` gate so the trait surface
+// itself is gated uniformly.
+
+#[cfg(feature = "hardening")]
+impl crate::backend::EncryptedColumn for PostgresBackend {
+    type KeyHandle = crate::encryption::aead::AeadKey;
+
+    async fn resolve_key(
+        &self,
+        _app_id: &str,
+        _key_id: &str,
+    ) -> Result<Self::KeyHandle, DbError> {
+        Err(p5_pr2_stub("EncryptedColumn::resolve_key (PG)"))
+    }
+
+    fn encrypt(
+        &self,
+        _key: &Self::KeyHandle,
+        _mode: crate::backend::EncryptionMode,
+        _plaintext: &[u8],
+        _aad: &[u8],
+    ) -> Result<Vec<u8>, DbError> {
+        Err(p5_pr2_stub("EncryptedColumn::encrypt (PG)"))
+    }
+
+    fn decrypt(
+        &self,
+        _key: &Self::KeyHandle,
+        _mode: crate::backend::EncryptionMode,
+        _ciphertext: &[u8],
+        _aad: &[u8],
+    ) -> Result<Vec<u8>, DbError> {
+        Err(p5_pr2_stub("EncryptedColumn::decrypt (PG)"))
+    }
+}
+
+impl crate::backend::Backup for PostgresBackend {
+    async fn snapshot(
+        &self,
+        _app_id: &str,
+        _dest_uri: &str,
+        _opts: crate::backend::SnapshotOpts,
+    ) -> Result<crate::backend::SnapshotHandle, DbError> {
+        Err(p5_pr2_stub("Backup::snapshot (PG)"))
+    }
+
+    async fn restore(
+        &self,
+        _app_id: &str,
+        _snapshot: &crate::backend::SnapshotHandle,
+    ) -> Result<(), DbError> {
+        Err(p5_pr2_stub("Backup::restore (PG)"))
+    }
+
+    async fn pitr_replay(
+        &self,
+        _app_id: &str,
+        _target: crate::backend::PitrTarget,
+    ) -> Result<(), DbError> {
+        Err(p5_pr2_stub("Backup::pitr_replay (PG)"))
+    }
+}
+
+/// Centralised PR-1 stub error so the `p5_pr2_stub` code + hint stay
+/// identical across the six stub impl methods on this file (and
+/// match the SQLite-side stubs in `backend/sqlite/mod.rs`).
+fn p5_pr2_stub(op: &str) -> DbError {
+    DbError::Configuration {
+        code: "p5_pr2_stub",
+        message: format!(
+            "{op}: P5 PR 1 ships only the trait surface; real body lands in PR 2-5"
+        ),
+        hint: Some(
+            "See docs/proposals/p5-encryption-backup-implementation-plan.md §9".to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit tests for [`PostgresBackend`].

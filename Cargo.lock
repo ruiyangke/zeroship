@@ -6000,10 +6000,12 @@ dependencies = [
 name = "zeroship-plugin-db"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "compio",
  "compio-postgres",
  "criterion",
  "flume 0.11.1",
+ "hkdf",
  "hmac 0.12.1",
  "rusqlite",
  "serde_json",

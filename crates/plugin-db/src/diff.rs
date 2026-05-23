@@ -174,6 +174,14 @@ pub struct ColumnInfo {
     /// CHECK constraint (SQLite). `false` for every existing column
     /// at HEAD; PR 4/5 populate this from live-schema introspection.
     pub is_geopoint: bool,
+    /// **P5 PR 1** — column-encryption metadata when the SDK
+    /// declared the column with `t.encrypted(...)`. `None` for every
+    /// existing column (the default at HEAD); PR 2 populates the PG
+    /// side from `__zeroship_meta.encrypted_columns`; PR 3 populates
+    /// the SQLite side via regex on `sqlite_master.sql` for the
+    /// sentinel CHECK comment. Stays `None` in the default-feature
+    /// build because no consumer wires the field yet.
+    pub encryption: Option<EncryptionMeta>,
 }
 
 impl Default for ColumnInfo {
@@ -182,8 +190,9 @@ impl Default for ColumnInfo {
     /// without restating the pre-P4 field defaults. The B-tree column
     /// shape is: empty type string, nullable, no default, no
     /// volatility, no vector dimension, not an FTS source, not a
-    /// geopoint. Every existing introspection / test site overrides
-    /// `pg_type` + `not_null` explicitly.
+    /// geopoint, **no encryption** (P5 PR 1 addition). Every existing
+    /// introspection / test site overrides `pg_type` + `not_null`
+    /// explicitly.
     fn default() -> Self {
         Self {
             pg_type: String::new(),
@@ -193,8 +202,48 @@ impl Default for ColumnInfo {
             vector_dims: None,
             is_fts_source: false,
             is_geopoint: false,
+            encryption: None,
         }
     }
+}
+
+/// **P5 PR 1** — encryption metadata attached to a [`ColumnInfo`] when
+/// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
+///
+/// Populated by schema introspection:
+/// - **PG** (PR 2): from `__zeroship_meta.encrypted_columns` rows the
+///   `register_model` DDL emitter writes alongside the table create.
+/// - **SQLite** (PR 3): from a sentinel CHECK comment
+///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
+///   `sqlite_master.sql` (same regex-on-DDL pattern P4 uses for
+///   vector dims; sidecar `__zs_schema_meta` is the upgrade path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionMeta {
+    /// Encryption mode declared by the SDK.
+    /// `Randomised` (default, fail-safe) or `Deterministic` (enables
+    /// B-tree equality lookups; carries the standard deterministic
+    /// leak). See `crate::backend::EncryptionMode`.
+    pub mode: crate::backend::EncryptionMode,
+    /// Key id selecting the per-platform root from
+    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` / `__zeroship_admin.column_keys`.
+    /// Defaults to `"default"` when the SDK caller omits the field.
+    pub key_id: String,
+    /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
+    /// regardless; `wraps` survives so validation walks the right
+    /// type-checker before the encrypt pass swaps bytes in.
+    pub wraps: WrappedType,
+}
+
+/// **P5 PR 1** — the inner type wrapped by a `t.encrypted(...)` builder.
+///
+/// Per Q-P5-B: P5 ships only string / number / bytes. Arbitrary JSON
+/// (object / array) wraps deferred — adds a serialisation round-trip
+/// on every read/write that isn't needed for the v1 surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrappedType {
+    String,
+    Number,
+    Bytes,
 }
 
 #[derive(Debug, Clone)]

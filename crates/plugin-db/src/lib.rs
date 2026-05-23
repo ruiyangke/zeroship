@@ -88,6 +88,14 @@ pub(crate) mod diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 
+// **P5 PR 1** — cross-backend column-encryption surface. Always
+// compiled (not gated to `pg` / `sqlite`) because both backends
+// consume it. PR 1 ships only the pure-Rust crypto module + trait
+// surface; the backend impls return `Configuration { code: "p5_pr2_stub" }`
+// and the CRUD call sites land in PR 2 (PG) and PR 3 (SQLite). See
+// `docs/proposals/p5-encryption-backup-implementation-plan.md` §9.
+pub(crate) mod encryption;
+
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
 // capability declared in `crate::backend::mod`. Crate-private — the
 // stable consumer surface is the `BackendHandle::as_change_stream_pg`
