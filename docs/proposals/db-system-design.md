@@ -5,7 +5,24 @@
 **Closes** (from `docs/reviews/plugin-db-deferred.md`): [C1] (Backend trait
 half-applied, §7); [I20] (WAL replication cross-tenant isolation, §17 +
 §19 P6); [I31]/F1 (§10 + §18); [I32]/F2 (§10 + §18).
-**Last updated**: 2026-05-24 (SQLite vector backend swapped to sqlite-vec).
+**Last updated**: 2026-05-24 (system fields + SQLite vector backend swapped to sqlite-vec).
+
+<!-- 2026-05-24 amendment: platform system fields -->
+**Changelog — 2026-05-24 amendment (platform system fields).** Every
+collection now auto-receives a fixed set of platform-managed fields:
+`id`, `created_at`, `updated_at`, `created_by`, `updated_by`,
+`version`, `deleted_at`. Creators don't declare them; reserved names
+enforced by `validate_field_name`. Naming convention is Salesforce-
+style naked (no `__zs_*` prefix) — matches the existing `id` field
+and the way LLM-generated app code reaches for these names. Drives:
+audit trail, optimistic concurrency, soft-delete (the new `delete()`
+default; `purge()` is hard-delete), CDC subscriber idempotency, and
+P5+ AEAD AAD binding (`version` folds into the AAD; defends against
+ciphertext rollback within the same row). The retired
+`.softDelete()` / `.withVersioning()` schema modifiers are
+**superseded** — these behaviours are now universal platform features.
+§6.1 and §15 carry the cross-references to the full proposal:
+`docs/proposals/platform-system-fields.md`.
 
 <!-- 2026-05-24 amendment: SQLite vector backend swapped to sqlite-vec -->
 **Changelog — 2026-05-24 amendment (P4 PR 7).** SQLite vector storage
@@ -258,6 +275,16 @@ SQLite: per-app file `${db_dir}/zs-${app_id}.sqlite` mounted via
 `ATTACH DATABASE 'file:…' AS "<app_id>"`. URI carries NO
 `cache=shared` (not compiled in); cross-process visibility uses
 SQLite's WAL journal and POSIX file locks.
+
+**System fields are auto-appended to every collection** — `id`,
+`created_at`, `updated_at`, `created_by`, `updated_by`, `version`,
+`deleted_at`. Creators don't declare them; they cannot redefine them
+(reserved names enforced by `validate_field_name`). The set provides
+audit trail, optimistic concurrency, soft-delete, and AEAD AAD
+binding. Full design: `docs/proposals/platform-system-fields.md`.
+Salesforce-style naked naming (no `__zs_*` prefix); matches the
+existing `id` convention and the way LLM-generated app code reaches
+for these fields naturally.
 
 ### 6.2 Columns / types
 
@@ -1010,9 +1037,25 @@ only.
 Authors declare collections under `default.schema` as `name →
 schema(...)` chains of column declarations (`t.string()`, `t.ref()`,
 `t.vector(n)`, `t.geoPoint()`, `t.json()`, `t.scope("...")`) and
-modifiers (`.softDelete()`, `.withVersioning()`, `.index/uniqueIndex`).
-Canonical example: `docs/reference/db.md`. plugin-db consumes via the
-`installSchema` orchestrator (`sdks/bootstrap/README.md`).
+modifiers (`.index/uniqueIndex`). Canonical example:
+`docs/reference/db.md`. plugin-db consumes via the `installSchema`
+orchestrator (`sdks/bootstrap/README.md`).
+
+**System fields are auto-injected by the platform** (§6.1; full design
+at `docs/proposals/platform-system-fields.md`). Creators don't declare
+them; they appear automatically in `Row<S>`:
+
+```typescript
+const post = await db.posts.findOne({ id: "post_..." });
+// post.created_at, post.updated_at, post.created_by,
+// post.updated_by, post.version, post.deleted_at — all auto-populated
+```
+
+The earlier `.softDelete()` / `.withVersioning()` modifiers are
+**retired** — these behaviours are now universal platform features,
+not opt-in per-collection. `delete()` performs soft-delete by default;
+`purge()` is the new hard-delete; optimistic concurrency via
+`version` field works on every table without declaration.
 
 **Type generation.** Vite-plugin build-time analysis emits ambient
 `Row<S>`/`RowInput<S>`/`Id<"posts">` via the `zeroship-schema` alias.

@@ -162,6 +162,8 @@ pub fn canonical_aad(collection: &str, column: &str, row_pk_bytes: Option<&[u8]>
 }
 ```
 
+**Future extension** (post-system-fields, see `docs/proposals/platform-system-fields.md` §8): the signature gains a fourth `version_bytes: Option<&[u8]>` block. Ciphertext format adds a 1-byte version flag in the wire header to allow rolling re-encryption from the P5-baseline AAD shape to the version-bound AAD shape. Decryption inspects the flag and reconstructs AAD accordingly. **P5 ships without this extension** — the system-fields proposal lands as its own phase (call it P7) and includes the rolling re-encryption pass. The version flag is reserved in the wire format from P5 day one so the upgrade requires no data migration of P5-era ciphertext other than re-encrypt-on-write.
+
 ### `wire.rs`
 
 Layout: `[12 nonce | n ciphertext | 16 GCM tag]`. No sentinel prefix per design §7.2.
