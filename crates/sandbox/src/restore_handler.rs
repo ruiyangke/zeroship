@@ -707,9 +707,20 @@ pub struct RealRestoreBackend {
     /// requires plumbing the per-sandbox signing key out of the
     /// sealed record, which is a follow-up PR.
     agent_livez_timeout: Duration,
-    /// Process-local reservation map for the source vm_index. The v1
-    /// reserve path is "this worker, this slot, right now"; v2's
-    /// cross-cluster fallback would consult pg.
+    /// **B18 fix (cluster smoke 2026-05-24 r4)**: shared
+    /// `vm_index` allocator with `NomadCHBackend`. When present,
+    /// `reserve_vm_index` and `release_vm_index` go through this
+    /// allocator instead of the local `VmIndexReservations` below —
+    /// so create-side `alloc()` cannot hand the same slot to a fresh
+    /// sandbox while the restored VM is still alive on that
+    /// tap/IP. Wired by `crate::AppState::from_config` from
+    /// `Backend::vm_index_allocator()`. `None` only for unit tests
+    /// that don't construct a `NomadCHBackend`.
+    shared_allocator: Option<Arc<Mutex<crate::backend::nomad_ch::VmIndexAllocator>>>,
+    /// Process-local reservation map for the source vm_index. Used
+    /// only when `shared_allocator` is `None` (unit tests). In
+    /// production this is bypassed entirely — `RealRestoreBackend::
+    /// with_shared_allocator` wires through to the create-side pool.
     reservations: Arc<Mutex<VmIndexReservations>>,
 }
 
@@ -736,13 +747,47 @@ impl RealRestoreBackend {
             cpus,
             alloc_running_timeout,
             agent_livez_timeout,
+            shared_allocator: None,
             reservations: Arc::new(Mutex::new(VmIndexReservations::new())),
         }
+    }
+
+    /// **B18 fix**: install a shared `vm_index` allocator. The
+    /// production wiring (`AppState::from_config`) extracts the
+    /// allocator from `Backend::vm_index_allocator()` and passes it
+    /// here so the restore path's `reserve(source_slot)` and the
+    /// create path's `alloc()` share state. Without this share, a
+    /// CREATE after WAKE can hand the same tap/IP to a fresh sandbox,
+    /// surfacing as a stale-pubkey 401 on /version (cluster smoke
+    /// 2026-05-24 r4; 11/16 c=4 cycles failed once slots 1-6 had
+    /// been used once).
+    pub fn with_shared_allocator(
+        mut self,
+        allocator: Arc<Mutex<crate::backend::nomad_ch::VmIndexAllocator>>,
+    ) -> Self {
+        self.shared_allocator = Some(allocator);
+        self
     }
 }
 
 impl RestoreBackend for RealRestoreBackend {
     fn reserve_vm_index(&self, vm_index: i16) -> Result<(), String> {
+        if let Some(shared) = self.shared_allocator.as_ref() {
+            // B18 fix: route through the create-side allocator so a
+            // concurrent CREATE on the same worker cannot hand the
+            // same tap/IP to a fresh sandbox while a restored VM is
+            // still alive on this slot. i16 → u16 cast: vm_index is
+            // validated [1..=255] on the producer side (proposal §
+            // 5.0; allocator's reserve() rejects out-of-range with
+            // a clear error).
+            let i = u16::try_from(vm_index).map_err(|_| {
+                format!("reserve_vm_index: vm_index {vm_index} out of u16 range")
+            })?;
+            return shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .reserve(i);
+        }
         self.reservations
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -750,6 +795,19 @@ impl RestoreBackend for RealRestoreBackend {
     }
 
     fn release_vm_index(&self, vm_index: i16) {
+        if let Some(shared) = self.shared_allocator.as_ref() {
+            // B18 fix: release back into the shared pool so the
+            // create-side `alloc()` can immediately reuse the slot
+            // once a restored VM has been torn down (or the wake
+            // path rolled back via `teardown_restore`).
+            if let Ok(i) = u16::try_from(vm_index) {
+                shared
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .release(i);
+            }
+            return;
+        }
         self.reservations
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1259,6 +1317,80 @@ mod real_backend_tests {
         assert!(err.contains("already reserved"), "{err}");
         backend.release_vm_index(42);
         backend.reserve_vm_index(42).expect("post-release must succeed");
+    }
+
+    /// **B18 regression** (cluster smoke 2026-05-24 r4): the wake
+    /// path's `reserve_vm_index` must block a concurrent create-side
+    /// `alloc()` from handing out the same slot. Pre-fix, two
+    /// separate allocators (NomadCHBackend's `vm_index_allocator` and
+    /// RealRestoreBackend's private `VmIndexReservations`) let a
+    /// CREATE-after-WAKE silently reuse a slot held by a live
+    /// restored VM, surfacing as a stale-pubkey 401 on /version.
+    /// Post-fix, `with_shared_allocator` routes reserve/release
+    /// through the create-side pool so this is impossible.
+    #[test]
+    fn b18_shared_allocator_blocks_create_side_reuse() {
+        use crate::backend::nomad_ch::VmIndexAllocator;
+        let cfg = base_cfg("http://127.0.0.1:1".into(), fresh_dir());
+        // Create-side allocator. Models `NomadCHBackend::vm_index_allocator`.
+        let shared = Arc::new(Mutex::new(VmIndexAllocator::new(1, 5)));
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0)
+            .with_shared_allocator(shared.clone());
+        // Simulate the prior cycle: create-side allocs slot 1, then
+        // releases it as part of `stop_preserving_state` (snapshot
+        // teardown). Slot 1 is now in `freed`.
+        let slot = shared.lock().unwrap().alloc().unwrap();
+        assert_eq!(slot, 1);
+        shared.lock().unwrap().release(slot);
+        // Wake reserves the slot via RealRestoreBackend.
+        backend.reserve_vm_index(slot as i16).expect("wake reserve");
+        // Now a concurrent create-side `alloc()` MUST NOT hand back
+        // slot 1 (the restored VM is still alive on that tap/IP).
+        // Pre-B18-fix it did — the freed set still contained slot 1
+        // because reserve() ran against a separate allocator.
+        let next = shared.lock().unwrap().alloc().unwrap();
+        assert_ne!(
+            next, slot,
+            "B18 regression: create-side allocator handed out slot {slot} \
+             while restored VM still owned it via wake reserve()"
+        );
+        // Release on wake teardown frees the slot for the next create.
+        backend.release_vm_index(slot as i16);
+        let reclaimed = shared.lock().unwrap().alloc().unwrap();
+        assert_eq!(
+            reclaimed, slot,
+            "post-release, the slot must be reusable by create-side alloc"
+        );
+    }
+
+    /// **B18 regression**: with shared allocator, calling
+    /// `reserve_vm_index` twice for the same slot must fail (the
+    /// allocator's new in-flight collision detection refuses
+    /// double-reserve of a live slot, even when the prior reserver is
+    /// the create-side `alloc()` rather than another wake).
+    #[test]
+    fn b18_shared_allocator_rejects_double_reserve_of_live_slot() {
+        use crate::backend::nomad_ch::VmIndexAllocator;
+        let cfg = base_cfg("http://127.0.0.1:1".into(), fresh_dir());
+        let shared = Arc::new(Mutex::new(VmIndexAllocator::new(1, 5)));
+        let backend = RealRestoreBackend::new(cfg, 1024, 2.0)
+            .with_shared_allocator(shared.clone());
+        // Create-side hands out slot 1; the slot is now live in the
+        // shared pool (next=2, freed={}).
+        let live = shared.lock().unwrap().alloc().unwrap();
+        assert_eq!(live, 1);
+        // Wake tries to reserve the same live slot — must error.
+        // Pre-B18-fix the allocator's `reserve()` would silently
+        // succeed (no in-flight detection), and the wake handler
+        // would proceed to submit a restore alloc that collides with
+        // the live create-side sandbox.
+        let err = backend
+            .reserve_vm_index(live as i16)
+            .expect_err("must reject reserve of in-flight slot");
+        assert!(
+            err.contains("already reserved"),
+            "expected 'already reserved' error, got: {err}"
+        );
     }
 
     /// Alloc-never-running times out and the error mentions the job

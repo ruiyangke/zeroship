@@ -3,7 +3,7 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-24 (cycle r4: B17 CLOSED via `ch-remote resume`, B15 verified PASS on cluster, B14a/B14b CLOSED; C2 + A6b closed in-code; A7 (config.token) + 9 round-r3 findings added; new bug B18 (slot-reuse pubkey) blocks B-SLO stress).
+Last updated: 2026-05-23 (B18-fixer cycle: **B18 CLOSED** via shared `Arc<Mutex<VmIndexAllocator>>` between NomadCHBackend and RealRestoreBackend; cluster c=4 verified 0/16 stale-pubkey 401s vs 11/16 pre-fix. New bug **B19** filed: wake path doesn't register restored VM in nomad_ch state map → post-wake stop 404 + vm_index slot leak).
 Branch HEAD at seed: `fce3e208`.
 Branch HEAD at last update: `dec489a1` (B17 closed via wrapper resume; A6b at `2380605e` closes 5 pub fields; C2 at `78320b56` gates persist.delete; T7 at `da220268`; A6 at `d9b95c2e`; B16 at `0061b96d`).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
@@ -31,20 +31,24 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### [B14b] (CLOSED 2026-05-24 r4) tap `NO-CARRIER` after CH `--restore`
 - **Status**: **CLOSED**. The NO-CARRIER was a real second-order observation of the B17 root cause: CH `--restore` attaches the tap but the VM is paused, so no LOWER_UP. Post-resume the tap transitions to `<BROADCAST,MULTICAST,UP,LOWER_UP>` as expected. The speculative tap-up retry loop at lines 414-418 stays as belt-and-braces.
 
-### [B18] Stale controller pubkey on VM slot reuse — create-side 401 (CRITICAL, open)
-- **Source**: cluster smoke c=4 2026-05-24 r4 (see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md`).
-- **Symptom**: After the vm_index ceiling is exhausted by one round of create+snapshot+stop cycles, the next create on a reused slot fails with: `backend.create: 3 attempts failed; last error: stale agent at http://10.99.10X.2:7777: /version returned 401 (agent is verifying with a different controller pubkey); expected fp=<hex>`. 11/16 of the c=4 cycles hit this once slot 1-6 had been used once. **Blocks scaling smoke past ~6 cycles per worker** (vm_index ceiling default = 12, but the issue surfaces well before exhaustion).
-- **Hypotheses**:
-  - Per-sandbox signing keys: each new sandbox generates a fresh pubkey (recorded in pg via `persist`); the wrapper injects the new pubkey via `zsbx_pubkey=<hex>` cmdline. If the in-VM `/sbin/init` doesn't unconditionally re-write `/keys/controller-pubkey` from the cmdline (e.g., if `[ ! -f /keys/controller-pubkey ]` skips the write when a stale file from prior boot exists), the agent verifies against the old key.
-  - **But** rootfs.img is per-NOMAD_TASK_DIR (the wrapper `cp`s fresh from `$ZSBX_ARTIFACT_DIR/rootfs-slim.img` if not present in the task dir), so the rootfs SHOULD be fresh — unless something stamps `/keys/controller-pubkey` in the source rootfs template.
-  - Alternative: the workspace.img is **per-sandbox** (`<host_state_dir>/<sandbox_id>/workspace.img`), so should be fresh per sandbox. The user-home.img is **per-user** (shared) — if /keys is mounted from the userhome that would explain stickiness.
-- **Reproducer**: provision 1+1, run `snapshot_stress.py --concurrency 4 --cycles 4`. Expect 5/16 OK (the first batch of 4 + one more) and 11/16 with the 401 signature.
-- **Inputs/tracing for next cycle**:
-  - `crates/sandbox/src/backend/nomad_ch.rs` — find where `expected_fp` is computed; verify it's reading the **new** sandbox's persisted pubkey, not a cached value.
-  - `crates/sandbox/src/persist.rs` — check whether signing keys are generated per-sandbox or per-user.
-  - The in-VM `/sbin/init` script (in the rootfs-slim.img.virtio-blk-v3 source) — does it unconditionally write `/keys/controller-pubkey` from cmdline?
-  - Capture the per-VM agent's `/version` signature payload to see WHICH pubkey it's actually using.
-- **Note**: this bug exists because B17 is now closed and we can finally run multiple cycles on the same slot. Pre-B17, every cycle hit a "fresh" alloc that failed at wake; the create-side never had to deal with slot reuse.
+### [B18] (CLOSED 2026-05-23 B18-fixer cycle) Stale controller pubkey on VM slot reuse — create-side 401
+- **Status**: **CLOSED**. Root cause was NOT in-VM stickiness; the init.sh path was already correct. Actual bug: two separate `vm_index` allocators (NomadCHBackend's `vm_index_allocator` vs RealRestoreBackend's private `VmIndexReservations`) — the wake path reserved slots into a private map invisible to the create-side allocator, so a subsequent create handed the same tap/IP to a fresh sandbox that collided with the live restored VM on that slot. The 401 surfaced because `/version` was answered by the **old** (restored) agent verifying a different signing-pubkey. Fix: share the `Arc<Mutex<VmIndexAllocator>>` between both backends. Two regression tests added. Cluster c=4 verification: 11/16 stale-pubkey 401s pre-fix → **0/16 post-fix**.
+- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix B.
+
+### [B19] Wake path doesn't register restored VM in backend state map (CRITICAL, open)
+- **Source**: cluster smoke c=4 2026-05-23 (B18-fixer cycle, see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix B); previously observed in r2 c=1 (§ "Side observations") and r1 appendix.
+- **Symptom**: After `restore_handler::do_restore_inner` returns Ok and the restored VM is alive on its agent_url, the sandbox is **not** inserted into `NomadCHBackend::state`. Any subsequent operation — `exec`, `read_file`, `stop`, `delete` — looks up via `NomadCHBackend::sandbox_keys` / `state.read().get(&id)` and hits the `"sandbox not found in nomad-ch backend"` branch.
+  - `exec` post-wake: 500 `sandbox not found in nomad-ch backend`.
+  - `stop` / `delete` post-wake: 404 `sandbox not found` (handler-side check).
+  - **vm_index slot leak across the controller's uptime** — `stop_inner` returns Ok-idempotent without calling `vm_index_allocator.release()`. With B18 closed, this surfaces as `vm-index allocator exhausted (floor=1, ceil=12)` after ~12 successful wakes per controller boot (the test reached it at 10 wakes with c=4 × 4 stress).
+- **Reproducer**: provision 1+1, run any c≥1 / cycles≥1 stress with `do_wake=True && do_stop=True`. Wake returns 200; stop returns 404. Or directly: `curl -X DELETE /sandboxes/<sbx>` after a successful wake.
+- **Files**:
+  - `crates/sandbox/src/restore_handler.rs` `do_restore_inner` step 7+ — needs to install the per-sandbox record into `NomadCHBackend::state` after `wait_for_livez` Ok.
+  - `crates/sandbox/src/backend/nomad_ch.rs` — provides `restore_from_pg_and_sealed` (used by controller-restart restart-restore) which already does the install; could be reused or factored into a new `Backend::register_restored(sandbox_id, vm_index, signing_key_bytes, agent_url, user_id)` method.
+- **Fix shape** (two options, pick one):
+  - (a) New `Backend::register_restored(...)` method that takes the explicit `(sandbox_id, vm_index, signing_key_bytes, agent_url, user_id)` tuple and does the same `state.write().insert(...)` `NomadCHBackend::create` does. Call from `do_restore_inner` after `wait_for_livez`.
+  - (b) Re-use `restore_from_pg_and_sealed` (pg → row + sealed → install + probe). The probe is redundant (we already know the agent is live, having just called `wait_for_livez`), but the code path is established and tested.
+- **Note**: this bug was latent pre-B18 (the c=4 stress never reached enough successful wakes to exhaust the pool — the 401 race blocked at cycle ~6). Now that B18 is closed, **B19 is the next blocker on the snapshot/restore path's production usability**.
 
 ### [A1] AEAD never wraps prod snapshot store (CRITICAL, security-r1)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)

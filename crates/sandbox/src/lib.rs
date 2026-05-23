@@ -605,12 +605,38 @@ impl AppState {
             };
             let ch: Arc<dyn ChRemoteClient> =
                 Arc::new(RealChRemoteClient::new());
-            let rb: Arc<dyn RestoreBackend> =
-                Arc::new(RealRestoreBackend::new(
-                    config.nomad_ch.clone(),
-                    config.memory_mb,
-                    config.cpus,
-                ));
+            // B18 fix: share the create-side allocator with the
+            // restore-side reservations. Without this, a CREATE after
+            // a successful WAKE hands the same tap/IP to a fresh
+            // sandbox because the restored VM holds the slot in a
+            // private `VmIndexReservations` map invisible to
+            // `NomadCHBackend::vm_index_allocator`. Cluster smoke
+            // 2026-05-24 r4: 11/16 c=4 cycles failed with a
+            // stale-pubkey 401 once slots 1-6 had been used once.
+            let shared_allocator = backend.vm_index_allocator();
+            let rb_inner = RealRestoreBackend::new(
+                config.nomad_ch.clone(),
+                config.memory_mb,
+                config.cpus,
+            );
+            let rb_inner = match shared_allocator {
+                Some(a) => {
+                    tracing::info!(
+                        "snapshot wiring: shared vm_index allocator with backend (B18)"
+                    );
+                    rb_inner.with_shared_allocator(a)
+                }
+                None => {
+                    tracing::warn!(
+                        backend = %backend.name(),
+                        "snapshot wiring: backend has no vm_index allocator; \
+                         RealRestoreBackend falls back to private reservations \
+                         (B18 race possible if create + restore concurrent)"
+                    );
+                    rb_inner
+                }
+            };
+            let rb: Arc<dyn RestoreBackend> = Arc::new(rb_inner);
             tracing::info!(
                 ch_version = ch.version(),
                 kek_path = ?config.snapshot_root_kek_path,

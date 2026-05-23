@@ -427,6 +427,25 @@ impl Backend {
         }
     }
 
+    /// Shared handle to the per-worker `vm_index` allocator, when the
+    /// backend has one. **B18 fix wiring**: `crate::restore_handler::
+    /// RealRestoreBackend::with_shared_allocator` consumes the result
+    /// so create-side `alloc()` and restore-side `reserve()` share
+    /// state — otherwise a restored VM holding slot N (private map)
+    /// stays invisible to the create-side allocator, which hands the
+    /// same tap/IP to a fresh sandbox → stale-pubkey 401 on /version.
+    /// Returns `None` for backends that don't have a slot pool
+    /// (Docker, K8s — they map sandboxes to ephemeral container/Pod
+    /// IPs assigned by the host runtime).
+    pub fn vm_index_allocator(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<nomad_ch::VmIndexAllocator>>> {
+        match self {
+            Self::NomadCh(b) => Some(b.vm_index_allocator()),
+            Self::Docker(_) | Self::K8s(_) => None,
+        }
+    }
+
     /// Round-8 Phase-1 restore. Pg row is canonical for non-secret
     /// fields; sealed record is canonical for the signing key. The
     /// boot loop has already probed the agent before this is called.

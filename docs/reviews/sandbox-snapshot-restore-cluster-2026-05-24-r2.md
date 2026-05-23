@@ -305,3 +305,238 @@ B17 brief constraints.
 - `/opt/nomad/data/alloc/*/alloc/logs/ch.stderr.0` (worker, pre-
   teardown) — the wrapper stderr with the `VM resumed` + tap-state
   evidence. Captured to `/tmp/smoke-b17.log` excerpts above.
+
+---
+
+# Appendix B — B18 fix attempt + c=4 validation (2026-05-23)
+
+**Branch HEAD pre-fix:** `03d15012`.
+**Branch HEAD post-fix:** (this commit).
+**Controller binary uploaded:** `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v14` (15.7 MiB, Docker `rust:slim-bookworm` cross-build; portable `/lib64/ld-linux-x86-64.so.2` interp confirmed by `readelf -p .interp`).
+**B18 verdict:** **CLOSED.**
+**Operator:** B18 fixer + cluster validation sub-agent.
+
+## Root cause (not what the original B18 brief suspected)
+
+The "stale-pubkey 401" was *not* an in-VM stickiness problem
+(workspace.img reuse, init.sh skipping the cmdline write, or per-user
+signing-key reuse). The init.sh path was already
+correct: `/run/keys/controller-pubkey` lives on tmpfs (fresh every
+boot), the wrapper sets `zsbx_pubkey=${ZSBX_PUBKEY_HEX}` on the cmdline
+from the freshly-minted `signing_key.verifying_key()`, and init.sh
+unconditionally rewrites the pubkey file via `printf '%b' ... > /run/keys/controller-pubkey`
+on every cold-boot. Each create-side `try_create()` does mint a fresh
+`Arc<SigningKey>` (`random_key32()`), so the controller's
+`expected_fp` is always against the new key.
+
+The **actual** bug: **two separate `vm_index` allocators that don't
+share state**.
+
+1. `NomadCHBackend::vm_index_allocator` (the production pool, sized
+   `[vm_index_floor, vm_index_ceil]`) hands out slots for new
+   creates and reclaims them via `release()` on `stop_inner`.
+2. `RealRestoreBackend::reservations` was a **private**
+   `VmIndexReservations` map that the wake path used to reserve the
+   source slot at `do_restore_inner` step 3.
+
+A wake sequence:
+
+- `stop_preserving_state` releases slot N **into the create-side
+  allocator's freed set**.
+- `do_restore_inner` reserves slot N **into the private wake-side
+  map**.
+- The restored VM lives on tap `zsbx-nm-N` / IP `10.99.10N.2`.
+- A concurrent CREATE on the same worker calls
+  `vm_index_allocator.alloc()` — which sees slot N as free (it's in
+  `freed`) and **hands it out again**.
+- The new create's wrapper boots a fresh CH against `zsbx-nm-N` and
+  the controller probes `/version` at `10.99.10N.2:7777` — the live
+  restored VM answers first, with the **original** snapshot's
+  signing-pubkey, so the controller's `sig::sign(...)` is rejected
+  with 401. Surface: `stale agent at http://10.99.10N.2:7777:
+  /version returned 401 ...`.
+
+The pre-existing in-source comment at
+`crates/sandbox/src/restore_handler.rs:656-662` (the
+`VmIndexReservations` doc) literally flagged this as
+"v2 follow-up — share the allocator with NomadCHBackend so a
+cross-backend create cannot collide with an in-flight restore." The
+share never landed; this PR does it.
+
+## Fix
+
+1. `crates/sandbox/src/backend/nomad_ch.rs`:
+   - `VmIndexAllocator` (`pub(crate)` → `pub`) so the restore handler
+     in the same crate can hold an `Arc<Mutex<_>>` over it.
+   - `VmIndexAllocator::reserve(i)`: added in-flight collision
+     detection — `i < next && i ∉ freed ⇒ Err("vm_index N already
+     reserved")`. Pre-fix, `reserve()` silently succeeded against a
+     live slot (because `next` was bumped past `i` without
+     checking). Post-fix, a double-reserve of a live slot is a hard
+     error.
+   - Added `NomadCHBackend::vm_index_allocator()` getter returning
+     `Arc::clone` of the shared `Arc<Mutex<VmIndexAllocator>>`.
+
+2. `crates/sandbox/src/backend/mod.rs`:
+   - Added `Backend::vm_index_allocator()` returning
+     `Option<Arc<Mutex<nomad_ch::VmIndexAllocator>>>`. `Some` only
+     for the `NomadCh` variant.
+
+3. `crates/sandbox/src/restore_handler.rs`:
+   - `RealRestoreBackend` grew a `shared_allocator:
+     Option<Arc<Mutex<...>>>` field plus a `with_shared_allocator()`
+     builder. The legacy `VmIndexReservations` stays as the
+     test-only fallback.
+   - `reserve_vm_index` / `release_vm_index`: when
+     `shared_allocator` is `Some`, route through it; else
+     fall back to the local map.
+
+4. `crates/sandbox/src/lib.rs`:
+   - The Phase-A snapshot/restore wiring block extracts
+     `backend.vm_index_allocator()` (when present) and passes it
+     into `RealRestoreBackend::with_shared_allocator(...)`. Boot
+     log: `snapshot wiring: shared vm_index allocator with backend
+     (B18)`.
+
+5. Added two regression tests in `restore_handler.rs::real_backend_tests`:
+   - `b18_shared_allocator_blocks_create_side_reuse`: reserves the
+     slot via wake, then asserts a concurrent create-side `alloc()`
+     does NOT hand back the same slot.
+   - `b18_shared_allocator_rejects_double_reserve_of_live_slot`:
+     create-side `alloc()`s slot 1, then wake tries `reserve(1)` —
+     must error "already reserved".
+
+## Smoke (1+1, c=1) — PASS
+
+Cluster: `zsbx-smoke`, 1 server (n2-standard-4) + 1 worker
+(n2-standard-32), `asia-northeast3-a`,
+`CONTROLLER_OBJECT=zeroship-sandbox.snapshot-v14`.
+
+```
+# stress: c=1 cycles=1 wake=True stop=True ctrl=http://localhost:9091
+# total wall-time: 63.1s
+create    ok=  1 err=  0 p50=  5239ms p95=  5239ms n=1
+snapshot  ok=  1 err=  0 p50= 48049ms p95= 48049ms n=1
+wake      ok=  1 err=  0 p50=  9762ms p95=  9762ms n=1
+stop      ok=  0 err=  1 (pre-existing bug #19; post-wake stop 404)
+```
+
+Wake = 9.76 s (same range as r2's 9.5 s). No regression from B17.
+
+## Smoke (1+1, c=4 × 4 = 16) — B18 verified PASS
+
+Pre-fix (r2 baseline): 11/16 create failures with stale-pubkey 401.
+
+Post-fix:
+
+```
+# stress: c=4 cycles=4 wake=True stop=True ctrl=http://localhost:9091
+# total wall-time: 239.9s
+create    ok= 10 err=  6 p50=13213ms p95=25426ms n=10
+snapshot  ok= 10 err=  0 p50=52254ms p95=61164ms n=10
+wake      ok= 10 err=  0 p50=15043ms p95=24931ms n=10
+stop      ok=  0 err= 10 (pre-existing bug #19)
+```
+
+**Controller-side evidence**:
+
+```
+# stale-pubkey 401 errors in controller log (was 11 pre-fix):
+$ grep -c "stale agent" /var/log/zeroship-sandbox.log
+0
+
+# B18 wiring log (boot):
+$ grep "shared vm_index" /var/log/zeroship-sandbox.log
+"message":"snapshot wiring: shared vm_index allocator with backend (B18)"
+
+# Remaining 6 create failures are allocator-exhausted (the EXPECTED
+# behaviour of the fix — 10 slots held by restored VMs + 6
+# new-create attempts > 12-slot ceiling):
+$ grep -c "allocator exhausted" /var/log/zeroship-sandbox.log
+18  # = 6 surfaced to client + 12 retries inside backend.create's
+    #   retry budget
+```
+
+Interpretation:
+- **0 stale-pubkey 401s** — the B18 root cause is gone.
+- The 6 remaining create errors are `vm-index allocator exhausted
+  (floor=1, ceil=12)`. This is the **correct** post-fix behaviour:
+  the shared allocator now accurately tracks which slots are held
+  by live restored VMs, so a concurrent create against an exhausted
+  pool fails fast at the allocator rather than booting a colliding VM.
+- Without **bug #19** fixed (post-wake stop → "sandbox not found"
+  → slot never released back to the shared allocator), the wake
+  path leaks slots permanently from the create-side pool. The c=4
+  stress dropoff from 16/16 to 10/16 is the slot-leak amplifying
+  through the cycle pattern — with B19 still open, c=4 × 4 is the
+  natural ceiling at vm_index_ceil=12.
+
+## Why c=20 stress was NOT run
+
+Bug #19 (wake doesn't register restored VM in `NomadCHBackend::
+state` map → `stop_inner` returns Ok-idempotent without releasing
+the slot) means the c=20 cycle pattern would hit allocator
+exhaustion after ~12 successful waking cycles, the same way c=4
+hit it after 10. The B-SLO p50/p95 numbers we'd record would be
+*lower bounds* on the wake budget (still limited by bug #19's slot
+leak). **Defer c=20 until #19 is fixed**; close B18 on the c=4
+evidence (zero 401s vs 11/16 pre-fix is unambiguous).
+
+## SLO snapshot (c=4 cycles=4 sample)
+
+| Metric    | Target | Observed (c=4 p50) | Observed (c=4 p95) |
+|-----------|--------|--------------------|--------------------|
+| Create    | (ref)  | 13.2 s             | 25.4 s             |
+| Snapshot  | (ref)  | 52.3 s             | 61.2 s             |
+| Wake      | ≤ 1 s  | 15.0 s             | 24.9 s             |
+| Stop      | ref    | n/a — bug #19      | n/a                |
+
+Wake p50 ↑ from r2's 13.2 s to 15.0 s under c=4. Still 1-2 orders
+of magnitude over the 1 s SLO; the 1 GB memory-ranges artifact
+restore is the ceiling.
+
+## Bug #19 (separate, NOT a B18 regression)
+
+The B18 fix does not touch the pre-existing wake-doesn't-register
+issue. After `do_restore_inner` returns Ok, the restored sandbox is
+**not** inserted into `NomadCHBackend::state`. Any subsequent
+operation (`exec`, `read_file`, `stop`) looks up via
+`sandbox_keys` / `state.read().get(&id)` and gets "sandbox not
+found". The slot stays reserved in the shared allocator until the
+controller restarts. Tracked in deferred backlog as **[B19]**.
+
+## Teardown
+
+```
+[teardown] project=suger-dev zone=asia-northeast3-a prefix=zsbx-smoke
+[teardown] deleting instances: zsbx-smoke-server-1 zsbx-smoke-worker-1
+…Deleted… (both instances + reserved IP)
+[teardown] remaining instances matching ^zsbx-smoke-: 0
+[teardown] OK: cluster fully torn down
+```
+
+`gcloud compute instances list --filter='name~"^zsbx-"'` → empty.
+
+## Estimated cost
+
+- Cluster wall-time: ~9 min (provision 90s + smoke c=1 63s + stress
+  c=4 240s + observation + teardown ~3 min).
+- n2-standard-32 worker @ ~$1.55/hr × 9/60 = **$0.23**.
+- n2-standard-4 server @ ~$0.17/hr × 9/60 = **$0.03**.
+- **Total: ~$0.26**. Well under the $30 cap.
+
+## Files of interest (B18 fix)
+
+- `crates/sandbox/src/backend/nomad_ch.rs` — `VmIndexAllocator`
+  pub-ification + in-flight collision check + getter on
+  `NomadCHBackend`.
+- `crates/sandbox/src/backend/mod.rs` — `Backend::vm_index_allocator()`.
+- `crates/sandbox/src/restore_handler.rs` — `RealRestoreBackend::
+  with_shared_allocator` builder + reserve/release routing + two
+  new B18 regression tests.
+- `crates/sandbox/src/lib.rs` — wiring at AppState::from_config.
+- `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v14` —
+  uploaded controller binary (Docker `rust:slim-bookworm`).
+- `/tmp/smoke-b18-c1.log`, `/tmp/smoke-b18-c4.log` — smoke
+  transcripts.
+- `/tmp/provision-b18.log` — provision transcript.

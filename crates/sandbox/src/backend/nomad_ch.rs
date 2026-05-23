@@ -254,8 +254,19 @@ impl std::fmt::Debug for NomadChSandbox {
 /// so we don't run off the end of the (host-pre-provisioned) tap
 /// pool. Bounded above by `ceil` (inclusive). Behaviour and rationale
 /// mirror `PortAllocator` in `k8s.rs`.
+///
+/// **Visibility note (B18 fix)**: this type is `pub` (not `pub(crate)`)
+/// because `RealRestoreBackend` in `crate::restore_handler` needs to
+/// hold an `Arc<Mutex<VmIndexAllocator>>` shared with `NomadCHBackend`,
+/// so create-side `alloc()` and restore-side `reserve()` go through the
+/// same state. Without the share, the restore path's `reserve(i)`
+/// silently passes against a private allocator while the create-side
+/// allocator still sees `i` as free → the next CREATE hands the same
+/// IP/tap to a fresh sandbox that collides with the live restored VM
+/// (cluster smoke 2026-05-24 r4; 11/16 c=4 cycles hit a stale-pubkey
+/// 401 once slots 1-6 had been used once).
 #[derive(Debug)]
-pub(crate) struct VmIndexAllocator {
+pub struct VmIndexAllocator {
     floor: u16,
     ceil: u16,
     /// Highest index we've ever handed out (well, `next` is "the
@@ -268,7 +279,7 @@ pub(crate) struct VmIndexAllocator {
 }
 
 impl VmIndexAllocator {
-    pub(crate) fn new(floor: u16, ceil: u16) -> Self {
+    pub fn new(floor: u16, ceil: u16) -> Self {
         Self {
             floor,
             ceil,
@@ -277,7 +288,7 @@ impl VmIndexAllocator {
         }
     }
 
-    pub(crate) fn alloc(&mut self) -> Result<u16, String> {
+    pub fn alloc(&mut self) -> Result<u16, String> {
         if let Some(&i) = self.freed.iter().next() {
             self.freed.remove(&i);
             return Ok(i);
@@ -293,7 +304,7 @@ impl VmIndexAllocator {
         Ok(i)
     }
 
-    pub(crate) fn release(&mut self, i: u16) {
+    pub fn release(&mut self, i: u16) {
         if i >= self.floor && i <= self.ceil {
             self.freed.insert(i);
         }
@@ -306,14 +317,27 @@ impl VmIndexAllocator {
     /// `create()` could hand the same index to a new sandbox while
     /// the original VM is still alive.
     ///
-    /// Returns `Err` if `i` is out of `[floor, ceil]`. Idempotent on
-    /// already-reserved indices (the second call is a no-op).
-    pub(crate) fn reserve(&mut self, i: u16) -> Result<(), String> {
+    /// Returns `Err` if `i` is out of `[floor, ceil]` OR if `i` is
+    /// already in-use (a hard-error reserve — the caller cannot
+    /// silently overwrite a live slot). B18 fix: the prior
+    /// `restore_handler::VmIndexReservations` was a "set if not
+    /// present" map with `Err("already reserved")` on collision; the
+    /// same contract is preserved here so the restore handler's
+    /// collision error message format ("vm_index N already
+    /// reserved") stays intact.
+    pub fn reserve(&mut self, i: u16) -> Result<(), String> {
         if i < self.floor || i > self.ceil {
             return Err(format!(
                 "vm-index {i} out of range [{}, {}]",
                 self.floor, self.ceil
             ));
+        }
+        // If the index is currently in flight from `alloc()` (i.e.,
+        // already handed out and not in `freed`), reserving it would
+        // hand the same slot to two callers — the exact B18 race.
+        // Detect: `i < self.next` AND `i ∉ self.freed` ⇒ in flight.
+        if i < self.next && !self.freed.contains(&i) {
+            return Err(format!("vm_index {i} already reserved"));
         }
         // Bump `next` past `i` so future first-time allocs don't
         // hand it out, and remove `i` from the freed set if the
@@ -349,6 +373,20 @@ impl NomadCHBackend {
 
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// Shared handle to the per-worker `vm_index` allocator. Used by
+    /// `crate::restore_handler::RealRestoreBackend` so the wake path's
+    /// `reserve(source_slot)` and the create path's `alloc()` go
+    /// through the same allocator state. Without this share, the
+    /// restore path reserved into a private map while the create
+    /// allocator still saw the slot as free — a subsequent CREATE on
+    /// the same worker handed the same tap/IP to a fresh sandbox that
+    /// collided with the live restored VM, surfacing as a stale-pubkey
+    /// 401 on `/version` (cluster smoke 2026-05-24 r4 bug B18; 11/16
+    /// c=4 cycles failed once slots 1-6 had been used once).
+    pub fn vm_index_allocator(&self) -> Arc<Mutex<VmIndexAllocator>> {
+        Arc::clone(&self.vm_index_allocator)
     }
 
     pub async fn probe(&self) -> Result<(), String> {
