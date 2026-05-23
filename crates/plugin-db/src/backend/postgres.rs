@@ -34,6 +34,18 @@ pub struct PostgresBackend {
     /// `db.beginTransaction()` and `migrationBegin` paths that need a
     /// connection that survives across pool-return points).
     url: String,
+    /// **P5 PR 2** — per-backend column-key cache. Lazily resolves
+    /// `(app_id, key_id) → AeadKey` via the
+    /// `__zeroship_admin.get_column_key` SECURITY DEFINER getter; falls
+    /// back to `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars when the getter
+    /// returns NULL (pre-migration / dev parity). Single-threaded
+    /// (`RefCell` inside `KeyStore`) since every `PostgresBackend` is
+    /// owned by a single compio thread.
+    ///
+    /// `#[cfg(feature = "hardening")]` because the `KeySource::PgAdminTable`
+    /// variant referencing this pool is itself gated to that feature.
+    #[cfg(feature = "hardening")]
+    key_store: crate::encryption::KeyStore,
     /// **P4 PR 2** — cached pgvector extension presence probe.
     ///
     /// `None` before the first call to [`VectorIndex::ensure_vector_index`]
@@ -68,11 +80,23 @@ impl std::fmt::Debug for PostgresBackend {
 impl PostgresBackend {
     /// Build a backend handle around an already-initialised pool.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
+        // **P5 PR 2** — wire the column-key store. We clone the `Rc<Pool>`
+        // into `KeySource::PgAdminTable` so the `KeyStore`'s
+        // `resolve(...)` method can call the SECURITY DEFINER getter
+        // without re-reaching into `PostgresBackend`. The pool clone is
+        // cheap (Rc inc), and the cache is invalidated naturally on
+        // backend drop.
+        #[cfg(feature = "hardening")]
+        let key_store = crate::encryption::KeyStore::new(
+            crate::encryption::KeySource::PgAdminTable(pool.clone()),
+        );
         Self {
             pool,
             url,
             pgvector_available: RefCell::new(None),
             postgis_available: RefCell::new(None),
+            #[cfg(feature = "hardening")]
+            key_store,
         }
     }
 
@@ -1182,36 +1206,54 @@ async fn create_index_with_recovery_audited(
 // fallback lives behind the same `hardening` gate so the trait surface
 // itself is gated uniformly.
 
+// **P5 PR 2** — Real `EncryptedColumn` body. Delegates to the workspace
+// `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
+// agnostic on decrypt because the wire format carries the nonce). Key
+// resolution goes through `self.key_store` which prefers the
+// SECURITY DEFINER getter and falls back to env-var sourcing.
 #[cfg(feature = "hardening")]
 impl crate::backend::EncryptedColumn for PostgresBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
     async fn resolve_key(
         &self,
-        _app_id: &str,
-        _key_id: &str,
+        app_id: &str,
+        key_id: &str,
     ) -> Result<Self::KeyHandle, DbError> {
-        Err(p5_pr2_stub("EncryptedColumn::resolve_key (PG)"))
+        self.key_store.resolve(app_id, key_id).await
     }
 
     fn encrypt(
         &self,
-        _key: &Self::KeyHandle,
-        _mode: crate::backend::EncryptionMode,
-        _plaintext: &[u8],
-        _aad: &[u8],
+        key: &Self::KeyHandle,
+        mode: crate::backend::EncryptionMode,
+        plaintext: &[u8],
+        aad: &[u8],
     ) -> Result<Vec<u8>, DbError> {
-        Err(p5_pr2_stub("EncryptedColumn::encrypt (PG)"))
+        match mode {
+            crate::backend::EncryptionMode::Randomised => {
+                crate::encryption::aead::encrypt_randomised(key, plaintext, aad)
+            }
+            crate::backend::EncryptionMode::Deterministic => {
+                crate::encryption::aead::encrypt_deterministic(key, plaintext, aad)
+            }
+        }
     }
 
     fn decrypt(
         &self,
-        _key: &Self::KeyHandle,
+        key: &Self::KeyHandle,
         _mode: crate::backend::EncryptionMode,
-        _ciphertext: &[u8],
-        _aad: &[u8],
+        ciphertext: &[u8],
+        aad: &[u8],
     ) -> Result<Vec<u8>, DbError> {
-        Err(p5_pr2_stub("EncryptedColumn::decrypt (PG)"))
+        // Decrypt is mode-agnostic: the wire format carries the nonce,
+        // and AES-GCM verifies the tag regardless of how the nonce was
+        // produced on the write side. The caller picks the
+        // mode-appropriate AAD (Camp A: row_pk in AAD for Randomised,
+        // omitted for Deterministic) — see
+        // `crate::crud::encryption_pass`.
+        crate::encryption::aead::decrypt(key, ciphertext, aad)
     }
 }
 

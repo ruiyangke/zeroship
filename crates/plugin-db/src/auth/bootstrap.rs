@@ -42,6 +42,11 @@ pub struct BootstrapOutcome {
     pub created_hmac_keys_table: bool,
     pub created_nonces_table: bool,
     pub created_session_ctx_table: bool,
+    /// **P5 PR 2** — created the `__zeroship_admin.column_keys`
+    /// table that stores per-key-id 32-byte root keys for column
+    /// encryption. Read only via the SECURITY DEFINER
+    /// `get_column_key` function below.
+    pub created_column_keys_table: bool,
     /// True if the bootstrap function had to insert an initial HMAC
     /// key (no `current` key existed at boot time).
     pub minted_initial_hmac_key: bool,
@@ -56,6 +61,7 @@ impl BootstrapOutcome {
             "createdHmacKeysTable":     self.created_hmac_keys_table,
             "createdNoncesTable":       self.created_nonces_table,
             "createdSessionCtxTable":   self.created_session_ctx_table,
+            "createdColumnKeysTable":   self.created_column_keys_table,
             "mintedInitialHmacKey":     self.minted_initial_hmac_key,
         })
         .to_string()
@@ -156,6 +162,9 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     out.created_hmac_keys_table = ensure_hmac_keys_table(pool).await?;
     out.created_nonces_table = ensure_nonces_table(pool).await?;
     out.created_session_ctx_table = ensure_session_ctx_table(pool).await?;
+    // **P5 PR 2** — column-encryption key table. Bytes never reach
+    // app code; only `__zeroship_admin.get_column_key(text)` does.
+    out.created_column_keys_table = ensure_column_keys_table(pool).await?;
 
     // ---- functions ----
     install_const_eq_function(pool).await?;
@@ -165,6 +174,9 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     install_reset_session_function(pool).await?;
     install_rotate_keys_function(pool).await?;
     install_slot_wrapper_functions(pool).await?;
+    // **P5 PR 2** — the SECURITY DEFINER getter the
+    // `KeySource::PgAdminTable` resolver calls.
+    install_get_column_key_function(pool).await?;
 
     // Mint the first HMAC key if none exists. We do this in the
     // function (instead of unconditional INSERT) so re-running
@@ -326,6 +338,82 @@ async fn ensure_session_ctx_table(pool: &Pool) -> Result<bool, DbError> {
     .map_err(|e| coded_sql("REVOKE session_ctx", e))?;
 
     Ok(true)
+}
+
+/// **P5 PR 2** — `__zeroship_admin.column_keys` (key_id text PK,
+/// root_key bytea, created_at timestamptz). Stores 32-byte root keys
+/// HKDF-expanded per-(app, slot) by `crate::encryption::keys::KeyStore`.
+/// REVOKEd from PUBLIC; only the SECURITY DEFINER getter is callable
+/// from app code.
+async fn ensure_column_keys_table(pool: &Pool) -> Result<bool, DbError> {
+    let exists: bool = !pool
+        .query_text_params(
+            "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'column_keys'",
+            &[&ADMIN_SCHEMA],
+        )
+        .await
+        .map_err(|e| coded_sql("probe column_keys", e))?
+        .is_empty();
+    if exists {
+        return Ok(false);
+    }
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{ADMIN_SCHEMA}".column_keys (
+                key_id     TEXT PRIMARY KEY,
+                root_key   BYTEA NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("CREATE TABLE column_keys", e))?;
+    pool.execute(
+        &format!(r#"REVOKE ALL ON "{ADMIN_SCHEMA}".column_keys FROM PUBLIC"#),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("REVOKE column_keys", e))?;
+    Ok(true)
+}
+
+/// **P5 PR 2** — SECURITY DEFINER getter for column root keys.
+///
+/// Returns the 32-byte root key for `p_key_id`, or NULL when the row is
+/// absent. `KeySource::PgAdminTable` calls this; NULL falls through to
+/// env-var sourcing so apps that haven't run the column-keys migration
+/// continue to function unchanged.
+///
+/// EXECUTE granted to PUBLIC — the function is the ONLY way app code
+/// reaches the raw bytes (the table itself is REVOKEd above). The
+/// SECURITY DEFINER boundary moves the privilege check from the
+/// caller to the function owner (`__zeroship_platform_role`).
+async fn install_get_column_key_function(pool: &Pool) -> Result<(), DbError> {
+    let sql = format!(
+        r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".get_column_key(p_key_id TEXT)
+           RETURNS BYTEA
+           LANGUAGE sql STABLE SECURITY DEFINER
+           SET search_path = pg_catalog, "{ADMIN_SCHEMA}"
+           AS $$
+             SELECT root_key FROM "{ADMIN_SCHEMA}".column_keys
+              WHERE key_id = p_key_id
+           $$"#
+    );
+    pool.execute(&sql, &[])
+        .await
+        .map_err(|e| coded_sql("CREATE get_column_key", e))?;
+    // Caller need only EXECUTE; the table grant stays REVOKEd so the
+    // raw bytes never bypass the SECURITY DEFINER boundary.
+    pool.execute(
+        &format!(
+            r#"GRANT EXECUTE ON FUNCTION "{ADMIN_SCHEMA}".get_column_key(TEXT) TO PUBLIC"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("GRANT get_column_key", e))?;
+    Ok(())
 }
 
 /// Constant-time BYTEA equality — avoids timing-side-channel HMAC
@@ -1073,6 +1161,7 @@ mod tests {
             created_hmac_keys_table: true,
             created_nonces_table: true,
             created_session_ctx_table: true,
+            created_column_keys_table: true,
             minted_initial_hmac_key: true,
         };
         let v: serde_json::Value = serde_json::from_str(&o.to_json()).unwrap();
@@ -1082,6 +1171,7 @@ mod tests {
         assert_eq!(v["createdHmacKeysTable"], true);
         assert_eq!(v["createdNoncesTable"], true);
         assert_eq!(v["createdSessionCtxTable"], true);
+        assert_eq!(v["createdColumnKeysTable"], true);
         assert_eq!(v["mintedInitialHmacKey"], true);
     }
 

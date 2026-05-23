@@ -28,6 +28,13 @@ sha2 = { workspace = true }
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 hmac = { workspace = true }
+# **P5 PR 2** — the CRUD encryption pass exchanges ciphertext over JSON
+# values (which cannot carry raw bytes), so plaintext bytes are
+# base64-encoded into a `Value::String` and the SQL bind layer wraps
+# the placeholder with `decode($N, 'base64')::bytea` on insert/update
+# / `encode("col", 'base64')` on read. Both legs need a hot-path
+# base64 codec; `base64` v0.22 is already a workspace dep.
+base64 = { workspace = true }
 # SQLite backend dependencies — gated behind the `sqlite` Cargo feature
 # below. P1 PR 1 reintroduces these alongside the
 # `crate::backend::sqlite` module skeleton (the previous declarations

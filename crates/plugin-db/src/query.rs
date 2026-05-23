@@ -630,6 +630,45 @@ pub fn build_create_indexes(
             continue;
         }
 
+        // **P5 PR 2** — deterministic-encrypted columns get an
+        // automatic B-tree index. The SDK refuses range / regex / LIKE
+        // on deterministic columns (only equality + `$in`), so a
+        // B-tree on the ciphertext is sufficient and matches the
+        // user's expectation that `find({ssnDet: "X"})` is fast.
+        // Randomised columns do NOT get this index — the ciphertext is
+        // different per write so equality lookups can't work anyway.
+        let det_encrypted = def
+            .get("encrypted")
+            .and_then(|enc| enc.get("mode"))
+            .and_then(|v| v.as_str())
+            == Some("deterministic");
+        if det_encrypted {
+            let name = index_name(collection, &[field.as_str()], /* unique = */ false);
+            let sql = format!(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
+                quote_ident(&name),
+                table_qualified,
+                quote_ident(field),
+            );
+            out.push(IndexSpec {
+                name,
+                columns: vec![field.clone()],
+                unique: false,
+                sql,
+                kind: IndexKind::BTree,
+            });
+            // Fall through — a deterministic-encrypted column may also
+            // carry `.unique()` (we still want a uniqueness constraint
+            // on the ciphertext, valid because deterministic mode
+            // preserves equality). The `wants_unique` branch below
+            // emits the unique index alongside; PG dedupes
+            // (two identical-shape indexes are cheap to ignore in
+            // theory, but our deterministic-name contract collapses
+            // them to a single entry if both were B-tree). We rely on
+            // the caller-side scope check (Q-P5-H) to refuse
+            // randomised+unique earlier; deterministic+unique is OK.
+        }
+
         let wants_index = def.get("index").and_then(|v| v.as_bool()) == Some(true);
         let wants_unique = def.get("unique").and_then(|v| v.as_bool()) == Some(true);
 
@@ -885,7 +924,14 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, Query
     validate_field_name(field)?;
     let pg_type_owned;
     let zs_type = def.get("type").and_then(|t| t.as_str());
-    let pg_type: &str = if zs_type == Some("vector") {
+    // **P5 PR 2** — `t.encrypted(...)`-declared columns always store the
+    // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
+    // regardless of `wraps`. The encryption pass swaps the plaintext
+    // out before the INSERT/UPDATE, and the SQL builder casts the
+    // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
+    let pg_type: &str = if def.get("encrypted").is_some() {
+        "BYTEA"
+    } else if zs_type == Some("vector") {
         // **P4 PR 2** — pgvector column type is parameterised by dims:
         // `vector(768)`. The SDK validates `vectorDims` is `1..=16000`
         // before sending; we treat a missing field as a schema bug and
@@ -1334,11 +1380,23 @@ pub fn build_insert(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
 
+    // **P5 PR 2** — the encryption pass marks each encrypted column
+    // with a sibling `__zsenc__<col>` key (`Value::Bool(true)`); the
+    // value at `<col>` is base64-encoded ciphertext. Walk the doc once
+    // to collect those marker keys so we can:
+    //   1. Skip emitting marker keys as columns.
+    //   2. Wrap encrypted-column placeholders with
+    //      `decode($N, 'base64')::bytea` so PG binds the raw bytes.
+    let encrypted_cols = collect_encrypted_cols(obj);
+
     let mut columns = Vec::new();
     let mut placeholders = Vec::new();
     let mut params: Vec<String> = Vec::new();
 
     for (key, value) in obj {
+        if key.starts_with("__zsenc__") {
+            continue;
+        }
         columns.push(quote_ident(key));
         // Postgres' text-format param protocol (`query_text_params`,
         // `&[&str]`) cannot represent NULL — an empty string would be
@@ -1349,7 +1407,12 @@ pub fn build_insert(
             placeholders.push("NULL".to_string());
         } else {
             params.push(value_to_param(value));
-            placeholders.push(format!("${}", params.len()));
+            let n = params.len();
+            if encrypted_cols.contains(key.as_str()) {
+                placeholders.push(format!("decode(${n}, 'base64')::bytea"));
+            } else {
+                placeholders.push(format!("${n}"));
+            }
         }
     }
 
@@ -1360,6 +1423,26 @@ pub fn build_insert(
     );
 
     Ok(BuiltQuery { sql, params })
+}
+
+/// **P5 PR 2** — collect the set of column names the encryption pass
+/// has marked as encrypted. The marker is a sibling key
+/// `__zsenc__<col> = true` inserted by
+/// `crate::crud::encryption_pass::encrypt_row_on_write`. Callers walk
+/// the doc once with this set to know which placeholders need the
+/// `decode($N, 'base64')::bytea` cast.
+pub(crate) fn collect_encrypted_cols(
+    obj: &serde_json::Map<String, Value>,
+) -> std::collections::HashSet<&str> {
+    let mut out = std::collections::HashSet::new();
+    for (k, v) in obj {
+        if let Some(name) = k.strip_prefix("__zsenc__") {
+            if v.as_bool() == Some(true) {
+                out.insert(name);
+            }
+        }
+    }
+    out
 }
 
 /// Build SET clauses from an update object, supporting update operators.
@@ -1391,15 +1474,34 @@ pub fn build_set_clauses(
         .as_object()
         .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
 
-    // Collect all fields: flatten $set inline, keep other keys as-is
+    // **P5 PR 2** — collect encrypted-column markers from the update
+    // doc (top-level AND nested `$set`). The encryption pass deposits
+    // both the base64 value and a `__zsenc__<col>` marker; we use the
+    // marker set to wrap the placeholder with `decode($N, 'base64')::bytea`.
+    let mut encrypted_cols = collect_encrypted_cols(update_obj);
+    if let Some(set_obj) = update_obj.get("$set").and_then(|v| v.as_object()) {
+        encrypted_cols.extend(collect_encrypted_cols(set_obj));
+    }
+
+    // Collect all fields: flatten $set inline, keep other keys as-is.
+    // Skip every `__zsenc__*` marker key — they're a side-channel from
+    // the encryption pass, not user-declared columns.
     let mut fields: Vec<(&String, &Value)> = Vec::new();
     for (key, value) in update_obj.iter() {
+        if key.starts_with("__zsenc__") {
+            continue;
+        }
         if key == "$set" {
             // Flatten $set fields into the top level
             let obj = value
                 .as_object()
                 .ok_or_else(|| QueryError::InvalidFilter("$set must be an object".to_string()))?;
-            fields.extend(obj.iter());
+            for (k, v) in obj.iter() {
+                if k.starts_with("__zsenc__") {
+                    continue;
+                }
+                fields.push((k, v));
+            }
         } else {
             fields.push((key, value));
         }
@@ -1425,7 +1527,12 @@ pub fn build_set_clauses(
                 let clause = match op {
                     "$set" => {
                         params.push(value_to_param(op_val));
-                        format!("{col} = ${}", params.len())
+                        let n = params.len();
+                        if encrypted_cols.contains(key.as_str()) {
+                            format!("{col} = decode(${n}, 'base64')::bytea")
+                        } else {
+                            format!("{col} = ${n}")
+                        }
                     }
                     "$inc" => {
                         params.push(value_to_param(op_val));
@@ -1472,7 +1579,12 @@ pub fn build_set_clauses(
 
         // Plain field: value — treat as $set
         params.push(value_to_param(value));
-        set_clauses.push(format!("{col} = ${}", params.len()));
+        let n = params.len();
+        if encrypted_cols.contains(key.as_str()) {
+            set_clauses.push(format!("{col} = decode(${n}, 'base64')::bytea"));
+        } else {
+            set_clauses.push(format!("{col} = ${n}"));
+        }
     }
 
     // Auto-update updated_at unless the caller explicitly set it
@@ -1540,13 +1652,32 @@ pub fn build_insert_many(
     let schema = quote_ident(app_id);
     let table = quote_ident(collection);
 
-    // Union all columns across all documents (not just the first)
+    // **P5 PR 2** — encrypted-column union across all docs. We treat
+    // a column as encrypted iff ANY doc carries the `__zsenc__<col>`
+    // marker (the encryption pass marks every doc consistently — if
+    // the schema says the column is encrypted, every row in the batch
+    // gets the marker after the pass runs).
+    let mut encrypted_cols: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for doc in arr {
+        if let Some(obj) = doc.as_object() {
+            for name in collect_encrypted_cols(obj) {
+                encrypted_cols.insert(name.to_string());
+            }
+        }
+    }
+
+    // Union all columns across all documents (not just the first).
+    // Skip every `__zsenc__*` marker key — they're a side-channel from
+    // the encryption pass, not user-declared columns.
     let mut column_set = std::collections::BTreeSet::<&String>::new();
     for doc in arr {
         let obj = doc.as_object().ok_or_else(|| {
             QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
         })?;
         for key in obj.keys() {
+            if key.starts_with("__zsenc__") {
+                continue;
+            }
             column_set.insert(key);
         }
     }
@@ -1576,7 +1707,12 @@ pub fn build_insert_many(
                 placeholders.push("NULL".to_string());
             } else {
                 params.push(value_to_param(val));
-                placeholders.push(format!("${}", params.len()));
+                let n = params.len();
+                if encrypted_cols.contains(key.as_str()) {
+                    placeholders.push(format!("decode(${n}, 'base64')::bytea"));
+                } else {
+                    placeholders.push(format!("${n}"));
+                }
             }
         }
         value_groups.push(format!("({})", placeholders.join(", ")));

@@ -112,6 +112,92 @@ function extractUpdateFields(update: PlainObject): PlainObject {
 }
 
 /**
+ * **P5 PR 2** — operators allowed on a `deterministic`-encrypted column.
+ * Only equality (`$eq`, `$in`) is sound on the ciphertext; range /
+ * regex / LIKE require ordering or substring matching that
+ * deterministic mode cannot provide. A query that mentions any other
+ * operator on a deterministic-encrypted field is rejected at the SDK
+ * boundary with `deterministic_encrypted_op_not_supported` so the
+ * call never reaches Rust.
+ *
+ * Bare values (`{ ssn: "X" }`) are treated as `$eq` and accepted.
+ */
+const DETERMINISTIC_ENCRYPTED_OPS_ALLOWED: ReadonlySet<string> = new Set(["$eq", "$in"]);
+
+/**
+ * **P5 PR 2** — walk a filter looking for keys that the schema marks
+ * as `encrypted`. Refuse:
+ *   - ANY use of a randomised-encrypted field
+ *     (`randomised_encrypted_field_not_filterable`) — the ciphertext
+ *     differs per write so no equality lookup can match.
+ *   - Range / regex / LIKE on a deterministic-encrypted field
+ *     (`deterministic_encrypted_op_not_supported`) — only `$eq`/`$in`
+ *     are sound on the ciphertext.
+ *
+ * Recurses into `$and` / `$or` arms. The walker is intentionally
+ * conservative — anything not on the allowed list is refused — so
+ * future operator additions stay fail-closed for encrypted columns.
+ */
+function validateEncryptedFieldsInFilter(
+  filter: PlainObject | undefined,
+  schema: NormalizedSchema,
+): void {
+  if (filter === null || filter === undefined) return;
+  if (typeof filter !== "object" || Array.isArray(filter)) return;
+
+  for (const [key, value] of Object.entries(filter)) {
+    // Logical combinators recurse into their arms.
+    if (key === "$and" || key === "$or") {
+      if (Array.isArray(value)) {
+        for (const arm of value) {
+          validateEncryptedFieldsInFilter(arm as PlainObject, schema);
+        }
+      }
+      continue;
+    }
+    if (key === "$not") {
+      validateEncryptedFieldsInFilter(value as PlainObject, schema);
+      continue;
+    }
+    if (key.startsWith("$")) {
+      continue;
+    }
+    const def = schema[key];
+    if (!def || def.encrypted === undefined) {
+      continue;
+    }
+    const mode = def.encrypted.mode;
+    if (mode === "randomised") {
+      // ANY filter on a randomised-encrypted column is refused.
+      throw Object.assign(
+        new Error(
+          `filter on "${key}": randomised-encrypted columns cannot be filtered — ` +
+            `the ciphertext differs per write so no equality lookup can match. ` +
+            `Switch the column to { mode: "deterministic" } if you need lookup, ` +
+            `or drop the filter clause.`,
+        ),
+        { code: "randomised_encrypted_field_not_filterable" as const },
+      );
+    }
+    // Deterministic: only `$eq` and `$in` are sound on the ciphertext.
+    // A bare value (`{ ssn: "X" }`) is treated as `$eq` — accepted.
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      for (const op of Object.keys(value as PlainObject)) {
+        if (op.startsWith("$") && !DETERMINISTIC_ENCRYPTED_OPS_ALLOWED.has(op)) {
+          throw Object.assign(
+            new Error(
+              `filter on "${key}": deterministic-encrypted columns support only $eq and $in (got "${op}"). ` +
+                `Range / regex / LIKE require ordering or substring matching that deterministic mode cannot provide.`,
+            ),
+            { code: "deterministic_encrypted_op_not_supported" as const },
+          );
+        }
+      }
+    }
+  }
+}
+
+/**
  * Validates $push / $addToSet values against the schema's array item type.
  * Throws ValidationError if any pushed value does not match the declared items type.
  * Numeric operators ($inc, $dec, $mul) are skipped — they are inherently numeric.
@@ -753,6 +839,8 @@ export class Collection<
       ? ({ id: idOrFilter } as Filter<S>)
       : idOrFilter);
     if (typeof idOrFilter !== "number") {
+      // **P5 PR 2** — encrypted-column filter fence.
+      validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
       _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     }
     return this._run(async () => {
@@ -819,6 +907,15 @@ export class Collection<
    */
   async exists(filter: Filter<S> = {} as Filter<S>): Promise<Result<boolean>> {
     trackCollectionAccess(this._name);
+    // **P5 PR 2** — encrypted-column filter fence. Cheaper to refuse
+    // here than via the downstream `this.find(filter)` because we
+    // want a typed `error.code` rather than a wrapped throw via
+    // `toResultError`.
+    try {
+      validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+    } catch (e) {
+      return err(toResultError(e));
+    }
     // Synchronous throws from `this.find(filter)` (e.g. R4 IMPORTANT-1
     // null-filter rejection inside `mapFilterOutbound`) must surface as
     // `Result.error`, not an uncaught throw — `exists` callers expect
@@ -848,6 +945,13 @@ export class Collection<
   find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
   find(filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec }): Query<S, Row<S>, AllSchemas> {
     trackCollectionAccess(this._name);
+    // **P5 PR 2** — refuse filters that touch a randomised-encrypted
+    // column (any op) or use range/regex/LIKE on a deterministic-
+    // encrypted column. Synchronous throw — Result-wrapping the throw
+    // would change the error rail; `find()` returns a `Query` that
+    // already swallows synchronous throws inside `.then()` via
+    // `toResultError`.
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
     const q = new Query<S, Row<S>, AllSchemas>(
@@ -882,6 +986,8 @@ export class Collection<
     create: RowInput<S>,
     opts?: { conflictFields?: (string & keyof Row<S>)[] },
   ): Promise<Result<{ row: Row<S>; created: boolean }>> {
+    // **P5 PR 2** — encrypted-column filter fence.
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
     return this._run(async () => {
       const filterKeys = Object.keys(filter as PlainObject).filter((k) => !k.startsWith("$"));
       let conflictFields = opts?.conflictFields;
@@ -969,6 +1075,12 @@ export class Collection<
       const filter = (typeof idOrFilter === "number"
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
+      // **P5 PR 2** — encrypted-column filter fence. We refuse only on
+      // the filter, not on the patch — writing to an encrypted column
+      // is the whole point.
+      if (typeof idOrFilter !== "number") {
+        validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+      }
       const updateObj = patch as PlainObject;
       const fields = extractUpdateFields(updateObj);
       checkPartial(fields, this._schema);
@@ -1004,6 +1116,9 @@ export class Collection<
     filter: Filter<S> = {} as Filter<S>,
     update: UpdateExpression<S>
   ): Promise<Result<{ count: number }>> {
+    // **P5 PR 2** — refuse filters on encrypted columns BEFORE
+    // entering `_run` so a synchronous throw produces a typed error.
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
     return this._run(async () => {
       const updateObj = update as PlainObject;
       const fields = extractUpdateFields(updateObj);
@@ -1038,6 +1153,10 @@ export class Collection<
       const filter = (typeof idOrFilter === "number"
         ? ({ id: idOrFilter } as Filter<S>)
         : idOrFilter);
+      // **P5 PR 2** — encrypted-column filter fence.
+      if (typeof idOrFilter !== "number") {
+        validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+      }
       const hard = opts.hard === true;
       // Both branches honor CAS — versioning + `{ version: N }` in the
       // filter must reject a concurrent writer's lost update, soft or
@@ -1076,6 +1195,9 @@ export class Collection<
     filter: Filter<S> = {} as Filter<S>,
     opts: { hard?: boolean } = {},
   ): Promise<Result<{ deletedCount: number }>> {
+    // **P5 PR 2** — encrypted-column filter fence (synchronous so a
+    // typed throw surfaces if the SDK consumer didn't wrap the call).
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
     _maybeWarnUnindexedFilter(this._name, this._schema, filter as PlainObject, this._indexes);
     return this._run(async () => {
       const hard = opts.hard === true;
@@ -1104,6 +1226,8 @@ export class Collection<
    */
   async count(filter: Filter<S> = {} as Filter<S>): Promise<Result<number>> {
     trackCollectionAccess(this._name);
+    // **P5 PR 2** — encrypted-column filter fence.
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
     return this._run(async () => {
       const mapped = this._mergeFilter(mapFilterOutbound(filter as ZeroshipDbFilter, this._toColumn));
       const n = await this._nativeCollection().count(mapped);
@@ -1117,6 +1241,23 @@ export class Collection<
    */
   async distinct(field: string & keyof Row<S>, filter: Filter<S> = {} as Filter<S>): Promise<Result<(string | number | boolean | null)[]>> {
     trackCollectionAccess(this._name);
+    // **P5 PR 2** — encrypted-column filter fence. Also refuse
+    // `distinct(<encrypted-col>)` because returning distinct ciphertext
+    // values would leak frequency analysis on randomised columns and
+    // contradict the deterministic-mode equality-only contract on a
+    // column-by-column basis.
+    validateEncryptedFieldsInFilter(filter as PlainObject, this._schema);
+    {
+      const def = this._schema[field as string];
+      if (def && def.encrypted) {
+        throw Object.assign(
+          new Error(
+            `distinct("${field}"): encrypted columns are not distinct-able (would leak ciphertext frequencies).`,
+          ),
+          { code: "distinct_on_encrypted_field_unsupported" as const },
+        );
+      }
+    }
     return this._run(async () => {
       if (!this._knownFields.has(field)) {
         throw new ValidationError({ [field]: { path: field, message: `unknown field: ${field}` } });

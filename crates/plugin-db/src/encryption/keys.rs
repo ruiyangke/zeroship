@@ -45,14 +45,32 @@ use sha2::Sha256;
 use super::aead::AeadKey;
 use crate::error::DbError;
 
-/// Source of root key material. PR 1 ships only the env-var variant;
-/// `PgAdminTable` lands in PR 2 alongside the SECURITY DEFINER getter.
+/// Source of root key material.
+///
+/// PR 1 shipped only [`Self::EnvVar`]. PR 2 adds
+/// [`Self::PgAdminTable`] — the production PG path. The PG path:
+///   1. Calls `__zeroship_admin.get_column_key($1)` (SECURITY DEFINER).
+///   2. If the getter returns NULL (table empty / key id missing),
+///      **falls back to the env-var path** so apps that haven't yet
+///      run the column-keys migration still resolve a key.
+///
+/// Both variants are gated to `feature = "hardening"` on the consumer
+/// side — only the `EncryptedColumn for PostgresBackend` impl (also
+/// `hardening`-gated) instantiates `PgAdminTable`.
 #[derive(Debug)]
-#[non_exhaustive] // Allow PR 2 to add the `PgAdminTable` variant without breaking matches.
+#[non_exhaustive] // Future variants (Vault, KMS, …) slot in here.
 pub enum KeySource {
     /// Read 32-byte root keys from `ZEROSHIP_COLUMN_KEY_<KEYID>` env
     /// vars (hex-encoded). SQLite tier + PG dev parity.
     EnvVar,
+    /// **P5 PR 2** — PG production source. Reads
+    /// `__zeroship_admin.column_keys` via the SECURITY DEFINER getter
+    /// installed by `crate::auth::bootstrap::ensure_admin_schema`.
+    /// Falls through to `EnvVar` when the getter returns NULL (covers
+    /// the pre-migration / dev-parity case). Gated on the consumer side
+    /// to `feature = "hardening"`.
+    #[cfg(feature = "hardening")]
+    PgAdminTable(std::rc::Rc<compio_postgres::Pool>),
 }
 
 /// Per-isolate column-key store. Caches derived `AeadKey` material
@@ -102,6 +120,18 @@ impl KeyStore {
         }
         let root = match &self.sourcing {
             KeySource::EnvVar => env_lookup_root(key_id)?,
+            #[cfg(feature = "hardening")]
+            KeySource::PgAdminTable(pool) => {
+                // PG-prod path: call the SECURITY DEFINER getter. NULL
+                // result (table empty, key id missing, table itself
+                // missing) → fall back to env-var sourcing so a
+                // pre-migration app still resolves a key.
+                match pg_admin_lookup_root(pool, key_id).await {
+                    Ok(Some(bytes)) => bytes,
+                    Ok(None) => env_lookup_root(key_id)?,
+                    Err(_) => env_lookup_root(key_id)?,
+                }
+            }
         };
         let key = derive_key(&root, app_id)?;
         self.cache.borrow_mut().insert(
@@ -184,6 +214,71 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
         b'A'..=b'F' => Ok(c - b'A' + 10),
         _ => Err(format!("invalid hex digit {:?}", c as char)),
     }
+}
+
+/// **P5 PR 2** — PG production root-key fetcher.
+///
+/// Calls `__zeroship_admin.get_column_key($1)` (the SECURITY DEFINER
+/// getter installed by `crate::auth::bootstrap::ensure_admin_schema`).
+/// Returns `Ok(Some(bytes))` on a successful lookup, `Ok(None)` when
+/// the getter returns NULL (table empty / row missing), and `Err(...)`
+/// when the call itself failed (table doesn't exist, permission denied,
+/// connection error). Callers fall through to env-var sourcing on
+/// `Ok(None)` OR `Err(_)` so apps that haven't run the column-keys
+/// migration still resolve a key.
+///
+/// The function returns the raw 32-byte root; HKDF expansion happens
+/// in `derive_key`.
+#[cfg(feature = "hardening")]
+async fn pg_admin_lookup_root(
+    pool: &compio_postgres::Pool,
+    key_id: &str,
+) -> Result<Option<[u8; 32]>, DbError> {
+    // The getter returns `bytea`. compio-postgres' text protocol
+    // surfaces bytea as a `\x`-prefixed hex string (the PG default for
+    // `bytea_output = hex`). We parse it back to bytes; an empty
+    // result set OR a NULL value → `Ok(None)`.
+    let rows = pool
+        .query_text_params(
+            "SELECT __zeroship_admin.get_column_key($1)",
+            &[&key_id],
+        )
+        .await
+        .map_err(|e| DbError::Configuration {
+            code: "column_key_not_configured",
+            message: format!(
+                "PG getter call failed for key_id '{key_id}': {e}"
+            ),
+            hint: Some(
+                "Run __zeroship_admin bootstrap migration or set ZEROSHIP_COLUMN_KEY_<KEYID>"
+                    .to_string(),
+            ),
+        })?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    // `try_get` returns `Err` for NULL (a `WasNull` typed error) and
+    // for type mismatches; either way we treat the row as "no key
+    // present" and let the caller fall through to env-var sourcing.
+    // `Row::get` would panic on NULL.
+    let s: String = match row.try_get::<_, String>(0) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    if s.is_empty() || s == "NULL" {
+        return Ok(None);
+    }
+    // PG `bytea_output = hex` format: `\xHHHH...`.
+    let hex_part = s.strip_prefix("\\x").unwrap_or(&s);
+    let Ok(decoded) = hex_decode(hex_part) else {
+        return Ok(None);
+    };
+    if decoded.len() != 32 {
+        return Ok(None);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(Some(out))
 }
 
 #[cfg(test)]

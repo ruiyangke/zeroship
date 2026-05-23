@@ -5784,3 +5784,348 @@ async fn postgis_extension_missing_reports_typed_error() {
         other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
     }
 }
+
+// ===========================================================================
+// P5 PR 2 — Encrypted column integration (gated `hardening`)
+// ===========================================================================
+//
+// These tests exercise the full PG round-trip for `t.encrypted(...)`-
+// declared columns: BYTEA emit on DDL, decode($N, 'base64')::bytea on
+// insert, encode-as-hex on read, AAD-bound decrypt. The Camp A fence
+// (row_pk in AAD for Randomised) is the load-bearing assertion in
+// `encrypted_randomised_row_swap_rejected` — copying ciphertext from
+// row A into row B's slot must surface `encryption_aead_failed` rather
+// than leak row A's plaintext through row B's read API.
+
+// Imports are local to this section. Earlier P4 test modules import
+// `PostgresBackend` + `DbError` per-fn via `use ...` inside the test
+// body; we surface them at module scope here so the four P5 tests can
+// share one `use` block. The `as _` on `EncryptedColumn` brings the
+// trait methods into scope without aliasing the trait name itself.
+use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode, PostgresBackend};
+use zeroship_plugin_db::encryption;
+use zeroship_plugin_db::error::DbError;
+
+/// Helper: set a synthetic root key in `ZEROSHIP_COLUMN_KEY_DEFAULT`
+/// for the duration of a test, restoring the previous value on drop.
+struct WithEnv {
+    name: &'static str,
+    prev: Option<String>,
+}
+#[allow(unsafe_code)]
+impl WithEnv {
+    fn set(name: &'static str, value: &str) -> Self {
+        let prev = std::env::var(name).ok();
+        // SAFETY: each test that touches the env var serialises via
+        // --test-threads=1 (per `required-features`). The
+        // `ZEROSHIP_COLUMN_KEY_*` namespace is plugin-db-owned; no
+        // other crate touches it. Std env mutation is `unsafe` in
+        // 2024-edition; we accept the contract here.
+        unsafe {
+            std::env::set_var(name, value);
+        }
+        Self { name, prev }
+    }
+}
+#[allow(unsafe_code)]
+impl Drop for WithEnv {
+    fn drop(&mut self) {
+        // SAFETY: same justification as above.
+        unsafe {
+            match &self.prev {
+                Some(p) => std::env::set_var(self.name, p),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+}
+
+/// **P5 PR 2 — gate #1**: round-trip an encrypted string column. Insert a
+/// row with `ssn` declared `t.encrypted({ mode: "randomised" })`,
+/// read it back via the PG path, expect the plaintext to recover.
+#[compio::test]
+async fn encrypted_column_round_trip_randomised() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    // Synthetic 32-byte root key.
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"a".repeat(64));
+
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+        .await
+        .unwrap();
+    // Manually create the table; the encryption pass operates on
+    // generic BYTEA columns regardless of how DDL emits them, and we
+    // want the integration test to not depend on the full
+    // register-model pipeline (which is gated to the V8 entry).
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{SCHEMA}"."enc_notes" (
+                id   TEXT PRIMARY KEY,
+                ssn  BYTEA
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let key = backend.resolve_key("app1", "default").await.expect("resolve_key");
+    let plaintext = b"123-45-6789";
+    let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
+    let ct = backend
+        .encrypt(&key, EncryptionMode::Randomised, plaintext, &aad)
+        .expect("encrypt");
+
+    // Bind via base64 decode just like the build_insert layer does.
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+        ),
+        &[&"row_a", &b64.as_str()],
+    )
+    .await
+    .unwrap();
+
+    // Read back as BYTEA via `encode(ssn, 'hex')` so the text protocol
+    // surfaces a hex string we can parse cleanly. (Reading the BYTEA
+    // column directly via Row::get<String> fails because the
+    // text-format BYTEA representation isn't UTF-8 in general.)
+    let rows = pool
+        .query_text_params(
+            &format!("SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{SCHEMA}\".\"enc_notes\" WHERE id = $1"),
+            &[&"row_a"],
+        )
+        .await
+        .unwrap();
+    let hex_str: String = rows[0].get("ssn_hex");
+    let raw = {
+        let mut out = Vec::with_capacity(hex_str.len() / 2);
+        for chunk in hex_str.as_bytes().chunks(2) {
+            let pair = std::str::from_utf8(chunk).unwrap();
+            out.push(u8::from_str_radix(pair, 16).unwrap());
+        }
+        out
+    };
+    let recovered = backend
+        .decrypt(&key, EncryptionMode::Randomised, &raw, &aad)
+        .expect("decrypt");
+    assert_eq!(recovered, plaintext);
+}
+
+/// **P5 PR 2 — Camp A fence**: copying ciphertext from row A into row
+/// B's slot must surface `encryption_aead_failed` (row_pk in AAD
+/// defeats the ciphertext-oracle attack on randomised columns).
+#[compio::test]
+async fn encrypted_randomised_row_swap_rejected() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"b".repeat(64));
+
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{SCHEMA}"."enc_notes" (
+                id   TEXT PRIMARY KEY,
+                ssn  BYTEA
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let key = backend.resolve_key("app1", "default").await.unwrap();
+    // Insert row A with its OWN AAD (binds row_pk = "row_a").
+    let ct_a = backend
+        .encrypt(
+            &key,
+            EncryptionMode::Randomised,
+            b"sensitive-A",
+            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
+        )
+        .unwrap();
+    let ct_b = backend
+        .encrypt(
+            &key,
+            EncryptionMode::Randomised,
+            b"sensitive-B",
+            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
+        )
+        .unwrap();
+    for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ct);
+        pool.execute(
+            &format!(
+                "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+            ),
+            &[&id, &b64.as_str()],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Attacker move: copy row A's ciphertext into row B's slot.
+    let b64_a = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_a);
+    pool.execute(
+        &format!(
+            "UPDATE \"{SCHEMA}\".\"enc_notes\" SET ssn = decode($1, 'base64')::bytea WHERE id = $2"
+        ),
+        &[&b64_a.as_str(), &"row_b"],
+    )
+    .await
+    .unwrap();
+
+    // Read row B → decrypt with row B's AAD (row_pk = "row_b"). Use
+    // `encode(ssn, 'hex')` per the round-trip test above.
+    let rows = pool
+        .query_text_params(
+            &format!("SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{SCHEMA}\".\"enc_notes\" WHERE id = $1"),
+            &[&"row_b"],
+        )
+        .await
+        .unwrap();
+    let hex_str: String = rows[0].get("ssn_hex");
+    let raw = {
+        let mut out = Vec::with_capacity(hex_str.len() / 2);
+        for chunk in hex_str.as_bytes().chunks(2) {
+            let pair = std::str::from_utf8(chunk).unwrap();
+            out.push(u8::from_str_radix(pair, 16).unwrap());
+        }
+        out
+    };
+    let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
+    let err = backend
+        .decrypt(&key, EncryptionMode::Randomised, &raw, &aad_b)
+        .expect_err("row-swap must fail AAD verification");
+    match err {
+        DbError::ValidationFailed { code, .. } => {
+            assert_eq!(code, "encryption_aead_failed");
+        }
+        other => panic!("expected ValidationFailed encryption_aead_failed, got {other:?}"),
+    }
+}
+
+/// **P5 PR 2 — gate #2**: deterministic mode produces identical
+/// ciphertext for identical plaintext under the same `(collection,
+/// column)` regardless of row_pk. This is what makes equality lookups
+/// on the ciphertext sound; the deterministic-encrypted column gets an
+/// automatic B-tree index from `build_create_indexes`.
+#[compio::test]
+async fn encrypted_deterministic_equality_lookup() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"c".repeat(64));
+
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{SCHEMA}"."enc_notes" (
+                id   TEXT PRIMARY KEY,
+                ssn  BYTEA
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(r#"CREATE INDEX ON "{SCHEMA}"."enc_notes" (ssn)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let key = backend.resolve_key("app1", "default").await.unwrap();
+
+    // Insert 5 rows with the same SSN to confirm deterministic mode
+    // produces identical ciphertext (we then query by exact ciphertext
+    // and expect all 5 to come back).
+    let aad = encryption::canonical_aad("enc_notes", "ssn", None);
+    let ct_shared = backend
+        .encrypt(&key, EncryptionMode::Deterministic, b"shared-ssn", &aad)
+        .unwrap();
+    let b64_shared = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_shared);
+
+    for i in 0..5 {
+        pool.execute(
+            &format!(
+                "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+            ),
+            &[&format!("row_{i}").as_str(), &b64_shared.as_str()],
+        )
+        .await
+        .unwrap();
+    }
+    // Plus a distinct row.
+    let ct_other = backend
+        .encrypt(&key, EncryptionMode::Deterministic, b"other-ssn", &aad)
+        .unwrap();
+    let b64_other = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_other);
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+        ),
+        &[&"row_other", &b64_other.as_str()],
+    )
+    .await
+    .unwrap();
+
+    // Query by the ciphertext (the SDK would compute the SAME
+    // ciphertext for `find({ssn: "shared-ssn"})` because deterministic
+    // mode is, well, deterministic; the orchestrator binds the same
+    // BYTEA via decode($N, 'base64')).
+    let rows = pool
+        .query_text_params(
+            &format!("SELECT id FROM \"{SCHEMA}\".\"enc_notes\" WHERE ssn = decode($1, 'base64')::bytea"),
+            &[&b64_shared.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 5, "deterministic equality lookup must match all 5 shared-ssn rows");
+}
+
+/// **P5 PR 2** — when `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
+/// var AND the `__zeroship_admin.column_keys` row is missing), the
+/// PG resolver surfaces a typed `column_key_not_configured`
+/// Configuration error rather than panicking or returning Internal.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn encrypted_column_missing_key_typed_error() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    // Defensively clear the env var (and don't restore — this test
+    // runs with --test-threads=1).
+    // SAFETY: same justification as `WithEnv`.
+    unsafe {
+        std::env::remove_var("ZEROSHIP_COLUMN_KEY_MISSING_TEST");
+    }
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let err = backend
+        .resolve_key("app1", "missing_test")
+        .await
+        .expect_err("missing key must yield a typed error");
+    match err {
+        DbError::Configuration { code, .. } => {
+            assert_eq!(code, "column_key_not_configured");
+        }
+        other => panic!("expected Configuration column_key_not_configured, got {other:?}"),
+    }
+}

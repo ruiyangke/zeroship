@@ -86,6 +86,14 @@ pub fn register_model_dispatch<'s>(
         match exec_register_model(&app_id_owned, &collection_owned, &schema, &indexes).await {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
+                // **P5 PR 2** — cache the schema so the CRUD encryption
+                // pass can find `t.encrypted(...)` columns at dispatch
+                // time. Cloned because the closure captures `schema` by
+                // move; the cache is per-isolate and lives for the
+                // isolate's lifetime (no eviction).
+                context::with_mut(|c| {
+                    c.cache_schema(&app_id_owned, &collection_owned, schema.clone());
+                });
                 OpResult::JsValue {
                     resolver,
                     value: ResolveValue::String("null".to_string()),

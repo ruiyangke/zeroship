@@ -94,7 +94,15 @@ pub(crate) mod v8_bridge;
 // surface; the backend impls return `Configuration { code: "p5_pr2_stub" }`
 // and the CRUD call sites land in PR 2 (PG) and PR 3 (SQLite). See
 // `docs/proposals/p5-encryption-backup-implementation-plan.md` §9.
+//
+// Visibility: crate-private in release builds; `pub` under
+// `test-helpers` so `tests/integration.rs` can reach
+// `encryption::canonical_aad` etc. for the P5 round-trip + row-swap
+// fences.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod encryption;
+#[cfg(feature = "test-helpers")]
+pub mod encryption;
 
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
 // capability declared in `crate::backend::mod`. Crate-private — the

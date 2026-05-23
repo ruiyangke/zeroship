@@ -29,7 +29,7 @@
 //! commits without churn.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use compio_postgres::{Client, Pool};
@@ -189,6 +189,18 @@ pub struct IsolateDbContext {
     /// consumer per app at a time).
     running_consumers: HashSet<String>,
 
+    /// **P5 PR 2** — per-isolate, per-`(app_id, collection)` schema
+    /// cache. Populated by `register_model_dispatch` on successful
+    /// register; consulted by the CRUD encryption pass (`crud::dispatch_*`)
+    /// to find columns declared `t.encrypted(...)`. Empty for any
+    /// collection that hasn't been registered on this thread, OR for
+    /// any collection registered before this PR landed — the cache is
+    /// best-effort: a miss means "skip the encryption pass entirely",
+    /// which is the correct behaviour for collections that have no
+    /// encrypted columns. Keyed by `"{app_id}:{collection}"`; the value
+    /// is the raw schema JSON the SDK declared.
+    schemas: HashMap<String, serde_json::Value>,
+
     /// Backend handle wrapping the pool — Stage 8e-R2; promoted to
     /// the typed [`BackendHandle`] enum in P0 PR 5 (round-3 critic
     /// CRITICAL #3 closure; see `docs/proposals/db-system-design.md`
@@ -227,6 +239,7 @@ impl IsolateDbContext {
             pending_emits: None,
             mig_lock: None,
             running_consumers: HashSet::new(),
+            schemas: HashMap::new(),
             backend: None,
         }
     }
@@ -302,6 +315,36 @@ impl IsolateDbContext {
     pub(crate) fn mark_model_registered(&mut self, app_id: &str, collection: &str) {
         let key = format!("{app_id}:{collection}");
         self.registered_models.insert(key);
+    }
+
+    /// **P5 PR 2** — cache the schema declared by `db.registerModel`.
+    /// Called after the four-phase DDL pipeline succeeds so the CRUD
+    /// encryption pass can find `t.encrypted(...)` columns by name.
+    /// Idempotent: re-registering the same collection overwrites the
+    /// cached schema (the DDL pipeline reconciles diffs but the in-
+    /// memory cache should reflect the latest declaration).
+    pub(crate) fn cache_schema(
+        &mut self,
+        app_id: &str,
+        collection: &str,
+        schema: serde_json::Value,
+    ) {
+        let key = format!("{app_id}:{collection}");
+        self.schemas.insert(key, schema);
+    }
+
+    /// **P5 PR 2** — fetch the cached schema for a `(app_id,
+    /// collection)`. Returns `None` when the collection hasn't been
+    /// registered on this isolate yet (the CRUD encryption pass
+    /// short-circuits on `None`, which is the correct behaviour for
+    /// collections with no encrypted columns).
+    pub(crate) fn schema_for(
+        &self,
+        app_id: &str,
+        collection: &str,
+    ) -> Option<serde_json::Value> {
+        let key = format!("{app_id}:{collection}");
+        self.schemas.get(&key).cloned()
     }
 
     // ----- TX_CONN / TX_TOKEN / TX_TOKEN_COUNTER / AUTO_TX_OWNED ------

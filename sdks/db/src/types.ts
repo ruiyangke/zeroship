@@ -338,6 +338,50 @@ export function err<T>(error: Error): Result<T> {
 
 /** Primitive field type names supported by the SDK. */
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json" | "calendarDate";
+
+/**
+ * **P5 PR 2** — column-encryption mode. Picks both the nonce-derivation
+ * strategy and the AAD shape (Camp A, resolved 2026-05-24):
+ *
+ * - `randomised` — per-write fresh nonce; AAD binds `(collection,
+ *   column, row_pk)`. Two encrypts of the same plaintext produce
+ *   different ciphertext (fail-safe default). The SDK refuses ANY
+ *   filter on a randomised column at the boundary because no
+ *   equality-on-ciphertext lookup can match.
+ * - `deterministic` — synthetic nonce HMAC-derived from the plaintext;
+ *   AAD binds `(collection, column)` only. Same plaintext under the
+ *   same column produces identical ciphertext, enabling B-tree
+ *   equality lookups. The SDK refuses range / regex / LIKE on
+ *   deterministic columns (only `$eq`/`$in`). Inherits the standard
+ *   deterministic-mode leak — equality across rows is observable to
+ *   anyone with column read access.
+ */
+export type EncryptionMode = "randomised" | "deterministic";
+
+/**
+ * **P5 PR 2** — options accepted by `t.encrypted(opts?)`.
+ *
+ * - `mode` — defaults to `"randomised"` (fail-safe).
+ * - `keyId` — selects the per-platform root key (env var
+ *   `ZEROSHIP_COLUMN_KEY_<KEYID>` or `__zeroship_admin.column_keys`).
+ *   Defaults to `"default"`.
+ * - `wraps` — the inner primitive type, ONE OF `t.string()` /
+ *   `t.number()` / `t.bytes()` (the `bytes` wrap accepts base64-encoded
+ *   string at the JS layer). Defaults to `t.string()`. Other types
+ *   throw synchronously with `encrypted_wraps_unsupported`.
+ */
+export interface EncryptedFieldOpts {
+  /** Encryption mode. Defaults to `"randomised"`. */
+  mode?: EncryptionMode;
+  /** Key id selecting the per-platform root. Defaults to `"default"`. */
+  keyId?: string;
+  /**
+   * Inner type the encrypted value wraps. Only string / number / bytes
+   * are supported. Passing any other `TypeBuilder` throws with code
+   * `encrypted_wraps_unsupported` at schema-definition time.
+   */
+  wraps?: TypeBuilder<any, any>;
+}
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
 /**
@@ -346,7 +390,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  * "literal" (C2 discriminator constant), and "union" (C2 discriminated
  * union document shape — proposal §C2).
  */
-export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint";
+export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes";
 
 /**
  * **P4 PR 2** — distance metric for `t.vector(...)` fields. The three
@@ -511,6 +555,27 @@ export interface FieldDef {
    * an explicit argument.
    */
   ftsLanguage?: string;
+  /**
+   * **P5 PR 2** — column-encryption metadata. Present iff the SDK
+   * declared the column with `t.encrypted({ mode, keyId, wraps })`.
+   * The DDL emitter renders BYTEA / BLOB regardless of `wraps`; the
+   * `wraps` field survives so the validator walks the right
+   * type-checker before the encrypt pass swaps bytes in.
+   *
+   * - `mode` — `"randomised"` (default, fail-safe) or `"deterministic"`
+   *   (enables B-tree equality lookups; carries the standard
+   *   deterministic-mode leak).
+   * - `keyId` — selects the per-platform root key. Defaults to
+   *   `"default"`.
+   * - `wraps` — the inner primitive (`"string"` | `"number"` | `"bytes"`).
+   *   Other types are refused at schema-definition time with code
+   *   `encrypted_wraps_unsupported`.
+   */
+  encrypted?: {
+    mode: EncryptionMode;
+    keyId: string;
+    wraps: "string" | "number" | "bytes";
+  };
 }
 
 /**
@@ -543,6 +608,20 @@ export class TypeBuilder<T = unknown, R extends boolean = false> {
 
   /** Adds a unique index constraint to the field. */
   unique(): this {
+    // **P5 PR 2** — randomised + unique is incoherent: randomised mode
+    // produces a fresh nonce per write, so the ciphertext for the
+    // same plaintext differs across rows, which defeats any
+    // ciphertext-equality uniqueness constraint. Deterministic mode
+    // CAN enforce uniqueness because identical plaintexts produce
+    // identical ciphertexts under the same (collection, column).
+    if (this._def.encrypted !== undefined && this._def.encrypted.mode === "randomised") {
+      throw Object.assign(
+        new Error(
+          "t.encrypted({ mode: 'randomised' }).unique(): unique enforcement requires equality on ciphertext, which randomised mode cannot provide. Switch to { mode: 'deterministic' } or drop .unique().",
+        ),
+        { code: "unique_encrypted_randomised_unsupported" as const },
+      );
+    }
     this._def.unique = true;
     return this;
   }
@@ -855,6 +934,108 @@ export const t = {
    */
   calendarDate(): TypeBuilder<string> {
     return new TypeBuilder<string>({ type: "calendarDate" });
+  },
+  /**
+   * **P5 PR 2** — byte-array wrap for `t.encrypted({ wraps: t.bytes() })`.
+   *
+   * At the JS layer the field is exchanged as a base64-encoded string;
+   * at the DB layer it becomes a BYTEA column (always — bytes-typed
+   * columns outside an `encrypted` wrap aren't yet supported in
+   * plugin-db). Outside `t.encrypted({ wraps: ... })` a bare
+   * `t.bytes()` schema field is an error at register-model time today;
+   * this builder exists so the encrypted-wrap argument is well-typed.
+   */
+  bytes(): TypeBuilder<string> {
+    return new TypeBuilder<string>({ type: "bytes" });
+  },
+  /**
+   * **P5 PR 2** — transparent column encryption. Wraps a string /
+   * number / bytes field with AEAD encryption at the storage boundary.
+   *
+   * ```ts
+   * const fields = {
+   *   ssn:        t.encrypted({ mode: "randomised" }).required(),
+   *   apiKey:     t.encrypted({ mode: "deterministic" }).unique(),
+   *   payload:    t.encrypted({ wraps: t.bytes() }),
+   *   amount:     t.encrypted({ wraps: t.number() }),
+   * };
+   * ```
+   *
+   * Modes:
+   * - `"randomised"` (default) — per-write fresh nonce; AAD binds
+   *   `(collection, column, row_pk)`. Two encrypts of the same plaintext
+   *   produce DIFFERENT ciphertext. Defeats the ciphertext-oracle
+   *   attack on rows with shared columns. ALL filtering on the column
+   *   is refused at the SDK boundary
+   *   (`randomised_encrypted_field_not_filterable`).
+   * - `"deterministic"` — synthetic nonce HMAC-derived from plaintext;
+   *   AAD binds `(collection, column)` only. Same plaintext → same
+   *   ciphertext, enabling B-tree equality lookups. Only equality
+   *   + `$in` filters are accepted; range / regex / LIKE are refused
+   *   with `deterministic_encrypted_op_not_supported`.
+   *
+   * Constraints:
+   * - `wraps` must be `t.string()` / `t.number()` / `t.bytes()`. Other
+   *   types throw with `encrypted_wraps_unsupported`.
+   * - The combination `mode: "randomised"` + `.unique()` is refused at
+   *   schema-definition time with `unique_encrypted_randomised_unsupported`
+   *   (randomised mode can't enforce uniqueness without equality).
+   * - Applying `t.encrypted()` to a `t.ref()` field is refused with
+   *   `encrypted_on_ref_unsupported` — FK columns must remain unencrypted
+   *   so the JOIN integrity check works.
+   */
+  encrypted<T extends string | number | Uint8Array = string>(
+    opts?: EncryptedFieldOpts,
+  ): TypeBuilder<T> {
+    const wrapsBuilder = opts?.wraps;
+    let wrapsKind: "string" | "number" | "bytes" = "string";
+    if (wrapsBuilder !== undefined) {
+      if (!(wrapsBuilder instanceof TypeBuilder)) {
+        throw Object.assign(
+          new Error("t.encrypted({ wraps }): wraps must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
+          { code: "encrypted_wraps_unsupported" as const },
+        );
+      }
+      const def = wrapsBuilder.toFieldDef();
+      if (def.type === "string") wrapsKind = "string";
+      else if (def.type === "number") wrapsKind = "number";
+      else if (def.type === "bytes") wrapsKind = "bytes";
+      else {
+        throw Object.assign(
+          new Error(
+            `t.encrypted({ wraps }): only string / number / bytes are supported, got "${def.type}"`,
+          ),
+          { code: "encrypted_wraps_unsupported" as const },
+        );
+      }
+    }
+    const mode: EncryptionMode = opts?.mode ?? "randomised";
+    if (mode !== "randomised" && mode !== "deterministic") {
+      throw Object.assign(
+        new Error(
+          `t.encrypted({ mode }): must be "randomised" or "deterministic", got "${String(mode)}"`,
+        ),
+        { code: "encrypted_invalid_mode" as const },
+      );
+    }
+    const keyId = opts?.keyId ?? "default";
+    if (typeof keyId !== "string" || keyId.length === 0 || !/^[A-Za-z0-9_]+$/.test(keyId)) {
+      throw Object.assign(
+        new Error(
+          `t.encrypted({ keyId }): keyId must be a [A-Za-z0-9_]+ token, got "${String(keyId)}"`,
+        ),
+        { code: "encrypted_invalid_key_id" as const },
+      );
+    }
+    // The DB column TYPE is BYTEA — the encryption pass + DDL emitter
+    // (`field_to_column` in plugin-db) ignore the `type` field when
+    // `encrypted` is present. We still carry the wrapped primitive's
+    // type so validators see the right user-facing shape (e.g.
+    // `validate.ts` rejects `123` for a wraps=string column).
+    return new TypeBuilder<T>({
+      type: wrapsKind === "bytes" ? "bytes" : wrapsKind === "number" ? "number" : "string",
+      encrypted: { mode, keyId, wraps: wrapsKind },
+    });
   },
   /**
    * C2 — literal-value field. Validation accepts only the exact value

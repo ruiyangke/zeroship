@@ -34,6 +34,14 @@ use crate::exec::{exec_count, exec_mutation_with_emit, exec_query};
 use crate::query;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
+// **P5 PR 2** — transparent column-encryption pass. The helpers in
+// this module (`encrypt_row_on_write` / `decrypt_row_on_read`) sit
+// around `query::build_*` and `exec_query` respectively. Crate-private:
+// the SDK reaches them indirectly via the regular CRUD entry points.
+// Public unit tests exercise the helpers without a V8 / PG round-trip
+// via in-test stub backends implementing `EncryptedColumn`.
+pub(crate) mod encryption_pass;
+
 // ---------------------------------------------------------------------------
 // dispatch_op template
 // ---------------------------------------------------------------------------
@@ -149,19 +157,60 @@ pub(crate) fn dispatch_find_one<'s>(
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
-    let order_by = opts.get("orderBy");
-    let select = opts.get("select");
+    let order_by = opts.get("orderBy").cloned();
+    let select = opts.get("select").cloned();
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_find(app_id, collection, &filter, Some(1), None, order_by, select);
+    let app = app_id.to_string();
+    let coll = collection.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        exec_query,
-        first_row_or_null,
-    )));
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let built = query::build_find(
+            &app,
+            &coll,
+            &filter,
+            Some(1),
+            None,
+            order_by.as_ref(),
+            select.as_ref(),
+        );
+        let bq = match built {
+            Ok(bq) => bq,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        match exec_query(bq).await {
+            Ok(rows) => {
+                // **P5 PR 2** — decrypt encrypted columns on the
+                // returned row. No-op when the schema declares none.
+                let rows = match apply_encryption_on_read(&app, &coll, rows).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                OpResult::JsValue {
+                    resolver,
+                    value: first_row_or_null(rows),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }
@@ -182,19 +231,60 @@ pub(crate) fn dispatch_find<'s>(
 
     let limit = opts.get("limit").and_then(Value::as_i64);
     let offset = opts.get("offset").and_then(Value::as_i64);
-    let order_by = opts.get("orderBy");
-    let select = opts.get("select");
+    let order_by = opts.get("orderBy").cloned();
+    let select = opts.get("select").cloned();
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_find(app_id, collection, &filter, limit, offset, order_by, select);
+    let app = app_id.to_string();
+    let coll = collection.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        exec_query,
-        rows_as_json_array,
-    )));
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let built = query::build_find(
+            &app,
+            &coll,
+            &filter,
+            limit,
+            offset,
+            order_by.as_ref(),
+            select.as_ref(),
+        );
+        let bq = match built {
+            Ok(bq) => bq,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        match exec_query(bq).await {
+            Ok(rows) => {
+                // **P5 PR 2** — decrypt encrypted columns on every
+                // returned row. No-op when the schema declares none.
+                let rows = match apply_encryption_on_read(&app, &coll, rows).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                OpResult::JsValue {
+                    resolver,
+                    value: rows_as_json_array(rows),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }
@@ -215,19 +305,56 @@ pub(crate) fn dispatch_insert<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_insert(app_id, collection, &doc);
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
-        },
-        first_row_or_null,
-    )));
+    // **P5 PR 2** — async tail so the encryption pass can `.await` the
+    // backend's `resolve_key` (PG SECURITY DEFINER round-trip) before
+    // `build_insert` consumes the doc. The non-encrypted hot path stays
+    // identical — `apply_encryption_on_write` short-circuits when the
+    // cached schema has no `t.encrypted(...)` columns.
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let mut doc = doc;
+        if let Err(e) = apply_encryption_on_write(&app, &coll, &mut doc).await {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+        let built = query::build_insert(&app, &coll, &doc);
+        let result = match built {
+            Ok(bq) => {
+                exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Insert).await
+            }
+            Err(e) => Err(DbError::from(e)),
+        };
+        match result {
+            Ok(rows) => {
+                let rows = apply_encryption_on_read(&app, &coll, rows).await;
+                let rows = match rows {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                OpResult::JsValue {
+                    resolver,
+                    value: first_row_or_null(rows),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }
@@ -276,19 +403,54 @@ pub(crate) fn dispatch_update_one<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    let built = query::build_update_one(app_id, collection, &filter, &update);
     let coll = collection.to_string();
     let app = app_id.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(run_op(
-        resolver,
-        request_id,
-        built,
-        move |bq| async move {
-            exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await
-        },
-        first_row_or_null,
-    )));
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let mut update = update;
+        if let Err(e) = apply_encryption_on_update(&app, &coll, &filter, &mut update).await {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            };
+        }
+        let built = query::build_update_one(&app, &coll, &filter, &update);
+        let bq = match built {
+            Ok(bq) => bq,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
+                    request_id,
+                };
+            }
+        };
+        match exec_mutation_with_emit(bq, &app, &coll, crate::broker::ChangeOp::Update).await {
+            Ok(rows) => {
+                let rows = match apply_encryption_on_read(&app, &coll, rows).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return OpResult::JsValue {
+                            resolver,
+                            value: ResolveValue::RejectError(e.to_op_error()),
+                            request_id,
+                        };
+                    }
+                };
+                OpResult::JsValue {
+                    resolver,
+                    value: first_row_or_null(rows),
+                    request_id,
+                }
+            }
+            Err(e) => OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
 
     promise
 }
@@ -1055,4 +1217,170 @@ pub(crate) fn dispatch_find_or_create<'s>(
     )));
 
     promise
+}
+
+// ===========================================================================
+// P5 PR 2 — transparent column encryption hooks
+// ===========================================================================
+
+/// **P5 PR 2** — encrypt every `t.encrypted(...)`-declared column on
+/// `doc` before the query builder reads it. Short-circuits when:
+///   - the cached schema for `(app_id, collection)` is absent (the
+///     collection wasn't registered on this isolate yet), OR
+///   - no column on the schema carries the `encrypted` metadata.
+///
+/// `row_pk` defaults to `doc["id"]` (typed_ids minted SDK-side per
+/// Camp A, ALWAYS available before INSERT). When the doc has no `id`
+/// field (e.g. partial update), the empty string is used; this is OK
+/// because the encryption pass also runs on UPDATE where row_pk comes
+/// from the filter — and a Randomised column with an empty row_pk
+/// would still encrypt consistently (the AAD just doesn't bind a row
+/// identity, which is a known limitation for callers who explicitly
+/// pass a doc without an `id`).
+async fn apply_encryption_on_write(
+    app_id: &str,
+    collection: &str,
+    doc: &mut Value,
+) -> Result<(), DbError> {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return Ok(());
+    };
+    if !schema_has_encrypted_columns(&schema) {
+        return Ok(());
+    }
+    // Row PK lookup: prefer `doc["id"]` (typed_id string), fall back to
+    // empty. Numeric ids are also accepted for legacy collections.
+    let row_pk = doc
+        .get("id")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    encryption_pass_dispatch(app_id, collection, &schema, &row_pk, doc).await
+}
+
+/// **P5 PR 2** — UPDATE variant that pulls `row_pk` from a filter
+/// object (`{ id: ... }`). Used by `dispatch_update_one` and
+/// `dispatch_update_many` so the AAD binds the target row's PK.
+///
+/// For multi-row updates (no `id` in the filter) `row_pk` falls back to
+/// the empty string — the Randomised path will then encrypt under an
+/// AAD that doesn't bind a specific row; the resulting ciphertext only
+/// decrypts back if every target row carries the same row_pk on read
+/// (which is generally NOT the case for bulk updates). The SDK's
+/// filter-validation layer refuses range / regex predicates on
+/// encrypted columns, but bulk-updating an encrypted column via
+/// `{ status: "active" }` (a non-encrypted filter) → `{ ssn: "X" }` is
+/// a footgun that we surface conservatively rather than silently
+/// breaking decrypt later.
+async fn apply_encryption_on_update(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    patch: &mut Value,
+) -> Result<(), DbError> {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return Ok(());
+    };
+    if !schema_has_encrypted_columns(&schema) {
+        return Ok(());
+    }
+    let row_pk = filter
+        .get("id")
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // Encrypt fields nested under `$set` if present, otherwise the
+    // top-level field map. We mirror the SET-clause flattening the
+    // build layer does.
+    if let Some(set_obj) = patch.get_mut("$set") {
+        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, set_obj).await
+    } else {
+        encryption_pass_dispatch(app_id, collection, &schema, &row_pk, patch).await
+    }
+}
+
+/// Decrypt every encrypted column on each row of `rows`. Short-circuits
+/// when the schema has no encrypted columns OR when not registered.
+async fn apply_encryption_on_read(
+    app_id: &str,
+    collection: &str,
+    mut rows: Vec<Value>,
+) -> Result<Vec<Value>, DbError> {
+    let Some(schema) = crate::context::with(|c| c.schema_for(app_id, collection)) else {
+        return Ok(rows);
+    };
+    if !schema_has_encrypted_columns(&schema) {
+        return Ok(rows);
+    }
+    let backend = crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    #[cfg(all(feature = "pg", feature = "hardening"))]
+    {
+        if let Some(pg) = backend.as_encrypted_column_pg() {
+            for row in rows.iter_mut() {
+                crate::crud::encryption_pass::decrypt_row_on_read(
+                    pg, app_id, collection, &schema, row,
+                )
+                .await?;
+            }
+            return Ok(rows);
+        }
+    }
+    let _ = backend; // silence unused under feature combinations
+    Ok(rows)
+}
+
+/// Run the write-side encryption pass over `doc` using the PG-arm
+/// `EncryptedColumn` impl. Gated on `feature = "pg" + hardening`;
+/// builds without those features short-circuit (no encrypted columns
+/// can reach this path because the SDK builder is also gated).
+#[allow(unused_variables)]
+async fn encryption_pass_dispatch(
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    row_pk: &str,
+    doc: &mut Value,
+) -> Result<(), DbError> {
+    let backend = crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    #[cfg(all(feature = "pg", feature = "hardening"))]
+    {
+        if let Some(pg) = backend.as_encrypted_column_pg() {
+            return crate::crud::encryption_pass::encrypt_row_on_write(
+                pg, app_id, collection, schema, row_pk, doc,
+            )
+            .await;
+        }
+    }
+    // No `hardening`-gated PG arm available — encrypted columns
+    // declared in the schema would reach a write site that has no
+    // encryption surface. Surface a typed Configuration error so the
+    // SDK can branch on `.code` rather than silently writing
+    // plaintext to a BYTEA column.
+    if schema_has_encrypted_columns(schema) {
+        return Err(DbError::Configuration {
+            code: "column_encryption_unavailable",
+            message:
+                "db: column encryption requires the `hardening` Cargo feature on this build"
+                    .to_string(),
+            hint: Some("rebuild with `--features hardening`".to_string()),
+        });
+    }
+    Ok(())
+}
+
+/// Cheap walk: does any field def on `schema` carry `encrypted`?
+fn schema_has_encrypted_columns(schema: &Value) -> bool {
+    schema
+        .as_object()
+        .map(|o| o.values().any(|def| def.get("encrypted").is_some()))
+        .unwrap_or(false)
 }
