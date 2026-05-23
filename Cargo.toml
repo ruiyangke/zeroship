@@ -140,6 +140,13 @@ tracing-bunyan-formatter = "0.3"
 # it now eliminates a Phase-1 dep churn.
 flume = { version = "0.11", default-features = false, features = ["async"] }
 
+# Auto-cleaning temp file / directory helper. Used by
+# `zeroship-plugin-db`'s `tests/sqlite_integration.rs` to provide a
+# per-test `db_dir` for the SQLite-backed `SqliteBackend::new(...)`
+# constructor (P1 PR 2). Workspace-level so the same pin is reused if
+# other crates pick up integration-test temp dirs in the future.
+tempfile = "3"
+
 # Internal crates
 zeroship-core = { path = "crates/core" }
 zeroship-bundle = { path = "crates/bundle" }

@@ -61,8 +61,19 @@ pub mod error;
 pub mod query;
 pub mod v8_classes;
 
-// Always crate-private:
+// `backend` is crate-private by default; under `test-helpers` it
+// becomes `pub` so the integration-test targets
+// (`tests/sqlite_integration.rs` in particular — P1 PR 2) can name
+// `backend::SqliteBackend` + the `SqlExecutor` trait directly. The PG
+// `tests/integration.rs` target reaches PG-specific behaviour through
+// the lifted-to-pub helpers in `exec` / `migrations` / `orchestrator`
+// — those continue to gate on `test-helpers`. The backend traits
+// themselves carry no production-only behaviour (their bodies are SQL
+// + RPC plumbing), so exposing them under the same gate is safe.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod backend;
+#[cfg(feature = "test-helpers")]
+pub mod backend;
 pub(crate) mod context;
 pub(crate) mod crud;
 pub(crate) mod diff;

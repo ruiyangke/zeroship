@@ -57,6 +57,11 @@ criterion = { workspace = true }
 # 7c6bd2ec drift in cycle 13:17 — a snapshot test would have caught
 # it pre-commit.
 tracing-subscriber = { workspace = true }
+# P1 PR 2: per-test temp directory for the SQLite integration target
+# (`tests/sqlite_integration.rs`). `SqliteBackend::new(db_dir)` opens
+# `<db_dir>/zs-control.sqlite`; the dir auto-cleans on drop so the
+# tests leave no on-disk artefacts.
+tempfile = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"

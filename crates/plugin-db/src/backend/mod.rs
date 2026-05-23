@@ -70,8 +70,18 @@ use crate::error::DbError;
 pub(crate) mod lock_guard;
 pub(crate) mod owned_lock_guard;
 pub mod postgres;
-#[cfg(feature = "sqlite")]
+// SQLite module — crate-private by default; under `test-helpers` it
+// becomes `pub` so the integration target
+// (`tests/sqlite_integration.rs` — P1 PR 2) can name
+// `backend::sqlite::SqliteBackend` and the session-handle accessor.
+// The PG-side test target reaches its backend through
+// `backend::PostgresBackend` (re-exported below); the SQLite arm has
+// session-actor internals worth pinning at the integration level, so
+// the full sub-module is visible under the same gate.
+#[cfg(all(feature = "sqlite", not(feature = "test-helpers")))]
 pub(crate) mod sqlite;
+#[cfg(all(feature = "sqlite", feature = "test-helpers"))]
+pub mod sqlite;
 
 pub(crate) use lock_guard::LockGuard;
 pub(crate) use owned_lock_guard::OwnedLockGuard;

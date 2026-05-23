@@ -129,24 +129,37 @@ impl SqlExecutor for SqliteBackend {
     type Client = SqliteSessionHandle;
 
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
-        // PR 2: clone the `Rc<SqliteSession>` and wrap it in a
-        // handle. SQLite has no per-client session — the actor IS the
-        // only writer — so every "dedicated client" handle multiplexes
-        // through the same mpsc queue. Documented divergence from PG.
-        Err(pr_stub("acquire_dedicated_client"))
+        // SQLite has no per-client session — the actor IS the only
+        // writer — so every "dedicated client" handle multiplexes
+        // through the same mpsc queue. Long-lived transactions
+        // serialise by construction because every command (BEGIN /
+        // INSERT / COMMIT) flows through the same single-threaded
+        // worker. This is the documented divergence from PG, where a
+        // dedicated client gets its own libpq connection.
+        Ok(SqliteSessionHandle::from(self.session.clone()))
     }
 
-    async fn pool_exec(&self, _sql: &str, _params: &[&str]) -> Result<u64, DbError> {
-        Err(pr_stub("pool_exec"))
+    async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
+        // "Pool" is a misnomer on the SQLite arm — there's only one
+        // writer. We route directly through the session actor. The
+        // PG side uses `pool.query_text_params`; the SQLite side
+        // serialises via `session.exec`, which lands on the same
+        // worker thread regardless of caller.
+        self.session.exec(sql, params).await
     }
 
     async fn client_exec(
         &self,
-        _client: &Self::Client,
-        _sql: &str,
-        _params: &[&str],
+        client: &Self::Client,
+        sql: &str,
+        params: &[&str],
     ) -> Result<u64, DbError> {
-        Err(pr_stub("client_exec"))
+        // `client` and `self.session` point at the same actor — the
+        // `Client` type is just an Rc handle. We route through the
+        // handle so a future where they diverge (e.g. per-app ATTACH
+        // scoping inside a transaction) can re-target without
+        // touching this method.
+        client.exec(sql, params).await
     }
 }
 
