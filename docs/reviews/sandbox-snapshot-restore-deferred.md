@@ -656,3 +656,76 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### [R9-T9] (MINOR) `/_clock_resync` 4 KiB body cap has no pin test or 413 A4-envelope shape test
 
 ### [R9-T10] (MINOR carry) r8's slow-agent / agent-500 / malformed-body gaps on clock_resync_post_restore
+
+---
+
+## NEW r10 ROUND FINDINGS (added by pilot cycle 2026-05-25 r3 — arch/code-quality/api-surface)
+
+### [R10-A1] `claim_orphan_transient_for_recovery` pushed db.rs to 3003 LOC; mate reader is outside db.rs (IMPORTANT, architecture-r10)
+- **Source**: 2026-05-25 architecture-r10
+- **Files**: `crates/sandbox/src/db.rs:2500` (the C1-FOLLOWUP recovery CAS) + `crates/sandbox/src/restore_handler.rs:332` (`read_snapshot_row` — an inline pg reader outside db.rs)
+- **Symptom**: recovery semantics now span db.rs (3003 LOC) AND restore_handler.rs. The C1-FOLLOWUP added a 100-LOC recovery fn to an already-overgrown module; the matching read path lives elsewhere, hiding the recovery contract.
+- **Action**: extract `crates/sandbox/src/db_recovery.rs` housing both the recovery CAS + the read_snapshot_row reader + the sweep's takeover loop's pg surface. Test: lib unaffected; pg-gated tests follow the new module path.
+
+### [R10-A2] `RestoreBackend` trait grew to 7 methods; 3 are 1-line delegations (CRITICAL, architecture-r10)
+- **Source**: 2026-05-25 architecture-r10
+- **File**: `crates/sandbox/src/restore_handler.rs::RestoreBackend` trait
+- **Symptom**: trait has 7 methods after B19 + B22 + R7-S2 + R8-A3-5; `RealRestoreBackend` holds 2 `Arc<NomadCHBackend>`-typed fields; 3 of 7 methods are 1-line delegations to the inner Arc. The trait is increasingly a facade over NomadCHBackend; pretends to be polymorphic but isn't.
+- **Action**: merge with the proposed `SnapshotCapableBackend` trait (from R3-A1/R5-A1) so the wake path uses ONE trait surface. The 3 delegations collapse. Subsumes R5-A1 / R3-A1 / R5-A2 if the merge is taken together.
+
+### [R10-A3] Backend enum still has 5 Err-returning methods after 3 rounds (CRITICAL, architecture-r10 — confirms R3-A1/R5-A1)
+- **Source**: 2026-05-25 architecture-r10 audit (inertia confirmation)
+- **File**: `crates/sandbox/src/backend/mod.rs` (enum surface)
+- **Symptom**: 5 methods still return `Err("backend X doesn't support …")` for 2/3 variants. R3-A1 (r3), R5-A1 (r5), now confirmed at r10. The "small additive fix" pattern has not slowed; structural fix is overdue.
+- **Action**: split `SnapshotCapableBackend` trait. Only NomadCH impls it. Use `&dyn SnapshotCapableBackend` at call sites needing the surface. Combine with R10-A2's RestoreBackend merge as ONE PR.
+
+### [R10-A4] nomad_ch.rs at 4923 LOC with a single 459-LOC `create()` (IMPORTANT, architecture-r10)
+- **Source**: 2026-05-25 architecture-r10
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs`
+- **Symptom**: one of the two heaviest modules in the crate. Single `create()` fn is 459 LOC.
+- **Action**: 8-child module split sketched in r10 report — `nomad_ch/{create,stop,restore,jobspec,allocator,state,ch_remote,tests}.rs`. PR can be staged file-by-file (each child split is one commit).
+
+### [R10-A5] (CLOSED) error_envelope.rs duplication between sandbox + sandbox-agent is structurally justified
+- **Source**: 2026-05-25 architecture-r10
+- **Finding**: divergence is real — sandbox has `extra`/`no_store` helpers, agent doesn't. Wire shape identical, code paths different. Keep duplicated. Closes the r8-A4 "extract to zeroship-core?" carry.
+
+### [R10-A7] T9 + T10 confirmed: ControllerIdleSnapshotter dup of admin_handlers (IMPORTANT, architecture-r10)
+- **Source**: 2026-05-25 architecture-r10
+- **Files**: `crates/sandbox/src/sweep.rs:283-407` + `crates/sandbox/src/admin_handlers.rs:1109-1206`
+- **Status**: r10 confirms T9 + T10 (open since r2). Two orchestrators with literally-duplicated `ResolvedSourceVmOps` adapters.
+- **Action**: extract `crates/sandbox/src/snapshot_orchestrator.rs` per T9. Closes T9 + T10 + R10-A7 together.
+
+### [R10-API1] `_test_build_auth_from_sealed` is pub but has zero callers (MINOR, api-surface-r10)
+- **Source**: 2026-05-25 api-surface-r10
+- **File**: `crates/sandbox/src/restore.rs:613`
+- **Symptom**: orphan pub fn. Possibly stale test helper from earlier scaffolding.
+- **Action**: delete or move to `#[cfg(test)]`-gated test helper module.
+
+### [R10-API2] `ExecBody` + `not_found` in sandbox-agent are over-pub'd (MINOR, api-surface-r10)
+- **Source**: 2026-05-25 api-surface-r10
+- **Files**: `crates/sandbox-agent/src/handlers.rs` (locate via grep `pub struct ExecBody\|pub fn not_found`)
+- **Symptom**: zero cross-crate consumers; same anti-pattern R8-API1 closed.
+- **Action**: pub→pub(crate). Mechanical.
+
+### [R10-API3] persist.rs has 5 module-level `pub fn`s with only in-crate callers (MINOR, api-surface-r10)
+- **Source**: 2026-05-25 api-surface-r10
+- **File**: `crates/sandbox/src/persist.rs` — `seal`, `unseal_one`, `unseal_dir`, `seal_filename_for`, `seal_filename_for_str`
+- **Symptom**: bypasses the `Persistence` handle's discipline. Pub on a stable boundary not justified externally.
+- **Action**: pub→pub(crate). Mechanical.
+
+### [R10-API4] `readyz` returns `{"status":"draining"}` rather than §10.0 envelope (MINOR, api-surface-r10)
+- **Source**: 2026-05-25 api-surface-r10
+- **Symptom**: liveness/readiness probes drift from §10.0 ErrorEnvelope. Arguably justified as a probe shape — but document the carve-out explicitly.
+- **Action**: either bring readyz in line with §10.0 OR add a comment + invariant test pinning the probe-shape decision.
+
+### [R10-Q1] (CRITICAL, code-quality-r10) handlers.rs:670/821/837 raw `{e}` leak — 6th-round carry
+- **Source**: 2026-05-25 code-quality-r10
+- **File**: `crates/sandbox/src/handlers.rs:670,821,837` (sandbox crate, NOT sandbox-agent — earlier briefs misattributed)
+- **Existing fix shape**: `crates/sandbox/src/admin_handlers.rs:228 fn err_safe(...)` — sanitizer already exists. The 3 sites just need to call err_safe(...) instead of err(...).
+- **Action**: 3-line mechanical fix; substitute `err(500, "…", format!("…: {e}"))` → `err_safe(500, "…", "…", e)`. Add 3 wire-shape tests asserting no raw driver text in body.
+
+### [R10-Q3] registry.rs has 35 bare `RwLock::{read,write}().unwrap()` sites with no poison-recover (MAJOR, code-quality-r10)
+- **Source**: 2026-05-25 code-quality-r10
+- **File**: `crates/sandbox/src/registry.rs` (35 sites); also k8s.rs (10) and docker.rs (6)
+- **Symptom**: 42 sites elsewhere in the crate use `unwrap_or_else(|p| p.into_inner())` for poison-recover. `registry.rs` is the hot-path `SandboxRegistry` shared by every HTTP request — any panic anywhere in the crate that crosses an RwLock leaves these sites panicking instead of recovering.
+- **Action**: bulk-replace `.unwrap()` → `.unwrap_or_else(|p| p.into_inner())` on RwLock {read,write} in registry.rs (35) + k8s.rs (10) + docker.rs (6). Wrap in a `lock_recover!` macro to keep the call sites short.
