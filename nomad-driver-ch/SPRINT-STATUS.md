@@ -12,6 +12,7 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 - [x] T-2 (graceful stop ladder + DestroyTask + SignalTask) — `dd017c23` (`nomad-driver-ch/stop_task: graceful-stop ladder (T-2)`)
 - [x] T-3 (per-VM /30 tap setup + teardown) — `31e05a3c` (`nomad-driver-ch/start_task,stop_task: per-VM /30 tap setup + teardown (T-3)`)
 - [x] T-4 (RecoverTask via ch-remote API socket) — `nomad-driver-ch/recover_task: reattach to running CH via API socket (T-4)`
+- [x] T-5 (TaskStats: per-task telemetry via host /proc) — `nomad-driver-ch/task_stats: per-task telemetry via /proc+/sys (T-5)`
 
 ## In progress
 
@@ -19,4 +20,4 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Up next
 
-- T-5: TaskStats (poll vm.info via Client.Info → drivers.TaskResourceUsage; ticker-driven, cancellable; surface CPU/memory deltas)
+- T-6: Restore path (vm.restore + post-restore hooks; controller-side clock-resync wiring is T-7)

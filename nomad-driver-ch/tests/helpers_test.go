@@ -20,6 +20,15 @@ import (
 // signature reads naturally.
 type driversTaskConfig = drivers.TaskConfig
 
+// driversTaskResourceUsage is an alias used by task_stats_test.go to
+// keep the test code readable without re-importing drivers everywhere.
+type driversTaskResourceUsage = drivers.TaskResourceUsage
+
+// driversErrTaskNotFound re-exports the sentinel TaskStats /
+// InspectTask consumers compare against; aliased here so test code
+// reads naturally.
+var driversErrTaskNotFound = drivers.ErrTaskNotFound
+
 // newDriversTaskConfig builds a *drivers.TaskConfig whose TaskDir()
 // resolves under the supplied taskDir. The driver-config payload is
 // msgpack-encoded so cfg.DecodeDriverConfig recovers a ch.TaskConfig

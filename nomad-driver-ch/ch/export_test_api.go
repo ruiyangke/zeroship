@@ -14,9 +14,11 @@
 package ch
 
 import (
+	"context"
 	"os/exec"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/plugins/drivers"
 )
 
 // ProcessRunnerSeam is the exported alias of processRunner, used by the
@@ -101,4 +103,27 @@ func CallRealSetupTap(idx uint16, subnetBaseOctet uint8) (string, error) {
 // CallRealSetupTap.
 func CallRealTeardownTap(tapName string) error {
 	return realTeardownTap(tapName)
+}
+
+// InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
+// plugin's task store so a TaskStats caller can find it without needing
+// to spawn a real CH process. Mirrors the minimal shape RecoverTask
+// builds — exitDone is created (so the supervisor-style exit gate works)
+// but no supervisor goroutine is started.
+//
+// Returns the synthetic exitDone channel so the test can `close(exitDone)`
+// to drive the "task exited" branch of the collector loop.
+func InstallFakeRunningTaskForStats(p *Plugin, taskID string, chPid int) chan struct{} {
+	exitDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &taskHandle{
+		taskConfig: &drivers.TaskConfig{ID: taskID, Name: taskID},
+		procState:  drivers.TaskStateRunning,
+		chPid:      chPid,
+		exitDone:   exitDone,
+		ctx:        ctx,
+		cancelFn:   cancel,
+	}
+	p.tasks.Set(taskID, h)
+	return exitDone
 }
