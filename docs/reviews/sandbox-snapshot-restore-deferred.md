@@ -475,3 +475,38 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **File**: `crates/sandbox-agent/src/handlers.rs:76`
 - **Symptom**: LRU=4 not exploitable today (controller mints one challenge per restore), but any future retry-on-transient that pushes 3+ resyncs in seconds could evict the legit challenge.
 - **Action**: bump to 16-32. One-line const. Doc the chosen capacity.
+
+---
+
+## NEW r9 ROUND FINDINGS (added by pilot cycle 2026-05-25, post critical-fix sweep audit)
+
+### [C1-FOLLOWUP] C1 lessee writes wired, but sweep recovery CAS still doesn't fire (CRITICAL, concurrency-r9)
+- **Source**: 2026-05-25 concurrency-r9 audit of C1 (closed at `de3523c4`)
+- **Files**: `crates/sandbox/src/sweep.rs:167-169` + `crates/sandbox/src/db.rs:1690-1697,1773`
+- **Symptom**: C1 correctly sets `lessee_updated_at` on transient entry + clears on exit. BUT the recovery CAS uses `self.host_id()` (current controller's host_id) which by definition never equals the CRASHED controller's host_id stored on the row. So §6.1 sweep query finds rows but the CAS-UPDATE rejects every one of them.
+- **Action**: change the sweep's CAS predicate to "lessee != self.host_id() AND lessee_updated_at < threshold" (i.e. recover OTHER controllers' wedges, not your own). Or use a `lessee IS NULL OR lessee = $1` shape with an explicit transfer.
+- **A1 follow-up flag**: A1 fail-CLOSED gap from arch-r9 also still open (boot warns vs panics on missing kek+tiered_GCS). Track separately as A1-FOLLOWUP.
+
+### [R9-C1] R8-A3-5 widened C3 a 6th time — cancel-unsafety window now 7 awaits (CRITICAL, concurrency-r9)
+- **Source**: 2026-05-25 concurrency-r9
+- **File**: `crates/sandbox/src/restore_handler.rs:489-517`
+- **Symptom**: pre-R8-A3-5, `submit_restore_job` and `wait_for_livez` were sync inline non-yielding calls. R8-A3-5 wrapped both in spawn_blocking, adding TWO new await points to `do_restore_inner`. Cancel-unsafety window: 5 → 7 awaits. Combined with C1-FOLLOWUP (sweep can't recover), a controller-restart-mid-restore = permanent wedge.
+- **Action**: subsumed by R4-A2's `LeasedVmSlot` RAII guard. The structural fix would close all 6 C3 widenings + the C1-FOLLOWUP recovery gap simultaneously. Now incident-class urgency.
+
+### [R9-P1] AEAD-active wake discards R5-P1's hard_link zero-copy win (CRITICAL, performance-r9)
+- **Source**: 2026-05-25 performance-r9
+- **File**: `crates/sandbox/src/snapshot_aead.rs:619-664`
+- **Symptom**: post-A3+A1, wake p50 estimated 2.5-4.5s when AEAD inactive (down from 9.2s — huge win). But AEAD-active wake = 5.5-7.5s because `AeadSnapshotStore::get` re-writes a full 1GB plaintext copy into `alloc_dir/memory-ranges` after the inner store hard-linked ciphertext into `stage/`. At c=4, four concurrent 1GB writes contend on the SSD queue.
+- **Action**: in-place decrypt: stream ciphertext from `stage/<sha>` and write plaintext directly to `alloc_dir/memory-ranges` in a single pass (no intermediate copy). Estimated wake p50 reduction: 0.5-1.5s/wake when AEAD on. Restores the hard_link win.
+
+### [R9-P2] A2b verify_metadata_only has ZERO production callers — dead code (IMPORTANT, performance-r9)
+- **Source**: 2026-05-25 performance-r9
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:693-718` (verify_metadata_only landed) + `crates/sandbox/src/sweep.rs` (no caller)
+- **Symptom**: A2b's fast-path is plumbed but nothing in `sweep.rs` actually calls `verify_metadata_only`. The whole point was that periodic sweeps use the fast-path; sweeps just don't call verify at all today.
+- **Action**: wire `verify_metadata_only` into the sweep's L2 integrity check (or document why the sweep doesn't need it; A2b may have anticipated a future sweep that hasn't materialized).
+
+### [R9-P3] AEAD snapshot path is 3 separate I/O passes on memory-ranges — fusable to 1 (IMPORTANT, performance-r9)
+- **Source**: 2026-05-25 performance-r9
+- **Files**: `crates/sandbox/src/snapshot_aead.rs:363-451` + `crates/sandbox/src/snapshot_store.rs:184-223`
+- **Symptom**: snapshot path with AEAD on does (1) encrypt-read, (2) encrypt-write, (3) SHA-read — three full 1GB passes on the same file. Fusable into one streamed pass via a chained reader.
+- **Action**: implement `EncryptingHashWriter<W>` that wraps the destination with both AEAD encrypt + SHA-256 in a single pass. Estimated snapshot p50 reduction: 0.6-1s/snapshot.
