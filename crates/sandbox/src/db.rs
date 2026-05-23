@@ -809,9 +809,22 @@ impl Database {
 /// Round-1 fixer / MINOR #19: enforce mode 0o400 on the
 /// pg-password file on Unix. Mirrors `persist::AeadKey::from_path`.
 /// On non-Unix targets this is a no-op (the modes are POSIX-only).
+///
+/// The file's owner uid is also checked: only uid 0 (root) is
+/// accepted (R9-S4c) — mode 0o400 alone is insufficient because a
+/// non-root attacker who pre-creates a chmod-400 file at
+/// `SANDBOX_DATABASE_PASSWORD_PATH` before systemd starts could
+/// inject an attacker-known pg password. If the attacker can also
+/// influence DNS or the pg endpoint, the controller connects to an
+/// attacker-controlled pg instance with that password — bigger
+/// blast radius than R9-S4 alone. Strict "uid == 0" matches the
+/// R9-S4 (snapshot KEK) and R9-S4b (AEAD key) sibling invariants
+/// and the systemd-style secret-loading convention at
+/// `/etc/zeroship/`.
 fn enforce_password_file_mode(path: &str) -> Result<()> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
         let meta = std::fs::metadata(path).map_err(|e| {
             DatabaseError::Validation(format!(
@@ -823,6 +836,13 @@ fn enforce_password_file_mode(path: &str) -> Result<()> {
             return Err(DatabaseError::Validation(format!(
                 "SANDBOX_DATABASE_PASSWORD_PATH={path:?}: mode={mode:o} \
                  must be 0o400 (chmod 400 the file)"
+            )));
+        }
+        let uid = meta.uid();
+        if uid != 0 {
+            return Err(DatabaseError::Validation(format!(
+                "SANDBOX_DATABASE_PASSWORD_PATH={path:?}: owner uid {uid} \
+                 != 0 (chown root:root the file)"
             )));
         }
     }
@@ -2940,16 +2960,101 @@ mod tests {
             std::fs::write(&path, "secret").unwrap();
             // Default permissions are usually 0o644 (umask-derived); be
             // explicit so this passes regardless of umask.
+            use std::os::unix::fs::MetadataExt as _;
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
             let err = enforce_password_file_mode(path.to_str().unwrap())
                 .expect_err("0o644 must be rejected");
             assert!(matches!(err, DatabaseError::Validation(_)));
 
-            // Tighten and retry.
+            // Tighten the mode. The "0o400 must pass" arm only holds
+            // when the file is root-owned (R9-S4c); skip it when the
+            // test runner is non-root (the common case in CI/dev).
+            // The non-root-owned-rejection assertion is pinned by the
+            // dedicated test `enforce_password_file_mode_rejects_non_root_owned_file`.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid == 0 {
+                enforce_password_file_mode(path.to_str().unwrap())
+                    .expect("0o400 root-owned must pass");
+            } else {
+                let err = enforce_password_file_mode(path.to_str().unwrap())
+                    .expect_err("0o400 non-root-owned must be rejected (R9-S4c)");
+                assert!(matches!(err, DatabaseError::Validation(_)));
+            }
+        });
+    }
+
+    /// R9-S4c: a 0o400 pg-password file owned by a non-root uid (i.e.
+    /// the test-runner user, which is uid != 0 in CI/dev) MUST be
+    /// refused. Without the owner check, a non-root attacker who
+    /// pre-creates a chmod-400 file at `SANDBOX_DATABASE_PASSWORD_PATH`
+    /// before the controller starts can inject an attacker-known pg
+    /// password; with influence over DNS / pg endpoint, the controller
+    /// connects to attacker-controlled pg using that password. Sibling
+    /// of R9-S4 (snapshot KEK) and R9-S4b (sealed-records AEAD key).
+    #[cfg(unix)]
+    #[test]
+    fn enforce_password_file_mode_rejects_non_root_owned_file() {
+        with_env_clean(|| {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let tmp = tempdir();
+            let path = tmp.path().join("pgpass");
+            std::fs::write(&path, "secret").unwrap();
+            // The file is created by the test-runner process, so its
+            // uid == effective uid of the runner. If that's 0 there's
+            // no non-root-owned file to materialise — skip (the
+            // positive arm below covers that branch).
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid == 0 {
+                eprintln!(
+                    "skipping enforce_password_file_mode_rejects_non_root_owned_file: \
+                     running as root, can't materialise a non-root-owned file"
+                );
+                return;
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+            let err = enforce_password_file_mode(path.to_str().unwrap())
+                .expect_err("non-root-owned pg-password file must be refused even at 0o400");
+            match err {
+                DatabaseError::Validation(msg) => {
+                    assert!(
+                        msg.contains("owner uid") && msg.contains("!= 0"),
+                        "error must mention owner uid != 0; got: {msg}"
+                    );
+                }
+                other => panic!("expected Validation, got {other:?}"),
+            }
+        });
+    }
+
+    /// R9-S4c positive arm: when the test runs as root, a 0o400
+    /// pg-password file owned by root passes the check. Skipped when
+    /// not running as root (the common case in CI/dev) — the negative
+    /// arm above already pins the bug-fix assertion in non-root
+    /// environments.
+    #[cfg(unix)]
+    #[test]
+    fn enforce_password_file_mode_accepts_root_owned_file_when_running_as_root() {
+        with_env_clean(|| {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            let tmp = tempdir();
+            let path = tmp.path().join("pgpass");
+            std::fs::write(&path, "secret").unwrap();
+            let runner_uid = std::fs::metadata(&path).unwrap().uid();
+            if runner_uid != 0 {
+                eprintln!(
+                    "skipping enforce_password_file_mode_accepts_root_owned_file_when_running_as_root: \
+                     not running as root, can't create a root-owned pg-password file"
+                );
+                return;
+            }
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
             enforce_password_file_mode(path.to_str().unwrap())
-                .expect("0o400 must pass");
+                .expect("root-owned 0o400 pg-password file must load");
         });
     }
 
