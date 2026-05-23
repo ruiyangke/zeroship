@@ -151,7 +151,7 @@ impl LocalDiskSnapshotStore {
 /// in the module docstring. Streams files chunk-by-chunk so 1 GB
 /// memory-ranges doesn't pin 1 GB of RAM in the controller.
 fn compute_artifact_sha256(dir: &Path) -> Result<([u8; 32], u64), SnapshotError> {
-    use std::io::Read;
+    use std::io::{BufReader, Read};
     let mut hasher = Sha256::new();
     let mut total: u64 = 0;
     for &name in ARTIFACT_FILES {
@@ -165,10 +165,17 @@ fn compute_artifact_sha256(dir: &Path) -> Result<([u8; 32], u64), SnapshotError>
         };
         hasher.update(name.as_bytes());
         hasher.update(len.to_be_bytes());
-        let mut f = std::fs::File::open(&path)?;
+        // R5-P1 (perf-r5, A3 slice 2): 1 MiB BufReader collapses
+        // 16× the syscall amplification of the prior unbuffered
+        // 64 KiB loop. On a 1 GB memory-ranges file the syscall
+        // count drops 16384 → 1024 read(2)s. The Sha256 update is
+        // still fed `&buf[..n]` chunks of arbitrary length so the
+        // hash is byte-identical to the pre-buffered output.
+        let f = std::fs::File::open(&path)?;
+        let mut reader = BufReader::with_capacity(1 << 20, f);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = f.read(&mut buf)?;
+            let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
             }
