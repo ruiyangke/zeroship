@@ -1042,6 +1042,14 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // A4 envelope wire-shape (proposal § 10.0): pin the 413 site
+        // here rather than in a duplicate test, since the shared
+        // TEST_BODY_CAP_OVERRIDE global serialises poorly with two
+        // 413-exercising tests running in parallel.
+        let bytes = test::read_body(resp).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "payload_too_large");
+        assert!(body["message"].is_string());
     }
 
     #[ntex::test]
@@ -1236,27 +1244,6 @@ mod tests {
         serde_json::from_slice(&bytes).expect("body is JSON")
     }
 
-    #[ntex::test]
-    async fn proxy_wire_shape_payload_too_large() {
-        let _g = set_body_cap(1024);
-        let state = make_state("a4_413");
-        let app = make_app!(state);
-        let path = "/proxy/5173/upload";
-        let body = vec![b'a'; 1025];
-        let (ts, nonce, sig) = sign_v1_1("PUT", path, &body);
-        let req = test::TestRequest::put()
-            .uri(path)
-            .header("x-sbx-timestamp", ts)
-            .header("x-sbx-nonce", nonce)
-            .header("x-sbx-signature", sig)
-            .set_payload(body)
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let body = body_json(resp).await;
-        assert_eq!(body["error"], "payload_too_large");
-        assert!(body["message"].is_string());
-    }
 
     #[ntex::test]
     async fn proxy_wire_shape_unauthorized() {
