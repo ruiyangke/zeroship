@@ -374,19 +374,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Action**: in wrapper restore branch post-`ch-remote resume`, issue clock sync via (a) VSOCK time bridge from host; (b) `chronyd makestep`; (c) `hwclock --hctosys` if RTC available; or (d) controller writes fresh ts to /workspace pre-resume and init.sh reads it. (c) is simplest.
 - **Sister concern**: nonce LRU survives snapshot (sig.rs:228 Mutex<LruCache> in guest RAM); will be the next failure once skew closes. Wake-time LRU clear is a one-line fix in init.sh post-resume.
 
-### [R6-P1] Snapshot p50 root cause: teardown_source_for_snapshot host-fence dominates 90% (CRITICAL, perf-r6)
-- **Source**: 2026-05-24 perf-r6 root-causing snapshot p50=50307ms.
-- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:1029-1123` (teardown_source_for_snapshot — host_fence + wait_for_job_gone) + `crates/sandbox/src/admin_handlers.rs:1289-1299` (sync await on response path).
-- **Symptom**: 90% of snapshot p50 is the synchronous wait for Nomad alloc-terminal status (up to 30s wait_for_job_gone + ~20s host-fence per inline comment).
-- **Action (single-step win)**: detach teardown into `compio::runtime::spawn` post-CAS, return 200 immediately. Expected snapshot p50: 50s → 3-5s. Big-win small-LOC.
-
-### [R6-A1] SANDBOX_PERSIST_NONE_OK escape hatch on prod boot path (CRITICAL, api-surface-r6)
-- **Source**: 2026-05-24 api-surface-r6 (R5-S1 sister-finding).
-- **File**: `crates/sandbox/src/lib.rs:435-441`
-- **Symptom**: R5-S1 added a test escape hatch read on prod boot path with NO `#[cfg(test)]` gate. Naming convention indistinguishable from other prod env vars (`SANDBOX_PERSIST_AUTH`, `SANDBOX_PERSIST_DIR`). Operator misconfiguration could silently re-enable the R5-S1 fail-OPEN that was the production bug B21.
-- **Action**: gate the escape hatch on `#[cfg(test)]` so it cannot be set from prod binary. Alternative: rename to `_TEST_ONLY_DISABLE_PERSIST_ASSERTION`.
-
-### [R6-C1] B17 wrapper background subshell un-reaped across 5 rounds (IMPORTANT, concurrency-r6)
-- **File**: `crates/sandbox/scripts/nomad-vm-wrapper.sh:388-419`
-- **Symptom**: B17 fix added a `( ... ) &` background subshell for ch-remote-ping polling. No `BG_PID=$!`, no `wait` in cleanup trap. Re-flagged across r3/r4/r5/r6 — 4 review rounds without a fix.
-- **Action (3-line shell fix)**: capture `RESUME_PID=$!`; add `kill -TERM $RESUME_PID 2>/dev/null; wait $RESUME_PID 2>/dev/null` to the cleanup trap.
+### [R6-P1] (CLOSED at `4c090992`) detach teardown_source_for_snapshot into compio::runtime::spawn
+### [R6-A1] (CLOSED at `2ead8692`) rename SANDBOX_PERSIST_NONE_OK → ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION
+### [R6-C1] (CLOSED at `e598c2dd`) reap ch-remote-resume background subshell via PID capture + cleanup trap
