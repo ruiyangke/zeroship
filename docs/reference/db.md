@@ -542,6 +542,212 @@ const { data } = await db.orders.aggregate([
 
 Supported accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`.
 
+## Vector / Full-Text / Geo
+
+Three search modalities ride on top of the schema DSL. Each has the
+same shape: declare the column with a `t.*` builder (or modifier);
+deploy registers the appropriate index; query via `Collection.search`
+or `Collection.near`. Cross-backend membership is identical; ranking
+scores are backend-specific (PG `ts_rank` vs SQLite `bm25`, PG float
+vs Rust float in the low significand bits) — assert set membership,
+not strict ordinal positions.
+
+### Backend extension dependency
+
+| Capability | PG dependency               | SQLite dependency         |
+|------------|-----------------------------|---------------------------|
+| Vector     | `pgvector` extension        | none — bundled            |
+| Full-text  | none — core PG              | none — FTS5 in bundled    |
+| Geo (point + radius) | `postgis` extension | none — bundled            |
+| Polygon ops          | `postgis` extension | **not supported** (PG-only) |
+
+The fastest path on PG is to swap the database image to
+`pgvector/pgvector:pg16`, which ships both `pgvector` AND `postgis`
+out of the box — see [`docs/runbooks/docker-compose.md`](../runbooks/docker-compose.md)
+for the operator-action runbook.
+
+On SQLite (dev/sandbox/test only) FTS5 is in the bundled build, so
+there is no extra setup. Vector / geo use pure-Rust flat scans (no C
+extension dependency, no `bundled` fork) — see "Backend coverage"
+below for the dev-scale ceiling.
+
+### Vector search
+
+Declare a column with `t.vector(dims, opts?)`:
+
+```ts
+import { t } from "@zeroship/db";
+
+export default {
+  schema: {
+    docs: {
+      title:     t.string().required(),
+      embedding: t.vector(1536, { metric: "cosine" }), // dims in 1..=16000
+    },
+  },
+};
+```
+
+- `dims` is **required** and must lie in `1..=16000` (pgvector's
+  hard ceiling). The SDK validates the literal at schema-parse time
+  and again at insert (`code: "vector_dimension_mismatch"` when
+  `vector.length !== dims`).
+- `opts.metric` selects the distance function: `"cosine"` (default),
+  `"l2"` (Euclidean), or `"innerProduct"` (negated dot product;
+  higher dot product → smaller "distance"). The metric is fixed at
+  index creation — changing the metric requires `DROP INDEX` + redeploy.
+
+Query with `Collection.search({ vector, k, ... })`:
+
+```ts
+const emb: number[] = await embed("rust async runtimes"); // your model
+const { data, error } = await db.docs.search({
+  vector: emb,
+  k: 10,                       // 1..=1000 (default 10)
+  metric: "cosine",            // optional, must match the index
+  column: "embedding",         // optional when only one vector column declared
+  filter: { language: "en" },  // optional WHERE clause — composes with the ANN scan
+});
+// data: (Row<S> & { _distance: number })[]
+```
+
+`_distance` is a synthetic column the row carries back from the scan.
+On PG this is `col <-> $query` (pgvector's distance operator
+specialised to the metric). On SQLite this is the per-row distance
+computed by the Rust flat scan (`bytemuck::cast_slice` over the
+column's `BLOB`).
+
+### Full-text search
+
+Mark text columns with `.fts(language?)`:
+
+```ts
+export default {
+  schema: {
+    posts: {
+      title: t.string().required().fts("english"),
+      body:  t.string().required().fts("english"),
+      lang:  t.string().enum("en", "fr", "de").default("en"),
+    },
+  },
+};
+```
+
+One composite FTS index is built per collection across every column
+that carries an `.fts()` modifier. On PG this is a hidden
+`__fts tsvector` column plus a GIN index, refreshed by a
+`tsvector_update_trigger` on the source columns. On SQLite this is
+an FTS5 virtual table named `<collection>__fts` (external-content,
+maintained by AFTER triggers — no doubled storage).
+
+Query with `Collection.search({ text, limit, ... })`:
+
+```ts
+const { data } = await db.posts.search({
+  text: "rust async",          // free-text — parsed by the backend
+  limit: 10,                   // 1..=1000 (default 10; alias `k` is accepted)
+  filter: { lang: "en" },      // optional WHERE clause — composes with MATCH
+});
+// data: (Row<S> & { _rank: number })[]
+```
+
+`_rank` is backend-specific (PG `ts_rank`, SQLite `bm25`). Per-backend
+ordering is stable, but values are NOT comparable across backends.
+
+**Query syntax differences.**
+
+- PG honours `t.string().fts("english")` and invokes
+  `plainto_tsquery('english', $1)`. Other regconfigs (`simple`,
+  `french`, etc.) work too; the literal you pass at schema time is
+  the literal PG sees.
+- SQLite FTS5 uses the bundled language-agnostic Unicode tokenizer.
+  The `language` argument is **accepted at schema-declaration time
+  but ignored at query time** — the same string passed to `text:` is
+  the FTS5 MATCH expression. FTS5 honours `"AND"`, `"OR"`, `"NEAR"`,
+  prefix (`"rust*"`), and quoted phrases.
+
+### Geo (point + radius)
+
+Declare a geo column with `t.geoPoint()`:
+
+```ts
+export default {
+  schema: {
+    stores: {
+      name: t.string().required(),
+      loc:  t.geoPoint(),                   // {lat, lng}
+    },
+  },
+};
+```
+
+On PG this maps to `geography(POINT, 4326)`. On SQLite this maps to a
+packed `BLOB` (16 bytes — two little-endian `f64`s, `(lat, lng)`)
+with a `CHECK (length("loc") = 16)` constraint. Both backends store
+WGS84 (EPSG:4326) coordinates; the `(lat, lng)` ordering is the SDK
+contract regardless of backend.
+
+Query with `Collection.near`:
+
+```ts
+const { data } = await db.stores.near({
+  field:  "loc",
+  point:  { lat: 51.5074, lng: -0.1278 },   // London
+  radius: 1000,                              // metres
+  filter: { open: true },                    // optional WHERE clause
+  limit:  20,                                // 1..=1000 (default 100)
+});
+// data: (Row<S> & { _distance_m: number })[]
+```
+
+`_distance_m` is the great-circle distance in metres. On PG this is
+`ST_Distance(loc, ST_MakePoint($lng, $lat)::geography)` (note:
+PostGIS takes lng-lat, but the SDK swaps for you — `point: {lat, lng}`
+is always the call site contract). On SQLite this is the Rust
+haversine computed during the full-scan post-filter.
+
+**Polygon ops are PG-only.** Passing a polygon to a SQLite backend
+rejects with `code: "polygon_ops_pg_only"`. Use PG for any
+production-scale geo workload.
+
+### Backend coverage
+
+- **PG vector** — `pgvector` `ivfflat` index built CONCURRENTLY.
+  Production-grade; scales to millions of rows.
+- **SQLite vector** — pure-Rust flat scan over a `BLOB` column
+  (`bytemuck::cast_slice` to `&[f32]`; `cosine_distance` /
+  `l2_distance` / `neg_inner_product` in ~50 LOC). **Dev/sandbox/
+  test only.** Degrades past ~50k rows; an HNSW / `sqlite-vec`
+  backend is deferred (see `docs/proposals/db-system-design.md` §4
+  row 7 amendment).
+- **PG FTS** — hidden `tsvector` column + GIN; `plainto_tsquery` with
+  the language passed at schema time.
+- **SQLite FTS** — FTS5 external-content vtable + AFTER triggers; the
+  bundled FTS5 build (`SQLITE_ENABLE_FTS5` is on by default in
+  `rusqlite`'s `bundled` feature) ships the language-agnostic Unicode
+  tokenizer.
+- **PG geo** — PostGIS `geography(POINT, 4326)` + GIST index; spheroid
+  distance via `ST_DWithin` / `ST_Distance`.
+- **SQLite geo** — packed `(lat, lng)` BLOB + full-scan haversine
+  (~30 LOC of trig). Dev-tier ceiling; for production geo workloads
+  use PG.
+
+### Error codes
+
+`Collection.search` and `Collection.near` add the following codes on
+top of the global error rail (§ Errors):
+
+| `error.code`                       | When                                                                 |
+|------------------------------------|----------------------------------------------------------------------|
+| `invalid_k`                        | `k` (or FTS `limit`) outside `1..=1000`. Client-side validation; the native side never sees the call. |
+| `vector_extension_missing`         | PG without `pgvector`. Hint mentions `CREATE EXTENSION vector;` and the `pgvector/pgvector:pg16` image swap. |
+| `postgis_extension_missing`        | PG without `postgis`. Hint mentions `CREATE EXTENSION postgis;` and the same image swap. |
+| `vector_dimension_mismatch`        | `args.vector.length !== <declared dims>` at insert or query time.    |
+| `polygon_ops_pg_only`              | A polygon was passed to `.near` on a SQLite backend.                 |
+
+All five carry a stable `.code` — branch on the code, never substring-match
+on `error.message`.
+
 ## Filter operators
 
 - Comparison: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
@@ -722,6 +928,7 @@ Errors carry a `.code` property where applicable:
 | `11000`                     | Duplicate unique-key violation.                     |
 | `OptimisticLockError`       | `update` with a CAS version that didn't match.     |
 | `migration_*` (see above)   | Migration lifecycle errors.                         |
+| `invalid_k`, `vector_extension_missing`, `postgis_extension_missing`, `vector_dimension_mismatch`, `polygon_ops_pg_only` | Vector / FTS / geo paths — see [Vector / Full-Text / Geo § Error codes](#error-codes). |
 
 Use the property directly — never substring-match on `error.message`.
 

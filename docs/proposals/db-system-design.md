@@ -5,7 +5,7 @@
 **Closes** (from `docs/reviews/plugin-db-deferred.md`): [C1] (Backend trait
 half-applied, §7); [I20] (WAL replication cross-tenant isolation, §17 +
 §19 P6); [I31]/F1 (§10 + §18); [I32]/F2 (§10 + §18).
-**Last updated**: 2026-05-22 (amended for native CDC via preupdate_hook).
+**Last updated**: 2026-05-23 (amended for P4 pure-Rust SQLite vector backend).
 
 <!-- preupdate_hook amendment -->
 **Changelog — 2026-05-22 amendment.** Swapped trigger+outbox SQLite
@@ -20,6 +20,28 @@ loses its DDL teardown step; §19 P2 loses two implementation steps.
 All round 1–9 review-loop findings about the outbox approach
 collapse to "use the native hook." Prior-round narrative remains in
 `docs/reviews/db-system-design-critique-round-*.md`.
+
+<!-- p4-pure-rust-vector amendment -->
+**Changelog — 2026-05-23 amendment (P4 closure).** SQLite vector
+storage is **pure-Rust flat scan**, not `sqlite-vec`. Decision
+source: `docs/proposals/p4-search-implementation-plan.md` §10
+(riskiest decision Q-P4-D). Reason: bundling `sqlite-vec` either
+forks the SQLite amalgamation per-platform (doubles the CI matrix)
+or loads a runtime `.so` (defeats the `bundled` feature's "no
+system libsqlite3" promise from §1 / line 56-60 of this doc).
+Pure-Rust flat scan keeps the bundled-SQLite invariant intact at the
+cost of a dev-tier-only scale ceiling (~50k rows, ≤1024 dims,
+≤100ms latency). Production vector workloads use pgvector on PG —
+the §1 stance that "SQLite = dev/sandbox/test ONLY" already
+encodes this. Mechanically: §4 row 7 now reads "pure-Rust flat scan
+(dev scale ≤50k rows); HNSW deferred"; §6.2 row `Vector(n)` SQLite
+cell now reads `BLOB` (pure-Rust flat scan); §7 vector-trait
+narrative drops the "wraps sqlite-vec" wording; §18 open question
+#7 is closed (no `sqlite-vec` runtime extension load — pure-Rust
+the chosen path). HNSW / `sqlite-vec` is deferred to a future
+deferred-list entry, not killed; if/when a future revision restores
+it, it ships behind a separate Cargo feature so the dev-tier
+default stays bundled.
 
 **Reading order.** §1 overview · §4 25-capability PG/SQLite split · §7
 capability trait redesign · §8 SQLite mechanism · §19 engineering
@@ -231,8 +253,8 @@ SQLite's WAL journal and POSIX file locks.
 | `Uuid` | `UUID` | `TEXT` (CHECK shape) |
 | `Bytes` | `BYTEA` | `BLOB` |
 | `Decimal(p,s)` | `NUMERIC(p,s)` | `TEXT`, see §6.2.1 |
-| `Vector(n)` | `vector(n)` (pgvector) | `BLOB` (sqlite-vec) |
-| `GeoPoint` | `geography(POINT, 4326)` | R-tree vtable + raw (lat,lng) |
+| `Vector(n)` | `vector(n)` (pgvector) | `BLOB` (pure-Rust flat scan; see §4 row 7 amendment) |
+| `GeoPoint` | `geography(POINT, 4326)` | `BLOB` 16 bytes packed `(lat, lng)` + Rust Haversine post-filter (see P4 plan §4.3) |
 | `Array(T)` | `T[]` native | `TEXT` (JSON-encoded) |
 
 `tsvector` is intentionally absent from the user-facing type table. Full-text
@@ -384,14 +406,16 @@ each backend to re-implement and entangle policy.
 <!-- preupdate_hook amendment -->
 **`VectorIndex`, `FullTextIndex`, `SpatialIndex`** — parallel shape:
 per-collection index creation + search. PG wraps pgvector / tsvector /
-PostGIS; SQLite wraps sqlite-vec / FTS5 / R-tree+Haversine. Search
-accepts the same filter object as `find` (`near(point) AND status =
-"open"`). SQLite caveat: `sqlite3_preupdate_hook` fires on rowid
-tables only, not vtables (FTS5, R-tree, sqlite-vec). Acceptable —
-the change-event path keys off mutations to the **base** collection;
-side-index vtable updates are an implementation detail driven by
-AFTER triggers (FTS5) or the orchestrator's own writes (sqlite-vec,
-R-tree), neither of which user code subscribes to.
+PostGIS; SQLite uses **pure-Rust flat scan** (vector; see §4 row 7
+amendment) / FTS5 / packed-BLOB+Haversine (see §6.2 amendment).
+Search accepts the same filter object as `find` (`near(point) AND
+status = "open"`). SQLite caveat: `sqlite3_preupdate_hook` fires on
+rowid tables only, not vtables (FTS5). Acceptable — the change-event
+path keys off mutations to the **base** collection; FTS5 vtable
+updates are an implementation detail driven by AFTER triggers, which
+user code does not subscribe to. Vector and geo storage are plain
+BLOB columns on the base collection (no vtable), so the preupdate
+hook sees their mutations natively.
 
 <!-- preupdate_hook amendment -->
 **`MaterializedView`** — ensure-and-refresh of cached aggregates. PG:
@@ -1351,8 +1375,12 @@ trust boundary; SQLite is not a production multi-tenant backend.
    terminal state."
 6. **Within-app RLS**: app-layer for v1; native PG RLS as
    defense-in-depth in P6.
-7. **`sqlite-vec`**: `bundled` vs runtime extension load. Recommend
-   `bundled`.
+7. **`sqlite-vec`**: `bundled` vs runtime extension load.
+   **CLOSED 2026-05-23 (P4)** — neither. Shipped pure-Rust flat scan
+   instead; both options conflicted with the bundled-SQLite
+   invariant (§1). See the 2026-05-23 P4 amendment block at the top
+   of this doc and `docs/proposals/p4-search-implementation-plan.md`
+   §10.
 8. **SQLite pool sizing**: 1 writer + 4 readers (separate Connection
    handles in WAL mode). Independent of compio blocking-pool size — a
    separate runtime tunable (§18A).

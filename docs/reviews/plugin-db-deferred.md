@@ -361,6 +361,16 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
+### [I45] P4 cross-backend search equivalence test (membership-only) — DEFERRED 2026-05-23 (PR 6b)
+- **Source**: `docs/proposals/p4-search-implementation-plan.md` §7 "Cross-backend equivalence" + PR 6b spec.
+- **File**: NEW `crates/plugin-db/tests/cross_backend_search_equivalence.rs`.
+- **Description**: A single `#[cfg(all(feature = "pg", feature = "sqlite", feature = "test-helpers", feature = "hardening"))]` integration test asserting **set-membership** (not ordinal ranking — ranking divergence is acceptable per the plan §9 "Determinism" note) across PG and SQLite for an FTS query, a vector kNN query, and a spatial `near` query. Membership equality across backends gives a hard floor on the SDK's "you can't tell which backend you're on" promise for the §1 creator surface.
+- **Why deferred**: the test requires a live env with BOTH backends + the PG extensions (`pgvector`, `postgis`) installed. The current verification env runs the two backends in separate cargo invocations (different feature flags); standing up a combined-feature env with both extensions is a CI-shape change, not a plugin-db change. The Rust impls (PR 1-5) are done — each backend has its own §19 P4 gate already green (`vector_search_returns_k_nearest`, `fts_search_matches_substring`, `near_returns_within_radius`, `fts_and_filter_compose` × {PG, SQLite}). The cross-backend membership claim is therefore covered transitively by the four per-backend tests asserting the same fixture data, even without a single test that exercises both at once.
+- **Effort**: small (~150 LOC; mirror the four per-backend tests with shared fixtures). Blocking item is CI env, not the test itself.
+- **Pickable this cycle**: no (env-blocked); pick when the worker CI gains a combined-feature shape.
+
+---
+
 ## SUPERSEDED (already fixed; remove next cycle)
 
 ### [S89] IMPORTANT (security r13 §[I43]; cycle 18:17) — blocking pg_advisory_lock replaced with bounded retry
