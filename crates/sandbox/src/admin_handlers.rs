@@ -1281,22 +1281,47 @@ pub async fn snapshot_sandbox(
     .await;
     match outcome {
         Ok(o) => {
-            // Source teardown — best-effort, post-snapshot. The pg row
-            // already reads `snapshotted` so a teardown failure here
-            // leaves a runtime-orphan that the next-boot orphan-prune
-            // sweeps. We log loudly + return 200 so the operator sees
-            // the snapshot succeeded.
-            if let Err(e) = state
-                .backend
-                .teardown_source_for_snapshot(sandbox_id)
-                .await
-            {
-                tracing::warn!(
-                    sandbox_id = %sandbox_id,
-                    error = %e,
-                    "admin/snapshot: source teardown failed (non-fatal; orphan-prune will reclaim)"
-                );
-            }
+            // Source teardown — best-effort, post-snapshot, DETACHED.
+            //
+            // R6-P1 fix (perf-r6): the pg row already reads `snapshotted`
+            // (the CAS inside `snapshot_handler::snapshot_sandbox` has
+            // committed by this point), so the snapshot itself is durable
+            // regardless of what the teardown does. The teardown's cost
+            // is dominated by Nomad alloc-terminal wait (up to 30s
+            // `wait_for_job_gone` + up to ~20s host_fence — see
+            // `backend::nomad_ch::stop_inner` steps 3–4), which kept
+            // snapshot p50 around 50s when awaited inline. Detaching it
+            // returns 200 immediately and lets the teardown run in
+            // background.
+            //
+            // Race safety: the vm_index_allocator is shared
+            // (`Arc<Mutex<VmIndexAllocator>>`, B19 wiring), so a wake
+            // racing the teardown will see `reserve(vm_index)` reject
+            // with "vm_index N already reserved" until the teardown's
+            // `release()` fires after host_fence clears. This is the
+            // same pre-existing race the sweep-path teardown already
+            // exposes (`sweep.rs::idle-eviction`); detaching does not
+            // create new shared state. A teardown failure here leaves a
+            // runtime-orphan that the next-boot orphan-prune sweeps.
+            //
+            // Errors surface as `tracing::error!` (not warn) — the
+            // operator has no other signal that the background teardown
+            // failed, so it must be loud in the logs.
+            let state_for_teardown = Arc::clone(&state);
+            compio::runtime::spawn(async move {
+                if let Err(e) = state_for_teardown
+                    .backend
+                    .teardown_source_for_snapshot(sandbox_id)
+                    .await
+                {
+                    tracing::error!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
+                    );
+                }
+            })
+            .detach();
             HttpResponse::Ok().json(&serde_json::json!({
                 "sandbox_id": format!(
                     "sbx_{}",
