@@ -6,6 +6,8 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 17:47 (post-P0 
 
 **Cycle 17:47 closures**: [C1] Backend trait half-applied (the entire P0 commit chain `9bc25726` → `9a241f58`).
 
+**Cycle 18:17 closures (2 verifications + 1 reprioritisation)**: [S11] AuditExecutor Boxes futures — verified CLOSED at HEAD (perf r15). [S10] broker per-subscriber HashMap clone half — verified CLOSED by commit chain `c54a9f15` → `0e58c4e8` (perf r15); Vec-alloc-on-publish half remains pending bench. [I43] blocking pg_advisory_lock — graduated to ACTIONABLE NOW per security r13 (~80 LOC PR sketched in security r13 §[I43]). 4 reviewers returned: code-critique r15 = 88 (+1); concurrency r13 = 87 (−2, NEW-R13-1+R13-2 surfaced); security r13 = 87 (+1, §1.3 audit defense-in-depth gap); performance r15 = 82 (±0, no forcing function this cycle).
+
 **Post-P0 backlog re-evaluation** (key items): I-R11-1 (more `pub(crate)` demotion) — superseded by P0 (capability traits replaced the surface). I-R11-2 (set_pool constructs PostgresBackend) — superseded; `set_pool` now wraps in `BackendHandle::Postgres`. I-R11-3 (create_ad_hoc_backend test escape hatch) — UNCHANGED, still in test-helpers. [I43] backend/postgres.rs:118 blocking pg_advisory_lock — UNCHANGED.
 
 
@@ -367,12 +369,13 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 ---
 
 ### [I43] bootstrap.rs still uses blocking pg_advisory_lock (security r4 IMPORTANT)
-- **Source**: `plugin-db-security-2026-05-22-r4.md` §"sharpened IMPORTANT"
-- **File**: `crates/plugin-db/src/orchestrator/register_model/bootstrap.rs:107`
-- **Description**: Bootstrap uses blocking `pg_advisory_lock` with no try-with-deadline / per-app cap. `migrations.rs` uses `try_acquire_advisory_lock`. The cbd12944 RAII refactor could have unified on the try-pattern but didn't — cross-tenant pool starvation risk remains: one app blocked on its lock holds a connection that other apps can't reach.
-- **Status as of 2026-05-22 03:25**: design decision needed — non-blocking with retry/backoff vs blocking with cap. Either is a meaningful semantic change.
-- **Effort**: small (mechanical swap to try-acquire) but requires a retry/backoff policy decision.
-- **Pickable this cycle**: rolled forward; needs design input.
+- **Source**: `plugin-db-security-2026-05-22-r4.md` §"sharpened IMPORTANT"; `plugin-db-security-2026-05-22-r13.md` §[I43] (fix sketch + ~80 LOC estimate)
+- **File**: `crates/plugin-db/src/backend/postgres.rs:118` (always-compiled; corrected from prior `bootstrap.rs` location per security r11)
+- **Description**: Backend's `acquire_dedicated_client` uses blocking `pg_advisory_lock` with no try-with-deadline / per-app cap. `migrations.rs` uses `try_acquire_advisory_lock`. Cross-tenant pool starvation risk remains: one app blocked on its lock holds a connection that other apps can't reach.
+- **Blocker**: ACTIONABLE NOW — security r13 confirms P0 stabilised the surface; estimated ~80 LOC PR per security r13's fix-sketch (see report §[I43]). The five-cycle blocker ("trait surface unstable" / "design-pending" / "deferred during redesign") cleared with P0 PR 6.
+- **Fix sketch** (per security r13): add `try_acquire_with_backoff` returning `DbError::LockContention { code: "lock_not_available" }` on exhaustion; swap `LockGuard::acquire` and the default impl at `backend/mod.rs:271-274`.
+- **Effort**: small (~80 LOC PR per security r13).
+- **Pickable this cycle**: ACTIONABLE NOW (next cycle pickup) — re-prioritised from "design-pending" to top of the IMPORTANT queue.
 
 ---
 
@@ -462,11 +465,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ### [S10] IMPORTANT perf I1/I2 — broker `publish` Vec alloc + per-subscriber HashMap clone
 - **Source**: `plugin-db-performance-2026-05-22-r1.md` §3 I1+I2
-- **Fixed by**: `c54a9f15 plugin-db/broker: share ChangeEvent payload via Rc to drop per-subscriber clone`. `broker.rs:439-462` uses `subs.retain` + `Rc::new(event.clone())` once before fan-out.
+- **Fixed by** (per-subscriber HashMap clone half): `c54a9f15 plugin-db/broker: share ChangeEvent payload via Rc to drop per-subscriber clone` + follow-up commit chain `49b0b98e`, `78a95d3b`, `0e58c4e8`. `broker.rs:439-462` uses `subs.retain` + `Rc::new(event.clone())` once before fan-out.
+- SUPERSEDED (per-subscriber HashMap clone half) — verified CLOSED by performance r15 (cycle 18:17) via the `c54a9f15` → `49b0b98e` → `78a95d3b` → `0e58c4e8` commit chain; per-subscriber HashMap clone is gone.
+- **Residual (Vec-alloc-on-publish half) still open**: one `event.clone()` per publish before Rc-distribution. Needs the `bench_broker_publish` forcing function performance r15 recommended before this graduates from speculative to actionable.
 
 ### [S11] IMPORTANT perf I4 — `AuditExecutor` boxes every future
 - **Source**: `plugin-db-performance-2026-05-22-r1.md` §3 I4
 - **Fixed by**: `f1c475f5 plugin-db/audit: convert helpers to Result<_, DbError> + async_fn_in_trait`. `audit.rs:431-437` uses `#[allow(async_fn_in_trait)] async fn query_text`. No `Pin<Box<dyn Future>>` in the trait. Trait is `pub(crate)`.
+- SUPERSEDED — verified CLOSED by performance r15 (cycle 18:17). `audit.rs::AuditExecutor` uses `async_fn_in_trait`; no `Box<dyn Future>` in production. Both impls (`Pool`, `Client`) are sized; no `dyn` use sites. Original finding predated the trait migration.
 - Residual: trait return type is still `Result<Vec<Row>, compio_postgres::Error>` rather than `Result<Vec<Row>, DbError>` (R3 M3) — but boxing is gone. Promote the residual to MINOR if it surfaces in a future review.
 
 ### [S12] API-surface I2 — internal modules over-exported
