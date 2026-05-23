@@ -174,11 +174,18 @@ impl RootKek {
         Self { bytes: zeroize::Zeroizing::new(bytes) }
     }
 
-    /// Read 32 raw bytes from a file with mode 0o400 (Unix). Mirrors
-    /// the persistence-key + admin-token loaders.
+    /// Read 32 raw bytes from a file with mode 0o400 owned by uid 0
+    /// (Unix). Mirrors the persistence-key + admin-token loaders, plus
+    /// an owner-uid check (R9-S4): mode 0o400 alone is insufficient
+    /// because a non-root attacker who pre-creates a chmod-400 file at
+    /// the KEK path before the controller starts could supply a
+    /// known/attacker-controlled key. The "uid == 0" invariant matches
+    /// systemd-style secret loading at `/etc/zeroship/`, where the
+    /// worker startup script creates the key as root.
     pub fn from_path(path: &Path) -> Result<Self, String> {
         #[cfg(unix)]
         {
+            use std::os::unix::fs::MetadataExt as _;
             use std::os::unix::fs::PermissionsExt as _;
             let meta = std::fs::metadata(path)
                 .map_err(|e| format!("{ROOT_KEK_ENV}={path:?}: stat: {e}"))?;
@@ -186,6 +193,13 @@ impl RootKek {
             if mode != 0o400 {
                 return Err(format!(
                     "{ROOT_KEK_ENV}={path:?}: mode={mode:o} must be 0o400"
+                ));
+            }
+            let uid = meta.uid();
+            if uid != 0 {
+                return Err(format!(
+                    "{ROOT_KEK_ENV}={path:?}: owner uid {uid} != 0 \
+                     (refusing to load; chown root:root the file)"
                 ));
             }
         }
@@ -1191,6 +1205,73 @@ mod tests {
             msg.contains("below tag size"),
             "undersized chunk length must report tag-size floor; got: {msg}"
         );
+        cleanup(&root);
+    }
+
+    /// R9-S4: a 0o400 KEK file owned by a non-root uid (i.e. the
+    /// test-runner user, which is uid != 0 in CI/dev) MUST be refused.
+    /// Without the owner check, a non-root attacker who pre-creates a
+    /// chmod-400 file at the KEK path before the controller starts can
+    /// supply an attacker-known key, breaking confidentiality of every
+    /// future snapshot.
+    #[cfg(unix)]
+    #[test]
+    fn root_kek_from_path_rejects_non_root_owned_file() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = fresh_root();
+        let p = root.join("kek");
+        std::fs::write(&p, [0xa5u8; ROOT_KEK_LEN]).unwrap();
+        // The file is created by the test-runner process, so its uid
+        // == effective uid of the runner. Detect "running as root" by
+        // reading that uid back: if it's 0 there's no non-root-owned
+        // file to materialise, so skip (the positive-arm test below
+        // covers that branch).
+        let runner_uid = std::fs::metadata(&p).unwrap().uid();
+        if runner_uid == 0 {
+            eprintln!(
+                "skipping root_kek_from_path_rejects_non_root_owned_file: \
+                 running as root, can't materialise a non-root-owned KEK file"
+            );
+            cleanup(&root);
+            return;
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let err = RootKek::from_path(&p)
+            .expect_err("non-root-owned KEK must be refused even at mode 0o400");
+        assert!(
+            err.contains("owner uid") && err.contains("!= 0"),
+            "error must mention owner uid != 0; got: {err}"
+        );
+        cleanup(&root);
+    }
+
+    /// R9-S4 positive arm: when the test runs as root, a 0o400 KEK
+    /// file owned by root loads OK. Skipped when not running as root
+    /// (the common case in CI/dev) — the negative arm above already
+    /// pins the bug-fix assertion in non-root environments.
+    #[cfg(unix)]
+    #[test]
+    fn root_kek_from_path_accepts_root_owned_file_when_running_as_root() {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = fresh_root();
+        let p = root.join("kek");
+        std::fs::write(&p, [0xa5u8; ROOT_KEK_LEN]).unwrap();
+        let runner_uid = std::fs::metadata(&p).unwrap().uid();
+        if runner_uid != 0 {
+            eprintln!(
+                "skipping root_kek_from_path_accepts_root_owned_file_when_running_as_root: \
+                 not running as root, can't create a root-owned KEK file"
+            );
+            cleanup(&root);
+            return;
+        }
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let kek = RootKek::from_path(&p).expect("root-owned 0o400 KEK must load");
+        // Sanity-check the bytes round-trip — first byte of the KEK.
+        assert_eq!(kek.bytes[0], 0xa5);
         cleanup(&root);
     }
 }
