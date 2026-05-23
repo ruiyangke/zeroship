@@ -556,11 +556,18 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: same vulnerability shape as R9-S4 but on `SANDBOX_AEAD_KEY_PATH` (the sealed-records persistence AEAD key, distinct from the snapshot-store root KEK). Mode 0o400 checked but uid not — non-root attacker who pre-creates the file at the path before systemd starts can supply a known key for sealed-record encryption.
 - **Action**: same one-line `metadata().uid() == 0` fix as R9-S4. Mirror the test pattern from `snapshot_aead.rs` (`from_path_rejects_non_root_owned_file`).
 
-### [R9-S4c] Third sibling: `db.rs::enforce_password_file_mode` has identical mode-only-no-uid bug (IMPORTANT, security-r9)
-- **Source**: Discovered by R9-S4b fixer 2026-05-25 r4. Comment at `crates/sandbox/src/db.rs:810` literally says "Mirrors `persist::AeadKey::from_path`" — inherited R9-S4 / R9-S4b's defect.
+### [R9-S4c] (CLOSED at 2c10f63a) db.rs enforce_password_file_mode uid check landed (sibling of R9-S4 / R9-S4b)
+- **Source**: Discovered by R9-S4b fixer 2026-05-25 r4. Comment at `crates/sandbox/src/db.rs:810` literally said "Mirrors `persist::AeadKey::from_path`" — inherited R9-S4 / R9-S4b's defect.
 - **File**: `crates/sandbox/src/db.rs:812-831` (`enforce_password_file_mode`)
 - **Symptom**: mode-only-no-uid on `SANDBOX_DATABASE_PASSWORD_PATH` (pg-superuser-password file). Non-root attacker pre-creating a 0o400 file at this path before systemd injects an attacker-known pg password → controller connects to pg with that password. Bigger blast radius if attacker can also influence DNS / pg endpoint.
-- **Action**: same one-line `metadata().uid() == 0` fix. Add 2 tests mirroring R9-S4/R9-S4b naming.
+- **Action**: same one-line `metadata().uid() == 0` fix. Added 2 tests mirroring R9-S4/R9-S4b naming; existing `_rejects_loose_permissions` test gained a uid-aware guard on its 0o400-pass arm.
+- **Fourth sibling identified (NOT closed here)**: `crates/sandbox/src/lib.rs::load_admin_token` (~line 924-942) loads `SANDBOX_ADMIN_TOKEN_PATH` with mode 0o400 checked but uid not. Same vulnerability shape, same one-line fix. Tracked as a follow-up so this commit stays focused on the pg-password loader. See new R9-S4d entry below.
+
+### [R9-S4d] Fourth sibling: `lib.rs::load_admin_token` has identical mode-only-no-uid bug (IMPORTANT, security-r9)
+- **Source**: Discovered by R9-S4c fixer 2026-05-25 r5. Comment at `crates/sandbox/src/lib.rs:908` says "Mirrors `Persistence::AeadKey::from_path`" — inherited the same mode-only-no-uid defect that R9-S4 / R9-S4b / R9-S4c each patched in their respective loaders.
+- **File**: `crates/sandbox/src/lib.rs:924-957` (`load_admin_token`); the mode check is at line 937-942, missing the owner-uid assertion.
+- **Symptom**: mode-only-no-uid on `SANDBOX_ADMIN_TOKEN_PATH` (admin-API bearer-token file). A non-root attacker who pre-creates a 0o400 file at this path before systemd starts injects an attacker-known admin token. The controller then accepts that token on every admin endpoint — full admin-API takeover on first boot.
+- **Action**: same one-line `metadata().uid() == 0` fix. Note: `load_admin_token` returns `Result<_, String>` (matching the R9-S4 / R9-S4b shape, not R9-S4c's `DatabaseError::Validation`). Add 2 tests mirroring R9-S4b naming.
 
 ### [R9-S5] Restore-branch wrapper handles ZSBX_SANDBOX_ID asymmetrically vs cold-boot (informational, hides pre-R7-S1-snapshot wedge mode) (IMPORTANT, security-r9)
 - **Source**: 2026-05-25 security-r9
