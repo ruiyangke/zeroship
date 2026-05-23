@@ -75,6 +75,14 @@ pub(crate) mod backend;
 #[cfg(feature = "test-helpers")]
 pub mod backend;
 pub(crate) mod context;
+// `cross_app_fk` is `pub` (not `pub(crate)`) because integration tests
+// in both `tests/integration.rs` (PG arm) and
+// `tests/sqlite_integration.rs` (SQLite arm) call the validator
+// directly to pin the rejection contract. The function is a pure JSON
+// walk — no DB round-trip — so exposing it has zero runtime impact;
+// the production call site is one line in
+// `orchestrator/register_model/bootstrap.rs::bootstrap`.
+pub mod cross_app_fk;
 pub(crate) mod crud;
 pub(crate) mod diff;
 pub(crate) mod read_set;

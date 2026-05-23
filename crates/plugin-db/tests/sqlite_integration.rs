@@ -20,9 +20,10 @@ use std::path::PathBuf;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
-    LockManager, LockScope, NamespaceManager, SchemaIntrospect, SqlExecutor,
+    IndexBuilder, LockManager, LockScope, NamespaceManager, SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::error::DbError;
+use zeroship_plugin_db::query::IndexSpec;
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -550,4 +551,226 @@ fn introspect_after_create_table_round_trip() {
             .expect("estimate_row_count");
         assert_eq!(n, 0, "freshly-created table has 0 rows");
     });
+}
+
+// ---------------------------------------------------------------------------
+// P1 PR 5 — IndexBuilder (CREATE INDEX) + cross-app FK parse-time check
+// integration tests.
+//
+// The IndexBuilder-side tests exercise the two terminal branches of
+// `create_index_with_recovery` on the SQLite arm:
+//
+// 1. Happy path — `CREATE [UNIQUE] INDEX IF NOT EXISTS` against a
+//    freshly-created table; the call returns Ok and the index appears
+//    in `PRAGMA index_list`.
+// 2. Unique-constraint violation — the table already carries duplicate
+//    rows, so a `CREATE UNIQUE INDEX` returns the canonical
+//    `DbError::SchemaRefused { code: "validation_refused", ... }`
+//    envelope (wire-compatible with the PG arm at
+//    `backend/postgres.rs::create_index_with_recovery_audited`).
+//
+// The cross-app FK test exercises the pure-Rust validator at
+// `crate::cross_app_fk::reject_cross_app_fk` end-to-end; it is the
+// same module the PG-side integration test imports, so this assertion
+// is mirrored byte-for-byte against the PG path in
+// `tests/integration.rs::cross_app_fk_rejected_at_parse`.
+// ---------------------------------------------------------------------------
+
+/// Provision the per-app `__zs_migrations` audit table the
+/// `AuditWriter` impl writes into. P1 PR 5 ships only the INSERT path;
+/// the audit-table provisioning DDL is a later-PR concern. We create
+/// it inline here so the `unique_violation` path's best-effort audit
+/// write actually lands during the test (the test still passes if the
+/// write fails — the SchemaRefused envelope assertion is the wire
+/// contract — but covering both halves is cheap).
+async fn ensure_audit_table(backend: &SqliteBackend, app_id: &str) {
+    let sql = format!(
+        "CREATE TABLE IF NOT EXISTS \"{app_id}\".\"__zs_migrations\" (\
+             id              INTEGER PRIMARY KEY AUTOINCREMENT, \
+             collection      TEXT NOT NULL, \
+             phase           TEXT NOT NULL, \
+             change_class    TEXT NOT NULL, \
+             change_kind     TEXT NOT NULL, \
+             details         TEXT NOT NULL, \
+             ddl_sql         TEXT, \
+             status          TEXT NOT NULL, \
+             deploy_id       TEXT NOT NULL, \
+             applied_by_kind TEXT NOT NULL, \
+             schema_version  INTEGER NOT NULL\
+         )"
+    );
+    backend
+        .pool_exec(&sql, &[])
+        .await
+        .expect("create __zs_migrations audit table");
+}
+
+#[test]
+fn create_index_succeeds() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        // Create the user table the index will cover.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"things\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE things");
+
+        // Build a non-unique index spec. The `sql` field is unused by
+        // the SQLite IndexBuilder impl (which rebuilds the DDL from
+        // `name` + `columns` + `unique` against the SQLite dialect),
+        // so we leave it empty — the test exercises the rebuild path.
+        let spec = IndexSpec {
+            name: "things_name_idx".to_string(),
+            columns: vec!["name".to_string()],
+            unique: false,
+            sql: String::new(),
+        };
+
+        backend
+            .create_index_with_recovery(
+                "app_demo",
+                "things",
+                &spec,
+                "test_deploy",
+                1,
+            )
+            .await
+            .expect("create_index_with_recovery should succeed on a clean table");
+
+        // Cross-check via SchemaIntrospect: the index must appear in the
+        // PRAGMA-walk output. Routes through the same actor as the
+        // CREATE INDEX, so visibility is guaranteed without an extra
+        // commit/flush step.
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect_schema");
+        let idxs = live
+            .indexes
+            .get("things")
+            .expect("things must have an index map after CREATE INDEX");
+        let info = idxs
+            .get("things_name_idx")
+            .expect("things_name_idx must be present");
+        assert!(!info.is_unique);
+        assert_eq!(info.columns, vec!["name".to_string()]);
+    });
+}
+
+#[test]
+fn create_unique_index_fails_on_duplicate_with_envelope() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        ensure_audit_table(&backend, "app_demo").await;
+
+        // Table + two rows with the same `email` value so a UNIQUE
+        // index on `email` cannot land.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"users\" (\
+                     id INTEGER PRIMARY KEY, \
+                     email TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE users");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_demo\".\"users\" (email) VALUES ('a@x'), ('a@x')",
+                &[],
+            )
+            .await
+            .expect("INSERT duplicate emails");
+
+        let spec = IndexSpec {
+            name: "users_email_uniq".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            sql: String::new(),
+        };
+
+        let err = backend
+            .create_index_with_recovery(
+                "app_demo",
+                "users",
+                &spec,
+                "test_deploy",
+                1,
+            )
+            .await
+            .expect_err("UNIQUE index on duplicate column values must reject");
+
+        // Wire-compatible envelope per `docs/proposals/p1-sqlite-implementation-plan.md`
+        // §3.5: code = "validation_refused" with structured `code:
+        // "unique_violation"` (via the inner `constraint: "unique"`
+        // field — the PG arm's envelope shape) inside the JSON body.
+        match err {
+            DbError::SchemaRefused { code, envelope_json } => {
+                assert_eq!(
+                    code, "validation_refused",
+                    "envelope outer code must be `validation_refused` for SDK branching"
+                );
+                let v: serde_json::Value = serde_json::from_str(&envelope_json)
+                    .expect("envelope must be valid JSON");
+                assert_eq!(v["code"], "validation_refused");
+                assert_eq!(v["change_kind"], "index_retry");
+                assert_eq!(v["collection"], "users");
+                assert_eq!(v["index"], "users_email_uniq");
+                assert_eq!(v["constraint"], "unique");
+                // Conflicting-key extraction divergence (plan §3.5):
+                // SQLite errors don't carry the duplicate key value the
+                // way PG's 23505 does. The envelope reports an empty
+                // list and a hint pointing the SDK at a read path.
+                assert!(
+                    v["conflicting_keys"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+                    "conflicting_keys must be the empty list on SQLite (divergence): {v}"
+                );
+            }
+            other => panic!("expected DbError::SchemaRefused, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn cross_app_fk_rejected_at_parse() {
+    // Pure-Rust validator — no DB round-trip required. The PG-side
+    // `tests/integration.rs::cross_app_fk_rejected_at_parse` is the
+    // mirror assertion; both reach the same `crate::cross_app_fk`
+    // module so a regression here would fail both targets.
+    use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
+
+    let schema = serde_json::json!({
+        "authorId": { "type": "ref", "refTarget": "other_app.users" }
+    });
+    let err = reject_cross_app_fk(&schema, "app_demo")
+        .expect_err("cross-app ref must reject at parse time");
+    match err {
+        DbError::Configuration { code, message, hint } => {
+            assert_eq!(code, "cross_app_fk_forbidden");
+            assert!(
+                message.contains("other_app.users"),
+                "message must name the offending target: {message}"
+            );
+            assert!(
+                hint.as_deref().map(|h| h.contains("Drop the")).unwrap_or(false),
+                "hint must point at remediation: {hint:?}"
+            );
+        }
+        other => panic!("expected DbError::Configuration, got {other:?}"),
+    }
 }

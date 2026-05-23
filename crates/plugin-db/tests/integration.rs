@@ -4762,3 +4762,42 @@ fn err_chain(e: &dyn std::error::Error) -> String {
     }
     s.to_lowercase()
 }
+
+// ---------------------------------------------------------------------------
+// P1 PR 5 — cross-app FK parse-time check (PG arm mirror).
+//
+// The validator lives at `crate::cross_app_fk::reject_cross_app_fk`
+// and runs on BOTH backends — the SQLite-side mirror is at
+// `tests/sqlite_integration.rs::cross_app_fk_rejected_at_parse`. The
+// hook is wired into `orchestrator/register_model/bootstrap.rs`, so
+// any future drift in the rejection contract would surface here AND
+// in the SQLite target. We exercise the validator directly (rather
+// than driving it through the full `run_pipeline`) so the test has
+// no DB dependency — the check is pure-Rust JSON walk.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cross_app_fk_rejected_at_parse() {
+    use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
+    use zeroship_plugin_db::error::DbError;
+
+    let schema = serde_json::json!({
+        "authorId": { "type": "ref", "refTarget": "other_app.users" }
+    });
+    let err = reject_cross_app_fk(&schema, "app_demo")
+        .expect_err("cross-app ref must reject at parse time");
+    match err {
+        DbError::Configuration { code, message, hint } => {
+            assert_eq!(code, "cross_app_fk_forbidden");
+            assert!(
+                message.contains("other_app.users"),
+                "message must name the offending target: {message}"
+            );
+            assert!(
+                hint.as_deref().map(|h| h.contains("Drop the")).unwrap_or(false),
+                "hint must point at remediation: {hint:?}"
+            );
+        }
+        other => panic!("expected DbError::Configuration, got {other:?}"),
+    }
+}

@@ -16,8 +16,8 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager, PgLockManager,
-    PgSqlExecutor, SchemaIntrospect, SqlExecutor,
+    AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
+    PgLockManager, PgSqlExecutor, SchemaIntrospect, SqlExecutor,
 };
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
@@ -247,6 +247,26 @@ impl IndexBuilder for PostgresBackend {
 impl PgSqlExecutor for PostgresBackend {
     fn pool_handle(&self) -> &Rc<compio_postgres::Pool> {
         &self.pool
+    }
+}
+
+// P1 PR 5: `AuditWriter` capability. The PG impl is a thin wrapper over
+// the existing `crate::audit::write_audit_row` free function — same SQL,
+// same `RETURNING id` round-trip, same error mapping. The trait method
+// discards the returned id because the only PR-5 consumer (the SQLite
+// arm's `IndexBuilder::create_index_with_recovery`) writes its audit
+// row in terminal state and doesn't need to transition it; PG's own
+// `create_index_with_recovery_audited` continues to call the free
+// function directly so it can chain `update_audit_status` after, no
+// behaviour change on the PG audit path.
+impl AuditWriter for PostgresBackend {
+    async fn write_audit_row(
+        &self,
+        app_id: &str,
+        row: &crate::audit::AuditRow,
+    ) -> Result<(), DbError> {
+        crate::audit::write_audit_row(self.pool.as_ref(), app_id, row).await?;
+        Ok(())
     }
 }
 
@@ -702,8 +722,8 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager, PgLockManager,
-        PgSqlExecutor, RegisterBackend, SchemaIntrospect, SqlExecutor,
+        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
+        PgLockManager, PgSqlExecutor, RegisterBackend, SchemaIntrospect, SqlExecutor,
     };
 
     /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
@@ -744,6 +764,13 @@ mod tests {
         // refactor that detaches the impl block fails at type-check.
         fn impls_dialect_builder<T: DialectBuilder>() {}
         impls_dialect_builder::<PostgresBackend>();
+
+        // P1 PR 5: `AuditWriter` impl wraps the free-function audit
+        // write path. The bound pins the trait wire so a future
+        // refactor that detaches the impl block fails at type-check
+        // here, not at a distant `IndexBuilder` consumer site.
+        fn impls_audit_writer<T: AuditWriter>() {}
+        impls_audit_writer::<PostgresBackend>();
     }
 
     // ---------------------------------------------------------------------

@@ -105,6 +105,26 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend>(
         .to_string();
 
     // -------------------------------------------------------------------
+    // P1 PR 5 — cross-app FK parse-time check (design §18 Q1, plan §6).
+    //
+    // Pure-Rust JSON walk over the field set; rejects any `t.ref` whose
+    // `refTarget` carries an `<other_app>.` prefix. Runs on BOTH
+    // backends (PG and SQLite) — the rule is platform policy, not a
+    // SQLite-specific limitation. The implementation lives at
+    // `crate::cross_app_fk` (lifted out of `backend/sqlite/` so PG-only
+    // builds also enforce it); the design lineage (SQLite ATTACH file
+    // isolation) is documented in that module's rustdoc.
+    //
+    // **Order is load-bearing**: this check runs BEFORE the advisory
+    // lock acquire. A malformed schema (cross-app FK) rejected here
+    // means we never take the per-app `register_model` lock for a
+    // deploy that will fail at parse — concurrent deploys for the same
+    // app stay un-blocked, and the validate-stage refusal path doesn't
+    // see a schema it cannot represent on the SQLite arm.
+    // -------------------------------------------------------------------
+    crate::cross_app_fk::reject_cross_app_fk(schema, app_id)?;
+
+    // -------------------------------------------------------------------
     // Concurrent-deploy serialisation: proposal A2 line 202.
     //
     // Two-key advisory lock keyed on (app_id, register_model). Held at

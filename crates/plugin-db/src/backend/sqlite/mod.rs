@@ -18,11 +18,12 @@
 //!   cross-app FK parse-time check + `impl Backend for SqliteBackend`
 //!   + the SQLite integration-test mirror.
 //!
-//! **`impl Backend for SqliteBackend` is intentionally absent in PR 1**
-//! — the `Backend` super-trait relaxation (Q-P1-B; see
-//! `docs/proposals/p1-sqlite-implementation-plan.md` §10) lands in this
-//! same PR, but the marker impl waits until PR 5 ties off every
-//! sub-trait. PR 1's surface is the carved capability traits only.
+//! **`impl Backend for SqliteBackend` lands in P1 PR 5**: every
+//! sub-trait now carries a real (non-stub) impl, so the composition
+//! marker `impl Backend for SqliteBackend {}` is added at the bottom
+//! of this file. The relaxation of the `Backend` super-bound to drop
+//! the `Client = compio_postgres::Client` pin landed in PR 1; PR 5 is
+//! the moment the marker actually wires up.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -32,17 +33,21 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::backend::{
-    DialectBuilder, IndexBuilder, LockManager, LockScope, NamespaceManager, SchemaIntrospect,
-    SqlExecutor,
+    AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
+    SchemaIntrospect, SqlExecutor,
 };
 use crate::error::DbError;
 use crate::query::IndexSpec;
 
 pub(crate) mod dialect;
 pub(crate) mod error;
-pub(crate) mod fk_parse;
 pub(crate) mod lock;
 pub(crate) mod session;
+// `fk_parse` was lifted out of this cfg-gated subtree in P1 PR 5 — the
+// cross-app FK check applies on BOTH backends (PG and SQLite) so it
+// lives at `crate::cross_app_fk` and is compiled unconditionally. The
+// module's design lineage (SQLite ATTACH file isolation per design §18
+// Q1) is documented in the new file's rustdoc.
 
 use dialect::SqliteDialect;
 use lock::InProcessLockRegistry;
@@ -55,14 +60,6 @@ use session::{SqliteSession, SqliteSessionHandle};
 // state, so storing it would be a 0-byte field carrying no
 // information. The delegation pattern below constructs the ZST
 // inline (`SqliteDialect`) per call; rustc inlines the value away.
-
-/// Sentinel returned by every capability-impl method body in PR 1.
-/// PR 2-5 replace the body call with the real implementation.
-fn pr_stub(method: &'static str) -> DbError {
-    DbError::Internal {
-        message: format!("SqliteBackend::{method} — P1 PR2+ stub"),
-    }
-}
 
 /// SQLite backend handle. One instance per worker thread (mirrors
 /// [`crate::backend::PostgresBackend`]'s lifecycle).
@@ -610,20 +607,203 @@ impl SchemaIntrospect for SqliteBackend {
 }
 
 impl IndexBuilder for SqliteBackend {
+    /// Atomic `CREATE [UNIQUE] INDEX IF NOT EXISTS` against the per-app
+    /// attached database. Per plan §3.5, SQLite has no `CREATE INDEX
+    /// CONCURRENTLY` analogue — the operation is atomic from the
+    /// engine's view, so the PG arm's INVALID-recovery retry loop has
+    /// no peer here. Either the statement succeeds or it surfaces a
+    /// classified failure on the first attempt.
+    ///
+    /// **Error envelope** (plan §3.5 + §15.7): when `error::from_sqlite`
+    /// classifies the failure as a unique-constraint violation
+    /// (`SQLITE_CONSTRAINT_UNIQUE`, extended code 2067), this method
+    /// writes a `unique_violation` audit row through [`AuditWriter`]
+    /// then returns the canonical [`DbError::SchemaRefused`] envelope
+    /// the SDK already parses on the PG side
+    /// (`backend/postgres.rs::create_index_with_recovery_audited` line
+    /// ~577) — the wire shape is identical so a creator's
+    /// `e.code === "validation_refused"` branch handles both backends
+    /// unchanged. Non-unique-constraint failures propagate verbatim;
+    /// the typed `DbError` variant `error::from_sqlite` returned still
+    /// stamps the canonical `.code` at the V8 boundary.
+    ///
+    /// **Conflicting-key extraction divergence** (plan §3.5): SQLite's
+    /// `SQLITE_CONSTRAINT_UNIQUE` error does not carry the conflicting
+    /// row's key value (contrast PG's 23505, which embeds it in the
+    /// detail field). The envelope therefore reports
+    /// `conflicting_keys: []` and points the SDK at the read path for
+    /// the offending rows. Documented as an acceptable dev-tier
+    /// divergence in the implementation plan.
     async fn create_index_with_recovery(
         &self,
-        _app_id: &str,
-        _collection: &str,
-        _spec: &IndexSpec,
-        _deploy_id: &str,
-        _schema_version: i32,
+        app_id: &str,
+        collection: &str,
+        spec: &IndexSpec,
+        deploy_id: &str,
+        schema_version: i32,
     ) -> Result<(), DbError> {
-        // PR 5: `CREATE [UNIQUE] INDEX IF NOT EXISTS` atomic; on
-        // `SQLITE_CONSTRAINT_UNIQUE` (extended code 2067) classify
-        // through `error::from_sqlite`, write a wire-compatible
-        // `unique_violation` audit row, return the canonical
-        // `DbError::SchemaRefused` envelope.
-        Err(pr_stub("create_index_with_recovery"))
+        // Build the CREATE INDEX SQL ourselves rather than reuse
+        // `spec.sql` because `IndexSpec::sql` was built against the PG
+        // dialect (`CREATE INDEX CONCURRENTLY` + qualified
+        // `"app"."idx" ON "app"."collection" (cols)`). SQLite uses
+        // `IF NOT EXISTS` (atomic, no CONCURRENTLY) and the index +
+        // table identifiers route through `self.quote_ident` (the
+        // dialect hook). We assemble the column list manually because
+        // SQLite has no `USING <method>` clause — every index is a
+        // B-tree on the listed columns.
+        let q_app = self.quote_ident(app_id);
+        let q_coll = self.quote_ident(collection);
+        let q_idx = self.quote_ident(&spec.name);
+        let cols_quoted: Vec<String> =
+            spec.columns.iter().map(|c| self.quote_ident(c)).collect();
+        let col_list = cols_quoted.join(", ");
+        let unique_kw = if spec.unique { "UNIQUE " } else { "" };
+        let sql = format!(
+            "CREATE {unique_kw}INDEX IF NOT EXISTS {q_app}.{q_idx} ON {q_coll} ({col_list})"
+        );
+
+        match self.session.exec(&sql, &[]).await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                // `session.exec` already routed the rusqlite error
+                // through `error::from_sqlite`, which maps a unique-
+                // constraint violation to `DbError::SchemaRefused {
+                // code: "unique_violation", ... }`. We inspect that
+                // structural shape here so the `unique_violation`
+                // branch can also write the matching audit row + emit
+                // a wire-compatible envelope (the PG arm builds it via
+                // `create_index_with_recovery_audited`'s `refuse`
+                // closure; we do the same shape inline).
+                let unique_violation = matches!(
+                    &err,
+                    DbError::SchemaRefused { code, .. } if *code == "unique_violation"
+                );
+                if !unique_violation {
+                    // Not a unique-constraint violation — propagate the
+                    // classified error verbatim. The variant's `.code`
+                    // already routes through `to_op_error` at the V8
+                    // boundary.
+                    return Err(err);
+                }
+
+                // Best-effort audit write. A failure to write the audit
+                // row must not mask the underlying `unique_violation`
+                // — the SDK's wire contract is the SchemaRefused
+                // envelope below.
+                let audit_row = crate::audit::AuditRow {
+                    collection: collection.to_string(),
+                    phase: crate::audit::Phase::Ddl,
+                    change_class: if spec.unique {
+                        crate::audit::ChangeClass::Compatible
+                    } else {
+                        crate::audit::ChangeClass::Additive
+                    },
+                    change_kind: "index_retry".to_string(),
+                    details: serde_json::json!({
+                        "reason": "data_violation",
+                        "index_name": spec.name,
+                        "columns": spec.columns,
+                        "unique": spec.unique,
+                        "sqlite_extended_code": "SQLITE_CONSTRAINT_UNIQUE",
+                    }),
+                    ddl_sql: Some(sql.clone()),
+                    status: crate::audit::InitialStatus::Running,
+                    deploy_id: deploy_id.to_string(),
+                    schema_version,
+                    actor: crate::audit::ActorKind::Auto,
+                };
+                if let Err(audit_err) =
+                    AuditWriter::write_audit_row(self, app_id, &audit_row).await
+                {
+                    tracing::warn!(
+                        app_id = %app_id,
+                        index = %spec.name,
+                        audit_err = %audit_err,
+                        "SqliteBackend::create_index_with_recovery: audit write failed; \
+                         falling through to SchemaRefused envelope",
+                    );
+                }
+
+                // Wire-compatible envelope. The shape matches the PG
+                // arm's `refuse(json!({...}))` body in
+                // `backend/postgres.rs::create_index_with_recovery_audited`
+                // so SDK callers see identical bytes regardless of
+                // backend. `conflicting_keys: []` documents the SQLite
+                // divergence (the engine does not carry the conflicting
+                // row's key value through its error API).
+                let envelope = serde_json::json!({
+                    "code": "validation_refused",
+                    "change_kind": "index_retry",
+                    "collection": collection,
+                    "constraint": if spec.unique { "unique" } else { "index" },
+                    "index": spec.name,
+                    "columns": spec.columns,
+                    "conflicting_keys": [],
+                    "message": err.to_string(),
+                    "hint": "SQLite does not surface the conflicting row's key value; \
+                             query the collection on the indexed columns to locate the duplicate.",
+                });
+                let envelope_json = serde_json::to_string(&envelope).unwrap_or_else(|_| {
+                    String::from(
+                        "{\"code\":\"validation_refused\",\
+                         \"reason\":\"envelope serialisation failed\"}",
+                    )
+                });
+                Err(DbError::SchemaRefused {
+                    code: "validation_refused",
+                    envelope_json,
+                })
+            }
+        }
+    }
+}
+
+// P1 PR 5: `AuditWriter` capability. The SQLite impl routes the
+// parameterised INSERT through the session actor. The audit table on
+// SQLite is named `__zs_migrations` (the per-app analogue of PG's
+// `__zeroship_migrations`); PR 5 ships only the INSERT path — the
+// audit-table provisioning ddl + the `update_audit_status` transition
+// path are SQLite-side work for a later PR, since `IndexBuilder` is
+// the only PR-5 consumer and it writes a terminal row in one shot.
+impl AuditWriter for SqliteBackend {
+    async fn write_audit_row(
+        &self,
+        app_id: &str,
+        row: &crate::audit::AuditRow,
+    ) -> Result<(), DbError> {
+        // Parameterised INSERT mirroring the PG-side
+        // `crate::audit::write_audit_row` shape (audit.rs:333). The
+        // SQLite column set is a subset (no `applied_at`, no
+        // `parent_id` — those land when the SQLite audit-table
+        // provisioning DDL ships). The INSERT uses `?N` positional
+        // binds so the session actor's `&[&str]` param surface routes
+        // through `rusqlite::Statement::execute` cleanly.
+        let q_app = self.quote_ident(app_id);
+        let sql = format!(
+            "INSERT INTO {q_app}.\"__zs_migrations\" \
+                (collection, phase, change_class, change_kind, details, \
+                 ddl_sql, status, deploy_id, applied_by_kind, schema_version) \
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+        );
+
+        let details_str = row.details.to_string();
+        let schema_version_str = row.schema_version.to_string();
+        let ddl_sql_str = row.ddl_sql.clone().unwrap_or_default();
+        let params: [&str; 10] = [
+            row.collection.as_str(),
+            row.phase.as_sql(),
+            row.change_class.as_sql(),
+            row.change_kind.as_str(),
+            details_str.as_str(),
+            ddl_sql_str.as_str(),
+            row.status.as_sql(),
+            row.deploy_id.as_str(),
+            row.actor.as_sql(),
+            schema_version_str.as_str(),
+        ];
+
+        self.session.exec(&sql, &params).await?;
+        Ok(())
     }
 }
 
@@ -659,32 +839,16 @@ impl DialectBuilder for SqliteBackend {
     }
 }
 
-// `impl Backend for SqliteBackend {}` is intentionally absent at PR 1.
-// PR 5 ties off every sub-trait + restores the marker impl. Routing
-// the field through `BackendHandle::Sqlite(Rc<SqliteBackend>)` does
-// NOT depend on the `Backend` marker (the `BackendHandle::with_sqlite`
-// / `as_sqlite` accessors hand out `&SqliteBackend` directly).
-//
-// Why defer the marker? See §10 Q-P1-B in the implementation plan:
-// the `Backend` super-trait relaxation lands in PR 1 (this commit)
-// but the sub-trait impl set isn't real until PR 5. Adding the
-// marker now would type-check (all sub-trait impls are present in
-// stub form) but mislead any reader who searches for the impl to
-// find a runtime-meaningful backend. Wait until PR 5 lights up the
-// behaviour before naming it `: Backend`.
-
-// `LockScope` is re-exported here so PR 4's `LockManager` impl can
-// pull it in without crossing module boundaries. PR 1 does not
-// reference it directly; the `#[allow(unused_imports)]` documents
-// the intent.
-#[allow(unused_imports)]
-use super::LockScope as _LockScopeForPr4;
-
-// Silence unused-import warnings on the LockScope item until PR 4
-// wires the typed-lock primitives. The import above is the load-
-// bearing one; this line ensures PR 1 builds clean.
-#[allow(dead_code)]
-fn _phantom_lock_scope(_s: &LockScope) {}
+// P1 PR 5: `Backend` composition marker. Every sub-trait
+// (`SqlExecutor`, `LockManager`, `NamespaceManager`,
+// `SchemaIntrospect`, `IndexBuilder`) now carries a real (non-stub)
+// impl above, and the PR-1 super-trait relaxation that dropped the
+// `Client = compio_postgres::Client` pin from `Backend` cleared the
+// last obstacle. The marker is the one-liner the design names —
+// orchestrator paths that future PRs migrate onto a backend-agnostic
+// bound (`<B: Backend>`) will pick up `SqliteBackend` via this impl
+// without any further per-trait wiring.
+impl Backend for SqliteBackend {}
 
 #[cfg(test)]
 mod tests {
@@ -699,9 +863,20 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        DialectBuilder, IndexBuilder, LockManager, NamespaceManager, SchemaIntrospect,
-        SqlExecutor,
+        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
+        SchemaIntrospect, SqlExecutor,
     };
+
+    /// P1 PR 5: `Backend` composition marker now lands on
+    /// `SqliteBackend`. Pinning the bound here means a future change
+    /// that detaches one of the five sub-trait impls (or that
+    /// regresses the PR-1 super-bound relaxation back to
+    /// `Client = compio_postgres::Client`) fails compilation in this
+    /// module rather than at a distant orchestrator call site.
+    fn assert_sqlite_backend_impls_backend() {
+        fn assert_impl<T: Backend>() {}
+        assert_impl::<SqliteBackend>();
+    }
 
     fn assert_sqlite_backend_impls_sql_executor() {
         fn assert_impl<T: SqlExecutor>() {}
@@ -733,6 +908,15 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
+    /// P1 PR 5: `AuditWriter` capability — pin the impl wire so a
+    /// future refactor that detaches the trait-impl block from this
+    /// type fails compilation here, not at the `IndexBuilder`
+    /// consumer site that pulls the audit row through.
+    fn assert_sqlite_backend_impls_audit_writer() {
+        fn assert_impl<T: AuditWriter>() {}
+        assert_impl::<SqliteBackend>();
+    }
+
     fn assert_sqlite_backend_is_static() {
         fn assert_static<T: 'static>() {}
         assert_static::<SqliteBackend>();
@@ -751,12 +935,14 @@ mod tests {
     fn compile_time_trait_assertions_link() {
         // Keep the asserter functions live — same convention as the
         // PG-side `compile_time_assertions_link`.
+        let _ = assert_sqlite_backend_impls_backend as fn();
         let _ = assert_sqlite_backend_impls_sql_executor as fn();
         let _ = assert_sqlite_backend_impls_lock_manager as fn();
         let _ = assert_sqlite_backend_impls_namespace_manager as fn();
         let _ = assert_sqlite_backend_impls_schema_introspect as fn();
         let _ = assert_sqlite_backend_impls_index_builder as fn();
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
+        let _ = assert_sqlite_backend_impls_audit_writer as fn();
         let _ = assert_sqlite_backend_is_static as fn();
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();
     }

@@ -629,6 +629,64 @@ pub trait IndexBuilder: SqlExecutor {
     ) -> Result<(), DbError>;
 }
 
+/// Audit-row writer capability — "persist an audit row for a DDL /
+/// validation / backfill event into the per-app `__zeroship_migrations`
+/// table".
+///
+/// **Introduced in P1 PR 5** (decision AW-1 in
+/// `docs/proposals/p1-sqlite-implementation-plan.md` §3.5 + §10). The
+/// trait exists so [`IndexBuilder::create_index_with_recovery`] (and
+/// future audit-emitting hooks) can stamp rows without hard-coding the
+/// PG-only [`crate::audit::write_audit_row`] free function.
+///
+/// **Two impls today**:
+///
+/// - PG ([`PostgresBackend`]) — thin wrapper around the existing
+///   [`crate::audit::write_audit_row`] free function reached via
+///   [`PgSqlExecutor::pool_handle`].
+/// - SQLite ([`crate::backend::sqlite::SqliteBackend`]) — routes the
+///   parameterised INSERT through the session actor.
+///
+/// **Why not on `Backend` super-bound?** The trait composition stays
+/// PR-1-shaped (5 sub-traits + `'static`). `AuditWriter` is opt-in:
+/// `IndexBuilder` consumers (today, just the per-backend `impl
+/// IndexBuilder for …` methods inside this crate) bound on it
+/// explicitly when they need to write rows. Forcing it onto every
+/// `Backend` would mean a future backend without audit semantics still
+/// has to satisfy the bound — a needless coupling for the small number
+/// of callers.
+///
+/// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
+pub trait AuditWriter: 'static {
+    /// Insert a single audit row keyed by `app_id`. Returns `Ok(())`
+    /// on success; transient SQL failures surface as the typed
+    /// [`DbError`] variant matching their SQLSTATE / SQLite extended
+    /// code so the caller can decide whether to retry, escalate, or
+    /// surface to the operator.
+    ///
+    /// **Backend divergence**:
+    ///
+    /// - PG impl forwards to [`crate::audit::write_audit_row`] — that
+    ///   helper still owns the `RETURNING id` round-trip the audit
+    ///   state machine needs for transitions. The trait method
+    ///   discards the returned id because the PR-5 SQLite consumer
+    ///   ([`IndexBuilder::create_index_with_recovery`] on the SQLite
+    ///   arm) writes the row in terminal state and doesn't need to
+    ///   transition it. A future trait method `write_and_return_id`
+    ///   can be added if audit-status-update consumers migrate onto
+    ///   this trait.
+    /// - SQLite impl builds the parameterised INSERT inline and routes
+    ///   through the session actor. The row lands in the per-app
+    ///   `__zs_migrations` table (the SQLite analogue of PG's
+    ///   `__zeroship_migrations`).
+    #[allow(async_fn_in_trait)]
+    async fn write_audit_row(
+        &self,
+        app_id: &str,
+        row: &crate::audit::AuditRow,
+    ) -> Result<(), DbError>;
+}
+
 /// SQL-dialect strategy — the seam every per-engine SQL-string
 /// builder route through.
 ///
