@@ -3,9 +3,9 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-23 (cycle r4: B18 CLOSED via shared `Arc<Mutex<VmIndexAllocator>>`; R3-Q1+R3-T1 closed in code; A4 helper landed but call sites pending; new B19 next blocker for B-SLO; 7 r3/r4 reviewer reports added).
+Last updated: 2026-05-23 (cycle r5: A3-partial hard_link, S4 admin error sanitization, B19 fix in-code; new B20 blocker; A7/R3-Q3/R4-T1/R4-Q1 marked CLOSED; 7 r4+r5 reviewer rounds added).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `469e22c8` (A4 helper at `469e22c8`; B18 at `b4ddb98b`; R3-T1 at `f6497590`; R3-Q1 at `a11ccb2d`; A7 at `a9e568a2`; B17 at `dec489a1`).
+Branch HEAD at last update: `4fd92bef` (S4 at `4fd92bef`; A3-partial at `0aa93a0f`; B19 at `15b4f9a8`; R4-T1 at `4e6c70c1`; R3-Q3 at `28f60d73`; A4 closed at `2928d5ae`; B18 at `b4ddb98b`). Lib tests at HEAD: **275 passed**.
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
@@ -35,20 +35,28 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: **CLOSED**. Root cause was NOT in-VM stickiness; the init.sh path was already correct. Actual bug: two separate `vm_index` allocators (NomadCHBackend's `vm_index_allocator` vs RealRestoreBackend's private `VmIndexReservations`) — the wake path reserved slots into a private map invisible to the create-side allocator, so a subsequent create handed the same tap/IP to a fresh sandbox that collided with the live restored VM on that slot. The 401 surfaced because `/version` was answered by the **old** (restored) agent verifying a different signing-pubkey. Fix: share the `Arc<Mutex<VmIndexAllocator>>` between both backends. Two regression tests added. Cluster c=4 verification: 11/16 stale-pubkey 401s pre-fix → **0/16 post-fix**.
 - **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix B.
 
-### [B19] Wake path doesn't register restored VM in backend state map (CRITICAL, open)
-- **Source**: cluster smoke c=4 2026-05-23 (B18-fixer cycle, see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix B); previously observed in r2 c=1 (§ "Side observations") and r1 appendix.
-- **Symptom**: After `restore_handler::do_restore_inner` returns Ok and the restored VM is alive on its agent_url, the sandbox is **not** inserted into `NomadCHBackend::state`. Any subsequent operation — `exec`, `read_file`, `stop`, `delete` — looks up via `NomadCHBackend::sandbox_keys` / `state.read().get(&id)` and hits the `"sandbox not found in nomad-ch backend"` branch.
-  - `exec` post-wake: 500 `sandbox not found in nomad-ch backend`.
-  - `stop` / `delete` post-wake: 404 `sandbox not found` (handler-side check).
-  - **vm_index slot leak across the controller's uptime** — `stop_inner` returns Ok-idempotent without calling `vm_index_allocator.release()`. With B18 closed, this surfaces as `vm-index allocator exhausted (floor=1, ceil=12)` after ~12 successful wakes per controller boot (the test reached it at 10 wakes with c=4 × 4 stress).
-- **Reproducer**: provision 1+1, run any c≥1 / cycles≥1 stress with `do_wake=True && do_stop=True`. Wake returns 200; stop returns 404. Or directly: `curl -X DELETE /sandboxes/<sbx>` after a successful wake.
-- **Files**:
-  - `crates/sandbox/src/restore_handler.rs` `do_restore_inner` step 7+ — needs to install the per-sandbox record into `NomadCHBackend::state` after `wait_for_livez` Ok.
-  - `crates/sandbox/src/backend/nomad_ch.rs` — provides `restore_from_pg_and_sealed` (used by controller-restart restart-restore) which already does the install; could be reused or factored into a new `Backend::register_restored(sandbox_id, vm_index, signing_key_bytes, agent_url, user_id)` method.
-- **Fix shape** (two options, pick one):
-  - (a) New `Backend::register_restored(...)` method that takes the explicit `(sandbox_id, vm_index, signing_key_bytes, agent_url, user_id)` tuple and does the same `state.write().insert(...)` `NomadCHBackend::create` does. Call from `do_restore_inner` after `wait_for_livez`.
-  - (b) Re-use `restore_from_pg_and_sealed` (pg → row + sealed → install + probe). The probe is redundant (we already know the agent is live, having just called `wait_for_livez`), but the code path is established and tested.
-- **Note**: this bug was latent pre-B18 (the c=4 stress never reached enough successful wakes to exhaust the pool — the 401 race blocked at cycle ~6). Now that B18 is closed, **B19 is the next blocker on the snapshot/restore path's production usability**.
+### [B19] (FIX LANDED in code, cluster verification pending bug #20) Wake path doesn't register restored VM in backend state map (CRITICAL, partially closed)
+- **Status (2026-05-23)**: Option (a) implemented at HEAD `15b4f9a8` (`sandbox/backend: register_restored to install restored VMs in state map (B19)`). Lib tests 266 → 268 with two regression tests (`register_restored_inserts_into_state_map`, `restored_sandbox_is_stoppable_and_releases_vm_index`). **Cluster smoke could not exercise the wake path** because every cold-boot create failed at `wait_for_agent_livez` — that's bug #20 below, NOT a B19 regression. Re-run cluster c=4 + c=20 once #20 closes; the wiring (`Backend::nomad_ch_handle()` shared into `RealRestoreBackend::with_nomad_handle`, `Persistence::unseal` per-sandbox, `register_restored` trait method) is already in place.
+- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix C.
+- **Files changed**:
+  - `crates/sandbox/src/backend/{nomad_ch.rs,mod.rs}` — `NomadCh(Arc<…>)` wrap + `register_restored` on both NomadCHBackend and Backend.
+  - `crates/sandbox/src/restore_handler.rs` — trait + impl + `with_nomad_handle` + `do_restore_inner` post-livez call.
+  - `crates/sandbox/src/persist.rs` — `Persistence::unseal(sandbox_id)`.
+  - `crates/sandbox/src/{admin_handlers.rs,lib.rs}` — wiring at `from_config` + `wake_sandbox`.
+
+### [B20] Cold-boot /livez never 200 — every create 503s `create_retry_budget_exhausted` (CRITICAL, NEW 2026-05-23)
+- **Source**: cluster smoke 2026-05-23 with v15 binary (Appendix C of `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md`).
+- **Symptom**: every cold-boot create reaches Nomad `client_status=running` (controller logs `sandbox/nomad-ch create alloc running … elapsed_ms=772`), then `wait_for_agent_livez` times out at the 30s budget. After 3 retries → 503 `create_retry_budget_exhausted`. Nomad kills the alloc (exit code 130 — interrupt + 10s grace) and GCs it. Reproducible at c=1 and c=4 (16/16 fails at c=4; 1/1 fails at c=1).
+- **Tap state**: taps `zsbx-nm-1`..`zsbx-nm-10` exist on the worker host, all `<NO-CARRIER,BROADCAST,MULTICAST,UP>` (DOWN at L2). Same surface shape as the B17 paused-vCPU symptom — but cold-boot CH is supposed to be running, not paused.
+- **NOT a B19 regression**: B19 only touches the wake path + the NomadCHBackend registry surface. The create-path `wait_for_agent_livez` helper is unchanged from v14 where B18's c=4 smoke PASSed 16/16 in early r4. The cluster's worker state (rootfs, vmlinuz, ch-remote, init.sh) is suspect — rebake / pin drift, or a fresh CH bug.
+- **Hypotheses to test (next-cycle fixer)**:
+  1. ch-remote / cloud-hypervisor v51.1 vs v50.2 pinning — has the artifact moved?
+  2. rootfs-slim.img.virtio-blk-v3 — does the in-VM `sandbox-agent` start? (boot the rootfs locally with `cloud-hypervisor` + serial console, watch for the agent's bind on `:7777`.)
+  3. init.sh — has the cmdline pubkey parser drifted? (cmp init.sh between r4 PASS and now)
+  4. vmlinuz — kernel version drift breaking virtio-net?
+- **Reproducer**: provision 1+1 (`bash crates/sandbox/scripts/provision-gcp-cluster.sh` with v15 controller); on worker `cd /opt/stress && sudo python3 snapshot_stress.py --base-url http://127.0.0.1:9091 --token-file /etc/zeroship/sandbox-token --admin-token-file /etc/zeroship/sandbox-admin-token --concurrency 1 --cycles 1 --label repro`. Expect 0/1 CREATE OK with the `never returned 200 on /livez` error.
+- **Evidence**: `/tmp/smoke-b19-c1.log`, `/tmp/smoke-b19-c4.log`, controller log on worker `/var/log/zeroship-sandbox.log` (captured pre-teardown). Nomad daemon log via `journalctl -u nomad`.
+- **First step**: SSH worker, capture `/var/log/zeroship-sandbox.log` + `/opt/nomad/data/alloc/*/alloc/logs/ch.stderr.0` + ch-remote socket ping output, then teardown. **Do NOT start fixing in the cluster — pull the artifacts off and reproduce locally first.** Most likely root cause: ch-remote / vmlinuz / rootfs drift, not Rust code.
 
 ### [A1] AEAD never wraps prod snapshot store (CRITICAL, security-r1)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)
@@ -68,7 +76,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### [A4] (CLOSED 2026-05-23 cycle r4) HTTP error envelope §10.0 — fully migrated
 - **Status**: **CLOSED**. A4 fixer reconvened late and landed 4 more commits after the pilot's r4 artifacts commit: `64db0d30` admin_handlers, `c0296c76` preview, `5330acd9` preview-share, `2928d5ae` wire-shape tests. Adherence: **8/26 (31%) → 26/26 (100%)**. All wire error responses now funnel through `crates/sandbox/src/error_envelope.rs::ErrorEnvelope` / `error_response()`. 21 new tests pin the shape at HEAD `2928d5ae`. Test count: 238 → 266 (+28).
 
-### [A7] `SandboxConfig.token` is `pub` — last credential field exposure (CRITICAL, A6b-fixer spotted)
+### [A7] (CLOSED 2026-05-23) `SandboxConfig.token` is `pub` — last credential field exposure
 - **Source**: 2026-05-24 A6b-fixer report (`2380605e`)
 - **File**: `crates/sandbox/src/config.rs:19` — `pub token: ApiToken` on `SandboxConfig`
 - **Symptom**: with A6b closing the 5 `AppState` fields, the last creator-side credential field that still allows external clobber lives on the embedded `SandboxConfig`. `ApiToken` is the bearer for creator-facing endpoints; swap = bypass-auth.
@@ -127,7 +135,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: `Result<Self, String>` that cannot fail forces in-crate callers to `.expect()` on an infallible operation. Signature smell.
 - **Action**: change to `pub fn with_persistence(self, p: Arc<Persistence>) -> Self`. Future invariants can switch to `Result` when they actually need it. Same shape applies to A6b's 5 new builders — review them.
 
-### [R3-Q3] Stale `alloc_running_timeout_secs: 60` in 11+ test fixtures post-T3 (MINOR, code-quality-r3)
+### [R3-Q3] (CLOSED 2026-05-23 at `28f60d73`) Stale `alloc_running_timeout_secs: 60` in test fixtures
 - **Files**: 11 test fixtures across `crates/sandbox/src/config.rs:744`, `backend/docker.rs:832`, `backend/nomad_ch.rs:3449`, 4 e2e tests; plus A6 newly copy-pasted `60` at `lib.rs:1267,1399`
 - **Symptom**: T3 bumped production default 60→120 but synthetic test fixtures stayed at 60. Not a bug today (fixtures don't exercise the default-loading path) but a noise source for grep-based refactors.
 - **Action**: bulk-update fixture literals 60→120. One-line per fixture. No test logic change.
@@ -142,12 +150,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: two separate locked structures span 60-120s of async fence work with no unified RAII guard. This is the architectural coupling underneath B18 — even though B18's surface fix (shared allocator) closed the symptom, the underlying race-window pattern remains. B19 is a symptom of the same design hole (forgotten state-map registration).
 - **Action**: introduce a `LeasedVmSlot` RAII guard that holds the state-map entry + vm_index reservation atomically; release on Drop or explicit commit. Subsumes the B18 fix and prevents B19-class bugs.
 
-### [R4-Q1] A7 newly copy-pasted stale `alloc_running_timeout_secs: 60` literal (MINOR, quality-r4)
+### [R4-Q1] (CLOSED at `28f60d73`, subsumed by R3-Q3) A7 stale 60 literal
 - **File**: `crates/sandbox/src/config.rs:652` (A7's new `new_fixture()` shadow constructor)
 - **Symptom**: same commit whose doc cites R3-Q2 by name introduced 2 more `60` literals (5 → 7 in-src). R3-Q3 already tracks the 11 fixture sites; this expands the count without addressing the root pattern.
 - **Action**: bulk-update 60 → 120 in fixtures (R3-Q3 catch-all). Subsume R4-Q1.
 
-### [R4-T1] `shellcheck --severity=error` would land GREEN as a free regression guard (CRITICAL, test-cov-r4)
+### [R4-T1] (CLOSED 2026-05-23 at `4e6c70c1`) `shellcheck --severity=error` regression gate landed
 - **Source**: 2026-05-24 test-coverage-r4 ran shellcheck on `crates/sandbox/scripts/nomad-vm-wrapper.sh` and got 5 INFO-level only, 0 errors/warnings.
 - **Action**: add `shellcheck --severity=error crates/sandbox/scripts/*.sh` as a workspace gate. Costs minutes; would have caught B12/B13/B17-like issues pre-cluster. Sister of R3-T3 (full coverage) — this is the cheap-first-step.
 
@@ -193,7 +201,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ## IMPORTANT (Phase B follow-ups; blocked on #14 closing)
 
 ### [B-SLO] 5-worker × 20-cycle SLO empirical validation
-- **Blocked-by**: **B18** (slot-reuse pubkey 401 — blocks scale past ~6 cycles per worker). B14a/B14b/B17 all closed.
+- **Blocked-by**: **B20** (cold-boot /livez never 200 — every create 503s; B19 fix is in code but unverified on cluster until #20 closes). B14a/B14b/B17/B18 all closed.
 - **Action**: close B18 first. Then scale to 3+5 + run cluster stress; capture create / snapshot / wake / post-exec / stop p50/p95/p99/max; compare wake p50 (this cycle measured 9.5s on c=1 single-cycle) to 4243ms cold-boot baseline (§ 10.2 SLO targets: p50 ≤ 1.0s; p95 ≤ 1.5s; p99 ≤ 2.0s; p99.9 ≤ 6.0s). Note: 9.5s p50 is FAR worse than the 1.0s target — likely improvable once A3 (sync I/O on compio worker) closes; document the gap when stress lands.
 
 ---
@@ -269,3 +277,45 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - Each cluster cycle MUST end with `bash crates/sandbox/scripts/teardown-gcp-cluster.sh` regardless of outcome
 - $30 hard cap per cycle (despite the 100K GCP credits — bound burn rate, not budget)
 - Honor the "13-bug observation chain" lesson: log every cluster bug verbatim before clearing it
+
+---
+
+## NEW r4/r5 ROUND FINDINGS (added by pilot cycle 2026-05-23)
+
+### [R4-S1] `Backend::vm_index_allocator()` is `pub` on `pub mod backend` (CRITICAL, api-surface-r4)
+- **File**: `crates/sandbox/src/backend/mod.rs:440-447`
+- **Symptom**: B18 added `vm_index_allocator()` accessor exposing the worker slot-pool `Arc<Mutex<VmIndexAllocator>>` externally. Zero out-of-crate callers; downstream code could `.lock()` it and deadlock create/restore.
+- **Action**: `pub(crate)`-restrict the accessor on Backend. Verify no out-of-crate uses first.
+
+### [R4-S2] `ErrorEnvelope::with_extra()` silently discards non-object Values (IMPORTANT, api-surface-r4)
+- **File**: `crates/sandbox/src/error_envelope.rs:93-104`
+- **Symptom**: `with_extra()` takes `serde_json::Value` but silently no-ops on non-object input. Should take `serde_json::Map<String, Value>` so the type forbids the misuse at compile-time.
+- **Action**: change signature; migrate the 4-5 in-crate call sites.
+
+### [R5-A1] B19 worsens enum-as-trait (5th `Err("backend X doesn't support…")` method) (CRITICAL, arch-r5)
+- **Files**: `crates/sandbox/src/backend/mod.rs:175-180,449-505`
+- **Symptom**: B19's `NomadCh(Arc<NomadCHBackend>)` asymmetric wrap + new `nomad_ch_handle()` escape hatch + `register_restored` as the 5th method that returns Err for 2/3 Backend variants. Confirms r3-A1 trend: structural debt accumulates with every "small additive fix".
+- **Action**: split `SnapshotCapableBackend` trait. Only NomadCH impls it. Use `&dyn SnapshotCapableBackend` at call sites needing the surface. Closes r3-A1 + r5-A1 together.
+
+### [R5-A2] B19 added 3rd state-map insert path; R4-A2 RAII gap still open (CRITICAL, arch-r5)
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:977-990,1650-1681`
+- **Symptom**: wake path now has FOUR ways to enter state map (create / restart-restore / register_restored / restore_from_pg_and_sealed). state-map removal still happens up-front in `stop_inner` while vm_index release straddles 60-120s of fence work. R4-A2's `LeasedVmSlot` RAII guard would subsume all four.
+- **Action**: introduce `LeasedVmSlot` RAII guard. Implement once, use everywhere. Closes R4-A2 + R5-A2 + the structural smell underneath B18/B19.
+
+### [R5-Q1] `RestoreBackend::register_restored` default impl silently returns Ok(()) (CRITICAL, code-quality-r5)
+- **File**: `crates/sandbox/src/restore_handler.rs:162-170` (trait) + `:1023-1030` (impl warning)
+- **Symptom**: trait method has a default impl returning `Ok(())` — a silent no-op. The `RealRestoreBackend::register_restored` impl's own doc-comment warns that silent no-ops re-introduce the pre-B19 slot-leak/sandbox-not-found symptoms. The default contradicts the safety property the impl is trying to enforce.
+- **Action**: remove the default impl; make `register_restored` required. Or have the default `Err(...)` so a missing impl fails loudly.
+
+### [R5-T1] B19 trait-dispatch wire-up at `restore_handler.rs:450-463` is uncovered (CRITICAL, test-cov-r5)
+- **Source**: 2026-05-24 test-coverage-r5
+- **File**: `crates/sandbox/src/restore_handler.rs:450-463` — the post-`wait_for_livez` Ok path that calls `backend.register_restored(...)`
+- **Symptom**: direct backend-level tests for `register_restored` exist (in nomad_ch.rs:4562+); but every in-repo `restore_sandbox` caller passes `persist=None`, which takes the warn-skip arm before reaching the trait-dispatch. So the wire-up is byte-coverage-zero.
+- **Action**: add an integration test that constructs a `RealRestoreBackend::with_nomad_handle(...)`, populates `persist` with a sealed record, calls `restore_sandbox`, and asserts both: (a) `register_restored` was invoked on the backend, (b) the post-stop assert (state-map empty + vm_index released) holds.
+
+### [R5-T2] R3-T3 wrapper coverage PARTIAL-CLOSED by R4-T1 (informational, test-cov-r5)
+- **Source**: 2026-05-24 test-coverage-r5
+- **Status**: R4-T1's shellcheck integration test covers syntax-half of R3-T3. Behavioral wrapper-logic coverage (start vs restore branch divergence, path-rewriting, etc.) is still open. Future fixer could add `bats` smoke tests that mock CH spawn.
+
+### [R5-S4] (CLOSED at `4fd92bef`) A4 admin sites leaked raw driver-error strings — sanitized via `err_safe()` helper
+- **Status**: 39 production callsites sanitized; 5 new tests pin no-leak invariant; raw errors now log via tracing::error! for operator debug, never on wire.

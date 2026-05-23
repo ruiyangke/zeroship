@@ -540,3 +540,128 @@ controller restarts. Tracked in deferred backlog as **[B19]**.
 - `/tmp/smoke-b18-c1.log`, `/tmp/smoke-b18-c4.log` — smoke
   transcripts.
 - `/tmp/provision-b18.log` — provision transcript.
+
+---
+
+# Appendix C — B19 fix attempt + c=4 / c=1 validation (2026-05-23)
+
+**Branch HEAD pre-fix:** `4e6c70c1` (post B18 + R3-Q3 + R4-T1).
+**Branch HEAD post-fix:** `15b4f9a8`.
+**Controller binary uploaded:** `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v15` (15.1 MiB, Docker `rust:slim-bookworm` cross-build; portable `/lib64/ld-linux-x86-64.so.2` interp confirmed by `readelf -p .interp`).
+**B19 verdict:** **UNVERIFIED on cluster** (lib tests PASS 266 → 268). The cluster smoke could not exercise the wake path because **every cold-boot create failed at `wait_for_agent_livez`** — a fresh blocker that surfaced post-v14, **NOT a B19 regression** (B19 touches the wake path only, never the create path). Filed below as **bug #20**.
+
+## Lib tests
+
+- Baseline at HEAD `4e6c70c1`: 266 passed, 1 ignored.
+- Post-B19 fix at HEAD `15b4f9a8`: **268 passed, 1 ignored** — exactly +2 from the two new regression tests:
+  - `backend::nomad_ch::tests::register_restored_inserts_into_state_map`
+  - `backend::nomad_ch::tests::restored_sandbox_is_stoppable_and_releases_vm_index`
+- Build clean (`cargo build -p zeroship-sandbox --tests`).
+
+## Fix shape (Option A from the deferred file)
+
+1. `crates/sandbox/src/backend/nomad_ch.rs`:
+   - new `pub(crate) fn register_restored(&self, sandbox_id, vm_index, signing_key_bytes, agent_url, user_id) -> Result<(), String>` doing `state.write().insert(NomadChSandbox { ... })` with a vacant-entry check that rejects clobber.
+2. `crates/sandbox/src/backend/mod.rs`:
+   - **`Backend::NomadCh(NomadCHBackend)` → `Backend::NomadCh(Arc<NomadCHBackend>)`** (asymmetric — only NomadCh wrapped, Docker/K8s stay by-value). Enables `RealRestoreBackend` to hold a shared `Arc<NomadCHBackend>` handle.
+   - new `Backend::nomad_ch_handle() -> Option<Arc<NomadCHBackend>>` getter (mirrors the B18 `vm_index_allocator()` getter shape).
+   - new `Backend::register_restored(...)` enum-level delegator returning Err for Docker/K8s.
+3. `crates/sandbox/src/restore_handler.rs`:
+   - new trait method `RestoreBackend::register_restored(sandbox_id, vm_index, signing_key_bytes, user_id) -> Result<(), String>` with a default `Ok(())` no-op (keeps `StubRestoreBackend`-driven tests compiling).
+   - `RealRestoreBackend` gets `nomad_handle: Option<Arc<NomadCHBackend>>` field + `with_nomad_handle(...)` builder.
+   - `RealRestoreBackend::register_restored(...)` impl re-derives the agent_url from `vm_index` + `subnet_second_octet` (same shape as `wait_for_livez`) and calls the backend's `register_restored`.
+   - `restore_sandbox` + `do_restore_inner` get a new `persist: Option<&Persistence>` arg. After `wait_for_livez` Ok, `persist.unseal(sandbox_id)` recovers the `signing_key_bytes` and the trait's `register_restored` is called. A `None` persist surfaces a tracing::warn; a `NotFound` sealed record surfaces as an Internal 500 (a live restored VM with no signing key cannot be safely registered).
+4. `crates/sandbox/src/persist.rs`:
+   - new `pub async fn unseal(&self, sandbox_id: Uuid) -> std::io::Result<SealedAuth>` (per-sandbox unseal — analog of `delete`, builds on `unseal_one`).
+5. `crates/sandbox/src/lib.rs`:
+   - `AppState::from_config` extracts `Arc<NomadCHBackend>` via `backend.nomad_ch_handle()` and pipes through `RealRestoreBackend::with_nomad_handle(...)`. Tracing line `snapshot wiring: shared NomadCHBackend handle for register_restored (B19)` on success; warn if absent.
+6. `crates/sandbox/src/admin_handlers.rs`:
+   - `wake_sandbox` passes `state.persist.as_deref()` into `restore_sandbox`.
+7. `crates/sandbox/tests/sandbox_pg_e2e.rs`:
+   - 5 call sites bulk-updated to pass `None` for the new `persist` arg (these tests use `StubRestoreBackend`, whose default `register_restored` impl is a no-op).
+
+## Cluster smoke (1+1, c=4 × 4) — BLOCKED on bug #20
+
+```
+[provision] OK at /tmp/provision-v15.log
+  zsbx-smoke-server-1 (n2-standard-4)
+  zsbx-smoke-worker-1 (n2-standard-32, nested-virt)
+[boot wiring log on worker]
+  "snapshot wiring: shared NomadCHBackend handle for register_restored (B19)"
+  "snapshot wiring: shared vm_index allocator with backend (B18)"
+
+stress (c=4, cycles=4) — /tmp/smoke-b19-c4.log:
+  CREATE OK: 0/16
+  SNAPSHOT OK: 0/0
+  WAKE OK: 0/0
+  POST-WAKE EXEC OK: 0/0
+  STOP OK: 0/16
+  FAILED CREATES: 16
+    Every create returned 503 create_retry_budget_exhausted with
+    last error:
+      "agent at http://10.99.X.2:7777 never returned 200 on /livez
+       (expected fp=…)"
+
+stress (c=1, cycles=1) — /tmp/smoke-b19-c1.log:
+  CREATE OK: 0/1
+  same failure: cold-boot /livez never 200.
+```
+
+Wake never fired (no successful create → no snapshot → no wake), so **B19 itself was not exercised in vivo**. The wiring log confirms the controller picked up the new `register_restored` plumbing at boot; the trait dispatch path is locally validated by the two regression tests at HEAD.
+
+## Bug #20 (NEW, NOT a B19 regression) — cold-boot /livez never 200
+
+- **Source:** cluster smoke 2026-05-23 c=4 + c=1 (Appendix C above).
+- **Symptom:** every cold-boot create reaches `client_status=running` (Nomad alloc up; controller logs `sandbox/nomad-ch create alloc running … elapsed_ms=772`), then `wait_for_agent_livez` times out at the configured 30s budget. After 3 retries the controller returns 503 `create_retry_budget_exhausted`. Nomad then kills the alloc (exit code 130 — interrupt + 10s grace) and GCs it.
+- **Tap state:** taps `zsbx-nm-1` through `zsbx-nm-10` present on the worker host, all `<NO-CARRIER,BROADCAST,MULTICAST,UP>` (DOWN at L2). Same shape as the B17 root cause (paused vCPUs not pumping virtio-net) — but here CH is supposed to be running cold-boot, not paused. Either CH itself failed to bring vCPUs up, or the agent inside the rootfs failed to start.
+- **Not a B19 regression:** B19 touches only the wake path (`restore_handler::do_restore_inner` after `wait_for_livez` Ok) + the `NomadCHBackend` registry surface. Create path is unchanged. The same `wait_for_agent_livez` helper that fails here is the one B18's c=4 smoke exercised PASS at v14 on 2026-05-23. Either v15 has a non-B19 regression (unlikely — diff is scoped) OR the cluster's worker/rootfs state diverged since the B18 cycle (rootfs rebake, init.sh change, vmlinuz pin moved, ch-remote v51.1 bug, …).
+- **Not investigated this cycle** per the task brief's "If a NEW bug surfaces (#20+): capture, do NOT start fixing" rule.
+- **Reproducer:** provision 1+1 with v15; manually `POST /sandboxes` with any `usr_*` typed-id; observe `wait_for_agent_livez` timeout after ~30s; allocs killed by Nomad.
+- **Evidence files:**
+  - `/tmp/smoke-b19-c4.log` — 16/16 fails.
+  - `/tmp/smoke-b19-c1.log` — 1/1 fails.
+  - controller log `/var/log/zeroship-sandbox.log` on worker (pre-teardown captured WARN/ERROR rows).
+  - Nomad daemon log via `journalctl -u nomad`: shows `Task started by client` then `Killing: Sent interrupt … Exit Code: 130`.
+
+## B-SLO (5-worker × 20-cycle) — not attempted
+
+Skipped per brief: c=4 failed at 0/16, so c=20 was not run. B-SLO measurements remain unmeasured.
+
+## Teardown
+
+```
+[teardown] project=suger-dev zone=asia-northeast3-a prefix=zsbx-smoke
+[teardown] deleting instances: zsbx-smoke-server-1 zsbx-smoke-worker-1
+… Deleted (both instances + reserved IP) …
+[teardown] remaining instances matching ^zsbx-smoke-: 0
+[teardown] OK: cluster fully torn down
+```
+
+`gcloud compute instances list --filter='name~"^zsbx-"'` → empty.
+
+## Estimated cost
+
+- Cluster wall-time: ~22 min (provision 90s + c=4 smoke ~7 min + c=1 smoke ~2 min + observation + teardown ~3 min, plus some Docker-build idle in between).
+- n2-standard-32 worker @ ~$1.55/hr × 22/60 = **$0.57**.
+- n2-standard-4 server @ ~$0.17/hr × 22/60 = **$0.06**.
+- **Total: ~$0.63**. Well under the $30 cap.
+
+## Files of interest (B19 fix)
+
+- `crates/sandbox/src/backend/nomad_ch.rs` — `register_restored` method + 2 regression tests.
+- `crates/sandbox/src/backend/mod.rs` — `NomadCh(Arc<…>)` wrap + `nomad_ch_handle()` + `register_restored` enum delegator.
+- `crates/sandbox/src/restore_handler.rs` — trait `register_restored` method + `with_nomad_handle` builder + `RealRestoreBackend::register_restored` impl + `do_restore_inner` post-livez call.
+- `crates/sandbox/src/persist.rs` — `Persistence::unseal(sandbox_id)`.
+- `crates/sandbox/src/admin_handlers.rs` — pass `state.persist.as_deref()` through.
+- `crates/sandbox/src/lib.rs` — `nomad_ch_handle()` extraction at boot.
+- `crates/sandbox/tests/sandbox_pg_e2e.rs` — 5 call sites updated to pass `None` for persist.
+- `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v15` — uploaded controller binary.
+- `/tmp/smoke-b19-c1.log`, `/tmp/smoke-b19-c4.log` — smoke transcripts (all-fail at create).
+- `/tmp/provision-v15.log` — provision transcript.
+- `/tmp/teardown-v15.log` — teardown transcript.
+
+## Recommendation
+
+- B19 lib-tested PASS (266 → 268). Trait + state-map wiring locally validated.
+- B19 cluster verification **gated on bug #20 closing** (cold-boot /livez recovery). Re-run c=4 × 4 + c=20 once #20 lands; the wiring is already in place to exercise wake/exec/stop end-to-end on a fresh v15+ binary.
+- Leave **[B19] in the deferred backlog as "fix landed in code, cluster verification pending bug #20"** rather than CLOSED.
