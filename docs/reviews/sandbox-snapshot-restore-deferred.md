@@ -556,6 +556,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: same vulnerability shape as R9-S4 but on `SANDBOX_AEAD_KEY_PATH` (the sealed-records persistence AEAD key, distinct from the snapshot-store root KEK). Mode 0o400 checked but uid not — non-root attacker who pre-creates the file at the path before systemd starts can supply a known key for sealed-record encryption.
 - **Action**: same one-line `metadata().uid() == 0` fix as R9-S4. Mirror the test pattern from `snapshot_aead.rs` (`from_path_rejects_non_root_owned_file`).
 
+### [R9-S4c] Third sibling: `db.rs::enforce_password_file_mode` has identical mode-only-no-uid bug (IMPORTANT, security-r9)
+- **Source**: Discovered by R9-S4b fixer 2026-05-25 r4. Comment at `crates/sandbox/src/db.rs:810` literally says "Mirrors `persist::AeadKey::from_path`" — inherited R9-S4 / R9-S4b's defect.
+- **File**: `crates/sandbox/src/db.rs:812-831` (`enforce_password_file_mode`)
+- **Symptom**: mode-only-no-uid on `SANDBOX_DATABASE_PASSWORD_PATH` (pg-superuser-password file). Non-root attacker pre-creating a 0o400 file at this path before systemd injects an attacker-known pg password → controller connects to pg with that password. Bigger blast radius if attacker can also influence DNS / pg endpoint.
+- **Action**: same one-line `metadata().uid() == 0` fix. Add 2 tests mirroring R9-S4/R9-S4b naming.
+
 ### [R9-S5] Restore-branch wrapper handles ZSBX_SANDBOX_ID asymmetrically vs cold-boot (informational, hides pre-R7-S1-snapshot wedge mode) (IMPORTANT, security-r9)
 - **Source**: 2026-05-25 security-r9
 - **Files**: `crates/sandbox/scripts/nomad-vm-wrapper.sh` (restore branch ~366-419 vs cold-boot branch ~140-170) + `crates/sandbox/src/backend/nomad_ch.rs::build_restore_nomad_job_json`
@@ -718,11 +724,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: liveness/readiness probes drift from §10.0 ErrorEnvelope. Arguably justified as a probe shape — but document the carve-out explicitly.
 - **Action**: either bring readyz in line with §10.0 OR add a comment + invariant test pinning the probe-shape decision.
 
-### [R10-Q1] (CRITICAL, code-quality-r10) handlers.rs:670/821/837 raw `{e}` leak — 6th-round carry
-- **Source**: 2026-05-25 code-quality-r10
-- **File**: `crates/sandbox/src/handlers.rs:670,821,837` (sandbox crate, NOT sandbox-agent — earlier briefs misattributed)
-- **Existing fix shape**: `crates/sandbox/src/admin_handlers.rs:228 fn err_safe(...)` — sanitizer already exists. The 3 sites just need to call err_safe(...) instead of err(...).
-- **Action**: 3-line mechanical fix; substitute `err(500, "…", format!("…: {e}"))` → `err_safe(500, "…", "…", e)`. Add 3 wire-shape tests asserting no raw driver text in body.
+### [R10-Q1] (CLOSED at `228569d3`) handlers.rs:670/821/837 raw `{e}` leak — was a 7-round carry, sanitized via shared `err_safe()`
+- **Source**: 2026-05-25 code-quality-r10 (also tracked as a 7-round api-surface carry across earlier review rounds)
+- **Files**: `crates/sandbox/src/handlers.rs:670,821,837` (3 substitutions) + `crates/sandbox/src/admin_handlers.rs:228` (bumped `err_safe` from `fn` → `pub(crate)` so handlers.rs can share the single sanitizer — option (a) from the brief: no new sibling module, no duplication)
+- **Fix**: substituted `err(500, "...", format!("...: {e}"))` → `err_safe(500, "...", "<public_msg>", e)`. Raw driver-error strings (ch-remote socket paths, agent IPs, mount paths, uids) now go to journald via `tracing::error!` only; wire body carries fixed public prose (`"backend stop failed"`, `"backend exec failed"`, `"backend file-tree failed"`).
+- **Tests added**: 3 wire-shape tests in `handlers::tests` (`r10_q1_backend_{stop,exec,file_tree}_sanitizes_raw_driver_error`) feed sentinel-bearing raw errors and assert (a) wire `message` is the fixed public string and (b) sentinel substrings are absent. Sandbox lib: 305 → 308.
+- **Verification post-fix**: `grep -nE 'err\(500.*\{e\}' crates/sandbox/src/*.rs` is empty — no other raw-leak sites of this shape remain in the crate.
 
 ### [R10-Q3] registry.rs has 35 bare `RwLock::{read,write}().unwrap()` sites with no poison-recover (MAJOR, code-quality-r10)
 - **Source**: 2026-05-25 code-quality-r10
