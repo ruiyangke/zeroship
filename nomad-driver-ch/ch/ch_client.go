@@ -250,10 +250,36 @@ func (c *Client) Shutdown(socketPath string) error {
 	return nil
 }
 
-// Resume sends `PUT /api/v1/vm.resume` to the VM at socketPath.
-// Stubbed until T-6 implements the restore path.
+// Resume invokes `ch-remote --api-socket <socketPath> resume`. This
+// is the wake-from-snapshot post-step: CH `--restore` brings the VM
+// back in a PAUSED state (vCPUs not running, virtio-net not
+// responding); the resume RPC is what starts the vCPUs and makes the
+// guest reachable again. Idempotent — CH returns success even if the
+// VM is already running.
+//
+// Shells to ch-remote (rather than issuing the HTTP PUT directly the
+// way Info does) for the same reason Shutdown does: ch-remote's CLI
+// validates argument shape and emits the exact error text the bash
+// wrapper consumes today, keeping cluster behaviour identical.
+//
+// Behaviour:
+//   - Returns nil on ch-remote exit 0.
+//   - Returns an error (containing the combined output) on non-zero
+//     exit, on missing ch-remote binary, or on empty socketPath.
 func (c *Client) Resume(socketPath string) error {
-	return errors.New("ch: T-6: Client.Resume not implemented")
+	if socketPath == "" {
+		return errors.New("ch: Resume: empty socket path")
+	}
+	chRemote := c.CHRemoteBin()
+	if chRemote == "" {
+		return errors.New("ch: Resume: ch-remote binary not resolved")
+	}
+	cmd := exec.Command(chRemote, "--api-socket", socketPath, "resume")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ch: Resume: ch-remote resume: %w (output=%q)", err, string(out))
+	}
+	return nil
 }
 
 // Probe is a composite liveness check used by RecoverTask (T-4) to decide

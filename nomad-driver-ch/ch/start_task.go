@@ -83,10 +83,12 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	}
 
 	if driverConfig.RestoreFrom != "" {
-		// Restore is T-6's sprint. Refuse explicitly with the matching
-		// tag so the operator gets a clean "not yet implemented" rather
-		// than a half-built cold-boot artifact.
-		return nil, nil, errors.New("ch: T-6: restore path not implemented (RestoreFrom set)")
+		// Restore (wake-from-snapshot) branch lives in
+		// restore_task.go. The two branches are kept fully separate
+		// so the cold-boot validation guards don't fire on a restore
+		// (which carries its boot material in the snapshot's memory
+		// image, not in TaskConfig).
+		return p.startTaskRestoreBranch(cfg, &driverConfig)
 	}
 
 	// Validate the cold-boot subset of fields. Each error names the field

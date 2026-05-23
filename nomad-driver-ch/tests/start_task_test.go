@@ -431,14 +431,16 @@ func TestStartTask_SpawnInvokesCH(t *testing.T) {
 	close(capturedRunner.waitCh)
 }
 
-// TestStartTask_RejectsRestoreFrom asserts the T-6 guard: cold-boot path
-// refuses if RestoreFrom is set, with the matching tag.
-func TestStartTask_RejectsRestoreFrom(t *testing.T) {
+// TestStartTask_RestoreFromRoutesToRestoreBranch asserts that
+// setting RestoreFrom flips StartTask to the restore branch (T-6).
+// With the snapshot dir missing, the restore branch surfaces a
+// snapshot-validation error — that's the routing signal.
+func TestStartTask_RestoreFromRoutesToRestoreBranch(t *testing.T) {
 	chBin := writeStubBinary(t, "cloud-hypervisor")
 	t.Setenv("ZSBX_CH_BIN", chBin)
 
 	cfg := validColdBootConfig()
-	cfg.RestoreFrom = "/some/snapshot/dir"
+	cfg.RestoreFrom = "/some/snapshot/dir/that/does/not/exist"
 
 	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
 		return newFakeRunner(cmd)
@@ -446,10 +448,10 @@ func TestStartTask_RejectsRestoreFrom(t *testing.T) {
 
 	_, _, err := p.StartTask(taskCfg)
 	if err == nil {
-		t.Fatal("expected error for RestoreFrom set, got nil")
+		t.Fatal("expected error for missing snapshot dir, got nil")
 	}
-	if !strings.Contains(err.Error(), "T-6") {
-		t.Errorf("error %q missing T-6 tag", err.Error())
+	if !strings.Contains(err.Error(), "restore") {
+		t.Errorf("error %q does not mention restore branch", err.Error())
 	}
 }
 

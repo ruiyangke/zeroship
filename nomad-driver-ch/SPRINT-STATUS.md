@@ -13,6 +13,7 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 - [x] T-3 (per-VM /30 tap setup + teardown) — `31e05a3c` (`nomad-driver-ch/start_task,stop_task: per-VM /30 tap setup + teardown (T-3)`)
 - [x] T-4 (RecoverTask via ch-remote API socket) — `nomad-driver-ch/recover_task: reattach to running CH via API socket (T-4)`
 - [x] T-5 (TaskStats: per-task telemetry via host /proc) — `nomad-driver-ch/task_stats: per-task telemetry via /proc+/sys (T-5)`
+- [x] T-6 (Restore path: --restore + ch-remote resume wake) — `nomad-driver-ch/restore_task: --restore + ch-remote resume wake path (T-6)`
 
 ## In progress
 
@@ -20,4 +21,4 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Up next
 
-- T-6: Restore path (vm.restore + post-restore hooks; controller-side clock-resync wiring is T-7)
+- T-7: Controller-integration (clock-resync wiring on restore mode; control-plane hand-off)

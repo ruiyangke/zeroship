@@ -105,6 +105,12 @@ func CallRealTeardownTap(tapName string) error {
 	return realTeardownTap(tapName)
 }
 
+// RewriteConfigJSON is the test entry point for the T-6 restore-path
+// config.json rewriter. Pure function; no side effects.
+func RewriteConfigJSON(orig []byte, taskDir string, vmIndex uint16, subnetBaseOctet uint8) ([]byte, error) {
+	return rewriteConfigJSON(orig, taskDir, vmIndex, subnetBaseOctet)
+}
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask
