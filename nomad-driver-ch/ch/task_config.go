@@ -28,12 +28,16 @@ type TaskConfig struct {
 	VMIndex uint16 `codec:"vm_index"`
 
 	// Kernel is the absolute path to a CH-compatible kernel image (typically
-	// a vmlinux blob baked into the worker image).
+	// a vmlinux blob baked into the worker image). Mirrors the wrapper's
+	// "$ZSBX_ARTIFACT_DIR/vmlinuz" path.
 	Kernel string `codec:"kernel"`
 
 	// Cmdline is the kernel command line passed verbatim as
-	// `cloud-hypervisor --cmdline ...`. Includes the agent-identity tokens
-	// (zsbx_pubkey, SANDBOX_AGENT_SANDBOX_ID) and the static IP token.
+	// `cloud-hypervisor --cmdline ...`. When empty, StartTask synthesises
+	// one from the agent-identity tokens below (PubkeyHex / SandboxId /
+	// VMIndex / SubnetBaseOctet). When non-empty, it overrides synthesis —
+	// kept for forward-compat with controllers that want to drive the
+	// cmdline themselves.
 	Cmdline string `codec:"cmdline"`
 
 	// CPUs is the boot vCPU count for the guest.
@@ -46,6 +50,10 @@ type TaskConfig struct {
 	// Disks is the list of virtio-blk disks attached to the guest, in order.
 	// The first entry is conventionally the rootfs; subsequent entries are
 	// workspace/userhome/etc. Each disk is a single --disk argv entry.
+	//
+	// When Disks is empty AND the wrapper-equivalent fields below
+	// (WorkspaceImg / UserHomeImg) are set, StartTask synthesises a 3-disk
+	// list (rootfs / workspace / userhome) mirroring the bash wrapper.
 	Disks []DiskSpec `codec:"disks"`
 
 	// Fs is the list of virtio-fs mounts; each one corresponds to a
@@ -54,13 +62,51 @@ type TaskConfig struct {
 	Fs []VirtioFsSpec `codec:"fs"`
 
 	// Net is the list of virtio-net interfaces. Today we always have exactly
-	// one (the per-VM /30 tap); the slice exists for forward-compat.
+	// one (the per-VM /30 tap); the slice exists for forward-compat. When
+	// empty, StartTask synthesises a single entry from VMIndex /
+	// SubnetBaseOctet (matches the wrapper's `zsbx-nm-$IDX` convention).
 	Net []NetSpec `codec:"net"`
 
 	// RestoreFrom, when non-empty, switches the driver from cold-boot to
 	// restore: CH is spawned with `--restore source_url=file://<RestoreFrom>`
 	// and then `ch-remote resume` is issued. When empty, cold-boot.
 	RestoreFrom string `codec:"restore_from"`
+
+	// --- Wrapper-equivalent env-mapped fields ---------------------------
+	//
+	// These mirror the bash wrapper's ZSBX_* env vars (see
+	// crates/sandbox/scripts/nomad-vm-wrapper.sh § "Inputs"). Each field
+	// maps 1:1 to one wrapper env var; StartTask reads them to synthesise
+	// the cmdline and disks when those higher-level fields aren't already
+	// populated.
+
+	// SandboxId is the typed-id (`sbx_…`) of the sandbox row. Embedded in
+	// the kernel cmdline as `SANDBOX_AGENT_SANDBOX_ID=<id>`. Wrapper env:
+	// ZSBX_SANDBOX_ID. Validated to be [0-9a-zA-Z_] only at StartTask time
+	// (would otherwise corrupt the kernel cmdline at the whitespace tokeniser).
+	SandboxId string `codec:"sandbox_id"`
+
+	// WorkspaceImg is the absolute host path to the workspace ext4 image
+	// (raw, attached as virtio-blk → guest /dev/vdb → /workspace). Wrapper
+	// env: ZSBX_WORKSPACE_IMG.
+	WorkspaceImg string `codec:"workspace_img"`
+
+	// UserHomeImg is the absolute host path to the per-user $HOME ext4
+	// image (raw, attached as virtio-blk → guest /dev/vdc → /userhome).
+	// Wrapper env: ZSBX_USER_HOME_IMG.
+	UserHomeImg string `codec:"user_home_img"`
+
+	// PubkeyHex is the lowercase-hex controller signing pubkey, no `0x`
+	// prefix. Embedded in the cmdline as `zsbx_pubkey=<hex>`; the guest
+	// /sbin/init decodes + writes /keys/controller-pubkey. Wrapper env:
+	// ZSBX_PUBKEY_HEX. Validated even-length + hex-only at StartTask time.
+	PubkeyHex string `codec:"pubkey_hex"`
+
+	// SubnetBaseOctet is the second octet of the per-VM /30 subnet
+	// (default 99, keeping the historical 10.99/16 layout). Used together
+	// with VMIndex to derive the guest IP / host IP. Wrapper env:
+	// ZSBX_SUBNET_BASE_OCTET. Bounded to u8 (0..255).
+	SubnetBaseOctet uint16 `codec:"subnet_base_octet"`
 }
 
 // DiskSpec is one virtio-blk disk.
@@ -91,10 +137,19 @@ type NetSpec struct {
 var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	"vm_index":     hclspec.NewAttr("vm_index", "number", true),
 	"kernel":       hclspec.NewAttr("kernel", "string", true),
-	"cmdline":      hclspec.NewAttr("cmdline", "string", true),
+	"cmdline":      hclspec.NewAttr("cmdline", "string", false),
 	"cpus":         hclspec.NewAttr("cpus", "number", true),
 	"memory_mb":    hclspec.NewAttr("memory_mb", "number", true),
 	"restore_from": hclspec.NewAttr("restore_from", "string", false),
+
+	// Wrapper-equivalent fields (see TaskConfig comments). All optional at
+	// the schema level so existing operator configs that drive Disks/Cmdline
+	// directly still validate; StartTask enforces the cold-boot subset.
+	"sandbox_id":        hclspec.NewAttr("sandbox_id", "string", false),
+	"workspace_img":     hclspec.NewAttr("workspace_img", "string", false),
+	"user_home_img":     hclspec.NewAttr("user_home_img", "string", false),
+	"pubkey_hex":        hclspec.NewAttr("pubkey_hex", "string", false),
+	"subnet_base_octet": hclspec.NewAttr("subnet_base_octet", "number", false),
 
 	"disks": hclspec.NewBlockList("disks", hclspec.NewObject(map[string]*hclspec.Spec{
 		"path":     hclspec.NewAttr("path", "string", true),

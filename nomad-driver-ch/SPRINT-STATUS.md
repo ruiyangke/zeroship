@@ -7,7 +7,8 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 - [x] T-0 (scaffold) — `ee4a76c3` (`nomad-driver-ch: scaffold from hashicorp/nomad-driver-virt (T-0)`)
 - [x] T-0.5 (flake + main.go) — see commits
   - `de35f49e` — `nomad-driver-ch: flake.nix + flake.lock for dev shell (T-0.5 part 1)`
-  - HEAD — `nomad-driver-ch: cmd/main.go go-plugin entry point (T-0.5 part 2)`
+  - `9f1a7e49` — `nomad-driver-ch: cmd/main.go go-plugin entry point (T-0.5 part 2)`
+- [x] T-1 (StartTask cold-boot CH spawn) — `6a8d2fcf` (`nomad-driver-ch/start_task: implement cold-boot CH spawn (T-1)`)
 
 ## In progress
 
@@ -15,4 +16,4 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Up next
 
-- T-1: StartTask cold-boot CH spawn
+- T-2: graceful stop ladder + WaitTask completeness + DestroyTask + SignalTask

@@ -181,7 +181,9 @@ func (p *Plugin) ConfigSchema() (*hclspec.Spec, error) {
 }
 
 // SetConfig is invoked once at plugin load with the operator's driver-level
-// config (msgpack-encoded against ConfigSchema). Stash it on the receiver.
+// config (msgpack-encoded against ConfigSchema). Stash it on the receiver
+// and propagate the configured binary paths into the shared CH client so
+// StartTask doesn't re-resolve them on every spawn.
 func (p *Plugin) SetConfig(cfg *base.Config) error {
 	var config Config
 	if len(cfg.PluginConfig) != 0 {
@@ -192,6 +194,11 @@ func (p *Plugin) SetConfig(cfg *base.Config) error {
 	p.config = &config
 	if cfg.AgentConfig != nil {
 		p.nomadConfig = cfg.AgentConfig.Driver
+	}
+	// Best-effort binary discovery using the new config. NewClient also
+	// did this; we redo it here in case Config arrives after construction.
+	if p.chClient != nil {
+		p.chClient.SetBinaries(p.config.CloudHypervisorBin, p.config.VirtiofsdBin)
 	}
 	return nil
 }
@@ -237,11 +244,29 @@ func (p *Plugin) handleFingerprint(ctx context.Context, ch chan<- *drivers.Finge
 }
 
 func (p *Plugin) buildFingerprint() *drivers.Fingerprint {
-	// T-0: stub. Probe CH/virtiofsd binaries + /dev/kvm in a follow-up.
+	// T-1: report the discovered CH binary so `nomad node status` shows
+	// whether the host is ready. /dev/kvm + virtiofsd are still TODO
+	// (T-3 covers the deeper probe — tap availability, kvm capability).
+	attrs := map[string]*structs.Attribute{}
+	chBin := ""
+	if p.chClient != nil {
+		chBin = p.chClient.CHBin()
+	}
+	if chBin == "" {
+		return &drivers.Fingerprint{
+			Attributes:        attrs,
+			Health:            drivers.HealthStateUndetected,
+			HealthDescription: "ch driver: cloud-hypervisor binary not found on PATH",
+		}
+	}
+	attrs["driver.ch.cloud_hypervisor_bin"] = structs.NewStringAttribute(chBin)
+	if chRemote := p.chClient.CHRemoteBin(); chRemote != "" {
+		attrs["driver.ch.ch_remote_bin"] = structs.NewStringAttribute(chRemote)
+	}
 	return &drivers.Fingerprint{
-		Attributes:        map[string]*structs.Attribute{},
-		Health:            drivers.HealthStateUndetected,
-		HealthDescription: "ch driver scaffold — not implemented",
+		Attributes:        attrs,
+		Health:            drivers.HealthStateHealthy,
+		HealthDescription: "ready",
 	}
 }
 

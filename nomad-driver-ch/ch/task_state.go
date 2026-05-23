@@ -57,6 +57,18 @@ type TaskState struct {
 	// Mode is "cold_boot" or "restore". Drives the controller-side
 	// post-Running hooks (e.g. clock-resync runs only on restore).
 	Mode string
+
+	// SandboxId is the typed-id of the sandbox this VM belongs to. Captured
+	// for RecoverTask + observability (so a recovered handle can re-emit
+	// the sandbox-id-tagged events even when the operator's TaskConfig was
+	// truncated mid-restart).
+	SandboxId string
+
+	// NomadTaskName is cfg.Name from the original TaskConfig — kept for
+	// RecoverTask context (StartTask records it; RecoverTask uses it to
+	// re-tag log lines so a recovered task is grepable in the same way it
+	// was at first boot).
+	NomadTaskName string
 }
 
 // taskHandle is the in-memory runtime view of a running task. It is created
@@ -92,6 +104,19 @@ type taskHandle struct {
 	vmIndex uint16
 	tap     string
 	mode    string
+
+	// runner is the live processRunner StartTask attached. WaitTask blocks
+	// on runner.Wait(); StopTask signals through runner.Signal(); the
+	// SignalTask RPC calls runner.Signal(); StderrTail pulls from runner.
+	// nil for handles produced by RecoverTask before T-4 wires up a
+	// re-attached process supervisor.
+	runner processRunner
+
+	// exitDone is closed by the supervisor goroutine (superviseCH) once
+	// runner.Wait returns. WaitTask subscribers select on it instead of
+	// calling cmd.Wait directly (which can only fire once per Cmd).
+	// nil for handles produced by RecoverTask before T-4.
+	exitDone chan struct{}
 
 	// ctx/cancelFn bound the per-task supervision goroutines (WaitTask
 	// monitor, TaskStats poller). Cancelled in StopTask/DestroyTask.
