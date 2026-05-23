@@ -2210,18 +2210,71 @@ pub(crate) const NOMAD_CPU_MHZ_ADVISORY: u32 = 500;
 
 // ─── Nomad job spec construction ────────────────────────────────
 
+/// Which Nomad task driver to target for the per-VM alloc. T-7 of the
+/// `nomad-driver-ch` (Go plugin) rollout adds the typed driver as a
+/// drop-in alternative to the shell wrapper; the flag stays off until
+/// T-8 validates the new path on cluster.
+///
+/// - `RawExec` (default): existing behaviour — jobspec uses
+///   `Driver: "raw_exec"` + `Config: { command: <wrapper_path> }` and
+///   ships per-VM inputs as `ZSBX_*` env vars the bash wrapper reads.
+/// - `ChPlugin`: jobspec uses `Driver: "ch"` (the Go plugin's declared
+///   name, see `nomad-driver-ch/ch/driver.go::PluginName`) + a typed
+///   `Config: { VMIndex, SandboxId, ... }` block whose shape matches
+///   the driver's `TaskConfig` struct
+///   (`nomad-driver-ch/ch/task_config.go`).
+///
+/// The two branches produce semantically identical VM lifecycles — the
+/// flag is just a transport switch (bash env → typed task config).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskDriverMode {
+    RawExec,
+    ChPlugin,
+}
+
+/// Read the `SANDBOX_TASK_DRIVER` env var and map to a [`TaskDriverMode`].
+/// Default (unset or any value other than `"ch_plugin"`) is `RawExec`
+/// for back-compat — the controller never opts a fleet into the Go
+/// driver implicitly.
+pub(crate) fn task_driver_mode_from_env() -> TaskDriverMode {
+    match std::env::var("SANDBOX_TASK_DRIVER").as_deref() {
+        Ok("ch_plugin") => TaskDriverMode::ChPlugin,
+        _ => TaskDriverMode::RawExec,
+    }
+}
+
 /// Build the JSON body for `POST /v1/jobs`. Returns the `{"Job": ...}`
 /// envelope ready to ship.
 ///
 /// The shape is the absolute minimum that Nomad accepts for a
-/// service-type raw_exec job: TaskGroup count=1, RestartPolicy with
-/// 0 attempts (the wrapper exits = the alloc dies; we don't want
-/// Nomad to retry, the controller is the orchestrator), one Task
-/// with `command = wrapper_path` and the env vars the wrapper
-/// reads. Resources are advisory — `raw_exec` doesn't enforce them
-/// (the cgroup is owned by the Nomad client, but CH ignores CPU
-/// quota anyway). KillTimeout=10s is the same window the demo
-/// wrapper's cleanup trap uses.
+/// service-type job: TaskGroup count=1, RestartPolicy with 0 attempts
+/// (the wrapper / driver exits = the alloc dies; we don't want Nomad
+/// to retry, the controller is the orchestrator), one Task whose
+/// `Driver` + `Config` shape depends on
+/// [`task_driver_mode_from_env`]:
+///
+/// - `RawExec`: `Driver: "raw_exec"`, `Config: { command: <wrapper> }`,
+///   and per-VM inputs ride in `Env: { ZSBX_* }`. Resources are
+///   advisory under raw_exec (`raw_exec` doesn't enforce CPU quota
+///   and CH ignores it anyway); memory is the real bin-packing input.
+/// - `ChPlugin`: `Driver: "ch"`, `Config: { VMIndex, SandboxId, ... }`
+///   with the typed field surface from
+///   `nomad-driver-ch/ch/task_config.go::TaskConfig`. The Env block
+///   stays populated under both modes for debugging + the B24 /
+///   R8-DEPLOY1 regression pin on `ZSBX_SANDBOX_ID` — under ChPlugin
+///   the env's contents are largely redundant with the typed Config
+///   but the bash wrapper validators that consumed them aren't loaded.
+///
+/// `restore_from`, when `Some`, switches the per-task surface to the
+/// restore branch: under `RawExec` it adds `ZSBX_RESTORE_FROM=<path>`
+/// to Env (which the wrapper's restore branch reads at line 364 to
+/// switch from cold-boot to `cloud-hypervisor --restore source_url=…`);
+/// under `ChPlugin` it sets the typed `RestoreFrom` Config field
+/// (`task_config.go:73`). When `None`, cold-boot (the original
+/// behaviour and the only path used by `Self::create` callers).
+///
+/// KillTimeout=10s is the same window the demo wrapper's cleanup trap
+/// uses.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_nomad_job_json(
     job_id: &str,
@@ -2234,6 +2287,182 @@ pub(crate) fn build_nomad_job_json(
     project_id: &str,
     sandbox_id: &str,
 ) -> serde_json::Value {
+    build_nomad_job_json_with(
+        job_id,
+        cfg,
+        vm_index,
+        workspace_img,
+        user_home_img,
+        pubkey_hex,
+        user_id,
+        project_id,
+        sandbox_id,
+        None,
+        task_driver_mode_from_env(),
+    )
+}
+
+/// Lower-level builder used by [`build_nomad_job_json`] and by tests
+/// that want to pin a specific [`TaskDriverMode`] and/or restore path
+/// without reaching for `std::env::set_var`. Production code paths go
+/// through `build_nomad_job_json` (which reads the env once); this
+/// helper is `pub(crate)` to keep the test surface clean.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_nomad_job_json_with(
+    job_id: &str,
+    cfg: &SandboxConfig,
+    vm_index: u16,
+    workspace_img: &Path,
+    user_home_img: &Path,
+    pubkey_hex: &str,
+    user_id: &str,
+    project_id: &str,
+    sandbox_id: &str,
+    restore_from: Option<&Path>,
+    mode: TaskDriverMode,
+) -> serde_json::Value {
+    // Per-VM env block. Populated under BOTH driver modes:
+    //   - RawExec: the bash wrapper reads these to construct CH argv.
+    //   - ChPlugin: largely redundant with the typed Config block,
+    //     but kept for debugging + the B24 / R8-DEPLOY1 regression
+    //     pin on `ZSBX_SANDBOX_ID`. The Go driver ignores Env.
+    //
+    // virtio-blk pivot (bug #11): the three virtio-fs share dirs
+    // are gone — we pass the two image paths + the controller pubkey
+    // as hex. The wrapper attaches the images as /dev/vdb,/vdc and
+    // injects the pubkey into the kernel cmdline.
+    let mut env = serde_json::json!({
+        "ZSBX_VM_INDEX": vm_index.to_string(),
+        // Artifact directory holding kernel + rootfs. Renamed from
+        // ZSBX_HERE in round 3 (M4) — the new name matches the Rust
+        // struct field `runtime_dir`'s intent.
+        "ZSBX_ARTIFACT_DIR": cfg.nomad_ch.runtime_dir.display().to_string(),
+        // ZSBX_RUNTIME is the per-allocation working dir Nomad
+        // provisions per task; the literal `${NOMAD_TASK_DIR}` here
+        // is a Nomad template variable that the agent expands
+        // before invoking the wrapper, NOT a bash expansion at our
+        // level.
+        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
+        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
+        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
+        "ZSBX_PUBKEY_HEX": pubkey_hex,
+        // Memory / CPU. The wrapper substitutes these into CH's
+        // `--memory size=${N}M,shared=on` and `--cpus boot=${N}`
+        // flags. Without these the wrapper would have no way to
+        // honour SandboxConfig.{memory_mb,cpus} — the Resources
+        // block is advisory-only on raw_exec.
+        "ZSBX_VM_MEMORY_MB": cfg.memory_mb.to_string(),
+        "ZSBX_VM_CPUS_BOOT": cpus_boot(cfg.cpus).to_string(),
+        // M6: pair the second octet with the controller-side
+        // computation of `agent_url`. Both sides MUST read the
+        // same value so the tap/IP the wrapper provisions matches
+        // the IP the controller dials.
+        "ZSBX_SUBNET_BASE_OCTET":
+            cfg.nomad_ch.subnet_second_octet.to_string(),
+        // B24 / R8-DEPLOY1: the wrapper's cold-boot env validator
+        // (nomad-vm-wrapper.sh:153) hard-errors when ZSBX_SANDBOX_ID
+        // is unset; missing it terminated cluster-smoke allocs ~50ms
+        // into spawn (0/16 CREATE at HEAD cf702457). The value is
+        // embedded VERBATIM in the guest's kernel cmdline as
+        // `SANDBOX_AGENT_SANDBOX_ID=<value>` (wrapper line 641) and
+        // feeds the in-VM agent's `init_sandbox_id_from_env` (R7-S1).
+        // The wrapper's `[!0-9a-zA-Z_]` validator at line 222 rejects
+        // hyphens, so the caller passes Uuid::simple() (32-hex, no
+        // hyphens) — matching the format used by job_id and host_dir
+        // derivation elsewhere in this file.
+        "ZSBX_SANDBOX_ID": sandbox_id,
+    });
+    // Restore-path env entry: the wrapper's branch at line 364 reads
+    // this and switches to `cloud-hypervisor --restore source_url=…`.
+    // Cold-boot leaves it unset.
+    if let Some(p) = restore_from {
+        env["ZSBX_RESTORE_FROM"] = serde_json::Value::String(p.display().to_string());
+    }
+
+    let resources = serde_json::json!({
+        // CPU MHz is advisory under raw_exec + CH — see
+        // `NOMAD_CPU_MHZ_ADVISORY`. Memory is the real bin-packing
+        // input.
+        //
+        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix, 2026-05-22 cluster
+        // validation). CH v51.1 mmap-faults the full guest RAM
+        // during snapshot/restore which gets accounted to the task's
+        // memcg; without slack the cgroup OOM-killer fires when CH
+        // approaches the hard limit. MemoryMB stays as the
+        // bin-packing input; MemoryMaxMB is the oversubscription
+        // ceiling Nomad enforces via memory.high.
+        "CPU": NOMAD_CPU_MHZ_ADVISORY,
+        "MemoryMB": cfg.memory_mb as u32,
+        "MemoryMaxMB": (cfg.memory_mb * 2) as u32,
+    });
+
+    // Driver + Config — the only material difference between the two
+    // modes. Under ChPlugin the typed surface matches the Go driver's
+    // `TaskConfig` struct (codec field names from `task_config.go`).
+    let (driver_name, config): (&str, serde_json::Value) = match mode {
+        TaskDriverMode::RawExec => (
+            "raw_exec",
+            serde_json::json!({
+                "command": cfg.nomad_ch.wrapper_path.display().to_string(),
+            }),
+        ),
+        TaskDriverMode::ChPlugin => {
+            // Field names + types mirror
+            // `nomad-driver-ch/ch/task_config.go::TaskConfig`:
+            //
+            //   vm_index          uint16 (1..ceil)
+            //   kernel            string  (host path to vmlinux)
+            //   cpus              uint8
+            //   memory_mb         uint32
+            //   restore_from      string  (empty for cold-boot)
+            //   sandbox_id        string  (32-hex, no hyphens)
+            //   workspace_img     string  (host path)
+            //   user_home_img     string  (host path)
+            //   pubkey_hex        string  (64-hex, no `0x`)
+            //   subnet_base_octet uint16  (0..255, default 99)
+            //   disks/fs/net      block-lists (empty → driver auto-
+            //                     synthesises from the above)
+            //
+            // We deliberately do NOT set `command` here — the Go
+            // driver's TaskConfig has no such field; including it
+            // would either be ignored (best case) or fail HCL
+            // decode if the schema gets stricter.
+            //
+            // `kernel` is sourced from the same `runtime_dir` the
+            // wrapper used — the driver's StartTask appends
+            // `/vmlinuz` itself (it mirrors the wrapper's
+            // `$ZSBX_ARTIFACT_DIR/vmlinuz` path). We forward the
+            // directory; if the driver evolves to take the full
+            // path, the controller side picks up the new contract
+            // here (and the driver-side default keeps working).
+            let kernel_path = cfg.nomad_ch.runtime_dir.join("vmlinuz");
+            let restore_str = restore_from
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            (
+                "ch",
+                serde_json::json!({
+                    "vm_index": vm_index,
+                    "kernel": kernel_path.display().to_string(),
+                    "cpus": cpus_boot(cfg.cpus),
+                    "memory_mb": cfg.memory_mb as u32,
+                    "restore_from": restore_str,
+                    "sandbox_id": sandbox_id,
+                    "workspace_img": workspace_img.display().to_string(),
+                    "user_home_img": user_home_img.display().to_string(),
+                    "pubkey_hex": pubkey_hex,
+                    "subnet_base_octet": cfg.nomad_ch.subnet_second_octet,
+                    // Block-lists — empty triggers driver-side
+                    // auto-synthesis from the typed fields above
+                    // (matches T-3 default behaviour).
+                    "disks": [],
+                    "fs": [],
+                    "net": [],
+                }),
+            )
+        }
+    };
+
     serde_json::json!({
         "Job": {
             "ID": job_id,
@@ -2261,87 +2490,10 @@ pub(crate) fn build_nomad_job_json(
                 },
                 "Tasks": [{
                     "Name": "ch",
-                    "Driver": "raw_exec",
-                    "Config": {
-                        "command": cfg.nomad_ch.wrapper_path.display().to_string(),
-                    },
-                    "Env": {
-                        "ZSBX_VM_INDEX": vm_index.to_string(),
-                        // Artifact directory holding kernel + rootfs.
-                        // Renamed from ZSBX_HERE in round 3 (M4) —
-                        // the previous name was meaningless on the
-                        // bash side; this matches the Rust struct
-                        // field `runtime_dir`'s intent.
-                        "ZSBX_ARTIFACT_DIR": cfg.nomad_ch.runtime_dir.display().to_string(),
-                        // ZSBX_RUNTIME is the per-allocation working
-                        // dir Nomad provisions per task; the literal
-                        // `${NOMAD_TASK_DIR}` here is a Nomad
-                        // template variable that the agent expands
-                        // before invoking the wrapper, NOT a bash
-                        // expansion at our level. See
-                        // https://developer.hashicorp.com/nomad/docs/runtime/environment
-                        "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
-                        // virtio-blk pivot (bug #11): the three virtio-fs
-                        // share dirs are gone. We now pass full image
-                        // paths (per-sandbox workspace + per-user home)
-                        // and the controller pubkey as hex. The wrapper
-                        // attaches the images as /dev/vdb,/vdc and
-                        // injects the pubkey into the kernel cmdline.
-                        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
-                        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
-                        "ZSBX_PUBKEY_HEX": pubkey_hex,
-                        // Memory / CPU. The wrapper substitutes these
-                        // into CH's `--memory size=${N}M,shared=on` and
-                        // `--cpus boot=${N}` flags. Without these the
-                        // wrapper would have no way to honour
-                        // SandboxConfig.{memory_mb,cpus} — the Resources
-                        // block is advisory-only on raw_exec.
-                        "ZSBX_VM_MEMORY_MB": cfg.memory_mb.to_string(),
-                        "ZSBX_VM_CPUS_BOOT": cpus_boot(cfg.cpus).to_string(),
-                        // M6: pair the second octet with the
-                        // controller-side computation of `agent_url`.
-                        // Both sides MUST read the same value so the
-                        // tap/IP the wrapper provisions matches the IP
-                        // the controller dials.
-                        "ZSBX_SUBNET_BASE_OCTET":
-                            cfg.nomad_ch.subnet_second_octet.to_string(),
-                        // B24 / R8-DEPLOY1: the wrapper's cold-boot
-                        // env validator (nomad-vm-wrapper.sh:153)
-                        // hard-errors when ZSBX_SANDBOX_ID is unset;
-                        // missing it terminated cluster-smoke allocs
-                        // ~50ms into spawn (0/16 CREATE at HEAD
-                        // cf702457). The value is embedded VERBATIM
-                        // in the guest's kernel cmdline as
-                        // `SANDBOX_AGENT_SANDBOX_ID=<value>` (wrapper
-                        // line 641) and feeds the in-VM agent's
-                        // `init_sandbox_id_from_env` (R7-S1). The
-                        // wrapper's `[!0-9a-zA-Z_]` validator at
-                        // line 222 rejects hyphens, so the caller
-                        // passes Uuid::simple() (32-hex, no hyphens)
-                        // — matching the format used by job_id and
-                        // host_dir derivation elsewhere in this file.
-                        "ZSBX_SANDBOX_ID": sandbox_id,
-                    },
-                    "Resources": {
-                        // CPU MHz is advisory under raw_exec + CH —
-                        // see `NOMAD_CPU_MHZ_ADVISORY`. Memory is the
-                        // real bin-packing input.
-                        //
-                        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix,
-                        // 2026-05-22 cluster validation). CH v51.1
-                        // mmap-faults the full guest RAM during
-                        // snapshot/restore which gets accounted to
-                        // the task's memcg; without slack the cgroup
-                        // OOM-killer fires when CH approaches the
-                        // hard limit. Matches the proposal's § 2
-                        // architectural recommendation. MemoryMB
-                        // stays as the bin-packing input;
-                        // MemoryMaxMB is the oversubscription
-                        // ceiling Nomad enforces via memory.high.
-                        "CPU": NOMAD_CPU_MHZ_ADVISORY,
-                        "MemoryMB": cfg.memory_mb as u32,
-                        "MemoryMaxMB": (cfg.memory_mb * 2) as u32,
-                    },
+                    "Driver": driver_name,
+                    "Config": config,
+                    "Env": env,
+                    "Resources": resources,
                     "KillTimeout": 10_000_000_000u64,  // 10s, ns
                 }],
             }],
@@ -3693,7 +3845,13 @@ mod tests {
         // injects the pubkey on the cmdline. The fixture pubkey is
         // 64 hex chars (32 bytes); short enough to read in error
         // messages but long enough to exercise the hex path.
-        let v = build_nomad_job_json(
+        //
+        // T-7: pin the explicit RawExec mode rather than going
+        // through the env-reading `build_nomad_job_json`, so a
+        // parallel `nomad_job_spec_uses_ch_when_flag_set` test that
+        // has `SANDBOX_TASK_DRIVER=ch_plugin` set doesn't flip the
+        // shape under our feet.
+        let v = build_nomad_job_json_with(
             "zsbx-abc",
             &cfg,
             7,
@@ -3703,6 +3861,8 @@ mod tests {
             "alice",
             "proj1",
             "abc",
+            None,
+            TaskDriverMode::RawExec,
         );
         let job = &v["Job"];
         assert_eq!(job["ID"], "zsbx-abc");
@@ -3787,10 +3947,13 @@ mod tests {
         // two together pin the pairing.
         let mut cfg = make_cfg();
         cfg.nomad_ch.subnet_second_octet = 50;
-        let v = build_nomad_job_json(
+        // T-7: explicit RawExec mode so a parallel ch_plugin test
+        // can't race the env read.
+        let v = build_nomad_job_json_with(
             "zsbx-y", &cfg, 1,
             Path::new("/w.img"), Path::new("/u.img"), "ab",
             "u", "p", "s",
+            None, TaskDriverMode::RawExec,
         );
         assert_eq!(
             v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["ZSBX_SUBNET_BASE_OCTET"],
@@ -3817,7 +3980,10 @@ mod tests {
         // wrapper-validator-safe shape.
         let sandbox_id = Uuid::now_v7();
         let sandbox_id_simple = sandbox_id.simple().to_string();
-        let v = build_nomad_job_json(
+        // T-7: explicit RawExec — under ChPlugin the sandbox_id flows
+        // through the typed Config, not Env; the dedicated B24-under-
+        // raw-exec test below covers the env-block invariant.
+        let v = build_nomad_job_json_with(
             "zsbx-r8",
             &cfg,
             3,
@@ -3827,6 +3993,8 @@ mod tests {
             "alice",
             "proj1",
             &sandbox_id_simple,
+            None,
+            TaskDriverMode::RawExec,
         );
         let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
         // 1. The entry exists and equals the passed value.
@@ -3868,7 +4036,10 @@ mod tests {
     #[test]
     fn nomad_job_json_serializes_to_valid_json() {
         let cfg = make_cfg();
-        let v = build_nomad_job_json(
+        // T-7: pin RawExec so the parallel-test env race doesn't flip
+        // the shape; the round-trip property holds under both modes,
+        // and a dedicated ChPlugin variant lives below.
+        let v = build_nomad_job_json_with(
             "zsbx-x",
             &cfg,
             1,
@@ -3878,11 +4049,288 @@ mod tests {
             "u",
             "p",
             "s",
+            None,
+            TaskDriverMode::RawExec,
         );
         let s = serde_json::to_string(&v).expect("serialize");
         // Round-trip — Nomad parses as JSON, so we should too.
         let _: serde_json::Value =
             serde_json::from_str(&s).expect("round-trip parse");
+    }
+
+    // ─── SANDBOX_TASK_DRIVER feature flag (T-7) ──────────────
+    //
+    // The two env-touching tests below mutate process-global state.
+    // `cargo test` runs lib tests in parallel, and another test that
+    // happens to call `task_driver_mode_from_env()` (or anything that
+    // reads `SANDBOX_TASK_DRIVER`) could race with these. We serialise
+    // env-touching tests with a Mutex — same pattern as
+    // `crates/sandbox/src/db.rs::tests::ENV_LOCK`.
+
+    /// Serialises every test in this submodule that mutates
+    /// `SANDBOX_TASK_DRIVER` via `std::env::{set_var, remove_var}`.
+    /// New env-touching tests MUST acquire this lock first.
+    static T7_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // SAFETY: env mutation is process-global; the lock above
+    // serialises every test in this module that reaches for the
+    // same var. No other crate touches SANDBOX_TASK_DRIVER at test
+    // time. The crate-level `#![deny(unsafe_code)]` forces us to opt
+    // in explicitly here — matching `db.rs::tests` which carries
+    // `#[allow(unsafe_code)]` on the module for the same reason.
+    #[allow(unsafe_code)]
+    fn with_task_driver_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _g = T7_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match value {
+            Some(v) => unsafe { std::env::set_var("SANDBOX_TASK_DRIVER", v) },
+            None => unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") },
+        }
+        let out = f();
+        // Restore the var to unset on the way out so subsequent tests
+        // that don't take this lock still see the default.
+        unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") };
+        out
+    }
+
+    /// Default (env unset) keeps the existing raw_exec transport —
+    /// the controller MUST NOT silently opt a fleet into the Go
+    /// driver. T-7 ships the flag; T-8 flips it on cluster.
+    #[test]
+    fn nomad_job_spec_uses_raw_exec_by_default() {
+        with_task_driver_env(None, || {
+            let cfg = make_cfg();
+            let v = build_nomad_job_json(
+                "zsbx-default", &cfg, 4,
+                Path::new("/w.img"), Path::new("/u.img"),
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "alice", "proj1", "abcdef0123456789abcdef0123456789",
+            );
+            let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+            assert_eq!(task["Driver"], "raw_exec");
+            assert_eq!(
+                task["Config"]["command"],
+                "/etc/zeroship/nomad-vm-wrapper.sh",
+                "default path must still call the bash wrapper — the \
+                 Go driver doesn't ship in T-7 yet"
+            );
+        });
+    }
+
+    /// `SANDBOX_TASK_DRIVER=ch_plugin` switches the jobspec to the
+    /// Go plugin's declared driver name. The name MUST equal the
+    /// `PluginName` const at `nomad-driver-ch/ch/driver.go:36`
+    /// (currently `"ch"`); any drift here decouples the controller
+    /// from the driver and the plugin-load handshake fails with
+    /// "driver not found".
+    #[test]
+    fn nomad_job_spec_uses_ch_when_flag_set() {
+        with_task_driver_env(Some("ch_plugin"), || {
+            let cfg = make_cfg();
+            let v = build_nomad_job_json(
+                "zsbx-flagged", &cfg, 4,
+                Path::new("/w.img"), Path::new("/u.img"),
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "alice", "proj1", "abcdef0123456789abcdef0123456789",
+            );
+            let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+            assert_eq!(
+                task["Driver"], "ch",
+                "ChPlugin mode MUST emit Driver=\"ch\" — matches \
+                 nomad-driver-ch::ch::PluginName"
+            );
+        });
+    }
+
+    /// Every field in the Go driver's `TaskConfig` struct
+    /// (`nomad-driver-ch/ch/task_config.go`) must be present in
+    /// the Nomad Config block when ChPlugin mode is active, with
+    /// the correct JSON type. This is the controller↔driver
+    /// wire-format pin — a rename / drop on either side breaks
+    /// jobspec decode.
+    #[test]
+    fn ch_plugin_jobspec_includes_all_task_config_fields() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json_with(
+            "zsbx-typed",
+            &cfg,
+            7,
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            TaskDriverMode::ChPlugin,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+
+        // Scalars — types matter, the Go driver decodes via msgpack
+        // codec tags so JSON-number-vs-string mismatches drop fields
+        // silently.
+        assert_eq!(config["vm_index"].as_u64(), Some(7));
+        assert_eq!(
+            config["kernel"].as_str(),
+            Some("/var/lib/zeroship/ch/vmlinuz"),
+            "kernel is derived from cfg.nomad_ch.runtime_dir + /vmlinuz",
+        );
+        assert_eq!(config["cpus"].as_u64(), Some(2));
+        assert_eq!(config["memory_mb"].as_u64(), Some(1024));
+        assert_eq!(
+            config["sandbox_id"].as_str(),
+            Some("abcdef0123456789abcdef0123456789"),
+        );
+        assert_eq!(
+            config["workspace_img"].as_str(),
+            Some("/var/zeroship/ch/abc/workspace.img"),
+        );
+        assert_eq!(
+            config["user_home_img"].as_str(),
+            Some("/var/zeroship/ch/users/alice/home.img"),
+        );
+        assert_eq!(
+            config["pubkey_hex"].as_str(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        );
+        assert_eq!(config["subnet_base_octet"].as_u64(), Some(99));
+
+        // Block-lists must be present as empty arrays — an absent
+        // field decodes to nil in the Go driver, which is also "auto-
+        // synthesise", but emitting `[]` pins the contract.
+        assert!(config["disks"].is_array());
+        assert_eq!(config["disks"].as_array().unwrap().len(), 0);
+        assert!(config["fs"].is_array());
+        assert_eq!(config["fs"].as_array().unwrap().len(), 0);
+        assert!(config["net"].is_array());
+        assert_eq!(config["net"].as_array().unwrap().len(), 0);
+
+        // restore_from is present as an empty string on cold-boot —
+        // separate test below pins the non-empty case.
+        assert_eq!(config["restore_from"].as_str(), Some(""));
+    }
+
+    /// Restore path: when `restore_from` is `Some`, the typed Config
+    /// MUST carry the non-empty path under ChPlugin mode. The Go
+    /// driver's `StartTask` branches on
+    /// `TaskConfig.RestoreFrom != ""` to choose `cloud-hypervisor
+    /// --restore source_url=file://…` vs. cold-boot.
+    #[test]
+    fn ch_plugin_restore_jobspec_includes_restore_from() {
+        let cfg = make_cfg();
+        let restore_dir = Path::new("/var/zeroship/ch/snapshots/snap-abc");
+        let v = build_nomad_job_json_with(
+            "zsbx-restore",
+            &cfg,
+            5,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            Some(restore_dir),
+            TaskDriverMode::ChPlugin,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert_eq!(
+            config["restore_from"].as_str(),
+            Some("/var/zeroship/ch/snapshots/snap-abc"),
+            "ChPlugin restore path MUST set Config.restore_from — \
+             the Go driver dispatches on the empty/non-empty test",
+        );
+    }
+
+    /// Cold-boot path: `restore_from = None` → typed Config has
+    /// `restore_from = ""`. The driver treats empty as cold-boot.
+    #[test]
+    fn ch_plugin_cold_boot_jobspec_has_empty_restore_from() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json_with(
+            "zsbx-cold",
+            &cfg,
+            2,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            TaskDriverMode::ChPlugin,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        // Cold-boot: the field must be PRESENT (so the Go driver's
+        // codec decode never sees a nil/missing) and empty. A
+        // non-empty value would mis-route cold-boot through the
+        // restore branch and crash CH on a phantom snapshot path.
+        assert_eq!(
+            config["restore_from"].as_str(),
+            Some(""),
+            "cold-boot ChPlugin Config.restore_from must be empty",
+        );
+    }
+
+    /// The raw_exec-only `command` field MUST NOT appear in the
+    /// ChPlugin Config block. The Go driver's TaskConfig has no
+    /// such field, and forwarding it would be either silently
+    /// ignored or (under stricter HCL decode) fail jobspec
+    /// validation at submit time.
+    #[test]
+    fn ch_plugin_jobspec_does_not_include_command_field() {
+        let cfg = make_cfg();
+        let v = build_nomad_job_json_with(
+            "zsbx-no-cmd",
+            &cfg,
+            1,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            "abcdef0123456789abcdef0123456789",
+            None,
+            TaskDriverMode::ChPlugin,
+        );
+        let config = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Config"];
+        assert!(
+            config["command"].is_null(),
+            "ChPlugin Config must NOT carry the raw_exec `command` \
+             field — Go driver TaskConfig has no such tag, got: {config:?}",
+        );
+    }
+
+    /// B24 regression pin under raw_exec mode: even with the flag
+    /// off (default), `ZSBX_SANDBOX_ID` must still flow through the
+    /// Env block — the bash wrapper's cold-boot validator
+    /// (nomad-vm-wrapper.sh:153) hard-errors otherwise. This is the
+    /// same invariant `nomad_job_spec_includes_sandbox_id_env` pins,
+    /// re-asserted explicitly through the T-7 driver-mode switch to
+    /// document the regression-pin contract.
+    #[test]
+    fn raw_exec_jobspec_includes_zsbx_sandbox_id_env() {
+        let cfg = make_cfg();
+        let sandbox_id = "abcdef0123456789abcdef0123456789";
+        let v = build_nomad_job_json_with(
+            "zsbx-b24",
+            &cfg,
+            3,
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
+            "alice",
+            "proj1",
+            sandbox_id,
+            None,
+            TaskDriverMode::RawExec,
+        );
+        let task = &v["Job"]["TaskGroups"][0]["Tasks"][0];
+        assert_eq!(task["Driver"], "raw_exec");
+        assert_eq!(
+            task["Env"]["ZSBX_SANDBOX_ID"], sandbox_id,
+            "B24: ZSBX_SANDBOX_ID must survive the T-7 driver-mode \
+             refactor under raw_exec — wrapper line 153 hard-errors \
+             otherwise",
+        );
     }
 
     // ─── virtio-blk disk-image helpers (bug #11 pivot) ───────
