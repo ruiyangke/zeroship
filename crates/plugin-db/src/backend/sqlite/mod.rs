@@ -56,6 +56,7 @@ pub(crate) mod session;
 // module's design lineage (SQLite ATTACH file isolation per design §18
 // Q1) is documented in the new file's rustdoc.
 
+use cdc::CommitPacket;
 use dialect::SqliteDialect;
 use lock::InProcessLockRegistry;
 use session::{SqliteSession, SqliteSessionHandle};
@@ -75,26 +76,34 @@ use session::{SqliteSession, SqliteSessionHandle};
 ///
 /// - `session`: the writer-actor handle. Owns the single
 ///   `rusqlite::Connection` for this backend and serialises all DDL
-///   / DML / DQL through a `flume` mpsc queue. Stubbed in PR 1.
-/// - `lock_registry`: in-process advisory-lock map. Empty in PR 1;
-///   PR 4 wires the `LockManager` impl through it.
+///   / DML / DQL through a `flume` mpsc queue.
+/// - `lock_registry`: in-process advisory-lock map.
 /// - `db_dir`: filesystem directory holding per-app SQLite files
-///   (`zs-<app_id>.sqlite`). The URL-scheme dispatcher
-///   (`sqlite:///path/to/dir`) lands in P1.5.
+///   (`zs-<app_id>.sqlite`).
 /// - `app_id_cache`: dedup set for the `NamespaceManager::ensure_app_schema`
 ///   path — SQLite errors on a second ATTACH of the same alias, so
 ///   we filter the second call site in Rust.
-///
-/// **P1 PR 3 simplification**: the previous PR-1 field set carried a
-/// `dialect: SqliteDialect` ZST. The ZST has no state, so the field
-/// was 0 bytes carrying no information; the trait-method delegation
-/// now constructs the ZST inline. See the impl block below.
+/// - `_publisher`: P2 PR 2 — the worker→compio publisher task that
+///   drains the dispatcher's `flume::Receiver<CommitPacket>` and
+///   re-emits each event onto the thread-local broker. The
+///   `JoinHandle` is held so dropping `SqliteBackend` cancels the task
+///   (the task body is `while let Ok(packet) = rx.recv_async().await
+///   { … }`; cancellation simply stops polling — no resources to
+///   release). The matching sender lives on the writer thread, captured
+///   by the three CDC hook closures; dropping the session drops the
+///   connection drops the hooks drops the sender drops the channel.
 #[allow(dead_code)]
 pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
+    /// P2 PR 2: keeps the publisher task alive for the lifetime of the
+    /// backend; dropped via `Drop` when the backend goes away. The
+    /// `JoinHandle` is a `compio::runtime::Task<Result<(), …>>` whose
+    /// `Drop` cancels the task per the `async-task` contract (see
+    /// `async_task::Task` rustdoc).
+    _publisher: compio::runtime::JoinHandle<()>,
 }
 
 impl std::fmt::Debug for SqliteBackend {
@@ -109,23 +118,59 @@ impl std::fmt::Debug for SqliteBackend {
 impl SqliteBackend {
     /// Construct a backend rooted at `db_dir`.
     ///
-    /// **P1 PR 1 stub**: opens a placeholder `SqliteSession` (which
-    /// itself returns `Err(DbError::Internal { … "P1 PR2 stub" … })`).
-    /// PR 2 wires the real `SqliteSession::open` + PRAGMA bootstrap.
+    /// Opens the control session at `<db_dir>/zs-control.sqlite` and
+    /// spawns the **P2 PR 2 worker→compio publisher task** that
+    /// drains the CDC dispatcher's `CommitPacket` channel and
+    /// re-emits each event onto the thread-local broker.
+    ///
+    /// **CDC arming**: the control session installs the
+    /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet on its
+    /// `rusqlite::Connection`. Writes against ATTACH-ed per-app
+    /// aliases (the `ensure_app_schema` path) fire the same hooks with
+    /// the alias as `db_name`, so a single dispatcher serves all apps
+    /// the backend hosts — no per-app session needed in PR 2. The
+    /// per-event `app_id` is derived from `db_name` inside the
+    /// publisher (see `cdc.rs::publisher_loop`).
+    ///
+    /// **Cross-thread wire**: the channel is `flume::unbounded()` per
+    /// plan §11 — lock-free, structurally bounded by COMMIT cadence.
+    /// Switching to a bounded + overflow-to-resync channel is a PR 3+
+    /// concern if production traffic surfaces the need (plan §10
+    /// Q-P2-A).
     #[allow(dead_code)]
     pub fn new(db_dir: PathBuf) -> Result<Self, DbError> {
-        // Construct a default lock registry + dialect — both are
-        // PR1-safe (the lock-registry storage is empty until PR 4
-        // wires consumers; the dialect is a ZST). The session is the
-        // load-bearing piece — PR 2 makes this constructor actually
-        // succeed.
+        // CDC packet channel — worker thread (producer, via commit
+        // hook) → compio publisher task (consumer, calls
+        // broker::publish on this thread).
+        let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
+
+        // Open the session WITH the packet sender so the worker
+        // thread arms the hook triplet during PRAGMA bootstrap. The
+        // `app_id` argument is currently unused inside the dispatcher
+        // (per-event app_id derives from the hook's `db_name`
+        // parameter — see `cdc::install` rustdoc), so we pass `None`.
         let session_path = db_dir.join("zs-control.sqlite");
-        let session = Rc::new(SqliteSession::open(&session_path)?);
+        let session = Rc::new(SqliteSession::open(
+            &session_path,
+            None,
+            Some(packet_tx),
+        )?);
+
+        // Spawn the publisher task on the current compio runtime. The
+        // task captures `Rc<SqliteSession>` (for lazy column-name
+        // resolution via `PRAGMA table_info`) + the receiver end of
+        // the CDC channel. Dropping the returned `JoinHandle` cancels
+        // the task; the channel sender on the worker thread will then
+        // fail-fast on the next commit attempt (logged + dropped, no
+        // commit veto).
+        let _publisher = cdc::spawn_publisher(session.clone(), packet_rx);
+
         Ok(Self {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
+            _publisher,
         })
     }
 }

@@ -44,6 +44,7 @@ use std::rc::Rc;
 
 use rusqlite::Connection;
 
+use crate::backend::sqlite::cdc::CommitPacket;
 use crate::backend::sqlite::error::from_sqlite;
 use crate::error::DbError;
 
@@ -150,7 +151,26 @@ impl SqliteSession {
     /// synchronously before entering the receive loop; any PRAGMA
     /// failure surfaces here as a typed [`DbError`] and the worker
     /// thread exits without ever serving a `Command`.
-    pub(crate) fn open(db_path: &Path) -> Result<Self, DbError> {
+    ///
+    /// **P2 PR 2 CDC integration**: when both `app_id` and
+    /// `packet_tx` are `Some`, the worker installs the
+    /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet via
+    /// [`crate::backend::sqlite::cdc::install`] before entering the
+    /// receive loop. The returned dispatcher is held on the worker's
+    /// stack frame for the lifetime of the connection so the hooks'
+    /// captured state outlives every write. Sessions opened with
+    /// `None` install no hooks (the control session — see
+    /// `SqliteBackend::new` rustdoc).
+    ///
+    /// The `app_id` parameter is currently unused inside the
+    /// dispatcher (per-event app_id is derived from the
+    /// preupdate hook's `db_name` argument — the ATTACH alias); it is
+    /// retained on the signature so a future PR can repoint it.
+    pub(crate) fn open(
+        db_path: &Path,
+        app_id: Option<&str>,
+        packet_tx: Option<flume::Sender<CommitPacket>>,
+    ) -> Result<Self, DbError> {
         // Bound the queue at 64 in-flight commands. The single-writer
         // actor means there is no parallelism downstream; a bigger
         // queue just delays backpressure. 64 is the same default
@@ -165,6 +185,11 @@ impl SqliteSession {
         // The `db_path` is `&Path` — we need an owned `PathBuf` to
         // move into the worker closure (the closure is `'static`).
         let db_path = db_path.to_path_buf();
+        // Owned copies for the worker closure. The dispatcher install
+        // step uses these AFTER the PRAGMA bootstrap; for the no-CDC
+        // case both are `None` and the install step short-circuits.
+        let app_id_owned: Option<String> = app_id.map(|s| s.to_string());
+        let packet_tx_owned = packet_tx;
 
         let worker = std::thread::Builder::new()
             .name("sqlite-session".to_string())
@@ -201,6 +226,28 @@ impl SqliteSession {
                 let _ = startup_tx.send(Err(from_sqlite(e)));
                 return;
             }
+
+            // 2b. P2 PR 2 — install the CDC hook triplet on this
+            //     connection. The dispatcher is bound to a local
+            //     `_dispatcher` so its owned `Arc<Mutex<…>>` clones
+            //     outlive `conn` (rusqlite stores the boxed hook
+            //     closures inside `InnerConnection` and frees them at
+            //     `Connection::drop`; the dispatcher's only role
+            //     post-install is to keep the captured `Arc`s alive,
+            //     which is automatic via Rust ownership). Sessions
+            //     opened without a packet_tx skip this step entirely
+            //     (the control session — see `SqliteBackend::new`).
+            let _dispatcher = if let Some(tx) = packet_tx_owned {
+                match crate::backend::sqlite::cdc::install(&conn, app_id_owned, tx) {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        let _ = startup_tx.send(Err(e));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
 
             // 3. Bootstrap succeeded — release the caller. From here
             //    on, errors flow through individual `Command::reply`

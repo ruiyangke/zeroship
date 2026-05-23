@@ -22,6 +22,7 @@ use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
     IndexBuilder, LockManager, LockScope, NamespaceManager, SchemaIntrospect, SqlExecutor,
 };
+use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
 use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::IndexSpec;
 
@@ -773,4 +774,375 @@ fn cross_app_fk_rejected_at_parse() {
         }
         other => panic!("expected DbError::Configuration, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// P2 PR 2 — SqliteCdcDispatcher (preupdate/commit/rollback hooks) +
+// worker→compio publisher integration tests.
+//
+// The publisher task is asynchronous: a COMMIT on the writer thread
+// ships a `CommitPacket` via flume, the publisher task wakes on
+// `recv_async`, resolves column names via `PRAGMA table_info` through
+// the session actor, then calls `broker::publish` on the compio
+// thread. The thread-local broker is the test consumer (we subscribe
+// directly on the compio thread).
+//
+// Each test:
+//   1. Spins up a fresh backend (which also spawns the publisher task).
+//   2. ATTACHes a per-app namespace via `ensure_app_schema(app_id)`.
+//   3. Creates a user table.
+//   4. Subscribes to (app_id, table) on the local broker.
+//   5. Performs the mutation(s) under test.
+//   6. Yields the runtime so the publisher task can drain the channel
+//      and call `broker::publish`.
+//   7. Drains the subscription queue + asserts shape.
+//
+// The publisher needs at least one `await` yield (and one PRAGMA
+// round-trip on cache miss) between COMMIT and broker delivery, so
+// each test awaits a short `compio::time::sleep` after the mutation.
+// 25ms is overkill for the in-process round-trip but keeps the tests
+// quiet on slow shared CI hosts.
+// ---------------------------------------------------------------------------
+
+/// Wait long enough for the publisher task to drain the CDC channel
+/// and call `broker::publish`. The publisher loop is:
+///
+///   recv_async → fetch PRAGMA table_info (1 round-trip on first
+///   touch) → broker::publish per event.
+///
+/// All steps run on the same compio thread as the test future, so a
+/// single yield is the lower bound; we sleep generously for CI noise
+/// tolerance.
+async fn drain_publisher() {
+    compio::time::sleep(std::time::Duration::from_millis(50)).await;
+}
+
+/// Drain a subscription's queue into a `Vec<SubscriptionMessage>` —
+/// the tests pattern-match on the resulting shape.
+fn drain(sub: &Subscription) -> Vec<SubscriptionMessage> {
+    let mut out = Vec::new();
+    while let Some(msg) = sub.pop() {
+        out.push(msg);
+    }
+    out
+}
+
+/// Helper: subscribe to `(app_id, collection)` on the thread-local
+/// broker. The broker lives in a thread-local cell — the publisher
+/// task and this test future run on the same compio thread, so the
+/// subscription is visible to the publisher's `broker::publish` calls.
+fn subscribe_local(app_id: &str, collection: &str) -> Subscription {
+    subscribe(app_id, collection)
+}
+
+#[test]
+fn insert_publishes_via_preupdate_hook() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+
+        // Create a user table the CDC hook will fire against.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        // Subscribe BEFORE the mutation. The DDL above is not a
+        // user-table write; it goes through `sqlite_master` which the
+        // dispatcher filters, so no event is queued.
+        let sub = subscribe_local("app_cdc", "items");
+
+        // INSERT a row — the preupdate hook fires, commit hook ships
+        // the packet, publisher resolves column names + publishes.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('alice')",
+                &[],
+            )
+            .await
+            .expect("INSERT items");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected 1 event after a single-row INSERT; got {msgs:?}"
+        );
+        match &msgs[0] {
+            SubscriptionMessage::Change(ev) => {
+                assert_eq!(ev.op, ChangeOp::Insert);
+                assert_eq!(ev.app_id, "app_cdc");
+                assert_eq!(ev.collection, "items");
+                assert!(
+                    !ev.new_tuple.is_empty(),
+                    "INSERT event must carry a populated new_tuple; got {:?}",
+                    ev.new_tuple
+                );
+                // Column names were resolved via PRAGMA table_info on
+                // the publisher — `name` should be present.
+                assert_eq!(
+                    ev.new_tuple.get("name"),
+                    Some(&"alice".to_string()),
+                    "new_tuple should carry the inserted `name`; got {:?}",
+                    ev.new_tuple
+                );
+                assert!(
+                    ev.old_tuple.is_none(),
+                    "INSERT must not carry an old_tuple; got {:?}",
+                    ev.old_tuple
+                );
+            }
+            other => panic!("expected Change event, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn update_publishes_change_event_with_pre_image() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        // Seed one row. We subscribe AFTER the seed so the INSERT
+        // event is not part of what `drain` sees.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (1, 'alice')",
+                &[],
+            )
+            .await
+            .expect("INSERT seed row");
+
+        // Give the publisher a chance to drain the seed event so it
+        // doesn't show up in the subscription created below (the
+        // subscribe happens on the same thread, but only AFTER the
+        // publisher has fanned out the prior packet).
+        drain_publisher().await;
+
+        let sub = subscribe_local("app_cdc", "items");
+
+        // UPDATE the row — the preupdate hook should capture both
+        // OLD ('alice') and NEW ('bob') tuples.
+        backend
+            .pool_exec(
+                "UPDATE \"app_cdc\".\"items\" SET name = 'bob' WHERE id = 1",
+                &[],
+            )
+            .await
+            .expect("UPDATE items");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected 1 event after a single-row UPDATE; got {msgs:?}"
+        );
+        match &msgs[0] {
+            SubscriptionMessage::Change(ev) => {
+                assert_eq!(ev.op, ChangeOp::Update);
+                assert!(
+                    !ev.new_tuple.is_empty(),
+                    "UPDATE event must carry a populated new_tuple; got {:?}",
+                    ev.new_tuple
+                );
+                assert_eq!(
+                    ev.new_tuple.get("name"),
+                    Some(&"bob".to_string()),
+                    "new_tuple should carry the post-image name; got {:?}",
+                    ev.new_tuple
+                );
+                let old = ev
+                    .old_tuple
+                    .as_ref()
+                    .expect("UPDATE must carry an old_tuple (pre-image)");
+                assert_eq!(
+                    old.get("name"),
+                    Some(&"alice".to_string()),
+                    "old_tuple should carry the pre-image name; got {old:?}"
+                );
+            }
+            other => panic!("expected Change event, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn rollback_does_not_publish() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        let sub = subscribe_local("app_cdc", "items");
+
+        // BEGIN / INSERT / ROLLBACK — each statement routes through
+        // the session actor (same worker thread; serialised by the
+        // mpsc queue). The rollback_hook clears the buffer; no packet
+        // ships.
+        backend
+            .pool_exec("BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('alice')",
+                &[],
+            )
+            .await
+            .expect("INSERT inside tx");
+        backend
+            .pool_exec("ROLLBACK", &[])
+            .await
+            .expect("ROLLBACK");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert!(
+            msgs.is_empty(),
+            "ROLLBACK must not publish any events; got {msgs:?}"
+        );
+    });
+}
+
+#[test]
+fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+        // Seed rows for the UPDATE + DELETE arms of the mixed-op tx
+        // below. Done BEFORE subscription so the seed events don't
+        // pollute the assertions.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (10, 'b_pre'), (20, 'c_pre')",
+                &[],
+            )
+            .await
+            .expect("INSERT seed rows");
+        drain_publisher().await;
+
+        let sub = subscribe_local("app_cdc", "items");
+
+        // BEGIN; INSERT a; UPDATE b; DELETE c; INSERT d; COMMIT.
+        // Each statement fires the preupdate hook once; the commit
+        // hook ships a single CommitPacket with all 4 events in
+        // buffer order.
+        backend
+            .pool_exec("BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (1, 'a')",
+                &[],
+            )
+            .await
+            .expect("INSERT a");
+        backend
+            .pool_exec(
+                "UPDATE \"app_cdc\".\"items\" SET name = 'b_post' WHERE id = 10",
+                &[],
+            )
+            .await
+            .expect("UPDATE b");
+        backend
+            .pool_exec(
+                "DELETE FROM \"app_cdc\".\"items\" WHERE id = 20",
+                &[],
+            )
+            .await
+            .expect("DELETE c");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (id, name) VALUES (2, 'd')",
+                &[],
+            )
+            .await
+            .expect("INSERT d");
+        backend
+            .pool_exec("COMMIT", &[])
+            .await
+            .expect("COMMIT");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert_eq!(
+            msgs.len(),
+            4,
+            "expected 4 events after a 4-statement tx; got {msgs:?}"
+        );
+        // Per plan §8: order is `[a, b, c, d]` = INSERT, UPDATE,
+        // DELETE, INSERT. Each msg is a Change variant carrying the
+        // event.
+        let ops: Vec<ChangeOp> = msgs
+            .iter()
+            .map(|m| match m {
+                SubscriptionMessage::Change(ev) => ev.op,
+                other => panic!("expected Change, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ops,
+            vec![
+                ChangeOp::Insert,
+                ChangeOp::Update,
+                ChangeOp::Delete,
+                ChangeOp::Insert,
+            ],
+            "events must appear in buffer order [a, b, c, d]: {ops:?}"
+        );
+    });
 }
