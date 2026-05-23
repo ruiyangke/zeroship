@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ntex::web::middleware::DefaultHeaders;
-use ntex::web::{self, HttpResponse};
+use ntex::web::{self};
 use tracing::{error, info};
 
 use zeroship_sandbox_agent::{
@@ -224,7 +224,9 @@ async fn run() -> Result<(), String> {
                     .route(web::route().to(proxy::proxy_http)),
             )
             .default_service(web::route().to(|| async {
-                HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"}))
+                // A4 envelope (proposal § 10.0): `error` is the
+                // machine-readable kind, `message` is human prose.
+                handlers::not_found()
             }))
     })
     .bind(&bind)

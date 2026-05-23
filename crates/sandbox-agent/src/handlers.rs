@@ -191,9 +191,20 @@ impl AppState {
 type State = web::types::State<AppState>;
 
 // ─── helpers ─────────────────────────────────────────────────────
+//
+// Every error response below funnels through `crate::error_envelope`
+// so the wire shape matches proposal § 10.0 A4:
+//     { "error": "<machine_kind>", "message": "<human prose>" }
+// Pre-migration these emitted `{"error":"<prose>"}` (no `message`)
+// or `{"error":"<kind>"}` (also no `message`) — see the module
+// docstring on `error_envelope` for the full account.
 
 fn unauthorized() -> HttpResponse {
-    HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}))
+    crate::error_envelope::error_response(
+        ntex::http::StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "authentication required",
+    )
 }
 
 /// 503 Service Unavailable — used for auth-gated endpoints once
@@ -202,19 +213,29 @@ fn unauthorized() -> HttpResponse {
 /// up new long-running execs while ntex's shutdown timeout
 /// approaches.
 fn draining() -> HttpResponse {
-    HttpResponse::ServiceUnavailable().json(&json!({"error": "draining"}))
+    crate::error_envelope::error_response(
+        ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+        "draining",
+        "agent is draining for shutdown",
+    )
 }
 
 fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
-    let s = msg.into();
-    let mut resp = match status {
-        400 => HttpResponse::BadRequest(),
-        403 => HttpResponse::Forbidden(),
-        404 => HttpResponse::NotFound(),
-        500 => HttpResponse::InternalServerError(),
-        _ => HttpResponse::InternalServerError(),
-    };
-    resp.json(&json!({"error": s}))
+    crate::error_envelope::error_from_status(status, msg)
+}
+
+/// 404 Not Found in A4-envelope shape. Exposed publicly because the
+/// binary's `default_service` lives in `main.rs` and needs to emit
+/// the same wire shape as every other error path; without this
+/// wrapper, `main.rs` would have to reach into `pub(crate)`
+/// `error_envelope` (which it can't, as the binary is a separate
+/// crate from the lib).
+pub fn not_found() -> HttpResponse {
+    crate::error_envelope::error_response(
+        ntex::http::StatusCode::NOT_FOUND,
+        "not_found",
+        "not found",
+    )
 }
 
 /// Pick the canonical-string version for a request based on the path.
@@ -1351,7 +1372,14 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
-        assert!(body["error"].as_str().unwrap().contains("no-such"));
+        // A4 envelope: `error` carries the machine kind, `message`
+        // the prose. The path-containing detail moved to `message`
+        // when this site migrated through `error_envelope`.
+        assert_eq!(body["error"], "not_found");
+        assert!(
+            body["message"].as_str().unwrap().contains("no-such"),
+            "message must still mention the path; got {body}",
+        );
     }
 
     #[ntex::test]
@@ -1922,4 +1950,56 @@ mod tests {
             resp.status()
         );
     }
+
+    // ─── A4 wire-shape tests (handlers helpers) ─────────────────────
+    //
+    // These pin the wire shape of `err`, `unauthorized`, and
+    // `draining` (the three helpers funnelled through
+    // `crate::error_envelope`). A regression that drops the `message`
+    // field or flips `error` back to prose fails one of these tests
+    // immediately.
+
+    #[ntex::test]
+    async fn a4_unauthorized_wire_shape() {
+        let (state, _d) = make_state("a4_unauth");
+        let app = make_app!(state);
+        // /exec without signature → unauthorized()
+        let req = test::TestRequest::post().uri("/exec").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+    }
+
+    #[ntex::test]
+    async fn a4_draining_wire_shape() {
+        let (state, _d) = make_state("a4_drain");
+        state.mark_draining();
+        let app = make_app!(state);
+        // /tree with valid signature but draining → draining()
+        let req = signed("GET", "/tree").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "draining");
+        assert!(body["message"].is_string());
+    }
+
+    #[ntex::test]
+    async fn a4_err_400_wire_shape() {
+        // Malformed JSON body on /exec → err(400, ...) →
+        // {error: "invalid_input", message: <prose>}.
+        let (state, _d) = make_state("a4_err400");
+        let app = make_app!(state);
+        let req = signed_with_body("POST", "/exec", "not json")
+            .header("content-type", "application/json")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_input");
+        assert!(body["message"].as_str().unwrap().contains("invalid JSON"));
+    }
+
 }
