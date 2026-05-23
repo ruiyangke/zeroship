@@ -25,6 +25,28 @@ export type NativeDb = ZeroshipDb;
 export type NativeCollection = ZeroshipCollection;
 
 /**
+ * Validates `k` / `limit` arguments to `.search()` are positive integers
+ * in `1..=1000`. Throws ValidationError with `code: "invalid_k"` on
+ * violation. The 1000-row ceiling matches the engine-side practical
+ * limit for kNN flat scan + GIN/ivfflat result sets.
+ */
+function _validateK(value: number, paramName: string): void {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 1000
+  ) {
+    throw new ValidationError({
+      args: {
+        path: paramName,
+        message: `search: \`${paramName}\` must be an integer in 1..=1000 (got ${value})`,
+      },
+    });
+  }
+}
+
+/**
  * Converts a caught value to an Error for inclusion in a Result.
  * ValidationError instances are returned as-is (they are already well-typed).
  * All other errors are passed through mapNativeError so that, e.g., unique
@@ -1137,42 +1159,70 @@ export class Collection<
   }
 
   /**
-   * **P4 PR 2-3** — vector-nearest-neighbour OR full-text search,
+   * **P4** — vector-nearest-neighbour OR full-text search,
    * discriminated by the presence of `vector` vs. `text` in `args`.
    *
-   * Vector branch:
+   * ### Vector branch
+   *
+   * Returns the `k` rows whose `column` vector is closest to `args.vector`
+   * by the chosen `metric`. Each returned row carries a synthetic
+   * `_distance` field (lower = closer for cosine/L2; higher = closer for
+   * `innerProduct` — pgvector negates internally so ORDER BY ASC works
+   * uniformly).
+   *
    * ```ts
    * const { data } = await db.docs.search({
-   *   vector: queryEmbedding,   // number[] (length must match the
-   *                              //          column's declared dims)
-   *   k: 5,
-   *   metric: "cosine",         // default; "l2" / "innerProduct" also
-   *                              // supported
-   *   column: "embedding",      // default — the vector column name
-   *   filter: { language: "en" },// optional WHERE clause
+   *   vector: queryEmbedding,    // number[] — must match the column's
+   *                              //   declared dims (1..=16000)
+   *   k: 5,                       // 1..=1000 (default 10)
+   *   metric: "cosine",          // "cosine" | "l2" | "innerProduct"
+   *                              //   (default "cosine")
+   *   column: "embedding",       // optional — the vector column name
+   *                              //   when more than one is declared
+   *   filter: { language: "en" }, // optional WHERE clause
    * });
-   * // Each row carries a synthetic `_distance` field.
+   * // data: (Row<S> & { _distance: number })[]
    * ```
    *
-   * Full-text branch (**P4 PR 3**):
+   * ### Full-text branch
+   *
+   * Returns rows matching the natural-language query across every
+   * column on the collection marked with `.fts()` in the schema.
+   * Each row carries a synthetic `_rank` field. PG uses `ts_rank`;
+   * SQLite uses bm25 — values are not comparable across backends, but
+   * the per-backend ordering is stable.
+   *
    * ```ts
    * const { data } = await db.posts.search({
    *   text: "rust async",
-   *   limit: 10,
-   *   filter: { lang: "en" },
+   *   limit: 10,                  // 1..=1000 (default 10; alias: `k`)
+   *   filter: { lang: "en" },     // optional WHERE clause
    * });
-   * // Each row carries a synthetic `_rank` field (PG: ts_rank).
+   * // data: (Row<S> & { _rank: number })[]
    * ```
    *
-   * Backend coverage:
+   * ### Errors
+   *
+   * - `code: "invalid_k"` — `k` (or FTS `limit`) outside 1..=1000.
+   * - `ValidationError` — `vector` not an array, `text` not a string,
+   *   or neither discriminator present.
+   * - `code: "vector_extension_missing"` — PG without `pgvector`.
+   *   Run `CREATE EXTENSION vector;` (the `pgvector/pgvector:pg16`
+   *   image ships it). See `docs/reference/db.md`.
+   * - `code: "vector_dimension_mismatch"` — `args.vector.length` does
+   *   not equal the column's declared dims.
+   *
+   * ### Backend coverage
+   *
    * - **PG vector** — routes to pgvector via `VectorIndex::vector_search`.
-   *   Errors: `vector_extension_missing` when the database lacks the
-   *   `vector` extension; standard SQLSTATE codes for query-time
-   *   failures.
-   * - **PG text** — routes through `FullTextIndex::fts_search` (tsvector
-   *   + GIN). No extension needed (FTS ships with core PG).
-   * - **SQLite** — surfaces `vector_unsupported` (P4 PR 4) and
-   *   `fts_unsupported` (P4 PR 5) until those PRs land the SQLite impls.
+   *   `ivfflat` index on the column.
+   * - **PG text** — routes through `FullTextIndex::fts_search`
+   *   (tsvector + GIN, language from `.fts(language)`).
+   * - **SQLite vector** — pure-Rust flat scan (`bytemuck::cast_slice` over
+   *   `BLOB`). Dev-tier only — degrades past ~50k rows.
+   * - **SQLite text** — FTS5 virtual table with the bundled
+   *   language-agnostic Unicode tokenizer (the `language` argument is
+   *   ignored).
    */
   async search(
     args:
@@ -1188,8 +1238,8 @@ export class Collection<
     trackCollectionAccess(this._name);
     return this._run(async () => {
       // Discriminator: presence of `vector` selects the pgvector path;
-      // `text` selects the FTS path (P4 PR 3). The native side does the
-      // real dispatch — we keep the SDK layer thin.
+      // `text` selects the FTS path. The native side does the real
+      // dispatch — we keep the SDK layer thin.
       const nativeArgs: {
         vector?: number[];
         text?: string;
@@ -1221,17 +1271,22 @@ export class Collection<
         nativeArgs.text = args.text;
         // FTS uses `limit` (and tolerates `k` as the legacy alias).
         if ((args as { limit?: number }).limit !== undefined) {
-          nativeArgs.limit = (args as { limit?: number }).limit;
+          const lim = (args as { limit?: number }).limit as number;
+          _validateK(lim, "limit");
+          nativeArgs.limit = lim;
         }
       } else {
         throw new ValidationError({
           args: {
             path: "args",
-            message: "search: args must include `vector` (P4 PR 2) or `text` (P4 PR 3)",
+            message: "search: args must include `vector` or `text`",
           },
         });
       }
-      if (args.k !== undefined) nativeArgs.k = args.k;
+      if (args.k !== undefined) {
+        _validateK(args.k, "k");
+        nativeArgs.k = args.k;
+      }
       if (args.filter !== undefined) {
         const mapped = this._mergeFilter(
           mapFilterOutbound(args.filter as ZeroshipDbFilter, this._toColumn),
