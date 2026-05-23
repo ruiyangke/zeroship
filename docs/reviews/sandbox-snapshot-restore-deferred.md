@@ -743,3 +743,129 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **File**: `crates/sandbox/src/registry.rs` (35 sites); also k8s.rs (10) and docker.rs (6)
 - **Symptom**: 42 sites elsewhere in the crate use `unwrap_or_else(|p| p.into_inner())` for poison-recover. `registry.rs` is the hot-path `SandboxRegistry` shared by every HTTP request — any panic anywhere in the crate that crosses an RwLock leaves these sites panicking instead of recovering.
 - **Action**: bulk-replace `.unwrap()` → `.unwrap_or_else(|p| p.into_inner())` on RwLock {read,write} in registry.rs (35) + k8s.rs (10) + docker.rs (6). Wrap in a `lock_recover!` macro to keep the call sites short.
+
+---
+
+## NEW r10/r11 ROUND FINDINGS (added by pilot cycle 2026-05-25 r5 — security r10, perf r11, code-quality r11, api-surface r11, test-coverage r10, concurrency r11)
+
+### [R11-P1] (CRITICAL, performance-r11) Every `Database` method opens a fresh pg Pool per call
+- **Source**: 2026-05-25 performance-r11
+- **Files**: `crates/sandbox/src/db.rs:492-514` (`open_pool()` called from every method) + `crates/compio-postgres/src/pool.rs:264-300` (fresh TCP+STARTUP+auth handshake per connect)
+- **Symptom**: TODO comment at db.rs:494-507 documents the pattern but no prior perf round flagged it. Wake-path pays 5× per restore (`get_sandbox_row`, `read_snapshot_row`, `update_sandbox_status` ×2, `clear_snapshot_metadata`); transient-takeover sweep pays 1+N per tick. Largest low-effort lever after R9-P1. Estimated savings: ~10-75 ms median per wake.
+- **Action**: cache the pool. Either a `OnceLock<Pool>` per Database struct OR an `Arc<RwLock<Option<Pool>>>` with lazy init. The pool already supports max_connections; we just need to stop re-creating it.
+
+### [R11-P2] (IMPORTANT, performance-r11) `download_to_disk` no BufWriter — 131072 write(2) calls per 1 GB
+- **Source**: 2026-05-25 performance-r11
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:438-445`
+- **Symptom**: `std::io::copy(reader, file)` defaults to 8 KiB buffer. 1 GB download = ~131072 write(2) syscalls. Wake-path counterpart to R10-P5 at 16× higher syscall granularity.
+- **Action**: wrap dest in `BufWriter::with_capacity(1 << 20, …)`. 1-line fix.
+
+### [R11-P3] (IMPORTANT, performance-r11) Two SHA helpers lack the BufReader R5-P1 added
+- **Source**: 2026-05-25 performance-r11
+- **Files**: `crates/sandbox/src/snapshot_store_gcs.rs:966-997` (`canonical_artifact_sha256`) + `:506-521` (`sha256_file`)
+- **Symptom**: R5-P1 added a 1 MiB `BufReader` on `snapshot_store.rs`'s SHA loop, but the GCS adapter has its own 2 SHA helpers that never got the same treatment. 16× syscall amplification on the 5-pass disk walk (R10-P1).
+- **Action**: 2-line fix in each helper. Wrap the `File` in `BufReader::with_capacity(1 << 20, …)` before the SHA loop.
+
+### [R11-P4] (MINOR, performance-r11) `sweep.rs::attempted` Vec clones SandboxRow unnecessarily
+- **Source**: 2026-05-25 performance-r11
+- **File**: `crates/sandbox/src/sweep.rs:524-526`
+- **Action**: change `attempted` to `Vec<TypedId>` (or just an integer counter) since consumers only want `len()` and the id.
+
+### [R11-Q2] (IMPORTANT, code-quality-r11) R9-S4/4b/4c/4d copy-pasted uid+mode+read logic — extract helper
+- **Source**: 2026-05-25 code-quality-r11
+- **Files**: `crates/sandbox/src/snapshot_aead.rs::RootKek::from_path` (R9-S4 cca1e74d) + `crates/sandbox/src/persist.rs::AeadKey::from_path` (R9-S4b e4e5db60) + `crates/sandbox/src/db.rs::enforce_password_file_mode` (R9-S4c 2c10f63a) + `crates/sandbox/src/lib.rs::load_admin_token` (R9-S4d pending)
+- **Symptom**: 4 sites with byte-for-byte identical pattern (stat → check mode 0o400 → check uid == 0 → length-check → read). Any future fifth secret-loader will inherit the same pattern.
+- **Action**: extract `pub(crate) fn read_root_owned_secret_file(path: &Path, expected_len: usize) -> Result<Vec<u8>, String>` (or similar). Move the 4 sites onto it after R9-S4d closes.
+
+### [R11-Q3] (MINOR, code-quality-r11) sandbox-agent JSON-parse paths leak serde_json::Error via raw format
+- **Source**: 2026-05-25 code-quality-r11
+- **Files**: `crates/sandbox-agent/src/handlers.rs:592,777`
+- **Symptom**: `format!("invalid JSON body: {e}")` exposes structural details of the body parser. 400-class so low signal, but the shape `err_safe` was built for.
+- **Action**: route through a sanitizing helper analogous to the controller-side `err_safe`. Could share the helper from R10-A5's discussion (or keep duplicated per R10-A5's resolution).
+
+### [R11-Q4] (MINOR, code-quality-r11) R9-S4b new test fns lack doc-comments — mixed convention
+- **Source**: 2026-05-25 code-quality-r11
+- **File**: `crates/sandbox/src/persist.rs:1072,1109`
+- **Action**: add `///` lines.
+
+### [R11-Q5] (MINOR, code-quality-r11, 7-round carry of R5-Q1) `register_restored` default `Ok(())` is a silent fail-OPEN
+- **Source**: 2026-05-23 code-quality-r5; carried through r11
+- **File**: `crates/sandbox/src/restore_handler.rs:162-170` (trait default)
+- **Symptom**: 7th-round carry; be246395's `unregister_restored` makes the silent fail-OPEN more consequential — if a future `RestoreBackend` impl forgets to override, the recovery state-map invariant breaks silently.
+- **Action**: remove the default impl; make `register_restored` required. Or have the default `panic!()` so a missing impl fails loudly.
+
+### [R11-API1] (MINOR, api-surface-r11) Orphan `#[doc(hidden)] pub fn` test accessors in metrics.rs
+- **Source**: 2026-05-25 api-surface-r11
+- **File**: `crates/sandbox-agent/src/metrics.rs:223,229` (`takeover_corrupt_value`, `sandbox_corrupt_id_value`)
+- **Symptom**: zero callers anywhere. Same flavor as R10-API1's `_test_build_auth_from_sealed`.
+- **Action**: delete or move to `#[cfg(test)]`. Cluster with R10-API1 in a single sweep.
+
+### [R10-API3 PARTIALLY INVALIDATED — only 3 of 5 `persist::*` pub fns are safely demotable]
+- **Source**: 2026-05-25 api-surface-r11 audit re-verified r10's claim
+- **Files**: `crates/sandbox/src/persist.rs`
+- **Resolution**: `unseal_one` + `seal_filename_for` ARE externally consumed by `tests/sandbox_preview_share_e2e.rs:151,1064,1114` — must stay `pub`. Only `seal`, `unseal_dir`, `seal_filename_for_str` are safely demotable.
+- **Action**: when picking up R10-API3, only demote those 3.
+
+### [R10-S1] (IMPORTANT, security-r10) R9-S4 KEK uid check has symlink-attack residual
+- **Source**: 2026-05-25 security-r10
+- **File**: `crates/sandbox/src/snapshot_aead.rs::RootKek::from_path` (R9-S4 closure at cca1e74d)
+- **Symptom**: R9-S4 used follow-symlinks `std::fs::metadata` + `std::fs::read`. Non-root attacker with symlink-create access + operator-typo'd KEK path can silently redirect to attacker-controlled file (which the attacker can chown root).
+- **Action**: `symlink_metadata` refusal OR `O_NOFOLLOW` + `fstat` on the same fd. Apply to all 4 sites (R9-S4/4b/4c/4d) when refactoring via R11-Q2.
+
+### [R10-S2] (IMPORTANT, security-r10) R10-C2 spawn_blocking discards JoinError — panic silently swallowed
+- **Source**: 2026-05-25 security-r10
+- **File**: `crates/sandbox/src/restore_handler.rs:294-298` (R10-C2 closure at be246395)
+- **Symptom**: the `let _ = compio::runtime::spawn_blocking(move || …).await;` form drops the JoinError. A panic inside teardown_restore → unregister_restored or release_vm_index is silenced, leaving ghost state.
+- **Action**: match the Err arm; tracing::error! the join error. 4-line fix.
+
+### [R10-S3] (MINOR, security-r10) teardown_restore releases vm_index even when Nomad DELETE fails
+- **Source**: 2026-05-25 security-r10
+- **Action**: re-order: only release vm_index after the DELETE returns Ok. Or: persist the vm_index as pending-release and let a sweep retry the DELETE.
+
+### [R10-S4] (MINOR, security-r10, duplicates R10-Q3) registry.rs RwLock unwrap pattern inconsistency
+
+### [R10-S5] (MINOR, security-r10, duplicates R9-S3) AEAD posture leak via pg snapshot_aead_dek_id
+
+### [R10-S6] (MINOR, security-r10, duplicates R9-T7-FOLLOWUP) read_sandbox_id_from_sources no UUID-shape guard
+
+### [R10-T1] (CRITICAL, test-coverage-r10) R10-C1+C2 tests structural-only — bypass restore_sandbox
+- **Source**: 2026-05-25 test-coverage-r10
+- **File**: `restore_handler.rs:2235,2308` (R10-C1+C2 integration tests at be246395)
+- **Symptom**: both new integration tests call `backend.teardown_restore(...)` DIRECTLY; never drive the rollback closure at `:263-313` where the fix actually lives. R10-C2 "test" is a pure `include_str!` text-grep with no behavioural assertion. The brief explicitly asked for >100ms-teardown behavioural test — doesn't exist.
+- **Action**: write a true end-to-end test that triggers do_restore_inner → CasLost → teardown_restore. Assert: state map empty post-teardown, vm_index released, no ghost via subsequent register_restored at same vm_index.
+
+### [R10-T2] (IMPORTANT, test-coverage-r10, re-files R9-T1) Persist(Some(_)) chain still uncovered
+- **Source**: 2026-05-25 test-coverage-r10 (4-round carry of R9-T1)
+- **File**: `restore_handler.rs:581-617`
+- **Symptom**: r10 cycle shipped +12 tests in real_backend_tests; none drives the production `unseal → clock_resync → register_restored` ladder. Every pg `restore_sandbox` call still passes `persist=None`.
+
+### [R10-T3] (IMPORTANT, test-coverage-r10) R9-T7 read_sandbox_id lacks cross-source test
+- **Source**: 2026-05-25 test-coverage-r10
+- **File**: `crates/sandbox-agent/src/handlers.rs::read_sandbox_id_from_sources`
+- **Symptom**: edge case "env=empty + file=valid" (where empty env wins via Ok("") at handlers.rs:139-150) is unpinned.
+- **Action**: add a test that sets env="" + file=valid, asserts empty wins (or fix the production semantic).
+
+### [R10-T4] (IMPORTANT, test-coverage-r10) R9-S4's from_env production entry not covered under the uid invariant
+- **Source**: 2026-05-25 test-coverage-r10
+- **Action**: add a test for `from_env` (not just `from_path`) — the env-driven entry should inherit the same uid check.
+
+### [R10-T5] (MINOR, test-coverage-r10) R10-P2 Tiered::put L2 spawn_blocking has no behavioural test
+- **Action**: add a test asserting L1 completes before L2 joins + a panic-isolation test (panic in L2 doesn't poison L1 result).
+
+### [R11-C1] (CRITICAL, concurrency-r11) teardown_restore unregister conditional on nomad_handle.is_some() — silent-fail-OPEN footgun
+- **Source**: 2026-05-25 concurrency-r11
+- **File**: `crates/sandbox/src/restore_handler.rs:1189-1199` (R10-C1 fix at be246395)
+- **Symptom**: if wiring regresses (or a test/stub path leaks into prod), state-map cleanup is silently skipped — same R10-C1 ghost the round-10 fix was supposed to close. The R10-C1 fix itself ships the footgun.
+- **Action**: invert the condition — error out if nomad_handle is None during teardown_restore in a production wake path. Or: make the field non-optional in RealRestoreBackend.
+
+### [R11-C2] (CRITICAL, concurrency-r11) R10-C2 spawn_blocking introduced new 2-await drop window
+- **Source**: 2026-05-25 concurrency-r11
+- **File**: `crates/sandbox/src/restore_handler.rs:294-298` (R10-C2)
+- **Symptom**: future-drop between the spawn_blocking join + the pg row update runs the blocking-pool teardown to completion BUT skips the pg `update_sandbox_status` — row stays `Restoring` for ≤120s until sweep takes over. Compounds with [R11-C1].
+- **Action**: subsumed by R4-A2 LeasedVmSlot RAII. Now incident-class — 6+ cycles open.
+
+### [R11-C2 retraction] r10's `snapshot_handler.rs:424 vm_ops.teardown_source` sync-on-async claim — RETRACTED
+- **Source**: 2026-05-25 concurrency-r11 verification
+- **Resolution**: both production `ResolvedSourceVmOps::teardown_source` impls return `Ok(())` unconditionally — it's a no-op stub, not a sync-on-async call. The real teardown runs from the admin/sweep async layer.
+
+### [R7-API2] (CLOSED at c8000537) — see /commit log
