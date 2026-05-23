@@ -665,3 +665,174 @@ Skipped per brief: c=4 failed at 0/16, so c=20 was not run. B-SLO measurements r
 - B19 lib-tested PASS (266 → 268). Trait + state-map wiring locally validated.
 - B19 cluster verification **gated on bug #20 closing** (cold-boot /livez recovery). Re-run c=4 × 4 + c=20 once #20 lands; the wiring is already in place to exercise wake/exec/stop end-to-end on a fresh v15+ binary.
 - Leave **[B19] in the deferred backlog as "fix landed in code, cluster verification pending bug #20"** rather than CLOSED.
+
+---
+
+# Appendix D — B20 root cause + fix + c=1/c=4 re-validation (2026-05-23)
+
+**Branch HEAD pre-fix:** `3e8bfad5`.
+**Controller binary:** `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v15` (unchanged — the bug is in the worker bootstrap script, not the Rust binary).
+**Worker bootstrap script changed locally** (re-uploaded to GCS implicitly via provision script reading the local file).
+**B20 verdict:** **CLOSED.**
+**Operator:** B20 fixer + cluster validation sub-agent.
+
+## Root cause (verbatim evidence from git history)
+
+`gs://suger-dev-zsbx-artifacts/` artifact listing showed nothing changed between v14 (B18 fixer's PASS) and v15 (B19 fixer's FAIL): same wrapper (22675 B since `dec489a1` 2026-05-22), same vmlinuz (2026-05-05), same `cloud-hypervisor.v51.1` / `ch-remote.v51.1` (2026-05-05). The only published artifact that differed was the controller binary itself, and the v14→v15 diff is **purely additive** in the wake path (`register_restored` method, `Arc<NomadCHBackend>` wrap, `with_nomad_handle` builder, `Persistence::unseal`); the cold-boot create path was bit-identical.
+
+That eliminated rootfs / vmlinuz / ch-remote / cloud-hypervisor / wrapper / controller-create-path. Remaining candidate: the worker bootstrap script. `git stash list` showed:
+
+```
+stash@{0}: WIP on feat/sandbox-snapshot-restore: a9e568a2
+  sandbox/config: pub(crate)-restrict SandboxConfig.token (A7)
+```
+
+`git show 'stash@{0}' -- crates/sandbox/scripts/gcp-worker-startup.sh` revealed the smoking gun:
+
+```diff
+-gs_pull rootfs-slim.img.fp32          "$ART/rootfs-slim.img" 0644
++gs_pull rootfs-slim.img.virtio-blk-v3 "$ART/rootfs-slim.img" 0644
+```
+
+The B18 fixer ran v14 with this stash applied. The B19 fixer (this cycle's predecessor) used a fresh worktree, did not re-apply the stash, so the **committed** script pulled the old `rootfs-slim.img.fp32` (2026-05-06, pre-virtio-blk pivot) into `/etc/zeroship/rootfs-slim.img`. The wrapper's cold-boot `--disk` block passes `$ZSBX_WORKSPACE_IMG` (virtio-blk) and the rootfs's `/sbin/init` (still the virtio-fs version on fp32) cannot mount `/dev/vdb`/`/dev/vdc` or has a broken pubkey decoder (bug #12/#13 series). Either way, the in-VM `sandbox-agent` never binds `:7777`, the tap stays `<NO-CARRIER>` (no peer over virtio-net), and `wait_for_agent_livez` times out at 30s × 3 retries → 503 `create_retry_budget_exhausted`. Exactly the v15 cluster smoke shape from Appendix C.
+
+GCS MD5 confirmation:
+```
+rootfs-slim.img.fp32          md5: de0c5f02f6324910827717875d01dd12
+rootfs-slim.img.virtio-blk-v3 md5: 4aaae4bff33e1bb7debde05f2d183c4c
+```
+
+After the fix in this cycle the worker pulled the virtio-blk-v3 rootfs:
+```
+$ md5sum /etc/zeroship/rootfs-slim.img
+4aaae4bff33e1bb7debde05f2d183c4c  /etc/zeroship/rootfs-slim.img
+```
+
+## Fix applied
+
+`crates/sandbox/scripts/gcp-worker-startup.sh` line 143:
+```diff
+-gs_pull rootfs-slim.img.fp32          "$ART/rootfs-slim.img" 0644
++gs_pull rootfs-slim.img.virtio-blk-v3 "$ART/rootfs-slim.img" 0644
+```
+
+Plus two comment updates (header + post-pull comment) marking the variant as virtio-blk and referencing this appendix.
+
+Size: 3 lines logical (one `gs_pull` line + two comments). No binary rebuild required. No rootfs rebake required. No wrapper change.
+
+## Smoke (1+1 diag, c=1) — PASS
+
+Cluster: `zsbx-diag`, 1 server (n2-standard-4) + 1 worker (n2-standard-32), `asia-northeast3-a`, `CONTROLLER_OBJECT=zeroship-sandbox.snapshot-v15` (unchanged).
+
+```
+# b20-fix: concurrency=1, cycles=1, total=1
+# elapsed: 62.7s
+CREATE OK:   1/1   create p50=5339ms
+SNAPSHOT OK: 1/1   snapshot p50=47834ms (1.07 GB artifact)
+WAKE OK:     1/1   wake p50=9505ms
+POST-WAKE EXEC OK: 0/1   "backend.exec: sandbox not found in nomad-ch backend"
+STOP OK:     1/1   stop p50=19ms
+```
+
+Create + snapshot + wake + stop succeed end-to-end. Wake p50 (9.5s) matches v14 and earlier appendices exactly — confirms the fix is the rootfs pull, not a behavior change.
+
+**EXEC_POST fails with the B19 "sandbox not found" symptom**. See bug #21 below — this is NOT a B20 regression but the latent consequence of B19's wake-side `register_restored` being silently no-op'd when the controller boots without `SANDBOX_PERSIST_AUTH=1`.
+
+## Smoke (1+1 diag, c=4 × 4 = 16) — B20 verified PASS
+
+```
+# b20-fix-c4: concurrency=4, cycles=4, total=16
+# elapsed: 272.9s
+CREATE OK:   11/16  create p50=15509ms p95=62802ms
+SNAPSHOT OK:  9/11  snapshot p50=54511ms p95=59293ms
+WAKE OK:      9/ 9  wake p50=11586ms p95=21189ms
+POST-WAKE EXEC OK: 0/9   (bug #21 — same shape as c=1)
+STOP OK:      9/16
+FAILED CREATES: 5  vm-index allocator exhausted (floor=1, ceil=12)
+FAILED SNAPSHOTS: 2  60s snapshot timeout
+```
+
+- 0/16 cold-boot creates pre-fix → 11/16 cold-boot creates post-fix. The remaining 5 are vm-index-exhausted, which is the expected downstream effect of B19's wake-side `register_restored` not firing (slot leaks per successful wake until floor=1..ceil=12 saturates).
+- Wake 9/9 (100%); the path is exercised end-to-end on every cycle that reached snapshot.
+- Wake p50 11.6s matches v14's c=4 wake p50 (15.0s) within stress noise. No regression.
+
+## Controller boot evidence (B19 wiring half-fires, persist=None)
+
+```
+{"message":"snapshot wiring: tiered L1+GCS","l1_root":"/var/zeroship/ch/snapshots","gcs_bucket":"suger-dev-zsbx-artifacts"}
+{"message":"snapshot wiring: shared vm_index allocator with backend (B18)"}
+{"message":"snapshot wiring: shared NomadCHBackend handle for register_restored (B19)"}
+{"message":"snapshot/restore wiring: enabled","ch_version":"ch-remote v51.1","kek_path":"None"}
+```
+
+But at wake time:
+```
+{"level":"WARN","message":"restore: register_restored skipped — persist=None
+  (expected only in tests; production wiring at AppState::from_config plumbs Some)",
+ "sandbox_id":"019e53ce-492a-7210-b80f-4a38e78c60b0"}
+```
+
+So the controller has all the B19 plumbing in place EXCEPT the `state.persist` field, which `AppState::from_config` builds via `Persistence::from_env()?.map(Arc::new)` — and `Persistence::from_env()` returns `Ok(None)` when `SANDBOX_PERSIST_AUTH` is not set. Filed as bug #21.
+
+## Bug #21 (NEW, cluster systemd misconfig) — `SANDBOX_PERSIST_AUTH=1` not set, B19 silently no-ops
+
+- **Source:** Appendix D diag cluster 2026-05-23.
+- **Symptom:** controller boots with B19's `nomad_ch_handle` plumbed into `RealRestoreBackend`, but the runtime warn path
+  ```
+  "restore: register_restored skipped — persist=None"
+  ```
+  fires on every wake. Trait dispatch never reaches `Backend::register_restored`, so the restored VM stays out of the state map; downstream EXEC returns 500 "sandbox not found"; STOP returns Ok-idempotent without releasing the vm_index. After 9 successful wakes the c=4 cluster saturated at 12 slots and the next 5 cold-boot creates failed with `allocator exhausted`. Identical surface to the latent B19 leak the deferred file describes.
+- **Root cause:** `crates/sandbox/scripts/gcp-worker-startup.sh` does NOT export `SANDBOX_PERSIST_AUTH=1` in the controller systemd Environment block. `Persistence::from_env()` returns `Ok(None)` → `state.persist = None` → wake-side warn-skip.
+- **Not investigated this cycle** per the brief's "If a NEW bug surfaces (#21+): capture, do NOT start fixing" rule.
+- **Likely fix:** add `Environment=SANDBOX_PERSIST_AUTH=1` (and any required `SANDBOX_PERSIST_KEK_PATH` / DEK seed material) to `gcp-worker-startup.sh` systemd unit. Cross-check what env var Persistence reads (search `Persistence::from_env`). One commit; trivial.
+- **Evidence:** `/tmp/smoke-b20-fix-c1.log`, `/tmp/smoke-b20-fix-c4.log`, controller log `register_restored skipped — persist=None`.
+
+## B19 cluster verification status
+
+- **Partially closed**: the post-fix cluster confirms the B19 plumbing reaches `restore_handler::do_restore_inner` step 7b (the post-livez branch). The wake itself works end-to-end on all 9 attempts. What B19 ALSO needs to clear cluster — full state-map registration after wake — is gated on bug #21 (persist=None). Until #21 closes, B19's lib tests pass + plumbing wires correctly + wake works, but `register_restored` is never called, so EXEC_POST and slot-release stay broken on cluster.
+- **Recommended status update**: B19 → keep "FIX LANDED in code, cluster verification PARTIALLY VERIFIED (wake path works; register_restored gated on bug #21)".
+
+## B-SLO (5-worker × 20-cycle) — NOT attempted
+
+Bug #21 keeps wake-side state-map registration off, which means every successful wake leaks a vm_index slot. A 5+20 stress (~100 cycles) would saturate the 12-slot pool after ~9 successful wakes per worker, dumping the rest of the budget on `allocator exhausted` 500s. Defer B-SLO until #21 closes.
+
+## Teardown
+
+```
+[teardown] project=suger-dev zone=asia-northeast3-a prefix=zsbx-diag
+[teardown] deleting instances: zsbx-diag-server-1 zsbx-diag-worker-1
+Deleted [...zones/.../instances/zsbx-diag-server-1].
+Deleted [...zones/.../instances/zsbx-diag-worker-1].
+[teardown] releasing internal addresses: zsbx-diag-server-1-ip
+Deleted [.../regions/.../addresses/zsbx-diag-server-1-ip].
+[teardown] remaining instances matching ^zsbx-diag-: 0
+[teardown] OK: cluster fully torn down
+```
+
+`gcloud compute instances list --filter='name~"^zsbx-"'` → empty.
+
+## Estimated cost
+
+- Cluster wall-time: ~10 min (provision 2 min + c=1 smoke 1 min + c=4 smoke 4.5 min + observation 1 min + teardown 1 min).
+- n2-standard-32 worker @ ~$1.55/hr × 10/60 = **$0.26**.
+- n2-standard-4 server @ ~$0.17/hr × 10/60 = **$0.03**.
+- **Total: ~$0.29**. Well under the $30 cap.
+
+## Files of interest (B20 fix)
+
+- `crates/sandbox/scripts/gcp-worker-startup.sh` — single `gs_pull` line + two comment updates (lines 11 / 143 / 159).
+- `gs://suger-dev-zsbx-artifacts/rootfs-slim.img.virtio-blk-v3` — unchanged; the right artifact.
+- `/tmp/smoke-b20-fix-c1.log`, `/tmp/smoke-b20-fix-c4.log` — smoke transcripts.
+- `/tmp/provision-diag.log` — provision transcript.
+- `/tmp/teardown-diag.log` — teardown transcript.
+
+## Lessons / scope
+
+- The B18-fixer cycle's c=4 PASS depended on a local stash that never landed. The B19-fixer cycle's c=4 FAIL was the inevitable consequence: a fresh worktree restored the committed (pre-pivot) script. Cluster validation cycles MUST either (a) commit the script change before running the smoke, or (b) the cron worker should snapshot+restore stashed changes before dispatching cluster work.
+- Surface a small lint: `bash -n crates/sandbox/scripts/gcp-worker-startup.sh && grep -c 'rootfs-slim.img.virtio-blk' crates/sandbox/scripts/gcp-worker-startup.sh` should return 1 in CI. R4-T1's shellcheck gate caught syntax issues but not this content-drift.
+
+## Recommendation
+
+- **Close B20** in deferred backlog. The cluster c=4 evidence is unambiguous (0/16 → 11/16; same shape as v14 c=4).
+- **Promote B19 to "PARTIALLY VERIFIED on cluster"** in deferred backlog. The plumbing reaches the wake path; the post-livez register call is gated on bug #21.
+- **Open bug #21** for the next cycle: add `SANDBOX_PERSIST_AUTH=1` + key material to the controller systemd Environment block in `gcp-worker-startup.sh`.

@@ -3,9 +3,9 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-23 (cycle r5: A3-partial hard_link, S4 admin error sanitization, B19 fix in-code; new B20 blocker; A7/R3-Q3/R4-T1/R4-Q1 marked CLOSED; 7 r4+r5 reviewer rounds added).
+Last updated: 2026-05-23 (cycle r5+B20-fixer: B20 closed via gcp-worker-startup.sh virtio-blk-v3 rootfs swap; B19 partially verified on cluster — wake path PASS but `register_restored` gated on new bug #21; cluster c=4 11/16 cold-boot creates PASS vs 0/16 pre-fix).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `4fd92bef` (S4 at `4fd92bef`; A3-partial at `0aa93a0f`; B19 at `15b4f9a8`; R4-T1 at `4e6c70c1`; R3-Q3 at `28f60d73`; A4 closed at `2928d5ae`; B18 at `b4ddb98b`). Lib tests at HEAD: **275 passed**.
+Branch HEAD at last update: B20 fixer cycle on `3e8bfad5` parent (B20 + Appendix D commit forthcoming). Prior commits: `4fd92bef` (S4); `0aa93a0f` (A3-partial); `15b4f9a8` (B19 in-code); `4e6c70c1` (R4-T1); `28f60d73` (R3-Q3); `2928d5ae` (A4 closed); `b4ddb98b` (B18). Lib tests at parent HEAD: **275 passed**.
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
@@ -35,28 +35,26 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: **CLOSED**. Root cause was NOT in-VM stickiness; the init.sh path was already correct. Actual bug: two separate `vm_index` allocators (NomadCHBackend's `vm_index_allocator` vs RealRestoreBackend's private `VmIndexReservations`) — the wake path reserved slots into a private map invisible to the create-side allocator, so a subsequent create handed the same tap/IP to a fresh sandbox that collided with the live restored VM on that slot. The 401 surfaced because `/version` was answered by the **old** (restored) agent verifying a different signing-pubkey. Fix: share the `Arc<Mutex<VmIndexAllocator>>` between both backends. Two regression tests added. Cluster c=4 verification: 11/16 stale-pubkey 401s pre-fix → **0/16 post-fix**.
 - **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix B.
 
-### [B19] (FIX LANDED in code, cluster verification pending bug #20) Wake path doesn't register restored VM in backend state map (CRITICAL, partially closed)
-- **Status (2026-05-23)**: Option (a) implemented at HEAD `15b4f9a8` (`sandbox/backend: register_restored to install restored VMs in state map (B19)`). Lib tests 266 → 268 with two regression tests (`register_restored_inserts_into_state_map`, `restored_sandbox_is_stoppable_and_releases_vm_index`). **Cluster smoke could not exercise the wake path** because every cold-boot create failed at `wait_for_agent_livez` — that's bug #20 below, NOT a B19 regression. Re-run cluster c=4 + c=20 once #20 closes; the wiring (`Backend::nomad_ch_handle()` shared into `RealRestoreBackend::with_nomad_handle`, `Persistence::unseal` per-sandbox, `register_restored` trait method) is already in place.
-- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix C.
+### [B19] (FIX LANDED in code; cluster PARTIALLY VERIFIED — wake path works, register_restored gated on bug #21) Wake path doesn't register restored VM in backend state map (CRITICAL, partially closed)
+- **Status (2026-05-23 r5 B20-fixer)**: Option (a) implemented at HEAD `15b4f9a8`. Lib tests 266 → 268. Cluster c=4 evidence: 9/9 wakes PASS post-B20 fix (Appendix D); the wake path is exercised end-to-end. BUT the `register_restored` trait call is gated on `state.persist = Some(_)`, which requires `SANDBOX_PERSIST_AUTH=1` in the controller env — currently NOT set in cluster systemd (bug #21). Until #21 closes, every wake fires `register_restored skipped — persist=None`, EXEC_POST returns 500 "sandbox not found", and the vm_index slot leaks (c=4 saturated at 12 slots after 9 wakes → 5/16 cold-boot creates failed with `allocator exhausted`).
+- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix C (pre-B20-fix, untested) + Appendix D (post-B20-fix; wake path now works, register_restored still no-ops on persist=None).
 - **Files changed**:
   - `crates/sandbox/src/backend/{nomad_ch.rs,mod.rs}` — `NomadCh(Arc<…>)` wrap + `register_restored` on both NomadCHBackend and Backend.
   - `crates/sandbox/src/restore_handler.rs` — trait + impl + `with_nomad_handle` + `do_restore_inner` post-livez call.
   - `crates/sandbox/src/persist.rs` — `Persistence::unseal(sandbox_id)`.
   - `crates/sandbox/src/{admin_handlers.rs,lib.rs}` — wiring at `from_config` + `wake_sandbox`.
 
-### [B20] Cold-boot /livez never 200 — every create 503s `create_retry_budget_exhausted` (CRITICAL, NEW 2026-05-23)
-- **Source**: cluster smoke 2026-05-23 with v15 binary (Appendix C of `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md`).
-- **Symptom**: every cold-boot create reaches Nomad `client_status=running` (controller logs `sandbox/nomad-ch create alloc running … elapsed_ms=772`), then `wait_for_agent_livez` times out at the 30s budget. After 3 retries → 503 `create_retry_budget_exhausted`. Nomad kills the alloc (exit code 130 — interrupt + 10s grace) and GCs it. Reproducible at c=1 and c=4 (16/16 fails at c=4; 1/1 fails at c=1).
-- **Tap state**: taps `zsbx-nm-1`..`zsbx-nm-10` exist on the worker host, all `<NO-CARRIER,BROADCAST,MULTICAST,UP>` (DOWN at L2). Same surface shape as the B17 paused-vCPU symptom — but cold-boot CH is supposed to be running, not paused.
-- **NOT a B19 regression**: B19 only touches the wake path + the NomadCHBackend registry surface. The create-path `wait_for_agent_livez` helper is unchanged from v14 where B18's c=4 smoke PASSed 16/16 in early r4. The cluster's worker state (rootfs, vmlinuz, ch-remote, init.sh) is suspect — rebake / pin drift, or a fresh CH bug.
-- **Hypotheses to test (next-cycle fixer)**:
-  1. ch-remote / cloud-hypervisor v51.1 vs v50.2 pinning — has the artifact moved?
-  2. rootfs-slim.img.virtio-blk-v3 — does the in-VM `sandbox-agent` start? (boot the rootfs locally with `cloud-hypervisor` + serial console, watch for the agent's bind on `:7777`.)
-  3. init.sh — has the cmdline pubkey parser drifted? (cmp init.sh between r4 PASS and now)
-  4. vmlinuz — kernel version drift breaking virtio-net?
-- **Reproducer**: provision 1+1 (`bash crates/sandbox/scripts/provision-gcp-cluster.sh` with v15 controller); on worker `cd /opt/stress && sudo python3 snapshot_stress.py --base-url http://127.0.0.1:9091 --token-file /etc/zeroship/sandbox-token --admin-token-file /etc/zeroship/sandbox-admin-token --concurrency 1 --cycles 1 --label repro`. Expect 0/1 CREATE OK with the `never returned 200 on /livez` error.
-- **Evidence**: `/tmp/smoke-b19-c1.log`, `/tmp/smoke-b19-c4.log`, controller log on worker `/var/log/zeroship-sandbox.log` (captured pre-teardown). Nomad daemon log via `journalctl -u nomad`.
-- **First step**: SSH worker, capture `/var/log/zeroship-sandbox.log` + `/opt/nomad/data/alloc/*/alloc/logs/ch.stderr.0` + ch-remote socket ping output, then teardown. **Do NOT start fixing in the cluster — pull the artifacts off and reproduce locally first.** Most likely root cause: ch-remote / vmlinuz / rootfs drift, not Rust code.
+### [B20] (CLOSED 2026-05-23 r5 B20-fixer) Cold-boot /livez never 200 — root cause: `gcp-worker-startup.sh` pulled pre-virtio-blk rootfs
+- **Status**: **CLOSED**. Root cause: `crates/sandbox/scripts/gcp-worker-startup.sh:143` hard-coded `gs_pull rootfs-slim.img.fp32` (2026-05-06 pre-virtio-blk artifact), but the wrapper's cold-boot `--disk` block passes virtio-blk paths and the new init.sh expects `/dev/vdb`/`/dev/vdc`. The fp32 rootfs's in-VM init.sh can't mount the virtio-blk disks (or has the bug-#12/#13-era broken pubkey decoder), so `sandbox-agent` never binds `:7777` and the tap stays `<NO-CARRIER>`. B18-fixer's c=4 v14 PASS depended on a local stash (`stash@{0}` swaps the line to `rootfs-slim.img.virtio-blk-v3`) that never landed; B19-fixer's fresh worktree reverted to the committed line, producing the 0/16 failure shape. Fix: bulk-bump to `virtio-blk-v3` + comment updates. Cluster c=4 post-fix: 11/16 cold-boot creates PASS (was 0/16); 9/9 wakes PASS; remaining 5 create failures are downstream of bug #21's slot leak. No controller / wrapper / rootfs rebuild needed.
+- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix D.
+
+### [B21] (NEW 2026-05-23 r5 B20-fixer) Controller systemd unit missing `SANDBOX_PERSIST_AUTH=1` — B19 wake-side `register_restored` silently no-ops (CRITICAL)
+- **Source**: cluster diag 2026-05-23 (Appendix D); post-B20-fix smoke shows wake path PASS but `register_restored` skipped.
+- **Symptom**: controller boot log shows `snapshot wiring: shared NomadCHBackend handle for register_restored (B19)` (the handle plumbing is in place), but every wake emits `restore: register_restored skipped — persist=None (expected only in tests; production wiring at AppState::from_config plumbs Some)`. Post-wake EXEC returns 500 `backend.exec: sandbox not found in nomad-ch backend`; STOP returns Ok-idempotent without releasing the vm_index. After ~9 successful wakes the 12-slot pool saturates → cold-boot creates fail `allocator exhausted (floor=1, ceil=12)`.
+- **Root cause**: `crates/sandbox/scripts/gcp-worker-startup.sh` writes the controller systemd `Environment=` block without `SANDBOX_PERSIST_AUTH=1`. `Persistence::from_env()?` returns `Ok(None)`; `state.persist` is `None`; the wake-side B19 trait call falls through to the warn-skip branch.
+- **Fix shape**: add `Environment=SANDBOX_PERSIST_AUTH=1` (and any required `SANDBOX_PERSIST_KEK_PATH` / DEK seed material — check `Persistence::from_env` for the required env vars) to the controller systemd unit in `gcp-worker-startup.sh`. Cross-reference `crates/sandbox/src/persist.rs` for the full env contract. One commit; no Rust change.
+- **Validation**: re-run cluster c=4 after fix; expect post-wake EXEC = 200, STOP = 200, and the vm-index allocator to **not** saturate after 9 wakes (allocator should release on every stop). Then run c=20 stress (3+5 workers) for B-SLO p50/p95/p99/max measurements.
+- **Evidence**: `/tmp/smoke-b20-fix-c1.log`, `/tmp/smoke-b20-fix-c4.log`; controller log lines verbatim in Appendix D.
 
 ### [A1] AEAD never wraps prod snapshot store (CRITICAL, security-r1)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)
@@ -201,8 +199,8 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ## IMPORTANT (Phase B follow-ups; blocked on #14 closing)
 
 ### [B-SLO] 5-worker × 20-cycle SLO empirical validation
-- **Blocked-by**: **B20** (cold-boot /livez never 200 — every create 503s; B19 fix is in code but unverified on cluster until #20 closes). B14a/B14b/B17/B18 all closed.
-- **Action**: close B18 first. Then scale to 3+5 + run cluster stress; capture create / snapshot / wake / post-exec / stop p50/p95/p99/max; compare wake p50 (this cycle measured 9.5s on c=1 single-cycle) to 4243ms cold-boot baseline (§ 10.2 SLO targets: p50 ≤ 1.0s; p95 ≤ 1.5s; p99 ≤ 2.0s; p99.9 ≤ 6.0s). Note: 9.5s p50 is FAR worse than the 1.0s target — likely improvable once A3 (sync I/O on compio worker) closes; document the gap when stress lands.
+- **Blocked-by**: **B21** (controller systemd missing `SANDBOX_PERSIST_AUTH=1`; B19's wake-side `register_restored` silently no-ops; vm-index slot leaks per wake; pool saturates at 12 after 9 wakes). B14a/B14b/B17/B18/B20 all closed.
+- **Action**: close B21 first (one-line env-var add in `gcp-worker-startup.sh`). Then scale to 3+5 + run cluster stress; capture create / snapshot / wake / post-exec / stop p50/p95/p99/max; compare wake p50 (this cycle measured 9.5s on c=1 single-cycle; 11.6s on c=4) to 4243ms cold-boot baseline (§ 10.2 SLO targets: p50 ≤ 1.0s; p95 ≤ 1.5s; p99 ≤ 2.0s; p99.9 ≤ 6.0s). Note: 9.5s p50 is FAR worse than the 1.0s target — likely improvable once A3 (sync I/O on compio worker) closes; document the gap when stress lands.
 
 ---
 
