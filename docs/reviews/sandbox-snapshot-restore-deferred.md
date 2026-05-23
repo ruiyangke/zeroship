@@ -460,9 +460,14 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: A4 (§10.0 ErrorEnvelope) closed in sandbox crate at `2928d5ae` but never extended to sandbox-agent. All ~34 sites emit non-§10.0 shapes. R7-S1's `/_clock_resync` inherits the broken shape.
 - **Action**: extract `ErrorEnvelope` from `crates/sandbox/src/error_envelope.rs` into either `zeroship-core` (cross-crate) OR duplicate into `crates/sandbox-agent/src/error_envelope.rs`. Migrate all 34 sites. Add wire-shape tests (cap N per file).
 
-### [R8-API1] 3 new `pub` items in sandbox-agent from R7-S1 + B22 should be `pub(crate)` (IMPORTANT, api-surface-r8)
-- **Files**: `crates/sandbox-agent/src/handlers.rs:95` (`init_sandbox_id_from_env` — needed by `main.rs`, can stay pub if there's a reason, otherwise pub(crate)); `crates/sandbox-agent/src/sig.rs:119` (`ResyncBody` — used only inside `handlers::clock_resync`, can be pub(crate)). (Note R7-API1 was closed at `0a271d2f` for `verify_kind_skew_bypass`.)
-- **Action**: mechanical pub→pub(crate). Same anti-pattern carve-out as R4-S1/R5-API*/R7-API1.
+### [R8-API1] (HALF-CLOSED at `df1e756c`) `ResyncBody` is now `pub(crate)`; `init_sandbox_id_from_env` blocked by sandbox-agent's `[lib]/[bin]` split
+- **Files**: `crates/sandbox-agent/src/handlers.rs:101` (`init_sandbox_id_from_env` — STILL `pub`, bin compiles against lib's public API)
+- **Blocker**: `Cargo.toml` declares both `[lib]` and `[[bin]]`. The bin (`main.rs`) imports through the crate root as `zeroship_sandbox_agent::handlers::init_sandbox_id_from_env`; reducing to `pub(crate)` causes E0603 at the bin build. Verified empirically.
+- **Action (3 options)**:
+  - (a) Add `pub fn bin_init()` wrapper in `lib.rs` that delegates to `pub(crate) fn init_sandbox_id_from_env()`. Public surface narrows to one purposefully-named entry point.
+  - (b) Move main.rs into a separate `bin/` workspace member that depends on the lib normally.
+  - (c) Accept the leak; document it as the canonical agent-boot entry point.
+  Recommend (a) — cleanest. 5-line change.
 
 ### [R8-A3-5] (CLOSED at `64cbb447`) spawn_blocking wraps on submit_restore_job + wait_for_livez; restore_sandbox + do_restore_inner signature flip to `Arc<dyn RestoreBackend>`; 5 test sites migrated. Expected wake p50 reduction 5-8s/wake pending cluster smoke verification.
 - **Source**: 2026-05-24 performance-r8
