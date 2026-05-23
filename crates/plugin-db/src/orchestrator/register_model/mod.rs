@@ -138,13 +138,9 @@ async fn exec_register_model(
     // `backend_unsupported` `DbError::Configuration` so a future SQLite
     // arm surfaces a coded SDK-visible error rather than aborting the
     // spawned compio task via `.expect()` panic.
-    let pg = backend.as_postgres().ok_or_else(|| DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: register_model requires the Postgres backend".to_string(),
-        hint: Some(
-            "SQLite backend support is not yet implemented for register_model".to_string(),
-        ),
-    })?;
+    let pg = backend
+        .as_postgres()
+        .ok_or_else(|| DbError::backend_unsupported("register_model"))?;
 
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());

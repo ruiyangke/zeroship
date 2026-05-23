@@ -199,20 +199,22 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     // [`SqlExecutor::acquire_dedicated_client`] so the
     // `compio_postgres::connect` + `connection.run()` spawn lives in
     // exactly one place (the PG impl in `backend/postgres.rs`).
-    // Operator-facing prefix ("auto-tx connect failed") preserved.
+    // The error rail is single-prefixed at the backend
+    // (`"db: backend connect failed: <e>"`) — see code-critique R15-3
+    // for the de-doubling of the previous `auto-tx connect failed` wrap.
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let pg = backend.as_postgres().ok_or_else(|| DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: auto-tx requires the Postgres backend".to_string(),
-        hint: None,
-    })?;
-    let client = pg.acquire_dedicated_client().await.map_err(|e| match e {
-        DbError::Transient { message } => DbError::Transient {
-            message: format!("db: auto-tx connect failed: {message}"),
-        },
-        other => other,
-    })?;
+    let pg = backend
+        .as_postgres()
+        .ok_or_else(|| DbError::backend_unsupported("auto-tx"))?;
+    // **Post-P0 mop-up (code-critique R15-3)**: `acquire_dedicated_client`
+    // already prefixes `Transient` errors with `"db: backend connect
+    // failed: <e>"`. Pre-fix the previous shape here re-prefixed with
+    // `"db: auto-tx connect failed: "`, producing a double-prefix the
+    // SDK observed on every connect failure. We now `?`-propagate the
+    // inner error directly — single prefix, same `Transient` variant,
+    // same wire `.code = "transient"`.
+    let client = pg.acquire_dedicated_client().await?;
 
     client
         .execute(&sql, &[])
@@ -333,8 +335,15 @@ mod tests {
         // `Transient` is the SQL class 08 / connection-drop bucket — the
         // SDK retries by `err.code === "transient"`. Pre-fix the wire
         // payload carried only `err.message` (the connect/socket text).
+        //
+        // **Code-critique R15-3**: the fixture used to assert the
+        // double-prefixed body `"db: auto-tx connect failed: db: backend
+        // connect failed: <e>"` produced by the old re-wrap shape in
+        // `exec_auto_begin`. Post-fix, auto-tx `?`-propagates
+        // `acquire_dedicated_client`'s error verbatim — the body is
+        // single-prefixed with `"db: backend connect failed: <e>"`.
         let rv = begin_to_resolve_value(Err(DbError::Transient {
-            message: "db: auto-tx connect failed: connection refused".into(),
+            message: "db: backend connect failed: connection refused".into(),
         }));
         let (code, hint) = reject_code_hint(rv);
         assert_eq!(code, "transient", "wire code must equal 'transient'");

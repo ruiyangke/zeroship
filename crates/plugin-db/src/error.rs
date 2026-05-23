@@ -352,6 +352,39 @@ impl DbError {
             message: message.into(),
         }
     }
+
+    /// Build the canonical [`DbError::Configuration`] returned when
+    /// [`crate::backend::BackendHandle::as_postgres`] yields `None` —
+    /// i.e. the active backend isn't the Postgres arm. Every call site
+    /// (`as_postgres().ok_or_else(...)?` / `Some/None` match) routes
+    /// through this helper so the wire `.code` (`backend_unsupported`)
+    /// AND the operator-facing `hint` stay identical across the
+    /// `migrations` / `migration` / `register_model` / `transaction` /
+    /// `auto_tx` paths.
+    ///
+    /// **Post-P0 mop-up (code-critique R15-1 / R15-2)**: prior hand-rolled
+    /// `DbError::Configuration { code: "backend_unsupported", ... }`
+    /// literals at four call sites had drifted into three distinct
+    /// `hint` shapes (two `None`, one PG-only sentence, one bare
+    /// `"register_model"`); centralising here keeps the SDK-visible
+    /// hint stable as the backend-arm dispatcher evolves.
+    ///
+    /// `op` names the operation surface for the message body
+    /// (e.g. `"beginTransaction"`, `"register_model"`, `"migration RPC"`)
+    /// so the operator-facing text stays specific without forcing each
+    /// call site to re-spell the static `code` / `hint`.
+    pub(crate) fn backend_unsupported(op: &str) -> Self {
+        DbError::Configuration {
+            code: "backend_unsupported",
+            message: format!(
+                "`{op}` requires the Postgres backend (SQLite arm lands in P1)"
+            ),
+            hint: Some(
+                "backend is single-arm PG in P0; SQLite arm re-introduced atomically in P1"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 /// Prepend a contextual phrase to the human-readable body of `err`

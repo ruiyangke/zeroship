@@ -145,25 +145,25 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
     // [`SqlExecutor::acquire_dedicated_client`] so the
     // `compio_postgres::connect` + `connection.run()` spawn lives in
     // exactly one place (the PG impl in `backend/postgres.rs`).
-    // Previously this site open-coded the connect; the error rail
-    // is the same (`DbError::Transient` with the "tx connect failed"
-    // operator-facing prefix), but the inline `connect(&url, NoTls)`
-    // call is gone.
+    // Previously this site open-coded the connect; now the inline
+    // `connect(&url, NoTls)` is gone and the error rail is
+    // single-prefixed at the backend (`"db: backend connect failed:
+    // <e>"`) instead of double-prefixed through a `tx connect failed`
+    // re-wrap (code-critique R15-3).
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let pg = backend.as_postgres().ok_or_else(|| DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: beginTransaction requires the Postgres backend".to_string(),
-        hint: None,
-    })?;
-    let client = pg.acquire_dedicated_client().await.map_err(|e| match e {
-        // Preserve the operator-facing `"tx connect failed"` prefix
-        // the prior inline shape used so log greps stay valid.
-        DbError::Transient { message } => DbError::Transient {
-            message: format!("db: tx connect failed: {message}"),
-        },
-        other => other,
-    })?;
+    let pg = backend
+        .as_postgres()
+        .ok_or_else(|| DbError::backend_unsupported("beginTransaction"))?;
+    // **Post-P0 mop-up (code-critique R15-3)**: `acquire_dedicated_client`
+    // already prefixes its `Transient` errors with `"db: backend connect
+    // failed: <e>"` (see `backend/postgres.rs::acquire_dedicated_client`).
+    // The previous shape here added a second `"db: tx connect failed: "`
+    // prefix on top, producing the double-prefixed body
+    // `"db: tx connect failed: db: backend connect failed: <e>"` the SDK
+    // saw. We now `?`-propagate the inner error verbatim — single prefix,
+    // same `Transient` variant, same wire `.code = "transient"`.
+    let client = pg.acquire_dedicated_client().await?;
 
     client
         .execute(&begin_sql, &[])

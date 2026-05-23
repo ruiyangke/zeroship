@@ -201,17 +201,8 @@ fn dispatch_by_spec<'s>(
                 return OpResult::JsValue {
                     resolver: resolver_global,
                     value: ResolveValue::RejectError(
-                        crate::error::DbError::Configuration {
-                            code: "backend_unsupported",
-                            message:
-                                "db: migration RPC requires the Postgres backend"
-                                    .to_string(),
-                            hint: Some(
-                                "SQLite backend support is not yet implemented for migrations"
-                                    .to_string(),
-                            ),
-                        }
-                        .to_op_error(),
+                        crate::error::DbError::backend_unsupported("migration RPC")
+                            .to_op_error(),
                     ),
                     request_id,
                 };

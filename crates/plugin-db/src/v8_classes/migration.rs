@@ -292,21 +292,29 @@ async fn ensure_backend() -> Result<crate::backend::BackendHandle, OpError> {
 /// Build the typed `OpError` returned when [`crate::backend::BackendHandle::as_postgres`]
 /// produces `None` — i.e. the active backend is not the Postgres arm.
 ///
+/// Thin adapter over [`crate::error::DbError::backend_unsupported`] —
+/// the central helper builds the `Configuration` variant with the
+/// canonical `code` / `hint`; this wrapper just calls `.to_op_error()`
+/// for the OpResult-returning call sites (`fetchBatch` / `commitBatch` /
+/// `start` spawn paths) that need an `OpError` directly rather than a
+/// `DbError`. The sync `?` call sites (`status` / `cancel` / `reset`)
+/// continue to use the central helper through `.to_op_error()` via
+/// `?`-propagation.
+///
 /// **Post-P0 mop-up (MAJOR-R14-1)**: the previous `.expect("PostgresBackend
 /// arm — … is PG-only in P0")` call sites converted the `None` arm
 /// into a runtime panic in async-spawned compio tasks. The SDK saw an
 /// unstructured promise rejection with no `.code` / `.hint` attached.
 /// `as_postgres` was specifically shaped as `Option<&_>` so async sites
 /// could `?`-propagate a typed error; this helper closes that loop.
+///
+/// **Code-critique R15-1 / R15-2**: prior to centralisation this helper
+/// open-coded the `Configuration { code: "backend_unsupported", ... }`
+/// literal inline; centralising in `error.rs` keeps the wire `hint` shape
+/// identical across the four other PG-only call sites that previously
+/// drifted.
 fn unsupported_backend_op_error() -> OpError {
-    crate::error::DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: migration RPC requires the Postgres backend".to_string(),
-        hint: Some(
-            "SQLite backend support is not yet implemented for migrations".to_string(),
-        ),
-    }
-    .to_op_error()
+    crate::error::DbError::backend_unsupported("migration RPC").to_op_error()
 }
 
 /// Coerce a JS number to a finite, integer-valued `i64`. Used by
