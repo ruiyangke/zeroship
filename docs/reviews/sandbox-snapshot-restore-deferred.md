@@ -873,3 +873,79 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Resolution**: both production `ResolvedSourceVmOps::teardown_source` impls return `Ok(())` unconditionally — it's a no-op stub, not a sync-on-async call. The real teardown runs from the admin/sweep async layer.
 
 ### [R7-API2] (CLOSED at c8000537) — see /commit log
+
+---
+
+## NEW r11 ROUND FINDINGS (added by pilot cycle 2026-05-25 r6 — arch r11, test-cov r11, security r11)
+
+### [R11-A1] (CRITICAL, architecture-r11, dup of R11-Q2) 4-site root-owned-secret-file loader duplication
+- **Source**: 2026-05-25 architecture-r11
+- **Files**: `crates/sandbox/src/snapshot_aead.rs:185` (R9-S4 closed), `persist.rs:333` (R9-S4b closed), `db.rs:824` (R9-S4c closed), `lib.rs:924` (R9-S4d closed at `b4c3ef27`)
+- **Symptom**: R9-S4 trio widened duplication 3→4 across the cycle. All 4 sites carry identical mode+uid+length+read+map_err logic. 6 near-identical tests across 3 files; R9-S4d added 2 more.
+- **Action**: extract to new `crates/sandbox/src/secret_io.rs` with `pub(crate) fn read_root_owned_secret_file(env_name, path, expected_len) -> Result<Vec<u8>, String>`. All 4 callers migrate. Consolidates the 8+ tests into one place. Closes R11-Q2 + R11-A1 in single PR.
+
+### [R11-A2] (IMPORTANT, architecture-r11) T-7 jobspec parallel-mode will fragment across 6 zones in nomad_ch.rs post-T-8
+- **Source**: 2026-05-25 architecture-r11 (read uncommitted T-7 working-tree state)
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:2213-2464` (T-7 adds `TaskDriverMode { RawExec, ChPlugin }` + 65 LOC parallel jobspec block; +241/-89 in working tree per test-cov r11)
+- **Symptom**: post-T-8 (bash wrapper removed) the cleanup spans 6 zones across the 5072-LOC file — surgical deletion across all 6. Architectural recommendation: land R10-A4 module split BEFORE T-8 so the deletion becomes `rm jobspec/rawexec.rs`.
+- **Action**: stage R10-A4 nomad_ch.rs split as a hard prerequisite for T-8. PR ordering: R10-A4 → T-7 lands → T-8 cluster validation → T-8 wrapper removal.
+
+### [R11-A3] (IMPORTANT, architecture-r11, 8th-cycle carry of R4-A1) AppState builder still 7 with_* + new_fixture; R8-API1 wrapper resolved into sandbox-agent (orthogonal)
+- **Source**: 2026-05-25 architecture-r11
+- **Resolution clarification**: r10's open question whether R8-API1's `boot_init_sandbox_id` would clean up AppState builder — NO. The wrapper lives in `crates/sandbox-agent/src/lib.rs`, not controller AppState. R4-A1 unchanged.
+
+### [R11-A4] (IMPORTANT, architecture-r11) C1-FOLLOWUP's `claim_orphan_transient_for_recovery` should move to recovery.rs
+- **Source**: 2026-05-25 architecture-r11
+- **File**: `crates/sandbox/src/db.rs:2520` + `restore_handler.rs:332` (`read_snapshot_row`)
+- **Symptom**: db.rs grew +105 LOC since C1-FOLLOWUP landed; recovery semantics now span db.rs (3108 LOC) AND restore_handler.rs. Recovery is its own bounded context.
+- **Action**: extract `crates/sandbox/src/recovery.rs` housing `claim_orphan_transient_for_recovery` + `read_snapshot_row` + `transient_state_lease_expired_sandboxes`. db.rs shrinks to schema/CRUD only.
+
+### [R11-A5] (CLOSED) Cross-crate ErrorEnvelope drift since r10: zero
+- **Source**: 2026-05-25 architecture-r11
+- **Resolution**: confirmed no field drift between sandbox + sandbox-agent envelope definitions since r10. R10-A5 verdict (keep duplicated) stands.
+
+### [R11-T1] (CRITICAL, test-coverage-r11) R10-T1 unaddressed + new 8th spawn_blocking site without panic handling
+- **Source**: 2026-05-25 test-coverage-r11
+- **Files**: `crates/sandbox/src/restore_handler.rs:294` (R10-C2 spawn_blocking; `let _ = …await` discards JoinHandle without panic-conversion — 8th spawn_blocking site, only one without explicit panic handling)
+- **Symptom**: R10-T1 (R10-C1+C2 integration tests structural-only) now 3rd-round critical. Combined with this 8th panic-recovery gap, the integration coverage hole is materially worse than r10 reported.
+- **Action**: subsumed by R10-T1's mandate to write a true do_restore_inner → CasLost rollback integration test.
+
+### [R11-T2] (CRITICAL, test-coverage-r11, 3rd-round carry) Persist(Some(_)) chain still untested
+- **Source**: 2026-05-25 test-coverage-r11 (continuation of R9-T1, R10-T2)
+- **File**: `crates/sandbox/src/restore_handler.rs:581-617`
+- **Symptom**: all 5 pg_e2e callsites of `restore_sandbox` still pass `persist=None`. 3 cycles without progress on the integration-through-`restore_sandbox` requirement.
+- **Action**: integration test that constructs `RealRestoreBackend::with_nomad_handle(...)`, populates `persist` with sealed record + fake snapshot artifact, calls `restore_sandbox`, asserts unseal + clock_resync_post_restore + register_restored all invoked with correct args.
+
+### [R11-T3] (IMPORTANT, test-coverage-r11) R7-API2 capability pin covers only 1 of 3 tiers
+- **Source**: 2026-05-25 test-coverage-r11
+- **File**: `crates/sandbox-agent/src/version.rs` + the new `mandatory_clock_resync_v1_present` test
+- **Symptom**: `proxy.ws-v1` + `auth.ed25519-v1.1` (named as "feature-detected" by R7-API2 commit body) have no equivalent regression pins.
+- **Action**: add 2 more capability-presence tests in the same module.
+
+### [R11-T4] (IMPORTANT, test-coverage-r11, drift evidence for R9-T6) derive_agent_url already drifted
+- **Source**: 2026-05-25 test-coverage-r11
+- **Files**: `crates/sandbox/src/restore_handler.rs:1153` (hardcodes `7777`) + `crates/sandbox/src/backend/nomad_ch.rs:1532` (uses `AGENT_PORT` const)
+- **Symptom**: R9-T6 predicted silent drift; it's already there. Two formulas not byte-equivalent in their dependency.
+- **Action**: parity test would fail today; one-line fix (use `AGENT_PORT` const in both) + the test pins the invariant.
+
+### [R11-T5] (MINOR, test-coverage-r11) R9-S4 family test fragmentation — extract helper first (now retro)
+- **Source**: 2026-05-25 test-coverage-r11
+- **Status**: R9-S4d shipped before this recommendation could be applied. Now 8 near-identical tests across 4 files. R11-Q2/R11-A1 helper extract would consolidate going forward.
+
+### [R11-S1] (CRITICAL, security-r11, elevation of R9-S4d) — CLOSED at b4c3ef27 — admin token uid check landed
+
+### [R11-S2] (MINOR, security-r11) `host_id` file at db.rs:1094-1105 reads with no mode/uid/shape validation
+- **Source**: 2026-05-25 security-r11
+- **File**: `crates/sandbox/src/db.rs:1094-1105` (reader) + `:1129-1138` (writer emits 0o600)
+- **Symptom**: writer is correct (0o600 mode); reader is symmetric-free. HA peer-identity spoofing → bypass of `claim_orphan_transient_for_recovery` self-host_id fence.
+- **Action**: add a mode + uid check on the reader. Mode 0o600 (matches writer); uid==0 (or relax to euid since the controller writes its own — match the writer's authority).
+
+### [R11-S3] (MINOR, security-r11, posture) chunk_aad missing sandbox_id + snapshot_taken_at
+- **Source**: 2026-05-25 security-r11
+- **File**: `crates/sandbox/src/snapshot_aead.rs:324-330` (`chunk_aad` returns `b"zsbx-snap" || chunk_index_le`)
+- **Symptom**: Poly1305 AAD doesn't bind sandbox_id or snapshot_taken_at. Amplifies R9-S2: under DEK collision (same-second re-snapshot), AAD without these fields means there's no last-line fence against cross-snapshot chunk-swap.
+- **Action**: bind both into AAD. Wire-incompatible — needs a version bump (header `cipher_id="v2"` if AAD shape changes).
+
+### [R11-Q2 / R11-A1] (UNIFIED) Extract `read_root_owned_secret_file` helper — closes 4 sites' duplication + 8+ tests' fragmentation
+
+### [R11-P2 + R11-P3] (CLOSED at 3d5c527f) BufReader/BufWriter on GCS download + SHA helpers
