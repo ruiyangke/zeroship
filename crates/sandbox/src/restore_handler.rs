@@ -321,6 +321,29 @@ async fn do_restore_inner(
     // ignore it (the LocalDiskSnapshotStore re-derives from
     // `<root>/<sandbox-id>/`). Surfaced here for tracing/logs.
     let get_result = store.get(&sandbox_id_typed, &alloc_dir, &snap.sha256);
+    // Bug-#14a diagnostic: surface what's on disk immediately after
+    // store.get returns. Prior cluster smokes (2026-05-22) reported
+    // the wake-time staging dir was empty despite a successful Ok
+    // from store.get. Logging file presence + sizes here gives the
+    // next cycle hard evidence whether the controller wrote files
+    // that subsequently disappeared, or store.get is mis-claiming
+    // success.
+    {
+        let mut sizes = Vec::with_capacity(3);
+        for name in ["config.json", "memory-ranges", "state.json"] {
+            let p = alloc_dir.join(name);
+            sizes.push(match std::fs::metadata(&p) {
+                Ok(m) => format!("{name}={} bytes", m.len()),
+                Err(e) => format!("{name}=MISSING ({e})"),
+            });
+        }
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            alloc_dir = %alloc_dir.display(),
+            stat = %sizes.join(", "),
+            "restore: post-store.get staged files"
+        );
+    }
     if let Err(e) = get_result {
         return Err(match e {
             crate::snapshot_store::SnapshotError::ChecksumMismatch { .. } => {

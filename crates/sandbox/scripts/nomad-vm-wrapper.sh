@@ -306,6 +306,18 @@ trap cleanup EXIT INT TERM
 # `--api-socket` is fresh (unrelated to the snapshot's recorded
 # api-socket path; CH treats it as a new control channel).
 if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
+  # Bug-#14 diagnostic: surface the actual on-disk state of the
+  # staging dir at the moment the wrapper inspects it. Prior cluster
+  # smokes (2026-05-22) reported the dir was empty at wake time
+  # despite the controller's store.get having returned Ok. Logging
+  # the dir contents + sizes + tap state to stderr (Nomad's task
+  # log) gives us the evidence the next cluster cycle needs.
+  echo "[wrapper] restore: ZSBX_RESTORE_FROM=$ZSBX_RESTORE_FROM" >&2
+  echo "[wrapper] restore: ls -la \$ZSBX_RESTORE_FROM:" >&2
+  ls -la "$ZSBX_RESTORE_FROM" 2>&1 | sed 's/^/[wrapper] restore:   /' >&2 || true
+  echo "[wrapper] restore: tap $TAP pre-CH-spawn:" >&2
+  ip -br link show "$TAP" 2>&1 | sed 's/^/[wrapper] restore:   /' >&2 || true
+
   # Defensive: confirm the staged dir exists + is non-empty. The
   # controller stages prior to job submission so the typical failure
   # mode is "controller rolled back mid-stage" — surface it loudly.
@@ -314,6 +326,11 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
      || [ ! -f "$ZSBX_RESTORE_FROM/config.json" ] \
      || [ ! -f "$ZSBX_RESTORE_FROM/state.json" ]; then
     echo "[wrapper] FATAL: ZSBX_RESTORE_FROM=$ZSBX_RESTORE_FROM missing one of {memory-ranges,config.json,state.json}" >&2
+    echo "[wrapper] FATAL: stat of each expected file:" >&2
+    for f in memory-ranges config.json state.json; do
+      stat -c '  %n: size=%s mtime=%y' "$ZSBX_RESTORE_FROM/$f" >&2 2>&1 || \
+        echo "  $ZSBX_RESTORE_FROM/$f: STAT FAILED (likely missing)" >&2
+    done
     exit 1
   fi
 
@@ -351,6 +368,20 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
     --restore    "source_url=file://$ZSBX_RESTORE_FROM" \
     > "$ZSBX_RUNTIME/ch.log" 2>&1 &
   CH_PID=$!
+
+  # Bug-#14b speculative fix: re-up the tap after CH spawn. CH's
+  # `--restore` re-attaches to the tap by name; depending on driver
+  # behaviour the tap can end up admin-DOWN even though we set it UP
+  # pre-spawn. A small poll loop (idempotent) ensures the tap is UP
+  # by the time the guest tries to send. Log state at 0/1/3s post-
+  # spawn so the next cluster cycle has empirical evidence.
+  (
+    for delay in 0.3 1 3; do
+      sleep "$delay"
+      ip -br link show "$TAP" 2>&1 | sed "s/^/[wrapper] restore: tap@+${delay}s   /" >&2 || true
+      ip link set "$TAP" up 2>&1 | sed "s/^/[wrapper] restore: tap-up-retry@+${delay}s: /" >&2 || true
+    done
+  ) &
 else
   # Cold boot. The cmdline carries the controller pubkey as hex
   # (`zsbx_pubkey=<hex>`); /sbin/init in the guest decodes it and
