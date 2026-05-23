@@ -1,6 +1,14 @@
 # crates/plugin-db — Deferred Backlog
 
-Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 16:47.
+Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 17:47 (post-P0 first-cycle sweep).
+
+**🎯 P0 CAPABILITY-TRAIT SPLIT COMPLETE** — 6-PR sequence landed locally between cycle 17:17 and the present. [C1] resolved. Tests at 367/391 (was 364/388 baseline). All architecture-axis findings the "design-vs-refactor" filter held back since cycle 14:47 are now eligible for re-evaluation.
+
+**Cycle 17:47 closures**: [C1] Backend trait half-applied (the entire P0 commit chain `9bc25726` → `9a241f58`).
+
+**Post-P0 backlog re-evaluation** (key items): I-R11-1 (more `pub(crate)` demotion) — superseded by P0 (capability traits replaced the surface). I-R11-2 (set_pool constructs PostgresBackend) — superseded; `set_pool` now wraps in `BackendHandle::Postgres`. I-R11-3 (create_ad_hoc_backend test escape hatch) — UNCHANGED, still in test-helpers. [I43] backend/postgres.rs:118 blocking pg_advisory_lock — UNCHANGED.
+
+
 
 **Cycle 16:47 closures (2)**: F1 warn-shape collection-slot snapshot test (`f173ed40` — closes error-ux r12 LOW; 364 lib tests pass) + F1 site-count drift sweep (`145e93c7` — closes docs-audit r10 + test-coverage r15 drift findings; corrected my own f173ed40 5+3 claim to the actual 6+2 at HEAD). 3 reviewers returned: **test-coverage r15 = 88 (+1)** (NEW-R14-1 partially closed; F1 family contract now backed by 2 snapshot tests); **docs-audit r10 = 91 (-1, first negative)** (caught the F1 site-count drift across 7 places — all closed by `145e93c7`); **performance r14 = 82 (±0)** (5th consecutive cycle without the `bench_v8_json_parse` forcing function; no regressions from cycle 15:17/15:47/16:17 commits).
 
@@ -107,16 +115,12 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ## CRITICAL (blocked or needs design)
 
-### [C1] Backend trait is half-applied (architecture R2-I1 / R2-I2 / R3-I1)
-- **Source**: `plugin-db-architecture-review-2026-05-21-round2.md` §4-I1, §4-I2; `plugin-db-architecture-review-2026-05-22-r3.md` §5
-- **File**: `crates/plugin-db/src/backend/mod.rs:68-355` (trait); `crates/plugin-db/src/migrations.rs:185-707` (six fns take `&PostgresBackend`); `crates/plugin-db/src/replication.rs:1-570` (bypasses trait); `crates/plugin-db/src/wal_consumer.rs:1-1258` (bypasses trait)
-- **Description**: The 26-method `Backend` trait is consumed generically only by `orchestrator/register_model/{plan,validate,apply}.rs` (`B: Backend`). Every other caller — `migrations::exec_*`, `v8_classes/migration.rs::ensure_backend`, `replication_ops.rs::ensure_pool`, and the entire `replication.rs` + `wal_consumer.rs` pair — names `&PostgresBackend` or talks directly to the raw `Pool`. The seam exists in name only; a future contributor adding a 27th method has no structural barrier preventing Postgres-specific leakage.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes. Grep `migrations.rs` line 185: `pub(crate) async fn exec_begin(backend: &PostgresBackend, …)` — concrete type, not `&impl Backend`. `replication.rs` and `wal_consumer.rs` do not import `Backend` at all.
-  - Blocker: **Design decision needed.** R2/R3 reviews explicitly recommend two paths: (1) shrink — delete the trait, keep `PostgresBackend` as a concrete struct; (2) grow — pull `query.rs` builders + replication slot ops behind the trait. R2 §6 recommends path (1) "for now" and (2) "when a second backend is in flight" (>6 months out per AGENTS.md).
-  - Already-superseded-by: N/A
-- **Effort**: large (multi-file refactor or full removal)
-- **Pickable this cycle**: no — needs explicit design decision from the user; both paths involve >5 files and one chooses an irreversible direction.
+### ~~[C1] Backend trait is half-applied~~ — **CLOSED by P0** (2026-05-22, commits `9bc25726` → `9a241f58`)
+- **Resolution path**: option (2) "grow the trait" via capability split per the converged design doc `docs/proposals/db-system-design.md` §7 + the P0 implementation plan `docs/proposals/p0-implementation-plan.md`.
+- **Closed by**: P0 PR 1 (`9bc25726` — carve SqlExecutor + LockManager), PR 2 (`1de39b34` — NamespaceManager + SchemaIntrospect + IndexBuilder + free-fn audit), PR 3 (`a5ad7bf7` — register_model migration + PgLockManager extension), PR 4 (`e0f10ed4` — migrations.rs migration + LockClient reified), PR 5 (`63314063` — BackendHandle enum + IsolateDbContext swap), PR 6 (`9a241f58` — LockScope enum + LockGuard rename).
+- **Post-P0 state**: `&PostgresBackend` parameter sites = 0; `dyn Backend` count = 0; `Backend` super-trait body = empty (pure composition marker). Every consumer (`register_model/*`, `migrations.rs`, `v8_classes/*`) takes a capability bound. The `replication.rs` + `wal_consumer.rs` pair is explicitly PG-only per §7 — outside the trait by design, not a half-application.
+- **Tests**: 367 lib / 391 hardening (up from 364/388 baseline at cycle 17:17). Integration suite still 73 / 1 ignored.
+- **Out-of-band**: 4 commits unpushed (`a5ad7bf7`, `e0f10ed4`, `63314063`, `9a241f58`); SSH agent dropped after PR 2 push. Will push when user runs `ssh-add`.
 
 ---
 
