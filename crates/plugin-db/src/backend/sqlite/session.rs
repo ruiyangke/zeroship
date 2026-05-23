@@ -582,6 +582,21 @@ impl SqliteSessionHandle {
     pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         self.0.query(sql, params).await
     }
+
+    /// **P5 PR 3.5** — forward a `query_typed` through the underlying
+    /// session. `pub` under the `test-helpers` feature so the P5 PR 3.5
+    /// end-to-end encrypted-column round-trip test in
+    /// `tests/sqlite_integration.rs` can read BLOB columns back as raw
+    /// bytes without the `<N bytes blob>` stringification `query`
+    /// emits.
+    #[cfg(feature = "test-helpers")]
+    pub async fn query_typed(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<TypedRows, DbError> {
+        self.0.query_typed(sql, params).await
+    }
 }
 
 impl From<Rc<SqliteSession>> for SqliteSessionHandle {
@@ -597,18 +612,67 @@ impl From<Rc<SqliteSession>> for SqliteSessionHandle {
 // ---------------------------------------------------------------------------
 
 fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, DbError> {
-    // Bind params positionally. rusqlite accepts `&[&dyn ToSql]` via
-    // `&[&(dyn ToSql + Send + Sync)]`; we synthesise it from
-    // `&[String]` by collecting `&str` references first (cheap — no
-    // allocation, just borrow each `String`).
-    let refs: Vec<&dyn rusqlite::ToSql> = params
+    // **P5 PR 3.5** — the param vector carries an optional encrypted-
+    // column side-channel: a value tagged with [`SQLITE_ENC_BLOB_PREFIX`]
+    // is base64-decoded to raw bytes and bound as BLOB instead of TEXT.
+    // The PG arm never produces this prefix; non-encrypted params
+    // travel as plain `String` on both arms.
+    let decoded = decode_blob_params(params)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = decoded
         .iter()
-        .map(|s| s as &dyn rusqlite::ToSql)
+        .map(|p| p.as_to_sql())
         .collect();
     let n = conn
         .execute(sql, refs.as_slice())
         .map_err(from_sqlite)?;
     Ok(n as u64)
+}
+
+/// **P5 PR 3.5** — typed bind value. Either a borrowed `&str` (the
+/// TEXT default — preserves the zero-alloc shape that
+/// `&[String] → &[&dyn ToSql]` had pre-PR-3.5) or an owned `Vec<u8>`
+/// produced by base64-decoding a [`SQLITE_ENC_BLOB_PREFIX`]-tagged
+/// param.
+enum BindParam<'a> {
+    /// Plain TEXT bind — borrows from the caller's `Vec<String>`.
+    Text(&'a str),
+    /// BLOB bind — owns the decoded bytes.
+    Blob(Vec<u8>),
+}
+
+impl BindParam<'_> {
+    fn as_to_sql(&self) -> &dyn rusqlite::ToSql {
+        match self {
+            Self::Text(s) => s as &dyn rusqlite::ToSql,
+            Self::Blob(v) => v as &dyn rusqlite::ToSql,
+        }
+    }
+}
+
+/// **P5 PR 3.5** — scan the param vector for encrypted-column side-
+/// channel markers and produce a typed bind list. Values prefixed with
+/// [`SQLITE_ENC_BLOB_PREFIX`] are base64-decoded to raw bytes and bound
+/// as BLOB; every other value passes through as TEXT.
+fn decode_blob_params(params: &[String]) -> Result<Vec<BindParam<'_>>, DbError> {
+    use base64::Engine as _;
+    let prefix = crate::query::SQLITE_ENC_BLOB_PREFIX;
+    let mut out = Vec::with_capacity(params.len());
+    for p in params {
+        match p.strip_prefix(prefix) {
+            Some(b64) => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| {
+                        DbError::internal(format!(
+                            "sqlite session: encrypted-column param is not valid base64: {e}"
+                        ))
+                    })?;
+                out.push(BindParam::Blob(bytes));
+            }
+            None => out.push(BindParam::Text(p.as_str())),
+        }
+    }
+    Ok(out)
 }
 
 fn run_query(
@@ -618,9 +682,12 @@ fn run_query(
 ) -> Result<Vec<Row>, DbError> {
     let mut stmt = conn.prepare(sql).map_err(from_sqlite)?;
     let column_count = stmt.column_count();
-    let refs: Vec<&dyn rusqlite::ToSql> = params
+    // **P5 PR 3.5** — same encrypted-column blob-bind side-channel as
+    // `run_exec` (see [`decode_blob_params`]).
+    let decoded = decode_blob_params(params)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = decoded
         .iter()
-        .map(|s| s as &dyn rusqlite::ToSql)
+        .map(|p| p.as_to_sql())
         .collect();
     let mut rows = stmt.query(refs.as_slice()).map_err(from_sqlite)?;
     let mut out = Vec::<Row>::new();
@@ -679,9 +746,12 @@ fn run_query_typed(
     let columns: Vec<String> = (0..column_count)
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = params
+    // **P5 PR 3.5** — same encrypted-column blob-bind side-channel as
+    // `run_exec` (see [`decode_blob_params`]).
+    let decoded = decode_blob_params(params)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = decoded
         .iter()
-        .map(|s| s as &dyn rusqlite::ToSql)
+        .map(|p| p.as_to_sql())
         .collect();
     let mut rows = stmt.query(refs.as_slice()).map_err(from_sqlite)?;
     let mut out = Vec::<Vec<TypedCell>>::new();

@@ -56,7 +56,13 @@ pub(crate) mod error;
 // `fts.rs` so the documented shapes stay unit-testable in isolation.
 pub(crate) mod fts;
 pub(crate) mod lock;
+// **P5 PR 3.5** — `pub` under `test-helpers` so the e2e encrypted-
+// column round-trip test in `tests/sqlite_integration.rs` can name
+// `session::TypedCell` for typed BLOB extraction.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod session;
+#[cfg(feature = "test-helpers")]
+pub mod session;
 // **P4 PR 5** — pure-Rust haversine + `(lat, lng)` BLOB round-trip.
 // The `impl SpatialIndex for SqliteBackend` block at the bottom of
 // this file routes the flat-scan path through this module; the math

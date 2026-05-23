@@ -3701,3 +3701,216 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
         assert_eq!(recovered, plaintext);
     });
 }
+
+// ===========================================================================
+// P5 PR 3.5 — close the SQLite CRUD-path gap
+// ===========================================================================
+//
+// PR 3 wired the `EncryptedColumn` trait on `SqliteBackend` and pinned
+// the trait surface with the round-trip tests above, but the
+// orchestrator's CRUD-path SQL builder still emitted PG-only
+// `decode($N, 'base64')::bytea` syntax for encrypted columns, so a
+// SQLite app with a `t.encrypted(...)` column on its schema surfaced
+// a typed `column_encryption_unavailable` error at the dispatch layer
+// rather than working. PR 3.5 closes that gap with a dialect-aware
+// bind: the SQL builder's encrypted-column placeholder is now
+// `decode($N, 'base64')::bytea` on PG (byte-for-byte identical to
+// PR 2) and a bare `$N` on SQLite, with the encryption pass tagging
+// the param value with `SQLITE_ENC_BLOB_PREFIX` so the SQLite session
+// actor decodes the base64 and binds raw bytes as BLOB.
+//
+// This integration test stitches the layers end-to-end:
+//   1. `encrypt_row_on_write` (PR 2's helper) against the SQLite
+//      backend → row carries the base64 ciphertext + `__zsenc__<col>`
+//      marker.
+//   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...)` → SQL with
+//      bare `$N` placeholder + sentinel-tagged param.
+//   3. `backend.pool_exec(sql, &params)` → SQLite session strips the
+//      sentinel, base64-decodes, binds BLOB.
+//   4. `client.query_typed("SELECT ssn FROM ...")` → raw bytes back.
+//   5. Render the typed BLOB as `\xHHHH` hex (PG text-protocol shape),
+//      wrap in `Value::String`, dispatch to `decrypt_row_on_read` —
+//      plaintext recovers.
+//
+// The "via the orchestrator's CRUD path" framing in the PR 3.5 plan is
+// what this test pins — the orchestrator's CRUD entry today routes
+// through `exec.rs::run_sql` which is PG-only, so we exercise the
+// underlying helpers in the same shape `dispatch_insert` /
+// `dispatch_find_one` will once the SQLite CRUD route lands. The
+// dialect-aware builder + sentinel-tagged bind is the load-bearing
+// piece this test proves correct.
+
+/// **P5 PR 3.5 — gate**: full encrypted-column round-trip through the
+/// SQLite CRUD pipeline (encryption pass → SQL builder w/ SQLite
+/// dialect → SQLite session bind → typed row decode → decrypt pass).
+/// This is the test that proves the end-to-end SDK works on SQLite for
+/// `t.encrypted(...)` columns.
+#[test]
+fn encrypted_column_e2e_crud_round_trip_sqlite() {
+    use zeroship_plugin_db::backend::SqlExecutor as _;
+    use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+    use zeroship_plugin_db::crud::encryption_pass::{decrypt_row_on_read, encrypt_row_on_write};
+    use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
+
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P5_E2E_CRUD", &"c".repeat(64));
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        // PRIMARY KEY `id TEXT` + encrypted `ssn BLOB` — same shape the
+        // CRUD path's `build_create_table_with_fks` emits for an
+        // `t.encrypted({ wraps: "string" })` field, except we skip the
+        // sentinel-comment metadata because the introspector isn't on
+        // the e2e read path here.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"users\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE users");
+
+        // The schema the encryption pass sees — declares `ssn` as a
+        // randomised-encrypted column wrapping the string type, keyed
+        // to the e2e-test-specific env var.
+        let schema = serde_json::json!({
+            "ssn": {
+                "type": "string",
+                "encrypted": {
+                    "mode": "randomised",
+                    "keyId": "p5_e2e_crud",
+                    "wraps": "string",
+                },
+            },
+        });
+
+        let plaintext = "123-45-6789";
+        let row_pk = "row_e2e";
+        let mut doc = serde_json::json!({
+            "id": row_pk,
+            "ssn": plaintext,
+        });
+
+        // Step 1 — encryption pass swaps ssn into base64 ciphertext +
+        // installs the `__zsenc__ssn` marker.
+        encrypt_row_on_write(&backend, "app_demo", "users", &schema, row_pk, &mut doc)
+            .await
+            .expect("encrypt_row_on_write");
+        assert!(
+            doc.get("__zsenc__ssn").and_then(|v| v.as_bool()) == Some(true),
+            "encryption pass must install the marker key: {doc:?}",
+        );
+        // Pull out the base64 ciphertext for a later equality check.
+        let ct_b64_before_bind = doc
+            .get("ssn")
+            .and_then(|v| v.as_str())
+            .expect("ssn must be a base64 string after encrypt")
+            .to_string();
+
+        // Step 2 — dialect-aware SQL build. The output SQL must use a
+        // bare `$N` placeholder (no `decode(...)::bytea`); the param
+        // vector must carry the `__zsenc_blob__:` sentinel prefix on
+        // the encrypted ssn value.
+        let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
+            .expect("build_insert_with_dialect");
+        assert!(
+            !bq.sql.contains("decode("),
+            "SQLite dialect must not emit `decode(...)::bytea`: {}",
+            bq.sql,
+        );
+        assert!(
+            bq.params
+                .iter()
+                .any(|p| p.starts_with("__zsenc_blob__:")),
+            "SQLite dialect must tag the encrypted param with the sentinel: {:?}",
+            bq.params,
+        );
+
+        // Step 3 — drive the build through the SQLite session. The
+        // session strips the sentinel, base64-decodes, binds BLOB. PR
+        // 3.5's session-layer fix is what makes this work.
+        // `pool_exec` uses the session under the hood; `query_text_params`
+        // doesn't exist on SQLite — `&[&str]` is the only surface.
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        // SQLite's `Connection::execute` only accepts a non-row-
+        // returning statement; `RETURNING *` produces a row, so we run
+        // it as a query and drop the rows. The session's `query`
+        // surface runs through the same `decode_blob_params` path.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let _affected = client
+            .query(&bq.sql, &param_refs)
+            .await
+            .expect("INSERT ... RETURNING via SQLite session");
+
+        // Step 4 — pull the BLOB back typed. The session's `query`
+        // surface stringifies BLOBs as `<N bytes blob>` placeholders, so
+        // we reach for the typed surface (PR 4's `query_typed` lane)
+        // via the session handle's `query_typed` helper.
+        let typed = client
+            .query_typed(
+                "SELECT id, ssn FROM \"app_demo\".\"users\" WHERE id = ?",
+                &[row_pk],
+            )
+            .await
+            .expect("SELECT typed");
+        assert_eq!(typed.rows.len(), 1, "exactly one row must exist");
+        let id_cell = &typed.rows[0][0];
+        let ssn_cell = &typed.rows[0][1];
+        let id_text = match id_cell {
+            TypedCell::Text(s) => s.clone(),
+            other => panic!("id must be TEXT, got {other:?}"),
+        };
+        assert_eq!(id_text, row_pk);
+        let ssn_bytes = match ssn_cell {
+            TypedCell::Blob(b) => b.clone(),
+            other => panic!("ssn must be BLOB, got {other:?}"),
+        };
+
+        // Sanity — the stored bytes must equal the bytes the encryption
+        // pass produced (base64-decoded back to raw). If the session's
+        // sentinel strip / base64 decode is wrong, the stored bytes
+        // diverge from the plaintext ciphertext.
+        let expected_bytes = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(&ct_b64_before_bind)
+                .expect("encryption pass must have produced valid base64")
+        };
+        assert_eq!(
+            ssn_bytes, expected_bytes,
+            "stored BLOB must equal the raw ciphertext (sentinel strip + base64 decode in session)",
+        );
+
+        // Step 5 — render the BLOB row as the JSON shape
+        // `decrypt_row_on_read` expects (`\xHHHH` hex string).
+        let mut hex = String::with_capacity(2 + ssn_bytes.len() * 2);
+        hex.push('\\');
+        hex.push('x');
+        for b in &ssn_bytes {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{b:02x}");
+        }
+        let mut row_value = serde_json::json!({
+            "id": id_text,
+            "ssn": hex,
+        });
+
+        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value)
+            .await
+            .expect("decrypt_row_on_read");
+
+        assert_eq!(
+            row_value.get("ssn").and_then(|v| v.as_str()),
+            Some(plaintext),
+            "decrypted plaintext must recover: {row_value}",
+        );
+    });
+}

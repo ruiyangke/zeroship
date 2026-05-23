@@ -48,6 +48,73 @@ pub struct BuiltQuery {
     pub params: Vec<String>,
 }
 
+/// **P5 PR 3.5** — SQL dialect tag for the small set of build sites
+/// whose encrypted-column placeholder shape diverges between PG and
+/// SQLite.
+///
+/// PG uses `decode($N, 'base64')::bytea` so the BYTEA column receives
+/// raw bytes from a base64-encoded text param (the encryption pass
+/// writes `Value::String(b64)`). SQLite's text-mode bind layer cannot
+/// represent BLOBs through a `&str` param — we emit a plain `$N`
+/// placeholder and tag the param value with the
+/// [`SQLITE_ENC_BLOB_PREFIX`] sentinel; the SQLite session actor
+/// recognises the sentinel and binds raw `Vec<u8>` (BLOB) instead of
+/// text. Non-encrypted parameters travel as plain `String` on both
+/// arms.
+///
+/// PG-side behaviour is byte-for-byte identical to PR 2 — the
+/// `decode($N, 'base64')::bytea` SQL fragment is unchanged and the
+/// sentinel-prefix is never produced on the PG arm. The dialect flag
+/// only flips behaviour for `t.encrypted(...)`-declared columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlDialect {
+    /// Postgres dialect: encrypted-column binds wrap the placeholder
+    /// with `decode($N, 'base64')::bytea` so the BYTEA column receives
+    /// raw bytes from the base64 text param. This is the dialect every
+    /// PR 2 build site already emits.
+    Postgres,
+    /// SQLite dialect: encrypted-column binds emit `$N` and the param
+    /// value is tagged with the [`SQLITE_ENC_BLOB_PREFIX`] sentinel so
+    /// the session actor binds raw bytes (BLOB) instead of text.
+    Sqlite,
+}
+
+impl SqlDialect {
+    /// Build the placeholder SQL fragment for an encrypted-column
+    /// parameter at position `n` (1-indexed). PG wraps the placeholder
+    /// in a `decode(...)::bytea` cast; SQLite emits a bare `$N`.
+    pub(crate) fn encrypted_column_bind_placeholder(self, n: usize) -> String {
+        match self {
+            Self::Postgres => format!("decode(${n}, 'base64')::bytea"),
+            Self::Sqlite => format!("${n}"),
+        }
+    }
+
+    /// Wrap an encrypted-column base64 param value with the
+    /// dialect-appropriate side-channel. PG returns the value
+    /// unchanged (it is decoded by the SQL fragment from
+    /// [`SqlDialect::encrypted_column_bind_placeholder`]); SQLite
+    /// prepends [`SQLITE_ENC_BLOB_PREFIX`] so the session actor can
+    /// route the param through a binary bind.
+    pub(crate) fn wrap_encrypted_param(self, b64_value: String) -> String {
+        match self {
+            Self::Postgres => b64_value,
+            Self::Sqlite => format!("{SQLITE_ENC_BLOB_PREFIX}{b64_value}"),
+        }
+    }
+}
+
+/// Sentinel prefix the SQLite session uses to recognise an encrypted-
+/// column param that must be base64-decoded and bound as BLOB. The
+/// prefix is deliberately long + improbable: a base64 payload contains
+/// only `[A-Za-z0-9+/=]`, never `_` or `:`, so this prefix can never
+/// collide with a real base64 value the encryption pass writes.
+///
+/// The SQLite session strips the prefix and base64-decodes the
+/// remainder; PG never sees a value with this prefix because
+/// [`SqlDialect::wrap_encrypted_param`] is a no-op on the PG arm.
+pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zsenc_blob__:";
+
 /// Validate a collection name: alphanumeric + underscores only.
 ///
 /// Additional security constraints (beyond character allowlist):
@@ -1398,10 +1465,30 @@ pub fn build_count(
 }
 
 /// Build an INSERT query: `INSERT INTO "app_id"."collection" (...) VALUES (...) RETURNING *`
+///
+/// PG-flavour wrapper around [`build_insert_with_dialect`]. Every
+/// existing CRUD call site stays on this signature — the orchestrator's
+/// `dispatch_insert` path still goes through Postgres today.
 pub fn build_insert(
     app_id: &str,
     collection: &str,
     doc: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_insert_with_dialect(app_id, collection, doc, SqlDialect::Postgres)
+}
+
+/// **P5 PR 3.5** — dialect-aware INSERT builder.
+///
+/// PG emits `decode($N, 'base64')::bytea` for encrypted columns
+/// (preserved byte-for-byte from PR 2); SQLite emits `$N` and tags the
+/// param value with [`SQLITE_ENC_BLOB_PREFIX`] so the session actor
+/// can bind the raw bytes as BLOB. Non-encrypted columns are
+/// dialect-agnostic on both arms.
+pub fn build_insert_with_dialect(
+    app_id: &str,
+    collection: &str,
+    doc: &Value,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -1424,8 +1511,8 @@ pub fn build_insert(
     // value at `<col>` is base64-encoded ciphertext. Walk the doc once
     // to collect those marker keys so we can:
     //   1. Skip emitting marker keys as columns.
-    //   2. Wrap encrypted-column placeholders with
-    //      `decode($N, 'base64')::bytea` so PG binds the raw bytes.
+    //   2. Wrap encrypted-column placeholders with the dialect's bind
+    //      shape ([`SqlDialect::encrypted_column_bind_placeholder`]).
     let encrypted_cols = collect_encrypted_cols(obj);
 
     let mut columns = Vec::new();
@@ -1445,10 +1532,17 @@ pub fn build_insert(
         if value.is_null() {
             placeholders.push("NULL".to_string());
         } else {
-            params.push(value_to_param(value));
+            let is_encrypted = encrypted_cols.contains(key.as_str());
+            let raw = value_to_param(value);
+            let param_value = if is_encrypted {
+                dialect.wrap_encrypted_param(raw)
+            } else {
+                raw
+            };
+            params.push(param_value);
             let n = params.len();
-            if encrypted_cols.contains(key.as_str()) {
-                placeholders.push(format!("decode(${n}, 'base64')::bytea"));
+            if is_encrypted {
+                placeholders.push(dialect.encrypted_column_bind_placeholder(n));
             } else {
                 placeholders.push(format!("${n}"));
             }
@@ -1509,6 +1603,18 @@ pub fn build_set_clauses(
     update: &Value,
     params: &mut Vec<String>,
 ) -> Result<Vec<String>, QueryError> {
+    build_set_clauses_with_dialect(update, params, SqlDialect::Postgres)
+}
+
+/// **P5 PR 3.5** — dialect-aware SET-clause builder for `build_update_one` /
+/// `build_update_many`. PG keeps the `decode($N, 'base64')::bytea` cast
+/// (byte-for-byte identical to PR 2); SQLite emits a plain `$N` and
+/// tags the encrypted-column param value with [`SQLITE_ENC_BLOB_PREFIX`].
+pub fn build_set_clauses_with_dialect(
+    update: &Value,
+    params: &mut Vec<String>,
+    dialect: SqlDialect,
+) -> Result<Vec<String>, QueryError> {
     let update_obj = update
         .as_object()
         .ok_or_else(|| QueryError::InvalidFilter("update must be an object".to_string()))?;
@@ -1516,7 +1622,8 @@ pub fn build_set_clauses(
     // **P5 PR 2** — collect encrypted-column markers from the update
     // doc (top-level AND nested `$set`). The encryption pass deposits
     // both the base64 value and a `__zsenc__<col>` marker; we use the
-    // marker set to wrap the placeholder with `decode($N, 'base64')::bytea`.
+    // marker set to wrap the placeholder via the dialect's bind shape
+    // (`SqlDialect::encrypted_column_bind_placeholder`).
     let mut encrypted_cols = collect_encrypted_cols(update_obj);
     if let Some(set_obj) = update_obj.get("$set").and_then(|v| v.as_object()) {
         encrypted_cols.extend(collect_encrypted_cols(set_obj));
@@ -1565,10 +1672,17 @@ pub fn build_set_clauses(
 
                 let clause = match op {
                     "$set" => {
-                        params.push(value_to_param(op_val));
+                        let is_encrypted = encrypted_cols.contains(key.as_str());
+                        let raw = value_to_param(op_val);
+                        let param_value = if is_encrypted {
+                            dialect.wrap_encrypted_param(raw)
+                        } else {
+                            raw
+                        };
+                        params.push(param_value);
                         let n = params.len();
-                        if encrypted_cols.contains(key.as_str()) {
-                            format!("{col} = decode(${n}, 'base64')::bytea")
+                        if is_encrypted {
+                            format!("{col} = {}", dialect.encrypted_column_bind_placeholder(n))
                         } else {
                             format!("{col} = ${n}")
                         }
@@ -1617,10 +1731,17 @@ pub fn build_set_clauses(
         }
 
         // Plain field: value — treat as $set
-        params.push(value_to_param(value));
+        let is_encrypted = encrypted_cols.contains(key.as_str());
+        let raw = value_to_param(value);
+        let param_value = if is_encrypted {
+            dialect.wrap_encrypted_param(raw)
+        } else {
+            raw
+        };
+        params.push(param_value);
         let n = params.len();
-        if encrypted_cols.contains(key.as_str()) {
-            set_clauses.push(format!("{col} = decode(${n}, 'base64')::bytea"));
+        if is_encrypted {
+            set_clauses.push(format!("{col} = {}", dialect.encrypted_column_bind_placeholder(n)));
         } else {
             set_clauses.push(format!("{col} = ${n}"));
         }
@@ -1635,11 +1756,29 @@ pub fn build_set_clauses(
 }
 
 /// Build an UPDATE query: `UPDATE "app_id"."collection" SET ... WHERE ctid = (...) RETURNING *`
+///
+/// PG-flavour wrapper — every existing call site goes through Postgres.
 pub fn build_update_one(
     app_id: &str,
     collection: &str,
     filter: &Value,
     update: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_update_one_with_dialect(app_id, collection, filter, update, SqlDialect::Postgres)
+}
+
+/// **P5 PR 3.5** — dialect-aware `updateOne` builder. Encrypted-column
+/// binds follow the dialect's
+/// [`SqlDialect::encrypted_column_bind_placeholder`]. The `ctid` subquery
+/// shape is PG-specific (`SqlDialect::Sqlite` callers should rebuild
+/// the LIMIT 1 narrowing differently — out of scope for PR 3.5; the
+/// builder body remains PG-shaped here).
+pub fn build_update_one_with_dialect(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    update: &Value,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -1648,11 +1787,14 @@ pub fn build_update_one(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let set_clauses = build_set_clauses(update, &mut params)?;
+    let set_clauses = build_set_clauses_with_dialect(update, &mut params, dialect)?;
 
     let where_clause = build_where(filter, &mut params)?;
 
-    // LIMIT 1 for updateOne — use a subquery with ctid for Postgres
+    // LIMIT 1 for updateOne — PG-flavoured `ctid` subquery. The SQLite
+    // arm's equivalent narrowing is a future PR; the dialect flag only
+    // selects the encrypted-column bind shape inside the SET clauses
+    // for now.
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE ctid = (SELECT ctid FROM {schema}.{table}{} LIMIT 1) RETURNING *",
         set_clauses.join(", "),
@@ -1670,10 +1812,22 @@ pub fn build_update_one(
 /// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING *`
 ///
 /// All docs must have the same column set (defined by the first document).
+///
+/// PG-flavour wrapper around [`build_insert_many_with_dialect`].
 pub fn build_insert_many(
     app_id: &str,
     collection: &str,
     docs: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_insert_many_with_dialect(app_id, collection, docs, SqlDialect::Postgres)
+}
+
+/// **P5 PR 3.5** — dialect-aware `insertMany` builder.
+pub fn build_insert_many_with_dialect(
+    app_id: &str,
+    collection: &str,
+    docs: &Value,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -1745,10 +1899,17 @@ pub fn build_insert_many(
             if val.is_null() {
                 placeholders.push("NULL".to_string());
             } else {
-                params.push(value_to_param(val));
+                let is_encrypted = encrypted_cols.contains(key.as_str());
+                let raw = value_to_param(val);
+                let param_value = if is_encrypted {
+                    dialect.wrap_encrypted_param(raw)
+                } else {
+                    raw
+                };
+                params.push(param_value);
                 let n = params.len();
-                if encrypted_cols.contains(key.as_str()) {
-                    placeholders.push(format!("decode(${n}, 'base64')::bytea"));
+                if is_encrypted {
+                    placeholders.push(dialect.encrypted_column_bind_placeholder(n));
                 } else {
                     placeholders.push(format!("${n}"));
                 }
@@ -1768,11 +1929,26 @@ pub fn build_insert_many(
 
 /// Build an UPDATE query for multiple rows (no LIMIT 1):
 /// `UPDATE "app_id"."collection" SET ... WHERE ... RETURNING *`
+///
+/// PG-flavour wrapper around [`build_update_many_with_dialect`].
 pub fn build_update_many(
     app_id: &str,
     collection: &str,
     filter: &Value,
     update: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    build_update_many_with_dialect(app_id, collection, filter, update, SqlDialect::Postgres)
+}
+
+/// **P5 PR 3.5** — dialect-aware `updateMany` builder. Encrypted-column
+/// binds follow the dialect's
+/// [`SqlDialect::encrypted_column_bind_placeholder`].
+pub fn build_update_many_with_dialect(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    update: &Value,
+    dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
@@ -1781,7 +1957,7 @@ pub fn build_update_many(
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
-    let set_clauses = build_set_clauses(update, &mut params)?;
+    let set_clauses = build_set_clauses_with_dialect(update, &mut params, dialect)?;
 
     let where_clause = build_where(filter, &mut params)?;
 
@@ -4930,5 +5106,160 @@ mod tests {
         let schema = serde_json::json!({ long_field: { "type": "string" } });
         let result = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline);
         assert!(result.is_err(), "expected error for 64-byte field name");
+    }
+
+    // -----------------------------------------------------------------
+    // P5 PR 3.5 — dialect-aware encrypted-column bind helpers
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dialect_pg_encrypted_placeholder_is_decode_bytea_cast() {
+        let p = SqlDialect::Postgres.encrypted_column_bind_placeholder(3);
+        assert_eq!(p, "decode($3, 'base64')::bytea");
+    }
+
+    #[test]
+    fn dialect_sqlite_encrypted_placeholder_is_bare_param() {
+        let p = SqlDialect::Sqlite.encrypted_column_bind_placeholder(7);
+        assert_eq!(p, "$7");
+    }
+
+    #[test]
+    fn dialect_pg_wrap_encrypted_param_is_identity() {
+        let v = SqlDialect::Postgres.wrap_encrypted_param("abc==".to_string());
+        assert_eq!(v, "abc==");
+    }
+
+    #[test]
+    fn dialect_sqlite_wrap_encrypted_param_prepends_sentinel() {
+        let v = SqlDialect::Sqlite.wrap_encrypted_param("abc==".to_string());
+        assert_eq!(v, format!("{SQLITE_ENC_BLOB_PREFIX}abc=="));
+    }
+
+    /// PG-flavour `build_insert` for an encrypted column must continue
+    /// to emit the `decode($N, 'base64')::bytea` cast byte-for-byte and
+    /// pass the base64 param through unchanged. This pins the
+    /// regression check the task calls out as load-bearing.
+    #[test]
+    fn build_insert_pg_encrypted_column_unchanged_from_pr2() {
+        let doc = serde_json::json!({
+            "id": "row1",
+            "ssn": "Y2lwaGVydGV4dF9ibG9i",
+            "__zsenc__ssn": true,
+        });
+        let bq = build_insert("app1", "users", &doc).expect("build_insert ok");
+        assert!(
+            bq.sql.contains("decode($"),
+            "PG path must wrap encrypted-column placeholder with decode(...)::bytea: {}",
+            bq.sql,
+        );
+        assert!(
+            bq.sql.contains("'base64')::bytea"),
+            "PG path must keep the BYTEA cast: {}",
+            bq.sql,
+        );
+        // The encrypted param must reach the bind layer as plain
+        // base64 (no `__zsenc_blob__:` sentinel on the PG arm).
+        assert!(
+            bq.params
+                .iter()
+                .all(|p| !p.starts_with(SQLITE_ENC_BLOB_PREFIX)),
+            "PG path must never emit the SQLite blob sentinel: {:?}",
+            bq.params,
+        );
+        // The marker key itself must not leak as a column.
+        assert!(
+            !bq.sql.contains("__zsenc__"),
+            "marker keys must not appear as columns: {}",
+            bq.sql,
+        );
+    }
+
+    /// SQLite-flavour `build_insert_with_dialect` must emit a bare `$N`
+    /// placeholder for encrypted columns and tag the param value with
+    /// `SQLITE_ENC_BLOB_PREFIX` so the session actor binds raw bytes
+    /// as BLOB. The marker key must not surface in the SQL.
+    #[test]
+    fn build_insert_sqlite_encrypted_column_emits_bare_placeholder() {
+        let doc = serde_json::json!({
+            "id": "row1",
+            "ssn": "Y2lwaGVydGV4dF9ibG9i",
+            "__zsenc__ssn": true,
+        });
+        let bq = build_insert_with_dialect("app1", "users", &doc, SqlDialect::Sqlite)
+            .expect("build_insert_with_dialect ok");
+        assert!(
+            !bq.sql.contains("decode("),
+            "SQLite path must NOT emit the PG `decode(...)::bytea` cast: {}",
+            bq.sql,
+        );
+        assert!(
+            !bq.sql.contains("::bytea"),
+            "SQLite path must NOT emit the PG `::bytea` cast: {}",
+            bq.sql,
+        );
+        // At least one param must carry the sentinel prefix (the
+        // encrypted ssn value).
+        assert!(
+            bq.params
+                .iter()
+                .any(|p| p.starts_with(SQLITE_ENC_BLOB_PREFIX)),
+            "SQLite path must tag the encrypted param with sentinel: {:?}",
+            bq.params,
+        );
+        // The marker key itself must not leak as a column.
+        assert!(
+            !bq.sql.contains("__zsenc__"),
+            "marker keys must not appear as columns: {}",
+            bq.sql,
+        );
+    }
+
+    /// `build_update_one_with_dialect` on the SQLite arm must mirror
+    /// the insert path: bare `$N` for encrypted columns + sentinel-
+    /// prefixed param. PG behaviour is byte-for-byte identical to PR 2.
+    #[test]
+    fn build_update_one_sqlite_encrypted_column_sentinel_tag() {
+        let filter = serde_json::json!({ "id": "row1" });
+        let update = serde_json::json!({
+            "ssn": "Y2lwaGVydGV4dF9ibG9i",
+            "__zsenc__ssn": true,
+        });
+        let bq = build_update_one_with_dialect(
+            "app1",
+            "users",
+            &filter,
+            &update,
+            SqlDialect::Sqlite,
+        )
+        .expect("build_update_one_with_dialect ok");
+        assert!(!bq.sql.contains("decode("), "no PG cast: {}", bq.sql);
+        assert!(
+            bq.params
+                .iter()
+                .any(|p| p.starts_with(SQLITE_ENC_BLOB_PREFIX)),
+            "sentinel tag on the encrypted param: {:?}",
+            bq.params,
+        );
+    }
+
+    /// `build_insert_many_with_dialect` SQLite arm: every per-doc
+    /// encrypted-column param carries the sentinel; the SQL stays
+    /// bare-`$N`.
+    #[test]
+    fn build_insert_many_sqlite_encrypted_columns_all_tagged() {
+        let docs = serde_json::json!([
+            { "id": "row1", "ssn": "Y2lwaGVydGV4dF9ibG9i", "__zsenc__ssn": true },
+            { "id": "row2", "ssn": "YW5vdGhlcl9jaXBoZXI=", "__zsenc__ssn": true },
+        ]);
+        let bq = build_insert_many_with_dialect("app1", "users", &docs, SqlDialect::Sqlite)
+            .expect("build_insert_many_with_dialect ok");
+        assert!(!bq.sql.contains("decode("), "no PG cast: {}", bq.sql);
+        let tagged = bq
+            .params
+            .iter()
+            .filter(|p| p.starts_with(SQLITE_ENC_BLOB_PREFIX))
+            .count();
+        assert_eq!(tagged, 2, "both encrypted ssn params must be tagged: {:?}", bq.params);
     }
 }

@@ -83,7 +83,15 @@ pub(crate) mod context;
 // the production call site is one line in
 // `orchestrator/register_model/bootstrap.rs::bootstrap`.
 pub mod cross_app_fk;
+// **P5 PR 3.5** — `crud` is crate-private in release builds; `pub`
+// under `test-helpers` so `tests/sqlite_integration.rs` can reach
+// `crud::encryption_pass::{encrypt_row_on_write, decrypt_row_on_read}`
+// for the end-to-end encrypted-column CRUD round-trip test. Same shape
+// as `encryption` below.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod crud;
+#[cfg(feature = "test-helpers")]
+pub mod crud;
 pub(crate) mod diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
