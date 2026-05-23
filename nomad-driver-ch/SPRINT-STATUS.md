@@ -14,6 +14,11 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 - [x] T-4 (RecoverTask via ch-remote API socket) — `nomad-driver-ch/recover_task: reattach to running CH via API socket (T-4)`
 - [x] T-5 (TaskStats: per-task telemetry via host /proc) — `nomad-driver-ch/task_stats: per-task telemetry via /proc+/sys (T-5)`
 - [x] T-6 (Restore path: --restore + ch-remote resume wake) — `nomad-driver-ch/restore_task: --restore + ch-remote resume wake path (T-6)`
+- [x] T-7 (Controller integration: SANDBOX_TASK_DRIVER=ch_plugin flag) — sandbox worktree `5fe36805` (`sandbox/nomad-ch: SANDBOX_TASK_DRIVER=ch_plugin flag switches jobspec to typed Go driver (T-7)`)
+  - Controller's `crates/sandbox/src/backend/nomad_ch.rs::build_nomad_job_json` now branches on env flag: default keeps `Driver: "raw_exec"`; `ch_plugin` emits `Driver: "ch"` + typed `Config{}` mapped to `nomad-driver-ch/ch/task_config.go::TaskConfig`.
+  - Field mapping verified against `task_config.go` codec tags: vm_index, kernel, cpus, memory_mb, restore_from, sandbox_id, workspace_img, user_home_img, pubkey_hex, subnet_base_octet, disks/fs/net.
+  - Sandbox-crate lib tests: 312 → 319 (+7 T-7 tests). Driver tests unaffected (separate worktree at HEAD `3531a58b`, 63 PASS + 0 SKIP).
+  - Production default unchanged — flag stays off until T-8 cluster validation.
 
 ## In progress
 
@@ -21,4 +26,4 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Up next
 
-- T-7: Controller-integration (clock-resync wiring on restore mode; control-plane hand-off)
+- T-8: Cluster cutover (drop bash wrapper, flip `SANDBOX_TASK_DRIVER=ch_plugin` as the controller default after smoke validation)
