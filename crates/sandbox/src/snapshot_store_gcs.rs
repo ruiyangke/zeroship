@@ -1063,10 +1063,7 @@ where
         let artifact_path = std::path::PathBuf::from(meta.artifact_path.clone());
         let ch_version_owned = ch_version.to_string();
         let sha256 = meta.sha256;
-        compio::runtime::spawn(async move {
-            // Synchronous I/O inside the task — the stub returns
-            // immediately. When real GCS lands, wrap in
-            // spawn_blocking like the rest of the controller.
+        compio::runtime::spawn_blocking(move || {
             match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
                 Ok(m) => {
                     if m.sha256 != sha256 {
