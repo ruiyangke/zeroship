@@ -74,6 +74,23 @@ const RESUMABLE_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 /// usage to objects we can hold in RAM cheaply.
 const SINGLE_SHOT_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Custom GCS object metadata key carrying the canonical artifact
+/// SHA-256 (hex). Read by [`GcsSnapshotStore::verify_metadata_only`]
+/// to avoid re-streaming the full ~1 GB artifact on every sweep.
+///
+/// The full header on the wire is `x-goog-meta-zsbx-canonical-sha256`
+/// — GCS prefixes user-supplied metadata with `x-goog-meta-`. The
+/// `zsbx-` prefix keeps the key namespaced so other tooling can
+/// stamp its own metadata without collision.
+const CANONICAL_SHA_METADATA_KEY: &str = "zsbx-canonical-sha256";
+
+/// Which artifact carries the canonical-hash custom metadata. The
+/// last file in `ARTIFACT_FILES` (`state.json`) — last to land in
+/// the put loop, so if it's present and tagged the rest of the
+/// artifact must have been successfully uploaded too. Small file,
+/// fast to HEAD.
+const CANONICAL_SHA_METADATA_OBJECT: &str = "state.json";
+
 /// Cached OAuth2 access token + expiry deadline.
 #[derive(Debug, Clone)]
 struct CachedToken {
@@ -202,12 +219,20 @@ impl GcsSnapshotStore {
     /// Single-shot upload (uploadType=media) for small files.
     /// Returns Ok on 200; otherwise InvalidArtifact with status +
     /// body for diagnostics.
+    ///
+    /// `canonical_sha256_stamp` — if Some, stamps the canonical
+    /// artifact hash as custom object metadata so
+    /// [`GcsSnapshotStore::verify_metadata_only`] can read it back
+    /// via the JSON-API object-metadata endpoint instead of
+    /// re-streaming the body. Set only when uploading
+    /// [`CANONICAL_SHA_METADATA_OBJECT`].
     fn upload_single_shot(
         &self,
         sandbox_id: &str,
         file: &str,
         bytes: &[u8],
         sha256: &[u8; 32],
+        canonical_sha256_stamp: Option<&[u8; 32]>,
     ) -> Result<(), SnapshotError> {
         let token = self.access_token()?;
         let object = self.object_name(sandbox_id, file);
@@ -217,12 +242,19 @@ impl GcsSnapshotStore {
             urlencoding(&object)
         );
         let sha_b64 = base64::engine::general_purpose::STANDARD.encode(sha256);
-        let resp = ureq::post(&url)
+        let canonical_hex = canonical_sha256_stamp.map(hex::encode);
+        let mut req = ureq::post(&url)
             .set("authorization", &format!("Bearer {token}"))
             .set("content-type", "application/octet-stream")
             .set("x-goog-hash", &format!("sha256={sha_b64}"))
-            .timeout(self.request_timeout)
-            .send_bytes(bytes);
+            .timeout(self.request_timeout);
+        if let Some(hex_str) = canonical_hex.as_deref() {
+            req = req.set(
+                &format!("x-goog-meta-{CANONICAL_SHA_METADATA_KEY}"),
+                hex_str,
+            );
+        }
+        let resp = req.send_bytes(bytes);
         match resp {
             Ok(r) if r.status() == 200 => Ok(()),
             Ok(r) => Err(SnapshotError::InvalidArtifact(format!(
@@ -249,12 +281,20 @@ impl GcsSnapshotStore {
     ///    session URL, each carrying a `Content-Range:
     ///    bytes <start>-<end>/<total>` header. 308 = continue.
     /// 3. Final chunk closes — 200/201 means complete.
+    ///
+    /// `canonical_sha256_stamp` — if Some, stamps the canonical
+    /// artifact hash as custom object metadata on the initiate
+    /// request (mirrors `upload_single_shot`). In practice the
+    /// canonical-hash holder is `state.json`, which is small
+    /// enough to take the single-shot path, so this param is
+    /// typically `None` here. Kept for symmetry.
     fn upload_resumable(
         &self,
         sandbox_id: &str,
         file: &str,
         path: &Path,
         sha256: &[u8; 32],
+        canonical_sha256_stamp: Option<&[u8; 32]>,
     ) -> Result<(), SnapshotError> {
         let token = self.access_token()?;
         let object = self.object_name(sandbox_id, file);
@@ -264,14 +304,21 @@ impl GcsSnapshotStore {
             urlencoding(&object)
         );
         let sha_b64 = base64::engine::general_purpose::STANDARD.encode(sha256);
+        let canonical_hex = canonical_sha256_stamp.map(hex::encode);
         // 1. Initiate session.
-        let init_resp = ureq::post(&init_url)
+        let mut init_req = ureq::post(&init_url)
             .set("authorization", &format!("Bearer {token}"))
             .set("content-type", "application/octet-stream")
             .set("x-goog-hash", &format!("sha256={sha_b64}"))
             .set("content-length", "0")
-            .timeout(Duration::from_secs(15))
-            .call();
+            .timeout(Duration::from_secs(15));
+        if let Some(hex_str) = canonical_hex.as_deref() {
+            init_req = init_req.set(
+                &format!("x-goog-meta-{CANONICAL_SHA_METADATA_KEY}"),
+                hex_str,
+            );
+        }
+        let init_resp = init_req.call();
         let session_url = match init_resp {
             Ok(r) if r.status() == 200 => r
                 .header("location")
@@ -496,10 +543,21 @@ impl SnapshotStore for GcsSnapshotStore {
         source_dir: &Path,
         ch_version: &str,
     ) -> Result<SnapshotMetadata, SnapshotError> {
-        // Compute the canonical concatenated SHA-256 (for the
-        // SnapshotMetadata return value) AND per-file SHA-256s
-        // (for x-goog-hash). The former is what L1 records in pg;
-        // the latter is per-file integrity for GCS transfers.
+        // Compute the canonical concatenated SHA-256 up-front so we
+        // can stamp it as custom metadata on the last artifact
+        // object (state.json — `CANONICAL_SHA_METADATA_OBJECT`). The
+        // stamp lets [`verify_metadata_only`] run a cheap object-
+        // metadata read instead of re-streaming ~1 GB of memory-
+        // ranges on every sweep cycle.
+        //
+        // Order: canonical first (one full read), then per-file
+        // hashes on the upload pass (one more full read each). The
+        // pre-pass is unavoidable — we need the canonical hash in
+        // hand before `state.json` hits the wire, and per-file
+        // `x-goog-hash` is required for GCS-side single-object
+        // integrity validation.
+        let (canonical_sha256, canonical_bytes) =
+            canonical_artifact_sha256(source_dir)?;
         let mut total: u64 = 0;
         for &name in ARTIFACT_FILES {
             let path = source_dir.join(name);
@@ -512,22 +570,44 @@ impl SnapshotStore for GcsSnapshotStore {
             };
             let len = metadata.len();
             let per_file_sha = sha256_file(&path)?;
+            // Stamp the canonical hash only on the last artifact
+            // (`state.json`). The HEAD-only verify path reads this
+            // exact object. Concentrating the stamp on one object
+            // (vs. mirroring on all three) keeps the put path
+            // simple — partial-put failure modes already invalidate
+            // the artifact regardless of which object carries the
+            // hash, because canonical verify needs all three files.
+            let canonical_stamp: Option<&[u8; 32]> =
+                if name == CANONICAL_SHA_METADATA_OBJECT {
+                    Some(&canonical_sha256)
+                } else {
+                    None
+                };
             if len <= SINGLE_SHOT_MAX_BYTES {
                 let bytes = std::fs::read(&path)?;
-                self.upload_single_shot(sandbox_id, name, &bytes, &per_file_sha)?;
+                self.upload_single_shot(
+                    sandbox_id,
+                    name,
+                    &bytes,
+                    &per_file_sha,
+                    canonical_stamp,
+                )?;
             } else {
-                self.upload_resumable(sandbox_id, name, &path, &per_file_sha)?;
+                self.upload_resumable(
+                    sandbox_id,
+                    name,
+                    &path,
+                    &per_file_sha,
+                    canonical_stamp,
+                )?;
             }
             total = total.checked_add(len).ok_or_else(|| {
                 SnapshotError::InvalidArtifact("size overflow".into())
             })?;
         }
-        // Canonical sha256 = same hash L1 computes. Re-use the L1
-        // helper so the contract matches verbatim.
-        let (sha256, bytes) = canonical_artifact_sha256(source_dir)?;
-        if bytes != total {
+        if canonical_bytes != total {
             return Err(SnapshotError::InvalidArtifact(format!(
-                "byte count drift: per-file sum={total}, canonical={bytes}"
+                "byte count drift: per-file sum={total}, canonical={canonical_bytes}"
             )));
         }
         Ok(SnapshotMetadata {
@@ -536,9 +616,9 @@ impl SnapshotStore for GcsSnapshotStore {
                 self.bucket,
                 self.object_prefix(sandbox_id)
             ),
-            sha256,
+            sha256: canonical_sha256,
             ch_version: ch_version.to_string(),
-            bytes,
+            bytes: canonical_bytes,
         })
     }
 
@@ -609,6 +689,34 @@ impl SnapshotStore for GcsSnapshotStore {
             self.open_object_stream(sandbox_id, name)
         })
     }
+
+    fn verify_metadata_only(
+        &self,
+        sandbox_id: &str,
+        expected_sha256: &[u8; 32],
+    ) -> Result<(), SnapshotError> {
+        // Fast-path: read the canonical-hash custom metadata
+        // (`x-goog-meta-zsbx-canonical-sha256`) off the `state.json`
+        // object via the JSON-API object-metadata endpoint and
+        // compare against `expected_sha256`. One small HTTP request
+        // (~ 100-byte response body), zero body egress for the
+        // ~ 1 GB memory-ranges file.
+        //
+        // Trust model differs from [`verify`] (deep). Metadata is
+        // bucket-writable, so this defends against bit-rot / silent
+        // body corruption (where the bytes change but the metadata
+        // doesn't) — the failure mode periodic sweeps target. A
+        // malicious bucket-write principal can substitute both body
+        // and metadata together; operators audit that case with
+        // `verify`.
+        verify_metadata_canonical_sha256(expected_sha256, |key| {
+            self.head_object_metadata_value(
+                sandbox_id,
+                CANONICAL_SHA_METADATA_OBJECT,
+                key,
+            )
+        })
+    }
 }
 
 /// Streamed canonical-hash check over the three artifact files.
@@ -654,6 +762,56 @@ where
     let h = hasher.finalize();
     let mut actual = [0u8; 32];
     actual.copy_from_slice(&h);
+    if &actual != expected_sha256 {
+        return Err(SnapshotError::ChecksumMismatch {
+            expected: *expected_sha256,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Metadata-only canonical-hash check.
+///
+/// `fetch_meta(key)` returns the value of a custom metadata key
+/// (without the `x-goog-meta-` prefix). The production callback is
+/// [`GcsSnapshotStore::head_object_metadata_value`]; tests inject a
+/// closure simulating the bucket-side state.
+///
+/// Errors:
+/// - missing key → [`SnapshotError::InvalidArtifact`] (the stamp was
+///   never written, or was stripped — operators run deep `verify` to
+///   re-authenticate and re-stamp).
+/// - hex-decode / wrong length → [`SnapshotError::InvalidArtifact`].
+/// - value present but mismatches → [`SnapshotError::ChecksumMismatch`].
+fn verify_metadata_canonical_sha256<F>(
+    expected_sha256: &[u8; 32],
+    mut fetch_meta: F,
+) -> Result<(), SnapshotError>
+where
+    F: FnMut(&str) -> Result<Option<String>, SnapshotError>,
+{
+    let raw = match fetch_meta(CANONICAL_SHA_METADATA_KEY)? {
+        Some(v) => v,
+        None => {
+            return Err(SnapshotError::InvalidArtifact(format!(
+                "verify_metadata_only: object {CANONICAL_SHA_METADATA_OBJECT}                  missing x-goog-meta-{CANONICAL_SHA_METADATA_KEY} header"
+            )));
+        }
+    };
+    let decoded = hex::decode(raw.trim()).map_err(|e| {
+        SnapshotError::InvalidArtifact(format!(
+            "verify_metadata_only: x-goog-meta-{CANONICAL_SHA_METADATA_KEY}              not hex: {e}"
+        ))
+    })?;
+    if decoded.len() != 32 {
+        return Err(SnapshotError::InvalidArtifact(format!(
+            "verify_metadata_only: x-goog-meta-{CANONICAL_SHA_METADATA_KEY}              wrong length: got {}, want 32",
+            decoded.len()
+        )));
+    }
+    let mut actual = [0u8; 32];
+    actual.copy_from_slice(&decoded);
     if &actual != expected_sha256 {
         return Err(SnapshotError::ChecksumMismatch {
             expected: *expected_sha256,
@@ -722,6 +880,82 @@ impl GcsSnapshotStore {
                 ))
             })?;
         Ok((len, Box::new(r.into_reader())))
+    }
+
+    /// Fetch a single custom-metadata value for a snapshot object
+    /// via the GCS JSON API object-metadata endpoint (no body
+    /// transfer). `meta_key` is the *unprefixed* metadata key
+    /// (e.g. `zsbx-canonical-sha256`); GCS exposes user-supplied
+    /// metadata under the JSON `metadata.<key>` field.
+    ///
+    /// Returns:
+    /// - `Ok(Some(value))` — present
+    /// - `Ok(None)` — object exists but lacks that metadata key
+    /// - `Err(NotFound)` — 404 (artifact gone)
+    /// - `Err(InvalidArtifact / Io)` — transport / unexpected status
+    fn head_object_metadata_value(
+        &self,
+        sandbox_id: &str,
+        file: &'static str,
+        meta_key: &str,
+    ) -> Result<Option<String>, SnapshotError> {
+        let token = self.access_token()?;
+        let object = self.object_name(sandbox_id, file);
+        // `fields=metadata` keeps the response payload to ~ 100
+        // bytes — the whole point of the fast-path is avoiding
+        // body egress.
+        let url = format!(
+            "https://storage.googleapis.com/storage/v1/b/{}/o/{}?fields=metadata",
+            self.bucket,
+            urlencoding(&object)
+        );
+        let resp = ureq::get(&url)
+            .set("authorization", &format!("Bearer {token}"))
+            .timeout(Duration::from_secs(15))
+            .call();
+        let body = match resp {
+            Ok(r) if r.status() == 200 => r.into_string().map_err(|e| {
+                SnapshotError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("GCS head-metadata {object}: read body: {e}"),
+                ))
+            })?,
+            Ok(r) if r.status() == 404 => {
+                return Err(SnapshotError::NotFound(format!("{sandbox_id}/{file}")));
+            }
+            Ok(r) => {
+                return Err(SnapshotError::InvalidArtifact(format!(
+                    "GCS head-metadata {object}: status {}, body={}",
+                    r.status(),
+                    r.into_string().unwrap_or_default()
+                )));
+            }
+            Err(ureq::Error::Status(404, _)) => {
+                return Err(SnapshotError::NotFound(format!("{sandbox_id}/{file}")));
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                return Err(SnapshotError::InvalidArtifact(format!(
+                    "GCS head-metadata {object}: status {code}, body={}",
+                    r.into_string().unwrap_or_default()
+                )));
+            }
+            Err(e) => {
+                return Err(SnapshotError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("GCS head-metadata {object}: {e}"),
+                )));
+            }
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+            SnapshotError::InvalidArtifact(format!(
+                "GCS head-metadata {object}: parse body: {e}"
+            ))
+        })?;
+        Ok(parsed
+            .get("metadata")
+            .and_then(|m| m.get(meta_key))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
     }
 }
 
@@ -925,6 +1159,27 @@ where
         match self.l1.verify(sandbox_id, expected_sha256) {
             Ok(()) => Ok(()),
             Err(SnapshotError::NotFound(_)) => self.l2.verify(sandbox_id, expected_sha256),
+            Err(other) => Err(other),
+        }
+    }
+
+    fn verify_metadata_only(
+        &self,
+        sandbox_id: &str,
+        expected_sha256: &[u8; 32],
+    ) -> Result<(), SnapshotError> {
+        // L1 first. L1's `verify_metadata_only` defaults to deep
+        // `verify` (no side-channel metadata on local filesystem),
+        // which is already cheap (~ 3 s for 1 GB on NVMe). The win
+        // lives at L2: when L1 has been evicted, the sweep would
+        // otherwise pay ~ 1 GB GCS egress per cycle. The GCS impl's
+        // `verify_metadata_only` collapses that to one ~ 100-byte
+        // JSON-API request.
+        match self.l1.verify_metadata_only(sandbox_id, expected_sha256) {
+            Ok(()) => Ok(()),
+            Err(SnapshotError::NotFound(_)) => {
+                self.l2.verify_metadata_only(sandbox_id, expected_sha256)
+            }
             Err(other) => Err(other),
         }
     }
@@ -1273,10 +1528,116 @@ mod tests {
         }
         // verify: re-streams artifact and recomputes canonical sha256.
         store.verify(&sid, &meta.sha256).expect("verify must succeed");
+        // verify_metadata_only: HEAD-only fast-path — no body egress.
+        store
+            .verify_metadata_only(&sid, &meta.sha256)
+            .expect("verify_metadata_only must succeed");
         // delete: idempotent.
         store.delete(&sid).expect("delete must succeed");
         store.delete(&sid).expect("delete second time must succeed");
 
         cleanup(&root);
+    }
+
+    /// A2b: `verify_metadata_only` must read the canonical-hash
+    /// custom metadata, reject mismatches, and reject missing/
+    /// malformed metadata — all without touching the artifact body.
+    ///
+    /// Exercises [`verify_metadata_canonical_sha256`] (the pure
+    /// helper) directly. The GCS impl is a transport adapter that
+    /// hands it a `(key) -> Option<String>` callback, so this test
+    /// reflects production semantics 1:1 — same way the existing
+    /// `gcs_verify_rejects_tampered_payload` test covers the deep
+    /// verify path.
+    #[test]
+    fn gcs_verify_metadata_only_fast_path_semantics() {
+        // Canonical hash the bucket claims to hold (matches `put`-
+        // time stamp on `state.json`).
+        let honest_hash: [u8; 32] = {
+            let mut h = [0u8; 32];
+            for (i, b) in h.iter_mut().enumerate() {
+                *b = (0xa0u8 ^ i as u8).wrapping_mul(17);
+            }
+            h
+        };
+        let honest_hex = hex::encode(honest_hash);
+
+        // 1. Metadata-present + matches expected → Ok. Zero body
+        //    reads (the callback is the only side effect; we
+        //    assert call count after).
+        let mut calls = 0u32;
+        let result_ok = verify_metadata_canonical_sha256(&honest_hash, |key| {
+            calls += 1;
+            assert_eq!(key, CANONICAL_SHA_METADATA_KEY);
+            Ok(Some(honest_hex.clone()))
+        });
+        assert!(result_ok.is_ok(), "honest fast-path verify must pass: {result_ok:?}");
+        assert_eq!(calls, 1, "fast-path must issue exactly one metadata fetch");
+
+        // 2. Metadata-present but mismatches → ChecksumMismatch.
+        //    Caller's `expected_sha256` is `honest_hash`; bucket
+        //    claims a different hash (mimics body+meta corruption
+        //    where the operator-recorded canonical hash and the
+        //    bucket-stamped hash diverged).
+        let tampered_hex = {
+            let mut h = honest_hash;
+            h[0] ^= 0xff; // flip a byte
+            hex::encode(h)
+        };
+        let result_bad = verify_metadata_canonical_sha256(&honest_hash, |_key| {
+            Ok(Some(tampered_hex.clone()))
+        });
+        match result_bad {
+            Err(SnapshotError::ChecksumMismatch { expected, actual }) => {
+                assert_eq!(expected, honest_hash);
+                assert_ne!(actual, honest_hash, "tampered metadata must differ");
+            }
+            other => panic!("expected ChecksumMismatch on tampered metadata, got {other:?}"),
+        }
+
+        // 3. Metadata absent → InvalidArtifact. Sweep cannot
+        //    authenticate via fast-path; operator must run deep
+        //    `verify` to either confirm corruption or re-stamp.
+        let result_missing = verify_metadata_canonical_sha256(&honest_hash, |_key| Ok(None));
+        assert!(
+            matches!(result_missing, Err(SnapshotError::InvalidArtifact(ref m))
+                if m.contains("missing x-goog-meta-")),
+            "expected InvalidArtifact(missing) on absent metadata, got {result_missing:?}"
+        );
+
+        // 4. Metadata present but not valid hex → InvalidArtifact.
+        let result_garbage = verify_metadata_canonical_sha256(&honest_hash, |_key| {
+            Ok(Some("not-hex-bytes!".to_string()))
+        });
+        assert!(
+            matches!(result_garbage, Err(SnapshotError::InvalidArtifact(ref m))
+                if m.contains("not hex")),
+            "expected InvalidArtifact(not hex) on garbage metadata, got {result_garbage:?}"
+        );
+
+        // 5. Metadata present + valid hex but wrong length →
+        //    InvalidArtifact. Bucket-side stamp got truncated.
+        let result_short = verify_metadata_canonical_sha256(&honest_hash, |_key| {
+            Ok(Some(hex::encode([0u8; 16]))) // 16 bytes, not 32
+        });
+        assert!(
+            matches!(result_short, Err(SnapshotError::InvalidArtifact(ref m))
+                if m.contains("wrong length")),
+            "expected InvalidArtifact(wrong length) on short hash, got {result_short:?}"
+        );
+
+        // 6. Transport error from the fetch callback bubbles up
+        //    unchanged (the callback owns the retry policy; the
+        //    verify helper is pure logic on the value).
+        let result_io = verify_metadata_canonical_sha256(&honest_hash, |_key| {
+            Err(SnapshotError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "simulated network blip",
+            )))
+        });
+        assert!(
+            matches!(result_io, Err(SnapshotError::Io(_))),
+            "transport errors must propagate, got {result_io:?}"
+        );
     }
 }

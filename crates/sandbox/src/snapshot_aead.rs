@@ -677,6 +677,19 @@ impl<S: SnapshotStore> SnapshotStore for AeadSnapshotStore<S> {
         // get/restore.
         self.inner.verify(sandbox_id, expected_sha256)
     }
+
+    fn verify_metadata_only(
+        &self,
+        sandbox_id: &str,
+        expected_sha256: &[u8; 32],
+    ) -> Result<(), SnapshotError> {
+        // Same delegation pattern as `verify` — the AEAD wrap
+        // doesn't change the canonical hash recorded in the
+        // metadata stamp (the inner store stamps over its own
+        // post-wrap bytes). Passing through preserves the GCS
+        // fast-path's O(1) cost.
+        self.inner.verify_metadata_only(sandbox_id, expected_sha256)
+    }
 }
 
 #[cfg(test)]

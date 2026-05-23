@@ -123,11 +123,42 @@ pub trait SnapshotStore: Send + Sync {
     fn delete(&self, sandbox_id: &str) -> Result<(), SnapshotError>;
 
     /// Verify the artifact's integrity without restoring it.
+    ///
+    /// Deep-verify: re-reads every artifact byte and recomputes the
+    /// canonical SHA-256. For L2 (GCS) this means ~1 GB of egress
+    /// per call — fine for manual integrity audits, too expensive
+    /// for the periodic sweep cron. Sweeps should call
+    /// [`verify_metadata_only`](Self::verify_metadata_only) instead.
     fn verify(
         &self,
         sandbox_id: &str,
         expected_sha256: &[u8; 32],
     ) -> Result<(), SnapshotError>;
+
+    /// Fast-path integrity check using only store-side metadata.
+    ///
+    /// For backends that record the canonical SHA-256 in a side
+    /// channel (e.g. GCS object custom metadata stamped at `put`
+    /// time), this avoids re-streaming the artifact body. The
+    /// default impl delegates to [`verify`](Self::verify) so the
+    /// trait contract still holds for stores without a metadata
+    /// channel (`LocalDiskSnapshotStore`, mocks).
+    ///
+    /// **Trust model.** A bucket-write attacker can substitute both
+    /// the body and any metadata they control, so this fast-path is
+    /// NOT a defense against a malicious bucket. It IS a defense
+    /// against bit-rot / accidental corruption of the body without
+    /// matching corruption of the metadata, which is the failure
+    /// mode periodic sweeps target. Operators running an integrity
+    /// audit (e.g. after a suspected compromise) call
+    /// [`verify`](Self::verify) directly for the deep gate.
+    fn verify_metadata_only(
+        &self,
+        sandbox_id: &str,
+        expected_sha256: &[u8; 32],
+    ) -> Result<(), SnapshotError> {
+        self.verify(sandbox_id, expected_sha256)
+    }
 }
 
 /// L1-only store backed by the local filesystem. No GCS, no AEAD,
