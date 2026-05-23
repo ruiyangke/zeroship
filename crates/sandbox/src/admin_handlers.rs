@@ -225,7 +225,7 @@ fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse 
 /// Operators recover the raw error from journald keyed by the
 /// `tracing::error!` line below. The `code` field on the wire is
 /// the stable client contract — clients still branch on it.
-fn err_safe(
+pub(crate) fn err_safe(
     status: u16,
     code: &'static str,
     public_msg: &'static str,
