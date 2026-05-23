@@ -70,10 +70,14 @@ use crate::error::DbError;
 pub(crate) mod lock_guard;
 pub(crate) mod owned_lock_guard;
 pub mod postgres;
+#[cfg(feature = "sqlite")]
+pub(crate) mod sqlite;
 
 pub(crate) use lock_guard::LockGuard;
 pub(crate) use owned_lock_guard::OwnedLockGuard;
 pub use postgres::PostgresBackend;
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteBackend;
 
 /// SQL execution capability — the "connection lifecycle + run a
 /// statement" slice of the data-store boundary.
@@ -615,6 +619,70 @@ pub trait IndexBuilder: SqlExecutor {
     ) -> Result<(), DbError>;
 }
 
+/// SQL-dialect strategy — the seam every per-engine SQL-string
+/// builder route through.
+///
+/// **Introduced in P1 PR 1** (see
+/// `docs/proposals/p1-sqlite-implementation-plan.md` §5). The six
+/// methods listed below are the minimum-viable hook set; PR 2-5 fill
+/// in additional hooks (RETURNING/upsert/JSON/vector/FTS) alongside
+/// the consumers that need them.
+///
+/// **No production caller as of PR 1** — the trait + ZST impls
+/// (`SqliteDialect` here; `PgDialect` lands in PR 3) exist so the
+/// `query.rs` free-function builders can be retargeted onto a
+/// dialect-typed entry point without re-shaping their call sites.
+/// Until PR 3 wires that retarget, `quote_ident` etc. continue to
+/// live as free `quote_ident_pg(...)`-style functions inside `query.rs`.
+///
+/// **Why on the backend, not on `SqlExecutor`**: dialect choice is a
+/// property of the *engine*, not the connection — a future PG-replica
+/// backend would re-use [`crate::backend::PostgresBackend`]'s pool +
+/// `SqlExecutor` impl but share a single `PgDialect`. Pinning
+/// `DialectBuilder` as its own trait (and composing into the
+/// per-backend struct) is the canonical shape.
+pub trait DialectBuilder: 'static {
+    /// Quote an identifier (column / table / schema name) per the
+    /// engine's lexical rules. PG: doubled `"`; SQLite: doubled `"`
+    /// with embedded-NUL rejection.
+    fn quote_ident(&self, name: &str) -> String;
+
+    /// Build the SQL string that idempotently provisions the per-app
+    /// namespace. PG: `CREATE SCHEMA IF NOT EXISTS "<app>"`. SQLite:
+    /// `ATTACH DATABASE 'file:.../zs-<app>.sqlite' AS "<app>"`.
+    fn build_ensure_app_schema(&self, app_id: &str) -> String;
+
+    /// Build a `CREATE INDEX` statement for the given [`crate::query::IndexSpec`].
+    /// `online = true` requests the engine's "concurrent" variant
+    /// (PG: `CREATE INDEX CONCURRENTLY`); SQLite has no concurrent
+    /// build, so the flag is a no-op there.
+    fn build_create_index(
+        &self,
+        spec: &crate::query::IndexSpec,
+        online: bool,
+    ) -> String;
+
+    /// Map a Zeroship-level type string (`"string"`, `"int"`,
+    /// `"timestamp"`, …) to the engine's column-type vocabulary.
+    /// `opts` is the per-field option object the SDK passes alongside
+    /// the type (e.g. `{ length: 256 }`).
+    fn map_zs_type(&self, zs_type: &str, opts: &serde_json::Value) -> String;
+
+    /// SQL fragment that evaluates to "now" on the server. PG: `NOW()`;
+    /// SQLite: `CURRENT_TIMESTAMP`. Returned as a `&'static str` so
+    /// callers can splice it into a query string without an alloc.
+    fn now_fn(&self) -> &'static str;
+
+    /// Engine-side SQL that returns the last-inserted rowid for a
+    /// non-RETURNING insert, if the engine supports the concept.
+    /// PG returns `None` (it routes through `RETURNING` instead).
+    /// SQLite returns `Some("SELECT last_insert_rowid()")`. Default
+    /// `None` so the PG impl doesn't need to override.
+    fn last_insert_rowid_sql(&self) -> Option<&'static str> {
+        None
+    }
+}
+
 /// Postgres-specific extension trait exposing the underlying pool
 /// handle so free-function consumers — chiefly the audit helpers in
 /// [`crate::audit`] — can reach an `&compio_postgres::Pool` without
@@ -724,7 +792,14 @@ impl<T> RegisterBackend for T where
 /// lives on a focused sub-trait. After P0 PR 2 the super-trait bound
 /// is the carved capability set:
 ///
-/// - [`SqlExecutor`] (`compio_postgres::Client`)
+/// - [`SqlExecutor`] — **P1 PR 1**: the `Client = compio_postgres::Client`
+///   pin was dropped from this super-bound so a `SqliteBackend` whose
+///   `SqlExecutor::Client = SqliteSessionHandle` can also satisfy
+///   `Backend`. PG-only consumers that *need* the concrete client
+///   type continue to bound on
+///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
+///   `Client = compio_postgres::Client`) — see the grep-audit table
+///   in the P1 PR 1 commit message for the per-site verdict.
 /// - [`LockManager`]
 /// - [`NamespaceManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
@@ -747,7 +822,7 @@ impl<T> RegisterBackend for T where
 ///   [`crate::context::IsolateDbContext::tx_conn`]) for the duration
 ///   of a session-scoped lock.
 pub trait Backend:
-    SqlExecutor<Client = compio_postgres::Client>
+    SqlExecutor
     + LockManager
     + NamespaceManager
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
@@ -791,6 +866,17 @@ pub enum BackendHandle {
     /// migrates to this arm one-to-one.
     #[cfg(feature = "pg")]
     Postgres(Rc<PostgresBackend>),
+
+    /// SQLite backend handle. Re-introduced in **P1 PR 1** alongside
+    /// the [`crate::backend::sqlite::SqliteBackend`] module skeleton
+    /// (the previous declaration was removed in the P0 mop-up because
+    /// the underlying module never landed and `--features sqlite`
+    /// failed E0433). At PR 1 the inner type's capability-impl
+    /// bodies are stubs returning `DbError::Internal { … "P1 PR2+ stub" … }`;
+    /// PR 2-5 backfill behaviour per
+    /// `docs/proposals/p1-sqlite-implementation-plan.md` §9.
+    #[cfg(feature = "sqlite")]
+    Sqlite(Rc<SqliteBackend>),
 }
 
 impl BackendHandle {
@@ -803,14 +889,20 @@ impl BackendHandle {
     /// did when the field was `Option<Rc<PostgresBackend>>`. No
     /// allocation, no vtable, no per-call overhead.
     ///
-    /// P0 has only the [`Self::Postgres`] arm so the match is
-    /// trivially exhaustive; when the SQLite arm returns in P1 a
-    /// second match arm will be added explicitly so consumers stop
-    /// on a typed error rather than panicking.
+    /// **P1 PR 1**: the SQLite arm is now reachable, so the closure
+    /// must convey "not the PG arm" rather than always running.
+    /// Return type became `Option<R>` (mirrors [`Self::as_postgres`])
+    /// — the closure runs and yields `Some(R)` on the PG arm; the
+    /// SQLite arm yields `None`. Call sites previously written as
+    /// `handle.with_postgres(|pg| …)` now write
+    /// `handle.with_postgres(|pg| …).ok_or_else(|| backend_unsupported_err())?`
+    /// — the same shape `as_postgres()` consumers already use.
     #[cfg(feature = "pg")]
-    pub fn with_postgres<R>(&self, f: impl FnOnce(&PostgresBackend) -> R) -> R {
+    pub fn with_postgres<R>(&self, f: impl FnOnce(&PostgresBackend) -> R) -> Option<R> {
         match self {
-            Self::Postgres(b) => f(b),
+            Self::Postgres(b) => Some(f(b)),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(_) => None,
         }
     }
 
@@ -845,6 +937,52 @@ impl BackendHandle {
     pub fn as_postgres(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(_) => None,
+        }
+    }
+
+    /// Run `f` against the inner [`SqliteBackend`], yielding
+    /// `Some(R)` on the SQLite arm or `None` otherwise.
+    ///
+    /// **P1 PR 1**: symmetric counterpart to [`Self::with_postgres`].
+    /// Stays `#[cfg(feature = "sqlite")]` so default-feature builds
+    /// don't pick up the SQLite arm at all — the `Option`-shaped
+    /// return makes the consumer code style identical whether the
+    /// caller's compiled-in arm set is `{pg}`, `{pg, sqlite}`, or
+    /// `{sqlite}`.
+    ///
+    /// Consumers still on the PG arm pattern at PR 1 typically write:
+    ///
+    /// ```ignore
+    /// let pg = backend.as_postgres().ok_or_else(|| backend_unsupported(...))?;
+    /// ```
+    ///
+    /// — the same shape works for SQLite via this accessor.
+    #[cfg(feature = "sqlite")]
+    pub fn with_sqlite<R>(&self, f: impl FnOnce(&SqliteBackend) -> R) -> Option<R> {
+        match self {
+            #[cfg(feature = "pg")]
+            Self::Postgres(_) => None,
+            Self::Sqlite(b) => Some(f(b)),
+        }
+    }
+
+    /// Borrow the inner [`SqliteBackend`] as a `&SqliteBackend`
+    /// reference — async-friendly companion to [`Self::with_sqlite`].
+    /// Returns `Some(&SqliteBackend)` on the SQLite arm; `None` on
+    /// the PG arm.
+    ///
+    /// **P1 PR 1**: present so PR 2-5's `as_sqlite()?` consumer
+    /// migration has a stable accessor to migrate onto. PR 1 has no
+    /// production caller — the orchestrator / migrations / register-model
+    /// paths continue to use `as_postgres()?` against the PG arm only.
+    #[cfg(feature = "sqlite")]
+    pub fn as_sqlite(&self) -> Option<&SqliteBackend> {
+        match self {
+            #[cfg(feature = "pg")]
+            Self::Postgres(_) => None,
+            Self::Sqlite(b) => Some(b),
         }
     }
 }
@@ -1028,9 +1166,10 @@ mod tests {
         // PostgresBackend lives in tests/integration.rs (which spins
         // up Postgres). This test pins the *type* shape.
         fn _shape_check(handle: BackendHandle) -> bool {
-            // `with_postgres` returns whatever the closure produces.
-            let _ = handle.with_postgres(|_b: &PostgresBackend| ());
-            // `as_postgres` returns `Option<&PostgresBackend>`.
+            // P1 PR 1: both accessors return `Option<…>` now (the PG
+            // arm yields `Some(…)`; the SQLite arm yields `None`).
+            // The exhaustive-match audit lives in the commit message.
+            let _: Option<()> = handle.with_postgres(|_b: &PostgresBackend| ());
             let _: Option<&PostgresBackend> = handle.as_postgres();
             true
         }

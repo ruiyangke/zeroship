@@ -64,6 +64,12 @@ postgres-protocol = "0.6"
 postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 fallible-iterator = "0.2"
 percent-encoding = "2"
+# SQLite — bundled amalgamation pinned at the rusqlite-shipped version
+# (3.51.3 ≥ the 3.16 minimum for `sqlite3_preupdate_hook`). `bundled`
+# avoids a system-library dep; `preupdate_hook` enables the CDC seam
+# we'll wire in P2. Optional throughout — only `zeroship-plugin-db`
+# pulls it in under its `sqlite` feature.
+rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
 
 # IDs
 uuid = { version = "1", features = ["v4", "v7", "serde"] }

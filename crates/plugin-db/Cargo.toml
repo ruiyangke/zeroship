@@ -18,6 +18,21 @@ v8 = { workspace = true }
 # (Postgres NAMEDATALEN=64 minus headroom).
 tracing = { workspace = true }
 sha2 = { workspace = true }
+# SQLite backend dependencies — gated behind the `sqlite` Cargo feature
+# below. P1 PR 1 reintroduces these alongside the
+# `crate::backend::sqlite` module skeleton (the previous declarations
+# were removed in the P0 mop-up because the underlying module did not
+# exist and `--features sqlite` failed E0433).
+#
+# - `rusqlite`: bundled SQLite amalgamation + `preupdate_hook` seam the
+#   P2 CDC pass will wire in.
+# - `flume`: bounded MPMC queue the `SqliteSession` actor uses to
+#   serialise calls onto the single rusqlite writer thread (compio is
+#   single-threaded; the actor runs under `spawn_blocking`). The
+#   `flume` workspace dep was already declared for the sandbox phase-1
+#   queue — we just opt in optionally here.
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"], optional = true }
+flume = { workspace = true, optional = true }
 
 [dev-dependencies]
 compio = { workspace = true }
@@ -78,6 +93,14 @@ harness = false
 # `crate::backend::sqlite::SqliteBackend` impl in P1.
 default = ["pg"]
 pg = []
+# Re-introduced in P1 PR 1 alongside the `crate::backend::sqlite`
+# module skeleton. Toggles the `rusqlite` + `flume` dep activation
+# and gates the `BackendHandle::Sqlite` arm. The skeleton commits
+# stub method bodies (every capability impl returns a typed
+# `DbError::Internal { message: "P1 PR2+ stub" }` or `unimplemented!`);
+# real behaviour lands across PR 2-5 per
+# `docs/proposals/p1-sqlite-implementation-plan.md` §9.
+sqlite = ["dep:rusqlite", "dep:flume"]
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via
@@ -97,6 +120,16 @@ hardening = []
 name = "integration"
 path = "tests/integration.rs"
 required-features = ["test-helpers", "hardening"]
+
+# SQLite-side integration target. P1 PR 1 wires the skeleton (a single
+# `smoke_compiles` test); PR 2-5 backfill mirror coverage for the
+# register-model / migration / introspection paths under the SQLite arm.
+# Behind `required-features` so the default-feature build stays clean —
+# `cargo test -p zeroship-plugin-db` (no flags) never builds rusqlite.
+[[test]]
+name = "sqlite_integration"
+path = "tests/sqlite_integration.rs"
+required-features = ["sqlite", "test-helpers"]
 
 [lints]
 workspace = true
