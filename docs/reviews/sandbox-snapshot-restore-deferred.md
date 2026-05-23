@@ -3,31 +3,40 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
+Last updated: 2026-05-23 (post bug-#14 diagnostic cycle — bug #15 found, both #14 demoted).
 Branch HEAD at seed: `fce3e208`.
+Branch HEAD at last update: `8ad3cf3f`.
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
 
 ## CRITICAL (open blockers on Phase B cluster validation)
 
-### [B14a] snap-stage `memory-ranges` absent at wake time → wrapper exits 1
-- **Source**: cluster smoke 2026-05-22 23:02Z (post-bug-#13 rebake)
-- **Symptom**: alloc `Started → Terminated msg="Exit Code: 1"` within ~2-80 ms. Wrapper's `set -Eeuo pipefail` kills it before CH starts. Either the `[ ! -f memory-ranges ]` precondition fires (snap-stage dir reported empty post-event) OR the `sed -i config.json` path rewrite fails.
-- **Suspected layer**: controller-vs-wrapper path skew — `RestoreBackend::restore_alloc_dir` returns one path; `SnapshotStore::get` populates another; or a stage→reset cycle wipes the dir between submit and wrapper exec.
+### [B15] `teardown_source_for_snapshot` wipes `host_dir` → workspace.img gone at wake → wrapper exit 1
+- **Source**: cluster smoke 2026-05-23 02:32Z (bug-#14 diagnostic round; see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md` for the verbatim evidence).
+- **Symptom**: every wake fails with `restore_backend: nomad alloc terminal status=failed: Failed tasks`. Wrapper stderr (captured via live-patched tee) shows `[wrapper] FATAL: workspace image missing: /var/zeroship/ch/<sandbox-id>/workspace.img`. Confirmed by directory listing: every host_dir whose snapshot succeeded ALSO had `workspace.img` removed; the one whose snapshot timed out (teardown not reached) still has the image.
+- **Root cause**: `crates/sandbox/src/admin_handlers.rs::snapshot_sandbox` post-success path calls `backend.teardown_source_for_snapshot(sandbox_id)`. That delegates to `b.stop(sandbox_id)` (`crates/sandbox/src/backend/mod.rs:412`). `stop()` step 5 (`crates/sandbox/src/backend/nomad_ch.rs:1063-1077`) runs `remove_dir_all(host_dir)`, which is the same dir holding the per-sandbox `workspace.img` created at `create_ext4_image_if_missing(&workspace_img, …)` (`nomad_ch.rs:660-663`). Wrapper's pre-CH defensive gate (`crates/sandbox/scripts/nomad-vm-wrapper.sh:222-225`) trips.
+- **Why missed earlier**: pre-virtio-blk pivot, host_dir held only a virtiofsd socket (re-attached on restore via fresh daemon). The pivot moved workspace storage into per-sandbox raw ext4 images under host_dir, but `teardown_source_for_snapshot` kept its "just call stop()" delegation. Unit tests use tempfile-stubs that don't exercise the host_dir-wipe interaction.
 - **Relevant code**:
-  - `crates/sandbox/src/restore_handler.rs::restore_sandbox` step 4 (`store.get(&sandbox_id_typed, &alloc_dir, &snap.sha256)`)
-  - `crates/sandbox/src/restore_handler.rs::RealRestoreBackend::restore_alloc_dir`
-  - `crates/sandbox/scripts/nomad-vm-wrapper.sh` restore branch (`ZSBX_RESTORE_FROM` validation around line 294)
-- **Action plan**: (1) add `tracing::info!(staged_dir=?alloc_dir, …)` after the `store.get` call in `restore_sandbox`; (2) have the wrapper log `ls -la $ZSBX_RESTORE_FROM` to stderr before the precondition check; (3) cluster smoke with diff between paths captured. Likely fix: store.get destination path needs to match wrapper-read path exactly.
+  - `crates/sandbox/src/admin_handlers.rs:1196-1206` (snapshot success → teardown call)
+  - `crates/sandbox/src/backend/mod.rs:407-419` (`teardown_source_for_snapshot` → stop)
+  - `crates/sandbox/src/backend/nomad_ch.rs:1063-1077` (host_dir `remove_dir_all`)
+  - `crates/sandbox/src/backend/nomad_ch.rs:660-663` (workspace.img creation in host_dir)
+  - `crates/sandbox/scripts/nomad-vm-wrapper.sh:222-225` (the FATAL gate)
+- **Action plan (Option A, recommended)**: introduce a snapshot-aware variant of stop() — call it `stop_preserving_state(&self, sandbox_id) -> Result<(), String>` — that runs steps 1-4 of the existing `stop` (Nomad job purge + host-fence + vm_index release + in-memory map removal) but **skips step 5's `remove_dir_all(host_dir)`**. Wire `teardown_source_for_snapshot` to it. Make the orphan-prune sweep aware that `snapshotted` rows' host_dirs are *expected* to persist; only sweep host_dirs whose pg row is `stopped`/terminal-not-restorable. Symmetric with how `home.img` is intentionally preserved across snapshot lifetimes.
+- **Action plan (rejected, Option B)**: re-materialize `workspace.img` in the wrapper or restore_handler. **Silently destroys persisted workspace data on every wake** — defeats the whole point of `/workspace` as durable per-sandbox storage. Don't do this.
+- **Tests to add**:
+  - `crates/sandbox/src/backend/nomad_ch.rs` unit test: assert `stop_preserving_state` does NOT call `remove_dir_all` on host_dir (mock filesystem).
+  - `crates/sandbox/tests/` integration test: cold-boot → write file to /workspace via agent (or just write a sentinel file at workspace.img mount path via a fake) → snapshot → assert host_dir + workspace.img still on disk → restore → assert workspace.img unchanged.
+- **Once landed**: re-run the 2026-05-23 1+1 smoke; re-evaluate whether B14a/B14b are still failing in their own right (likely both go away when B15 closes, since the wrapper never got past the workspace.img gate to demonstrate either).
 
-### [B14b] tap `NO-CARRIER` after CH `--restore` → No route to host (agent unreachable)
-- **Source**: cluster smoke 2026-05-22 23:02Z (the one snapshot that did succeed and the post-smoke ad-hoc retries)
-- **Symptom**: CH restore succeeds (no Mode A), guest boots, but the tap shows state DOWN / NO-CARRIER for the whole restore lifecycle; livez timeout fires at 30s; alloc terminated by controller SIGINT (exit 130).
-- **Suspected layer**: CH `--restore` may detach + re-attach the tap as part of resume; wrapper's `ip link set up` (line 142, pre-CH-spawn) gets undone by CH's tap-reattach; or CH's tap-attach silently fails when restoring from snapshot's net device state.
-- **Relevant code**:
-  - `crates/sandbox/scripts/nomad-vm-wrapper.sh` tap-up block (lines 142-150) and the restore branch (line 290+)
-  - `crates/sandbox/src/restore_handler.rs::rewrite_config_json` (net.tap/mac rewrite already verified by bug-#8 test)
-- **Action plan**: (1) capture `ip -br link show $TAP` at three points — before CH spawn, 1s after CH spawn, 10s after spawn — log to wrapper stderr; (2) tail CH's resume log for net-device messages (`grep -i 'net\|tap\|virtio_net' ch.log`); (3) likely fix: add a post-CH-spawn `ip link set $TAP up` polling loop in the wrapper (the cgroup may force a re-up). Alternatively: switch CH net mode away from tap-by-name to file-descriptor passing, but that's wrapper-invasive.
+### [B14a] (DEMOTED) snap-stage `memory-ranges` absent at wake time → wrapper exits 1
+- **Status**: refuted by 2026-05-23 cycle. Controller `restore: post-store.get staged files` tracing confirms all three files (config.json=2804, memory-ranges=1073741824, state.json=~102K) are staged successfully. The wake fails AFTER staging because of bug-#15, not because the stage is empty.
+- **Disposition**: leave listed as a watch-item; re-test once #15 closes. If the wrapper's restore-branch instrumentation never fires in the next smoke, this is fully closed.
+
+### [B14b] (DEMOTED) tap `NO-CARRIER` after CH `--restore` → No route to host
+- **Status**: not reproduced in 2026-05-23 cycle. The wrapper never gets past the workspace.img gate, so we never observe CH `--restore` proceeding to net-device resume. The previously-observed NO-CARRIER could be a real second-order bug or could have been a one-off; can't tell from current evidence.
+- **Disposition**: same — re-test once #15 closes. The speculative tap-up retry loop (lines 378-384 of nomad-vm-wrapper.sh) is harmless; keep it.
 
 ---
 
