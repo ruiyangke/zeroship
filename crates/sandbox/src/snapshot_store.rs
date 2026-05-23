@@ -246,7 +246,32 @@ impl SnapshotStore for LocalDiskSnapshotStore {
 
         std::fs::create_dir_all(target_dir)?;
         for &name in ARTIFACT_FILES {
-            std::fs::copy(src.join(name), target_dir.join(name))?;
+            let from = src.join(name);
+            let to = target_dir.join(name);
+            // Source + dest live under the same `host_state_dir` root in
+            // production, so `hard_link` is O(1) zero-copy — avoids the
+            // 1 GB `memory-ranges` copy that piles onto the worker's
+            // disk queue under c=4 wake stress (perf-r4 A3).
+            //
+            // A stale dest from a previous failed restore would make
+            // `hard_link` return `AlreadyExists`; remove and retry.
+            // Cross-device deployments fall back to copy.
+            match std::fs::hard_link(&from, &to) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::remove_file(&to)?;
+                    std::fs::hard_link(&from, &to)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+                    tracing::warn!(
+                        src = %from.display(),
+                        dst = %to.display(),
+                        "snapshot get: hard_link cross-device, falling back to copy",
+                    );
+                    std::fs::copy(&from, &to)?;
+                }
+                Err(e) => return Err(SnapshotError::Io(e)),
+            }
         }
         Ok(())
     }
@@ -446,4 +471,85 @@ mod tests {
 
         cleanup(&root);
     }
+
+    /// A3-partial: `LocalDiskSnapshotStore::get` uses `hard_link`, not
+    /// `copy`, when source + dest share a filesystem. Equality of the
+    /// underlying inode is the canonical proof on Unix.
+    #[cfg(unix)]
+    #[test]
+    fn local_disk_get_uses_hard_link_when_same_fs() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = fresh_root();
+        let store = LocalDiskSnapshotStore::new(root.join("store"));
+
+        let src = root.join("src");
+        write_fake_artifact(&src);
+        let meta = store.put("sbx_hardlink", &src, "v51.1").unwrap();
+
+        let target = root.join("target");
+        store.get("sbx_hardlink", &target, &meta.sha256).unwrap();
+
+        let store_dir = root.join("store").join("sbx_hardlink");
+        for &name in ARTIFACT_FILES {
+            let src_md = std::fs::metadata(store_dir.join(name)).unwrap();
+            let dst_md = std::fs::metadata(target.join(name)).unwrap();
+            // Same filesystem under tempdir root → hard_link succeeds
+            // and both names resolve to the same inode.
+            assert_eq!(
+                src_md.ino(),
+                dst_md.ino(),
+                "{name}: expected hard_link (inode equality), got copy",
+            );
+            assert_eq!(src_md.dev(), dst_md.dev(), "{name}: device id differs");
+            // Link count is >= 2 (store entry + restored entry).
+            assert!(
+                src_md.nlink() >= 2,
+                "{name}: nlink={} expected >= 2",
+                src_md.nlink(),
+            );
+        }
+
+        cleanup(&root);
+    }
+
+    /// A stale destination from a previous failed restore must not
+    /// abort `get`: the `AlreadyExists` branch removes + relinks.
+    #[cfg(unix)]
+    #[test]
+    fn local_disk_get_overwrites_stale_destination() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = fresh_root();
+        let store = LocalDiskSnapshotStore::new(root.join("store"));
+
+        let src = root.join("src");
+        write_fake_artifact(&src);
+        let meta = store.put("sbx_stale", &src, "v51.1").unwrap();
+
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        // Pre-populate with stale files (e.g., from a prior aborted
+        // restore). The retry path should clean these up.
+        for &name in ARTIFACT_FILES {
+            std::fs::write(target.join(name), b"stale-prior-restore").unwrap();
+        }
+
+        store.get("sbx_stale", &target, &meta.sha256).unwrap();
+
+        let store_dir = root.join("store").join("sbx_stale");
+        for &name in ARTIFACT_FILES {
+            let src_ino = std::fs::metadata(store_dir.join(name)).unwrap().ino();
+            let dst_ino = std::fs::metadata(target.join(name)).unwrap().ino();
+            assert_eq!(src_ino, dst_ino, "{name}: relink did not produce same inode");
+        }
+
+        cleanup(&root);
+    }
+
+    // NOTE: the `CrossesDevices` fallback path is not exercised here.
+    // Simulating it requires two distinct filesystems (e.g., bind
+    // mount + tmpfs), which CI runners don't reliably provide. The
+    // branch is a small, type-checked tail; production-mode coverage
+    // lives in the integration runbook (docs/runbooks/sandbox-nomad-ch.md).
 }
