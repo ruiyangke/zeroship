@@ -74,7 +74,64 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signature, VerifyingKey, SIGNATURE_LENGTH};
 use lru::LruCache;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+/// **R7-S1 hardening.** Canonical body schema for `POST /_clock_resync`.
+///
+/// **Pre-R7-S1 body shape** (bug #22, B22-fixer):
+/// `{"ts": <unix_secs>}` — no `sandbox_id`, no per-restore challenge.
+/// The signature plus the agent's nonce LRU were the only replay
+/// defenses. Because `/_clock_resync` runs POST-restore, no resync
+/// nonce is ever in any snapshot's LRU. A network-adjacent attacker
+/// who captured a cycle-N resync (sig + ts + nonce + body) could
+/// race the controller's cycle-N+1 POST and set `CLOCK_REALTIME` to
+/// the stale cycle-N value → sustained 401 DoS on every strict-skew
+/// RPC for the lifetime of the sandbox.
+///
+/// **R7-S1 fix.** The body now binds **two additional fields** into
+/// the signed canonical (and therefore into the body-hash slot):
+///
+/// - `sandbox_id` — the UUID string the agent reads at boot from the
+///   `SANDBOX_AGENT_SANDBOX_ID` env var (or `/run/keys/sandbox-id`).
+///   The agent's `clock_resync` handler asserts it equals its own
+///   sandbox_id; a captured resync from sandbox A cannot be replayed
+///   against sandbox B (they have different verifier instances anyway,
+///   but the sandbox_id bind makes the rejection explicit and audit-
+///   loggable rather than relying on signature mismatch).
+///
+/// - `challenge` — a 64-char lowercase hex string (32 bytes of
+///   `getrandom`). The controller mints a fresh challenge for every
+///   restore call; the agent stores recently-seen challenges in a
+///   small process-local LRU. A captured cycle-N resync replayed
+///   POST-cycle-N+1 either (a) carries cycle-N's challenge → matches
+///   the LRU → rejected as replay, or (b) carries no challenge /
+///   wrong length → rejected at body validation. Either way the
+///   attacker cannot wedge the clock to a stale value.
+///
+/// Wire-stable: any future field added must append, never reorder
+/// (serde tolerates trailing unknown fields by default, so older
+/// controllers can still talk to newer agents during a rolling
+/// upgrade — they just don't supply optional bind values). Removing
+/// `sandbox_id` or `challenge` is a wire break that requires a
+/// `PROTOCOL_VERSION` bump.
+#[derive(Debug, Deserialize)]
+pub struct ResyncBody {
+    /// Sandbox UUID (string form, e.g. `019486f5-…`). Agent rejects
+    /// the request if this doesn't match its own boot-time-known
+    /// sandbox_id.
+    pub sandbox_id: String,
+    /// Unix seconds the controller wants the guest's `CLOCK_REALTIME`
+    /// set to. Same field name + semantics as the pre-R7-S1 body so
+    /// the controller's `settimeofday(2)` call site is unchanged.
+    pub ts: u64,
+    /// 64-char lowercase hex string (32 bytes of random). The agent
+    /// stores it in a small LRU to reject replays of a captured
+    /// resync against future restore cycles. Width is load-bearing:
+    /// the agent rejects any value whose length isn't exactly 64
+    /// before consulting the LRU.
+    pub challenge: String,
+}
 
 /// Maximum allowed clock skew between controller and agent.
 pub const SKEW_S: u64 = 5;

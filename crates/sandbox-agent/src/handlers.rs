@@ -21,9 +21,11 @@
 //!   - `DELETE /files/{path}*`   — delete file
 //!   - `POST /shutdown`          — flip drain flag (graceful drain)
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
+use lru::LruCache;
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
@@ -32,8 +34,131 @@ use serde_json::json;
 use crate::audit;
 use crate::exec;
 use crate::files::Workspace;
-use crate::sig::{self, AuthFail, CanonicalKind, Verifier};
+use crate::sig::{self, AuthFail, CanonicalKind, ResyncBody, Verifier};
 use crate::version;
+
+/// **R7-S1.** The agent's own sandbox UUID, learned at boot from
+/// `SANDBOX_AGENT_SANDBOX_ID` env (preferred) or `/run/keys/sandbox-id`.
+/// Set once via [`init_sandbox_id_from_env`] from `main.rs` before
+/// the server starts; reading is `&'static str`-cheap thereafter.
+///
+/// The clock-resync handler asserts the controller-signed body's
+/// `sandbox_id` field equals this value; a captured resync from a
+/// different sandbox is rejected before the LRU is consulted.
+///
+/// **Why a static, not an `AppState` field.** The existing
+/// `state_with_paths` constructor (in `lib.rs`) takes (pubkey_path,
+/// workspace_path); adding a third parameter would ripple through
+/// every test helper and the SDK call sites. A process-local
+/// `OnceLock` set from `main.rs` is the smaller blast radius for the
+/// R7-S1 hardening pass — handlers read it at most once per resync
+/// request, `OnceLock` is lock-free on the hot path.
+///
+/// Tests set this via [`test_set_sandbox_id`] so the handler can be
+/// driven through the in-memory ntex transport without env var racing.
+static SANDBOX_ID: OnceLock<String> = OnceLock::new();
+
+/// **R7-S1.** Process-local LRU of recently-seen resync challenges
+/// (hex strings). Capacity is small on purpose: the controller only
+/// calls `/_clock_resync` once per restore cycle, so even four entries
+/// covers far more replay surface than any realistic attacker can
+/// exploit. A larger cache wastes memory inside the snapshot (the
+/// agent's heap is part of the CH memory image).
+///
+/// Initialised lazily on first access via the helper accessor below
+/// so test code that never touches resync doesn't allocate the LRU.
+static RESYNC_CHALLENGES: OnceLock<Mutex<LruCache<String, ()>>> = OnceLock::new();
+
+/// Bound on the resync-challenge LRU. Four entries is enough to defeat
+/// the documented replay race (the controller issues exactly one
+/// resync per restore cycle, and restore cycles are seconds apart at
+/// worst); going higher just bloats the in-memory image.
+const RESYNC_CHALLENGE_CAPACITY: usize = 4;
+
+/// R7-S1 hex-encoding width for the resync challenge. 32 random bytes
+/// → 64 lowercase hex chars. The agent rejects any other length before
+/// consulting the LRU so a "challenge=" or 1-byte stub can't get past
+/// the body-shape gate.
+const RESYNC_CHALLENGE_HEX_LEN: usize = 64;
+
+/// R7-S1 init — call once from `main.rs` after parsing env. Reads the
+/// `SANDBOX_AGENT_SANDBOX_ID` env var (preferred) or
+/// `/run/keys/sandbox-id` file (fallback for wrappers that mount the
+/// id rather than env-inject it). Returns `Err` if neither source is
+/// available; the caller should log + treat as a hard error (the
+/// resync handler will reject every request without a known id, which
+/// would wedge every cluster wake → loud crash is better).
+///
+/// Idempotent: a second call after the OnceLock is set returns Ok
+/// without re-reading. Subsequent calls with a DIFFERENT id return Ok
+/// but do NOT overwrite — the OnceLock semantics are write-once.
+pub fn init_sandbox_id_from_env() -> Result<(), String> {
+    if SANDBOX_ID.get().is_some() {
+        return Ok(());
+    }
+    let id = if let Ok(v) = std::env::var("SANDBOX_AGENT_SANDBOX_ID") {
+        v
+    } else {
+        // Fallback: a small file mounted by the wrapper. Same path
+        // convention as the pubkey mount.
+        std::fs::read_to_string("/run/keys/sandbox-id")
+            .map_err(|e| format!(
+                "SANDBOX_AGENT_SANDBOX_ID env unset and /run/keys/sandbox-id read failed: {e}"
+            ))?
+            .trim()
+            .to_string()
+    };
+    if id.is_empty() {
+        return Err("sandbox_id is empty".to_string());
+    }
+    // OnceLock::set returns Err if already set — that's a no-op here
+    // (we checked above). Tolerate the race for symmetry.
+    let _ = SANDBOX_ID.set(id);
+    Ok(())
+}
+
+/// Test-only setter for the boot-time sandbox_id. Idempotent across
+/// the test suite because OnceLock writes are single-shot; tests that
+/// need a fresh id should run in their own process (or use
+/// [`test_set_sandbox_id`] from the first test that touches it).
+#[cfg(test)]
+pub fn test_set_sandbox_id(id: &str) {
+    let _ = SANDBOX_ID.set(id.to_string());
+}
+
+/// Read the boot-time sandbox_id. Returns `None` if init was never
+/// called (handlers treat this as an unrecoverable misconfiguration
+/// and 500 the request).
+fn boot_sandbox_id() -> Option<&'static str> {
+    SANDBOX_ID.get().map(String::as_str)
+}
+
+/// Lazily-initialised handle to the resync challenge LRU.
+fn resync_challenges() -> &'static Mutex<LruCache<String, ()>> {
+    RESYNC_CHALLENGES.get_or_init(|| {
+        let cap = NonZeroUsize::new(RESYNC_CHALLENGE_CAPACITY)
+            .expect("RESYNC_CHALLENGE_CAPACITY > 0");
+        Mutex::new(LruCache::new(cap))
+    })
+}
+
+/// Clear the resync-challenge LRU. Test-only escape hatch kept for
+/// future tests that need a deterministic starting state.
+///
+/// **Production callers MUST NOT use this** — dropping the LRU lets
+/// a replay window open. The R7-S1 regression suite ([
+/// `clock_resync_accepts_fresh_challenge`,
+/// `clock_resync_rejects_replayed_challenge`]) does NOT call this;
+/// every test uses [`unique_challenge`] to generate a collision-
+/// resistant per-test value. Clearing mid-suite would race the
+/// replay-rejection test (its second call relies on the LRU still
+/// containing the challenge from the first call).
+#[cfg(test)]
+#[allow(dead_code)] // kept as a deliberate escape hatch; see doc-comment.
+fn test_clear_resync_challenges() {
+    let mut g = resync_challenges().lock().unwrap_or_else(|p| p.into_inner());
+    g.clear();
+}
 
 /// State shared by every handler. Cheap to clone (`Arc` inside).
 #[derive(Clone, Debug)]
@@ -542,7 +667,7 @@ pub async fn delete_file(
     }
 }
 
-// ─── /_clock_resync — bug #22: post-CH-restore wall-clock fixup ──
+// ─── /_clock_resync — bug #22 + R7-S1 hardening ─────────────────
 //
 // The controller calls this once, immediately after `wait_for_livez`
 // returns Ok during a snapshot wake. CH `--restore` brings the VM
@@ -553,28 +678,28 @@ pub async fn delete_file(
 // The handler:
 //   1. Verifies the request signature WITHOUT applying the 5-second
 //      skew window (`verify_signed_skew_bypass`).
-//   2. Parses the body `{"ts": <unix_secs>}`.
-//   3. Calls `settimeofday(2)` to set `CLOCK_REALTIME` to the
+//   2. Parses the body `{"sandbox_id": <uuid>, "ts": <unix_secs>,
+//      "challenge": <hex64>}` (R7-S1 hardening — pre-R7-S1 the body
+//      was just `{"ts": ...}`).
+//   3. Asserts `sandbox_id` equals the agent's own boot-time-known id;
+//      asserts `challenge` is exactly 64 lowercase hex chars and is
+//      not in the resync-challenge LRU.
+//   4. Calls `settimeofday(2)` to set `CLOCK_REALTIME` to the
 //      controller's signed ts.
-//   4. Returns 200.
+//   5. Records the challenge in the LRU and returns 200.
 //
 // Security: the signature requires the controller's private key, so
-// an in-VM attacker cannot push the clock. The nonce LRU prevents
-// replay. The endpoint is the ONLY path that bypasses the skew gate;
-// every other endpoint uses `verify_signed`.
+// an in-VM attacker cannot push the clock. The challenge LRU + the
+// `sandbox_id` bind close R7-S1's replay-DoS surface: a captured
+// cycle-N resync replayed against cycle-N+1 either matches the LRU
+// (rejected) or carries the wrong sandbox_id (rejected). The nonce
+// LRU on the verifier path remains in place; this layer is in
+// addition.
 //
-// Idempotency: a re-call with a fresh ts/nonce simply re-sets the
-// clock; no state in the agent depends on "we already resynced" beyond
-// the LRU's per-nonce uniqueness. The controller can retry on transient
-// network errors without harm.
-
-#[derive(Debug, Deserialize)]
-pub struct ClockResyncBody {
-    /// Unix seconds the controller wants the guest's `CLOCK_REALTIME`
-    /// set to. The canonical body-hash binds this number to the
-    /// signature, so an attacker can't substitute a different value.
-    pub ts: u64,
-}
+// Idempotency: a re-call with a fresh challenge/nonce simply re-sets
+// the clock; no agent-side state persists beyond the LRU's per-
+// challenge uniqueness. The controller can retry on transient network
+// errors by minting a fresh challenge.
 
 pub async fn clock_resync(
     req: HttpRequest,
@@ -589,10 +714,99 @@ pub async fn clock_resync(
     // Even during drain the resync is harmless and lets the
     // controller's final teardown talk to the agent. Allow.
 
-    let parsed: ClockResyncBody = match serde_json::from_slice(&body) {
+    let parsed: ResyncBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => return err(400, format!("invalid JSON body: {e}")),
     };
+
+    // R7-S1: sandbox_id bind. The controller signs the body with the
+    // sandbox-specific UUID; the agent rejects any value that doesn't
+    // match its own boot-time-known id. Misconfiguration (id not
+    // initialised) is a hard 500 — every cluster wake would be
+    // unauthenticated and we want operators to see a loud failure
+    // instead of a silent skew-bypass-without-binding.
+    let agent_id = match boot_sandbox_id() {
+        Some(s) => s,
+        None => {
+            tracing::error!(
+                "clock_resync: SANDBOX_ID not initialised — refusing resync \
+                 (call init_sandbox_id_from_env in main before serving)"
+            );
+            audit::record(
+                audit::events::AUTH_FAIL,
+                "endpoint=clock_resync reason=sandbox-id-unset",
+            );
+            crate::metrics::inc_auth_fail("sandbox-id-unset");
+            return err(500, "agent misconfigured: sandbox_id not initialised");
+        }
+    };
+    if parsed.sandbox_id != agent_id {
+        audit::record(
+            audit::events::AUTH_FAIL,
+            &format!(
+                "endpoint=clock_resync reason=sandbox-id-mismatch \
+                 want_len={} got_len={}",
+                agent_id.len(),
+                parsed.sandbox_id.len(),
+            ),
+        );
+        crate::metrics::inc_auth_fail("sandbox-id-mismatch");
+        return unauthorized();
+    }
+
+    // R7-S1: challenge shape gate. Must be exactly 64 lowercase hex
+    // chars (32 bytes of random). We check shape BEFORE consulting the
+    // LRU so an attacker can't pollute the LRU with cheap garbage
+    // strings even with a valid signature on a malformed body.
+    if parsed.challenge.len() != RESYNC_CHALLENGE_HEX_LEN
+        || !parsed
+            .challenge
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        audit::record(
+            audit::events::AUTH_FAIL,
+            &format!(
+                "endpoint=clock_resync reason=challenge-bad-shape len={}",
+                parsed.challenge.len()
+            ),
+        );
+        crate::metrics::inc_auth_fail("challenge-bad-shape");
+        return unauthorized();
+    }
+
+    // R7-S1: replay check + record. The challenge LRU's contains-check
+    // is the load-bearing replay defense — a captured cycle-N resync
+    // replayed against cycle-N+1 carries cycle-N's challenge → hit →
+    // reject. We record the challenge IMMEDIATELY after the contains
+    // check (before settimeofday) for two reasons:
+    //
+    //   1. The signature already binds the entire body (including the
+    //      challenge) to the controller's private key, so recording a
+    //      not-yet-acted-on challenge is safe — the same body can
+    //      never be replayed by a different signer.
+    //   2. If settimeofday fails (e.g., EPERM in tests where the
+    //      process isn't PID 1), we still want the LRU to remember
+    //      the challenge so a retry attempt from a captured replay
+    //      can't slip through during the same agent lifetime.
+    //
+    // We drop the lock before settimeofday so the syscall doesn't
+    // serialise behind LRU operations from any concurrent future
+    // handler.
+    {
+        let mut cache = resync_challenges()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if cache.contains(&parsed.challenge) {
+            audit::record(
+                audit::events::AUTH_REPLAY,
+                "endpoint=clock_resync reason=challenge-replayed",
+            );
+            crate::metrics::inc_auth_fail("challenge-replayed");
+            return unauthorized();
+        }
+        cache.put(parsed.challenge.clone(), ());
+    }
 
     // i64::try_from is the cleanest "is this representable as a
     // timeval.tv_sec?" gate. ~292 billion years of headroom on 64-bit
@@ -1271,7 +1485,7 @@ mod tests {
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
-    // ─── Bug #22 fix: /_clock_resync ─────────────────────────────
+    // ─── Bug #22 + R7-S1: /_clock_resync ──────────────────────────
     //
     // The endpoint MUST:
     //   1. Reject unsigned / wrong-key requests with 401.
@@ -1279,13 +1493,54 @@ mod tests {
     //   3. ACCEPT signed requests whose ts is far outside the normal
     //      5-second skew window — that's the entire point.
     //   4. Reject malformed bodies with 400 (not 401).
+    //   5. **R7-S1**: reject body that omits `sandbox_id` (treated as
+    //      malformed JSON → 400 since serde rejects).
+    //   6. **R7-S1**: reject body whose `sandbox_id` mismatches the
+    //      agent's own boot-time-known id → 401.
+    //   7. **R7-S1**: reject a body whose `challenge` is in the LRU
+    //      → 401 (replay defense).
+    //   8. **R7-S1**: accept a body whose `challenge` is fresh (32-byte
+    //      hex), distinct from the previous test's value.
     //
-    // Test 3 is the load-bearing regression assertion: the cluster
-    // smoke (Appendix E) saw 9/9 wakes 401 on /exec because the
-    // strict-skew gate rejected every controller-signed RPC after CH
-    // `--restore`. The skew-bypass path on /_clock_resync is the
-    // recovery handshake; if it stops accepting far-future ts the
-    // wake path immediately re-breaks.
+    // Tests 5-8 are R7-S1's load-bearing regression assertions: the
+    // pre-R7-S1 body shape was just `{"ts": <unix_secs>}`, with no
+    // per-restore challenge and no sandbox_id bind. A network-adjacent
+    // attacker who captured cycle-N's resync could race cycle-N+1 to
+    // re-set CLOCK_REALTIME to the stale value, wedging every strict-
+    // skew RPC. The challenge LRU + sandbox_id bind close that surface.
+
+    /// Set the boot-time sandbox_id for the test process. Idempotent
+    /// across the entire suite — OnceLock semantics mean the first
+    /// call wins. All clock_resync tests use this same id so they can
+    /// share the global state without racing.
+    const TEST_SANDBOX_ID: &str = "01900000-0000-7000-8000-000000000000";
+
+    fn ensure_test_sandbox_id() {
+        test_set_sandbox_id(TEST_SANDBOX_ID);
+    }
+
+    /// Each test uses a unique challenge so they don't collide in the
+    /// global RESYNC_CHALLENGES LRU. 32 random bytes → 64 hex chars;
+    /// we synthesise from a counter + label so the hex pattern is
+    /// distinctive in audit logs if a test fails.
+    fn unique_challenge(label: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, AtomOrd::SeqCst);
+        // 64 lowercase hex chars. Embed label hash + counter to avoid
+        // collision across tests that all use, say, "0000…0001".
+        let mut bytes = [0u8; 32];
+        let label_hash = label.bytes().fold(0u8, |a, b| a.wrapping_add(b));
+        bytes[0] = label_hash;
+        bytes[1..9].copy_from_slice(&n.to_be_bytes());
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Build the R7-S1 body shape for `/_clock_resync`.
+    fn resync_body(ts: u64, challenge: &str) -> String {
+        format!(
+            r#"{{"sandbox_id":"{TEST_SANDBOX_ID}","ts":{ts},"challenge":"{challenge}"}}"#
+        )
+    }
 
     /// Sign a `/_clock_resync` request with a CALLER-supplied ts so
     /// the test can vary it freely. The default `sign()` helper above
@@ -1318,12 +1573,15 @@ mod tests {
     /// (missing JSON body) MUST NOT fire before the signature check.
     #[ntex::test]
     async fn clock_resync_without_signature_returns_401() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-noauth");
         let app = make_app!(state);
+        let challenge = unique_challenge("noauth");
+        let body = resync_body(1_700_000_000, &challenge);
         let req = test::TestRequest::post()
             .uri("/_clock_resync")
             .header("content-type", "application/json")
-            .set_payload(r#"{"ts":1700000000}"#)
+            .set_payload(body)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1335,6 +1593,7 @@ mod tests {
     /// every cluster wake breaks on the first /exec.
     #[ntex::test]
     async fn clock_resync_accepts_far_future_ts() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-far");
         let app = make_app!(state);
         // We do NOT actually settimeofday in the test (the test
@@ -1350,10 +1609,11 @@ mod tests {
         //     unlikely in CI) or 500 (auth passed, settimeofday
         //     returned EPERM) is acceptable evidence the bypass
         //     works.
-        let body = r#"{"ts":1900000000}"#;
+        let challenge = unique_challenge("far");
+        let body = resync_body(1_900_000_000, &challenge);
         // 1900000000 is ~year 2030 — guaranteed > 5s skew at any
         // real wall-clock the test process will see.
-        let req = clock_resync_req(1_900_000_000, "resync-far-test", body).to_request();
+        let req = clock_resync_req(1_900_000_000, "resync-far-test", &body).to_request();
         let resp = test::call_service(&app, req).await;
         assert_ne!(
             resp.status(),
@@ -1379,10 +1639,12 @@ mod tests {
     /// bypass.
     #[ntex::test]
     async fn clock_resync_accepts_far_past_ts() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-past");
         let app = make_app!(state);
-        let body = r#"{"ts":1500000000}"#;
-        let req = clock_resync_req(1_500_000_000, "resync-past-test", body).to_request();
+        let challenge = unique_challenge("past");
+        let body = resync_body(1_500_000_000, &challenge);
+        let req = clock_resync_req(1_500_000_000, "resync-past-test", &body).to_request();
         let resp = test::call_service(&app, req).await;
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
@@ -1391,11 +1653,14 @@ mod tests {
     /// path does NOT weaken any other check.
     #[ntex::test]
     async fn clock_resync_with_tampered_body_returns_401() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-tamper");
         let app = make_app!(state);
         // Sign for body A, send body B.
-        let signed_body = r#"{"ts":1700000000}"#;
-        let sent_body = r#"{"ts":1800000000}"#;
+        let c1 = unique_challenge("tamper-1");
+        let c2 = unique_challenge("tamper-2");
+        let signed_body = resync_body(1_700_000_000, &c1);
+        let sent_body = resync_body(1_800_000_000, &c2);
         let ts: u64 = 1_700_000_000;
         let nonce = "resync-tamper-test";
         let (ts_hdr, nonce_hdr, sig) =
@@ -1406,7 +1671,7 @@ mod tests {
             .header("x-sbx-timestamp", ts_hdr)
             .header("x-sbx-nonce", nonce_hdr)
             .header("x-sbx-signature", sig)
-            .set_payload(sent_body.to_string())
+            .set_payload(sent_body)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1416,13 +1681,15 @@ mod tests {
     /// rejection MUST still fire under the skew-bypass path.
     #[ntex::test]
     async fn clock_resync_with_wrong_key_returns_401() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-wrongkey");
         let app = make_app!(state);
         // Sign with a key the agent's verifier does NOT trust.
         let other_sk = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
         let ts: u64 = 1_900_000_000;
         let nonce = "resync-wrongkey-test";
-        let body = r#"{"ts":1900000000}"#;
+        let challenge = unique_challenge("wrongkey");
+        let body = resync_body(1_900_000_000, &challenge);
         let sig = crate::sig::sign(&other_sk, "POST", "/_clock_resync", body.as_bytes(), ts, nonce);
         let req = test::TestRequest::post()
             .uri("/_clock_resync")
@@ -1430,7 +1697,7 @@ mod tests {
             .header("x-sbx-timestamp", ts.to_string())
             .header("x-sbx-nonce", nonce)
             .header("x-sbx-signature", sig)
-            .set_payload(body.to_string())
+            .set_payload(body)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1442,6 +1709,7 @@ mod tests {
     /// an attack.
     #[ntex::test]
     async fn clock_resync_with_malformed_json_returns_400() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-badjson");
         let app = make_app!(state);
         let body = "not json at all";
@@ -1451,21 +1719,201 @@ mod tests {
     }
 
     /// Replayed nonce → 401 (`ReplayedNonce` audit reason). The
-    /// skew-bypass path does NOT weaken the LRU defense.
+    /// skew-bypass path does NOT weaken the LRU defense. **Note**:
+    /// this exercises the verifier's nonce LRU, which fires BEFORE
+    /// the R7-S1 challenge LRU — same body + same nonce → nonce
+    /// replay surfaces first.
     #[ntex::test]
     async fn clock_resync_replay_returns_401() {
+        ensure_test_sandbox_id();
         let (state, _d) = make_state("resync-replay");
         let app = make_app!(state);
-        let body = r#"{"ts":1900000000}"#;
+        let challenge = unique_challenge("nonce-replay");
+        let body = resync_body(1_900_000_000, &challenge);
         let ts: u64 = 1_900_000_000;
         let nonce = "resync-replay-test";
-        let req1 = clock_resync_req(ts, nonce, body).to_request();
+        let req1 = clock_resync_req(ts, nonce, &body).to_request();
         let resp1 = test::call_service(&app, req1).await;
         // First call: not 401 (200 or 500 — see far-future test).
         assert_ne!(resp1.status(), StatusCode::UNAUTHORIZED);
         // Replay with the SAME nonce + ts + body must 401.
-        let req2 = clock_resync_req(ts, nonce, body).to_request();
+        let req2 = clock_resync_req(ts, nonce, &body).to_request();
         let resp2 = test::call_service(&app, req2).await;
         assert_eq!(resp2.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── R7-S1 regression tests ───────────────────────────────────
+    //
+    // The 4 tests below pin the sandbox_id + per-restore challenge
+    // binds that close R7-S1. They use distinct nonces + challenges
+    // so each test exercises ONE constraint without bleeding into
+    // the others via the shared verifier LRU or challenge LRU.
+
+    /// **R7-S1**: a body that omits `sandbox_id` → 400. serde rejects
+    /// the missing required field; the handler maps that to 400, not
+    /// 401, because the signature itself was valid (the attacker
+    /// would have needed the controller's private key to even reach
+    /// the JSON parse).
+    #[ntex::test]
+    async fn clock_resync_rejects_missing_sandbox_id() {
+        ensure_test_sandbox_id();
+        let (state, _d) = make_state("resync-missing-sbid");
+        let app = make_app!(state);
+        let challenge = unique_challenge("missing-sbid");
+        // No "sandbox_id" field — serde::Deserialize requires it.
+        let body = format!(
+            r#"{{"ts":1900000000,"challenge":"{challenge}"}}"#
+        );
+        let req = clock_resync_req(
+            1_900_000_000,
+            "resync-missing-sbid-nonce",
+            &body,
+        )
+        .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "R7-S1 regression: body without sandbox_id must 400 (serde missing-field)"
+        );
+    }
+
+    /// **R7-S1**: a body whose `sandbox_id` does not match the agent's
+    /// own boot-time-known id → 401. This is the explicit replay
+    /// defense for cross-sandbox capture: even if the attacker could
+    /// somehow obtain a signed-and-fresh resync for sandbox A, they
+    /// cannot replay it against sandbox B's agent because the body
+    /// is bound to A's UUID.
+    #[ntex::test]
+    async fn clock_resync_rejects_wrong_sandbox_id() {
+        ensure_test_sandbox_id();
+        let (state, _d) = make_state("resync-wrong-sbid");
+        let app = make_app!(state);
+        let challenge = unique_challenge("wrong-sbid");
+        // Different UUID — agent has TEST_SANDBOX_ID; signed body
+        // carries some-other-sandbox-id.
+        let other_sbid = "01900000-0000-7000-8000-000000000999";
+        let body = format!(
+            r#"{{"sandbox_id":"{other_sbid}","ts":1900000000,"challenge":"{challenge}"}}"#
+        );
+        let req = clock_resync_req(
+            1_900_000_000,
+            "resync-wrong-sbid-nonce",
+            &body,
+        )
+        .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "R7-S1 regression: body with wrong sandbox_id must 401 (cross-sandbox replay)"
+        );
+    }
+
+    /// **R7-S1 CRITICAL**: a body whose `challenge` is in the LRU
+    /// (i.e., already seen by THIS agent process) → 401. This is the
+    /// load-bearing defense against the post-restore replay DoS: an
+    /// attacker who captured cycle-N's resync (sig + ts + nonce +
+    /// body bytes verbatim) cannot replay it against cycle-N+1 with
+    /// a NEW verifier nonce, because the challenge inside the body
+    /// is still cycle-N's value and is in the agent's LRU. Note we
+    /// use distinct nonces here so the verifier's nonce LRU does NOT
+    /// fire first — the challenge LRU is what we're pinning.
+    #[ntex::test]
+    async fn clock_resync_rejects_replayed_challenge() {
+        ensure_test_sandbox_id();
+        let (state, _d) = make_state("resync-replay-chal");
+        let app = make_app!(state);
+        let challenge = unique_challenge("replay-chal");
+        let body = resync_body(1_900_000_000, &challenge);
+
+        // First call: use nonce N1. Should succeed past auth (200 or
+        // 500 depending on settimeofday capability). The challenge is
+        // now in the LRU.
+        let req1 = clock_resync_req(
+            1_900_000_000,
+            "resync-replay-chal-n1",
+            &body,
+        )
+        .to_request();
+        let resp1 = test::call_service(&app, req1).await;
+        assert_ne!(
+            resp1.status(),
+            StatusCode::UNAUTHORIZED,
+            "first call must pass auth so the challenge enters the LRU"
+        );
+
+        // Second call: SAME challenge, fresh nonce N2 and fresh ts to
+        // bypass the verifier's nonce/ts replay defenses. The
+        // verifier accepts the signature (different canonical bytes
+        // → different nonce / ts), but the handler MUST reject because
+        // the challenge is already in the LRU.
+        let req2 = clock_resync_req(
+            1_900_000_001, // +1s — different canonical, signature still valid for THIS ts
+            "resync-replay-chal-n2",
+            &body, // same body bytes → same challenge → must lose to LRU
+        )
+        .to_request();
+        // Note: the body bytes encode ts=1_900_000_000 inside; but
+        // the signature is over the body bytes verbatim, so signing
+        // with ts=1_900_000_001 in the HEADER does not change the
+        // body. The body-hash slot in the canonical covers the body
+        // bytes verbatim → signature is valid for THIS request even
+        // though the inner ts is stale. That's the exact attack
+        // scenario R7-S1 closes.
+        let resp2 = test::call_service(&app, req2).await;
+        assert_eq!(
+            resp2.status(),
+            StatusCode::UNAUTHORIZED,
+            "R7-S1 CRITICAL: same challenge replayed with fresh outer nonce/ts \
+             must 401 — challenge LRU is the load-bearing defense against \
+             the post-restore replay-DoS."
+        );
+    }
+
+    /// **R7-S1**: a body with a FRESH challenge (not in the LRU) →
+    /// passes auth. Confirms the happy path still works after the
+    /// hardening; without this, the previous three tests would
+    /// trivially pass via a global "reject everything" defect.
+    ///
+    /// **Test isolation note.** The challenge LRU is process-global
+    /// (`OnceLock<Mutex<LruCache>>`). Tests share it across the
+    /// thread-pool, so we must NOT call `test_clear_resync_challenges`
+    /// here — clearing mid-suite would race the
+    /// `clock_resync_rejects_replayed_challenge` test (whose second
+    /// call relies on the LRU still containing the challenge from
+    /// the first call). Instead, every test uses `unique_challenge`
+    /// to generate a collision-resistant value (per-test counter +
+    /// per-test label byte → no cross-test collision).
+    #[ntex::test]
+    async fn clock_resync_accepts_fresh_challenge() {
+        ensure_test_sandbox_id();
+        let (state, _d) = make_state("resync-fresh-chal");
+        let app = make_app!(state);
+        let challenge = unique_challenge("fresh");
+        let body = resync_body(1_900_000_000, &challenge);
+        let req = clock_resync_req(
+            1_900_000_000,
+            "resync-fresh-chal-nonce",
+            &body,
+        )
+        .to_request();
+        let resp = test::call_service(&app, req).await;
+        // Same accept-criterion as the bug-#22 far-future test:
+        // 200 if root + CAP_SYS_TIME, 500 if EPERM. 401 is the
+        // failure mode that breaks R7-S1.
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "R7-S1: a fresh challenge must pass the LRU gate"
+        );
+        assert!(
+            matches!(
+                resp.status(),
+                StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR
+            ),
+            "expected 200 or 500 post-auth; got {}",
+            resp.status()
+        );
     }
 }

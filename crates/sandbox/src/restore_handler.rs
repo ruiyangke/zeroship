@@ -510,13 +510,17 @@ async fn do_restore_inner(
             ))
         })?;
         let agent_url = backend.derive_agent_url(snap.vm_index);
-        clock_resync_post_restore(&agent_url, &sealed.signing_key_bytes)
-            .await
-            .map_err(|e| {
-                RestoreHandlerError::Backend(format!(
-                    "post-wake clock_resync to {agent_url}: {e}"
-                ))
-            })?;
+        clock_resync_post_restore(
+            &agent_url,
+            sandbox_id,
+            &sealed.signing_key_bytes,
+        )
+        .await
+        .map_err(|e| {
+            RestoreHandlerError::Backend(format!(
+                "post-wake clock_resync to {agent_url}: {e}"
+            ))
+        })?;
         backend
             .register_restored(
                 sandbox_id,
@@ -1430,10 +1434,24 @@ fn wait_for_livez_blocking(
 /// other controller→agent RPC uses; the only difference is the agent
 /// dispatches `/_clock_resync` through the skew-bypass verifier.
 ///
+/// **R7-S1 body shape (wire change).** The signed body is now
+/// `{"sandbox_id": <uuid>, "ts": <unix_secs>, "challenge": <hex64>}`.
+/// The `sandbox_id` field lets the agent reject a captured resync
+/// from sandbox A replayed against sandbox B; the `challenge` field
+/// (32 random bytes hex-encoded) lets the agent reject a captured
+/// resync from cycle-N replayed against cycle-N+1 of the same sandbox.
+/// Pre-R7-S1 controllers signed just `{"ts": ...}` — those messages
+/// no longer pass the new agent's body validation. Rolling upgrade:
+/// rootfs v5 + controller v18 land together; the wire change is
+/// atomic in deployment.
+///
 /// **Security:** the controller's private key is the trust anchor —
-/// an in-VM attacker can't forge this call. The nonce LRU prevents a
-/// captured resync from being replayed. The endpoint is the ONLY one
-/// that bypasses the skew window; every other agent endpoint stays on
+/// an in-VM attacker can't forge this call. The agent's nonce LRU
+/// prevents a captured resync from being replayed within the agent's
+/// process lifetime; the new **challenge LRU** prevents the post-
+/// restore replay-DoS (a fresh outer nonce on the same captured body
+/// would otherwise slip past). The endpoint is the ONLY one that
+/// bypasses the skew window; every other agent endpoint stays on
 /// strict 5-second skew.
 ///
 /// **Failure mode:** any non-200 response (including the agent's
@@ -1443,6 +1461,7 @@ fn wait_for_livez_blocking(
 /// row at `Restoring` with a broken VM.
 async fn clock_resync_post_restore(
     agent_url: &str,
+    sandbox_id: Uuid,
     signing_key_bytes: &[u8; 32],
 ) -> Result<(), String> {
     use ed25519_dalek::SigningKey;
@@ -1452,6 +1471,11 @@ async fn clock_resync_post_restore(
     let url = format!("{agent_url}/_clock_resync");
     let path = "/_clock_resync".to_string();
     let url_for_blocking = url.clone();
+    // R7-S1: bind the sandbox UUID into the signed body so the agent's
+    // handler can assert it matches its own boot-time-known id. We
+    // capture by value (`to_string`) because spawn_blocking takes
+    // `'static` closures.
+    let sandbox_id_str = sandbox_id.to_string();
     compio::runtime::spawn_blocking(move || {
         // Use std::time directly here (mirror of `unix_now` in
         // nomad_ch.rs) — clock_resync targets `CLOCK_REALTIME` so
@@ -1461,10 +1485,26 @@ async fn clock_resync_post_restore(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // Bind the new wall-clock value into the body so the agent's
-        // body-hash check covers it and an in-VM attacker can't
-        // substitute a different ts.
-        let body = serde_json::json!({ "ts": ts }).to_string();
+        // R7-S1: mint a fresh per-restore challenge (32 random bytes
+        // hex-encoded → 64 chars to match the agent's
+        // `RESYNC_CHALLENGE_HEX_LEN`). The agent's challenge LRU
+        // rejects any value it has seen recently — without this bind,
+        // a captured resync could be replayed POST-cycle to set a
+        // stale ts and 401 every strict-skew RPC.
+        let challenge = match clock_resync_random_hex(32) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("challenge gen: {e}")),
+        };
+        // Bind sandbox_id + ts + challenge into the body so the
+        // agent's body-hash check covers all three and an in-VM
+        // attacker can't substitute a different value for any of them.
+        // R7-S1 wire shape (pre-R7-S1 was just `{"ts": ts}`).
+        let body = serde_json::json!({
+            "sandbox_id": sandbox_id_str,
+            "ts": ts,
+            "challenge": challenge,
+        })
+        .to_string();
         let body_bytes = body.as_bytes();
         let nonce = match clock_resync_nonce() {
             Ok(n) => n,
@@ -1512,8 +1552,18 @@ async fn clock_resync_post_restore(
 /// #22's surgical scope is fully contained to (a) restore_handler,
 /// (b) the agent crate.
 fn clock_resync_nonce() -> Result<String, String> {
+    clock_resync_random_hex(16)
+}
+
+/// R7-S1 helper: fetch `n_bytes` from `/dev/urandom` and hex-encode.
+/// Used for both the per-restore `challenge` field (n_bytes=32 → 64
+/// hex chars, matching the agent's `RESYNC_CHALLENGE_HEX_LEN`) and
+/// the resync nonce (n_bytes=16 → 32 hex chars). Same source as
+/// `random_hex` in `crates/sandbox/src/restore.rs`; kept local so the
+/// restore module doesn't reach into backend internals.
+fn clock_resync_random_hex(n_bytes: usize) -> Result<String, String> {
     use std::io::Read as _;
-    let mut buf = [0u8; 16];
+    let mut buf = vec![0u8; n_bytes];
     std::fs::File::open("/dev/urandom")
         .map_err(|e| format!("open /dev/urandom: {e}"))?
         .read_exact(&mut buf)
@@ -1813,7 +1863,8 @@ mod real_backend_tests {
             (200, r#"{"resynced":true,"ts":1700000000}"#.to_string())
         });
         let signing_key_bytes = [0xabu8; 32];
-        let r = clock_resync_post_restore(&agent_url, &signing_key_bytes).await;
+        let sandbox_id = Uuid::now_v7();
+        let r = clock_resync_post_restore(&agent_url, sandbox_id, &signing_key_bytes).await;
         assert!(r.is_ok(), "happy path must Ok; got {r:?}");
         assert_eq!(
             calls.load(AOrdering::SeqCst),
@@ -1830,7 +1881,8 @@ mod real_backend_tests {
             (401, r#"{"error":"unauthorized"}"#.to_string())
         });
         let signing_key_bytes = [0xcdu8; 32];
-        let err = clock_resync_post_restore(&agent_url, &signing_key_bytes)
+        let sandbox_id = Uuid::now_v7();
+        let err = clock_resync_post_restore(&agent_url, sandbox_id, &signing_key_bytes)
             .await
             .expect_err("401 must error");
         assert!(
@@ -1848,8 +1900,9 @@ mod real_backend_tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let agent_url = format!("http://{addr}");
+        let sandbox_id = Uuid::now_v7();
         let r =
-            clock_resync_post_restore(&agent_url, &[0u8; 32]).await;
+            clock_resync_post_restore(&agent_url, sandbox_id, &[0u8; 32]).await;
         let err = r.expect_err("closed port must error");
         // ureq surfaces this as a transport error; the wrapper text
         // distinguishes from the status-code variant so an operator
@@ -1857,6 +1910,131 @@ mod real_backend_tests {
         assert!(
             err.contains("transport"),
             "expected transport error wrapper text; got: {err}"
+        );
+    }
+
+    /// **R7-S1**: pin the wire-format change. The body the controller
+    /// sends to `/_clock_resync` MUST carry `sandbox_id` + `ts` +
+    /// `challenge`. A future contributor who removes any of these
+    /// re-opens the post-restore replay-DoS surface; this test reads
+    /// the bytes the fake agent received and asserts the JSON keys
+    /// + the 64-char challenge width.
+    #[ntex::test]
+    async fn clock_resync_post_restore_binds_sandbox_id_and_challenge() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        // Hand-rolled fake agent that reads UNTIL the body content-
+        // length is satisfied. The default `spawn_fake_agent` reads
+        // one 8KB chunk and may miss the body on slow TCP packets;
+        // this variant explicitly drains both halves of the request.
+        let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = captured.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let mut stream = match listener.accept() {
+                Ok((s, _)) => s,
+                Err(_) => return,
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            // Drain the request in a loop until we've seen CRLF CRLF
+            // (header terminator) AND the body bytes implied by
+            // Content-Length, OR until the read times out.
+            let mut all = Vec::with_capacity(4096);
+            let mut buf = [0u8; 4096];
+            let mut header_end: Option<usize> = None;
+            let mut content_length: Option<usize> = None;
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        all.extend_from_slice(&buf[..n]);
+                        if header_end.is_none() {
+                            if let Some(idx) =
+                                all.windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                header_end = Some(idx + 4);
+                                // Parse Content-Length from headers.
+                                let hdrs = &all[..idx];
+                                for line in hdrs.split(|b| *b == b'\n') {
+                                    let line = String::from_utf8_lossy(line);
+                                    let line = line.trim();
+                                    if line.to_ascii_lowercase()
+                                        .starts_with("content-length:")
+                                    {
+                                        if let Some((_, v)) = line.split_once(':') {
+                                            if let Ok(n) = v.trim().parse::<usize>() {
+                                                content_length = Some(n);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let (Some(end), Some(cl)) = (header_end, content_length) {
+                            if all.len() >= end + cl {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break, // read timeout — we have what we have
+                }
+            }
+            // Hand the captured body to the assertion code via the
+            // shared Arc<Mutex<>>. Empty body falls through to the
+            // assertion's panic message.
+            if let (Some(end), Some(cl)) = (header_end, content_length) {
+                let slice_end = (end + cl).min(all.len());
+                let mut g = captured_for_handler.lock().unwrap();
+                *g = all[end..slice_end].to_vec();
+            } else if let Some(end) = header_end {
+                let mut g = captured_for_handler.lock().unwrap();
+                *g = all[end..].to_vec();
+            }
+            let body = r#"{"resynced":true,"ts":1700000000}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        let agent_url = format!("http://{addr}");
+
+        let signing_key_bytes = [0xefu8; 32];
+        let sandbox_id = Uuid::now_v7();
+        let r =
+            clock_resync_post_restore(&agent_url, sandbox_id, &signing_key_bytes)
+                .await;
+        assert!(r.is_ok(), "happy path must Ok; got {r:?}");
+        // Body has all three fields and the challenge is exactly the
+        // 64-char hex width the agent demands.
+        let body_bytes = captured.lock().unwrap().clone();
+        let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&body_str)
+            .unwrap_or_else(|e| panic!("body not valid JSON: {e}: body={body_str:?}"));
+        // R7-S1: sandbox_id field carries the UUID the caller passed.
+        assert_eq!(
+            parsed["sandbox_id"].as_str().unwrap_or(""),
+            sandbox_id.to_string(),
+            "R7-S1: body must bind the caller-supplied sandbox_id"
+        );
+        // R7-S1: challenge is a 64-char lowercase hex string (32 random bytes).
+        let challenge = parsed["challenge"].as_str().unwrap_or("");
+        assert_eq!(
+            challenge.len(),
+            64,
+            "R7-S1: challenge MUST be exactly 64 hex chars (32 random bytes); got len={}",
+            challenge.len()
+        );
+        assert!(
+            challenge.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "R7-S1: challenge MUST be lowercase hex; got {challenge:?}"
+        );
+        // R7-S1: ts is present + numeric.
+        assert!(
+            parsed["ts"].is_u64(),
+            "R7-S1: body must carry a numeric ts; got {parsed:?}"
         );
     }
 }
