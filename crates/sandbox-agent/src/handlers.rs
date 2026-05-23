@@ -59,21 +59,27 @@ use crate::version;
 static SANDBOX_ID: OnceLock<String> = OnceLock::new();
 
 /// **R7-S1.** Process-local LRU of recently-seen resync challenges
-/// (hex strings). Capacity is small on purpose: the controller only
-/// calls `/_clock_resync` once per restore cycle, so even four entries
-/// covers far more replay surface than any realistic attacker can
-/// exploit. A larger cache wastes memory inside the snapshot (the
-/// agent's heap is part of the CH memory image).
+/// (hex strings). Sized to absorb a burst of restore cycles plus any
+/// retry-on-transient logic the controller may grow in future — see
+/// `RESYNC_CHALLENGE_CAPACITY` for the sizing argument.
 ///
 /// Initialised lazily on first access via the helper accessor below
 /// so test code that never touches resync doesn't allocate the LRU.
 static RESYNC_CHALLENGES: OnceLock<Mutex<LruCache<String, ()>>> = OnceLock::new();
 
-/// Bound on the resync-challenge LRU. Four entries is enough to defeat
-/// the documented replay race (the controller issues exactly one
-/// resync per restore cycle, and restore cycles are seconds apart at
-/// worst); going higher just bloats the in-memory image.
-const RESYNC_CHALLENGE_CAPACITY: usize = 4;
+/// Bound on the resync-challenge LRU.
+///
+/// Sized for N concurrent restores × M retries per restore = N×M entries.
+/// With max 12 vm_index slots × 2–3 retries each = ~36; 32 gives some
+/// headroom but caps memory growth (the agent's heap is part of the CH
+/// memory image, so an unbounded cache would bloat every snapshot).
+///
+/// The previous value of 4 was fragile against any future retry-on-
+/// transient logic that pushes 3+ resyncs per cycle: LRU eviction of a
+/// recently-issued challenge would re-open the replay window the cache
+/// exists to close. 32 is comfortably above worst-case observed traffic
+/// while remaining ~2 KB of resident heap.
+const RESYNC_CHALLENGE_CAPACITY: usize = 32;
 
 /// R7-S1 hex-encoding width for the resync challenge. 32 random bytes
 /// → 64 lowercase hex chars. The agent rejects any other length before
