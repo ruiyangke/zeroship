@@ -915,12 +915,24 @@ pub(crate) fn assert_persist_required_when_snapshot_enabled(
 ///
 /// Three outcomes:
 ///   - `path = None` → `Ok(None)` (admin API disabled by config)
-///   - file readable + mode 0o400 + non-empty → `Ok(Some(token))`
+///   - file readable + mode 0o400 + owner uid 0 + non-empty → `Ok(Some(token))`
 ///   - ANYTHING else → `Err(...)` (refuse to boot loudly)
 ///
 /// Distinguishes "admin API disabled" (legitimate config) from
 /// "admin token misconfigured" (operator error) — Round-2 leaked
 /// the latter as a silent fail-open via `.ok()?` on metadata().
+///
+/// The file's owner uid is also checked: only uid 0 (root) is
+/// accepted (R9-S4d) — mode 0o400 alone is insufficient because a
+/// non-root attacker who pre-creates a chmod-400 file at
+/// `SANDBOX_ADMIN_TOKEN_PATH` before systemd starts could inject
+/// an attacker-known admin bearer; the controller would then
+/// register that token as the admin credential on boot, granting
+/// the attacker full admin-API access (sandbox create/delete/exec/
+/// file-tree everywhere) on first request. Strict "uid == 0"
+/// matches the R9-S4 (snapshot KEK), R9-S4b (sealed-records AEAD
+/// key) and R9-S4c (pg-password file) sibling invariants and the
+/// systemd-style secret-loading convention at `/etc/zeroship/`.
 pub(crate) fn load_admin_token(
     path: Option<&std::path::Path>,
 ) -> Result<Option<String>, String> {
@@ -930,6 +942,7 @@ pub(crate) fn load_admin_token(
 
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
         let meta = std::fs::metadata(path).map_err(|e| {
             format!("SANDBOX_ADMIN_TOKEN_PATH={path:?}: stat: {e}")
@@ -938,6 +951,13 @@ pub(crate) fn load_admin_token(
         if mode != 0o400 {
             return Err(format!(
                 "SANDBOX_ADMIN_TOKEN_PATH={path:?}: mode={mode:o} must be 0o400"
+            ));
+        }
+        let uid = meta.uid();
+        if uid != 0 {
+            return Err(format!(
+                "SANDBOX_ADMIN_TOKEN_PATH={path:?}: owner uid {uid} != 0 \
+                 (chown root:root the file)"
             ));
         }
     }
@@ -1468,14 +1488,45 @@ mod boot_loader_tests {
         assert!(matches!(got, Ok(None)), "None path must yield Ok(None); got {got:?}");
     }
 
+    /// Helper for R9-S4d tests whose 0o400 positive arm depends
+    /// on whether the test-runner is root: non-root runners can't
+    /// materialise a uid-0 file, so the loader correctly rejects
+    /// with the owner-uid error; root runners exercise the happy
+    /// path. Returns the runner's effective uid (always 0 on
+    /// non-unix targets, where the uid check is compiled out).
+    #[cfg(unix)]
+    fn current_file_uid(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(path).unwrap().uid()
+    }
+    #[cfg(not(unix))]
+    fn current_file_uid(_path: &std::path::Path) -> u32 {
+        0
+    }
+
     #[test]
     fn loader_reads_token_when_mode_0o400() {
         let path = temp_path();
         let token = "boot-loader-token-0o400-aaaa";
         write_with_mode(&path, token, 0o400);
+        // R9-S4d: the "0o400 must pass" arm only holds when the
+        // file is root-owned. In CI/dev the test-runner uid is
+        // non-zero, so the loader now correctly refuses the file.
+        // Pin the positive case behind a uid guard; the
+        // non-root-owned-rejection assertion is covered by
+        // `load_admin_token_rejects_non_root_owned_file` below.
+        let runner_uid = current_file_uid(&path);
         let got = load_admin_token(Some(&path));
         cleanup(&path);
-        assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        if runner_uid == 0 {
+            assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        } else {
+            let err = got.expect_err("0o400 non-root-owned must be rejected (R9-S4d)");
+            assert!(
+                err.contains("owner uid") && err.contains("!= 0"),
+                "error must mention owner uid != 0; got: {err}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1493,10 +1544,24 @@ mod boot_loader_tests {
     fn loader_refuses_empty_file() {
         let path = temp_path();
         write_with_mode(&path, "", 0o400);
+        // R9-S4d: the empty-file check fires AFTER the mode + uid
+        // checks pass. In a non-root test runner the uid check
+        // trips first; assert whichever error surfaces. Both
+        // branches are correct refusals — this test pins "loader
+        // rejects an empty 0o400 file" rather than the specific
+        // message.
+        let runner_uid = current_file_uid(&path);
         let got = load_admin_token(Some(&path));
         cleanup(&path);
-        let err = got.expect_err("empty file must yield Err");
-        assert!(err.contains("empty"), "error must mention 'empty'; got {err}");
+        let err = got.expect_err("empty / non-root file must yield Err");
+        if runner_uid == 0 {
+            assert!(err.contains("empty"), "error must mention 'empty'; got {err}");
+        } else {
+            assert!(
+                err.contains("owner uid") && err.contains("!= 0"),
+                "error must mention owner uid != 0; got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1504,9 +1569,89 @@ mod boot_loader_tests {
         let path = temp_path();
         let token = "trim-newline-token-bbbb";
         write_with_mode(&path, &format!("{token}\n"), 0o400);
+        // R9-S4d: same uid-guard logic as
+        // `loader_reads_token_when_mode_0o400`.
+        let runner_uid = current_file_uid(&path);
         let got = load_admin_token(Some(&path));
         cleanup(&path);
-        assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        if runner_uid == 0 {
+            assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+        } else {
+            let err = got.expect_err("0o400 non-root-owned must be rejected (R9-S4d)");
+            assert!(
+                err.contains("owner uid") && err.contains("!= 0"),
+                "error must mention owner uid != 0; got: {err}"
+            );
+        }
+    }
+
+    /// R9-S4d: a 0o400 admin-token file owned by a non-root uid
+    /// (i.e. the test-runner user, which is uid != 0 in CI/dev)
+    /// MUST be refused. Without the owner check, a non-root
+    /// attacker who pre-creates a chmod-400 file at
+    /// `SANDBOX_ADMIN_TOKEN_PATH` before the controller starts can
+    /// inject an attacker-known admin bearer; the controller
+    /// registers it as the admin credential on boot, yielding full
+    /// admin-API access (sandbox create/delete/exec/file-tree
+    /// everywhere) on first request. Sibling of R9-S4 (snapshot
+    /// KEK), R9-S4b (sealed-records AEAD key) and R9-S4c (pg
+    /// password file).
+    #[cfg(unix)]
+    #[test]
+    fn load_admin_token_rejects_non_root_owned_file() {
+        let path = temp_path();
+        write_with_mode(&path, "attacker-known-admin-bearer", 0o400);
+        // The file is created by the test-runner process, so its
+        // uid == effective uid of the runner. If that's 0 there's
+        // no non-root-owned file to materialise — skip (the
+        // positive arm is covered by
+        // `load_admin_token_accepts_root_owned_file_when_running_as_root`).
+        let runner_uid = current_file_uid(&path);
+        if runner_uid == 0 {
+            cleanup(&path);
+            eprintln!(
+                "skipping load_admin_token_rejects_non_root_owned_file: \
+                 running as root, can't materialise a non-root-owned file"
+            );
+            return;
+        }
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        let err = got.expect_err(
+            "non-root-owned admin-token file must be refused even at 0o400",
+        );
+        assert!(
+            err.contains("owner uid") && err.contains("!= 0"),
+            "error must mention owner uid != 0; got: {err}"
+        );
+    }
+
+    /// R9-S4d positive arm: when the test runs as root, a 0o400
+    /// admin-token file owned by root passes the check. Skipped
+    /// when not running as root (the common case in CI/dev) — the
+    /// negative arm above already pins the bug-fix assertion in
+    /// non-root environments.
+    #[cfg(unix)]
+    #[test]
+    fn load_admin_token_accepts_root_owned_file_when_running_as_root() {
+        let path = temp_path();
+        let token = "root-owned-admin-bearer-cccc";
+        write_with_mode(&path, token, 0o400);
+        let runner_uid = current_file_uid(&path);
+        if runner_uid != 0 {
+            cleanup(&path);
+            eprintln!(
+                "skipping load_admin_token_accepts_root_owned_file_when_running_as_root: \
+                 not running as root, can't create a root-owned admin-token file"
+            );
+            return;
+        }
+        let got = load_admin_token(Some(&path));
+        cleanup(&path);
+        assert!(
+            matches!(&got, Ok(Some(s)) if s == token),
+            "root-owned 0o400 admin-token file must load; got {got:?}"
+        );
     }
 }
 
