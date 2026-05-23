@@ -88,7 +88,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    if config.token.is_empty() {
+    if config.token().is_empty() {
         tracing::warn!("sandbox: SANDBOX_TOKEN not set — endpoints are unauthenticated");
     }
 

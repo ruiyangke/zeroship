@@ -30,7 +30,7 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
-use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+use zeroship_sandbox::config::{ApiToken, SandboxConfig};
 use zeroship_sandbox::preview;
 
 /// Handle a single request from the fixture agent. Captures the
@@ -106,53 +106,10 @@ impl Drop for FixtureAgent {
 }
 
 fn make_cfg(token: &str) -> SandboxConfig {
-    SandboxConfig {
-        port: 9091,
-        token: ApiToken::new(token),
-        backend: "nomad-ch".into(),
-        image: "img".into(),
-        workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
-        network: "n".into(),
-        memory_mb: 1024,
-        cpus: 2.0,
-        idle_timeout_secs: 1800,
-        max_lifetime_secs: 28800,
-        auto_pull: false,
-        k8s: K8sConfig {
-            namespace: "default".into(),
-            image: "i".into(),
-            runtime_class: "kvm-sandbox".into(),
-            ready_timeout_secs: 120,
-            use_port_forward: false,
-            port_forward_start: 18000,
-            user_home_size: "5Gi".into(),
-            user_home_storage_class: None,
-            startup_orphan_cleanup: false,
-        },
-        nomad_ch: NomadCHConfig {
-            nomad_addr: "http://127.0.0.1:4646".into(),
-            datacenter: "dc1".into(),
-            wrapper_path: std::path::PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
-            runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
-            host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
-            user_home_dir_root: std::path::PathBuf::from("/var/zeroship/ch/users"),
-            vm_index_floor: 1,
-            vm_index_ceil: 200,
-            alloc_running_timeout_secs: 60,
-            agent_livez_timeout_secs: 30,
-            host_fence_timeout_secs: 30,
-            startup_orphan_cleanup: false,
-            subnet_second_octet: 99,
-        },
-        create_retry_max: 2,
-        create_retry_total_timeout_secs: 90,
-        snapshot_enabled: false,
-        snapshot_l1_root: std::path::PathBuf::from("/var/zeroship/ch/snapshots"),
-        snapshot_use_gcs: false,
-        snapshot_gcs_bucket: None,
-        snapshot_root_kek_path: None,
-        workspace_image_size_gb: 20,
-    }
+    // A7 (deferred): see sandbox_admin_e2e.rs::make_cfg for rationale.
+    // `token` is `pub(crate)`; construct via the public fixture
+    // constructor + `with_token` builder.
+    SandboxConfig::new_fixture().with_token(ApiToken::new(token))
 }
 
 /// Build an `Arc<AppState>` with a NomadCh backend and a sandbox
