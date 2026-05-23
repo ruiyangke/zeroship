@@ -410,7 +410,14 @@ impl Verifier {
     /// `SkewTooLarge` — but since the whole point of this verifier
     /// path is to bypass skew, the protection there comes solely
     /// from the nonce LRU.
-    pub fn verify_kind_skew_bypass(
+    ///
+    /// **INVARIANT: only `/_clock_resync` calls this.** The
+    /// `pub(crate)` visibility enforces it at the type level so a
+    /// future handler cannot reach the skew-bypass path by accident.
+    /// Any new caller introduces a skew-bypass attack surface and
+    /// MUST be reviewed by security before relaxing this restriction.
+    /// (Closes R7-API1 — sibling of R4-S1/R5-API1/R5-API2.)
+    pub(crate) fn verify_kind_skew_bypass(
         &self,
         kind: CanonicalKind,
         method: &str,
