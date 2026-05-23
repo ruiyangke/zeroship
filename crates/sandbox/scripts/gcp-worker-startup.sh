@@ -44,6 +44,14 @@
 #   - vm-index-ceil:       int, default 12; number of taps to create
 #   - snapshot-bucket:     GCS bucket for L2 snapshot storage
 #                          (default = artifact-bucket; can be same/separate)
+#   - install-ch-plugin-driver:
+#                          "1" to install the Go-based nomad-driver-ch
+#                          plugin alongside the bash wrapper and switch
+#                          zsbx-ctl to `SANDBOX_TASK_DRIVER=ch_plugin`
+#                          (T-8 cutover gate). Default unset → no-op,
+#                          preserving the raw_exec wrapper path. Will be
+#                          flipped on in the next worker provision once
+#                          T-8b smoke validation confirms the cutover.
 #
 # Sentinel: the FINAL echo line:  `[startup] zsbx-worker-ready`
 
@@ -80,6 +88,9 @@ ARTIFACT_BUCKET=$(md artifact-bucket)
 CONTROLLER_OBJECT=$(md controller-object)
 VM_INDEX_CEIL=$(md vm-index-ceil); VM_INDEX_CEIL=${VM_INDEX_CEIL:-12}
 SNAPSHOT_BUCKET=$(md snapshot-bucket); SNAPSHOT_BUCKET=${SNAPSHOT_BUCKET:-$ARTIFACT_BUCKET}
+# T-8 cutover gate. Default "" → no-op; "1" installs the Go plugin
+# driver and flips zsbx-ctl into ch_plugin jobspec mode.
+INSTALL_CH_PLUGIN_DRIVER=$(md install-ch-plugin-driver); INSTALL_CH_PLUGIN_DRIVER=${INSTALL_CH_PLUGIN_DRIVER:-0}
 
 : "${SERVER_IPS:?missing server-ips}"
 : "${PG_HOST:?missing pg-host}"
@@ -154,6 +165,27 @@ gs_pull vmlinuz                    "$ART/vmlinuz"                  0644
 gs_pull rootfs-slim.img.virtio-blk-v5 "$ART/rootfs-slim.img"          0644
 gs_pull nomad-vm-wrapper.sh        "$ART/nomad-vm-wrapper.sh"      0755
 gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
+
+# T-8 cutover gate: pull the Go-based ch_plugin driver alongside the
+# bash wrapper. Both coexist until T-8b smoke confirms parity; until
+# the install flag flips on, this block is a no-op so existing worker
+# nodes (raw_exec wrapper path) are unaffected.
+if [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ]; then
+  echo "[startup] INSTALL_CH_PLUGIN_DRIVER=1 — installing nomad-driver-ch"
+  mkdir -p /etc/zeroship/nomad-plugins
+  gs_pull nomad-driver-ch.v1 /etc/zeroship/nomad-plugins/nomad-driver-ch 0755
+  chown root:root /etc/zeroship/nomad-plugins/nomad-driver-ch
+  # Surface the embedded gitSHA so we can confirm which build landed.
+  /etc/zeroship/nomad-plugins/nomad-driver-ch --version || true
+
+  # Tell Nomad where to find plugins. The HCL fragment is loaded
+  # alongside /etc/nomad.d/nomad.hcl (Nomad concatenates everything
+  # in /etc/nomad.d/*.hcl), so writing it BEFORE `systemctl enable
+  # --now nomad` below means we don't need a restart afterwards.
+  cat > /etc/nomad.d/plugin-dir.hcl <<EOF
+plugin_dir = "/etc/zeroship/nomad-plugins"
+EOF
+fi
 
 # Stress harness (best-effort: a missing file is non-fatal for cluster
 # bringup; the provisioner uses `gsutil cp` directly to push these too).
@@ -402,6 +434,12 @@ Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
 
 # pg migrations: run only on worker-1.
 $( [ "$IS_MIGRATOR" = "1" ] && echo "Environment=SANDBOX_PG_RUN_MIGRATIONS=1" )
+
+# T-8 cutover gate. With INSTALL_CH_PLUGIN_DRIVER=1 the controller
+# routes through the Go nomad-driver-ch plugin (driver="ch", typed
+# task_config); without it, the bash wrapper raw_exec path stays in
+# effect. nomad_ch::build_nomad_job_json branches on this env.
+$( [ "$INSTALL_CH_PLUGIN_DRIVER" = "1" ] && echo "Environment=SANDBOX_TASK_DRIVER=ch_plugin" )
 
 # API
 Environment=SANDBOX_PORT=9091
