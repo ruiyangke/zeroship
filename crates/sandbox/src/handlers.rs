@@ -7,11 +7,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ntex::http::StatusCode;
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::error_envelope::error_response;
 use crate::{auth, AppState};
 
 type State = web::types::State<Arc<AppState>>;
@@ -19,28 +21,30 @@ type State = web::types::State<Arc<AppState>>;
 // ─── helpers ─────────────────────────────────────────────────────
 
 fn unauthorized() -> HttpResponse {
-    HttpResponse::Unauthorized().json(&serde_json::json!({"error": "unauthorized"}))
+    error_response(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "authentication required",
+    )
 }
 
-fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
+/// Render a §10.0-compliant error envelope.
+///
+/// `status` is the wire HTTP code; `code` is a snake_case kind (e.g.
+/// `"invalid_input"`, `"sandbox_not_found"`); `msg` is the human prose
+/// that ends up in the `message` field. Pre-A4 this emitted
+/// `{"error":<human prose>}` with no `message`; the new shape is
+/// `{"error":<code>,"message":<msg>}` per proposal § 10.0.
+fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse {
     let s = msg.into();
     // FM-B: every 5xx returned to a client gets a structured
-    // operator-visible log line. The N=8 stress test surfaced 14
-    // 5xx in c2's cycle — none of which appeared in the controller
-    // log because the only existing error path was the HTTP
-    // response body.
+    // operator-visible log line.
     if status >= 500 {
-        tracing::error!(status, error = %s, "sandbox/handlers");
+        tracing::error!(status, code, error = %s, "sandbox/handlers");
     }
-    let mut resp = match status {
-        400 => HttpResponse::BadRequest(),
-        404 => HttpResponse::NotFound(),
-        409 => HttpResponse::Conflict(),
-        500 => HttpResponse::InternalServerError(),
-        503 => HttpResponse::ServiceUnavailable(),
-        _ => HttpResponse::InternalServerError(),
-    };
-    resp.json(&serde_json::json!({"error": s}))
+    let sc = StatusCode::from_u16(status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    error_response(sc, code, s)
 }
 
 /// Parse a sandbox id from an HTTP path segment into the embedded
@@ -69,7 +73,11 @@ fn parse_sandbox_id_to_uuid(s: &str) -> Result<Uuid, HttpResponse> {
         return Ok(uuid);
     }
     s.parse::<Uuid>().map_err(|_| {
-        err(400, "invalid sandbox id (expected sbx_<base62> or hyphenated uuid)")
+        err(
+            400,
+            "invalid_sandbox_id",
+            "invalid sandbox id (expected sbx_<base62> or hyphenated uuid)",
+        )
     })
 }
 
@@ -157,6 +165,7 @@ pub async fn create_sandbox(
     if !is_typed_id(&user_id, "usr") {
         return err(
             400,
+            "invalid_user_id",
             "invalid user_id: must be a typed-id of the form usr_<base62>",
         );
     }
@@ -165,6 +174,7 @@ pub async fn create_sandbox(
     if !is_typed_id(&project_id, "prj") {
         return err(
             400,
+            "invalid_project_id",
             "invalid project_id: must be a typed-id of the form prj_<base62>",
         );
     }
@@ -281,7 +291,7 @@ pub async fn create_sandbox(
             }
             HttpResponse::Created().json(&stored)
         }
-        CreateOutcome::Failed { status, message } => err(status, message),
+        CreateOutcome::Failed { status, code, message } => err(status, code, message),
     }
 }
 
@@ -301,8 +311,10 @@ pub(crate) enum CreateOutcome {
         info: crate::backend::SandboxInfo,
     },
     /// `status` is the HTTP code the handler should emit (500 for
-    /// non-retriable, 503 for retry-budget exhaustion).
-    Failed { status: u16, message: String },
+    /// non-retriable, 503 for retry-budget exhaustion); `code` is the
+    /// §10.0 machine-readable kind that ends up in the response's
+    /// `error` field.
+    Failed { status: u16, code: &'static str, message: String },
 }
 
 /// FM-E: drives the create + retry loop. Extracted so unit tests
@@ -338,6 +350,7 @@ where
             );
             return CreateOutcome::Failed {
                 status: 503,
+                code: "create_retry_budget_exhausted",
                 message: format!(
                     "backend.create: retry budget exhausted after {} \
                      attempt(s); last error: {}",
@@ -374,6 +387,7 @@ where
                 if !retriable {
                     return CreateOutcome::Failed {
                         status: 500,
+                        code: "backend_create_failed",
                         message: format!(
                             "backend.create: {}",
                             last_err.unwrap_or_default()
@@ -385,6 +399,7 @@ where
     }
     CreateOutcome::Failed {
         status: 503,
+        code: "create_retry_budget_exhausted",
         message: format!(
             "backend.create: {max_attempts} attempts failed; last error: {last}",
             last = last_err.unwrap_or_else(|| "<no error captured>".to_string()),
@@ -443,11 +458,12 @@ pub async fn list_sandboxes(
     let Some(user_id) = query.into_inner().user_id else {
         return err(
             400,
+            "missing_user_id",
             "list requires ?user_id=<id> — cross-user listing is not exposed",
         );
     };
     if !is_typed_id(&user_id, "usr") {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let filtered: Vec<_> = state
         .sandboxes
@@ -479,16 +495,16 @@ pub async fn get_sandbox(
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match parse_sandbox_id_to_uuid(&path) { Ok(u) => u, Err(r) => return r };
     let Some(user_id) = query.into_inner().user_id else {
-        return err(400, "get requires ?user_id=<id>");
+        return err(400, "missing_user_id", "get requires ?user_id=<id>");
     };
     if !is_typed_id(&user_id, "usr") {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     match state.sandboxes.get(&id) {
         Some(info) if info.user_id == user_id => HttpResponse::Ok().json(&info),
         // 404 for both "no such sandbox" and "wrong owner" — the
         // API must not reveal the difference.
-        _ => err(404, "sandbox not found"),
+        _ => err(404, "sandbox_not_found", "sandbox not found"),
     }
 }
 
@@ -521,11 +537,11 @@ fn require_owner(
         })
         .unwrap_or_default();
     if !is_typed_id(&user_id, "usr") {
-        return Err(err(404, "sandbox not found"));
+        return Err(err(404, "sandbox_not_found", "sandbox not found"));
     }
     match state.sandboxes.get(&id) {
         Some(info) if info.user_id == user_id => Ok(id),
-        _ => Err(err(404, "sandbox not found")),
+        _ => Err(err(404, "sandbox_not_found", "sandbox not found")),
     }
 }
 
@@ -651,7 +667,7 @@ pub async fn stop_sandbox(
         // (Pod/container) is the controller's responsibility to
         // chase down via cluster-side cleanup.
         state.sandboxes.remove(&id);
-        return err(500, format!("backend.stop: {e}"));
+        return err(500, "backend_stop_failed", format!("backend.stop: {e}"));
     }
     state.sandboxes.remove(&id);
 
@@ -802,7 +818,7 @@ pub async fn exec(
             "stderr": out.stderr,
             "timed_out": out.timed_out,
         })),
-        Err(e) => err(500, format!("backend.exec: {e}")),
+        Err(e) => err(500, "backend_exec_failed", format!("backend.exec: {e}")),
     }
 }
 
@@ -818,7 +834,7 @@ pub async fn file_tree(
 
     match state.backend.file_tree(id).await {
         Ok(entries) => HttpResponse::Ok().json(&serde_json::json!({"entries": entries})),
-        Err(e) => err(500, format!("backend.file_tree: {e}")),
+        Err(e) => err(500, "backend_file_tree_failed", format!("backend.file_tree: {e}")),
     }
 }
 
@@ -838,9 +854,9 @@ pub async fn read_file(
             .content_type(infer_content_type(&file_path))
             .body(bytes),
         Err(e) if e.contains("No such file") || e.contains("file not found") || e.starts_with("read") => {
-            err(404, e)
+            err(404, "file_not_found", e)
         }
-        Err(e) => err(400, e),
+        Err(e) => err(400, "read_file_failed", e),
     }
 }
 
@@ -861,7 +877,7 @@ pub async fn write_file(
             "written": file_path,
             "size": body.len(),
         })),
-        Err(e) => err(400, e),
+        Err(e) => err(400, "write_file_failed", e),
     }
 }
 
@@ -878,8 +894,8 @@ pub async fn delete_file(
 
     match state.backend.delete_file(id, &file_path).await {
         Ok(true) => HttpResponse::Ok().json(&serde_json::json!({"deleted": file_path})),
-        Ok(false) => err(404, "file not found"),
-        Err(e) => err(400, e),
+        Ok(false) => err(404, "file_not_found", "file not found"),
+        Err(e) => err(400, "delete_file_failed", e),
     }
 }
 
@@ -1030,7 +1046,7 @@ mod tests {
         .await;
         match outcome {
             CreateOutcome::Ok { .. } => {}
-            CreateOutcome::Failed { status, message } => {
+            CreateOutcome::Failed { status, code: _, message } => {
                 panic!("expected Ok, got {status}: {message}")
             }
         }
@@ -1097,7 +1113,7 @@ mod tests {
             "must try max_attempts (1 initial + 2 retries) times"
         );
         match outcome {
-            CreateOutcome::Failed { status, message } => {
+            CreateOutcome::Failed { status, code: _, message } => {
                 assert_eq!(status, 503, "exhausted retries → 503");
                 assert!(
                     message.contains("attempts failed") || message.contains("attempt"),
@@ -1184,7 +1200,7 @@ mod tests {
             "budget cap must short-circuit before max_attempts; got {n}"
         );
         match outcome {
-            CreateOutcome::Failed { status, message } => {
+            CreateOutcome::Failed { status, code: _, message } => {
                 assert_eq!(status, 503);
                 assert!(
                     message.contains("budget") || message.contains("attempts failed"),

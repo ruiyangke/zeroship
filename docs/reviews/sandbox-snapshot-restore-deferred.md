@@ -3,9 +3,9 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-23 (B18-fixer cycle: **B18 CLOSED** via shared `Arc<Mutex<VmIndexAllocator>>` between NomadCHBackend and RealRestoreBackend; cluster c=4 verified 0/16 stale-pubkey 401s vs 11/16 pre-fix. New bug **B19** filed: wake path doesn't register restored VM in nomad_ch state map → post-wake stop 404 + vm_index slot leak).
+Last updated: 2026-05-23 (cycle r4: B18 CLOSED via shared `Arc<Mutex<VmIndexAllocator>>`; R3-Q1+R3-T1 closed in code; A4 helper landed but call sites pending; new B19 next blocker for B-SLO; 7 r3/r4 reviewer reports added).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `dec489a1` (B17 closed via wrapper resume; A6b at `2380605e` closes 5 pub fields; C2 at `78320b56` gates persist.delete; T7 at `da220268`; A6 at `d9b95c2e`; B16 at `0061b96d`).
+Branch HEAD at last update: `469e22c8` (A4 helper at `469e22c8`; B18 at `b4ddb98b`; R3-T1 at `f6497590`; R3-Q1 at `a11ccb2d`; A7 at `a9e568a2`; B17 at `dec489a1`).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
@@ -65,12 +65,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: stalls a single-threaded compio worker for the full SHA-256 + AEAD + GCS roundtrip. Up to 90s blocking on ureq + Command + std::fs.
 - **Action**: wrap all `SnapshotStore::put`/`get` calls + `ChRemoteClient` calls in `compio::runtime::spawn_blocking` (pattern already used in `persist.rs:641,656,676`). Replace `std::thread::sleep` with `compio::time::sleep`.
 
-### [A4] HTTP error envelope §10.0 violated globally (CRITICAL, api-surface-r1)
-- **Source**: 2026-05-24 api-surface review
-- **Files**: `crates/sandbox/src/admin_handlers.rs:179-192` + `handlers.rs:25-44` + `preview.rs:836-838` + `preview_share_handlers.rs:112-114` (only `admin_handlers.rs:1041-1044` matches spec)
+### [A4] HTTP error envelope §10.0 — PARTIAL (helper landed, 18 call sites pending)
+- **Source**: 2026-05-24 api-surface review; A4 fixer at `469e22c8` landed `crates/sandbox/src/error_envelope.rs` (scaffolding only, no call-site migration). The fixer was interrupted mid-task; handlers.rs draft was lost in a concurrent-stash race. 18 call sites still emit non-compliant shapes.
+- **Status**: HELPER LANDED, MIGRATION PENDING. Treat as a fresh fixer task next cycle.
+- **Files to migrate**: `crates/sandbox/src/admin_handlers.rs:179-192` + `handlers.rs:25-44` + `preview.rs:836-838` + `preview_share_handlers.rs:112-114` (only `admin_handlers.rs:1041-1044` matches spec)
 - **Spec**: `{"error":"<kind>","message":"<human>",...}` per proposal § 10.0
-- **Symptom**: most sites emit `{"error":"<human prose>"}` (no `message`); preview sites emit `{"error":<code>,"code":<code>}` (duplicate, no message).
-- **Action**: introduce typed `ErrorEnvelope` helper in `crates/sandbox/src/error_envelope.rs`; replace all `err()` call sites; lock with a unit test per error site.
+- **Action**: read `crates/sandbox/src/error_envelope.rs` (already pub(crate) with `error_response(StatusCode, code, msg)` API), migrate 18 sites, add 1 unit test per file (4-5 total batched). Should be a clean ~30min task with the helper already in place.
 
 ### [A7] `SandboxConfig.token` is `pub` — last credential field exposure (CRITICAL, A6b-fixer spotted)
 - **Source**: 2026-05-24 A6b-fixer report (`2380605e`)
@@ -126,11 +126,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: bool flags accumulate (B15 added `remove_host_dir`, C2 reused it; future may add `cleanup_metrics`, `cancel_alloc`, etc.). Bool-soup signature.
 - **Action**: introduce `enum StopDisposition { TearDown, PreserveForSnapshotWake }` (or similar). Methods take the enum; the boolean knobs become exhaustive match arms.
 
-### [R3-Q1] `run_idle_eviction_once` lies about `attempted` on graceful shutdown (CRITICAL, code-quality-r3)
-- **File**: `crates/sandbox/src/sweep.rs:443-446`
-- **Symptom**: `attempted = rows.clone()` is computed BEFORE the chunk loop. Under graceful shutdown (`shutdown.is_shutting_down()` check inside the loop), the function silently lies about which rows it actually tried — contradicts the function's own doc.
-- **Action**: track the actual attempted set during the chunk loop. Return the truthful list. Add a test: `idle_sweep_attempted_reflects_partial_shutdown`.
-
 ### [R3-Q2] A6 added infallible `Result<Self, String>` builder signatures (MINOR, code-quality-r3)
 - **File**: `crates/sandbox/src/lib.rs:272` (`with_persistence -> Result<Self, String>`)
 - **Symptom**: `Result<Self, String>` that cannot fail forces in-crate callers to `.expect()` on an infallible operation. Signature smell.
@@ -141,10 +136,29 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: T3 bumped production default 60→120 but synthetic test fixtures stayed at 60. Not a bug today (fixtures don't exercise the default-loading path) but a noise source for grep-based refactors.
 - **Action**: bulk-update fixture literals 60→120. One-line per fixture. No test logic change.
 
-### [R3-T1] T7 wall-time bound is CI-flaky-prone (IMPORTANT, test-coverage-r3)
-- **File**: `crates/sandbox/src/sweep.rs::sweep_concurrency_is_actually_concurrent`
-- **Symptom**: 200ms ideal, asserted < 500ms. On a loaded CI runner that's still tight; could flake.
-- **Action**: either (a) raise the threshold to 1000ms (still proves concurrency vs 800ms serial floor) OR (b) track `max_in_flight` explicitly (already done in the test's eprintln) and assert on THAT instead of wall-time.
+### [R4-A1] AppState builder pattern is becoming a typed-state builder by accretion (CRITICAL, arch-r4)
+- **Files**: `crates/sandbox/src/lib.rs:50-407` — 8 `with_*` builders across 3 different return-type shapes (`Self`, `Result<Self, String>`, mixed) + a 14-field `new_fixture()` shadow constructor on both `AppState` AND `SandboxConfig`
+- **Symptom**: A5/A6/A6b/A7 trail evidences a typed-state builder being built by accretion rather than design. `new_fixture()` now spans 2 production types as `pub` API — test scaffolding has leaked into production surface.
+- **Action**: refactor to a single `AppStateBuilder` typed-state pattern. `new_fixture()` becomes `#[cfg(test)]` or feature-gated behind `pub(crate)`. R3-Q2 (infallible Result) auto-closes by consistent shape.
+
+### [R4-A2] State HashMap eviction + vm_index_allocator release straddle 60-120s of async fence work (CRITICAL, arch-r4)
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:944-952` (state HashMap removal) + `:1087-1091` (vm_index_allocator release)
+- **Symptom**: two separate locked structures span 60-120s of async fence work with no unified RAII guard. This is the architectural coupling underneath B18 — even though B18's surface fix (shared allocator) closed the symptom, the underlying race-window pattern remains. B19 is a symptom of the same design hole (forgotten state-map registration).
+- **Action**: introduce a `LeasedVmSlot` RAII guard that holds the state-map entry + vm_index reservation atomically; release on Drop or explicit commit. Subsumes the B18 fix and prevents B19-class bugs.
+
+### [R4-Q1] A7 newly copy-pasted stale `alloc_running_timeout_secs: 60` literal (MINOR, quality-r4)
+- **File**: `crates/sandbox/src/config.rs:652` (A7's new `new_fixture()` shadow constructor)
+- **Symptom**: same commit whose doc cites R3-Q2 by name introduced 2 more `60` literals (5 → 7 in-src). R3-Q3 already tracks the 11 fixture sites; this expands the count without addressing the root pattern.
+- **Action**: bulk-update 60 → 120 in fixtures (R3-Q3 catch-all). Subsume R4-Q1.
+
+### [R4-T1] `shellcheck --severity=error` would land GREEN as a free regression guard (CRITICAL, test-cov-r4)
+- **Source**: 2026-05-24 test-coverage-r4 ran shellcheck on `crates/sandbox/scripts/nomad-vm-wrapper.sh` and got 5 INFO-level only, 0 errors/warnings.
+- **Action**: add `shellcheck --severity=error crates/sandbox/scripts/*.sh` as a workspace gate. Costs minutes; would have caught B12/B13/B17-like issues pre-cluster. Sister of R3-T3 (full coverage) — this is the cheap-first-step.
+
+### [R4-T2] A3 local wake-latency canary is feasible (IMPORTANT, test-cov-r4)
+- **Source**: 2026-05-24 test-coverage-r4
+- **Note**: two concurrent `do_restore_inner` calls + a `SlowGetSnapshotStore` (returns 1 GB in 100ms simulated) would expose A3's 9.5s wake p50 without a real cluster. `restore_handler.rs:286-412` already takes `&dyn` traits.
+- **Action**: add a `wake_latency_canary` integration test that asserts wake completes within N×100ms when N concurrent waker tasks run. Catches A3 regression before cluster.
 
 ### [R3-T2] A5/A6/A6b builders cover happy/empty only — no fuzz/edge (MINOR, test-coverage-r3)
 - **Files**: `lib.rs::admin_token_setter_tests` + `persist_setter_tests` + new `field_setter_tests`
