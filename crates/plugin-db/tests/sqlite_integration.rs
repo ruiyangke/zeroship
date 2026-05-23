@@ -1462,3 +1462,303 @@ fn audit_table_writes_do_not_emit_events() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P2 PR 4 — round-5 CRITICAL fences (plan §7 + §8 + §9).
+//
+// These two tests are the round-5 design-loop fences for the
+// backfill-pause + schema-pending decoder rails. They must pass
+// byte-for-byte: a regression that detaches `BrokerPauseGuard::drop`
+// from `wal_consumer::unsuppress_app` + `Broker::resume_app_with_resync`,
+// or that detaches `SchemaPendingGuard::drop` from
+// `broker::disengage_schema_pending` + `Broker::resume_app_with_resync`,
+// or that drops the publisher's per-event suppression check, will
+// fail here at the integration boundary rather than at a deferred
+// orchestrator call site.
+//
+// Drain budget: each test sleeps generously (100 ms) after the
+// COMMIT before draining the subscription. The publisher is a single
+// compio task on the same thread as the test future; 100 ms is well
+// above the in-process upper bound on dev hardware. See
+// `drain_publisher()` for the existing 50 ms baseline used by the
+// PR 2/PR 3 tests.
+// ---------------------------------------------------------------------------
+
+/// Longer drain — the new fences move ~100 events through the
+/// publisher under a paused broker. The 100 ms budget is the same
+/// upper bound `subscription_fanout_under_load` uses (200 ms there
+/// for 100 events × 10 subscribers; halved here because we only have
+/// one subscriber).
+async fn drain_publisher_long() {
+    compio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
+#[test]
+fn backfill_run_pauses_broker_and_emits_one_resync() {
+    // Plan §7 + §9 PR 4 gate — backfill pause rail end-to-end:
+    //
+    // 1. ensure_app_schema + CREATE TABLE.
+    // 2. Subscribe BEFORE the pause window so the subscription is
+    //    visible to `resume_app_with_resync` on guard drop.
+    // 3. Engage `BrokerPauseGuard` — this calls `suppress_app(app_id)`
+    //    on the thread-local rail.
+    // 4. INSERT 100 rows. The preupdate hook still fires + buffers,
+    //    the commit_hook ships packets, BUT the publisher's per-event
+    //    suppression check drops each packet (debug-logged).
+    // 5. Drop the guard. `unsuppress_app` clears the flag +
+    //    `resume_app_with_resync` pushes ONE `Resync` per active
+    //    subscription.
+    // 6. Drain the subscriber → exactly ONE `Resync`, ZERO `Change`
+    //    messages.
+    //
+    // The asymmetry between "INSERT 100 rows" and "one Resync" is the
+    // load-bearing contract: backfill silently drops events; the
+    // single Resync tells the subscriber to refetch + catch up via
+    // the read path, NOT via the event stream.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_backfill")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_backfill\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        let sub = subscribe_local("app_backfill", "items");
+
+        // Engage backfill pause. `BrokerPauseGuard::new` calls
+        // `wal_consumer::suppress_app(app_id)`; the publisher's
+        // per-event check drops every packet for this app until the
+        // guard drops.
+        let guard = backend.pause_broker_for_tests("app_backfill");
+
+        // INSERT 100 rows under the suppression window. Each statement
+        // routes through the session actor, the preupdate hook fires,
+        // the commit_hook ships a one-event CommitPacket — the
+        // publisher receives the packet, sees `is_app_suppressed`,
+        // drops the event + emits a debug-level trace, moves on.
+        for i in 0..100 {
+            let sql = format!(
+                "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
+            );
+            backend
+                .pool_exec(&sql, &[])
+                .await
+                .expect("INSERT under backfill pause");
+        }
+
+        // Give the publisher time to drain the 100 dropped packets
+        // BEFORE we drop the guard. Without this sleep the guard's
+        // resume_app_with_resync could push the `Resync` while
+        // packets are still in flight — they'd still be dropped (the
+        // suppression flag is per-packet), but the test invariant
+        // ("drain finds exactly one Resync") would be order-sensitive.
+        // With the sleep, every packet has been consumed BEFORE we
+        // drop the guard, so the Resync is the last thing the
+        // subscriber sees.
+        drain_publisher_long().await;
+
+        // Drop the guard — calls unsuppress_app + emits one Resync
+        // onto every active subscription on `app_backfill`.
+        drop(guard);
+
+        // The Resync push is synchronous (broker::resume_app_with_resync
+        // pushes onto the subscription's queue inside the guard's
+        // Drop), so no further sleep is needed before draining.
+        let msgs = drain(&sub);
+
+        // Exactly one message; it must be Resync.
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one Resync after backfill pause + drop; \
+             got {} messages: {msgs:?}",
+            msgs.len()
+        );
+        assert!(
+            matches!(msgs[0], SubscriptionMessage::Resync),
+            "the single message must be Resync; got {:?}",
+            msgs[0]
+        );
+        // Defensive: NO Change events leaked past the publisher
+        // suppression check. (Covered by the len==1 assert above —
+        // restated here so a future change that emits an
+        // out-of-order Resync alongside Change events surfaces the
+        // intent explicitly.)
+        let change_count = msgs
+            .iter()
+            .filter(|m| matches!(m, SubscriptionMessage::Change(_)))
+            .count();
+        assert_eq!(
+            change_count, 0,
+            "no Change events must reach the subscriber during a backfill window; got {change_count}"
+        );
+    });
+}
+
+#[test]
+fn schema_pending_decoder_drops_then_resyncs() {
+    // Plan §7 + §16.7 + §9 PR 4 gate — schema-pending decoder rail
+    // end-to-end:
+    //
+    // 1. ensure_app_schema + CREATE TABLE.
+    // 2. Subscribe via the broker BEFORE engaging schema-pending.
+    // 3. Engage `SchemaPendingGuard`. This sets the thread-local
+    //    `schema_pending_apps` flag AND ensures the publisher's
+    //    per-event check drops every packet for the app.
+    // 4. INSERT 50 rows — every packet is dropped at the publisher
+    //    (debug-logged).
+    // 5. While engaged, `broker::try_subscribe(app_id, "other")` MUST
+    //    return `DbError::Coded { code: "schema_pending" }`. This is
+    //    the LOUD rail (vs the silent backfill rail above).
+    // 6. Drop the guard — clears the schema-pending flag + emits one
+    //    `Resync` per active subscription.
+    // 7. Subsequent INSERT publishes normally (the flag is cleared).
+    // 8. Drain: the subscriber observes (a) one Resync from the
+    //    guard's drop, then (b) one Change from the post-disengage
+    //    INSERT. No events from the pre-disengage window.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_pending")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_pending\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        let sub = subscribe_local("app_pending", "items");
+
+        // Engage schema-pending. `SchemaPendingGuard::new` calls
+        // `broker::engage_schema_pending(app_id)`; both the publisher
+        // suppression check AND the `Broker::try_subscribe` rejection
+        // branch activate.
+        let guard = backend.engage_schema_pending_for_tests("app_pending");
+
+        // INSERT 50 rows under the schema-pending window. Same shape
+        // as the backfill test above — packets ship, publisher drops.
+        for i in 0..50 {
+            let sql = format!(
+                "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
+            );
+            backend
+                .pool_exec(&sql, &[])
+                .await
+                .expect("INSERT under schema-pending");
+        }
+
+        // The loud-rail invariant: while engaged, a NEW subscribe call
+        // (via `try_subscribe`) MUST return the typed conflict
+        // envelope. We don't use the legacy `subscribe()` here because
+        // it is infallible by design (back-compat with ~40 in-crate
+        // callers); the SDK boundary that lands later wires
+        // `try_subscribe` so the JS layer can branch on
+        // `e.code === "schema_pending"`.
+        let attempt = zeroship_plugin_db::broker::try_subscribe(
+            "app_pending",
+            "other_collection",
+        );
+        match &attempt {
+            Err(DbError::Coded { code, .. }) => {
+                assert_eq!(
+                    code, "schema_pending",
+                    "try_subscribe during schema-pending must reject \
+                     with code=schema_pending; got code={code}"
+                );
+            }
+            other => panic!(
+                "expected Err(Coded {{ code: schema_pending }}); got {other:?}"
+            ),
+        }
+
+        // Let the publisher drain the 50 dropped packets so the
+        // sequence "Resync, then post-disengage Change" stays
+        // deterministic.
+        drain_publisher_long().await;
+
+        // Drop the guard — clears schema_pending flag + pushes one
+        // Resync per active subscription.
+        drop(guard);
+
+        // Post-disengage: a fresh INSERT must publish normally.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES (999, 'after')",
+                &[],
+            )
+            .await
+            .expect("INSERT after disengage");
+
+        // Give the publisher time to drain the single post-disengage
+        // packet onto the broker.
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+
+        // Expected shape: [Resync, Change(999, 'after')].
+        // - The 50 INSERTs under the window produced zero events
+        //   (publisher dropped them).
+        // - The guard's drop pushed exactly one Resync.
+        // - The post-disengage INSERT published one Change event.
+        assert_eq!(
+            msgs.len(),
+            2,
+            "expected exactly [Resync, Change]; got {} messages: {msgs:?}",
+            msgs.len()
+        );
+        assert!(
+            matches!(msgs[0], SubscriptionMessage::Resync),
+            "first message must be the disengage-emitted Resync; got {:?}",
+            msgs[0]
+        );
+        match &msgs[1] {
+            SubscriptionMessage::Change(ev) => {
+                assert_eq!(ev.op, ChangeOp::Insert);
+                assert_eq!(ev.collection, "items");
+                assert_eq!(
+                    ev.new_tuple.get("name"),
+                    Some(&"after".to_string()),
+                    "second message must be the post-disengage INSERT; \
+                     new_tuple={:?}",
+                    ev.new_tuple
+                );
+            }
+            other => panic!(
+                "second message must be Change(post-disengage); got {other:?}"
+            ),
+        }
+
+        // Defensive: zero Change events came from the pre-disengage
+        // window. (Implied by len==2 + the explicit Change shape
+        // above, but stating the contract here makes a future
+        // regression that pre-pends events to the Resync surface
+        // explicitly.)
+        let pre_disengage_changes = msgs
+            .iter()
+            .filter_map(|m| match m {
+                SubscriptionMessage::Change(ev) => Some(ev),
+                _ => None,
+            })
+            .filter(|ev| ev.new_tuple.get("name").map(String::as_str) != Some("after"))
+            .count();
+        assert_eq!(
+            pre_disengage_changes, 0,
+            "no pre-disengage Change events must reach the subscriber; got {pre_disengage_changes}"
+        );
+    });
+}

@@ -527,7 +527,63 @@ async fn publisher_loop(
     let mut name_cache: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
-        for pending in packet.events {
+        // P2 PR 4 — backfill pause + schema-pending decoder fence
+        // (plan §5 + §7). The publisher runs on the compio thread and
+        // owns the broker-side; it is THE chokepoint where suppression
+        // applies for the SQLite arm (the PG arm uses the legacy
+        // `wal_consumer::is_app_suppressed` rail inside `emit_local`).
+        //
+        // Suppression is keyed by `app_id` and the dispatcher derives
+        // the per-event `app_id` from the preupdate hook's `db_name`
+        // parameter (the ATTACH alias by convention equals the app
+        // id; see `cdc::install` + `preupdate_callback` for the
+        // contract). A single packet may carry events for one app_id
+        // — the writer is single-threaded and the buffer flushes
+        // per-commit — but we group by `app_id` defensively so a
+        // future multi-app commit (unlikely under the current actor
+        // shape) still pulls the right flag set.
+        //
+        // The check is debug-only (NOT warn): both the backfill
+        // window and the schema-pending window are normal lifecycle
+        // events (`migrations.run` is the dominant caller of the
+        // former; `bundle_invalidated` of the latter), and a stream
+        // of warns during a deploy would spam operators.
+        let mut suppressed_count: usize = 0;
+        let mut schema_pending_count: usize = 0;
+        let mut delivered: Vec<PendingEvent> = Vec::with_capacity(packet.events.len());
+        for ev in packet.events {
+            let app_id = ev.db_name.as_str();
+            if crate::wal_consumer::is_app_suppressed(app_id) {
+                suppressed_count += 1;
+                continue;
+            }
+            if crate::broker::is_schema_pending(app_id) {
+                schema_pending_count += 1;
+                continue;
+            }
+            delivered.push(ev);
+        }
+        if suppressed_count > 0 {
+            tracing::debug!(
+                count = suppressed_count,
+                commit_id = packet.commit_id,
+                "SqliteCdcDispatcher publisher: dropped events under \
+                 BrokerPauseGuard (backfill window)"
+            );
+        }
+        if schema_pending_count > 0 {
+            tracing::debug!(
+                count = schema_pending_count,
+                commit_id = packet.commit_id,
+                "SqliteCdcDispatcher publisher: dropped events under \
+                 SchemaPendingGuard (schema-pending decoder)"
+            );
+        }
+        if delivered.is_empty() {
+            continue;
+        }
+
+        for pending in delivered {
             // Look up column names for this (db, table). Cache miss
             // routes through the session actor's `Query` command —
             // safe to await here because we're on the compio thread

@@ -137,6 +137,43 @@ impl SqliteBackend {
     /// Switching to a bounded + overflow-to-resync channel is a PR 3+
     /// concern if production traffic surfaces the need (plan §10
     /// Q-P2-A).
+    /// **Test helper** (P2 PR 4) — open a [`crate::backend::BrokerPauseGuard`]
+    /// for `app_id`. While the returned guard is bound, the SQLite CDC
+    /// publisher drops every packet whose `app_id` matches; on drop
+    /// the suppression flag clears and one `Resync` is pushed per
+    /// active subscription registered on the app.
+    ///
+    /// Gated to `cfg(any(test, feature = "test-helpers"))` so the
+    /// production binary doesn't carry this convenience. The orchestrator
+    /// reaches the same guard via
+    /// `BackendHandle::as_change_stream_sqlite(...).pause_broker(app_id)`;
+    /// the test helper exists because the integration test fixture
+    /// owns the `SqliteBackend` directly rather than wrapping it in a
+    /// `BackendHandle::Sqlite(Rc<...>)`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn pause_broker_for_tests(
+        &self,
+        app_id: &str,
+    ) -> crate::backend::BrokerPauseGuard {
+        crate::backend::BrokerPauseGuard::new(app_id.to_string())
+    }
+
+    /// **Test helper** (P2 PR 4) — engage [`crate::backend::SchemaPendingGuard`]
+    /// for `app_id`. While the guard is bound,
+    /// [`crate::broker::Broker::try_subscribe`] returns
+    /// `DbError::Coded { code: "schema_pending" }` for the app AND
+    /// the SQLite CDC publisher drops every packet for the app. On
+    /// drop the flag clears and one `Resync` is pushed per active
+    /// subscription. Same gating + rationale as
+    /// [`Self::pause_broker_for_tests`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn engage_schema_pending_for_tests(
+        &self,
+        app_id: &str,
+    ) -> crate::backend::SchemaPendingGuard {
+        crate::backend::SchemaPendingGuard::new(app_id.to_string())
+    }
+
     #[allow(dead_code)]
     pub fn new(db_dir: PathBuf) -> Result<Self, DbError> {
         // CDC packet channel — worker thread (producer, via commit

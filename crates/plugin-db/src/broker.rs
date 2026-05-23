@@ -58,12 +58,13 @@
 //!   reports an empty set.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::task::Waker;
 
 use serde_json::Value;
 
+use crate::error::DbError;
 use crate::read_set::ReadSetEntry;
 
 // ---------------------------------------------------------------------------
@@ -421,6 +422,16 @@ impl Broker {
     /// Returns the subscription handle. Drop the handle (or call
     /// [`Subscription::close`]) to unsubscribe; the broker GC's its
     /// reference on next publish.
+    ///
+    /// **Infallible** by design: the V8-side `subscribe()` call site
+    /// (`v8_classes::subscription::mint_subscription`) and the rich
+    /// existing test surface (~40 in-crate call sites) consume a
+    /// `Subscription` directly. The P2 PR 4 schema-pending rejection
+    /// branch is layered on top via [`Self::try_subscribe`], which
+    /// returns a `Result` so the SDK boundary can surface the typed
+    /// `DbError::Coded { code: "schema_pending" }`. New SDK call sites
+    /// should prefer `try_subscribe`; the infallible variant stays for
+    /// the back-compat surface.
     pub fn subscribe(&mut self, app_id: &str, collection: &str) -> Subscription {
         self.next_id += 1;
         let sub = Subscription::new(
@@ -440,6 +451,42 @@ impl Broker {
             .or_default()
             .push(sub.clone());
         sub
+    }
+
+    /// Fallible variant of [`Self::subscribe`] — rejects with
+    /// `DbError::Coded { code: "schema_pending" }` while the app is in
+    /// the schema-pending window (see [`engage_schema_pending`] /
+    /// [`is_schema_pending`]).
+    ///
+    /// Per design §16.7 ("schema-pending decoder"): when a deploy is
+    /// in flight that changes the app's schema, new subscriptions
+    /// MUST be refused loudly so the SDK can surface a typed error
+    /// rather than open a subscription whose collection may not exist
+    /// after the deploy stabilises. The mirror "soft" path is backfill
+    /// pause (see [`crate::backend::BrokerPauseGuard`]) which silently
+    /// drops events at the publisher and emits one `Resync` per active
+    /// subscription on disengage — there is no `subscribe()` rejection
+    /// there because backfill is internally driven.
+    pub fn try_subscribe(
+        &mut self,
+        app_id: &str,
+        collection: &str,
+    ) -> Result<Subscription, DbError> {
+        if is_schema_pending(app_id) {
+            return Err(DbError::Coded {
+                code: "schema_pending".to_string(),
+                message: format!(
+                    "subscribe refused for app `{app_id}`: a schema-pending \
+                     deploy is in flight; the collection set is unstable"
+                ),
+                hint: Some(
+                    "retry after deploy stabilises (the SchemaPendingGuard \
+                     window ends + one Resync is pushed per active subscription)"
+                        .to_string(),
+                ),
+            });
+        }
+        Ok(self.subscribe(app_id, collection))
     }
 
     /// Fast probe: does any subscriber exist for `(app_id, collection)`?
@@ -638,6 +685,53 @@ impl std::fmt::Debug for Broker {
 
 thread_local! {
     pub(crate) static BROKER: RefCell<Broker> = RefCell::new(Broker::new());
+
+    /// **P2 PR 4 — schema-pending decoder window** (design §16.7).
+    ///
+    /// App ids currently in the schema-pending state. Populated by
+    /// [`engage_schema_pending`] (called from
+    /// [`crate::backend::SchemaPendingGuard::new`]); cleared by
+    /// [`disengage_schema_pending`] (called from the guard's `Drop`).
+    /// Read by [`is_schema_pending`] on the [`Broker::try_subscribe`]
+    /// path and on the SQLite CDC publisher's per-packet drop check
+    /// (see `backend/sqlite/cdc.rs::publisher_loop`).
+    ///
+    /// Thread-local mirrors [`crate::wal_consumer::SUPPRESSED_APPS`]
+    /// (the matching rail for backfill pause). The broker is
+    /// thread-local too — both flags live on the compio runtime thread
+    /// that owns the per-app isolate; no cross-thread synchronisation.
+    static SCHEMA_PENDING_APPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Mark `app_id` as schema-pending on this thread. While engaged,
+/// [`Broker::try_subscribe`] returns `DbError::Coded { code:
+/// "schema_pending" }` for the app, and the SQLite CDC publisher
+/// drops every packet whose `app_id` matches.
+///
+/// Internal — called from
+/// [`crate::backend::SchemaPendingGuard::new`]; production code should
+/// reach the guard through `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
+pub fn engage_schema_pending(app_id: &str) {
+    SCHEMA_PENDING_APPS.with(|s| {
+        s.borrow_mut().insert(app_id.to_string());
+    });
+}
+
+/// Inverse of [`engage_schema_pending`]. Idempotent — calling on an
+/// app that is not engaged is a no-op. Called from
+/// [`crate::backend::SchemaPendingGuard::drop`] before
+/// `resume_app_with_resync` pushes the per-subscription `Resync`.
+pub fn disengage_schema_pending(app_id: &str) {
+    SCHEMA_PENDING_APPS.with(|s| {
+        s.borrow_mut().remove(app_id);
+    });
+}
+
+/// True if `app_id` is currently in the schema-pending window on
+/// this thread. Used by [`Broker::try_subscribe`] and by the SQLite
+/// CDC publisher's drop-packet check.
+pub fn is_schema_pending(app_id: &str) -> bool {
+    SCHEMA_PENDING_APPS.with(|s| s.borrow().contains(app_id))
 }
 
 /// Convenience accessor — publish without locating the broker manually.
@@ -656,6 +750,12 @@ pub(crate) fn has_subscribers(app_id: &str, collection: &str) -> bool {
 /// manually.
 pub fn subscribe(app_id: &str, collection: &str) -> Subscription {
     BROKER.with(|b| b.borrow_mut().subscribe(app_id, collection))
+}
+
+/// Fallible variant of [`subscribe`] — surfaces the schema-pending
+/// rejection branch added in P2 PR 4. See [`Broker::try_subscribe`].
+pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbError> {
+    BROKER.with(|b| b.borrow_mut().try_subscribe(app_id, collection))
 }
 
 /// Total live (not-yet-closed) subscriptions on this thread's broker.
@@ -1416,5 +1516,114 @@ mod tests {
         b.publish(&ev("a", "messages", ChangeOp::Insert, Some(1)));
         // Per-app entry collapsed away — no leaked inner HashMap.
         assert_eq!(b.by_key.len(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // P2 PR 4 — schema-pending decoder window unit tests.
+    // -----------------------------------------------------------------
+
+    /// Guard that engages schema-pending on construction + clears on
+    /// Drop, even on panic-unwind. Tests use this so a panicked
+    /// assertion doesn't leak the thread-local into the next test on
+    /// the same thread (cargo test runs each `#[test]` on its own
+    /// thread by default, but the safety belt costs nothing).
+    struct SchemaPendingTestGuard {
+        app_id: String,
+    }
+
+    impl SchemaPendingTestGuard {
+        fn engage(app_id: &str) -> Self {
+            engage_schema_pending(app_id);
+            Self {
+                app_id: app_id.to_string(),
+            }
+        }
+    }
+
+    impl Drop for SchemaPendingTestGuard {
+        fn drop(&mut self) {
+            disengage_schema_pending(&self.app_id);
+        }
+    }
+
+    #[test]
+    fn engage_then_is_schema_pending_returns_true() {
+        let _g = SchemaPendingTestGuard::engage("test_app_engage");
+        assert!(is_schema_pending("test_app_engage"));
+        assert!(!is_schema_pending("other_app"));
+    }
+
+    #[test]
+    fn disengage_schema_pending_clears_flag() {
+        engage_schema_pending("test_app_disengage");
+        assert!(is_schema_pending("test_app_disengage"));
+        disengage_schema_pending("test_app_disengage");
+        assert!(!is_schema_pending("test_app_disengage"));
+    }
+
+    #[test]
+    fn disengage_schema_pending_is_idempotent_on_unengaged_app() {
+        // Calling disengage on an app never engaged is a no-op — the
+        // RefCell HashSet `.remove` returns `false`, no panic.
+        disengage_schema_pending("never_engaged_app");
+        assert!(!is_schema_pending("never_engaged_app"));
+    }
+
+    #[test]
+    fn try_subscribe_succeeds_when_not_schema_pending() {
+        let mut b = Broker::new();
+        let result = b.try_subscribe("happy_app", "messages");
+        assert!(
+            result.is_ok(),
+            "try_subscribe should succeed when not schema_pending; got {result:?}"
+        );
+        let sub = result.unwrap();
+        assert_eq!(sub.app_id(), "happy_app");
+        assert_eq!(sub.collection(), "messages");
+    }
+
+    #[test]
+    fn try_subscribe_rejects_with_schema_pending_code_when_engaged() {
+        let _g = SchemaPendingTestGuard::engage("pending_app");
+        let mut b = Broker::new();
+        let result = b.try_subscribe("pending_app", "messages");
+        match result {
+            Err(DbError::Coded { code, .. }) => {
+                assert_eq!(
+                    code, "schema_pending",
+                    "try_subscribe must reject with code=schema_pending; got code={code}"
+                );
+            }
+            other => panic!("expected Err(Coded {{ code: schema_pending }}); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_subscribe_carries_hint_in_rejection() {
+        let _g = SchemaPendingTestGuard::engage("hint_app");
+        let mut b = Broker::new();
+        let result = b.try_subscribe("hint_app", "messages");
+        match result {
+            Err(DbError::Coded { hint, .. }) => {
+                assert!(
+                    hint.is_some(),
+                    "schema_pending rejection must carry a non-empty hint"
+                );
+            }
+            other => panic!("expected Err(Coded); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_subscribe_only_blocks_the_engaged_app() {
+        let _g = SchemaPendingTestGuard::engage("blocked_app");
+        let mut b = Broker::new();
+        // Sibling app is unaffected.
+        assert!(b.try_subscribe("sibling_app", "messages").is_ok());
+        // Engaged app is rejected.
+        assert!(matches!(
+            b.try_subscribe("blocked_app", "messages"),
+            Err(DbError::Coded { .. })
+        ));
     }
 }
