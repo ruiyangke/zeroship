@@ -521,3 +521,131 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/snapshot_aead.rs:363-451` + `crates/sandbox/src/snapshot_store.rs:184-223`
 - **Symptom**: snapshot path with AEAD on does (1) encrypt-read, (2) encrypt-write, (3) SHA-read — three full 1GB passes on the same file. Fusable into one streamed pass via a chained reader.
 - **Action**: implement `EncryptingHashWriter<W>` that wraps the destination with both AEAD encrypt + SHA-256 in a single pass. Estimated snapshot p50 reduction: 0.6-1s/snapshot.
+
+---
+
+## NEW r9/r10 ROUND FINDINGS (added by pilot cycle 2026-05-25 r2; post-C1-FOLLOWUP, post-R8-API1 full close)
+
+### [R9-S1] AEAD by-design exempts `config.json`; W1 Python rewrite passes through attacker-substituted disks[].path / serial.file (CRITICAL, security-r9)
+- **Source**: 2026-05-25 security-r9
+- **Files**: `crates/sandbox/src/snapshot_aead.rs` (config.json deliberately unwrapped) + `crates/sandbox/scripts/nomad-vm-wrapper.sh` (Python rewrite anchored at `^/opt/nomad/data/alloc/.../local(/|$)`; non-matching paths pass through verbatim)
+- **Symptom**: GCS-bucket-write attacker can substitute `disks[].path` or `serial.file` with arbitrary host paths (e.g. `/etc/shadow`, `/dev/sda`). Deep verify SHA-256 catches it but only if a sweep deep-verifies the artifact; AEAD doc-comment is misleading ("only memory-ranges wrapped" implies the rest are integrity-protected).
+- **Action**: extend AEAD wrap to config.json + state.json (struct-aware reserialize after decrypt — keep the wrapper's anchored-rewrite trust boundary). Alternatively: at wake time, validate every path in config.json against a whitelist before passing to CH.
+
+### [R9-S2] AEAD DEK derivation uses 1-sec timestamp granularity — same-second re-snapshot = ChaCha20-Poly1305 nonce reuse (IMPORTANT, security-r9)
+- **Source**: 2026-05-25 security-r9
+- **File**: `crates/sandbox/src/snapshot_aead.rs` (DEK derivation function; uses `time_of_put_unix_secs`)
+- **Symptom**: same-sandbox same-second re-snapshot derives identical DEK; chunk nonce starts from same prefix → nonce reuse if plaintext differs across the two snapshots. Confidentiality + integrity broken for the colliding pair.
+- **Action**: extend DEK derivation domain to include a per-snapshot random salt (32 bytes); store salt in the AEAD header. Or use a monotonic counter from pg.
+
+### [R9-S3] `snapshot_aead_dek_id="v1"` hard-coded regardless of AEAD active — pg metadata diverges from artifact truth (IMPORTANT, security-r9)
+- **Source**: 2026-05-25 security-r9
+- **File**: `crates/sandbox/src/snapshot_handler.rs:417`
+- **Symptom**: when AEAD inactive (no KEK), pg still stamps `snapshot_aead_dek_id="v1"`. Operator audit trail says "encrypted" but artifact is plaintext.
+- **Action**: stamp the actual posture (`"none"` when no KEK; `"v1"` only when `AeadSnapshotStore` wrapped).
+
+### [R9-S4] KEK loader checks mode 0o400 but not owner uid — root controller will load any 0o400 file as KEK (IMPORTANT, security-r9)
+- **Source**: 2026-05-25 security-r9
+- **File**: KEK loader (locate via `grep -rn "AEAD_KEY_PATH" crates/sandbox/src/`)
+- **Symptom**: a non-root attacker who can pre-create a chmod-400 file at the KEK path before systemd starts can supply a known-key to the controller, breaking confidentiality of all future snapshots.
+- **Action**: add `metadata().uid() == 0` check; refuse to load otherwise. Cheap insurance.
+
+### [R9-S5] Restore-branch wrapper handles ZSBX_SANDBOX_ID asymmetrically vs cold-boot (informational, hides pre-R7-S1-snapshot wedge mode) (IMPORTANT, security-r9)
+- **Source**: 2026-05-25 security-r9
+- **Files**: `crates/sandbox/scripts/nomad-vm-wrapper.sh` (restore branch ~366-419 vs cold-boot branch ~140-170) + `crates/sandbox/src/backend/nomad_ch.rs::build_restore_nomad_job_json`
+- **Symptom**: restore-branch logs `ZSBX_SANDBOX_ID` informationally but has no validator and no cmdline injection (because the agent inherits its sandbox_id from the snapshot RAM image — for a pre-R7-S1 snapshot, that's undefined). Wake-from-pre-R7-S1 snapshot wedges silently.
+- **Action**: either inject `SANDBOX_AGENT_SANDBOX_ID` on the restore branch too (cheap insurance; backward-compat with restored agents that ignore the env) OR gate restore on snapshot version metadata (refuse pre-R7-S1 snapshots in pg).
+
+### [R9-S6] (MINOR carry) Restore-internal `/_clock_resync` error path still embeds 256 chars of agent body in journald
+- **Source**: 2026-05-25 security-r9 (r8 carry)
+- **File**: `crates/sandbox/src/restore_handler.rs::clock_resync_post_restore` error path
+- **Symptom**: wire is sanitized but journald log line embeds up to 256 chars of arbitrary agent-controlled response body. Information leak to a non-root reader of journald.
+- **Action**: truncate to 64 chars + force-ascii-printable in the log line.
+
+### [R10-C1] `teardown_restore` releases vm_index but does NOT remove the state-map entry (CRITICAL, concurrency-r10)
+- **Source**: 2026-05-25 concurrency-r10
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs::teardown_restore` (locate via grep)
+- **Symptom**: after `register_restored` inserts into state map + `update_sandbox_status(Running)` returns CasLost (legitimate, e.g., parallel admin stop), `teardown_restore` rolls back vm_index but the state-map entry survives. Next create reuses the vm_index → second sandbox in state map at same slot; ghost's eventual stop_inner releases the live tenant's vm_index → three sandboxes can share one slot. Subsumed by R4-A2 RAII when that lands, but a 1-line state-map remove() in teardown_restore is the cheap interim.
+- **Action**: 1-line `state_map.remove(&sandbox_id)` in `teardown_restore` before the vm_index release. Add a regression test that asserts state-map empty after a teardown_restore call.
+
+### [R10-C2] `teardown_restore` is a SYNC fn called from async `do_restore_inner` — blocks ntex worker up to 10s on ureq DELETE (CRITICAL, concurrency-r10)
+- **Source**: 2026-05-25 concurrency-r10
+- **File**: `crates/sandbox/src/restore_handler.rs:274` (call site) + `crates/sandbox/src/backend/nomad_ch.rs::teardown_restore` (callee is sync fn)
+- **Symptom**: R8-A3-5 wrapped submit/livez in spawn_blocking but missed the rollback path. teardown_restore is not even drop-cancellable (sync fn, not async). Under controller restart mid-rollback, the future drop doesn't reach the teardown.
+- **Action**: change `teardown_restore` to `async fn` + wrap the ureq DELETE in `compio::runtime::spawn_blocking`. Or call site wraps the sync fn in spawn_blocking (cleaner: keep callee sync, wrap at call site, matching R5-P1b pattern).
+
+### [R10-I1] Drop ordering on final CAS Err leaves state-map entry + (with R10-C1) ghost (IMPORTANT, concurrency-r10)
+- **Source**: 2026-05-25 concurrency-r10
+- **File**: `crates/sandbox/src/restore_handler.rs:~595-620` (final CAS Err arm)
+- **Action**: subsumed by R4-A2 LeasedVmSlot RAII; the R10-C1 interim 1-liner partially closes this too.
+
+### [R10-P1] AEAD+GCS snapshot path reads memory-ranges 5 times sequentially per snapshot — fusable to 2 (CRITICAL, performance-r10)
+- **Source**: 2026-05-25 performance-r10
+- **Files**: `crates/sandbox/src/snapshot_aead.rs:363-449` + `crates/sandbox/src/snapshot_store.rs:184-223` + `crates/sandbox/src/snapshot_store_gcs.rs:539-622`
+- **Symptom**: 5 passes: (1) encrypt-in-place input read, (2) L1 SHA, (3) L2 canonical SHA, (4) L2 per-file SHA, (5) L2 upload stream. Fusable to 2.
+- **Action**: implement streaming `EncryptingHashWriter` (subsumes R9-P3) + plumb `SnapshotStore::put` to accept a precomputed sha256 (R10-P4). Estimated savings ~1.5-2.5 s/snapshot at single-stream SSD; unknown at c=N.
+
+### [R10-P2] `TieredSnapshotStore::put` uses `compio::runtime::spawn` (not `spawn_blocking`) — confirms R7-P2 still open (CRITICAL, performance-r10)
+- **Source**: 2026-05-25 performance-r10
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:1066`
+- **Symptom**: file has an inline TODO comment saying "wrap in spawn_blocking like the rest of the controller" but uses `spawn(...)`. Sync ureq HTTP PUT runs on a compio executor thread, parking it for the full GCS PUT duration.
+- **Action**: 2-line change `spawn(...)` → `spawn_blocking(...)`. Closes R7-P2 + R10-P2 together.
+
+### [R10-P3] `cipher.encrypt`/`decrypt` allocate fresh 1-MiB Vec per chunk — 2048 heap allocs per AEAD round-trip (IMPORTANT, performance-r10)
+- **Source**: 2026-05-25 performance-r10
+- **File**: `crates/sandbox/src/snapshot_aead.rs` (encrypt/decrypt chunk loop)
+- **Action**: switch to `encrypt_in_place_detached` / `decrypt_in_place_detached`. Estimated saving: bounded by alloc-amortization; likely ~10-50 ms per 1 GB round-trip.
+
+### [R10-P4] GCS L2 put recomputes canonical SHA that L1 already knows (IMPORTANT, performance-r10)
+- **Source**: 2026-05-25 performance-r10
+- **File**: `crates/sandbox/src/snapshot_store.rs` (put signature) + `crates/sandbox/src/snapshot_store_gcs.rs::put`
+- **Action**: extend `SnapshotStore::put` signature with `precomputed_sha256: Option<Hash>`. L1 → L2 call passes the L1-computed hash; L2 verifies the upload completion against it instead of recomputing.
+
+### [R10-P5] (MINOR) Missing `BufWriter` on AEAD output paths
+- **Source**: 2026-05-25 performance-r10
+- **Action**: wrap the destination with `BufWriter::with_capacity(1 << 20, …)`.
+
+### [R10-P6] ~32 fresh ureq connections per wake at 250 ms / 150 ms poll cadences — cached `ureq::Agent` saves ~30-100 ms (IMPORTANT, performance-r10)
+- **Source**: 2026-05-25 performance-r10
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs::wait_for_alloc_running` + `wait_for_livez` polling
+- **Action**: cache a `ureq::Agent` per controller (or per nomad_url) with keep-alive + connection pool. One-shot fix; saves connection-establishment cost on every poll.
+
+### [R10-P7] (MINOR) `clock_resync_random_hex` could use `hex::encode` (refines r9 #7)
+
+### [R9-T1] (CRITICAL) AEAD + persist + clock_resync + register_restored block has zero end-to-end integration coverage
+- **Source**: 2026-05-25 test-coverage-r9
+- **File**: `crates/sandbox/src/restore_handler.rs:557-593` (the post-livez Ok arm with persist=Some)
+- **Symptom**: every existing `restore_sandbox` integration test passes `persist=None` (StubRestoreBackend), which takes the warn-skip branch. The B19 + B22 + R7-S1 + R8-A3-5 trait-dispatch wire-up is byte-coverage-zero.
+- **Action**: add an integration test that constructs a `RealRestoreBackend::with_nomad_handle(...)`, populates `persist` with a sealed record + fake snapshot artifact, calls `restore_sandbox`, and asserts: (a) `unseal` was called, (b) `clock_resync_post_restore` was called with the right url/sandbox_id, (c) `register_restored` was called on the backend, (d) post-stop assert (state-map empty + vm_index released) holds. Pattern from existing nomad_ch::tests with a mock RestoreBackend.
+
+### [R9-T2] (CLOSED at `0e71e5c4`) sweep takeover used same-host fixture; now uses `inject_extra_host` to simulate crashed peer
+
+### [R9-T3] 6 spawn_blocking-panic-recovery branches untested (IMPORTANT, test-coverage-r9)
+- **Source**: 2026-05-25 test-coverage-r9
+- **Action**: a unit test per spawn_blocking site that pre-poisons via `panic!()` inside the closure; assert the parent surfaces a clean Backend error envelope, not a panic.
+
+### [R9-T4] 4 AEAD header-validation guard arms untested (IMPORTANT, test-coverage-r9)
+- **Source**: 2026-05-25 test-coverage-r9
+- **File**: `crates/sandbox/src/snapshot_aead.rs` (header parse)
+- **Action**: 4 negative tests (bad magic, bad version, bad cipher-tag, bad nonce-prefix). Each asserts the specific error variant, not just "decrypt failed".
+
+### [R9-T5] `build_restore_nomad_job_json` has zero test callers — restore-side env block contracts untested (IMPORTANT, test-coverage-r9)
+- **Source**: 2026-05-25 test-coverage-r9
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs::build_restore_nomad_job_json`
+- **Action**: mirror the cold-boot path's `nomad_job_spec_includes_sandbox_id_env` regression test (B24 added). Pin restore-side env block shape too.
+
+### [R9-T6] `derive_agent_url` duplicated across two backends; no test pins they match (IMPORTANT, test-coverage-r9)
+- **Source**: 2026-05-25 test-coverage-r9
+- **Files**: `crates/sandbox/src/restore_handler.rs::RealRestoreBackend::derive_agent_url` + `crates/sandbox/src/backend/nomad_ch.rs::NomadCHBackend::derive_agent_url`
+- **Action**: add a test that constructs both backends with same inputs + asserts the URLs are byte-equal. Closes the silent-drift risk.
+
+### [R9-T7] `init_sandbox_id_from_env` has zero direct tests (IMPORTANT, test-coverage-r9)
+- **Source**: 2026-05-25 test-coverage-r9
+- **File**: `crates/sandbox-agent/src/handlers.rs` (now pub(crate) after R8-API1 full close at `10bddc20`)
+- **Action**: add direct tests for env-var path / file fallback / empty-id guard / typed_id-shape guard. Existing tests use `test_set_sandbox_id` which bypasses these arms.
+
+### [R9-T8] (MINOR) Sweep recovery end-to-end pinned only for Snapshotting, not Restoring/RestoringCold
+
+### [R9-T9] (MINOR) `/_clock_resync` 4 KiB body cap has no pin test or 413 A4-envelope shape test
+
+### [R9-T10] (MINOR carry) r8's slow-agent / agent-500 / malformed-body gaps on clock_resync_post_restore
