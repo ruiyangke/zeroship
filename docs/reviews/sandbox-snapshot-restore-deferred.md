@@ -3,32 +3,14 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-23 (post bug-#14 diagnostic cycle — bug #15 found, both #14 demoted).
+Last updated: 2026-05-23 (B15 closed — `stop_preserving_state` landed; pg-gated integration test added).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `8ad3cf3f`.
+Branch HEAD at last update: `172622d0` (B15 fix at `eaf5ea83`; B14a/B14b stay demoted pending next cluster smoke).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
 
 ## CRITICAL (open blockers on Phase B cluster validation)
-
-### [B15] `teardown_source_for_snapshot` wipes `host_dir` → workspace.img gone at wake → wrapper exit 1
-- **Source**: cluster smoke 2026-05-23 02:32Z (bug-#14 diagnostic round; see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md` for the verbatim evidence).
-- **Symptom**: every wake fails with `restore_backend: nomad alloc terminal status=failed: Failed tasks`. Wrapper stderr (captured via live-patched tee) shows `[wrapper] FATAL: workspace image missing: /var/zeroship/ch/<sandbox-id>/workspace.img`. Confirmed by directory listing: every host_dir whose snapshot succeeded ALSO had `workspace.img` removed; the one whose snapshot timed out (teardown not reached) still has the image.
-- **Root cause**: `crates/sandbox/src/admin_handlers.rs::snapshot_sandbox` post-success path calls `backend.teardown_source_for_snapshot(sandbox_id)`. That delegates to `b.stop(sandbox_id)` (`crates/sandbox/src/backend/mod.rs:412`). `stop()` step 5 (`crates/sandbox/src/backend/nomad_ch.rs:1063-1077`) runs `remove_dir_all(host_dir)`, which is the same dir holding the per-sandbox `workspace.img` created at `create_ext4_image_if_missing(&workspace_img, …)` (`nomad_ch.rs:660-663`). Wrapper's pre-CH defensive gate (`crates/sandbox/scripts/nomad-vm-wrapper.sh:222-225`) trips.
-- **Why missed earlier**: pre-virtio-blk pivot, host_dir held only a virtiofsd socket (re-attached on restore via fresh daemon). The pivot moved workspace storage into per-sandbox raw ext4 images under host_dir, but `teardown_source_for_snapshot` kept its "just call stop()" delegation. Unit tests use tempfile-stubs that don't exercise the host_dir-wipe interaction.
-- **Relevant code**:
-  - `crates/sandbox/src/admin_handlers.rs:1196-1206` (snapshot success → teardown call)
-  - `crates/sandbox/src/backend/mod.rs:407-419` (`teardown_source_for_snapshot` → stop)
-  - `crates/sandbox/src/backend/nomad_ch.rs:1063-1077` (host_dir `remove_dir_all`)
-  - `crates/sandbox/src/backend/nomad_ch.rs:660-663` (workspace.img creation in host_dir)
-  - `crates/sandbox/scripts/nomad-vm-wrapper.sh:222-225` (the FATAL gate)
-- **Action plan (Option A, recommended)**: introduce a snapshot-aware variant of stop() — call it `stop_preserving_state(&self, sandbox_id) -> Result<(), String>` — that runs steps 1-4 of the existing `stop` (Nomad job purge + host-fence + vm_index release + in-memory map removal) but **skips step 5's `remove_dir_all(host_dir)`**. Wire `teardown_source_for_snapshot` to it. Make the orphan-prune sweep aware that `snapshotted` rows' host_dirs are *expected* to persist; only sweep host_dirs whose pg row is `stopped`/terminal-not-restorable. Symmetric with how `home.img` is intentionally preserved across snapshot lifetimes.
-- **Action plan (rejected, Option B)**: re-materialize `workspace.img` in the wrapper or restore_handler. **Silently destroys persisted workspace data on every wake** — defeats the whole point of `/workspace` as durable per-sandbox storage. Don't do this.
-- **Tests to add**:
-  - `crates/sandbox/src/backend/nomad_ch.rs` unit test: assert `stop_preserving_state` does NOT call `remove_dir_all` on host_dir (mock filesystem).
-  - `crates/sandbox/tests/` integration test: cold-boot → write file to /workspace via agent (or just write a sentinel file at workspace.img mount path via a fake) → snapshot → assert host_dir + workspace.img still on disk → restore → assert workspace.img unchanged.
-- **Once landed**: re-run the 2026-05-23 1+1 smoke; re-evaluate whether B14a/B14b are still failing in their own right (likely both go away when B15 closes, since the wrapper never got past the workspace.img gate to demonstrate either).
 
 ### [B14a] (DEMOTED) snap-stage `memory-ranges` absent at wake time → wrapper exits 1
 - **Status**: refuted by 2026-05-23 cycle. Controller `restore: post-store.get staged files` tracing confirms all three files (config.json=2804, memory-ranges=1073741824, state.json=~102K) are staged successfully. The wake fails AFTER staging because of bug-#15, not because the stage is empty.

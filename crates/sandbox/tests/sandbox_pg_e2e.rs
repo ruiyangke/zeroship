@@ -3058,3 +3058,160 @@ async fn phase_b_lookup_source_vm_ops_resolves_handle_against_nomad() {
         "sanity: a freshly-bound UnixListener must show up as is_socket()"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Bug #15 — teardown_source_for_snapshot MUST preserve host_dir.
+//
+// Regression coverage for the 2026-05-23 cluster smoke (see
+// `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md`):
+// the old snapshot-teardown path delegated to `stop()`, whose step 5
+// `remove_dir_all(host_dir)` deleted the per-sandbox `workspace.img`.
+// On wake, the wrapper's `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then
+// tripped. The fix: route the snapshot teardown through
+// `stop_preserving_state`, which skips step 5.
+//
+// This integration test exercises the FULL `Backend` enum surface
+// (not the inner `stop_inner` bool): it constructs a real `Backend`,
+// injects a sandbox + stages a sentinel `workspace.img` on disk,
+// calls `teardown_source_for_snapshot`, asserts the image survives,
+// then calls `stop()` and asserts the image is reaped. This is
+// `#[ignore]`'d to match the file's pg-gated convention even though
+// it doesn't actually touch pg — the cron worker invokes it with the
+// rest of the pg-gated suite (`-- --ignored --test-threads=1`).
+// ════════════════════════════════════════════════════════════════════
+
+#[compio::test]
+#[ignore = "B15 regression coverage; bundled with pg-gated suite (no pg needed)"]
+async fn teardown_source_for_snapshot_preserves_host_dir_then_stop_reaps() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    // 1. Spin up a 404-mock for Nomad. Every request → 404.
+    //    `stop_nomad_job` accepts {200, 404}; `wait_for_job_gone`
+    //    returns Ok on a 404 from `/v1/job/{id}`. So the teardown
+    //    proceeds cleanly through steps 2-4.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let nomad_addr = format!("http://127.0.0.1:{port}");
+    let stop_flag = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag_thread = stop_flag.clone();
+    thread::spawn(move || {
+        while !stop_flag_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                    let _ = s.set_write_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf);
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                    let _ = s.write_all(resp.as_bytes());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // 2. Build a cfg with a writable host_state_dir + Nomad pointed at
+    //    the 404-mock + fence disabled.
+    let host_state_dir = fresh_temp("b15-host-state");
+    let mut cfg = sweep_test_cfg(true);
+    cfg.nomad_ch.nomad_addr = nomad_addr;
+    cfg.nomad_ch.host_state_dir = host_state_dir.clone();
+    cfg.nomad_ch.host_fence_timeout_secs = 0; // skip /livez fence
+
+    // 3. Construct the Backend (the full enum, not just the inner
+    //    nomad-ch backend) so the test exercises the snapshot
+    //    teardown's dispatch through `Backend::teardown_source_for_snapshot`.
+    let backend = Backend::from_config(&cfg).expect("backend");
+
+    // 4. Inject a sandbox record. `_test_inject_sandbox` derives
+    //    host_dir as `<host_state_dir>/<sandbox-id>/`; we materialise
+    //    that dir + drop a workspace.img sentinel before tearing down.
+    let sid = Uuid::now_v7();
+    let user_id = typed_id("usr");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[15u8; 32]);
+    if let Backend::NomadCh(b) = &backend {
+        b._test_inject_sandbox(
+            sid,
+            &user_id,
+            signing.clone(),
+            // Unreachable; /shutdown errors are best-effort (logged
+            // to errs, not fatal for our post-condition assertions).
+            "http://127.0.0.1:1".into(),
+            42,
+        );
+    } else {
+        panic!("expected nomad-ch backend");
+    }
+    let host_dir = host_state_dir.join(sid.to_string());
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let workspace_img = host_dir.join("workspace.img");
+    std::fs::write(&workspace_img, b"PRESERVE-ACROSS-SNAPSHOT").unwrap();
+    let extra = host_dir.join("config.json");
+    std::fs::write(&extra, b"{}").unwrap();
+
+    // 5. Snapshot teardown. The old (pre-#15) code called `stop`
+    //    under the hood and deleted host_dir; the new code calls
+    //    `stop_preserving_state` and leaves the dir alone.
+    let _ = backend.teardown_source_for_snapshot(sid).await;
+
+    assert!(
+        host_dir.exists(),
+        "B15 regression: teardown_source_for_snapshot removed \
+         host_dir; the next wake's wrapper [ ! -f $ZSBX_WORKSPACE_IMG ] \
+         gate will exit 1 (cluster bug #15)"
+    );
+    assert!(
+        workspace_img.exists(),
+        "B15 regression: teardown_source_for_snapshot removed \
+         host_dir/workspace.img; durable per-sandbox storage gone"
+    );
+    let contents = std::fs::read(&workspace_img).unwrap();
+    assert_eq!(
+        contents,
+        b"PRESERVE-ACROSS-SNAPSHOT",
+        "B15 regression: workspace.img sentinel was modified"
+    );
+    assert!(
+        extra.exists(),
+        "B15 regression: teardown_source_for_snapshot removed adjacent \
+         file under host_dir (config.json — restore stage dir's neighbour)"
+    );
+
+    // 6. Re-inject (the teardown removed the in-memory record), then
+    //    call the real `stop` and assert the dir IS reaped — proving
+    //    the host_dir is owned by `stop`, not orphaned. This is the
+    //    "host_dir is finally reaped by the next regular stop" half
+    //    of the deferred-file's Option A contract.
+    if let Backend::NomadCh(b) = &backend {
+        b._test_inject_sandbox(
+            sid,
+            &user_id,
+            signing,
+            "http://127.0.0.1:1".into(),
+            42,
+        );
+    }
+    // host_dir already exists from above. workspace.img also still
+    // there. stop() runs steps 1-5 against the same 404-mock; with
+    // fence disabled and job_confirmed_gone=true, step 5 deletes.
+    let _ = backend.stop(sid).await;
+
+    assert!(
+        !host_dir.exists(),
+        "stop() must reap host_dir under favourable conditions \
+         (404-mock + fence disabled); got dir still present after stop"
+    );
+
+    // Cleanup.
+    stop_flag.store(true, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&host_state_dir);
+}
