@@ -754,17 +754,19 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: TODO comment at db.rs:494-507 documents the pattern but no prior perf round flagged it. Wake-path pays 5× per restore (`get_sandbox_row`, `read_snapshot_row`, `update_sandbox_status` ×2, `clear_snapshot_metadata`); transient-takeover sweep pays 1+N per tick. Largest low-effort lever after R9-P1. Estimated savings: ~10-75 ms median per wake.
 - **Action**: cache the pool. Either a `OnceLock<Pool>` per Database struct OR an `Arc<RwLock<Option<Pool>>>` with lazy init. The pool already supports max_connections; we just need to stop re-creating it.
 
-### [R11-P2] (IMPORTANT, performance-r11) `download_to_disk` no BufWriter — 131072 write(2) calls per 1 GB
+### [R11-P2] (IMPORTANT, performance-r11) `download_to_disk` no BufWriter — 131072 write(2) calls per 1 GB — CLOSED at 3d5c527f
 - **Source**: 2026-05-25 performance-r11
 - **File**: `crates/sandbox/src/snapshot_store_gcs.rs:438-445`
 - **Symptom**: `std::io::copy(reader, file)` defaults to 8 KiB buffer. 1 GB download = ~131072 write(2) syscalls. Wake-path counterpart to R10-P5 at 16× higher syscall granularity.
 - **Action**: wrap dest in `BufWriter::with_capacity(1 << 20, …)`. 1-line fix.
+- **Resolution (3d5c527f)**: `download_to_disk` now wraps the destination File in `std::io::BufWriter::with_capacity(1 << 20, f)` around `io::copy`; `into_inner()` flushes the BufWriter before `sync_all()` so all bytes are observed on disk. Tests: sandbox lib 310 (unchanged — perf-only).
 
-### [R11-P3] (IMPORTANT, performance-r11) Two SHA helpers lack the BufReader R5-P1 added
+### [R11-P3] (IMPORTANT, performance-r11) Two SHA helpers lack the BufReader R5-P1 added — CLOSED at 3d5c527f
 - **Source**: 2026-05-25 performance-r11
 - **Files**: `crates/sandbox/src/snapshot_store_gcs.rs:966-997` (`canonical_artifact_sha256`) + `:506-521` (`sha256_file`)
 - **Symptom**: R5-P1 added a 1 MiB `BufReader` on `snapshot_store.rs`'s SHA loop, but the GCS adapter has its own 2 SHA helpers that never got the same treatment. 16× syscall amplification on the 5-pass disk walk (R10-P1).
 - **Action**: 2-line fix in each helper. Wrap the `File` in `BufReader::with_capacity(1 << 20, …)` before the SHA loop.
+- **Resolution (3d5c527f)**: both `sha256_file` and `canonical_artifact_sha256` now wrap the input File in `std::io::BufReader::with_capacity(1 << 20, f)` before the SHA chunk loop, mirroring R5-P1's pattern at 77ea717f byte-for-byte (same canonical hash domain). Tests: sandbox lib 310 (unchanged — perf-only).
 
 ### [R11-P4] (MINOR, performance-r11) `sweep.rs::attempted` Vec clones SandboxRow unnecessarily
 - **Source**: 2026-05-25 performance-r11
