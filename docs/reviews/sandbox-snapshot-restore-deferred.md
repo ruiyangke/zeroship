@@ -42,10 +42,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Scope**: counting bucket on `GET /admin/users/{u}/export` (REPEATABLE READ + multi-table aggregate) + `DELETE /admin/users/{u}` (multi-statement cascade). Default 1 req/s sustained, burst 5; bypass for `force_takeover` admin scope.
 - **Last considered**: 2026-05-22 — clean follow-up; no blocker
 
-### [T3] `alloc_running_timeout_secs` 60→120 default
-- **Source**: May-5 cluster stress (31/60 creates timed out before alloc-running under c=60 single-worker)
-- **Scope**: one-line default change in `crates/sandbox/src/config.rs` (and matching tests). Mirrors the host_fence_timeout 30→120 shape from commit `cad098e`.
-
 ### [T4] Controller-side stop semaphore
 - **Source**: May-5 cluster stress observations
 - **Scope**: cap concurrent host_fence polls per worker via `Mutex<HashMap<worker_id, RateBucket>>` on AppState. Default 16 concurrent stops; surfaces metric.

@@ -326,9 +326,18 @@ pub struct NomadCHConfig {
     /// "running" means the wrapper script started, NOT that the VM is
     /// up. Past this we give up and the `CreateGuard` tears the job
     /// down. `SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS` (default
-    /// 60). Should be enough to cover Nomad scheduling, plan-evaluate,
+    /// 120). Should be enough to cover Nomad scheduling, plan-evaluate,
     /// and `raw_exec` task launch on a healthy cluster (typically
-    /// well under 5s; 60s leaves room for a reschedule under load).
+    /// well under 5s; 120s leaves room for a reschedule under load).
+    ///
+    /// Was 60s pre-Phase-3 stress run; bumped to 120s after the May-5
+    /// cluster stress (31/60 creates timed out before reaching
+    /// alloc-running under c=60 on a single n2-standard-32 worker —
+    /// concurrent VM density past round-2's 16-cap pushed Nomad
+    /// scheduler + raw_exec launch latency well past the 60s budget).
+    /// Mirrors the `host_fence_timeout_secs` 30→120 bump from
+    /// cad098e6 — same root cause (single-worker saturation under
+    /// concurrent ops), same shape of fix.
     pub alloc_running_timeout_secs: u64,
 
     /// Once the alloc is running, how long to wait for the in-VM
@@ -638,7 +647,7 @@ impl SandboxConfig {
             vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 155u16)?,
             alloc_running_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS",
-                60u64,
+                120u64,
             )?,
             agent_livez_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_AGENT_LIVEZ_TIMEOUT_SECS",
