@@ -886,22 +886,29 @@ impl NomadCHBackend {
 
     /// Snapshot-aware variant of [`Self::stop`] that runs steps 1-4
     /// of the standard teardown (Nomad job purge + host-fence +
-    /// vm_index release + in-memory map removal) **but skips step
-    /// 5's `remove_dir_all(host_dir)`**. Symmetric with how
-    /// `home.img` is intentionally preserved across snapshot
-    /// lifetimes: the per-sandbox `workspace.img` (created under
-    /// `host_dir`) holds durable user state that the restored VM
-    /// re-mounts on wake. Wiping it would silently destroy that data.
+    /// vm_index release + in-memory map removal) **but skips both
+    /// step 5's `remove_dir_all(host_dir)` AND the trailing
+    /// `persist.delete(sandbox_id)`**. Symmetric with how `home.img`
+    /// is intentionally preserved across snapshot lifetimes: the
+    /// per-sandbox `workspace.img` (created under `host_dir`) holds
+    /// durable user state that the restored VM re-mounts on wake,
+    /// and the sealed record carries the signing key the next wake
+    /// needs to talk to the restored agent. Wiping either would
+    /// silently break wake.
     ///
     /// Used by the snapshot path's post-success teardown
     /// ([`super::Backend::teardown_source_for_snapshot`]). The
-    /// host_dir is finally reaped by the next [`Self::stop`] call
-    /// (operator delete, or terminal-not-restorable transition).
+    /// host_dir AND sealed record are finally reaped by the next
+    /// [`Self::stop`] call (operator delete, or terminal-not-
+    /// restorable transition).
     ///
     /// Bug #15 fix (`docs/reviews/sandbox-snapshot-restore-cluster-
     /// 2026-05-23-r1.md`): the prior code called `stop` directly,
     /// which deleted `host_dir/workspace.img`, and the next wake's
-    /// wrapper `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then tripped.
+    /// wrapper `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then tripped. C2
+    /// (deferred 2026-05-24): the B15 fix only gated the host_dir
+    /// rm; `persist.delete` still fired unconditionally. Now both
+    /// share the gate.
     pub async fn stop_preserving_state(
         &self,
         sandbox_id: Uuid,
@@ -911,12 +918,24 @@ impl NomadCHBackend {
 
     /// Shared implementation of [`Self::stop`] /
     /// [`Self::stop_preserving_state`]. The `remove_host_dir` bool
-    /// gates step 5: when `true` (the regular stop path), the
-    /// per-sandbox `host_dir` (which owns `workspace.img`) is
+    /// gates **all on-host durable-state cleanup**:
+    ///
+    /// - step 5 (`rm -rf host_dir` — owns `workspace.img`), and
+    /// - the trailing `persist.delete(sandbox_id)` call (the sealed
+    ///   record carrying the signing key for restart-restore).
+    ///
+    /// When `true` (the regular stop path) both fire: host_dir is
     /// `rm -rf`'d after the Nomad job is confirmed gone + the
-    /// host_fence has cleared. When `false`, the dir survives across
-    /// the call — used by the snapshot teardown so `workspace.img`
-    /// stays on disk for the next wake.
+    /// host_fence has cleared, and the sealed record is removed.
+    /// When `false` (the snapshot-aware teardown via
+    /// [`Self::stop_preserving_state`]) both are skipped: the
+    /// per-sandbox `workspace.img` AND its sealed record survive
+    /// across the snapshot → wake gap. Wiping either would silently
+    /// break wake — `workspace.img` because the wrapper's
+    /// `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate trips (bug #15), the
+    /// sealed record because the moment wake plumbs sealed-record-
+    /// based key recovery the agent becomes unreachable (deferred
+    /// item C2).
     async fn stop_inner(
         &self,
         sandbox_id: Uuid,
@@ -1157,14 +1176,35 @@ impl NomadCHBackend {
         // boot's restore loop probes the sandbox's `/version`, finds it
         // unreachable (the VM is gone), and leaves the file in place
         // for periodic prune (Phase 5) to mop up.
-        if let Some(persist) = &self.persist {
-            if let Err(e) = persist.delete(sandbox_id).await {
-                tracing::warn!(
-                    sandbox_id = %sandbox_id,
-                    error = %e,
-                    "sandbox/nomad-ch persist.delete failed (non-fatal; sealed record will be cleaned by next-boot unreachable-probe + Phase-5 prune)"
-                );
+        //
+        // Gated by `remove_host_dir` for symmetry with step 5 above:
+        // when the caller is the snapshot-aware teardown
+        // (`stop_preserving_state` → `remove_host_dir == false`) the
+        // sandbox is being put to sleep, not killed — `workspace.img`
+        // survives on disk and so MUST the sealed record carrying the
+        // signing key the next wake needs to talk to the restored
+        // agent. Wiping it here is the C2 latent bug
+        // (`docs/reviews/sandbox-snapshot-restore-deferred.md`): it
+        // bites the moment wake plumbs sealed-record-based key
+        // recovery. Today's wake path doesn't (yet) read the sealed
+        // record, but the contract is "preserve everything across the
+        // snapshot → wake gap" — host_dir and sealed record alike.
+        if remove_host_dir {
+            if let Some(persist) = &self.persist {
+                if let Err(e) = persist.delete(sandbox_id).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/nomad-ch persist.delete failed (non-fatal; sealed record will be cleaned by next-boot unreachable-probe + Phase-5 prune)"
+                    );
+                }
             }
+        } else {
+            tracing::info!(
+                sandbox_id = %sandbox_id,
+                job = %sandbox.job_id,
+                "sandbox/nomad-ch stop_preserving_state: skipping persist.delete (snapshot-aware teardown; sealed record must survive to wake)"
+            );
         }
 
         tracing::info!(
@@ -4286,5 +4326,134 @@ mod tests {
         // Safety net in case the assertion above changes: don't
         // leak the dir.
         let _ = std::fs::remove_dir_all(&host_dir);
+    }
+
+    // ─── C2 regression: persist.delete must be gated on
+    //     remove_host_dir, mirroring step 5's host_dir rm. The B15
+    //     fix gated host_dir cleanup but left persist.delete firing
+    //     unconditionally — latent today (wake doesn't read the
+    //     sealed record yet) but bites the moment sealed-record-
+    //     based key recovery lands. Source:
+    //     `docs/reviews/sandbox-snapshot-restore-deferred.md` C2.
+
+    #[compio::test]
+    async fn stop_preserving_state_does_not_delete_sealed_record() {
+        // 1. Spin up the 404-mock for Nomad (same fixture as the
+        //    B15 host_dir test). Every request → 404.
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        // 2. cfg pointed at the mock + fence disabled (so the
+        //    teardown reaches the persist.delete tail).
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0;
+
+        // 3. Build a real Persistence rooted at a fresh tempdir,
+        //    wire it into the backend, and seal a record for our
+        //    synthetic sandbox so the C2 invariant has something to
+        //    observe.
+        let persist_root = fresh_host_dir("c2-persist");
+        let key = crate::persist::AeadKey::from_bytes([0x5c; 32]);
+        let persist = Arc::new(crate::persist::Persistence::new(persist_root.clone(), key));
+        let backend = NomadCHBackend::new(cfg, Some(persist.clone())).expect("new");
+
+        let id = Uuid::now_v7();
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: id.to_string(),
+            signing_key_bytes: [0xab; 32],
+            preview_secrets: None,
+            boot_id: Some(1),
+        };
+        persist.seal(id, &record).await.expect("seal sealed record");
+        let sealed_path = persist
+            .sealed_records_dir()
+            .join(crate::persist::seal_filename_for(id));
+        assert!(
+            sealed_path.exists(),
+            "test setup: persist.seal must place the sealed file on disk"
+        );
+
+        // 4. Hand-insert the in-memory sandbox record. The host_dir
+        //    is irrelevant to the C2 contract but stop_inner expects
+        //    a real path it can stat; reuse the B15 fixture style.
+        let host_dir = fresh_host_dir("c2-host");
+        let sentinel = host_dir.join("workspace.img");
+        std::fs::write(&sentinel, b"PRESERVE-ME").expect("write sentinel");
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_c2_preserve".into(),
+                job_id: "zsbx-c2-preserve".into(),
+                vm_index: 51,
+                host_dir: host_dir.clone(),
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+
+        // 5. Snapshot-teardown variant: MUST preserve the sealed
+        //    record on disk. /shutdown to 127.0.0.1:1 errors → Err
+        //    return is expected, but the post-conditions are what
+        //    we're pinning.
+        let _ = backend.stop_preserving_state(id).await;
+
+        // 5a. In-memory state was reaped (the rest of the teardown
+        //     ran — proves we hit the persist.delete branch, not an
+        //     early-return).
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "stop_preserving_state must still remove the in-memory \
+             record (steps 1-4 ran)"
+        );
+
+        // 5b. host_dir + sentinel survive (B15 invariant — sanity
+        //     check we didn't accidentally regress while wiring C2).
+        assert!(
+            host_dir.exists(),
+            "regression check: stop_preserving_state removed host_dir"
+        );
+        assert!(
+            sentinel.exists(),
+            "regression check: stop_preserving_state removed workspace.img"
+        );
+
+        // 5c. THE C2 INVARIANT: the sealed record survives.
+        assert!(
+            sealed_path.exists(),
+            "C2 regression: stop_preserving_state deleted the sealed \
+             record at {}; the next wake's sealed-record-based key \
+             recovery will fail",
+            sealed_path.display()
+        );
+
+        // 6. Now the for-real stop must finally reap the sealed
+        //    record (symmetric with how it reaps host_dir). Re-
+        //    insert the in-memory record since step 5 removed it.
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_c2_preserve".into(),
+                job_id: "zsbx-c2-preserve".into(),
+                vm_index: 51,
+                host_dir: host_dir.clone(),
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+        let _ = backend.stop(id).await;
+
+        assert!(
+            !sealed_path.exists(),
+            "stop (the for-real variant) MUST delete the sealed \
+             record at {}; got file still present",
+            sealed_path.display()
+        );
+
+        // Cleanup.
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&host_dir);
+        let _ = std::fs::remove_dir_all(&persist_root);
     }
 }
