@@ -8,7 +8,7 @@
 #   1. apt deps: nomad, kvm, dnsmasq, virtiofsd build deps, python3
 #   2. pull binaries from GCS:
 #        - cloud-hypervisor (v51.1), ch-remote, virtiofsd
-#        - vmlinuz, rootfs-slim.img.virtio-blk-v4 → rootfs-slim.img
+#        - vmlinuz, rootfs-slim.img.virtio-blk-v5 → rootfs-slim.img
 #          (per the virtio-blk pivot — bug #20 cluster smoke 2026-05-23
 #          showed v15 failures because the worker startup still pulled
 #          the pre-pivot rootfs-slim.img.fp32, whose in-VM /sbin/init
@@ -151,7 +151,7 @@ gs_pull cloud-hypervisor.v51.1     /usr/local/bin/cloud-hypervisor 0755
 gs_pull ch-remote.v51.1            /usr/local/bin/ch-remote        0755
 gs_pull virtiofsd                  /usr/local/bin/virtiofsd        0755
 gs_pull vmlinuz                    "$ART/vmlinuz"                  0644
-gs_pull rootfs-slim.img.virtio-blk-v4 "$ART/rootfs-slim.img"          0644
+gs_pull rootfs-slim.img.virtio-blk-v5 "$ART/rootfs-slim.img"          0644
 gs_pull nomad-vm-wrapper.sh        "$ART/nomad-vm-wrapper.sh"      0755
 gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 
