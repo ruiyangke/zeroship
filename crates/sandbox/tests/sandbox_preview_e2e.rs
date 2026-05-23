@@ -32,7 +32,6 @@ use uuid::Uuid;
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
 use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
 use zeroship_sandbox::preview;
-use zeroship_sandbox::registry::SandboxRegistry;
 
 /// Handle a single request from the fixture agent. Captures the
 /// raw request bytes (so the test can assert on the headers we
@@ -179,7 +178,6 @@ fn make_state(
     } else {
         unreachable!("test pinned to nomad-ch");
     }
-    let registry = SandboxRegistry::new();
     // NOTE: this fixture keeps the legacy hyphenated UUID form for
     // `info.sandbox_id` because the existing tests in this file
     // build URLs from the bare `Uuid` struct. The typed-id wire
@@ -195,24 +193,11 @@ fn make_state(
         created_at_secs: 0,
         last_used_at_secs: 0,
     };
-    registry.insert(sandbox_id, info);
-    let state = Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
-        // Phase-0 sandbox-pg-state: tests run pg-disabled. The
-        // backends never read this field in Phase 0, so `None` is
-        // the live shape AppState::from_config picks when
-        // SANDBOX_DATABASE_URL is absent.
-        database: None,
-        persist: None,
-        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admin_token: None,
-        snapshot_store: None,
-        ch_remote: None,
-        restore_backend: None,
-    });
+    // A5: out-of-crate construction goes through `new_fixture` (admin_token = None;
+    // Phase-0 sandbox-pg-state tests run pg-disabled).
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.sandboxes.insert(sandbox_id, info);
+    let state = Arc::new(state);
     (state, sandbox_id)
 }
 

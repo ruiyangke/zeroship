@@ -95,7 +95,15 @@ pub struct AppState {
     /// recover the bearer. (Live-process reads are still a concern,
     /// but the post-mortem surface is closed.) Mirrors the
     /// `config::ApiToken` treatment of `SANDBOX_TOKEN`.
-    pub admin_token: Option<zeroize::Zeroizing<String>>,
+    ///
+    /// A5 (api-surface-2026-05-24-r1): restricted to `pub(crate)` so
+    /// no out-of-crate caller can clobber the field with an empty
+    /// `Zeroizing<String>` (which would defeat the constant-time
+    /// compare — see `admin_handlers::admin_check`). Tests and other
+    /// in-crate constructors set the field via the safe
+    /// [`AppState::with_admin_token`] builder, which rejects empty
+    /// strings before they can reach the auth path.
+    pub(crate) admin_token: Option<zeroize::Zeroizing<String>>,
 
     /// Phase-A snapshot/restore wiring: present (`Some`) only when
     /// `config.snapshot_enabled = true`. The trio of stores +
@@ -143,6 +151,79 @@ impl AppState {
     /// iteration to decide whether to break out.
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// A5 (api-surface-2026-05-24-r1): safe builder for
+    /// `admin_token`. The field itself is `pub(crate)` so external
+    /// callers (notably integration tests in `crates/sandbox/tests/`)
+    /// cannot construct it directly — they go through this builder,
+    /// which rejects empty strings BEFORE they can reach
+    /// `admin_handlers::admin_check`.
+    ///
+    /// `admin_check` has a defense-in-depth empty check on the
+    /// expected token, but pushing the rejection to the only
+    /// out-of-crate entry point turns the footgun (the post-Round-4
+    /// review's `pub admin_token: Some(Zeroizing::new(String::new()))`
+    /// silent-auth-bypass shape) into a `Err(...)` at the call site.
+    ///
+    /// Semantics:
+    ///   - `token = None`  → clears the field (admin API disabled).
+    ///   - `token = Some("")` → `Err("admin_token must not be empty")`.
+    ///   - `token = Some(non-empty)` → wraps in `Zeroizing<String>`.
+    pub fn with_admin_token(
+        mut self,
+        token: Option<String>,
+    ) -> Result<Self, String> {
+        match token {
+            None => {
+                self.admin_token = None;
+                Ok(self)
+            }
+            Some(t) if t.is_empty() => {
+                Err("admin_token must not be empty".to_string())
+            }
+            Some(t) => {
+                self.admin_token = Some(zeroize::Zeroizing::new(t));
+                Ok(self)
+            }
+        }
+    }
+
+    /// Read-only accessor for the admin bearer. Returns the raw
+    /// string slice; callers MUST use constant-time comparison
+    /// (`subtle::ConstantTimeEq` via `admin_handlers::admin_check`)
+    /// rather than `==` against user-presented bytes. Mainly here
+    /// so integration tests can assert wiring without poking the
+    /// `pub(crate)` field.
+    pub fn admin_token(&self) -> Option<&str> {
+        self.admin_token.as_deref().map(|z| z.as_str())
+    }
+
+    /// A5 (api-surface-2026-05-24-r1): public fixture constructor
+    /// for out-of-crate integration tests. Returns an `AppState`
+    /// with `admin_token = None` and the other "wiring" fields at
+    /// their disabled defaults (`database = None`, `persist = None`,
+    /// snapshot trio all `None`, fresh registry, fresh shutdown
+    /// flag, fresh `MintRateLimiter`). Tests mutate the still-`pub`
+    /// fields directly and chain [`AppState::with_admin_token`] to
+    /// set the bearer (which rejects empty strings — that's the
+    /// whole point of A5).
+    ///
+    /// Production code uses [`AppState::from_config`], not this.
+    pub fn new_fixture(config: SandboxConfig, backend: Backend) -> Self {
+        Self {
+            config,
+            sandboxes: SandboxRegistry::new(),
+            backend,
+            mint_rate_limiter: Some(MintRateLimiter::new()),
+            database: None,
+            persist: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            admin_token: None,
+            snapshot_store: None,
+            ch_remote: None,
+            restore_backend: None,
+        }
     }
 }
 
@@ -1059,6 +1140,132 @@ mod boot_loader_tests {
         let got = load_admin_token(Some(&path));
         cleanup(&path);
         assert!(matches!(&got, Ok(Some(s)) if s == token), "got {got:?}");
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A5 (api-surface-2026-05-24-r1) — `AppState::with_admin_token`
+// builder semantics. Constructs a minimal in-crate state (where
+// `admin_token` is visible) and asserts the empty-string rejection
+// that turns the post-Round-4 footgun into a `Result::Err`.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod admin_token_setter_tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+
+    /// Minimal config that satisfies `Backend::from_config` for the
+    /// nomad-ch backend WITHOUT touching the network — the builder
+    /// only needs `SandboxConfig` to populate the field; no probe
+    /// runs here.
+    fn min_cfg() -> SandboxConfig {
+        SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: std::path::PathBuf::from(
+                    "/etc/zeroship/nomad-vm-wrapper.sh",
+                ),
+                runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: std::path::PathBuf::from(
+                    "/var/zeroship/ch/users",
+                ),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 60,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from(
+                "/var/zeroship/ch/snapshots",
+            ),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
+    fn min_state() -> AppState {
+        let cfg = min_cfg();
+        let backend = Backend::from_config(&cfg).expect("backend");
+        AppState::new_fixture(cfg, backend)
+    }
+
+    #[test]
+    fn admin_token_setter_rejects_empty() {
+        let state = min_state();
+        match state.with_admin_token(Some(String::new())) {
+            Ok(_) => panic!("empty string must yield Err"),
+            Err(e) => assert!(
+                e.contains("empty"),
+                "error message must mention 'empty'; got {e}"
+            ),
+        }
+    }
+
+    #[test]
+    fn admin_token_setter_accepts_non_empty() {
+        let state = min_state();
+        let state = match state
+            .with_admin_token(Some("operator-bearer-abcdef".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty string must be accepted: {e}"),
+        };
+        assert_eq!(
+            state.admin_token(),
+            Some("operator-bearer-abcdef"),
+            "the reader must surface the wrapped token"
+        );
+    }
+
+    #[test]
+    fn admin_token_setter_none_clears_field() {
+        // Set then clear — exercises the two-call flow that test
+        // fixtures use when toggling the bearer between cases.
+        let state = min_state();
+        let state = match state
+            .with_admin_token(Some("bearer-to-clear-aaaa".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty accepted: {e}"),
+        };
+        assert!(state.admin_token().is_some(), "precondition: set");
+        let state = match state.with_admin_token(None) {
+            Ok(s) => s,
+            Err(e) => panic!("None clears unconditionally: {e}"),
+        };
+        assert!(state.admin_token().is_none(), "None must clear the field");
     }
 }
 

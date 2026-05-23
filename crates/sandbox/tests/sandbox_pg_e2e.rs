@@ -2592,7 +2592,6 @@ async fn restore_handler_vm_index_unavailable_when_cluster_exhausted() {
 
 use zeroship_sandbox::backend::Backend;
 use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
-use zeroship_sandbox::registry::SandboxRegistry;
 use zeroship_sandbox::sweep::{
     run_idle_eviction_once, run_transient_takeover_once, RecordingIdleSnapshotter,
 };
@@ -2653,22 +2652,11 @@ fn build_sweep_state(
 ) -> std::sync::Arc<zeroship_sandbox::AppState> {
     let cfg = sweep_test_cfg(snapshot_enabled);
     let backend = Backend::from_config(&cfg).expect("backend");
-    let registry = SandboxRegistry::new();
-    std::sync::Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(
-            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
-        ),
-        database: Some(std::sync::Arc::new(db)),
-        persist: None,
-        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admin_token: None,
-        snapshot_store: None,
-        ch_remote: None,
-        restore_backend: None,
-    })
+    // A5: `admin_token` is `pub(crate)`; out-of-crate construction
+    // goes through `AppState::new_fixture` (admin_token = None).
+    let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.database = Some(std::sync::Arc::new(db));
+    std::sync::Arc::new(state)
 }
 
 #[compio::test]

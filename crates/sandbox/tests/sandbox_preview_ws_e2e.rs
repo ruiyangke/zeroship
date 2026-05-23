@@ -50,7 +50,6 @@ use uuid::Uuid;
 
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
 use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
-use zeroship_sandbox::registry::SandboxRegistry;
 use zeroship_sandbox_agent::sig::{self, CanonicalKind};
 
 // ─── fixture: WS-echo upstream ──────────────────────────────────────
@@ -222,7 +221,6 @@ fn make_state(
     } else {
         unreachable!("test pinned to nomad-ch");
     }
-    let registry = SandboxRegistry::new();
     // NOTE: legacy hyphenated UUID form. The typed-id wire shape is
     // covered in `tests/sandbox_typed_id_e2e.rs`.
     let info = SandboxInfo {
@@ -234,21 +232,11 @@ fn make_state(
         created_at_secs: 0,
         last_used_at_secs: 0,
     };
-    registry.insert(sandbox_id, info);
-    let state = Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(zeroship_sandbox::preview_share_handlers::MintRateLimiter::new()),
-        // Phase-0 sandbox-pg-state: tests run pg-disabled.
-        database: None,
-        persist: None,
-        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admin_token: None,
-        snapshot_store: None,
-        ch_remote: None,
-        restore_backend: None,
-    });
+    // A5: out-of-crate construction goes through `new_fixture`
+    // (admin_token = None; Phase-0 sandbox-pg-state tests run pg-disabled).
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.sandboxes.insert(sandbox_id, info);
+    let state = Arc::new(state);
     (state, sandbox_id)
 }
 

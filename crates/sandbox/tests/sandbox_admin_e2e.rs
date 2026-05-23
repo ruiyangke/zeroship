@@ -26,7 +26,6 @@ use zeroship_sandbox::admin_handlers;
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
 use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
 use zeroship_sandbox::db::Database;
-use zeroship_sandbox::registry::SandboxRegistry;
 
 const TEST_URL_ENV: &str = "PG_TEST_URL";
 const DEFAULT_URL: &str = "postgres://postgres:zeroship@localhost:5440/zeroship";
@@ -95,26 +94,16 @@ fn make_state_with_admin_token(
 ) -> Arc<zeroship_sandbox::AppState> {
     let cfg = make_cfg("ignored-creator-token");
     let backend = Backend::from_config(&cfg).expect("backend");
-    let registry = SandboxRegistry::new();
-    Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(
-            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
-        ),
-        database,
-        persist: None,
-        shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        // Round-4 / MINOR #5: admin_token is now Zeroizing-wrapped so
-        // the heap allocation is scrubbed on drop.
-        admin_token: admin_token.map(zeroize::Zeroizing::new),
-        // Phase A snapshot/restore wiring fields — None for tests
-        // (snapshot_enabled stays false in fixtures).
-        snapshot_store: None,
-        ch_remote: None,
-        restore_backend: None,
-    })
+    // A5: `admin_token` is `pub(crate)`; out-of-crate construction
+    // goes through `AppState::new_fixture` + the `with_admin_token`
+    // builder (which rejects empty strings — the post-Round-4
+    // footgun).
+    let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.database = database;
+    let state = state
+        .with_admin_token(admin_token)
+        .expect("admin_token must be non-empty when Some");
+    Arc::new(state)
 }
 
 // Round-4 / MINOR #4: `AdminTokenFile`, `EnvGuard`, and `ENV_LOCK`
@@ -782,7 +771,6 @@ fn make_state_with_snapshot_wiring(
     let mut cfg = make_cfg("ignored-creator-token");
     cfg.snapshot_enabled = true;
     let backend = Backend::from_config(&cfg).expect("backend");
-    let registry = SandboxRegistry::new();
     // Build the snapshot trio identically to AppState::from_config's
     // production path, but with an in-memory L1 root so the test
     // doesn't litter `/var/zeroship`.
@@ -804,21 +792,16 @@ fn make_state_with_snapshot_wiring(
             cfg.memory_mb,
             cfg.cpus,
         ));
-    Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(
-            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
-        ),
-        database: None,
-        persist: None,
-        shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admin_token: admin_token.map(zeroize::Zeroizing::new),
-        snapshot_store: Some(store),
-        ch_remote: Some(ch),
-        restore_backend: Some(rb),
-    })
+    // A5: out-of-crate construction goes through `new_fixture` +
+    // `with_admin_token`.
+    let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.snapshot_store = Some(store);
+    state.ch_remote = Some(ch);
+    state.restore_backend = Some(rb);
+    let state = state
+        .with_admin_token(admin_token)
+        .expect("admin_token must be non-empty when Some");
+    Arc::new(state)
 }
 
 #[ntex::test]

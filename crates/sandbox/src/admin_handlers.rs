@@ -125,15 +125,20 @@ fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
 /// request. Bounded amplification at 10k req/s; no slow-FS DoS;
 /// no fail-open on chmod-error (boot-time read fails loud).
 ///
-/// Round-4 / IMPORTANT #2: defense-in-depth empty-token guard.
-/// `AppState.admin_token` is a `pub` field; if anything constructs
-/// `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
-/// the constant-time compare against an empty `Authorization: Bearer `
-/// presented bytes would PASS — silent unauthenticated admin access.
-/// The boot loader (`load_admin_token`) already rejects empty tokens
-/// loudly, so production code never reaches this branch, but tests
-/// construct `AppState` directly and the type system advertises the
-/// footgun. Treat empty-`expected` as "no token configured" → 401.
+/// Round-4 / IMPORTANT #2 + A5 (api-surface-2026-05-24-r1):
+/// defense-in-depth empty-token guard. The post-Round-4 footgun was
+/// that `AppState.admin_token` was a `pub` field — anyone could
+/// build `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
+/// and the constant-time compare against an empty
+/// `Authorization: Bearer ` presented bytes would PASS (silent
+/// unauthenticated admin access). A5 closed the front door by
+/// restricting the field to `pub(crate)` and routing all writes
+/// through `AppState::with_admin_token`, which rejects empty
+/// strings. The boot loader (`load_admin_token`) also rejects
+/// empty tokens loudly, so production never reaches the branch
+/// below. We KEEP this check as defense-in-depth for any future
+/// in-crate setter that bypasses the builder — treat empty
+/// `expected` as "no token configured" → 401.
 pub(crate) fn admin_check(
     req: &HttpRequest,
     state: &AppState,

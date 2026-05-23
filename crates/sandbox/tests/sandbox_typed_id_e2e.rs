@@ -32,7 +32,6 @@ use uuid::Uuid;
 
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
 use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
-use zeroship_sandbox::registry::SandboxRegistry;
 use zeroship_sandbox::{handlers, preview_share_handlers};
 
 fn make_cfg(token: &str) -> SandboxConfig {
@@ -114,7 +113,6 @@ fn make_state_with_typed_id_fixture(token: &str) -> (Arc<zeroship_sandbox::AppSt
         unreachable!("test pinned to nomad-ch");
     }
 
-    let registry = SandboxRegistry::new();
     // CRITICAL: `info.sandbox_id` carries the typed-id wire form, which
     // is what `POST /sandboxes` returns to the caller. Endpoints that
     // surface info.sandbox_id in responses MUST keep this exact string.
@@ -127,23 +125,11 @@ fn make_state_with_typed_id_fixture(token: &str) -> (Arc<zeroship_sandbox::AppSt
         created_at_secs: 0,
         last_used_at_secs: 0,
     };
-    registry.insert(sandbox_uuid, info);
 
-    let state = Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(
-            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
-        ),
-        database: None,
-        persist: None,
-        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admin_token: None,
-        snapshot_store: None,
-        ch_remote: None,
-        restore_backend: None,
-    });
+    // A5: out-of-crate construction goes through `new_fixture`.
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.sandboxes.insert(sandbox_uuid, info);
+    let state = Arc::new(state);
     (state, sandbox_uuid, sandbox_typed, user_typed)
 }
 
