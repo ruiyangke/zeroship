@@ -116,18 +116,11 @@ async fn exec_register_model(
     if !has_pool {
         crate::init_pool_async()
             .await
-            .map_err(|e| DbError::Configuration {
-                code: "lazy_init_failed",
-                message: format!("db: lazy init failed: {e}"),
-                hint: None,
-            })?;
+            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
     }
 
-    let backend = context::with(|c| c.backend()).ok_or_else(|| DbError::Configuration {
-        code: "backend_not_initialized",
-        message: "db: backend not initialized".to_string(),
-        hint: None,
-    })?;
+    let backend = context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("backend_not_initialized", "db: backend not initialized"))?;
     // P0 PR 5: `BackendHandle` is the enum (no `dyn Backend`). The
     // PG-only register-model pipeline pulls a `&PostgresBackend` out
     // of the enum via `as_postgres()` for the duration of the

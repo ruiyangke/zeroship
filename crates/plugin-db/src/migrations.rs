@@ -309,10 +309,11 @@ where
     // release below. The §10.5 invariant ("release uses the same
     // keys as the acquire") lives in a single `LockScope` value
     // instead of two textually-identical struct literals.
-    let scope = LockScope::GlobalApp {
-        app_id: app_id.to_string(),
-        name: format!("mig:{name}"),
-    };
+    //
+    // arch r13 I-R13-1 / api-surface r13 MINOR-R13-2: the `"mig:"`
+    // prefix is encoded in `LockScope::migration` so the literal
+    // lives in one place across the 3 acquire/release sites.
+    let scope = LockScope::migration(app_id, name);
     let got = backend
         .try_acquire(&client, &scope)
         .await
@@ -549,10 +550,12 @@ where
                 // end is the belt-and-braces unlock), then clear the
                 // slot. F1 warn-shape (`{app_id, name, error}`) is
                 // preserved per i6 documentation snapshot.
-                let release_scope = LockScope::GlobalApp {
-                    app_id: app_id.to_string(),
-                    name: format!("mig:{name}"),
-                };
+                //
+                // arch r13 I-R13-1 / api-surface r13 MINOR-R13-2:
+                // `LockScope::migration` centralises the `"mig:"`
+                // prefix invariant — shared with `exec_begin`'s
+                // acquisition and the `is_done` finalise path.
+                let release_scope = LockScope::migration(app_id, &name);
                 if let Some(client) = take_lock_client() {
                     if let Err(e) = backend.release(&client, &release_scope).await {
                         tracing::warn!(
@@ -774,10 +777,12 @@ where
         // cannot share this binding directly — the §10.5 key-derivation
         // convention (`name = "mig:{name}"`) is the cross-function
         // contract here.
-        let release_scope = LockScope::GlobalApp {
-            app_id: app_id.to_string(),
-            name: format!("mig:{name}"),
-        };
+        //
+        // arch r13 I-R13-1 / api-surface r13 MINOR-R13-2:
+        // `LockScope::migration` centralises the `"mig:"` prefix
+        // invariant shared with `exec_begin` + the pre-validation
+        // reject path above.
+        let release_scope = LockScope::migration(app_id, &name);
         if let Err(e) = backend.release(&client, &release_scope).await {
             tracing::warn!(
                 app_id,
@@ -1104,18 +1109,21 @@ mod tests {
 
     // ----- [I6] release_advisory_lock warn-shape documentation ---------
     //
-    // Two `release_advisory_lock` callers in this file (lines 291 and
-    // 670 at HEAD) emit `tracing::warn!` with the same field shape:
-    // `{app_id, name, error}` + a message identifying the call site
-    // (cancelled-refusal vs backfill-finalise). Pin the shape so a
-    // future refactor of the unlock-SQL retry path doesn't drop a
-    // field that the runbook greps on. test-coverage r13 NEW-R13-2.
+    // Three `release_advisory_lock` callers in this file (lines 346,
+    // 561, and 787 at HEAD) emit `tracing::warn!` with the same field
+    // shape: `{app_id, name, error}` + a message identifying the call
+    // site (cancelled-refusal vs terminalStatus pre-validation reject
+    // vs backfill-finalise). Pin the shape so a future refactor of the
+    // unlock-SQL retry path doesn't drop a field that the runbook greps
+    // on. test-coverage r13 NEW-R13-2 + r18 NEW-R18-6 (the third
+    // pre-validation reject site was added by concurrency r13 NEW-R13-2
+    // via f2b66132 and the count was updated here).
     //
     // Same caveat as the F1 documentation snapshot in
     // `orchestrator/register_model/apply.rs`: this test re-emits the
     // SAME `tracing::warn!` syntax, so it does NOT drive the live
     // unlock-SQL path — it only documents the shape contributors
-    // must keep aligned across the two sites. End-to-end coverage
+    // must keep aligned across the three sites. End-to-end coverage
     // lives in `tests/integration.rs`.
 
     #[test]

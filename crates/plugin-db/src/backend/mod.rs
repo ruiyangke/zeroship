@@ -226,6 +226,30 @@ impl LockScope {
             Self::GlobalApp { name, .. } | Self::LocalApp { name, .. } => name.as_str(),
         }
     }
+
+    /// Constructor for the migration-progress lock scope.
+    ///
+    /// Encodes the `"mig:"` prefix as the migration-specific
+    /// lock-name invariant. Every migration `acquire` / `release`
+    /// pair across `exec_begin` (acquisition), the pre-validation
+    /// reject path in `exec_commit_batch`, and the `is_done`
+    /// finalise path in `exec_commit_batch` MUST go through this
+    /// constructor so the `(key1, key2)` shape derived by
+    /// [`Self::to_keys`] stays identical across the three sites
+    /// (§7.2 / §10.5). The resulting scope is always
+    /// [`Self::GlobalApp`] — migrations are cluster-wide.
+    ///
+    /// `pub(crate)` on purpose: the migration lock is an internal
+    /// orchestration primitive, not part of the public surface.
+    /// Adopted in arch r13 I-R13-1 / api-surface r13 MINOR-R13-2
+    /// to centralise the `"mig:"` literal that was previously
+    /// reconstructed at 3 sites in `migrations.rs`.
+    pub(crate) fn migration(app_id: impl Into<String>, name: &str) -> LockScope {
+        LockScope::GlobalApp {
+            app_id: app_id.into(),
+            name: format!("mig:{name}"),
+        }
+    }
 }
 
 /// Advisory-lock capability — session-scoped `(key1, key2)` locks held
