@@ -618,7 +618,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Source**: 2026-05-25 test-coverage-r9
 - **Action**: a unit test per spawn_blocking site that pre-poisons via `panic!()` inside the closure; assert the parent surfaces a clean Backend error envelope, not a panic.
 
-### [R9-T4] (CLOSED at `88da7580`) AEAD header-validation guard arms untested
+### [R9-T4] (CLOSED at `419c154b`) AEAD header-validation guard arms untested
 - **Source**: 2026-05-25 test-coverage-r9
 - **File**: `crates/sandbox/src/snapshot_aead.rs` (header parse, `decrypt_to`)
 - **Resolution**: 7 negative tests added (4 from the original list + 3 additional arms surfaced while reading the parser). Each pins the specific error-message substring since every guard collapses to `SnapshotError::InvalidArtifact(String)` — a bare `is_err()` would conflate magic/version/cipher/nonce/chunk-bounds failures.
