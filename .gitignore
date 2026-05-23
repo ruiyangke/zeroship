@@ -27,3 +27,7 @@ crates/runtime/tests/wpt/
 # Reject foreign package-manager lockfiles — pnpm-lock.yaml is the source of truth.
 package-lock.json
 yarn.lock
+
+# Go build artefacts for nomad-driver-ch (the driver has its own .gitignore
+# but be defensive — `make build` drops binaries here).
+nomad-driver-ch/bin/

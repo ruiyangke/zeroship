@@ -31,52 +31,14 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
-use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
-use zeroship_sandbox::registry::SandboxRegistry;
+use zeroship_sandbox::config::{ApiToken, SandboxConfig};
 use zeroship_sandbox::{handlers, preview_share_handlers};
 
 fn make_cfg(token: &str) -> SandboxConfig {
-    SandboxConfig {
-        port: 9091,
-        token: ApiToken::new(token),
-        backend: "nomad-ch".into(),
-        image: "img".into(),
-        workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
-        network: "n".into(),
-        memory_mb: 1024,
-        cpus: 2.0,
-        idle_timeout_secs: 1800,
-        max_lifetime_secs: 28800,
-        auto_pull: false,
-        k8s: K8sConfig {
-            namespace: "default".into(),
-            image: "i".into(),
-            runtime_class: "kvm-sandbox".into(),
-            ready_timeout_secs: 120,
-            use_port_forward: false,
-            port_forward_start: 18000,
-            user_home_size: "5Gi".into(),
-            user_home_storage_class: None,
-            startup_orphan_cleanup: false,
-        },
-        nomad_ch: NomadCHConfig {
-            nomad_addr: "http://127.0.0.1:4646".into(),
-            datacenter: "dc1".into(),
-            wrapper_path: std::path::PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
-            runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
-            host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
-            user_home_dir_root: std::path::PathBuf::from("/var/zeroship/ch/users"),
-            vm_index_floor: 1,
-            vm_index_ceil: 200,
-            alloc_running_timeout_secs: 60,
-            agent_livez_timeout_secs: 30,
-            host_fence_timeout_secs: 30,
-            startup_orphan_cleanup: false,
-            subnet_second_octet: 99,
-        },
-        create_retry_max: 2,
-        create_retry_total_timeout_secs: 90,
-    }
+    // A7 (deferred): see sandbox_admin_e2e.rs::make_cfg for rationale.
+    // `token` is `pub(crate)`; construct via the public fixture
+    // constructor + `with_token` builder.
+    SandboxConfig::new_fixture().with_token(ApiToken::new(token))
 }
 
 /// Build an AppState pre-loaded with one sandbox whose registry id
@@ -108,7 +70,6 @@ fn make_state_with_typed_id_fixture(token: &str) -> (Arc<zeroship_sandbox::AppSt
         unreachable!("test pinned to nomad-ch");
     }
 
-    let registry = SandboxRegistry::new();
     // CRITICAL: `info.sandbox_id` carries the typed-id wire form, which
     // is what `POST /sandboxes` returns to the caller. Endpoints that
     // surface info.sandbox_id in responses MUST keep this exact string.
@@ -121,20 +82,11 @@ fn make_state_with_typed_id_fixture(token: &str) -> (Arc<zeroship_sandbox::AppSt
         created_at_secs: 0,
         last_used_at_secs: 0,
     };
-    registry.insert(sandbox_uuid, info);
 
-    let state = Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(
-            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
-        ),
-        database: None,
-        persist: None,
-        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        admin_token: None,
-    });
+    // A5: out-of-crate construction goes through `new_fixture`.
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    state.sandboxes.insert(sandbox_uuid, info);
+    let state = Arc::new(state);
     (state, sandbox_uuid, sandbox_typed, user_typed)
 }
 

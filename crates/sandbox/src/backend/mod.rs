@@ -19,14 +19,17 @@
 //!     its own kernel.
 //!
 //!   - **`nomad-ch`** — Nomad `raw_exec` job per sandbox; the job
-//!     invokes a wrapper script that spawns 3 × `virtiofsd` plus a
-//!     `cloud-hypervisor` microVM. The same in-VM
+//!     invokes a wrapper script that launches a `cloud-hypervisor`
+//!     microVM with three virtio-blk disks (rootfs + per-sandbox
+//!     workspace.img + per-user home.img) and the controller's
+//!     signing pubkey hex on the kernel cmdline. The same in-VM
 //!     `zeroship-sandbox-agent` runs as PID 1 (signed-request
 //!     contract identical to `k8s`). No Kubernetes — no kubelet,
 //!     no CNI, no CSI — just `nomad agent` + a shell wrapper.
 //!     Best for single-node / small-cluster operators who already
 //!     run Nomad and want libkrun-equivalent isolation without the
-//!     k8s control-plane overhead.
+//!     k8s control-plane overhead. (Pre virtio-blk pivot the wrapper
+//!     spawned virtiofsd × 3; that's gone, see bug #11 closure.)
 //!
 //! ## Why an enum, not a `dyn Trait`
 //!
@@ -75,9 +78,11 @@ pub mod nomad_ch;
 ///   `vm_index` (`http://10.99.<100+idx>.2:7777`); K8s uses Pod-IP or
 ///   the port-forward loopback; Docker uses the container's bridge IP.
 /// - `pubkey_fp`: stable short fingerprint of the verifying key
-///   (`sig::pubkey_fingerprint(...)` — first 8 bytes of SHA-256 over
-///   the 32-byte pubkey, hex-encoded → 16 ASCII chars). Used by the
-///   controller's restart-time `/version` rebind probe (§ II.5 of
+///   (`sig::pubkey_fingerprint(...)` — first 16 bytes of SHA-256 over
+///   the 32-byte pubkey, hex-encoded → 32 ASCII chars). Width is
+///   load-bearing: `sandbox.sandboxes.key_fp` has a `CHECK (key_fp ~
+///   '^[0-9a-f]{32}$')` constraint. Used by the controller's
+///   restart-time `/version` rebind probe (§ II.5 of
 ///   docs/proposals/sandbox-preview-urls.md) to confirm the agent at
 ///   `agent_url` is the same agent the controller minted keys for.
 ///
@@ -157,11 +162,21 @@ pub struct SandboxInfo {
 }
 
 /// The Backend enum. Static dispatch at the call site.
+///
+/// **B19 fix (2026-05-23)**: the `NomadCh` variant wraps its inner
+/// backend in `Arc` so the snapshot/wake-path's `RealRestoreBackend`
+/// can hold a shared handle and call `register_restored` after
+/// `wait_for_livez` succeeds. Without that shared handle, the
+/// restored VM never landed in `NomadCHBackend::state`, and every
+/// post-wake `exec`/`stop`/`delete` hit the "sandbox not found"
+/// branch + leaked the vm_index slot. Wrapping is asymmetric
+/// (Docker/K8s stay by-value) because only nomad-ch hits the
+/// restore path in v1.
 #[derive(Debug)]
 pub enum Backend {
     Docker(docker::DockerBackend),
     K8s(k8s::K8sBackend),
-    NomadCh(nomad_ch::NomadCHBackend),
+    NomadCh(std::sync::Arc<nomad_ch::NomadCHBackend>),
 }
 
 impl Backend {
@@ -189,10 +204,9 @@ impl Backend {
                 persist,
             ))),
             "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone(), persist)?)),
-            "nomad-ch" => Ok(Self::NomadCh(nomad_ch::NomadCHBackend::new(
-                cfg.clone(),
-                persist,
-            )?)),
+            "nomad-ch" => Ok(Self::NomadCh(std::sync::Arc::new(
+                nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?,
+            ))),
             other => Err(format!(
                 "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             )),
@@ -367,7 +381,164 @@ impl Backend {
         }
     }
 
-    /// Pg row is canonical for non-secret
+    /// Phase B snapshot wiring: resolve `(api_socket, vm_index, alloc_dir)`
+    /// for a running sandbox so the snapshot handler can `ch-remote
+    /// pause` + `ch-remote snapshot`.
+    ///
+    /// Only `nomad-ch` supports this in v1 — k8s/docker would each
+    /// need a different "where is the VM running?" lookup (kubelet
+    /// alloc lookup; container PID lookup) which Phase B does not
+    /// implement. The other variants return `Err` so admin handlers
+    /// can map to a 501 / 503 envelope.
+    pub async fn lookup_source_vm_ops(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<nomad_ch::SourceVmOpsHandle, String> {
+        match self {
+            Self::NomadCh(b) => b.lookup_source_vm_ops(sandbox_id).await,
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "lookup_source_vm_ops: backend {:?} doesn't support \
+                 snapshot/restore (Phase B nomad-ch-only)",
+                self.name()
+            )),
+        }
+    }
+
+    /// Phase B snapshot wiring: tear down the source VM after a
+    /// snapshot lands in pg. Mirrors [`Self::stop`] but the in-memory
+    /// state has already been removed by `lookup_source_vm_ops`'s
+    /// caller path. Idempotent + best-effort: any error is logged but
+    /// not propagated (the snapshot artifact is already authoritative).
+    ///
+    /// Calls [`nomad_ch::NomadCHBackend::stop_preserving_state`] —
+    /// runs the Nomad-job purge + host-fence + vm_index release +
+    /// in-memory map removal, but **DOES NOT remove the per-sandbox
+    /// `host_dir`**. That dir holds `workspace.img`, which the next
+    /// wake re-mounts as durable per-sandbox storage; deleting it
+    /// here trips the wrapper's `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate
+    /// on the next wake (bug #15 — see
+    /// `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md`).
+    /// The host_dir is finally reaped by the next real [`Self::stop`]
+    /// call (operator delete, or terminal-not-restorable transition).
+    /// Symmetric with how `home.img` is intentionally preserved
+    /// across snapshot lifetimes.
+    pub async fn teardown_source_for_snapshot(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<(), String> {
+        match self {
+            Self::NomadCh(b) => b.stop_preserving_state(sandbox_id).await,
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "teardown_source_for_snapshot: backend {:?} doesn't support \
+                 snapshot/restore (Phase B nomad-ch-only)",
+                self.name()
+            )),
+        }
+    }
+
+    /// Shared handle to the per-worker `vm_index` allocator, when the
+    /// backend has one. **B18 fix wiring**: `crate::restore_handler::
+    /// RealRestoreBackend::with_shared_allocator` consumes the result
+    /// so create-side `alloc()` and restore-side `reserve()` share
+    /// state — otherwise a restored VM holding slot N (private map)
+    /// stays invisible to the create-side allocator, which hands the
+    /// same tap/IP to a fresh sandbox → stale-pubkey 401 on /version.
+    /// Returns `None` for backends that don't have a slot pool
+    /// (Docker, K8s — they map sandboxes to ephemeral container/Pod
+    /// IPs assigned by the host runtime).
+    ///
+    /// `pub(crate)` because the returned `Arc<Mutex<>>` is a footgun on
+    /// the public surface — downstream code could `.lock()` it and
+    /// deadlock create/restore. The only legitimate caller is
+    /// `crate::restore_handler::RealRestoreBackend::with_shared_allocator`
+    /// inside `crate::AppState::from_config`. Sandbox v1 has no
+    /// out-of-crate consumer.
+    pub(crate) fn vm_index_allocator(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<nomad_ch::VmIndexAllocator>>> {
+        match self {
+            Self::NomadCh(b) => Some(b.vm_index_allocator()),
+            Self::Docker(_) | Self::K8s(_) => None,
+        }
+    }
+
+    /// Shared `Arc<NomadCHBackend>` handle when the backend is
+    /// nomad-ch. **B19 fix wiring**: `crate::restore_handler::
+    /// RealRestoreBackend::with_nomad_handle` consumes the result so
+    /// the wake path can call `register_restored(...)` after
+    /// `wait_for_livez` Ok — without that, the restored VM never
+    /// landed in `NomadCHBackend::state` and post-wake exec/stop/
+    /// delete all returned "sandbox not found" + leaked the slot.
+    /// Returns `None` for Docker/K8s (those backends don't expose
+    /// a restore registry surface today).
+    ///
+    /// `pub(crate)` because handing out a concrete
+    /// `Arc<NomadCHBackend>` bypasses the "enum dispatch is the only
+    /// contract" promise — out-of-crate callers could reach past the
+    /// `Backend` enum and call backend-specific methods directly,
+    /// stranding the trait surface. The only legitimate caller is
+    /// `crate::restore_handler::RealRestoreBackend::with_nomad_handle`
+    /// inside `crate::AppState::from_config`.
+    pub(crate) fn nomad_ch_handle(
+        &self,
+    ) -> Option<std::sync::Arc<nomad_ch::NomadCHBackend>> {
+        match self {
+            Self::NomadCh(b) => Some(std::sync::Arc::clone(b)),
+            Self::Docker(_) | Self::K8s(_) => None,
+        }
+    }
+
+    /// B19 fix: install a restored sandbox into the backend's in-memory
+    /// state map so post-wake `exec`/`stop`/`delete` find it. Called by
+    /// `restore_handler::do_restore_inner` after `wait_for_livez` Ok.
+    ///
+    /// Only `nomad-ch` implements it (the restore path is nomad-ch-only
+    /// in v1; Docker/K8s lack a deterministic agent_url + a slot pool,
+    /// so they return Err). Inputs are everything `NomadCHBackend::
+    /// create`'s state-map insert needs: the sandbox id, the source
+    /// vm_index, the per-sandbox signing key (already unsealed), the
+    /// agent URL (already derived), and the user id (from the snapshot
+    /// row).
+    ///
+    /// `pub(crate)` because the signature takes raw `[u8; 32]` SK bytes
+    /// — a key-material footgun that does not belong on the public
+    /// surface. The only legitimate caller is
+    /// `crate::restore_handler::RealRestoreBackend::register_restored`
+    /// (via the trait), which itself routes through the
+    /// `nomad_ch_handle()`-borrowed `Arc<NomadCHBackend>`. Out-of-crate
+    /// code must drive restore through `crate::AppState`, not by
+    /// hand-rolling state-map inserts.
+    ///
+    /// `#[allow(dead_code)]`: the trait-dispatch path in
+    /// `restore_handler::RealRestoreBackend::register_restored` calls
+    /// `NomadCHBackend::register_restored` directly off the
+    /// `nomad_ch_handle()`-borrowed `Arc`, bypassing this enum-level
+    /// delegator. Kept for symmetry with the other `Backend::*` variants
+    /// and for the eventual Docker/K8s restore impls — when those land,
+    /// restore_handler can switch back to the enum surface and drop this
+    /// allow.
+    #[allow(dead_code)]
+    pub(crate) fn register_restored(
+        &self,
+        sandbox_id: Uuid,
+        vm_index: u16,
+        signing_key_bytes: [u8; 32],
+        agent_url: String,
+        user_id: String,
+    ) -> Result<(), String> {
+        match self {
+            Self::NomadCh(b) => {
+                b.register_restored(sandbox_id, vm_index, signing_key_bytes, agent_url, user_id)
+            }
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "register_restored: backend {:?} doesn't support \
+                 snapshot/restore (Phase B nomad-ch-only)",
+                self.name()
+            )),
+        }
+    }
+
+    /// Round-8 Phase-1 restore. Pg row is canonical for non-secret
     /// fields; sealed record is canonical for the signing key. The
     /// boot loop has already probed the agent before this is called.
     pub async fn restore_from_pg_and_sealed(

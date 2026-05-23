@@ -46,6 +46,11 @@ static AUTH_FAIL_OTHER: AtomicU64 = AtomicU64::new(0);
 static FILES_BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
 /// /files GET byte total.
 static FILES_BYTES_READ: AtomicU64 = AtomicU64::new(0);
+/// /_clock_resync invocations that successfully set CLOCK_REALTIME.
+/// **Bug #22 fix**: controller calls this once per snapshot-wake to
+/// repair the guest's frozen-at-snapshot wall clock; an operator
+/// monitoring this counter sees one increment per successful wake.
+static CLOCK_RESYNC_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 // ─── increment helpers ───────────────────────────────────────────
 //
@@ -68,6 +73,14 @@ pub fn add_files_bytes_written(n: u64) {
 }
 pub fn add_files_bytes_read(n: u64) {
     FILES_BYTES_READ.fetch_add(n, Ordering::Relaxed);
+}
+
+/// **Bug #22 fix**: increment on each successful `/_clock_resync`.
+/// Exposed as the `sbx_agent_clock_resyncs_total` Prometheus counter
+/// so an operator can confirm restored sandboxes are getting their
+/// `CLOCK_REALTIME` repaired.
+pub fn inc_clock_resync() {
+    CLOCK_RESYNC_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Bucket an auth failure reason (string carried in audit events) into
@@ -174,6 +187,12 @@ pub fn render(started_at_unix: u64) -> String {
         "sbx_agent_files_bytes_read_total",
         "Total bytes returned via GET /files.",
         FILES_BYTES_READ.load(Ordering::Relaxed),
+    );
+    push_counter(
+        &mut out,
+        "sbx_agent_clock_resyncs_total",
+        "Successful /_clock_resync invocations (bug #22 fix — post-restore CLOCK_REALTIME repair).",
+        CLOCK_RESYNC_TOTAL.load(Ordering::Relaxed),
     );
 
     push_gauge(

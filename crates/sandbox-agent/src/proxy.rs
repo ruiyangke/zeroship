@@ -47,7 +47,6 @@ use ntex::http::header::HeaderName;
 use ntex::http::{StatusCode, Uri};
 use ntex::util::Bytes;
 use ntex::web::{self, HttpRequest, HttpResponse};
-use serde_json::json;
 
 use crate::handlers::AppState;
 use crate::sig::{self, CanonicalKind};
@@ -96,15 +95,27 @@ pub async fn proxy_http(
     // discarded instead of buffered fully). 413 is the spec response.
     let max_body = max_body_bytes();
     if body.len() > max_body {
-        return err(StatusCode::PAYLOAD_TOO_LARGE, "payload too large");
+        return crate::error_envelope::error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "payload too large",
+        );
     }
 
     if !crate::handlers::verify_signed_pub(&req, &body, &state) {
-        return HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}));
+        return crate::error_envelope::error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "authentication required",
+        );
     }
 
     if state.is_draining() {
-        return HttpResponse::ServiceUnavailable().json(&json!({"error": "draining"}));
+        return crate::error_envelope::error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "draining",
+            "agent is draining for shutdown",
+        );
     }
 
     let (port, sub_path) = parts.into_inner();
@@ -113,7 +124,11 @@ pub async fn proxy_http(
     // the last line). The dynamic deny-list is not yet wired through
     // sandbox config today — DEFAULT_DENY ships everywhere.
     if !is_proxyable_port(port, DEFAULT_DENY) {
-        return err(StatusCode::BAD_REQUEST, "port not allowed");
+        return crate::error_envelope::error_response(
+            StatusCode::BAD_REQUEST,
+            "port_not_allowed",
+            "port not allowed",
+        );
     }
 
     let method = req.method().clone();
@@ -192,14 +207,22 @@ pub async fn proxy_http(
         Ok(Err(e)) => {
             logmeta.emit(0, 0);
             tracing::warn!(error = %e, port, path = %sub_path, "[sandbox-agent/proxy] upstream error");
-            return err_with_code(StatusCode::BAD_GATEWAY, "upstream", &e);
+            // A4 envelope: `error` = machine code, `message` = prose.
+            // Pre-migration this site INVERTED the field order
+            // (`error` carried prose, `code` carried the kind); fixed
+            // here so the wire shape matches the rest of the agent.
+            return crate::error_envelope::error_response(
+                StatusCode::BAD_GATEWAY,
+                "upstream",
+                e,
+            );
         }
         Err(_join_panic) => {
             // The blocking pool's task panicked; the error payload is
             // a `Box<dyn Any>` (no Display) — we don't try to format it.
             logmeta.emit(0, 0);
             tracing::warn!("[sandbox-agent/proxy] blocking-pool join failure (panicked)");
-            return err_with_code(
+            return crate::error_envelope::error_response(
                 StatusCode::BAD_GATEWAY,
                 "upstream",
                 "blocking-pool join failure",
@@ -251,14 +274,6 @@ fn max_body_bytes() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_BODY_BYTES)
-}
-
-fn err(status: StatusCode, msg: &str) -> HttpResponse {
-    HttpResponse::build(status).json(&json!({"error": msg}))
-}
-
-fn err_with_code(status: StatusCode, code: &str, msg: &str) -> HttpResponse {
-    HttpResponse::build(status).json(&json!({"error": msg, "code": code}))
 }
 
 /// Sync HTTP/1.1 forward. Returns (status, headers, body).
@@ -1028,6 +1043,14 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // A4 envelope wire-shape (proposal § 10.0): pin the 413 site
+        // here rather than in a duplicate test, since the shared
+        // TEST_BODY_CAP_OVERRIDE global serialises poorly with two
+        // 413-exercising tests running in parallel.
+        let bytes = test::read_body(resp).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "payload_too_large");
+        assert!(body["message"].is_string());
     }
 
     #[ntex::test]
@@ -1206,4 +1229,104 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         stop.store(true, Ordering::Relaxed);
     }
+
+    // ─── A4 wire-shape tests (proposal § 10.0) ──────────────────────
+    //
+    // Every error path through `proxy.rs` MUST emit
+    //     { "error": "<machine_kind>", "message": "<prose>" }
+    // since the error_envelope migration. The cases below pin each
+    // distinct error site to its envelope `error` code; if a refactor
+    // ever drops the migration's field-order fix (the original
+    // `err_with_code` placed prose in `error` and the kind in `code`)
+    // these tests will fail.
+
+    async fn body_json(resp: ntex::web::WebResponse) -> serde_json::Value {
+        let bytes = test::read_body(resp).await;
+        serde_json::from_slice(&bytes).expect("body is JSON")
+    }
+
+
+    #[ntex::test]
+    async fn proxy_wire_shape_unauthorized() {
+        let state = make_state("a4_401");
+        let app = make_app!(state);
+        let req = test::TestRequest::get()
+            .uri("/proxy/5173/index.html")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+    }
+
+    #[ntex::test]
+    async fn proxy_wire_shape_port_not_allowed() {
+        let state = make_state("a4_port_deny");
+        let app = make_app!(state);
+        let path = "/proxy/22/index";
+        let (ts, nonce, sig) = sign_v1_1("GET", path, b"");
+        let req = test::TestRequest::get()
+            .uri(path)
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "port_not_allowed");
+        assert!(body["message"].is_string());
+    }
+
+    #[ntex::test]
+    async fn proxy_wire_shape_draining() {
+        let state = make_state("a4_503");
+        state.mark_draining();
+        let app = make_app!(state);
+        let path = "/proxy/5173/index";
+        let (ts, nonce, sig) = sign_v1_1("GET", path, b"");
+        let req = test::TestRequest::get()
+            .uri(path)
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "draining");
+        assert!(body["message"].is_string());
+    }
+
+    #[ntex::test]
+    async fn proxy_wire_shape_upstream_error_field_order_fixed() {
+        // Bind a port to learn it's free, then drop it; ureq's dial
+        // hits ECONNREFUSED → 502 with A4 envelope. Pre-migration,
+        // `err_with_code` INVERTED the field order: `error` carried
+        // the prose, `code` carried "upstream". The test asserts the
+        // post-migration shape so a regression fails loudly.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let state = make_state("a4_502");
+        let app = make_app!(state);
+        let path = format!("/proxy/{dead_port}/index");
+        let (ts, nonce, sig) = sign_v1_1("GET", &path, b"");
+        let req = test::TestRequest::get()
+            .uri(&path)
+            .header("x-sbx-timestamp", ts)
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "upstream");
+        assert!(body["message"].is_string());
+        // Anti-regression: the OLD broken shape had a top-level
+        // `code` field. Make sure the new shape no longer emits one.
+        assert!(body.get("code").is_none(), "A4 shape has no `code` key; got {body}");
+    }
+
 }

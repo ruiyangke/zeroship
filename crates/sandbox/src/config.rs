@@ -57,7 +57,17 @@ pub struct SandboxConfig {
     ///
     /// Wrapped in [`ApiToken`] so debug output is redacted and the
     /// heap allocation is zeroed on drop.
-    pub token: ApiToken,
+    ///
+    /// A7 (deferred): restricted to `pub(crate)` because this is the
+    /// creator-side bearer that authenticates every `/sandbox/*`
+    /// request (see `crates/sandbox/src/auth.rs`). A
+    /// `cfg.token = ApiToken::new("known")` swap from out-of-crate
+    /// code could plant an attacker-known token. Out-of-crate
+    /// callers (notably integration tests in
+    /// `crates/sandbox/tests/`) use [`SandboxConfig::new_fixture`]
+    /// + [`SandboxConfig::with_token`] to set the field; direct
+    /// struct-literal construction is blocked by the visibility.
+    pub(crate) token: ApiToken,
 
     /// Backend selector. `SANDBOX_BACKEND=docker|k8s` (default docker).
     pub backend: String,
@@ -126,6 +136,54 @@ pub struct SandboxConfig {
     /// retries remain. `SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS`
     /// (default 90).
     pub create_retry_total_timeout_secs: u64,
+
+    /// Snapshot/restore master feature flag. When `false`, the
+    /// snapshot/wake/cold-boot admin handlers return 501
+    /// `feature_disabled` and the idle-eviction sweep is a no-op.
+    /// Lease-takeover for transient states (§ 6.1) stays on
+    /// regardless — we always need to unwedge stuck rows.
+    /// `SANDBOX_SNAPSHOT_ENABLED` (default `false`).
+    /// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+    /// § 10.3, § 13.1.
+    pub snapshot_enabled: bool,
+
+    /// L1 root directory for snapshot artifacts. Each sandbox's
+    /// artifact lives at `<root>/<sandbox-id>/{config,state,memory}.<ext>`.
+    /// `SANDBOX_SNAPSHOT_L1_ROOT` (default `/var/zeroship/ch/snapshots`).
+    pub snapshot_l1_root: PathBuf,
+
+    /// When `true`, the controller wraps `LocalDiskSnapshotStore`
+    /// in `TieredSnapshotStore<L1=disk, L2=GCS>` so put writes
+    /// fire-and-forget to GCS in addition to L1, and L1-miss reads
+    /// fall back to GCS. Requires `snapshot_gcs_bucket` to be set.
+    /// `SANDBOX_SNAPSHOT_USE_GCS` (default `false`).
+    pub snapshot_use_gcs: bool,
+
+    /// GCS bucket name (no `gs://` prefix). Required when
+    /// `snapshot_use_gcs = true`; ignored otherwise.
+    /// `SANDBOX_SNAPSHOT_GCS_BUCKET` (default `None`).
+    pub snapshot_gcs_bucket: Option<String>,
+
+    /// Path to the root KEK (key-encryption key) file used by the
+    /// AEAD wrap layer (snapshot_aead.rs). When `None`, the wrap
+    /// layer runs in passthrough mode — snapshots are not
+    /// encrypted at rest. Production deployments set this to a
+    /// 0o400 file containing the 32-byte key.
+    /// `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` (default `None`).
+    pub snapshot_root_kek_path: Option<PathBuf>,
+
+    /// Size of the per-sandbox `workspace.img` AND per-user
+    /// `home.img` virtio-blk images, in gigabytes. Set at create()
+    /// time via `truncate -s <N>G` so the on-disk file is sparse —
+    /// actual host bytes used grow with what the guest writes, not
+    /// the declared size. The same value caps both images for the
+    /// virtio-blk pivot (bug #11); we don't need separate workspace
+    /// and home ceilings because they share the same FS layer and
+    /// the host_state_dir overall is bounded by operator-level
+    /// quota anyway. `SANDBOX_WORKSPACE_IMAGE_SIZE_GB` (default 20).
+    /// Source-of-truth: `docs/proposals/sandbox-snapshot-restore.md`
+    /// virtio-blk pivot.
+    pub workspace_image_size_gb: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -278,9 +336,18 @@ pub struct NomadCHConfig {
     /// "running" means the wrapper script started, NOT that the VM is
     /// up. Past this we give up and the `CreateGuard` tears the job
     /// down. `SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS` (default
-    /// 60). Should be enough to cover Nomad scheduling, plan-evaluate,
+    /// 120). Should be enough to cover Nomad scheduling, plan-evaluate,
     /// and `raw_exec` task launch on a healthy cluster (typically
-    /// well under 5s; 60s leaves room for a reschedule under load).
+    /// well under 5s; 120s leaves room for a reschedule under load).
+    ///
+    /// Was 60s pre-Phase-3 stress run; bumped to 120s after the May-5
+    /// cluster stress (31/60 creates timed out before reaching
+    /// alloc-running under c=60 on a single n2-standard-32 worker —
+    /// concurrent VM density past round-2's 16-cap pushed Nomad
+    /// scheduler + raw_exec launch latency well past the 60s budget).
+    /// Mirrors the `host_fence_timeout_secs` 30→120 bump from
+    /// cad098e6 — same root cause (single-worker saturation under
+    /// concurrent ops), same shape of fix.
     pub alloc_running_timeout_secs: u64,
 
     /// Once the alloc is running, how long to wait for the in-VM
@@ -494,6 +561,111 @@ impl NomadCHConfig {
 }
 
 impl SandboxConfig {
+    /// A7 (deferred): read-only accessor for the creator-side bearer
+    /// [`SandboxConfig::token`]. `pub` (not `pub(crate)`) because the
+    /// `zeroship-sandbox` **binary** target (`src/main.rs`) is a
+    /// separate crate from the library and needs to log
+    /// "endpoints are unauthenticated" when the token is empty
+    /// (`SANDBOX_ALLOW_NO_AUTH=true` dev path). In-crate readers
+    /// (`auth.rs`, `preview_ws.rs`) bypass the accessor and read
+    /// `self.token` directly via the `pub(crate)` field — this
+    /// accessor is purely for the out-of-crate bin.
+    ///
+    /// Callers MUST use constant-time comparison
+    /// (`subtle::ConstantTimeEq` via `auth::check_token`) when
+    /// matching against user-presented bytes — never `==`.
+    pub fn token(&self) -> &ApiToken {
+        &self.token
+    }
+
+    /// A7 (deferred): safe builder for [`SandboxConfig::token`]. The
+    /// field itself is `pub(crate)` so external callers (notably
+    /// integration tests in `crates/sandbox/tests/`) cannot construct
+    /// or mutate it directly — they go through this builder.
+    ///
+    /// Unlike `AppState::with_admin_token`, this setter does NOT
+    /// reject empty `ApiToken`s. Empty-token semantics are a
+    /// **deployment** decision validated at boot in [`Self::from_env`]
+    /// (it refuses to start with an empty `SANDBOX_TOKEN` unless the
+    /// operator opts in via `SANDBOX_ALLOW_NO_AUTH=true`), not a
+    /// per-field invariant. Tests legitimately need to construct
+    /// configs with empty / short tokens to exercise the no-auth and
+    /// boot-rejection paths; rejecting empty here would block those.
+    /// Returning plain `Self` (not `Result<Self, String>`) reflects
+    /// that this builder cannot fail — matches the R3-Q2 finding that
+    /// always-`Ok` builders are a smell.
+    ///
+    /// Replaces any prior value.
+    pub fn with_token(mut self, token: ApiToken) -> Self {
+        self.token = token;
+        self
+    }
+
+    /// A7 (deferred): public fixture constructor for out-of-crate
+    /// integration tests. Returns a `SandboxConfig` populated with
+    /// defaults that exercise the `nomad-ch` backend wiring without
+    /// touching the network (the network probe runs in
+    /// `Backend::from_config`, not here). The `token` field is set
+    /// to a non-empty placeholder; tests that need a specific
+    /// bearer chain [`Self::with_token`].
+    ///
+    /// This is the only legal out-of-crate construction path now
+    /// that `token` is `pub(crate)`. Production code uses
+    /// [`Self::from_env`].
+    ///
+    /// Non-`token` fields remain `pub`, so tests that need to vary
+    /// e.g. `snapshot_enabled` or `port` can still mutate them via
+    /// direct field assignment on a `let mut cfg = new_fixture()`.
+    pub fn new_fixture() -> Self {
+        Self {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
+                runtime_dir: PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 120,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: PathBuf::from("/var/zeroship/ch/snapshots"),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let port = parse_env("SANDBOX_PORT", 9091u16)?;
         let token_raw = std::env::var("SANDBOX_TOKEN").unwrap_or_default();
@@ -590,7 +762,7 @@ impl SandboxConfig {
             vm_index_ceil: parse_env("SANDBOX_NOMAD_CH_VM_INDEX_CEIL", 155u16)?,
             alloc_running_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_ALLOC_RUNNING_TIMEOUT_SECS",
-                60u64,
+                120u64,
             )?,
             agent_livez_timeout_secs: parse_env(
                 "SANDBOX_NOMAD_CH_AGENT_LIVEZ_TIMEOUT_SECS",
@@ -616,6 +788,42 @@ impl SandboxConfig {
         let create_retry_max = parse_env("SANDBOX_CREATE_RETRY_MAX", 2u32)?;
         let create_retry_total_timeout_secs =
             parse_env("SANDBOX_CREATE_RETRY_TOTAL_TIMEOUT_SECS", 90u64)?;
+        let snapshot_enabled = parse_env("SANDBOX_SNAPSHOT_ENABLED", false)?;
+        let snapshot_l1_root = PathBuf::from(
+            std::env::var("SANDBOX_SNAPSHOT_L1_ROOT")
+                .unwrap_or_else(|_| "/var/zeroship/ch/snapshots".to_string()),
+        );
+        let snapshot_use_gcs = parse_env("SANDBOX_SNAPSHOT_USE_GCS", false)?;
+        let snapshot_gcs_bucket = std::env::var("SANDBOX_SNAPSHOT_GCS_BUCKET")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let snapshot_root_kek_path = std::env::var("SANDBOX_SNAPSHOT_ROOT_KEK_PATH")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+
+        // Validate: GCS path requires the bucket. Refuse to boot
+        // with use_gcs=true and no bucket — the operator's intent
+        // is clear and silently falling back to L1-only would
+        // surprise them on the first put.
+        if snapshot_enabled && snapshot_use_gcs && snapshot_gcs_bucket.is_none() {
+            return Err(
+                "SANDBOX_SNAPSHOT_USE_GCS=true requires SANDBOX_SNAPSHOT_GCS_BUCKET to be set"
+                    .to_string(),
+            );
+        }
+
+        let workspace_image_size_gb =
+            parse_env("SANDBOX_WORKSPACE_IMAGE_SIZE_GB", 20u32)?;
+        if workspace_image_size_gb == 0 {
+            return Err(
+                "SANDBOX_WORKSPACE_IMAGE_SIZE_GB=0; refusing to start \
+                 (mkfs.ext4 against a 0-byte sparse file aborts). \
+                 Set to ≥ 1."
+                    .to_string(),
+            );
+        }
 
         Ok(Self {
             port, token, backend, image, workspace_root, network,
@@ -623,6 +831,12 @@ impl SandboxConfig {
             k8s, nomad_ch,
             create_retry_max,
             create_retry_total_timeout_secs,
+            snapshot_enabled,
+            snapshot_l1_root,
+            snapshot_use_gcs,
+            snapshot_gcs_bucket,
+            snapshot_root_kek_path,
+            workspace_image_size_gb,
         })
     }
 }
@@ -651,7 +865,7 @@ mod tests {
             user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
             vm_index_floor: 1,
             vm_index_ceil: 155,
-            alloc_running_timeout_secs: 60,
+            alloc_running_timeout_secs: 120,
             agent_livez_timeout_secs: 30,
             host_fence_timeout_secs: 30,
             startup_orphan_cleanup: false,
@@ -781,5 +995,57 @@ mod tests {
         cfg.user_home_dir_root = PathBuf::from("/var/zeroship/ch/homes");
         let err = cfg.validate().expect_err("must reject");
         assert!(err.contains("USER_HOME_ROOT"), "{err}");
+    }
+
+    /// A7 (deferred): `with_token` is the only legal out-of-crate
+    /// write path to `SandboxConfig.token`. Verify it replaces the
+    /// prior value. Mirrors the field-setter test pattern from A6b's
+    /// `with_config_replaces_existing` — build a fixture with one
+    /// token, swap to a second, assert the second wins.
+    ///
+    /// `ApiToken` has no `PartialEq` (zeroize-wrapped string) so we
+    /// compare via `as_bytes()`, which is the same surface
+    /// `auth::check_token` uses on the hot path.
+    #[test]
+    fn with_token_replaces_existing() {
+        let first = SandboxConfig::new_fixture()
+            .with_token(ApiToken::new("first-token-aaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert_eq!(
+            first.token.as_bytes(),
+            b"first-token-aaaaaaaaaaaaaaaaaaaaaaaa",
+            "fixture starts with the first token"
+        );
+
+        let second = first
+            .with_token(ApiToken::new("second-token-bbbbbbbbbbbbbbbbbbbbbbbb"));
+        assert_eq!(
+            second.token.as_bytes(),
+            b"second-token-bbbbbbbbbbbbbbbbbbbbbbbb",
+            "with_token must replace the prior ApiToken"
+        );
+    }
+
+    /// virtio-blk pivot (bug #11): SANDBOX_WORKSPACE_IMAGE_SIZE_GB=0
+    /// is a foot-gun (mkfs.ext4 against a 0-byte sparse file aborts);
+    /// from_env refuses to start in that state. Mutex over the global
+    /// env table makes this test serializable with the other from_env
+    /// tests; we set + unset the var locally.
+    #[test]
+    fn workspace_image_size_gb_zero_is_rejected_at_startup() {
+        // Serialize against other env-mutating tests in this module by
+        // taking the same mutex pattern used elsewhere if present;
+        // since there's no shared mutex here we rely on the
+        // SANDBOX_TOKEN+ALLOW_NO_AUTH cofiguration also being set so
+        // the validator gets far enough to evaluate the image-size
+        // field.
+        std::env::set_var("SANDBOX_TOKEN", "x".repeat(32));
+        std::env::set_var("SANDBOX_WORKSPACE_IMAGE_SIZE_GB", "0");
+        let err = SandboxConfig::from_env().expect_err("zero must reject");
+        assert!(
+            err.contains("WORKSPACE_IMAGE_SIZE_GB"),
+            "expected WORKSPACE_IMAGE_SIZE_GB in error; got: {err}"
+        );
+        std::env::remove_var("SANDBOX_WORKSPACE_IMAGE_SIZE_GB");
+        std::env::remove_var("SANDBOX_TOKEN");
     }
 }

@@ -51,6 +51,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth;
+use crate::error_envelope::{error_response, ErrorEnvelope};
 use crate::preview_share::{
     self, validate_token, validate_token_skip_scope, RegistrySecretLookup, TokenClaims,
     TokenError, TOKEN_RAW_MAX,
@@ -616,50 +617,59 @@ fn check_sec_fetch(req: &HttpRequest) -> Result<(), HttpResponse> {
         .get("sec-fetch-dest")
         .and_then(|v| v.to_str().ok());
     if site.is_none() || mode.is_none() || dest.is_none() {
-        return Err(HttpResponse::BadRequest()
-            .header("Cache-Control", "no-store")
-            .json(&json!({
-                "error": "client too old; Fetch Metadata required for cookie-conversion",
-                "code": "client_too_old",
-                "min_browser_versions": {
-                    "chrome": 76, "firefox": 90, "safari": 16.4, "edge": 79
-                },
-            })));
+        return Err(ErrorEnvelope::new(
+            StatusCode::BAD_REQUEST,
+            "client_too_old",
+            "client too old; Fetch Metadata required for cookie-conversion",
+        )
+        .no_store()
+        .with_extra(json!({
+            "min_browser_versions": {
+                "chrome": 76, "firefox": 90, "safari": 16.4, "edge": 79
+            },
+        }))
+        .into_response());
     }
     let mode = mode.unwrap();
     let dest = dest.unwrap();
     let site = site.unwrap();
     // Top-level navigation: Mode=navigate, Dest=document.
     if !mode.eq_ignore_ascii_case("navigate") || !dest.eq_ignore_ascii_case("document") {
-        return Err(HttpResponse::Forbidden()
-            .header("Cache-Control", "no-store")
-            .json(&json!({"error": "CSRF: not a top-level navigation", "code": "csrf"})));
+        return Err(ErrorEnvelope::new(
+            StatusCode::FORBIDDEN,
+            "csrf",
+            "CSRF: not a top-level navigation",
+        )
+        .no_store()
+        .into_response());
     }
     // Site values that indicate an OK navigation. `none` =
     // user-typed-or-bookmark; `same-origin` = link from this same
     // origin; `cross-site` = paste from external (Slack, email, etc.).
     if !matches!(site, "none" | "same-origin" | "cross-site" | "same-site") {
-        return Err(HttpResponse::Forbidden()
-            .header("Cache-Control", "no-store")
-            .json(&json!({"error": "CSRF: unrecognized Sec-Fetch-Site", "code": "csrf"})));
+        return Err(ErrorEnvelope::new(
+            StatusCode::FORBIDDEN,
+            "csrf",
+            "CSRF: unrecognized Sec-Fetch-Site",
+        )
+        .no_store()
+        .into_response());
     }
     Ok(())
 }
 
-/// Render the appropriate response for a token-error. `expired` and
-/// `revoked` carry their own codes; everything else collapses to 401.
+/// Render the appropriate response for a token-error. The §10.0
+/// `error` field carries the wire-stable kind (e.g. `"expired"`,
+/// `"revoked"`, `"scope_forbidden"`); the `message` is the human prose.
 fn token_error_response(e: TokenError) -> HttpResponse {
-    let code = e.wire_code();
+    let code: &'static str = e.wire_code();
     let status = match e {
         TokenError::Expired => StatusCode::UNAUTHORIZED,
         TokenError::Revoked => StatusCode::UNAUTHORIZED,
         TokenError::ScopeForbidden => StatusCode::FORBIDDEN,
         _ => StatusCode::UNAUTHORIZED,
     };
-    HttpResponse::build(status).json(&json!({
-        "error": "share token rejected",
-        "code": code,
-    }))
+    error_response(status, code, "share token rejected")
 }
 
 /// Compute the `__Host-zsbx_share_<sbx>` cookie suffix. The slug is
@@ -811,30 +821,30 @@ fn forward_blocking(
 }
 
 // ─── uniform error responses (no oracle by sandbox existence) ──────
+//
+// All four helpers emit the §10.0-compliant `{"error":<code>,
+// "message":<human prose>}` shape via `error_response`. The pre-A4
+// shape (`{"error":<prose>,"code":<code>}` and the duplicate-code
+// `{"error":<code>,"code":<code>}` in `err_with_code`) is gone.
 
 fn uniform_401() -> HttpResponse {
-    HttpResponse::Unauthorized().json(&json!({
-        "error": "unauthorized",
-        "code": "auth_required",
-    }))
+    error_response(StatusCode::UNAUTHORIZED, "unauthorized", "authentication required")
 }
 
 fn uniform_404() -> HttpResponse {
-    HttpResponse::NotFound().json(&json!({
-        "error": "not found",
-        "code": "not_found",
-    }))
+    error_response(StatusCode::NOT_FOUND, "not_found", "not found")
 }
 
 fn uniform_413() -> HttpResponse {
-    HttpResponse::PayloadTooLarge().json(&json!({
-        "error": "payload too large",
-        "code": "payload_too_large",
-    }))
+    error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "payload too large")
 }
 
-fn err_with_code(status: StatusCode, code: &str) -> HttpResponse {
-    HttpResponse::build(status).json(&json!({"error": code, "code": code}))
+/// Emit a §10.0 envelope with `error == code` and a generic human
+/// `message` derived from the code (snake_case → spaced). Used for
+/// bad-gateway / agent-unreachable paths where the machine-readable
+/// kind IS the entire information.
+fn err_with_code(status: StatusCode, code: &'static str) -> HttpResponse {
+    error_response(status, code, code.replace('_', " "))
 }
 
 #[cfg(test)]
@@ -902,5 +912,73 @@ mod tests {
         let a = mint_nonce();
         let b = mint_nonce();
         assert_ne!(a, b);
+    }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ─────────────────
+    //
+    // Coverage for preview.rs error sites. Pre-A4 these emitted
+    // `{"error":<prose>,"code":<code>}` or `{"error":<code>,
+    // "code":<code>}` (duplicate, no message). Now they funnel
+    // through `error_response` / `ErrorEnvelope` and the envelope
+    // carries `error` (code) + `message` (human prose) per §10.0.
+
+    use crate::error_envelope::test_helpers::body_json;
+    use crate::preview_share::TokenError;
+
+    #[compio::test]
+    async fn a4_uniform_401_envelope() {
+        let resp = uniform_401();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+        // §10.0 has no `code` field — `error` IS the code.
+        assert!(body.get("code").is_none(), "duplicate `code` field removed");
+    }
+
+    #[compio::test]
+    async fn a4_uniform_404_envelope() {
+        let resp = uniform_404();
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert!(body["message"].is_string());
+        assert!(body.get("code").is_none());
+    }
+
+    #[compio::test]
+    async fn a4_uniform_413_envelope() {
+        let resp = uniform_413();
+        assert_eq!(resp.status().as_u16(), 413);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "payload_too_large");
+        assert!(body["message"].is_string());
+    }
+
+    #[compio::test]
+    async fn a4_err_with_code_envelope() {
+        let resp = err_with_code(StatusCode::BAD_GATEWAY, "agent_unreachable");
+        assert_eq!(resp.status().as_u16(), 502);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "agent_unreachable");
+        assert!(body["message"].is_string());
+        // Pre-A4 emitted {"error":<code>,"code":<code>} — duplicate
+        // `code` field MUST be gone.
+        assert!(body.get("code").is_none(), "duplicate `code` field removed");
+    }
+
+    #[compio::test]
+    async fn a4_token_error_response_envelope() {
+        let resp = token_error_response(TokenError::Expired);
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "expired");
+        assert!(body["message"].is_string());
+
+        let resp = token_error_response(TokenError::ScopeForbidden);
+        assert_eq!(resp.status().as_u16(), 403);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "scope_forbidden");
+        assert!(body["message"].is_string());
     }
 }

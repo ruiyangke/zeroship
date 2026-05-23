@@ -1388,6 +1388,12 @@ async fn every_sandbox_status_value_passes_pg_check() {
         SandboxStatus::Recreating,
         SandboxStatus::Orphan,
         SandboxStatus::Unreachable,
+        SandboxStatus::Snapshotting,
+        SandboxStatus::Snapshotted,
+        SandboxStatus::SnapshottingAborted,
+        SandboxStatus::SnapshottedSuspect,
+        SandboxStatus::Restoring,
+        SandboxStatus::RestoringCold,
     ];
     // Compile-time guard: this match must be exhaustive. If a new
     // variant lands, the test author must extend `all`.
@@ -1401,6 +1407,12 @@ async fn every_sandbox_status_value_passes_pg_check() {
             SandboxStatus::Recreating => {}
             SandboxStatus::Orphan => {}
             SandboxStatus::Unreachable => {}
+            SandboxStatus::Snapshotting => {}
+            SandboxStatus::Snapshotted => {}
+            SandboxStatus::SnapshottingAborted => {}
+            SandboxStatus::SnapshottedSuspect => {}
+            SandboxStatus::Restoring => {}
+            SandboxStatus::RestoringCold => {}
         }
     }
 
@@ -1413,6 +1425,35 @@ async fn every_sandbox_status_value_passes_pg_check() {
         db.insert_sandbox(&info, host_id, &"0".repeat(32), Some("http://x"), None)
             .await
             .unwrap();
+
+        // The 0007 CHECK `sandboxes_snapshot_artifact_consistency`
+        // requires Snapshotted/SnapshottedSuspect rows to carry a
+        // populated artifact descriptor (path + sha + ch_version).
+        // For these two states we pre-populate via direct SQL — PR 3
+        // will add the proper Rust API for snapshot writes.
+        if status.is_snapshotted() {
+            let pool = db.pool_app().await.unwrap();
+            let client = pool.get().await.unwrap();
+            let sid_typed = format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&sid)
+            );
+            let path: &str = "gs://test/snap";
+            let sha: Vec<u8> = vec![0u8; 32];
+            let ver: &str = "v51.1";
+            client
+                .execute(
+                    "UPDATE sandbox.sandboxes \
+                        SET snapshot_artifact_path = $1::TEXT, \
+                            snapshot_sha256 = $2::BYTEA, \
+                            snapshot_ch_version = $3::TEXT \
+                      WHERE sandbox_id = $4::TEXT",
+                    &[&path, &sha, &ver, &sid_typed],
+                )
+                .await
+                .unwrap();
+        }
+
         // First UPDATE (generation 0 → 1).
         let _ = db
             .update_sandbox_status(sid, status, 0, None)
@@ -1931,4 +1972,1418 @@ async fn role_sandbox_app_can_update_sandboxes() {
         .await
         .expect("sandbox_app must be able to UPDATE sandboxes");
     assert_eq!(n, 1, "UPDATE should affect 1 row");
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3h — snapshot writers (update_snapshot_metadata,
+// clear_snapshot_metadata, update_lessee, transient_state_lease_expired,
+// idle_eligible_sandboxes).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 9.1 (schema), § 6.1 (transient lease), § 7 (idle sweep).
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::snapshot_store::SnapshotMetadata;
+
+fn dummy_meta(path: &str) -> SnapshotMetadata {
+    let mut sha = [0u8; 32];
+    sha[0] = 0xab;
+    sha[31] = 0xcd;
+    SnapshotMetadata {
+        artifact_path: path.to_string(),
+        sha256: sha,
+        ch_version: "v51.1".into(),
+        bytes: 1024,
+    }
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h snapshot metadata writer"]
+async fn update_snapshot_metadata_records_artifact_and_cas_to_snapshotted() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    // Move to snapshotting first (gen 0 → 1).
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .expect("CAS to snapshotting");
+    assert_eq!(g1, 1);
+
+    let meta = dummy_meta("/var/zeroship/ch/snapshots/sbx_test/");
+    let backing = r#"{"keys":"unknown","userhome":"unknown","rootfs_overlay":"unknown"}"#;
+    let g2 = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, Some("v1"))
+        .await
+        .expect("update_snapshot_metadata");
+    assert_eq!(g2, g1 + 1);
+
+    // Verify the row reached `snapshotted` with the artifact descriptor
+    // populated.
+    let row = db
+        .get_sandbox_row(sid)
+        .await
+        .expect("read row")
+        .expect("row exists");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+    assert_eq!(row.generation, g2);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h CAS-loss path"]
+async fn update_snapshot_metadata_returns_cas_lost_on_stale_generation() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let meta = dummy_meta("/p");
+    let backing = r#"{"keys":"x","userhome":"x","rootfs_overlay":"x"}"#;
+    // First call uses correct generation; second call uses stale one.
+    db.update_snapshot_metadata(sid, g1, &meta, 7, backing, None)
+        .await
+        .expect("first metadata write");
+    let err = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, None)
+        .await
+        .expect_err("second write must miss CAS");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::CasLost { .. }),
+        "expected CasLost, got {err:?}",
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h clear_snapshot_metadata wipes snapshot_*"]
+async fn clear_snapshot_metadata_nulls_all_snapshot_columns() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Drive into snapshotted, then back to running.
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let meta = dummy_meta("/p");
+    let backing = r#"{"keys":"x","userhome":"x","rootfs_overlay":"x"}"#;
+    let g2 = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, None)
+        .await
+        .unwrap();
+
+    // Move from snapshotted → restoring → running so the CHECK
+    // constraint doesn't reject the column-clear (status='running'
+    // permits NULL snapshot_*).
+    let g3 = db
+        .update_sandbox_status(sid, SandboxStatus::Restoring, g2, None)
+        .await
+        .unwrap();
+    let g4 = db
+        .update_sandbox_status(sid, SandboxStatus::Running, g3, None)
+        .await
+        .unwrap();
+    let g5 = db
+        .clear_snapshot_metadata(sid, g4)
+        .await
+        .expect("clear");
+    assert_eq!(g5, g4 + 1);
+
+    // Verify columns are NULL via direct query.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT snapshot_artifact_path, snapshot_sha256, snapshot_ch_version \
+               FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    let path: Option<String> = row.try_get(0).ok();
+    let sha: Option<Vec<u8>> = row.try_get(1).ok();
+    let ver: Option<String> = row.try_get(2).ok();
+    assert!(path.is_none(), "artifact_path must be NULL after clear");
+    assert!(sha.is_none(), "sha256 must be NULL after clear");
+    assert!(ver.is_none(), "ch_version must be NULL after clear");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h lease bump"]
+async fn update_lessee_bumps_only_in_transient_states() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // running → bump must affect 0 rows (status guard).
+    let n0 = db.update_lessee(sid).await.expect("running noop");
+    assert_eq!(n0, 0, "update_lessee must skip non-transient rows");
+
+    // snapshotting → bump must affect 1 row.
+    let _g = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let n1 = db.update_lessee(sid).await.expect("transient bump");
+    assert_eq!(n1, 1, "update_lessee must bump transient rows");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h transient sweep query"]
+async fn transient_state_lease_expired_filters_by_threshold() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+    // Move to snapshotting + bump lessee (now()).
+    let _g = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    db.update_lessee(sid).await.unwrap();
+
+    // Threshold high → 0 rows (we just bumped).
+    let none = db
+        .transient_state_lease_expired_sandboxes(60)
+        .await
+        .expect("query");
+    assert!(
+        !none.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "fresh-bumped row must not appear in expired set"
+    );
+
+    // Backdate lessee_updated_at to ~5 min ago + re-query at 120s
+    // threshold; must find our row.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes SET lessee_updated_at = now() - interval '5 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let stale = db
+        .transient_state_lease_expired_sandboxes(120)
+        .await
+        .expect("query");
+    assert!(
+        stale.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "stale-lease row must surface"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// C1 regression: update_sandbox_status must wire `lessee_updated_at`
+// per §6.1. A target transient state stamps now(); a target
+// non-transient state clears to NULL. Pre-fix, neither happened — the
+// sweep filter `WHERE lessee_updated_at IS NOT NULL` therefore
+// excluded every real transient row, and abandoned snapshotting /
+// restoring rows wedged forever.
+// ────────────────────────────────────────────────────────────────────
+
+#[compio::test]
+#[ignore = "needs Postgres; C1 regression"]
+async fn state_transition_to_snapshotting_sets_lessee() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Pre-condition: a fresh `running` row carries no lessee timestamp.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let pre: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(pre.is_none(), "fresh running row must have NULL lessee_updated_at");
+
+    // Cross the running → snapshotting transient boundary.
+    let _g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .expect("CAS to snapshotting");
+
+    // lessee_updated_at must be non-NULL now.
+    let post: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        post.is_some(),
+        "after CAS to snapshotting, lessee_updated_at must be set so the §6.1 sweep can find it"
+    );
+
+    // And the sweep query at a 0s threshold must surface it. This is
+    // the load-bearing assertion: pre-fix, the row was invisible.
+    let stale = db
+        .transient_state_lease_expired_sandboxes(0)
+        .await
+        .expect("sweep query");
+    assert!(
+        stale.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "transient row with set lessee must be findable by the lease-takeover sweep"
+    );
+
+    // Restoring (the other transient kind) must do the same. Drive
+    // snapshotting → snapshotted → restoring through the metadata
+    // writer first (CHECK constraint requires artifact-path).
+    let g_snap = db
+        .update_snapshot_metadata(
+            sid,
+            // generation post-CAS-to-snapshotting is 1.
+            1,
+            &dummy_meta("/p"),
+            1,
+            r#"{"keys":"x","userhome":"x","rootfs_overlay":"x"}"#,
+            None,
+        )
+        .await
+        .expect("snapshotted");
+    // update_snapshot_metadata clears lessee_updated_at (it already
+    // did so pre-fix); verify and then re-enter transient.
+    let after_snap: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(after_snap.is_none(), "snapshotted row must have NULL lessee");
+
+    let _g_rst = db
+        .update_sandbox_status(sid, SandboxStatus::Restoring, g_snap, None)
+        .await
+        .expect("CAS to restoring");
+    let after_rst: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        after_rst.is_some(),
+        "after CAS to restoring, lessee_updated_at must be set (sweep covers all three transient states)"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; C1 regression"]
+async fn state_transition_to_running_clears_lessee() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Drive into snapshotting → row carries a non-NULL lessee.
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let mid: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(mid.is_some(), "snapshotting row must carry lessee_updated_at");
+
+    // Roll back to running (snapshot_handler error path). lessee MUST
+    // clear — otherwise a subsequent failed-then-completed cycle could
+    // leak a stale timestamp into a future transient run.
+    let _g2 = db
+        .update_sandbox_status(sid, SandboxStatus::Running, g1, None)
+        .await
+        .expect("CAS to running");
+    let post: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        post.is_none(),
+        "after CAS back to running, lessee_updated_at must be NULL (§6.1 invariant)"
+    );
+
+    // And the sweep must not see this row anymore.
+    let stale = db
+        .transient_state_lease_expired_sandboxes(0)
+        .await
+        .expect("sweep query");
+    assert!(
+        !stale.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "running row must not appear in the transient-lease sweep"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3h idle sweep query"]
+async fn idle_eligible_sandboxes_respects_opt_in_and_threshold() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    // Default `idle_snapshot_opted_in = FALSE` → never returned.
+    let none = db
+        .idle_eligible_sandboxes(0, 100)
+        .await
+        .expect("query opted-out");
+    assert!(
+        !none.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "opted-out rows must not appear",
+    );
+
+    // Opt the row in + backdate last_used_at; query at threshold > 0
+    // expects a hit.
+    let url = test_url();
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET idle_snapshot_opted_in = TRUE, \
+                    last_used_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    let some = db
+        .idle_eligible_sandboxes(60, 100)
+        .await
+        .expect("query opted-in");
+    assert!(
+        some.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "opted-in stale row must surface"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3b — SnapshotHandler integration tests (mock ch-remote +
+// LocalDiskSnapshotStore + StubSourceVmOps; real Database).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 3, § 8.2 (rollback on mid-flight failure).
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::snapshot_handler::{
+    snapshot_sandbox, ChRemoteClient, MockChRemoteClient, SnapshotHandlerError, StubSourceVmOps,
+};
+use zeroship_sandbox::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
+
+fn fresh_temp(suffix: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "zsbx-snap-handler-{}-{}-{}",
+        std::process::id(),
+        Uuid::now_v7().simple(),
+        suffix,
+    ));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b snapshot handler happy path"]
+async fn snapshot_handler_happy_path_records_artifact_and_tears_down_source() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage");
+    let store_root = fresh_temp("store");
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
+    let api_sock = fresh_temp("api").join("ch.sock");
+    let vm_ops = StubSourceVmOps::new(api_sock, 7);
+
+    let outcome = snapshot_sandbox(
+        &db,
+        std::sync::Arc::clone(&store),
+        std::sync::Arc::clone(&ch),
+        &vm_ops,
+        sid,
+        stage_dir.clone(),
+        true,
+    )
+    .await
+    .expect("happy-path snapshot");
+    assert_eq!(outcome.vm_index, 7);
+    assert_eq!(outcome.metadata.ch_version, "v51.1");
+
+    // pg row must be in `snapshotted` with metadata populated.
+    let row = db
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+
+    // Source teardown was invoked.
+    assert!(
+        vm_ops
+            .teardown_called
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "teardown_source must have been invoked on success"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b state-mismatch refusal"]
+async fn snapshot_handler_refuses_non_running_state() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+    // Move out of running.
+    db.update_sandbox_status(sid, SandboxStatus::Stopping, 0, None)
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage2");
+    let store_root = fresh_temp("store2");
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
+    let vm_ops = StubSourceVmOps::new(fresh_temp("a").join("s"), 1);
+
+    let err = snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir, true)
+        .await
+        .expect_err("must refuse");
+    assert!(
+        matches!(err, SnapshotHandlerError::StateMismatch { .. }),
+        "{err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b rollback on ch-remote failure"]
+async fn snapshot_handler_rolls_back_on_ch_remote_failure() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage3");
+    let store_root = fresh_temp("store3");
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch_inner = {
+        let mut c = MockChRemoteClient::default();
+        c.fail_snapshot = true; // pause succeeds, snapshot fails
+        c
+    };
+    let ch: std::sync::Arc<dyn ChRemoteClient> = std::sync::Arc::new(ch_inner);
+    let vm_ops = StubSourceVmOps::new(fresh_temp("b").join("s"), 1);
+
+    let err = snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir, true)
+        .await
+        .expect_err("must fail");
+    assert!(
+        matches!(err, SnapshotHandlerError::ChRemote(_)),
+        "{err:?}"
+    );
+
+    // Row must have rolled back to `running` with generation bumped
+    // twice (running→snapshotting→running).
+    let row = db
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.status, SandboxStatus::Running);
+    assert!(
+        row.generation >= 2,
+        "rollback should have bumped gen at least twice; got {}",
+        row.generation
+    );
+
+    // Teardown must NOT have run (we rolled back the snapshot).
+    assert!(
+        !vm_ops
+            .teardown_called
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "teardown_source must not run on rollback"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3b feature flag off"]
+async fn snapshot_handler_returns_feature_disabled_when_flag_off() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(1))
+        .await
+        .unwrap();
+
+    let stage_dir = fresh_temp("stage4");
+    let store_root = fresh_temp("store4");
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
+    let vm_ops = StubSourceVmOps::new(fresh_temp("c").join("s"), 1);
+
+    let err =
+        snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir, /* enabled = */ false)
+            .await
+            .expect_err("must refuse with flag off");
+    assert!(
+        matches!(err, SnapshotHandlerError::FeatureDisabled),
+        "{err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&store_root);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3e — RestoreHandler integration tests (LocalDiskSnapshotStore +
+// StubRestoreBackend; real Database).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 5 (identity rewrite), § 8 (failure modes).
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::restore_handler::{
+    restore_sandbox, RestoreBackend, RestoreHandlerError, StubRestoreBackend,
+};
+
+/// Drive a row to `Snapshotted` with a real artifact on disk so the
+/// restore handler can find + verify it. Returns
+/// (artifact-store, sha256, vm_index, generation-after-snapshot).
+async fn seed_snapshotted_row(
+    db: &Database,
+    sid: Uuid,
+    info: &SandboxInfo,
+    store_root: &std::path::Path,
+) -> ([u8; 32], i16, i64) {
+    let store = LocalDiskSnapshotStore::new(store_root);
+    let host_id = db.host_id();
+    db.insert_sandbox(info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Drive to running → snapshotting → snapshotted.
+    let g0 = 0i64;
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, g0, None)
+        .await
+        .unwrap();
+
+    // Stage a fake artifact.
+    let stage = std::env::temp_dir().join(format!(
+        "zsbx-restore-test-stage-{}-{}",
+        std::process::id(),
+        Uuid::now_v7().simple(),
+    ));
+    std::fs::create_dir_all(&stage).unwrap();
+    // Minimal config.json carrying the v1 rewrite shape.
+    std::fs::write(
+        stage.join("config.json"),
+        r#"{
+            "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
+            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+        }"#,
+    )
+    .unwrap();
+    std::fs::write(stage.join("state.json"), b"{\"st\":1}").unwrap();
+    std::fs::write(stage.join("memory-ranges"), b"fake-mem").unwrap();
+    let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
+    let meta = store.put(&typed, &stage, "v51.1").unwrap();
+    let _ = std::fs::remove_dir_all(&stage);
+
+    let backing = r#"{"keys":"u","userhome":"u","rootfs_overlay":"u"}"#;
+    let g2 = db
+        .update_snapshot_metadata(sid, g1, &meta, 7, backing, Some("v1"))
+        .await
+        .unwrap();
+    (meta.sha256, 7, g2)
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e restore happy path"]
+async fn restore_handler_happy_path_drives_snapshotted_to_running() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore");
+    let (_sha, _vm_index, _g2) = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let backend_root = fresh_temp("rback");
+    // R8-A3-5: `restore_sandbox` takes `Arc<dyn RestoreBackend>` so
+    // the spawn_blocking wraps on submit_restore_job + wait_for_livez
+    // own a clonable handle. Keep a concrete-typed Arc for post-call
+    // assertions; hand a coerced dyn-Arc to `restore_sandbox`.
+    let backend = std::sync::Arc::new(StubRestoreBackend::new(backend_root.clone()));
+    let backend_dyn: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
+        std::sync::Arc::clone(&backend) as _;
+
+    let outcome = restore_sandbox(
+        &db,
+        std::sync::Arc::clone(&store),
+        backend_dyn,
+        None,
+        sid,
+        true,
+    )
+    .await
+    .expect("happy path restore");
+    assert_eq!(outcome.vm_index, 7);
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Running);
+
+    // The stub backend should have seen the full sequence.
+    assert!(backend.submit_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(backend.livez_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!backend.teardown_called.load(std::sync::atomic::Ordering::SeqCst));
+
+    // config.json got rewritten in-place inside backend's restore_alloc_dir.
+    let cfg_path = backend.restore_alloc_dir(sid).join("config.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e checksum mismatch → snapshotted_suspect"]
+async fn restore_handler_checksum_mismatch_marks_suspect() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore_corrupt");
+    let (_sha, _vm_index, g2) = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    // Corrupt the on-disk artifact so the SHA-256 verify fails.
+    let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
+    let mr = store_root.join(&typed).join("memory-ranges");
+    std::fs::write(&mr, b"tampered").unwrap();
+    let _ = g2;
+
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let backend_root = fresh_temp("rback_corrupt");
+    let backend: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
+        std::sync::Arc::new(StubRestoreBackend::new(backend_root.clone()));
+
+    let err = restore_sandbox(&db, std::sync::Arc::clone(&store), backend, None, sid, true)
+        .await
+        .expect_err("must fail with corrupt artifact");
+    assert!(matches!(err, RestoreHandlerError::SnapshotCorrupt), "{err:?}");
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::SnapshottedSuspect);
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e cluster-exhausted vm_index → 503"]
+async fn restore_handler_vm_index_unavailable_when_cluster_exhausted() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore_busy");
+    let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let backend_root = fresh_temp("rback_busy");
+    let mut backend_inner = StubRestoreBackend::new(backend_root.clone());
+    backend_inner.fail_reserve = true;
+    let backend: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
+        std::sync::Arc::new(backend_inner);
+
+    let err = restore_sandbox(&db, std::sync::Arc::clone(&store), backend, None, sid, true)
+        .await
+        .expect_err("must fail with cluster-exhausted");
+    assert!(
+        matches!(err, RestoreHandlerError::VmIndexUnavailable { .. }),
+        "{err:?}"
+    );
+
+    // Row should have rolled back to `snapshotted` (artifact preserved).
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PR 3g — sweep tasks (transient-state takeover + idle eviction).
+//
+// Source-of-truth: docs/proposals/sandbox-snapshot-restore.md
+// § 6.1 + § 7.
+// ════════════════════════════════════════════════════════════════════
+
+use zeroship_sandbox::backend::Backend;
+use zeroship_sandbox::config::{ApiToken, SandboxConfig};
+use zeroship_sandbox::sweep::{
+    run_idle_eviction_once, run_transient_takeover_once, RecordingIdleSnapshotter,
+};
+
+fn sweep_test_cfg(snapshot_enabled: bool) -> SandboxConfig {
+    // A7 (deferred): `token` is `pub(crate)`; out-of-crate construction
+    // goes through `SandboxConfig::new_fixture` + the `with_token`
+    // builder. `snapshot_enabled` is still `pub`, so we mutate it via
+    // direct field assignment on the returned value.
+    let mut cfg = SandboxConfig::new_fixture().with_token(ApiToken::new("ignored"));
+    cfg.snapshot_enabled = snapshot_enabled;
+    cfg
+}
+
+fn build_sweep_state(
+    db: Database,
+    snapshot_enabled: bool,
+) -> std::sync::Arc<zeroship_sandbox::AppState> {
+    let cfg = sweep_test_cfg(snapshot_enabled);
+    let backend = Backend::from_config(&cfg).expect("backend");
+    // A5: `admin_token` is `pub(crate)`; out-of-crate construction
+    // goes through `AppState::new_fixture` (admin_token = None).
+    // A6b: `database` is `pub(crate)`; set via `with_database`
+    // builder instead of struct-field assignment.
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend)
+        .with_database(std::sync::Arc::new(db));
+    std::sync::Arc::new(state)
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3g transient takeover sweep"]
+async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    // Drive into snapshotting and stamp a stale lessee_updated_at by
+    // direct UPDATE (bypassing update_lessee which stamps now()).
+    let g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let _ = g1;
+    // Backdate `lessee_updated_at` 600 seconds — well past the 120s
+    // threshold the sweep uses by default.
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let n = client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/true);
+    let (seen, recovered) = run_transient_takeover_once(&state, 120).await;
+    assert!(seen >= 1, "sweep should have seen at least our stale row; seen={seen}");
+    assert!(recovered >= 1, "sweep should have recovered at least our row; recovered={recovered}");
+
+    // Row must be in `snapshotting_aborted` per § 9.2.
+    // A6b: `database` field is `pub(crate)`; use the `database()`
+    // accessor instead of poking the field directly.
+    let row = state
+        .database()
+        .unwrap()
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.status, SandboxStatus::SnapshottingAborted);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3g idle-eviction sweep selects opted-in stale rows"]
+async fn sweep_idle_eviction_selects_opted_in_stale_rows() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Mark opted-in + stale.
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET idle_snapshot_opted_in = TRUE, \
+                    last_used_at = now() - interval '30 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/true);
+    let snapshotter = RecordingIdleSnapshotter::default();
+    let attempted = run_idle_eviction_once(&state, &snapshotter, 60, 2).await;
+    assert!(
+        attempted.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "sweep must select our opted-in stale row; got {attempted:?}"
+    );
+    let seen = snapshotter.seen.lock().unwrap();
+    assert!(
+        seen.contains(&sid),
+        "snapshotter must have been called for our row; seen={seen:?}"
+    );
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3g idle-eviction sweep no-op when feature disabled"]
+async fn sweep_idle_eviction_skips_when_feature_disabled() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, _sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET idle_snapshot_opted_in = TRUE, \
+                    last_used_at = now() - interval '30 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/false);
+    let snapshotter = RecordingIdleSnapshotter::default();
+    let attempted = run_idle_eviction_once(&state, &snapshotter, 60, 2).await;
+    assert!(
+        attempted.is_empty(),
+        "sweep must self-disable when snapshot_enabled=false; attempted={}",
+        attempted.len()
+    );
+    let seen = snapshotter.seen.lock().unwrap();
+    assert!(seen.is_empty(), "snapshotter must not have been called; seen={seen:?}");
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; PR 3e feature flag off"]
+async fn restore_handler_returns_feature_disabled_when_flag_off() {
+    let db = migrated_db().await;
+    let (info, sid) = fresh_info("alice");
+    let store_root = fresh_temp("rstore_flag");
+    let _ = seed_snapshotted_row(&db, sid, &info, &store_root).await;
+
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let backend_root = fresh_temp("rback_flag");
+    let backend: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
+        std::sync::Arc::new(StubRestoreBackend::new(backend_root.clone()));
+
+    let err = restore_sandbox(&db, std::sync::Arc::clone(&store), backend, None, sid, false)
+        .await
+        .expect_err("must refuse with flag off");
+    assert!(matches!(err, RestoreHandlerError::FeatureDisabled), "{err:?}");
+
+    // Row stays at snapshotted (no CAS attempted).
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Phase B — full snapshot → wake cycle. Drives the same handler chain
+// the admin endpoint uses (snapshot_handler::snapshot_sandbox +
+// restore_handler::restore_sandbox) against a real Database with mock
+// ch-remote and stub restore backend. Asserts the row state transitions
+// running → snapshotting → snapshotted → restoring → running and that
+// the artifact survives the round trip.
+// ════════════════════════════════════════════════════════════════════
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase B snapshot→wake round trip"]
+async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+
+    // Phase 1: snapshot. Drives running → snapshotting → snapshotted.
+    let stage_dir = fresh_temp("phaseb-stage");
+    let store_root = fresh_temp("phaseb-store");
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
+    // Use a path under stage so the artifact can be restored: the
+    // mock ch-remote writes the three artifact files inside the temp
+    // dir, and `LocalDiskSnapshotStore::put` migrates them to the
+    // canonical store path. We hand the api_socket as a placeholder
+    // file path — the mock ignores it.
+    let api_sock = fresh_temp("phaseb-api").join("ch.sock");
+    let vm_ops = StubSourceVmOps::new(api_sock, 7);
+
+    // Mirror the admin handler's call shape but with the StubSourceVmOps
+    // (the production wiring uses ResolvedSourceVmOps which we exercise
+    // via the lookup_source_vm_ops unit test below).
+    let snapshot_outcome =
+        snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir.clone(), true)
+            .await
+            .expect("phase 1 snapshot");
+    assert_eq!(snapshot_outcome.vm_index, 7);
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotted);
+    assert!(
+        vm_ops
+            .teardown_called
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "snapshot handler must have invoked teardown_source"
+    );
+
+    // Phase 2: wake. Drives snapshotted → restoring → running.
+    let backend_root = fresh_temp("phaseb-rback");
+    // R8-A3-5: keep a concrete-typed Arc for post-call observation
+    // (the counter fields live on the stub) and hand a coerced
+    // dyn-Arc to `restore_sandbox`.
+    let restore_backend = std::sync::Arc::new(StubRestoreBackend::new(backend_root.clone()));
+    let restore_backend_dyn: std::sync::Arc<
+        dyn zeroship_sandbox::restore_handler::RestoreBackend,
+    > = std::sync::Arc::clone(&restore_backend) as _;
+    // Stage a `config.json` so the rewrite step finds the structural
+    // shape it expects. The mock ch-remote in phase 1 writes a
+    // placeholder; we overwrite it with a v1-shaped JSON before the
+    // restore so the rewrite assertion succeeds. Real CH artifacts
+    // carry this shape natively.
+    let typed = format!("sbx_{}", zeroship_core::typed_id::uuid_to_base62(&sid));
+    let cfg_path = store_root.join(&typed).join("config.json");
+    std::fs::write(
+        &cfg_path,
+        r#"{
+            "net":[{"tap":"zsbx-nm-99","mac":"12:34:56:78:9b:63"}],
+            "fs":[{"tag":"keys","socket":"/opt/nomad/data/alloc/oldalloc/zsbx-keys/vfs-keys.sock"}],
+            "serial":{"mode":"File","file":"/opt/nomad/data/alloc/oldalloc/serial.log"}
+        }"#,
+    )
+    .unwrap();
+    // Re-stamp pg with the new sha256 so restore's verify passes.
+    let store2 = LocalDiskSnapshotStore::new(&store_root);
+    let resnap_stage = fresh_temp("phaseb-resnap");
+    // Read all three files back from the canonical path and re-stage
+    // so put() recomputes the sha256 with the rewritten config.json.
+    for &name in zeroship_sandbox::snapshot_store::ARTIFACT_FILES {
+        let src = store_root.join(&typed).join(name);
+        let dst = resnap_stage.join(name);
+        std::fs::copy(&src, &dst).unwrap();
+    }
+    let new_meta = store2.put(&typed, &resnap_stage, "v51.1").unwrap();
+    let _ = std::fs::remove_dir_all(&resnap_stage);
+    // Stamp the pg row's snapshot_sha256 with the post-rewrite digest
+    // so the restore's checksum verify succeeds against the in-place
+    // config.json we just wrote. (In production the handler does this
+    // via update_snapshot_metadata; here we touch the pg directly.)
+    let url = test_url();
+    let mut pcfg = PoolConfig::default();
+    pcfg.max_size = 2;
+    let pool = Pool::connect_with_config(&url, pcfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes SET snapshot_sha256 = $1::BYTEA \
+              WHERE sandbox_id = $2::TEXT",
+            &[&(&new_meta.sha256[..]), &info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    let store2_arc: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(store2);
+    let restore_outcome = restore_sandbox(&db, store2_arc, restore_backend_dyn, None, sid, true)
+        .await
+        .expect("phase 2 wake");
+    assert_eq!(restore_outcome.vm_index, 7);
+    assert!(restore_backend.submit_called.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(restore_backend.livez_called.load(std::sync::atomic::Ordering::SeqCst));
+
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Running);
+
+    // config.json was rewritten in-place with the source vm_index's
+    // tap (vm_index=7 → zsbx-nm-7).
+    let restored_cfg = restore_backend.restore_alloc_dir(sid).join("config.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&restored_cfg).unwrap()).unwrap();
+    assert_eq!(v["net"][0]["tap"], "zsbx-nm-7");
+
+    let _ = std::fs::remove_dir_all(&store_root);
+    let _ = std::fs::remove_dir_all(&backend_root);
+}
+
+#[compio::test]
+#[ignore = "needs Postgres; Phase B lookup_source_vm_ops queries Nomad"]
+async fn phase_b_lookup_source_vm_ops_resolves_handle_against_nomad() {
+    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+    use std::time::Duration;
+
+    // Spin up a fake Nomad on 127.0.0.1 that returns one running
+    // alloc with a known ID. Same shape as the existing
+    // `spawn_fake_nomad` in restore_handler tests but inlined so the
+    // pg-gated tests can run without leaning on `cfg(test)` from the
+    // sibling module.
+    let alloc_id = "phaseb-alloc-1234567890ab";
+    let body = format!(r#"[{{"ID":"{alloc_id}","ClientStatus":"running"}}]"#);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let nomad_addr = format!("http://{}", listener.local_addr().unwrap());
+    let body_clone = body.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut s = match stream {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body_clone.len(),
+                body_clone
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+
+    // Stage the alloc dir on local fs so `lookup_source_vm_ops`'s
+    // `metadata().is_socket()` check passes. We bind a Unix socket
+    // at the expected path.
+    //
+    // Path layout (from wrapper): NOMAD_ALLOC_ROOT/<alloc>/ch/local/ch.sock.
+    // The const inside nomad_ch.rs is `/opt/nomad/data/alloc`, which
+    // we can't write to in CI; we override by bind-mounting a temp
+    // root via `LD_PRELOAD` — too heavy for a unit test. Instead this
+    // test asserts the lookup ERR path: alloc dir doesn't exist
+    // locally, so `metadata()` errors and `lookup_source_vm_ops`
+    // returns Err.
+    let mut cfg = sweep_test_cfg(true);
+    cfg.nomad_ch.nomad_addr = nomad_addr;
+    let backend = Backend::from_config(&cfg).expect("backend");
+    let sid = Uuid::now_v7();
+    let user_id = typed_id("usr");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    if let Backend::NomadCh(b) = &backend {
+        b._test_inject_sandbox(
+            sid,
+            &user_id,
+            signing,
+            "http://10.99.107.2:7777".into(),
+            7,
+        );
+    } else {
+        panic!("expected nomad-ch backend");
+    }
+
+    // Resolve: Nomad returns an alloc, but the local /opt/nomad/data/alloc
+    // path doesn't exist, so the socket-existence check should fail
+    // with a clear error. (Production hosts have the path; here we
+    // verify the err shape so the admin handler maps it to 503.)
+    let err = backend
+        .lookup_source_vm_ops(sid)
+        .await
+        .expect_err("alloc dir not on local fs in test");
+    assert!(
+        err.contains("api_socket") || err.contains("not accessible"),
+        "expected an api_socket-related error; got {err}"
+    );
+
+    // Belt-and-suspenders: verify a sandbox NOT in the in-memory map
+    // surfaces the "not in nomad-ch state map" path, NOT the Nomad
+    // HTTP path (we never even reach Nomad).
+    let unknown_sid = Uuid::now_v7();
+    let err2 = backend
+        .lookup_source_vm_ops(unknown_sid)
+        .await
+        .expect_err("unknown sandbox must not be resolved");
+    assert!(
+        err2.contains("not in nomad-ch state map"),
+        "expected 'not in state map'; got {err2}"
+    );
+
+    // Drop a sealed unix socket at a controlled path so the positive
+    // existence test still gets coverage. We can't redirect
+    // NOMAD_ALLOC_ROOT (it's a const), so this assertion lives in a
+    // smaller scope: just verify that creating a UnixListener at
+    // some path produces a metadata().is_socket() = true. The full
+    // happy path is exercised E2E against a real worker in the
+    // cluster stress run.
+    let sock_dir = fresh_temp("phaseb-sock");
+    let sock_path = sock_dir.join("ch.sock");
+    let _listener = UnixListener::bind(&sock_path).unwrap();
+    let md = std::fs::metadata(&sock_path).unwrap();
+    use std::os::unix::fs::FileTypeExt as _;
+    assert!(
+        md.file_type().is_socket(),
+        "sanity: a freshly-bound UnixListener must show up as is_socket()"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Bug #15 — teardown_source_for_snapshot MUST preserve host_dir.
+//
+// Regression coverage for the 2026-05-23 cluster smoke (see
+// `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-23-r1.md`):
+// the old snapshot-teardown path delegated to `stop()`, whose step 5
+// `remove_dir_all(host_dir)` deleted the per-sandbox `workspace.img`.
+// On wake, the wrapper's `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then
+// tripped. The fix: route the snapshot teardown through
+// `stop_preserving_state`, which skips step 5.
+//
+// This integration test exercises the FULL `Backend` enum surface
+// (not the inner `stop_inner` bool): it constructs a real `Backend`,
+// injects a sandbox + stages a sentinel `workspace.img` on disk,
+// calls `teardown_source_for_snapshot`, asserts the image survives,
+// then calls `stop()` and asserts the image is reaped. This is
+// `#[ignore]`'d to match the file's pg-gated convention even though
+// it doesn't actually touch pg — the cron worker invokes it with the
+// rest of the pg-gated suite (`-- --ignored --test-threads=1`).
+// ════════════════════════════════════════════════════════════════════
+
+#[compio::test]
+#[ignore = "B15 regression coverage; bundled with pg-gated suite (no pg needed)"]
+async fn teardown_source_for_snapshot_preserves_host_dir_then_stop_reaps() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    // 1. Spin up a 404-mock for Nomad. Every request → 404.
+    //    `stop_nomad_job` accepts {200, 404}; `wait_for_job_gone`
+    //    returns Ok on a 404 from `/v1/job/{id}`. So the teardown
+    //    proceeds cleanly through steps 2-4.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let nomad_addr = format!("http://127.0.0.1:{port}");
+    let stop_flag = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_flag_thread = stop_flag.clone();
+    thread::spawn(move || {
+        while !stop_flag_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                    let _ = s.set_write_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf);
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                    let _ = s.write_all(resp.as_bytes());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // 2. Build a cfg with a writable host_state_dir + Nomad pointed at
+    //    the 404-mock + fence disabled.
+    let host_state_dir = fresh_temp("b15-host-state");
+    let mut cfg = sweep_test_cfg(true);
+    cfg.nomad_ch.nomad_addr = nomad_addr;
+    cfg.nomad_ch.host_state_dir = host_state_dir.clone();
+    cfg.nomad_ch.host_fence_timeout_secs = 0; // skip /livez fence
+
+    // 3. Construct the Backend (the full enum, not just the inner
+    //    nomad-ch backend) so the test exercises the snapshot
+    //    teardown's dispatch through `Backend::teardown_source_for_snapshot`.
+    let backend = Backend::from_config(&cfg).expect("backend");
+
+    // 4. Inject a sandbox record. `_test_inject_sandbox` derives
+    //    host_dir as `<host_state_dir>/<sandbox-id>/`; we materialise
+    //    that dir + drop a workspace.img sentinel before tearing down.
+    let sid = Uuid::now_v7();
+    let user_id = typed_id("usr");
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[15u8; 32]);
+    if let Backend::NomadCh(b) = &backend {
+        b._test_inject_sandbox(
+            sid,
+            &user_id,
+            signing.clone(),
+            // Unreachable; /shutdown errors are best-effort (logged
+            // to errs, not fatal for our post-condition assertions).
+            "http://127.0.0.1:1".into(),
+            42,
+        );
+    } else {
+        panic!("expected nomad-ch backend");
+    }
+    let host_dir = host_state_dir.join(sid.to_string());
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let workspace_img = host_dir.join("workspace.img");
+    std::fs::write(&workspace_img, b"PRESERVE-ACROSS-SNAPSHOT").unwrap();
+    let extra = host_dir.join("config.json");
+    std::fs::write(&extra, b"{}").unwrap();
+
+    // 5. Snapshot teardown. The old (pre-#15) code called `stop`
+    //    under the hood and deleted host_dir; the new code calls
+    //    `stop_preserving_state` and leaves the dir alone.
+    let _ = backend.teardown_source_for_snapshot(sid).await;
+
+    assert!(
+        host_dir.exists(),
+        "B15 regression: teardown_source_for_snapshot removed \
+         host_dir; the next wake's wrapper [ ! -f $ZSBX_WORKSPACE_IMG ] \
+         gate will exit 1 (cluster bug #15)"
+    );
+    assert!(
+        workspace_img.exists(),
+        "B15 regression: teardown_source_for_snapshot removed \
+         host_dir/workspace.img; durable per-sandbox storage gone"
+    );
+    let contents = std::fs::read(&workspace_img).unwrap();
+    assert_eq!(
+        contents,
+        b"PRESERVE-ACROSS-SNAPSHOT",
+        "B15 regression: workspace.img sentinel was modified"
+    );
+    assert!(
+        extra.exists(),
+        "B15 regression: teardown_source_for_snapshot removed adjacent \
+         file under host_dir (config.json — restore stage dir's neighbour)"
+    );
+
+    // 6. Re-inject (the teardown removed the in-memory record), then
+    //    call the real `stop` and assert the dir IS reaped — proving
+    //    the host_dir is owned by `stop`, not orphaned. This is the
+    //    "host_dir is finally reaped by the next regular stop" half
+    //    of the deferred-file's Option A contract.
+    if let Backend::NomadCh(b) = &backend {
+        b._test_inject_sandbox(
+            sid,
+            &user_id,
+            signing,
+            "http://127.0.0.1:1".into(),
+            42,
+        );
+    }
+    // host_dir already exists from above. workspace.img also still
+    // there. stop() runs steps 1-5 against the same 404-mock; with
+    // fence disabled and job_confirmed_gone=true, step 5 deletes.
+    let _ = backend.stop(sid).await;
+
+    assert!(
+        !host_dir.exists(),
+        "stop() must reap host_dir under favourable conditions \
+         (404-mock + fence disabled); got dir still present after stop"
+    );
+
+    // Cleanup.
+    stop_flag.store(true, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&host_state_dir);
 }

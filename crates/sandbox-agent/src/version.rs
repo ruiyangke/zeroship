@@ -46,6 +46,12 @@ pub const CAPABILITIES: &[&str] = &[
     "auth.ed25519-v1.1-ws",  // v1.1-ws canonical (ED25519-V1.1-WS tag) for WS Upgrade (Phase 2)
     "proxy.http-v1",         // ANY /proxy/{port}/{path*} HTTP forward (Phase 1)
     "proxy.ws-v1",           // WS Upgrade on the dedicated compio listener (Phase 2)
+    // Bug #22 fix (cluster smoke 2026-05-23): POST /_clock_resync —
+    // signed handshake the controller issues post-CH-`--restore` to
+    // repair the guest's frozen-at-snapshot CLOCK_REALTIME. The
+    // controller feature-detects via this string so older agents
+    // (no resync endpoint) gracefully fall back to the pre-fix path.
+    "clock.resync-v1",
 ];
 
 /// Agent crate version (`Cargo.toml`).

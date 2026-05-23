@@ -4,15 +4,25 @@
 //! wrapper script (shipped at `crates/sandbox/scripts/nomad-vm-wrapper.sh`,
 //! installed on the host out-of-band) that spawns:
 //!
-//!   - 3 × `virtiofsd` processes (`keys`, `workspace`, `userhome` shares)
 //!   - 1 × `cloud-hypervisor` foreground process
 //!
+//! CH attaches three virtio-blk disks (rootfs + per-sandbox workspace
+//! image + per-user home image) and injects the controller's signing
+//! pubkey via the kernel cmdline (`zsbx_pubkey=<hex>`). The previous
+//! revision used virtio-fs with three host-side `virtiofsd` daemons;
+//! the pivot to virtio-blk eliminated the only userspace process
+//! whose vhost-user state had to survive snapshot/restore (closes
+//! bug #11). See `docs/proposals/sandbox-snapshot-restore.md` §
+//! virtio-blk pivot.
+//!
 //! The CH VM boots a tiny Linux kernel (CONFIG_IP_PNP=y) + raw ext4
-//! rootfs containing `/sbin/init` (a shell script that mounts the
-//! virtio-fs shares + execs `zeroship-sandbox-agent`). The agent's
-//! wire-protocol-v1 auth (Ed25519 signed requests, 5 s skew + 30 s
-//! nonce LRU) is **identical** to the K8s backend; only the runtime
-//! plumbing differs.
+//! rootfs containing `/sbin/init` (a shell script that parses the
+//! `zsbx_pubkey=` cmdline arg to /run/keys/controller-pubkey, formats
+//! + mounts /dev/vdb at /workspace and /dev/vdc at /home/u, then
+//! execs `zeroship-sandbox-agent`). The agent's wire-protocol-v1
+//! auth (Ed25519 signed requests, 5 s skew + 30 s nonce LRU) is
+//! **identical** to the K8s backend; only the runtime plumbing
+//! differs.
 //!
 //! ## Why this exists
 //!
@@ -28,11 +38,20 @@
 //! ```text
 //! /var/zeroship/ch/                                 # host_state_dir
 //!   <sandbox-id>/
-//!     keys/controller-pubkey                        # virtiofs tag=keys → /run/keys
-//!     workspace/                                    # virtiofs tag=workspace → /workspace
-//!   users/<user_id>/home/                           # virtiofs tag=userhome → /home/u
-//!                                                   # (persists across sandboxes)
+//!     workspace.img                                 # virtio-blk → /dev/vdb → /workspace
+//!                                                   # (per-sandbox, raw ext4, sparse)
+//!   users/<user_id>/
+//!     home.img                                      # virtio-blk → /dev/vdc → /home/u
+//!                                                   # (per-user, raw ext4, persists
+//!                                                   #  across this user's sandboxes)
 //! ```
+//!
+//! The controller's signing pubkey is no longer a file on the host —
+//! it's hex-encoded into `ZSBX_PUBKEY_HEX` and the wrapper injects
+//! it into the guest's kernel cmdline as `zsbx_pubkey=<hex>`. The
+//! guest's /sbin/init decodes it back into 32 raw bytes at
+//! `/run/keys/controller-pubkey`, which is the path the agent's
+//! `auth.rs::DEFAULT_PUBKEY_PATH` already points at.
 //!
 //! ## Network
 //!
@@ -87,28 +106,38 @@
 //!
 //! ## Note on rootfs init.sh
 //!
-//! The demo rootfs ships an `init.sh` that mounts only the `keys`
-//! and `workspace` shares. The 3-share design (`+userhome`) requires
-//! a re-baked rootfs whose init.sh also runs:
+//! Post virtio-blk pivot, the rootfs ships an `init.sh` (committed
+//! at `crates/sandbox/scripts/init.sh`) that:
 //!
-//! ```sh
-//! mkdir -p /home/u
-//! mount -t virtiofs userhome /home/u
-//! ```
+//!   1. Parses `zsbx_pubkey=<hex>` from /proc/cmdline, decodes hex,
+//!      writes `/run/keys/controller-pubkey` (tmpfs-backed /run).
+//!   2. Formats `/dev/vdb` + `/dev/vdc` if `blkid` reports no FS,
+//!      then mounts them at `/workspace` and `/home/u` respectively.
+//!   3. Execs `/usr/local/bin/sandbox-agent`.
 //!
-//! Until that lands, `vm_index` is allocated and the share is
-//! advertised, but the in-VM mount is a no-op — package caches
-//! reside on the per-alloc rootfs and don't persist.
+//! The rootfs must be re-baked (`bake-rootfs.sh`) before any cluster
+//! can run this code — the in-tree init.sh ships only when the
+//! operator rebakes + reuploads the rootfs image.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
+/// Default Nomad alloc data root. Phase B's snapshot wiring derives
+/// `<NOMAD_ALLOC_ROOT>/<alloc-id>/ch/local/ch.sock` to reach
+/// cloud-hypervisor's API socket on the same worker. This matches
+/// Nomad's default `data_dir = /opt/nomad/data`; the path is wired
+/// here as a const because (a) it's already implicit in the wrapper's
+/// `ZSBX_RUNTIME=${NOMAD_TASK_DIR}` expansion that the controller
+/// reads back, and (b) the wider Nomad agent config isn't surfaced
+/// to the controller crate.
+const NOMAD_ALLOC_ROOT: &str = "/opt/nomad/data/alloc";
+
 use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 use zeroship_sandbox_agent::sig;
@@ -139,6 +168,30 @@ pub struct NomadCHBackend {
     /// [`crate::persist::Persistence`]. `None` when
     /// `SANDBOX_PERSIST_AUTH` is unset.
     persist: Option<Arc<crate::persist::Persistence>>,
+}
+
+/// Phase B / snapshot wiring: resolved source-VM identity for a
+/// running sandbox. Returned by [`NomadCHBackend::lookup_source_vm_ops`]
+/// and consumed by the snapshot admin handler before it issues
+/// `ch-remote pause` + `ch-remote snapshot`.
+///
+/// All three fields are derived from the live Nomad alloc:
+///   - `api_socket` — path to cloud-hypervisor's HTTP API UDS,
+///     `<alloc_dir>/ch/local/ch.sock` (the wrapper's `${ZSBX_RUNTIME}/ch.sock`).
+///   - `vm_index` — pulled from the in-memory backend record (NOT from
+///     Nomad meta) so it stays consistent with the registry's view of
+///     the IP/MAC/tap derivation.
+///   - `alloc_dir` — Nomad's per-alloc data dir; passed through to the
+///     restore handler's `ZSBX_RESTORE_FROM` env if the operator wakes
+///     a same-worker snapshot. v1 doesn't restore from this dir
+///     directly (the snapshot store re-stages into a fresh `restore/`
+///     subdir), but capturing it now keeps the audit-log + future
+///     in-place restore optimisation cheap.
+#[derive(Debug, Clone)]
+pub struct SourceVmOpsHandle {
+    pub api_socket: PathBuf,
+    pub vm_index: u16,
+    pub alloc_dir: PathBuf,
 }
 
 /// Per-sandbox bookkeeping. Lives only in process memory; on
@@ -201,8 +254,19 @@ impl std::fmt::Debug for NomadChSandbox {
 /// so we don't run off the end of the (host-pre-provisioned) tap
 /// pool. Bounded above by `ceil` (inclusive). Behaviour and rationale
 /// mirror `PortAllocator` in `k8s.rs`.
+///
+/// **Visibility note (B18 fix)**: this type is `pub` (not `pub(crate)`)
+/// because `RealRestoreBackend` in `crate::restore_handler` needs to
+/// hold an `Arc<Mutex<VmIndexAllocator>>` shared with `NomadCHBackend`,
+/// so create-side `alloc()` and restore-side `reserve()` go through the
+/// same state. Without the share, the restore path's `reserve(i)`
+/// silently passes against a private allocator while the create-side
+/// allocator still sees `i` as free → the next CREATE hands the same
+/// IP/tap to a fresh sandbox that collides with the live restored VM
+/// (cluster smoke 2026-05-24 r4; 11/16 c=4 cycles hit a stale-pubkey
+/// 401 once slots 1-6 had been used once).
 #[derive(Debug)]
-pub(crate) struct VmIndexAllocator {
+pub struct VmIndexAllocator {
     floor: u16,
     ceil: u16,
     /// Highest index we've ever handed out (well, `next` is "the
@@ -215,7 +279,7 @@ pub(crate) struct VmIndexAllocator {
 }
 
 impl VmIndexAllocator {
-    pub(crate) fn new(floor: u16, ceil: u16) -> Self {
+    pub fn new(floor: u16, ceil: u16) -> Self {
         Self {
             floor,
             ceil,
@@ -224,7 +288,7 @@ impl VmIndexAllocator {
         }
     }
 
-    pub(crate) fn alloc(&mut self) -> Result<u16, String> {
+    pub fn alloc(&mut self) -> Result<u16, String> {
         if let Some(&i) = self.freed.iter().next() {
             self.freed.remove(&i);
             return Ok(i);
@@ -240,7 +304,7 @@ impl VmIndexAllocator {
         Ok(i)
     }
 
-    pub(crate) fn release(&mut self, i: u16) {
+    pub fn release(&mut self, i: u16) {
         if i >= self.floor && i <= self.ceil {
             self.freed.insert(i);
         }
@@ -253,14 +317,27 @@ impl VmIndexAllocator {
     /// `create()` could hand the same index to a new sandbox while
     /// the original VM is still alive.
     ///
-    /// Returns `Err` if `i` is out of `[floor, ceil]`. Idempotent on
-    /// already-reserved indices (the second call is a no-op).
-    pub(crate) fn reserve(&mut self, i: u16) -> Result<(), String> {
+    /// Returns `Err` if `i` is out of `[floor, ceil]` OR if `i` is
+    /// already in-use (a hard-error reserve — the caller cannot
+    /// silently overwrite a live slot). B18 fix: the prior
+    /// `restore_handler::VmIndexReservations` was a "set if not
+    /// present" map with `Err("already reserved")` on collision; the
+    /// same contract is preserved here so the restore handler's
+    /// collision error message format ("vm_index N already
+    /// reserved") stays intact.
+    pub fn reserve(&mut self, i: u16) -> Result<(), String> {
         if i < self.floor || i > self.ceil {
             return Err(format!(
                 "vm-index {i} out of range [{}, {}]",
                 self.floor, self.ceil
             ));
+        }
+        // If the index is currently in flight from `alloc()` (i.e.,
+        // already handed out and not in `freed`), reserving it would
+        // hand the same slot to two callers — the exact B18 race.
+        // Detect: `i < self.next` AND `i ∉ self.freed` ⇒ in flight.
+        if i < self.next && !self.freed.contains(&i) {
+            return Err(format!("vm_index {i} already reserved"));
         }
         // Bump `next` past `i` so future first-time allocs don't
         // hand it out, and remove `i` from the freed set if the
@@ -296,6 +373,20 @@ impl NomadCHBackend {
 
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
+    }
+
+    /// Shared handle to the per-worker `vm_index` allocator. Used by
+    /// `crate::restore_handler::RealRestoreBackend` so the wake path's
+    /// `reserve(source_slot)` and the create path's `alloc()` go
+    /// through the same allocator state. Without this share, the
+    /// restore path reserved into a private map while the create
+    /// allocator still saw the slot as free — a subsequent CREATE on
+    /// the same worker handed the same tap/IP to a fresh sandbox that
+    /// collided with the live restored VM, surfacing as a stale-pubkey
+    /// 401 on `/version` (cluster smoke 2026-05-24 r4 bug B18; 11/16
+    /// c=4 cycles failed once slots 1-6 had been used once).
+    pub fn vm_index_allocator(&self) -> Arc<Mutex<VmIndexAllocator>> {
+        Arc::clone(&self.vm_index_allocator)
     }
 
     pub async fn probe(&self) -> Result<(), String> {
@@ -464,7 +555,15 @@ impl NomadCHBackend {
             .nomad_ch
             .host_state_dir
             .join(sandbox_id.simple().to_string());
-        let user_home_dir = self.cfg.nomad_ch.user_home_dir_root.join(user_id).join("home");
+        // virtio-blk pivot (bug #11): the per-user home is now a single
+        // raw ext4 image file rather than a directory. The file lives
+        // at `<user_home_dir_root>/<user_id>/home.img` and is reused
+        // across all of that user's sandboxes (package caches, dotfiles
+        // persist). The wrapper attaches it as the guest's /dev/vdc.
+        let user_home_img = user_home_image_path(
+            &self.cfg.nomad_ch.user_home_dir_root,
+            user_id,
+        );
 
         let mut guard = CreateGuard::new(
             self.vm_index_allocator.clone(),
@@ -481,7 +580,7 @@ impl NomadCHBackend {
                 project_id,
                 &job_id,
                 &host_dir,
-                &user_home_dir,
+                &user_home_img,
                 &mut guard,
             )
             .await;
@@ -511,7 +610,7 @@ impl NomadCHBackend {
         project_id: &str,
         job_id: &str,
         host_dir: &Path,
-        user_home_dir: &Path,
+        user_home_img: &Path,
         guard: &mut CreateGuard,
     ) -> Result<SandboxInfo, String> {
         let create_started = Instant::now();
@@ -527,7 +626,15 @@ impl NomadCHBackend {
         let sk_bytes = random_key32()?;
         let signing_key = Arc::new(SigningKey::from_bytes(&sk_bytes));
         let pubkey = signing_key.verifying_key();
-        let pubkey_b64 = B64.encode(pubkey.as_bytes());
+        // virtio-blk pivot (bug #11): the pubkey no longer travels
+        // through a virtiofs-mounted file; we hex-encode it and the
+        // wrapper injects it into the guest's kernel cmdline as
+        // `zsbx_pubkey=<hex>`. The guest's /sbin/init decodes the
+        // hex back to 32 raw bytes at /run/keys/controller-pubkey,
+        // which is the path the agent's auth loader reads. base64
+        // is no longer emitted here (the agent accepts either raw
+        // 32 bytes or base64, and the cmdline path produces raw).
+        let pubkey_hex = hex::encode(pubkey.as_bytes());
         let key_fp = sig::pubkey_fingerprint(&pubkey);
         tracing::info!(
             sandbox_id = %sandbox_id,
@@ -560,47 +667,64 @@ impl NomadCHBackend {
             "sandbox/nomad-ch vm_index allocated"
         );
 
-        // 3. Materialize host dirs. The wrapper script + virtiofsd
-        //    expect these to exist; per-sandbox dirs are unique
-        //    (sandbox_id), per-user is shared across all of this
-        //    user's sandboxes (and intentionally NOT cleaned up on
-        //    sandbox stop).
-        let keys_dir = host_dir.join("keys");
-        let workspace_dir = host_dir.join("workspace");
-        std::fs::create_dir_all(&keys_dir)
-            .map_err(|e| format!("mkdir {}: {}", keys_dir.display(), e))?;
-        std::fs::create_dir_all(&workspace_dir)
-            .map_err(|e| format!("mkdir {}: {}", workspace_dir.display(), e))?;
-        std::fs::create_dir_all(user_home_dir)
-            .map_err(|e| format!("mkdir {}: {}", user_home_dir.display(), e))?;
+        // 3. Materialize host disk images for the two virtio-blk
+        //    devices the wrapper attaches:
+        //      - `<host_dir>/workspace.img` — per-sandbox; freshly
+        //        created (sparse `truncate -s … + mkfs.ext4`).
+        //      - `<user_home_dir_root>/<user>/home.img` — per-user;
+        //        created once on the user's first sandbox, reused
+        //        across subsequent sandboxes (package caches +
+        //        dotfiles persist). The directory tree is mkdir'd
+        //        for the image's parent.
+        //
+        //    Idempotent: if the file already exists at the path we
+        //    skip both `truncate` and `mkfs.ext4`. This matters for
+        //    `home.img` (per-user reuse) and is harmless belt-and-
+        //    braces for `workspace.img` (per-sandbox dir is unique
+        //    by UUID).
+        //
+        //    Disk-image creation costs ~1–3s on first invocation
+        //    (mostly the mkfs.ext4 metadata write); per-user reuse
+        //    means the cost amortizes to ~0 after the user's first
+        //    sandbox.
+        std::fs::create_dir_all(host_dir)
+            .map_err(|e| format!("mkdir {}: {}", host_dir.display(), e))?;
+        if let Some(parent) = user_home_img.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+        }
         guard.host_dir_created = true;
 
-        // 4. Write public key. The agent's verifier loads this from
-        //    /run/keys/controller-pubkey at boot — which is the
-        //    virtiofs-mounted view of `keys_dir`.
-        //
-        //    create + write_all + chmod 0444 + fsync, in that order:
-        //    - 0444 because the file is a non-secret read-only
-        //      attestation; we'd rather not let a buggy in-VM uid
-        //      truncate it.
-        //    - fsync so a host crash between the write and CH boot
-        //      doesn't serve a 0-byte pubkey to the agent (which
-        //      would 401 every signed request forever).
-        let pubkey_path = keys_dir.join("controller-pubkey");
-        write_pubkey_file(&pubkey_path, pubkey_b64.as_bytes())
-            .map_err(|e| format!("write {}: {}", pubkey_path.display(), e))?;
+        let workspace_img = workspace_image_path(host_dir);
+        let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
+        create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
+            .map_err(|e| format!("workspace.img: {e}"))?;
+        create_ext4_image_if_missing(user_home_img, workspace_img_size_gb)
+            .map_err(|e| format!("home.img: {e}"))?;
+
+        // 4. (was: write pubkey file — now baked into the cmdline by
+        //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
 
         // 5. Build + submit the Nomad job spec.
+        //
+        // B24 / R8-DEPLOY1: the sandbox_id flows into
+        // `ZSBX_SANDBOX_ID`, which the wrapper embeds VERBATIM in
+        // the guest's kernel cmdline. The wrapper's validator
+        // (nomad-vm-wrapper.sh:222) rejects any character outside
+        // `[0-9a-zA-Z_]` — that's hyphens too. Uuid's hyphenated
+        // form (`to_string()`) would fail it; `.simple()` (32-hex,
+        // no hyphens) passes and matches the format the rest of
+        // this file already uses for `job_id` and `host_dir`.
         let job_json = build_nomad_job_json(
             job_id,
             &self.cfg,
             vm_index,
-            &keys_dir,
-            &workspace_dir,
-            user_home_dir,
+            &workspace_img,
+            user_home_img,
+            &pubkey_hex,
             user_id,
             project_id,
-            &sandbox_id.to_string(),
+            &sandbox_id.simple().to_string(),
         );
         submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json)
             .await
@@ -800,6 +924,70 @@ impl NomadCHBackend {
     /// jobs that were holding them). The host_dir is left in place
     /// for the same reason — virtiofsd may still hold its socket open.
     pub async fn stop(&self, sandbox_id: Uuid) -> Result<(), String> {
+        // The for-real stop: tear everything down INCLUDING the
+        // per-sandbox host_dir (which owns workspace.img). Callers
+        // who need to keep `workspace.img` alive across a snapshot →
+        // wake gap MUST use [`Self::stop_preserving_state`] instead.
+        self.stop_inner(sandbox_id, true).await
+    }
+
+    /// Snapshot-aware variant of [`Self::stop`] that runs steps 1-4
+    /// of the standard teardown (Nomad job purge + host-fence +
+    /// vm_index release + in-memory map removal) **but skips both
+    /// step 5's `remove_dir_all(host_dir)` AND the trailing
+    /// `persist.delete(sandbox_id)`**. Symmetric with how `home.img`
+    /// is intentionally preserved across snapshot lifetimes: the
+    /// per-sandbox `workspace.img` (created under `host_dir`) holds
+    /// durable user state that the restored VM re-mounts on wake,
+    /// and the sealed record carries the signing key the next wake
+    /// needs to talk to the restored agent. Wiping either would
+    /// silently break wake.
+    ///
+    /// Used by the snapshot path's post-success teardown
+    /// ([`super::Backend::teardown_source_for_snapshot`]). The
+    /// host_dir AND sealed record are finally reaped by the next
+    /// [`Self::stop`] call (operator delete, or terminal-not-
+    /// restorable transition).
+    ///
+    /// Bug #15 fix (`docs/reviews/sandbox-snapshot-restore-cluster-
+    /// 2026-05-23-r1.md`): the prior code called `stop` directly,
+    /// which deleted `host_dir/workspace.img`, and the next wake's
+    /// wrapper `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate then tripped. C2
+    /// (deferred 2026-05-24): the B15 fix only gated the host_dir
+    /// rm; `persist.delete` still fired unconditionally. Now both
+    /// share the gate.
+    pub async fn stop_preserving_state(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<(), String> {
+        self.stop_inner(sandbox_id, false).await
+    }
+
+    /// Shared implementation of [`Self::stop`] /
+    /// [`Self::stop_preserving_state`]. The `remove_host_dir` bool
+    /// gates **all on-host durable-state cleanup**:
+    ///
+    /// - step 5 (`rm -rf host_dir` — owns `workspace.img`), and
+    /// - the trailing `persist.delete(sandbox_id)` call (the sealed
+    ///   record carrying the signing key for restart-restore).
+    ///
+    /// When `true` (the regular stop path) both fire: host_dir is
+    /// `rm -rf`'d after the Nomad job is confirmed gone + the
+    /// host_fence has cleared, and the sealed record is removed.
+    /// When `false` (the snapshot-aware teardown via
+    /// [`Self::stop_preserving_state`]) both are skipped: the
+    /// per-sandbox `workspace.img` AND its sealed record survive
+    /// across the snapshot → wake gap. Wiping either would silently
+    /// break wake — `workspace.img` because the wrapper's
+    /// `[ ! -f $ZSBX_WORKSPACE_IMG ]` gate trips (bug #15), the
+    /// sealed record because the moment wake plumbs sealed-record-
+    /// based key recovery the agent becomes unreachable (deferred
+    /// item C2).
+    async fn stop_inner(
+        &self,
+        sandbox_id: Uuid,
+        remove_host_dir: bool,
+    ) -> Result<(), String> {
         let sandbox = match self
             .state
             .write()
@@ -989,46 +1177,81 @@ impl NomadCHBackend {
         //    virtiofsd may still hold the socket / share open, and
         //    pulling the dir from under it would just produce
         //    confusing logs.
-        let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
-        if host_dir_safe_to_rm && sandbox.host_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
-                errs.push(format!(
-                    "rm -rf {}: {}",
-                    sandbox.host_dir.display(),
-                    e
-                ));
-            }
-        } else if sandbox.host_dir.exists() {
-            // Either the Nomad purge didn't confirm or the host
-            // fence failed. Either way virtiofsd may still hold the
-            // share; leaking the dir for orphan-prune is the safer
-            // choice.
-            let reason = if !job_confirmed_gone {
-                "job not confirmed gone"
-            } else {
-                "host_fence timeout"
-            };
-            tracing::warn!(
+        //
+        //    `remove_host_dir == false` is the snapshot-teardown path
+        //    (bug #15): callers want the per-sandbox `workspace.img`
+        //    (and the dir holding it) to survive across the snapshot
+        //    → wake gap. The next regular `stop` reaps it.
+        if !remove_host_dir {
+            tracing::info!(
+                sandbox_id = %sandbox_id,
                 job = %sandbox.job_id,
                 host_dir = %sandbox.host_dir.display(),
-                reason,
-                "sandbox/nomad-ch stop: leaking host_dir"
+                "sandbox/nomad-ch stop_preserving_state: skipping host_dir rm (snapshot-aware teardown; workspace.img must survive to wake)"
             );
+        } else {
+            let host_dir_safe_to_rm = job_confirmed_gone && fence_passed;
+            if host_dir_safe_to_rm && sandbox.host_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&sandbox.host_dir) {
+                    errs.push(format!(
+                        "rm -rf {}: {}",
+                        sandbox.host_dir.display(),
+                        e
+                    ));
+                }
+            } else if sandbox.host_dir.exists() {
+                // Either the Nomad purge didn't confirm or the host
+                // fence failed. Either way virtiofsd may still hold
+                // the share; leaking the dir for orphan-prune is the
+                // safer choice.
+                let reason = if !job_confirmed_gone {
+                    "job not confirmed gone"
+                } else {
+                    "host_fence timeout"
+                };
+                tracing::warn!(
+                    job = %sandbox.job_id,
+                    host_dir = %sandbox.host_dir.display(),
+                    reason,
+                    "sandbox/nomad-ch stop: leaking host_dir"
+                );
+            }
         }
 
         // Delete the sealed record (`docs/proposals/sandbox-preview-urls.md` § II.0 §4). BEST-EFFORT:
         // a delete failure is logged but does NOT fail stop(). The next
         // boot's restore loop probes the sandbox's `/version`, finds it
         // unreachable (the VM is gone), and leaves the file in place
-        // for a future prune pass to mop up.
-        if let Some(persist) = &self.persist {
-            if let Err(e) = persist.delete(sandbox_id).await {
-                tracing::warn!(
-                    sandbox_id = %sandbox_id,
-                    error = %e,
-                    "sandbox/nomad-ch persist.delete failed (non-fatal; sealed record will be cleaned by next-boot unreachable-probe + Phase-5 prune)"
-                );
+        // for periodic prune (Phase 5) to mop up.
+        //
+        // Gated by `remove_host_dir` for symmetry with step 5 above:
+        // when the caller is the snapshot-aware teardown
+        // (`stop_preserving_state` → `remove_host_dir == false`) the
+        // sandbox is being put to sleep, not killed — `workspace.img`
+        // survives on disk and so MUST the sealed record carrying the
+        // signing key the next wake needs to talk to the restored
+        // agent. Wiping it here is the C2 latent bug
+        // (`docs/reviews/sandbox-snapshot-restore-deferred.md`): it
+        // bites the moment wake plumbs sealed-record-based key
+        // recovery. Today's wake path doesn't (yet) read the sealed
+        // record, but the contract is "preserve everything across the
+        // snapshot → wake gap" — host_dir and sealed record alike.
+        if remove_host_dir {
+            if let Some(persist) = &self.persist {
+                if let Err(e) = persist.delete(sandbox_id).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "sandbox/nomad-ch persist.delete failed (non-fatal; sealed record will be cleaned by next-boot unreachable-probe + Phase-5 prune)"
+                    );
+                }
             }
+        } else {
+            tracing::info!(
+                sandbox_id = %sandbox_id,
+                job = %sandbox.job_id,
+                "sandbox/nomad-ch stop_preserving_state: skipping persist.delete (snapshot-aware teardown; sealed record must survive to wake)"
+            );
         }
 
         tracing::info!(
@@ -1410,7 +1633,63 @@ impl NomadCHBackend {
         })
     }
 
-    /// Legacy v2-shape restore. Keep this so existing tests
+    /// B19 fix (cluster smoke 2026-05-23 r4): install a restored
+    /// sandbox into the in-memory state map so `exec`/`stop`/
+    /// `delete`/`sandbox_keys` look-ups succeed after a wake. Mirrors
+    /// the state-map insert at the tail of [`Self::create`] +
+    /// [`Self::restore_from_pg_and_sealed`], but does NOT touch the
+    /// vm_index allocator (the restore handler already reserved the
+    /// slot before this is called) and does NOT issue any I/O — the
+    /// caller (`restore_handler::do_restore_inner` after
+    /// `wait_for_livez` Ok) has already brought the VM live and
+    /// unsealed the signing key.
+    ///
+    /// Returns `Err` if `sandbox_id` is already present in the state
+    /// map: the contract is "freshly restored entry", not "overwrite a
+    /// live one". The caller maps the error to a 500.
+    ///
+    /// **What this fixes**: pre-B19, `do_restore_inner` returned Ok
+    /// after `wait_for_livez` but never inserted the per-sandbox
+    /// record. Subsequent `exec` returned 500 "sandbox not found in
+    /// nomad-ch backend", `stop`/`delete` returned 404, and the
+    /// vm_index slot leaked across controller uptime (the
+    /// stop_inner's idempotent-Ok branch fired without releasing the
+    /// allocator). After ~10 successful wakes the allocator
+    /// exhausted (floor=1, ceil=12) and blocked new creates.
+    pub(crate) fn register_restored(
+        &self,
+        sandbox_id: Uuid,
+        vm_index: u16,
+        signing_key_bytes: [u8; 32],
+        agent_url: String,
+        user_id: String,
+    ) -> Result<(), String> {
+        let signing_key = Arc::new(SigningKey::from_bytes(&signing_key_bytes));
+        let host_dir = self.derive_host_dir(sandbox_id);
+        let job_id = Self::derive_job_id(sandbox_id);
+
+        let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
+        use std::collections::hash_map::Entry;
+        match g.entry(sandbox_id) {
+            Entry::Vacant(slot) => {
+                slot.insert(NomadChSandbox {
+                    user_id,
+                    job_id,
+                    vm_index,
+                    host_dir,
+                    agent_url,
+                    signing_key,
+                });
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(format!(
+                "register_restored: sandbox {sandbox_id} already present in \
+                 nomad-ch state map (would clobber live record); refusing"
+            )),
+        }
+    }
+
+    /// Legacy v2-shape restore. Round-8 keeps this so existing tests
     /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
     /// through [`Self::restore_from_pg_and_sealed`].
     #[allow(dead_code)]
@@ -1420,6 +1699,115 @@ impl NomadCHBackend {
         _sealed: &crate::persist::SealedAuth,
     ) -> Result<super::SandboxAuth, String> {
         Err("restore_from_sealed: round-8 deprecated — use restore_from_pg_and_sealed".into())
+    }
+
+    /// Phase B: resolve the source VM's `(api_socket, vm_index, alloc_dir)`
+    /// for a sandbox the snapshot handler is about to pause+snapshot.
+    ///
+    /// Returns `Err` when:
+    ///   - The sandbox is unknown to this controller (lease-takeover
+    ///     orphan, or peer-owned).
+    ///   - Nomad is unreachable / returns no running alloc (the VM has
+    ///     already terminated).
+    ///   - The derived `ch.sock` path is not a Unix socket on local fs
+    ///     (the alloc is on a different worker — single-controller-per-
+    ///     -worker model means we cannot reach a remote socket).
+    ///
+    /// Caller (admin_handlers::snapshot_sandbox) maps the Err to a 503
+    /// CAS-rollback so the row stays `running` and operators can retry.
+    pub async fn lookup_source_vm_ops(
+        &self,
+        sandbox_id: Uuid,
+    ) -> Result<SourceVmOpsHandle, String> {
+        // 1. Look up the in-memory sandbox record. We need the `job_id`
+        //    (to query Nomad for allocs) and the `vm_index` (which is
+        //    the same field the snapshot handler stamps onto the row).
+        let (job_id, vm_index) = {
+            let guard = self.state.read().unwrap_or_else(|p| p.into_inner());
+            let s = guard.get(&sandbox_id).ok_or_else(|| {
+                format!("lookup_source_vm_ops: sandbox {sandbox_id} not in nomad-ch state map")
+            })?;
+            (s.job_id.clone(), s.vm_index)
+        };
+
+        // 2. Query Nomad for the running alloc on this job. We mirror
+        //    the shape of `wait_for_alloc_running` but only need a
+        //    single-shot read — the snapshot handler is invoked while
+        //    the row is `running`, so by definition there's at least
+        //    one alloc and it's already past the `running` ClientStatus.
+        let url = format!(
+            "{}/v1/job/{}/allocations",
+            self.cfg.nomad_ch.nomad_addr, job_id
+        );
+        let resp = http_get_unsigned(&url, Duration::from_secs(5))
+            .await
+            .map_err(|e| {
+                format!("lookup_source_vm_ops: nomad GET {url}: {e}")
+            })?;
+        if resp.status != 200 {
+            return Err(format!(
+                "lookup_source_vm_ops: nomad GET {url} → status {}: {}",
+                resp.status,
+                resp.body.trim()
+            ));
+        }
+        let allocs: serde_json::Value = serde_json::from_str(&resp.body)
+            .map_err(|e| {
+                format!("lookup_source_vm_ops: parse alloc list: {e}")
+            })?;
+        let mut alloc_id: Option<String> = None;
+        for a in allocs.as_array().into_iter().flatten() {
+            let cs = a["ClientStatus"].as_str().unwrap_or("");
+            if cs == "running" {
+                if let Some(id) = a["ID"].as_str() {
+                    alloc_id = Some(id.to_string());
+                    break;
+                }
+            }
+        }
+        let alloc_id = alloc_id.ok_or_else(|| {
+            format!(
+                "lookup_source_vm_ops: no running alloc found for job {job_id} \
+                 (VM may have already terminated)"
+            )
+        })?;
+
+        // 3. Derive alloc_dir + api_socket. Same convention used by
+        //    Phase 3's stop path and the wrapper's `ZSBX_RUNTIME =
+        //    ${NOMAD_TASK_DIR}` expansion: the task is named "ch", so
+        //    the per-task dir is `<alloc_dir>/ch/local/`, and the
+        //    wrapper writes its API socket as `${ZSBX_RUNTIME}/ch.sock`.
+        let alloc_dir = PathBuf::from(NOMAD_ALLOC_ROOT).join(&alloc_id);
+        let api_socket = alloc_dir.join("ch").join("local").join("ch.sock");
+
+        // 4. Verify the socket exists locally. The single-controller-
+        //    per-worker model puts the alloc on the same host as us;
+        //    a missing socket means either (a) the alloc is on a
+        //    different worker (peer-owned via lease-takeover), or
+        //    (b) the wrapper has already torn down. Either case is
+        //    a snapshot-impossible signal.
+        match std::fs::metadata(&api_socket) {
+            Ok(md) => {
+                if !md.file_type().is_socket() {
+                    return Err(format!(
+                        "lookup_source_vm_ops: {} exists but is not a unix socket",
+                        api_socket.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "lookup_source_vm_ops: api_socket {} not accessible: {e}",
+                    api_socket.display()
+                ));
+            }
+        }
+
+        Ok(SourceVmOpsHandle {
+            api_socket,
+            vm_index,
+            alloc_dir,
+        })
     }
 
     /// Build a short prefix for agent-error log lines so a fleet-
@@ -1804,9 +2192,9 @@ pub(crate) fn build_nomad_job_json(
     job_id: &str,
     cfg: &SandboxConfig,
     vm_index: u16,
-    keys_dir: &Path,
-    workspace_dir: &Path,
-    user_home_dir: &Path,
+    workspace_img: &Path,
+    user_home_img: &Path,
+    pubkey_hex: &str,
     user_id: &str,
     project_id: &str,
     sandbox_id: &str,
@@ -1858,9 +2246,15 @@ pub(crate) fn build_nomad_job_json(
                         // expansion at our level. See
                         // https://developer.hashicorp.com/nomad/docs/runtime/environment
                         "ZSBX_RUNTIME": "${NOMAD_TASK_DIR}",
-                        "ZSBX_KEYS_DIR": keys_dir.display().to_string(),
-                        "ZSBX_WORKSPACE_DIR": workspace_dir.display().to_string(),
-                        "ZSBX_USER_HOME_DIR": user_home_dir.display().to_string(),
+                        // virtio-blk pivot (bug #11): the three virtio-fs
+                        // share dirs are gone. We now pass full image
+                        // paths (per-sandbox workspace + per-user home)
+                        // and the controller pubkey as hex. The wrapper
+                        // attaches the images as /dev/vdb,/vdc and
+                        // injects the pubkey into the kernel cmdline.
+                        "ZSBX_WORKSPACE_IMG": workspace_img.display().to_string(),
+                        "ZSBX_USER_HOME_IMG": user_home_img.display().to_string(),
+                        "ZSBX_PUBKEY_HEX": pubkey_hex,
                         // Memory / CPU. The wrapper substitutes these
                         // into CH's `--memory size=${N}M,shared=on` and
                         // `--cpus boot=${N}` flags. Without these the
@@ -1876,13 +2270,42 @@ pub(crate) fn build_nomad_job_json(
                         // the controller dials.
                         "ZSBX_SUBNET_BASE_OCTET":
                             cfg.nomad_ch.subnet_second_octet.to_string(),
+                        // B24 / R8-DEPLOY1: the wrapper's cold-boot
+                        // env validator (nomad-vm-wrapper.sh:153)
+                        // hard-errors when ZSBX_SANDBOX_ID is unset;
+                        // missing it terminated cluster-smoke allocs
+                        // ~50ms into spawn (0/16 CREATE at HEAD
+                        // cf702457). The value is embedded VERBATIM
+                        // in the guest's kernel cmdline as
+                        // `SANDBOX_AGENT_SANDBOX_ID=<value>` (wrapper
+                        // line 641) and feeds the in-VM agent's
+                        // `init_sandbox_id_from_env` (R7-S1). The
+                        // wrapper's `[!0-9a-zA-Z_]` validator at
+                        // line 222 rejects hyphens, so the caller
+                        // passes Uuid::simple() (32-hex, no hyphens)
+                        // — matching the format used by job_id and
+                        // host_dir derivation elsewhere in this file.
+                        "ZSBX_SANDBOX_ID": sandbox_id,
                     },
                     "Resources": {
                         // CPU MHz is advisory under raw_exec + CH —
                         // see `NOMAD_CPU_MHZ_ADVISORY`. Memory is the
                         // real bin-packing input.
+                        //
+                        // MemoryMaxMB = 2 × MemoryMB (bug-#9 fix,
+                        // 2026-05-22 cluster validation). CH v51.1
+                        // mmap-faults the full guest RAM during
+                        // snapshot/restore which gets accounted to
+                        // the task's memcg; without slack the cgroup
+                        // OOM-killer fires when CH approaches the
+                        // hard limit. Matches the proposal's § 2
+                        // architectural recommendation. MemoryMB
+                        // stays as the bin-packing input;
+                        // MemoryMaxMB is the oversubscription
+                        // ceiling Nomad enforces via memory.high.
                         "CPU": NOMAD_CPU_MHZ_ADVISORY,
                         "MemoryMB": cfg.memory_mb as u32,
+                        "MemoryMaxMB": (cfg.memory_mb * 2) as u32,
                     },
                     "KillTimeout": 10_000_000_000u64,  // 10s, ns
                 }],
@@ -2440,8 +2863,8 @@ fn log_agent_error(sandbox_id: Uuid, op: &str, status: u16, body: &str) {
 ///
 /// The fingerprint is the kernel of "is this OUR agent?" — the
 /// controller mints a fresh Ed25519 keypair per sandbox; the agent
-/// publishes the pubkey-SHA256[..8] under `pubkey_fingerprint` on
-/// `/version`. A stale-tenant agent has a *different* fingerprint
+/// publishes the pubkey-SHA256[..16] (32 hex chars) under
+/// `pubkey_fingerprint` on `/version`. A stale-tenant agent has a *different* fingerprint
 /// (different keypair → different pubkey → different hash), so we
 /// keep polling until either:
 ///   1. `/version.pubkey_fingerprint` matches `expected_fp` → ready, OR
@@ -2664,25 +3087,75 @@ async fn wait_for_agent_silent(
 
 // ─── small utilities (mirrored from k8s.rs) ─────────────────────
 
-/// Write `controller-pubkey`: create + write_all + chmod 0444 +
-/// sync_all. fsync so a host crash between write and CH boot doesn't
-/// serve a 0-byte pubkey to the agent.
-fn write_pubkey_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(body)?;
-    let mut perms = f.metadata()?.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o444);
+/// Derive the per-user home-image path from the configured root.
+/// Layout: `<user_home_dir_root>/<user_id>/home.img`. The path is
+/// reused across every sandbox the user creates so package caches
+/// and dotfiles persist (see `create_sandbox` step 3).
+pub(crate) fn user_home_image_path(
+    user_home_dir_root: &Path,
+    user_id: &str,
+) -> PathBuf {
+    user_home_dir_root.join(user_id).join("home.img")
+}
+
+/// Derive the per-sandbox workspace-image path inside a sandbox's
+/// host_dir. Per-sandbox, freshly created on cold-boot.
+pub(crate) fn workspace_image_path(host_dir: &Path) -> PathBuf {
+    host_dir.join("workspace.img")
+}
+
+/// Create a raw ext4 image at `path` of `size_gb` gigabytes if and
+/// only if the file does not already exist. Uses `truncate -s` to
+/// produce a sparse image (no zero-write up front, just metadata)
+/// and `mkfs.ext4 -q -F` to format. Idempotent: a second invocation
+/// against the same path is a no-op.
+///
+/// The `-F` flag on mkfs.ext4 is required to format a regular file
+/// that isn't a block device; without it mkfs prompts and aborts.
+///
+/// Returns `Err` with a String describing which subprocess failed.
+/// The caller maps that into a controller-side error log; the
+/// `CreateGuard` Drop on the calling path tears down the partial
+/// host_dir state.
+pub(crate) fn create_ext4_image_if_missing(
+    path: &Path,
+    size_gb: u32,
+) -> Result<(), String> {
+    if path.exists() {
+        return Ok(());
     }
-    #[cfg(not(unix))]
-    {
-        perms.set_readonly(true);
+    // truncate(1) is universally present on debian + bash; using it
+    // (rather than `std::fs::File::set_len`) keeps the path-and-size
+    // contract identical to the CLI an operator would type, which
+    // makes the failure mode easier to reproduce by hand.
+    let size = format!("{size_gb}G");
+    let truncate_status = std::process::Command::new("truncate")
+        .args(["-s", &size])
+        .arg(path)
+        .status()
+        .map_err(|e| format!("spawn truncate: {e}"))?;
+    if !truncate_status.success() {
+        return Err(format!(
+            "truncate -s {size} {} exited {}",
+            path.display(),
+            truncate_status,
+        ));
     }
-    std::fs::set_permissions(path, perms)?;
-    f.sync_all()?;
+    let mkfs_status = std::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F"])
+        .arg(path)
+        .status()
+        .map_err(|e| format!("spawn mkfs.ext4: {e}"))?;
+    if !mkfs_status.success() {
+        // Clean up the half-created image so a retry doesn't see
+        // an unformatted file at the same path and skip the mkfs.
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "mkfs.ext4 -q -F {} exited {}",
+            path.display(),
+            mkfs_status,
+        ));
+    }
     Ok(())
 }
 
@@ -3132,7 +3605,7 @@ mod tests {
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
                 vm_index_floor: 1,
                 vm_index_ceil: 155,
-                alloc_running_timeout_secs: 60,
+                alloc_running_timeout_secs: 120,
                 agent_livez_timeout_secs: 30,
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
@@ -3140,6 +3613,12 @@ mod tests {
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from("/var/zeroship/ch/snapshots"),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
         };
         cfg
     }
@@ -3173,13 +3652,19 @@ mod tests {
     #[test]
     fn nomad_job_json_basic_shape() {
         let cfg = make_cfg();
+        // virtio-blk pivot (bug #11): build_nomad_job_json now takes
+        // workspace.img + home.img paths + pubkey hex (not three
+        // share dirs). The wrapper attaches these as virtio-blk and
+        // injects the pubkey on the cmdline. The fixture pubkey is
+        // 64 hex chars (32 bytes); short enough to read in error
+        // messages but long enough to exercise the hex path.
         let v = build_nomad_job_json(
             "zsbx-abc",
             &cfg,
             7,
-            Path::new("/var/zeroship/ch/abc/keys"),
-            Path::new("/var/zeroship/ch/abc/workspace"),
-            Path::new("/var/zeroship/ch/users/alice/home"),
+            Path::new("/var/zeroship/ch/abc/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "alice",
             "proj1",
             "abc",
@@ -3218,18 +3703,30 @@ mod tests {
             "ZSBX_HERE should be gone (renamed to ZSBX_ARTIFACT_DIR)"
         );
         assert_eq!(task["Env"]["ZSBX_RUNTIME"], "${NOMAD_TASK_DIR}");
+        // virtio-blk pivot (bug #11): the three virtio-fs share-dir
+        // env vars are gone; we now emit two image paths and the
+        // pubkey hex. Assert both the new names appear AND the old
+        // names do NOT — so a future ad-hoc deploy that references
+        // ZSBX_KEYS_DIR / ZSBX_WORKSPACE_DIR / ZSBX_USER_HOME_DIR
+        // fails fast instead of silently picking up nothing.
         assert_eq!(
-            task["Env"]["ZSBX_KEYS_DIR"],
-            "/var/zeroship/ch/abc/keys"
+            task["Env"]["ZSBX_WORKSPACE_IMG"],
+            "/var/zeroship/ch/abc/workspace.img"
         );
         assert_eq!(
-            task["Env"]["ZSBX_WORKSPACE_DIR"],
-            "/var/zeroship/ch/abc/workspace"
+            task["Env"]["ZSBX_USER_HOME_IMG"],
+            "/var/zeroship/ch/users/alice/home.img"
         );
         assert_eq!(
-            task["Env"]["ZSBX_USER_HOME_DIR"],
-            "/var/zeroship/ch/users/alice/home"
+            task["Env"]["ZSBX_PUBKEY_HEX"],
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
+        for legacy in ["ZSBX_KEYS_DIR", "ZSBX_WORKSPACE_DIR", "ZSBX_USER_HOME_DIR"] {
+            assert!(
+                task["Env"][legacy].is_null(),
+                "{legacy} should be gone (virtio-blk pivot)",
+            );
+        }
         // The wrapper reads memory + cpu count from these two env vars.
         // Resources.{CPU,MemoryMB} are advisory-only on raw_exec; the
         // wrapper would otherwise hardcode 1024M/2vCPU and lie to
@@ -3257,12 +3754,79 @@ mod tests {
         cfg.nomad_ch.subnet_second_octet = 50;
         let v = build_nomad_job_json(
             "zsbx-y", &cfg, 1,
-            Path::new("/k"), Path::new("/w"), Path::new("/u"),
+            Path::new("/w.img"), Path::new("/u.img"), "ab",
             "u", "p", "s",
         );
         assert_eq!(
             v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["ZSBX_SUBNET_BASE_OCTET"],
             "50"
+        );
+    }
+
+    /// B24 / R8-DEPLOY1 regression pin: the wrapper's cold-boot
+    /// env-validator (nomad-vm-wrapper.sh:153) hard-errors when
+    /// `ZSBX_SANDBOX_ID` is unset — cluster smoke at cf702457
+    /// failed 0/16 CREATE because the controller's Nomad task
+    /// template never set it. This test fails if the env entry is
+    /// ever removed, AND asserts the value passes the wrapper's
+    /// `[0-9a-zA-Z_]+` character-set validator (line 222) by
+    /// rejecting hyphens. The hyphenated Uuid form would corrupt
+    /// the kernel cmdline that embeds the value verbatim as
+    /// `SANDBOX_AGENT_SANDBOX_ID=<value>`.
+    #[test]
+    fn nomad_job_spec_includes_sandbox_id_env() {
+        let cfg = make_cfg();
+        // Use the same encoding the production caller uses
+        // (`sandbox_id.simple().to_string()`) so the test pins
+        // both that the entry exists AND that we pass it in the
+        // wrapper-validator-safe shape.
+        let sandbox_id = Uuid::now_v7();
+        let sandbox_id_simple = sandbox_id.simple().to_string();
+        let v = build_nomad_job_json(
+            "zsbx-r8",
+            &cfg,
+            3,
+            Path::new("/var/zeroship/ch/r8/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice",
+            "proj1",
+            &sandbox_id_simple,
+        );
+        let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
+        // 1. The entry exists and equals the passed value.
+        assert_eq!(
+            env["ZSBX_SANDBOX_ID"],
+            sandbox_id_simple,
+            "ZSBX_SANDBOX_ID must be wired through verbatim — wrapper \
+             line 153 hard-errors otherwise (B24 / R8-DEPLOY1)"
+        );
+        // 2. The value passes the wrapper's character-set
+        //    validator at line 222 (`*[!0-9a-zA-Z_]*` rejects
+        //    anything outside that class). simple() produces 32
+        //    hex chars, no hyphens — should pass.
+        let val = env["ZSBX_SANDBOX_ID"].as_str().expect("string env value");
+        assert!(
+            val.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "ZSBX_SANDBOX_ID='{val}' contains chars outside [0-9a-zA-Z_] — \
+             would be rejected by nomad-vm-wrapper.sh:222 and corrupt the \
+             kernel cmdline"
+        );
+        // 3. Defense-in-depth: Uuid::simple() is exactly 32 hex chars.
+        //    If a future refactor swaps to hyphenated `to_string()`
+        //    (36 chars w/ 4 hyphens) this catches it.
+        assert_eq!(
+            val.len(),
+            32,
+            "ZSBX_SANDBOX_ID should be Uuid::simple() form (32 hex chars), \
+             got {} chars: '{val}'",
+            val.len(),
+        );
+        assert!(
+            !val.contains('-'),
+            "ZSBX_SANDBOX_ID must not contain hyphens — \
+             nomad-vm-wrapper.sh:222 would reject"
         );
     }
 
@@ -3273,9 +3837,9 @@ mod tests {
             "zsbx-x",
             &cfg,
             1,
-            Path::new("/k"),
-            Path::new("/w"),
-            Path::new("/u"),
+            Path::new("/w.img"),
+            Path::new("/u.img"),
+            "ab",
             "u",
             "p",
             "s",
@@ -3284,6 +3848,82 @@ mod tests {
         // Round-trip — Nomad parses as JSON, so we should too.
         let _: serde_json::Value =
             serde_json::from_str(&s).expect("round-trip parse");
+    }
+
+    // ─── virtio-blk disk-image helpers (bug #11 pivot) ───────
+
+    /// `workspace_image_path` derivation: per-sandbox image lives
+    /// inside the sandbox's host_dir, always named `workspace.img`.
+    /// The wrapper attaches this as /dev/vdb.
+    #[test]
+    fn workspace_image_path_is_host_dir_join_workspace_img() {
+        let host_dir = Path::new("/var/zeroship/ch/abc123");
+        assert_eq!(
+            workspace_image_path(host_dir),
+            PathBuf::from("/var/zeroship/ch/abc123/workspace.img"),
+        );
+    }
+
+    /// `user_home_image_path` derivation: per-user image lives
+    /// under <user_home_dir_root>/<user_id>/home.img. The wrapper
+    /// attaches this as /dev/vdc. The path is reused across the
+    /// user's sandboxes; the controller idempotently mkfs's it
+    /// on first use only.
+    #[test]
+    fn user_home_image_path_is_root_user_home_img() {
+        let root = Path::new("/var/zeroship/ch/users");
+        assert_eq!(
+            user_home_image_path(root, "alice"),
+            PathBuf::from("/var/zeroship/ch/users/alice/home.img"),
+        );
+        // typed-id-shaped user ids round-trip identically.
+        assert_eq!(
+            user_home_image_path(root, "usr_01h5x2"),
+            PathBuf::from("/var/zeroship/ch/users/usr_01h5x2/home.img"),
+        );
+    }
+
+    /// Idempotent ext4 image creation: a second invocation against
+    /// the same path is a no-op (file already exists, helper
+    /// returns Ok without re-running truncate or mkfs). This is the
+    /// invariant per-user home.img depends on (every sandbox after
+    /// the user's first must NOT clobber their package caches).
+    ///
+    /// We can't exercise the success path of mkfs.ext4 in a unit
+    /// test (it needs root, requires e2fsprogs, and writes ~MiBs of
+    /// metadata). We can exercise the idempotency path: pre-create
+    /// the file, then call the helper and assert the file content
+    /// is unchanged.
+    #[test]
+    fn create_ext4_image_if_missing_skips_when_file_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-img-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("home.img");
+
+        // Pre-stamp a file with known contents that NEITHER truncate
+        // NOR mkfs.ext4 would leave intact. If the helper short-
+        // circuits on "exists", these bytes survive.
+        let sentinel = b"i-am-a-pre-existing-image-do-not-touch";
+        std::fs::write(&img, sentinel).unwrap();
+        let stat_before = std::fs::metadata(&img).unwrap();
+        let len_before = stat_before.len();
+
+        create_ext4_image_if_missing(&img, 20)
+            .expect("idempotent path must succeed");
+
+        let stat_after = std::fs::metadata(&img).unwrap();
+        assert_eq!(stat_after.len(), len_before, "len must not change");
+        assert_eq!(
+            std::fs::read(&img).unwrap(),
+            sentinel,
+            "contents must survive the idempotent call",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── path / id sanitizers (mirror k8s.rs unit tests) ────
@@ -3674,5 +4314,489 @@ mod tests {
             err.contains("not found"),
             "Err must mention not-found; got {err:?}"
         );
+    }
+
+    // ─── Bug #15: stop_preserving_state preserves host_dir ──────
+    //
+    // The snapshot teardown path (`teardown_source_for_snapshot` →
+    // `stop_preserving_state` → `stop_inner(.., false)`) MUST NOT
+    // remove the per-sandbox `host_dir`, because that directory owns
+    // `workspace.img` — the durable per-sandbox storage that the
+    // next wake's wrapper re-mounts. The wrapper's gate
+    // `[ ! -f $ZSBX_WORKSPACE_IMG ] && exit 1` (see
+    // `crates/sandbox/scripts/nomad-vm-wrapper.sh`) is what blew up
+    // empirically in the 2026-05-23 cluster smoke.
+    //
+    // This test exercises the full `stop_inner` path against a tiny
+    // TcpListener-backed Nomad mock that 404s every request — which
+    // both `stop_nomad_job` (DELETE accepts 200|404) and
+    // `wait_for_job_gone` (GET 404 → Ok) consume as "job is gone".
+    // `host_fence_timeout_secs = 0` bypasses the fence loop (the
+    // 500ms grace sleep is acceptable inside a #[compio::test]).
+    // We then assert: (1) the in-memory record is removed (steps
+    // 1-4 ran), and (2) the host_dir + its sentinel file survive
+    // (step 5 was skipped).
+
+    /// Spin up a TcpListener that responds 404 to every request
+    /// (with Content-Length: 0). Returns (port, stop_flag). The
+    /// thread exits when the flag flips. Reusing the existing
+    /// `spawn_mock_agent` style.
+    fn spawn_404_mock() -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf).unwrap_or(0);
+                        let resp =
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(resp.as_bytes());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, stop)
+    }
+
+    /// Process-unique tempdir (mirrors the
+    /// `crates/sandbox/src/snapshot_store.rs::fresh_root` pattern —
+    /// avoids pulling in the `tempfile` crate for one test).
+    fn fresh_host_dir(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "zsbx-b15-{}-{}-{}",
+            tag,
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[compio::test]
+    async fn stop_preserving_state_does_not_remove_host_dir() {
+        // 1. Spin up the 404-mock for Nomad. Every request → 404.
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        // 2. Build a cfg pointed at the mock + fence disabled.
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0; // skip /livez fence
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+
+        // 3. Hand-insert a sandbox record with a real on-disk host_dir
+        //    + sentinel file (stand-in for workspace.img).
+        let id = Uuid::now_v7();
+        let host_dir = fresh_host_dir("preserve");
+        let sentinel = host_dir.join("workspace.img");
+        std::fs::write(&sentinel, b"PRESERVE-ME").expect("write sentinel");
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_b15_preserve".into(),
+                job_id: "zsbx-b15-preserve".into(),
+                vm_index: 42,
+                host_dir: host_dir.clone(),
+                // agent_url 127.0.0.1:1 is unreachable; /shutdown
+                // errors but it's best-effort and ignored.
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+
+        // 4. Snapshot-teardown variant: MUST preserve host_dir.
+        let res = backend.stop_preserving_state(id).await;
+        // The /shutdown call to 127.0.0.1:1 errors → res is Err
+        // with a /shutdown blurb, but the post-conditions we care
+        // about are observed regardless.
+        let _ = res;
+
+        // 5a. In-memory state was reaped (step 4 ran).
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "stop_preserving_state must remove the in-memory record \
+             (step 4 of the teardown ran)"
+        );
+
+        // 5b. host_dir + sentinel file SURVIVE (step 5 was skipped —
+        //     this is the bug #15 invariant).
+        assert!(
+            host_dir.exists(),
+            "B15 regression: stop_preserving_state removed host_dir; \
+             the next wake's wrapper [ ! -f $ZSBX_WORKSPACE_IMG ] gate \
+             will exit 1"
+        );
+        assert!(
+            sentinel.exists(),
+            "B15 regression: stop_preserving_state removed \
+             host_dir/workspace.img; durable per-sandbox storage gone"
+        );
+        let contents = std::fs::read(&sentinel).expect("read sentinel");
+        assert_eq!(
+            contents,
+            b"PRESERVE-ME",
+            "B15 regression: workspace.img sentinel was modified"
+        );
+
+        // Cleanup.
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&host_dir);
+    }
+
+    #[compio::test]
+    async fn stop_for_real_removes_host_dir() {
+        // Mirror test: the existing `stop()` MUST still rm the
+        // host_dir under the same favourable conditions. This is the
+        // structural counterpart that proves the bool gate, not
+        // independent infra, is what makes the difference.
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0;
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let host_dir = fresh_host_dir("for-real");
+        let sentinel = host_dir.join("workspace.img");
+        std::fs::write(&sentinel, b"WIPE-ME").expect("write sentinel");
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_b15_forreal".into(),
+                job_id: "zsbx-b15-forreal".into(),
+                vm_index: 43,
+                host_dir: host_dir.clone(),
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+
+        let _ = backend.stop(id).await;
+
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "stop must remove the in-memory record"
+        );
+        // host_dir IS removed by the regular stop path under these
+        // favourable conditions (404-mock → job_confirmed_gone=true,
+        // fence_secs=0 → fence_passed=true).
+        assert!(
+            !host_dir.exists(),
+            "stop (the for-real variant) must remove host_dir when \
+             job_confirmed_gone && fence_passed; got dir still present"
+        );
+
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Safety net in case the assertion above changes: don't
+        // leak the dir.
+        let _ = std::fs::remove_dir_all(&host_dir);
+    }
+
+    // ─── C2 regression: persist.delete must be gated on
+    //     remove_host_dir, mirroring step 5's host_dir rm. The B15
+    //     fix gated host_dir cleanup but left persist.delete firing
+    //     unconditionally — latent today (wake doesn't read the
+    //     sealed record yet) but bites the moment sealed-record-
+    //     based key recovery lands. Source:
+    //     `docs/reviews/sandbox-snapshot-restore-deferred.md` C2.
+
+    #[compio::test]
+    async fn stop_preserving_state_does_not_delete_sealed_record() {
+        // 1. Spin up the 404-mock for Nomad (same fixture as the
+        //    B15 host_dir test). Every request → 404.
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        // 2. cfg pointed at the mock + fence disabled (so the
+        //    teardown reaches the persist.delete tail).
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0;
+
+        // 3. Build a real Persistence rooted at a fresh tempdir,
+        //    wire it into the backend, and seal a record for our
+        //    synthetic sandbox so the C2 invariant has something to
+        //    observe.
+        let persist_root = fresh_host_dir("c2-persist");
+        let key = crate::persist::AeadKey::from_bytes([0x5c; 32]);
+        let persist = Arc::new(crate::persist::Persistence::new(persist_root.clone(), key));
+        let backend = NomadCHBackend::new(cfg, Some(persist.clone())).expect("new");
+
+        let id = Uuid::now_v7();
+        let record = crate::persist::SealedAuth {
+            version: crate::persist::SEAL_VERSION,
+            sandbox_id: id.to_string(),
+            signing_key_bytes: [0xab; 32],
+            preview_secrets: None,
+            boot_id: Some(1),
+        };
+        persist.seal(id, &record).await.expect("seal sealed record");
+        let sealed_path = persist
+            .sealed_records_dir()
+            .join(crate::persist::seal_filename_for(id));
+        assert!(
+            sealed_path.exists(),
+            "test setup: persist.seal must place the sealed file on disk"
+        );
+
+        // 4. Hand-insert the in-memory sandbox record. The host_dir
+        //    is irrelevant to the C2 contract but stop_inner expects
+        //    a real path it can stat; reuse the B15 fixture style.
+        let host_dir = fresh_host_dir("c2-host");
+        let sentinel = host_dir.join("workspace.img");
+        std::fs::write(&sentinel, b"PRESERVE-ME").expect("write sentinel");
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_c2_preserve".into(),
+                job_id: "zsbx-c2-preserve".into(),
+                vm_index: 51,
+                host_dir: host_dir.clone(),
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+
+        // 5. Snapshot-teardown variant: MUST preserve the sealed
+        //    record on disk. /shutdown to 127.0.0.1:1 errors → Err
+        //    return is expected, but the post-conditions are what
+        //    we're pinning.
+        let _ = backend.stop_preserving_state(id).await;
+
+        // 5a. In-memory state was reaped (the rest of the teardown
+        //     ran — proves we hit the persist.delete branch, not an
+        //     early-return).
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "stop_preserving_state must still remove the in-memory \
+             record (steps 1-4 ran)"
+        );
+
+        // 5b. host_dir + sentinel survive (B15 invariant — sanity
+        //     check we didn't accidentally regress while wiring C2).
+        assert!(
+            host_dir.exists(),
+            "regression check: stop_preserving_state removed host_dir"
+        );
+        assert!(
+            sentinel.exists(),
+            "regression check: stop_preserving_state removed workspace.img"
+        );
+
+        // 5c. THE C2 INVARIANT: the sealed record survives.
+        assert!(
+            sealed_path.exists(),
+            "C2 regression: stop_preserving_state deleted the sealed \
+             record at {}; the next wake's sealed-record-based key \
+             recovery will fail",
+            sealed_path.display()
+        );
+
+        // 6. Now the for-real stop must finally reap the sealed
+        //    record (symmetric with how it reaps host_dir). Re-
+        //    insert the in-memory record since step 5 removed it.
+        backend.state.write().unwrap().insert(
+            id,
+            NomadChSandbox {
+                user_id: "usr_c2_preserve".into(),
+                job_id: "zsbx-c2-preserve".into(),
+                vm_index: 51,
+                host_dir: host_dir.clone(),
+                agent_url: "http://127.0.0.1:1".into(),
+                signing_key: make_sk(),
+            },
+        );
+        let _ = backend.stop(id).await;
+
+        assert!(
+            !sealed_path.exists(),
+            "stop (the for-real variant) MUST delete the sealed \
+             record at {}; got file still present",
+            sealed_path.display()
+        );
+
+        // Cleanup.
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&host_dir);
+        let _ = std::fs::remove_dir_all(&persist_root);
+    }
+
+    // ─── B19 regression: register_restored must install the
+    //     post-wake VM into the backend's state map so subsequent
+    //     exec/stop/delete find it (closing the cluster-smoke
+    //     2026-05-23 r4 "sandbox not found" + vm_index leak).
+    //     Source: docs/reviews/sandbox-snapshot-restore-deferred.md
+    //     B19.
+
+    #[compio::test]
+    async fn register_restored_inserts_into_state_map() {
+        // Construct a NomadCHBackend with no Persistence (this method
+        // never touches persist; only state.write().insert(...)).
+        // Call register_restored with synthetic values and assert the
+        // state map carries the matching NomadChSandbox.
+        let cfg = make_cfg();
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let user_id = "usr_b19_register".to_string();
+        let vm_index: u16 = 5;
+        let signing_seed = [0x9eu8; 32];
+        let expected_pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&signing_seed).verifying_key(),
+        );
+        let agent_url = backend.derive_agent_url(vm_index);
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                signing_seed,
+                agent_url.clone(),
+                user_id.clone(),
+            )
+            .expect("first register must succeed");
+
+        let guard = backend.state.read().unwrap();
+        let entry = guard
+            .get(&id)
+            .expect("B19 regression: register_restored did not insert into state map");
+        assert_eq!(entry.user_id, user_id);
+        assert_eq!(entry.vm_index, vm_index);
+        assert_eq!(entry.agent_url, agent_url);
+        // Job id matches the create-side derivation (zsbx-<simple>).
+        assert_eq!(entry.job_id, format!("zsbx-{}", id.simple()));
+        // signing_key is the same 32-byte seed we passed in.
+        let got_fp = sig::pubkey_fingerprint(&entry.signing_key.verifying_key());
+        assert_eq!(
+            got_fp, expected_pubkey_fp,
+            "B19 regression: register_restored stored a signing key \
+             whose pubkey fingerprint doesn't match the seed we handed in"
+        );
+        drop(guard);
+
+        // Second register against the same sandbox_id must Err: a
+        // live state-map entry MUST NOT be clobbered.
+        let err = backend
+            .register_restored(
+                id,
+                vm_index,
+                signing_seed,
+                agent_url,
+                user_id,
+            )
+            .expect_err("second register must reject (would clobber live record)");
+        assert!(
+            err.contains("already present"),
+            "B19 regression: clobber-refusal error did not surface 'already present'; got {err:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn restored_sandbox_is_stoppable_and_releases_vm_index() {
+        // Closes the second half of B19: the slot leak. Before the
+        // fix, stop_inner's idempotent-Ok branch fired without
+        // releasing the allocator because the post-wake sandbox was
+        // never in the state map. Register a restored sandbox via
+        // the new method, then stop it under favourable conditions,
+        // assert (a) the state-map entry is gone and (b) the
+        // vm_index is back in the allocator's free list (the
+        // create-side `alloc()` would hand it out again next).
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        // Use a parent dir under temp so the backend derives a host_dir
+        // we can pre-materialise (stop_inner step 5 will rm it).
+        let host_state_parent = fresh_host_dir("b19-stop");
+
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0;
+        cfg.nomad_ch.host_state_dir = host_state_parent.clone();
+        // Tight pool so we can assert the slot is reclaimed by index
+        // (after register/stop it should be the smallest free index).
+        cfg.nomad_ch.vm_index_floor = 4;
+        cfg.nomad_ch.vm_index_ceil = 6;
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        // Pre-reserve slot 4 so the next alloc() would hand out 5 if
+        // the free-list was empty. We restore into slot 4 and prove
+        // it lands back in the free-list after stop.
+        let allocator = backend.vm_index_allocator();
+        allocator
+            .lock()
+            .unwrap()
+            .reserve(4)
+            .expect("pre-reserve slot 4");
+
+        let id = Uuid::now_v7();
+        // Materialise the per-sandbox host_dir the backend derives
+        // (`<host_state_dir>/<sandbox-id>/`) so step 5's rm has
+        // something to wipe.
+        let host_dir = host_state_parent.join(id.to_string());
+        std::fs::create_dir_all(&host_dir).expect("mkdir host_dir");
+        std::fs::write(host_dir.join("workspace.img"), b"WIPE-ME")
+            .expect("write sentinel");
+
+        backend
+            .register_restored(
+                id,
+                4u16,
+                [0xb1; 32],
+                "http://127.0.0.1:1".into(),
+                "usr_b19_stop".into(),
+            )
+            .expect("register restored");
+
+        // Sanity: state map carries the entry, and slot 4 is held by
+        // the allocator (we pre-reserved it; register_restored does
+        // not touch the allocator).
+        assert!(
+            backend.state.read().unwrap().get(&id).is_some(),
+            "test setup: register_restored must place an entry"
+        );
+
+        // Now stop. Under the favourable 404-mock + fence_secs=0
+        // setup, the stop path reaches step 6 (vm_index release).
+        let _ = backend.stop(id).await;
+
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "B19 regression: stop on a registered-restored sandbox \
+             must remove the state-map entry"
+        );
+        // Slot 4 must be back in the allocator's free list. Round-
+        // trip via alloc(): it should hand out 4 first (freed slots
+        // win over `next`).
+        let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(
+            reclaimed, 4,
+            "B19 regression: vm_index slot 4 not returned to allocator \
+             after stop; got {reclaimed} (pool=[4,6], pre-reserved slot 4)"
+        );
+
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&host_state_parent);
     }
 }

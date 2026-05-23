@@ -24,9 +24,8 @@ use uuid::Uuid;
 
 use zeroship_sandbox::admin_handlers;
 use zeroship_sandbox::backend::{Backend, SandboxInfo};
-use zeroship_sandbox::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+use zeroship_sandbox::config::{ApiToken, SandboxConfig};
 use zeroship_sandbox::db::Database;
-use zeroship_sandbox::registry::SandboxRegistry;
 
 const TEST_URL_ENV: &str = "PG_TEST_URL";
 const DEFAULT_URL: &str = "postgres://postgres:zeroship@localhost:5440/zeroship";
@@ -36,47 +35,13 @@ fn test_url() -> String {
 }
 
 fn make_cfg(token: &str) -> SandboxConfig {
-    SandboxConfig {
-        port: 9091,
-        token: ApiToken::new(token),
-        backend: "nomad-ch".into(),
-        image: "img".into(),
-        workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
-        network: "n".into(),
-        memory_mb: 1024,
-        cpus: 2.0,
-        idle_timeout_secs: 1800,
-        max_lifetime_secs: 28800,
-        auto_pull: false,
-        k8s: K8sConfig {
-            namespace: "default".into(),
-            image: "i".into(),
-            runtime_class: "kvm-sandbox".into(),
-            ready_timeout_secs: 120,
-            use_port_forward: false,
-            port_forward_start: 18000,
-            user_home_size: "5Gi".into(),
-            user_home_storage_class: None,
-            startup_orphan_cleanup: false,
-        },
-        nomad_ch: NomadCHConfig {
-            nomad_addr: "http://127.0.0.1:4646".into(),
-            datacenter: "dc1".into(),
-            wrapper_path: std::path::PathBuf::from("/etc/zeroship/nomad-vm-wrapper.sh"),
-            runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
-            host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
-            user_home_dir_root: std::path::PathBuf::from("/var/zeroship/ch/users"),
-            vm_index_floor: 1,
-            vm_index_ceil: 200,
-            alloc_running_timeout_secs: 60,
-            agent_livez_timeout_secs: 30,
-            host_fence_timeout_secs: 30,
-            startup_orphan_cleanup: false,
-            subnet_second_octet: 99,
-        },
-        create_retry_max: 2,
-        create_retry_total_timeout_secs: 90,
-    }
+    // A7 (deferred): `token` is `pub(crate)`; out-of-crate construction
+    // goes through `SandboxConfig::new_fixture` (the only legal public
+    // constructor for a non-`from_env` config) + the `with_token`
+    // builder. Other fields stay `pub` so tests that vary
+    // `snapshot_enabled` / `port` continue to mutate via direct field
+    // assignment on the returned value.
+    SandboxConfig::new_fixture().with_token(ApiToken::new(token))
 }
 
 fn make_state(database: Option<Arc<Database>>) -> Arc<zeroship_sandbox::AppState> {
@@ -89,21 +54,21 @@ fn make_state_with_admin_token(
 ) -> Arc<zeroship_sandbox::AppState> {
     let cfg = make_cfg("ignored-creator-token");
     let backend = Backend::from_config(&cfg).expect("backend");
-    let registry = SandboxRegistry::new();
-    Arc::new(zeroship_sandbox::AppState {
-        config: cfg,
-        sandboxes: registry,
-        backend,
-        mint_rate_limiter: Some(
-            zeroship_sandbox::preview_share_handlers::MintRateLimiter::new(),
-        ),
-        database,
-        persist: None,
-        shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        // `admin_token` is `Zeroizing`-wrapped so the heap allocation
-        // is scrubbed on drop.
-        admin_token: admin_token.map(zeroize::Zeroizing::new),
-    })
+    // A5: `admin_token` is `pub(crate)`; out-of-crate construction
+    // goes through `AppState::new_fixture` + the `with_admin_token`
+    // builder (which rejects empty strings — the post-Round-4
+    // footgun).
+    // A6b: `database` is `pub(crate)`; set via `with_database` instead
+    // of struct-field assignment. `None` skips the builder entirely
+    // so the field stays at its `new_fixture` default.
+    let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
+    if let Some(db) = database {
+        state = state.with_database(db);
+    }
+    let state = state
+        .with_admin_token(admin_token)
+        .expect("admin_token must be non-empty when Some");
+    Arc::new(state)
 }
 
 // `AdminTokenFile`, `EnvGuard`, and `ENV_LOCK` are gone. The
@@ -145,6 +110,14 @@ macro_rules! make_app {
                 .service(
                     web::resource("/admin/hosts")
                         .route(web::get().to(admin_handlers::list_hosts)),
+                )
+                .service(
+                    web::resource("/admin/sandboxes/{id}/snapshot")
+                        .route(web::post().to(admin_handlers::snapshot_sandbox)),
+                )
+                .service(
+                    web::resource("/admin/sandboxes/{id}/wake")
+                        .route(web::post().to(admin_handlers::wake_sandbox)),
                 ),
         )
         .await
@@ -748,4 +721,106 @@ async fn admin_gdpr_delete_user_with_zero_sandboxes_writes_no_synthetic_id() {
         0,
         "no synthetic sandbox_id may have been written"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Phase A snapshot wiring smoke. Verifies the admin endpoint moves
+// past the 501 `feature_disabled` envelope when wiring is on.
+// ────────────────────────────────────────────────────────────────────
+
+fn make_state_with_snapshot_wiring(
+    admin_token: Option<String>,
+) -> Arc<zeroship_sandbox::AppState> {
+    let mut cfg = make_cfg("ignored-creator-token");
+    cfg.snapshot_enabled = true;
+    let backend = Backend::from_config(&cfg).expect("backend");
+    // Build the snapshot trio identically to AppState::from_config's
+    // production path, but with an in-memory L1 root so the test
+    // doesn't litter `/var/zeroship`.
+    let l1_root = std::env::temp_dir().join(format!(
+        "zsbx-admin-wiring-{}-{}",
+        std::process::id(),
+        Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&l1_root).unwrap();
+    let store: std::sync::Arc<dyn zeroship_sandbox::snapshot_store::SnapshotStore> =
+        std::sync::Arc::new(
+            zeroship_sandbox::snapshot_store::LocalDiskSnapshotStore::new(l1_root),
+        );
+    let ch: std::sync::Arc<dyn zeroship_sandbox::snapshot_handler::ChRemoteClient> =
+        std::sync::Arc::new(zeroship_sandbox::snapshot_handler::MockChRemoteClient::default());
+    let rb: std::sync::Arc<dyn zeroship_sandbox::restore_handler::RestoreBackend> =
+        std::sync::Arc::new(zeroship_sandbox::restore_handler::RealRestoreBackend::new(
+            cfg.nomad_ch.clone(),
+            cfg.memory_mb,
+            cfg.cpus,
+        ));
+    // A5: out-of-crate construction goes through `new_fixture` +
+    // `with_admin_token`.
+    // A6b: snapshot trio fields are `pub(crate)`; set via the
+    // `with_snapshot_store` / `with_ch_remote` / `with_restore_backend`
+    // builders instead of struct-field assignment.
+    let state = zeroship_sandbox::AppState::new_fixture(cfg, backend)
+        .with_snapshot_store(store)
+        .with_ch_remote(ch)
+        .with_restore_backend(rb);
+    let state = state
+        .with_admin_token(admin_token)
+        .expect("admin_token must be non-empty when Some");
+    Arc::new(state)
+}
+
+#[ntex::test]
+async fn snapshot_endpoint_moves_past_501_when_enabled() {
+    // Phase B smoke: with snapshot_enabled = true and the trio
+    // populated, the admin endpoint must not return 501
+    // feature_disabled. With `database = None` (test shape), the
+    // handler returns 503 because the wiring requires a real pg
+    // handle to read/CAS the row. Production flips the bit through
+    // `AppState::from_config` so the trio + db land together.
+    //
+    // Pre-Phase-B this returned 503 `wiring_partial` from a
+    // hand-rolled short-circuit; Phase B replaced that short-circuit
+    // with the real handler call, so the failure mode now comes from
+    // the handler's own preflight (database missing → 503).
+    let token = "admin-bearer-aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let state = make_state_with_snapshot_wiring(Some(token.to_string()));
+    let svc = make_app!(state);
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "Phase B wiring must move past 501 feature_disabled"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "expected 503 (database None in test shape); got {}",
+        resp.status()
+    );
+}
+
+#[ntex::test]
+async fn snapshot_endpoint_returns_501_when_disabled() {
+    // Confirms the off path is unchanged: snapshot_enabled = false
+    // → 501 feature_disabled, regardless of admin auth.
+    let token = "admin-bearer-bbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let state = make_state_with_admin_token(None, Some(token.to_string()));
+    let svc = make_app!(state);
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {token}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }

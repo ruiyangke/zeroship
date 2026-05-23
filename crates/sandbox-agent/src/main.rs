@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use ntex::web::middleware::DefaultHeaders;
-use ntex::web::{self, HttpResponse};
+use ntex::web::{self};
 use tracing::{error, info};
 
 use zeroship_sandbox_agent::{
@@ -84,6 +84,23 @@ async fn run() -> Result<(), String> {
     // (Reaper installed at the very top of `main` so SIGCHLD is
     // already blocked process-wide by the time we reach this point.)
     let state = state_from_env(workspace.clone())?;
+
+    // R7-S1: bind the agent's own sandbox_id before serving so the
+    // `/_clock_resync` handler can match controller-signed bodies
+    // against it. Hard error if neither `SANDBOX_AGENT_SANDBOX_ID`
+    // env nor `/run/keys/sandbox-id` mount provides it — without
+    // this, the handler would refuse every cluster wake (500) and
+    // the controller would surface that as a backend failure on the
+    // restore path. The wrapper script must inject one of these
+    // before launching the agent (rootfs v5 + controller v18 land
+    // the wire change together).
+    handlers::init_sandbox_id_from_env().map_err(|e| {
+        format!(
+            "R7-S1: cannot bind sandbox_id for /_clock_resync: {e}. \
+             Set SANDBOX_AGENT_SANDBOX_ID env or mount /run/keys/sandbox-id."
+        )
+    })?;
+
     let bind = format!("0.0.0.0:{port}");
     info!(bind = %bind, workspace = %workspace.display(), "agent listening");
 
@@ -168,6 +185,18 @@ async fn run() -> Result<(), String> {
             )
             .service(web::resource("/tree").route(web::get().to(handlers::file_tree)))
             .service(web::resource("/shutdown").route(web::post().to(handlers::shutdown)))
+            // Bug #22 fix: POST /_clock_resync — controller calls
+            // this once after CH `--restore` to repair the guest's
+            // frozen-at-snapshot `CLOCK_REALTIME`. The handler
+            // verifies the signature WITHOUT applying the strict
+            // 5-second skew window (the very window that the broken
+            // clock would otherwise blow through). Body is a tiny
+            // JSON `{"ts": <unix_secs>}`; cap at the small_limit
+            // generic budget.
+            .service(
+                web::resource("/_clock_resync")
+                    .route(web::post().to(handlers::clock_resync)),
+            )
             .service(
                 web::resource("/files/{path}*")
                     .state(web::types::PayloadConfig::default().limit(files_limit))
@@ -195,7 +224,9 @@ async fn run() -> Result<(), String> {
                     .route(web::route().to(proxy::proxy_http)),
             )
             .default_service(web::route().to(|| async {
-                HttpResponse::NotFound().json(&serde_json::json!({"error": "not found"}))
+                // A4 envelope (proposal § 10.0): `error` is the
+                // machine-readable kind, `message` is human prose.
+                handlers::not_found()
             }))
     })
     .bind(&bind)

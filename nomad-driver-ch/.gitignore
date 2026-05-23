@@ -1,0 +1,12 @@
+# Build artefacts
+/bin/
+nomad-driver-ch
+*.test
+*.out
+*.log
+
+# Editor / IDE
+.idea/
+.vscode/
+*.code-workspace
+*.swp

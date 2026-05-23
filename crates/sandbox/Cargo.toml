@@ -38,10 +38,12 @@ ed25519-dalek = { workspace = true }
 # crates/sandbox/src/persist.rs and the `docs/proposals/sandbox-preview-urls.md` § II.0.
 chacha20poly1305 = { workspace = true }
 base64 = { workspace = true }
-# Sync HTTP client (blocking) for talking to the in-VM agent. Run
-# inside `compio::runtime::spawn_blocking` so the ntex runtime
-# never blocks on it.
-ureq = { version = "2", default-features = false, features = ["json"] }
+# Sync HTTP client (blocking) for talking to the in-VM agent + GCS
+# snapshot artifact upload. Run inside `compio::runtime::spawn_blocking`
+# so the ntex runtime never blocks on it. The `tls` feature pulls
+# rustls + native-roots so we can talk HTTPS to storage.googleapis.com
+# (Phase A4: GcsSnapshotStore).
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 # WebSocket Upgrade parsing for the controller's preview-WS forwarder
 # (Phase 2). The forwarder is a tiny compio raw-TCP listener that
 # parses just the HTTP request-head with httparse, signs V1_1_Ws,
@@ -66,7 +68,7 @@ thiserror = { workspace = true }
 flume = { workspace = true }
 
 [dev-dependencies]
-ureq = { version = "2", default-features = false, features = ["json"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 
 [lints]
 workspace = true

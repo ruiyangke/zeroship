@@ -35,6 +35,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::error_envelope::{error_response, ErrorEnvelope};
 use crate::preview_share::{
     fresh_token_id, is_known_scope, mint, TokenClaims, MINT_TTL_MAX_SECS,
     MINT_TTL_MIN_SECS,
@@ -98,21 +99,19 @@ pub struct MintBody {
 }
 
 fn unauthorized() -> HttpResponse {
-    HttpResponse::Unauthorized().json(&json!({
-        "error": "unauthorized",
-        "code": "auth_required",
-    }))
+    error_response(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "authentication required",
+    )
 }
 
 fn not_found() -> HttpResponse {
-    HttpResponse::NotFound().json(&json!({
-        "error": "not found",
-        "code": "not_found",
-    }))
+    error_response(StatusCode::NOT_FOUND, "not_found", "not found")
 }
 
 fn bad_request(code: &'static str, msg: &str) -> HttpResponse {
-    HttpResponse::BadRequest().json(&json!({"error": msg, "code": code}))
+    error_response(StatusCode::BAD_REQUEST, code, msg.to_string())
 }
 
 fn unix_now() -> u64 {
@@ -210,11 +209,15 @@ pub async fn mint_share(
         .as_ref()
         .expect("mint_rate_limiter wired in AppState");
     if !rl.take(id, now) {
-        return HttpResponse::TooManyRequests().json(&json!({
-            "error": "rate limited",
-            "code": "rate_limited",
+        return ErrorEnvelope::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "share token mint rate limit exceeded (100 per sandbox per day)",
+        )
+        .with_extra(json!({
             "retry_after_secs": 86_400 - (now % 86_400),
-        }));
+        }))
+        .into_response();
     }
 
     // Mint a secret ring on first use; idempotent for the rest.
@@ -473,12 +476,16 @@ pub async fn revoke_one_share(
     if let Err(r) = authorize_owner(&req, &state, &sandbox_id_str, port) {
         return r;
     }
-    HttpResponse::build(StatusCode::NOT_IMPLEMENTED).json(&json!({
-        "error": "per-token revoke not implemented in v1",
-        "code": "deferred-to-phase-5",
+    ErrorEnvelope::new(
+        StatusCode::NOT_IMPLEMENTED,
+        "deferred_to_phase_5",
+        "per-token revoke not implemented in v1",
+    )
+    .with_extra(json!({
         "note": "use DELETE /sandboxes/{id}/preview/{port}/share to rotate the \
                  whole secret; this rotates ALL tokens at once.",
     }))
+    .into_response()
 }
 
 /// Render a sandbox slug for the public preview hostname. Mirrors
@@ -531,5 +538,43 @@ mod tests {
             "11111111222233334444555555555555"
         );
         assert_eq!(sandbox_slug("ABC-123"), "abc123");
+    }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ─────────────────
+    //
+    // Coverage for preview_share_handlers.rs error sites. Pre-A4
+    // these emitted `{"error":<prose>,"code":<code>}`; now they
+    // funnel through `error_response` / `ErrorEnvelope` carrying
+    // `error` (code) + `message` (human prose) per §10.0.
+
+    use crate::error_envelope::test_helpers::body_json;
+
+    #[compio::test]
+    async fn a4_share_unauthorized_envelope() {
+        let resp = unauthorized();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+        assert!(body.get("code").is_none(), "duplicate `code` field removed");
+    }
+
+    #[compio::test]
+    async fn a4_share_not_found_envelope() {
+        let resp = not_found();
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert!(body["message"].is_string());
+        assert!(body.get("code").is_none());
+    }
+
+    #[compio::test]
+    async fn a4_share_bad_request_envelope() {
+        let resp = bad_request("invalid_expires", "expires_in_secs out of range");
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_expires");
+        assert_eq!(body["message"], "expires_in_secs out of range");
     }
 }

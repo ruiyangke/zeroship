@@ -829,7 +829,7 @@ mod tests {
                 user_home_dir_root: PathBuf::from("/var/zeroship/ch/users"),
                 vm_index_floor: 1,
                 vm_index_ceil: 155,
-                alloc_running_timeout_secs: 60,
+                alloc_running_timeout_secs: 120,
                 agent_livez_timeout_secs: 30,
                 host_fence_timeout_secs: 30,
                 startup_orphan_cleanup: false,
@@ -837,6 +837,12 @@ mod tests {
             },
             create_retry_max: 2,
             create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from("/var/zeroship/ch/snapshots"),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
         };
         let backend = DockerBackend::new(cfg, None);
         let id = Uuid::now_v7();

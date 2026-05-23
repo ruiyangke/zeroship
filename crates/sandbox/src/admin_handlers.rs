@@ -62,10 +62,12 @@
 use std::sync::Arc;
 
 use compio_postgres::Pool;
+use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
+use crate::error_envelope::{error_response, ErrorEnvelope};
 use crate::AppState;
 
 type State = web::types::State<Arc<AppState>>;
@@ -118,15 +120,20 @@ fn constant_time_bearer_eq(presented: &[u8], expected: &[u8]) -> bool {
 /// amplification and ensures chmod/read failures fail at boot rather
 /// than on the auth path.
 ///
-/// Defense-in-depth empty-token guard.
-/// `AppState.admin_token` is a `pub` field; if anything constructs
-/// `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
-/// the constant-time compare against an empty `Authorization: Bearer `
-/// presented bytes would PASS — silent unauthenticated admin access.
-/// The boot loader (`load_admin_token`) already rejects empty tokens
-/// loudly, so production code never reaches this branch, but tests
-/// construct `AppState` directly and the type system advertises the
-/// footgun. Treat empty-`expected` as "no token configured" → 401.
+/// Round-4 / IMPORTANT #2 + A5 (api-surface-2026-05-24-r1):
+/// defense-in-depth empty-token guard. The post-Round-4 footgun was
+/// that `AppState.admin_token` was a `pub` field — anyone could
+/// build `AppState { admin_token: Some(Zeroizing::new(String::new())), .. }`
+/// and the constant-time compare against an empty
+/// `Authorization: Bearer ` presented bytes would PASS (silent
+/// unauthenticated admin access). A5 closed the front door by
+/// restricting the field to `pub(crate)` and routing all writes
+/// through `AppState::with_admin_token`, which rejects empty
+/// strings. The boot loader (`load_admin_token`) also rejects
+/// empty tokens loudly, so production never reaches the branch
+/// below. We KEEP this check as defense-in-depth for any future
+/// in-crate setter that bypasses the builder — treat empty
+/// `expected` as "no token configured" → 401.
 pub(crate) fn admin_check(
     req: &HttpRequest,
     state: &AppState,
@@ -135,8 +142,11 @@ pub(crate) fn admin_check(
     let expected: &Zeroizing<String> = match state.admin_token.as_ref() {
         Some(t) => t,
         None => {
-            return Err(HttpResponse::ServiceUnavailable()
-                .json(&serde_json::json!({"error": "admin api disabled"})));
+            return Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admin_api_disabled",
+                "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH not configured)",
+            ));
         }
     };
     let expected_bytes: &[u8] = expected.as_bytes();
@@ -165,23 +175,66 @@ pub(crate) fn admin_check(
 }
 
 fn unauthorized() -> HttpResponse {
-    HttpResponse::Unauthorized()
-        .json(&serde_json::json!({"error": "unauthorized"}))
+    error_response(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "authentication required",
+    )
 }
 
-fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
+/// Render a §10.0-compliant error envelope for admin endpoints.
+///
+/// `msg` is the user-visible message; pass ONLY values that are safe
+/// to ship over the wire (typed-ids, fixed prose, structural status
+/// names). For raw driver-error strings — `compio_postgres::Error`
+/// renders host:port + schema + SQL fragments, `ch-remote` errors
+/// render binary paths — funnel through [`err_safe`] instead, which
+/// logs the raw error via `tracing::error!` and returns a sanitized
+/// envelope.
+fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse {
     let s = msg.into();
     if status >= 500 {
-        tracing::error!(status, error = %s, "sandbox/admin");
+        tracing::error!(status, code, error = %s, "sandbox/admin");
     }
-    let mut resp = match status {
-        400 => HttpResponse::BadRequest(),
-        404 => HttpResponse::NotFound(),
-        500 => HttpResponse::InternalServerError(),
-        503 => HttpResponse::ServiceUnavailable(),
-        _ => HttpResponse::InternalServerError(),
-    };
-    resp.json(&serde_json::json!({"error": s}))
+    let sc = StatusCode::from_u16(status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    error_response(sc, code, s)
+}
+
+/// Sanitizing variant of [`err`]. Logs the raw error to operator
+/// observability (journald via `tracing::error!`) but renders a
+/// FIXED `public_msg` into the wire-visible `message` field.
+///
+/// Per security review r4 (S4): A4's uniform envelope migration
+/// funneled 30+ admin sites' `format!("query: {e}")` into the
+/// `message` field. `compio_postgres::Error` carries host:port,
+/// schema names, and sometimes SQL fragments / row values; the
+/// admin endpoint IS admin-token-gated, but admin-token holders
+/// shouldn't see internal infrastructure details either (defense
+/// in depth — the threat model is the leak surface, not the
+/// authorization gate). The `code` field is the stable contract;
+/// the `message` should be safe prose.
+///
+/// Operators recover the raw error from journald keyed by the
+/// `tracing::error!` line below. The `code` field on the wire is
+/// the stable client contract — clients still branch on it.
+fn err_safe(
+    status: u16,
+    code: &'static str,
+    public_msg: &'static str,
+    raw: impl std::fmt::Display,
+) -> HttpResponse {
+    if status >= 500 {
+        tracing::error!(
+            status,
+            code,
+            error = %raw,
+            "sandbox/admin: sanitized error (raw not on wire)"
+        );
+    }
+    let sc = StatusCode::from_u16(status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    error_response(sc, code, public_msg)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -223,10 +276,10 @@ pub struct AdminSandboxRow {
 
 async fn open_app_pool(state: &AppState) -> Result<Pool, HttpResponse> {
     let Some(db) = state.database.as_ref() else {
-        return Err(err(503, "pg integration disabled"));
+        return Err(err(503, "pg_disabled", "pg integration disabled"));
     };
     db.pool_app().await.map_err(|e| {
-        err(503, format!("admin api: pool_app: {e}"))
+        err_safe(503, "pg_pool_unavailable", "database unavailable", e)
     })
 }
 
@@ -261,23 +314,23 @@ pub async fn list_all_sandboxes(
     // a malformed filter results in 400 rather than a 500 from pg.
     if let Some(ref u) = q.user_id {
         if zeroship_core::typed_id::parse_with_prefix(u, "usr").is_err() {
-            return err(400, "invalid user_id filter");
+            return err(400, "invalid_user_id", "invalid user_id filter");
         }
     }
     if let Some(ref h) = q.host_id {
         if zeroship_core::typed_id::parse_with_prefix(h, "hst").is_err() {
-            return err(400, "invalid host_id filter");
+            return err(400, "invalid_host_id", "invalid host_id filter");
         }
     }
     if let Some(ref s) = q.status {
         if !is_known_status(s) {
-            return err(400, "invalid status filter");
+            return err(400, "invalid_status", "invalid status filter");
         }
     }
 
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
 
     // Single SQL with three optional WHERE predicates; pg's planner
@@ -303,7 +356,7 @@ pub async fn list_all_sandboxes(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
 
     let mut out: Vec<AdminSandboxRow> = Vec::with_capacity(rows.len());
@@ -375,15 +428,15 @@ pub async fn get_sandbox_detail(
     let raw = path.into_inner();
     let uuid = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
         Ok(u) => u,
-        Err(_) => return err(400, "invalid sandbox_id"),
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
     };
     let Some(db) = state.database.as_ref() else {
-        return err(503, "pg integration disabled");
+        return err(503, "pg_disabled", "pg integration disabled");
     };
     let row = match db.get_sandbox_row(uuid).await {
         Ok(Some(r)) => r,
-        Ok(None) => return err(404, "sandbox not found"),
-        Err(e) => return err(500, format!("get_sandbox_row: {e}")),
+        Ok(None) => return err(404, "sandbox_not_found", "sandbox not found"),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
 
     let in_memory_info = state.sandboxes.get(&uuid);
@@ -432,7 +485,7 @@ pub async fn list_user_sandboxes(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let mut q = query.into_inner();
     q.user_id = Some(user_id);
@@ -455,7 +508,7 @@ async fn list_all_sandboxes_inner(
     let offset = clamp_offset(q.offset);
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let rows = client
         .query(
@@ -477,7 +530,7 @@ async fn list_all_sandboxes_inner(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
     let mut out: Vec<AdminSandboxRow> = Vec::with_capacity(rows.len());
     for r in rows {
@@ -525,7 +578,7 @@ pub async fn list_user_shares(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let pool = match open_app_pool(&state).await {
         Ok(p) => p,
@@ -533,7 +586,7 @@ pub async fn list_user_shares(
     };
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let rows = client
         .query(
@@ -555,7 +608,7 @@ pub async fn list_user_shares(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
     let out: Vec<serde_json::Value> = rows
         .into_iter()
@@ -599,7 +652,7 @@ pub async fn list_hosts(
     };
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let rows = client
         .query(
@@ -616,7 +669,7 @@ pub async fn list_hosts(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err_safe(500, "pg_query_failed", "database error", e),
     };
     let out: Vec<serde_json::Value> = rows
         .into_iter()
@@ -662,7 +715,7 @@ pub async fn export_user(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let pool = match open_app_pool(&state).await {
         Ok(p) => p,
@@ -670,17 +723,17 @@ pub async fn export_user(
     };
     let mut client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_unavailable", "database unavailable", e),
     };
     let tx = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return err(500, format!("begin tx: {e}")),
+        Err(e) => return err_safe(500, "pg_tx_begin_failed", "database error", e),
     };
     if let Err(e) = tx
         .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
     {
-        return err(500, format!("set tx isolation: {e}"));
+        return err_safe(500, "pg_tx_isolation_failed", "database error", e);
     }
 
     let sandboxes_json = match tx
@@ -692,7 +745,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export sandboxes: {e}")),
+        Err(e) => return err_safe(500, "export_sandboxes_failed", "database error", e),
     };
     let shares_json = match tx
         .query_one(
@@ -705,7 +758,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export shares: {e}")),
+        Err(e) => return err_safe(500, "export_shares_failed", "database error", e),
     };
     // Cap events at 10k. Order by ts so the truncation is a tail-cut
     // (operator gets the most recent 10k).
@@ -738,7 +791,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export events: {e}")),
+        Err(e) => return err_safe(500, "export_events_failed", "database error", e),
     };
     let events_count: i64 = match tx
         .query_one(
@@ -750,7 +803,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get(0),
-        Err(e) => return err(500, format!("count events: {e}")),
+        Err(e) => return err_safe(500, "count_events_failed", "database error", e),
     };
     let deleted_json = match tx
         .query_one(
@@ -761,10 +814,10 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export tombstones: {e}")),
+        Err(e) => return err_safe(500, "export_tombstones_failed", "database error", e),
     };
     if let Err(e) = tx.commit().await {
-        return err(500, format!("commit: {e}"));
+        return err_safe(500, "pg_commit_failed", "database error", e);
     }
 
     let exported_at_secs = std::time::SystemTime::now()
@@ -829,24 +882,24 @@ pub async fn delete_user(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let Some(db) = state.database.as_ref() else {
-        return err(503, "pg integration disabled");
+        return err(503, "pg_disabled", "pg integration disabled");
     };
 
     // Use the gdpr-role pool. Single connection — the cascade is one TX.
     let gdpr_pool = match db.pool_gdpr().await {
         Ok(p) => p,
-        Err(e) => return err(503, format!("pool_gdpr: {e}")),
+        Err(e) => return err_safe(503, "pg_pool_gdpr_unavailable", "database unavailable", e),
     };
     let mut client = match gdpr_pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(500, format!("pool_gdpr acquire: {e}")),
+        Err(e) => return err_safe(500, "pg_pool_gdpr_acquire_failed", "database unavailable", e),
     };
     let tx = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return err(500, format!("begin tx: {e}")),
+        Err(e) => return err_safe(500, "pg_tx_begin_failed", "database error", e),
     };
 
     // Cross-user-leak guard: the `WHERE user_id = $1` predicate is on
@@ -861,7 +914,7 @@ pub async fn delete_user(
         .await
     {
         Ok(rows) => rows.into_iter().map(|r| r.get::<_, String>(0)).collect(),
-        Err(e) => return err(500, format!("collect ids: {e}")),
+        Err(e) => return err_safe(500, "gdpr_collect_ids_failed", "database error", e),
     };
 
     let events_deleted: i64 = match tx
@@ -872,7 +925,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("delete events: {e}")),
+        Err(e) => return err_safe(500, "gdpr_delete_events_failed", "database error", e),
     };
     let shares_deleted: i64 = match tx
         .execute(
@@ -885,7 +938,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("delete shares: {e}")),
+        Err(e) => return err_safe(500, "gdpr_delete_shares_failed", "database error", e),
     };
     let tombstoned: i64 = match tx
         .execute(
@@ -899,7 +952,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("tombstone: {e}")),
+        Err(e) => return err_safe(500, "gdpr_tombstone_failed", "database error", e),
     };
     let sandboxes_deleted: i64 = match tx
         .execute(
@@ -909,7 +962,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("delete sandboxes: {e}")),
+        Err(e) => return err_safe(500, "gdpr_delete_sandboxes_failed", "database error", e),
     };
     // Audit row inside the same TX. The sandbox_gdpr role has INSERT
     // grant on events for exactly this audit row (§ 13.2).
@@ -947,11 +1000,11 @@ pub async fn delete_user(
         )
         .await
     {
-        return err(500, format!("audit insert: {e}"));
+        return err_safe(500, "audit_insert_failed", "database error", e);
     }
 
     if let Err(e) = tx.commit().await {
-        return err(500, format!("commit: {e}"));
+        return err_safe(500, "pg_commit_failed", "database error", e);
     }
 
     // Sealed-record cleanup outside the TX. Best-effort + idempotent —
@@ -1001,6 +1054,356 @@ async fn unlink_sealed_for_user(state: &AppState, sandbox_ids: &[String]) -> u64
         }
     }
     unlinked
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Snapshot/restore admin handlers.
+//
+// Lifecycle:
+//   - PR 2c: 501 `feature_disabled` stubs
+//   - PR 3a-h: db + store + handler + sweep modules landed (unwired)
+//   - Phase A: wired `state.snapshot_store / ch_remote /
+//     restore_backend` into AppState; left a 503 `wiring_partial`
+//     short-circuit because `SourceVmOps` was not yet exposed from
+//     `NomadCHBackend`.
+//   - Phase B (this commit): `Backend::lookup_source_vm_ops` returns
+//     a resolved `SourceVmOpsHandle { api_socket, vm_index, alloc_dir }`
+//     so the snapshot handler can run end to end. The wake handler
+//     forwards to `restore_handler::restore_sandbox`. Cold-boot stays
+//     a 501 stub until the cold-boot orchestrator ships.
+// ────────────────────────────────────────────────────────────────────
+
+use crate::backend::nomad_ch::SourceVmOpsHandle;
+use crate::snapshot_handler::{
+    self, snap_stage_dir, SnapshotHandlerError, SourceVmOps,
+};
+use crate::restore_handler::{self, RestoreHandlerError};
+use uuid::Uuid;
+
+fn feature_disabled() -> HttpResponse {
+    // 501 Not Implemented — matches § 10.0's `feature_disabled` envelope.
+    error_response(
+        StatusCode::NOT_IMPLEMENTED,
+        "feature_disabled",
+        "snapshot/restore feature is not enabled (SANDBOX_SNAPSHOT_ENABLED=false)",
+    )
+}
+
+/// Wire envelope for snapshot/wake errors. Maps the typed handler
+/// errors to the response shapes documented in proposal § 10.0.
+fn map_snapshot_error(e: SnapshotHandlerError) -> HttpResponse {
+    match e {
+        SnapshotHandlerError::FeatureDisabled => feature_disabled(),
+        SnapshotHandlerError::StateMismatch { current } => ErrorEnvelope::new(
+            StatusCode::CONFLICT,
+            "state_mismatch",
+            format!("sandbox is in state {current:?}; snapshot requires \"running\""),
+        )
+        .with_extra(serde_json::json!({
+            "current": current,
+            "expected": "running",
+        }))
+        .into_response(),
+        SnapshotHandlerError::NotFound(id) => ErrorEnvelope::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "sandbox not found",
+        )
+        .with_extra(serde_json::json!({"sandbox_id": id}))
+        .into_response(),
+        SnapshotHandlerError::ChRemote(s) => {
+            err_safe(500, "ch_remote_failed", "hypervisor error", s)
+        }
+        SnapshotHandlerError::Store(s) => {
+            err_safe(500, "snapshot_store_failed", "snapshot store error", s)
+        }
+        SnapshotHandlerError::Database(d) => {
+            err_safe(500, "database_failed", "database error", d)
+        }
+        SnapshotHandlerError::Internal(s) => {
+            err_safe(500, "internal_error", "internal error", s)
+        }
+    }
+}
+
+fn map_restore_error(e: RestoreHandlerError) -> HttpResponse {
+    match e {
+        RestoreHandlerError::FeatureDisabled => feature_disabled(),
+        RestoreHandlerError::StateMismatch { current } => ErrorEnvelope::new(
+            StatusCode::CONFLICT,
+            "state_mismatch",
+            format!("sandbox is in state {current:?}; wake requires \"snapshotted\""),
+        )
+        .with_extra(serde_json::json!({
+            "current": current,
+            "expected": "snapshotted",
+        }))
+        .into_response(),
+        RestoreHandlerError::NotFound(id) => ErrorEnvelope::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "sandbox not found",
+        )
+        .with_extra(serde_json::json!({"sandbox_id": id}))
+        .into_response(),
+        RestoreHandlerError::VmIndexUnavailable { requested } => ErrorEnvelope::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "vm_index_unavailable",
+            "no vm_index available to host the restored sandbox",
+        )
+        .with_extra(serde_json::json!({"requested": requested}))
+        .into_response(),
+        RestoreHandlerError::SnapshotCorrupt => {
+            err(500, "snapshot_corrupt", "snapshot_corrupt: row marked snapshotted_suspect")
+        }
+        RestoreHandlerError::Store(s) => {
+            err_safe(500, "snapshot_store_failed", "snapshot store error", s)
+        }
+        RestoreHandlerError::Backend(s) => {
+            err_safe(500, "restore_backend_failed", "restore backend error", s)
+        }
+        RestoreHandlerError::ConfigRewrite(s) => {
+            err_safe(500, "config_rewrite_failed", "config rewrite error", s)
+        }
+        RestoreHandlerError::Database(d) => {
+            err_safe(500, "database_failed", "database error", d)
+        }
+        RestoreHandlerError::Internal(s) => {
+            err_safe(500, "internal_error", "internal error", s)
+        }
+    }
+}
+
+/// Adapter: wrap the resolved `SourceVmOpsHandle` into a
+/// `SourceVmOps` trait impl that the snapshot handler consumes.
+///
+/// The trait's `locate_*` methods are sync and ignore the `sandbox_id`
+/// arg because we resolve the handle ahead of time (the lookup is
+/// async and HTTP-bound to Nomad).
+///
+/// `teardown_source` is a no-op here — the admin handler tears down
+/// the source explicitly after `snapshot_sandbox` returns success
+/// (see `snapshot_sandbox` below). Folding the teardown into the
+/// trait would force a sync→async bridge inside the snapshot handler;
+/// keeping it post-handler keeps both layers boring.
+struct ResolvedSourceVmOps {
+    handle: SourceVmOpsHandle,
+}
+
+impl SourceVmOps for ResolvedSourceVmOps {
+    fn locate_api_socket(&self, _sandbox_id: Uuid) -> Option<std::path::PathBuf> {
+        Some(self.handle.api_socket.clone())
+    }
+
+    fn locate_vm_index(&self, _sandbox_id: Uuid) -> Option<i16> {
+        i16::try_from(self.handle.vm_index).ok()
+    }
+
+    fn teardown_source(&self, _sandbox_id: Uuid) -> Result<(), String> {
+        // No-op: the admin handler runs the async backend teardown
+        // after `snapshot_sandbox` returns, so the snapshot handler
+        // doesn't need a sync→async bridge. The handler logs a
+        // warning if this returns Err, which we never do.
+        Ok(())
+    }
+}
+
+pub async fn snapshot_sandbox(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    if !state.config.snapshot_enabled {
+        return feature_disabled();
+    }
+    let raw = path.into_inner();
+    let sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
+    };
+
+    // The store + ch + db handles are present iff snapshot_enabled.
+    let (Some(store), Some(ch), Some(db)) = (
+        state.snapshot_store.as_ref(),
+        state.ch_remote.as_ref(),
+        state.database.as_ref(),
+    ) else {
+        return err(503, "snapshot_wiring_unavailable", "snapshot wiring not initialized (database/store/ch_remote None)");
+    };
+
+    // Resolve the source VM identity BEFORE the destructive CAS so a
+    // missing alloc / unreachable Nomad surfaces as 503 with the row
+    // still `running`. (snapshot_handler also re-checks this inside
+    // its own resolve step but that one is sync — the async lookup
+    // here gives operators a clearer error path.)
+    let handle = match state.backend.lookup_source_vm_ops(sandbox_id).await {
+        Ok(h) => h,
+        Err(e) => {
+            // Per security review r4 (S4): the raw error here can
+            // carry Nomad addresses / internal alloc ids; log it but
+            // return a fixed public message. The `code` field is the
+            // stable wire contract.
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "admin/snapshot: lookup_source_vm_ops failed; refusing snapshot"
+            );
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "source_vm_unavailable",
+                "source VM unavailable",
+            );
+        }
+    };
+
+    let stage_dir = snap_stage_dir(&state.config.snapshot_l1_root, sandbox_id);
+    let vm_ops = ResolvedSourceVmOps { handle };
+    let outcome = snapshot_handler::snapshot_sandbox(
+        db.as_ref(),
+        std::sync::Arc::clone(store),
+        std::sync::Arc::clone(ch),
+        &vm_ops,
+        sandbox_id,
+        stage_dir,
+        state.config.snapshot_enabled,
+    )
+    .await;
+    match outcome {
+        Ok(o) => {
+            // Source teardown — best-effort, post-snapshot, DETACHED.
+            //
+            // R6-P1 fix (perf-r6): the pg row already reads `snapshotted`
+            // (the CAS inside `snapshot_handler::snapshot_sandbox` has
+            // committed by this point), so the snapshot itself is durable
+            // regardless of what the teardown does. The teardown's cost
+            // is dominated by Nomad alloc-terminal wait (up to 30s
+            // `wait_for_job_gone` + up to ~20s host_fence — see
+            // `backend::nomad_ch::stop_inner` steps 3–4), which kept
+            // snapshot p50 around 50s when awaited inline. Detaching it
+            // returns 200 immediately and lets the teardown run in
+            // background.
+            //
+            // Race safety: the vm_index_allocator is shared
+            // (`Arc<Mutex<VmIndexAllocator>>`, B19 wiring), so a wake
+            // racing the teardown will see `reserve(vm_index)` reject
+            // with "vm_index N already reserved" until the teardown's
+            // `release()` fires after host_fence clears. This is the
+            // same pre-existing race the sweep-path teardown already
+            // exposes (`sweep.rs::idle-eviction`); detaching does not
+            // create new shared state. A teardown failure here leaves a
+            // runtime-orphan that the next-boot orphan-prune sweeps.
+            //
+            // Errors surface as `tracing::error!` (not warn) — the
+            // operator has no other signal that the background teardown
+            // failed, so it must be loud in the logs.
+            let state_for_teardown = Arc::clone(&state);
+            compio::runtime::spawn(async move {
+                if let Err(e) = state_for_teardown
+                    .backend
+                    .teardown_source_for_snapshot(sandbox_id)
+                    .await
+                {
+                    tracing::error!(
+                        sandbox_id = %sandbox_id,
+                        error = %e,
+                        "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
+                    );
+                }
+            })
+            .detach();
+            HttpResponse::Ok().json(&serde_json::json!({
+                "sandbox_id": format!(
+                    "sbx_{}",
+                    zeroship_core::typed_id::uuid_to_base62(&o.sandbox_id)
+                ),
+                "generation": o.generation,
+                "vm_index": o.vm_index,
+                "snapshot": {
+                    "artifact_path": o.metadata.artifact_path,
+                    "sha256_hex": hex::encode(o.metadata.sha256),
+                    "ch_version": o.metadata.ch_version,
+                    "bytes": o.metadata.bytes,
+                },
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "admin/snapshot: handler failed"
+            );
+            map_snapshot_error(e)
+        }
+    }
+}
+
+pub async fn wake_sandbox(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<String>,
+) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    if !state.config.snapshot_enabled {
+        return feature_disabled();
+    }
+    let raw = path.into_inner();
+    let sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
+    };
+    let (Some(store), Some(rb), Some(db)) = (
+        state.snapshot_store.as_ref(),
+        state.restore_backend.as_ref(),
+        state.database.as_ref(),
+    ) else {
+        return err(
+            503,
+            "wake_wiring_unavailable",
+            "wake wiring not initialized (database/store/restore_backend None)",
+        );
+    };
+    let outcome = restore_handler::restore_sandbox(
+        db.as_ref(),
+        std::sync::Arc::clone(store),
+        std::sync::Arc::clone(rb),
+        state.persist.as_deref(),
+        sandbox_id,
+        state.config.snapshot_enabled,
+    )
+    .await;
+    match outcome {
+        Ok(o) => HttpResponse::Ok().json(&serde_json::json!({
+            "sandbox_id": format!(
+                "sbx_{}",
+                zeroship_core::typed_id::uuid_to_base62(&o.sandbox_id)
+            ),
+            "vm_index": o.vm_index,
+            "generation": o.generation,
+        })),
+        Err(e) => {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "admin/wake: handler failed"
+            );
+            map_restore_error(e)
+        }
+    }
+}
+
+pub async fn cold_boot_sandbox(req: HttpRequest, state: State) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    // Cold-boot is a separate state machine (no source VM, no
+    // memory snapshot — it's a fresh boot from the rootfs). Stays
+    // 501 until that orchestrator ships.
+    feature_disabled()
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1108,5 +1511,259 @@ mod tests {
         let presented = vec![0u8; 64];
         let expected = b"y";
         assert!(!constant_time_bearer_eq(&presented, expected));
+    }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ─────────────────
+    //
+    // Coverage for admin_handlers.rs error sites. ~50 call sites
+    // funnel through `err()`, `feature_disabled`, or
+    // `map_{snapshot,restore}_error`; testing each helper once is
+    // sufficient to prevent a regression that drops the `message`
+    // field at every call site that flows through it.
+
+    use crate::error_envelope::test_helpers::body_json;
+    use crate::restore_handler::RestoreHandlerError;
+    use crate::snapshot_handler::SnapshotHandlerError;
+
+    #[compio::test]
+    async fn a4_admin_unauthorized_envelope() {
+        let resp = unauthorized();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+    }
+
+    #[compio::test]
+    async fn a4_admin_err_helper_envelope_all_statuses() {
+        let resp = err(400, "invalid_user_id", "invalid user_id filter");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_user_id");
+        assert_eq!(body["message"], "invalid user_id filter");
+
+        let resp = err(404, "sandbox_not_found", "sandbox not found");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "sandbox_not_found");
+        assert_eq!(body["message"], "sandbox not found");
+
+        let resp = err(500, "pg_query_failed", "query: connection refused");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "pg_query_failed");
+        assert_eq!(body["message"], "query: connection refused");
+
+        let resp = err(503, "pg_disabled", "pg integration disabled");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "pg_disabled");
+        assert_eq!(body["message"], "pg integration disabled");
+    }
+
+    #[compio::test]
+    async fn a4_feature_disabled_envelope() {
+        let resp = feature_disabled();
+        assert_eq!(resp.status().as_u16(), 501);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "feature_disabled");
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("SANDBOX_SNAPSHOT_ENABLED"));
+    }
+
+    #[compio::test]
+    async fn a4_map_snapshot_error_state_mismatch_envelope() {
+        let resp = map_snapshot_error(SnapshotHandlerError::StateMismatch {
+            current: "snapshotted",
+        });
+        assert_eq!(resp.status().as_u16(), 409);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "state_mismatch");
+        assert!(body["message"].is_string(), "missing `message` per §10.0");
+        // §10.0 table — kind-specific extras must round-trip.
+        assert_eq!(body["expected"], "running");
+        assert_eq!(body["current"], "snapshotted");
+    }
+
+    #[compio::test]
+    async fn a4_map_snapshot_error_not_found_envelope() {
+        let resp = map_snapshot_error(SnapshotHandlerError::NotFound(
+            "sbx_abc".to_string(),
+        ));
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert!(body["message"].is_string());
+        assert_eq!(body["sandbox_id"], "sbx_abc");
+    }
+
+    #[compio::test]
+    async fn a4_map_restore_error_vm_index_unavailable_envelope() {
+        let resp = map_restore_error(RestoreHandlerError::VmIndexUnavailable {
+            requested: 7,
+        });
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "vm_index_unavailable");
+        assert!(body["message"].is_string());
+        assert_eq!(body["requested"], 7);
+    }
+
+    #[compio::test]
+    async fn a4_map_restore_error_state_mismatch_envelope() {
+        let resp = map_restore_error(RestoreHandlerError::StateMismatch {
+            current: "running",
+        });
+        assert_eq!(resp.status().as_u16(), 409);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "state_mismatch");
+        assert!(body["message"].is_string());
+        assert_eq!(body["expected"], "snapshotted");
+        assert_eq!(body["current"], "running");
+    }
+
+    // ─── S4: sanitization pins — raw driver text must never appear ──
+    //
+    // Per security review r4 (S4): A4's uniform-envelope migration
+    // funneled raw `compio_postgres::Error` / `ch-remote` error
+    // strings into the wire-visible `message` field. These tests pin
+    // the no-leak invariant: feed a Display impl whose string
+    // contains realistic pg-DSN / SQL-fragment / ch-remote-binary-path
+    // shrapnel; assert the response body does NOT contain it.
+
+    /// Mimics a `compio_postgres::Error` rendered via Display:
+    /// includes host:port, schema, and a SQL fragment.
+    const PG_DSN_LEAK_SAMPLE: &str =
+        "db error: connecting to host=pg-primary.internal port=5432 \
+         user=sandbox_admin schema=sandbox failed: FATAL \
+         password authentication failed for user \"sandbox_admin\" \
+         (SQLSTATE 28P01) while executing \
+         SELECT sandbox_id FROM sandbox.sandboxes WHERE user_id=$1";
+
+    /// Mimics a `ch-remote` failure: process arg-vec + a host fs path.
+    const CH_REMOTE_LEAK_SAMPLE: &str =
+        "ch-remote: /usr/local/libexec/cloud-hypervisor/ch-remote \
+         --api-socket /run/sandbox/alloc/abc123/api.sock snapshot \
+         file:///var/lib/sandbox/snapshots/sbx_xxx exited with status 1: \
+         Error: SnapshotReceive: Permission denied (os error 13)";
+
+    #[compio::test]
+    async fn admin_error_does_not_leak_pg_dsn_in_message() {
+        // err_safe sanitizes pg-style errors into "database error".
+        let resp = err_safe(
+            500,
+            "pg_query_failed",
+            "database error",
+            PG_DSN_LEAK_SAMPLE,
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "pg_query_failed", "code is the stable contract");
+        assert_eq!(body["message"], "database error", "message is fixed prose");
+        // Wire body must not carry host, schema, SQL fragment, or
+        // sqlstate from the raw pg error.
+        let body_str = body.to_string();
+        for needle in [
+            "pg-primary.internal",
+            "5432",
+            "sandbox_admin",
+            "SQLSTATE",
+            "28P01",
+            "FROM sandbox.sandboxes",
+            "WHERE user_id",
+        ] {
+            assert!(
+                !body_str.contains(needle),
+                "raw pg-error fragment `{needle}` leaked into wire body: {body_str}",
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn admin_error_does_not_leak_sql_fragment_in_message() {
+        // Whatever the code field, the message must not carry SQL
+        // text. Test all four "database error"-class codes.
+        for code in [
+            "pg_query_failed",
+            "pg_tx_begin_failed",
+            "gdpr_delete_sandboxes_failed",
+            "audit_insert_failed",
+        ] {
+            let resp = err_safe(500, code, "database error", PG_DSN_LEAK_SAMPLE);
+            let body = body_json(resp).await;
+            let body_str = body.to_string();
+            assert!(
+                !body_str.contains("SELECT") && !body_str.contains("FROM sandbox."),
+                "code={code} leaked SQL into body: {body_str}",
+            );
+            assert_eq!(body["message"], "database error");
+        }
+    }
+
+    #[compio::test]
+    async fn admin_error_does_not_leak_ch_remote_path_in_message() {
+        // Snapshot/restore handlers funnel ch-remote stderr into
+        // SnapshotHandlerError::ChRemote(String). The map_*_error
+        // path now routes through err_safe → "hypervisor error".
+        let resp = map_snapshot_error(SnapshotHandlerError::ChRemote(
+            CH_REMOTE_LEAK_SAMPLE.to_string(),
+        ));
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "ch_remote_failed");
+        assert_eq!(body["message"], "hypervisor error");
+        let body_str = body.to_string();
+        for needle in [
+            "/usr/local/libexec",
+            "ch-remote",
+            "/run/sandbox/alloc",
+            "/var/lib/sandbox",
+            "api.sock",
+            "Permission denied",
+            "os error 13",
+        ] {
+            assert!(
+                !body_str.contains(needle),
+                "raw ch-remote fragment `{needle}` leaked into wire body: {body_str}",
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn admin_error_internal_message_is_fixed_prose() {
+        // SnapshotHandlerError::Internal carries an arbitrary String
+        // from inner layers — could be a panic message, a backtrace,
+        // anything. The message field must collapse to fixed prose.
+        let resp = map_snapshot_error(SnapshotHandlerError::Internal(
+            "panicked at 'index out of bounds' in registry.rs:847".to_string(),
+        ));
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "internal_error");
+        assert_eq!(body["message"], "internal error");
+        let body_str = body.to_string();
+        assert!(
+            !body_str.contains("panicked") && !body_str.contains("registry.rs"),
+            "internal-error raw text leaked: {body_str}",
+        );
+    }
+
+    #[compio::test]
+    async fn admin_error_keeps_public_identifiers_in_envelope() {
+        // The threat model is internal infrastructure leaking. Public
+        // identifiers (sandbox_id, user_id, requested vm_index) that
+        // the client itself supplied are FINE to keep — operators
+        // need them for diagnostic clarity. This test pins that
+        // sanitization does NOT over-strip.
+        let resp = map_snapshot_error(SnapshotHandlerError::NotFound(
+            "sbx_abc123".to_string(),
+        ));
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(
+            body["sandbox_id"], "sbx_abc123",
+            "client-supplied identifier must survive sanitization",
+        );
+
+        let resp = map_restore_error(RestoreHandlerError::VmIndexUnavailable {
+            requested: 42,
+        });
+        let body = body_json(resp).await;
+        assert_eq!(body["requested"], 42, "structural extras must survive");
     }
 }

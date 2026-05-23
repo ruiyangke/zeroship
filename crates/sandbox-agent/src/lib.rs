@@ -11,6 +11,7 @@
 pub mod audit;
 pub mod auth;
 pub mod dropuser;
+pub(crate) mod error_envelope;
 pub mod exec;
 pub mod files;
 pub mod handlers;

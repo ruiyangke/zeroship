@@ -13,6 +13,7 @@ pub mod auth;
 pub mod backend;
 pub mod config;
 pub mod db;
+pub(crate) mod error_envelope;
 pub mod files;
 pub mod handlers;
 pub mod metrics;
@@ -23,6 +24,12 @@ pub mod preview_share_handlers;
 pub mod preview_ws;
 pub mod registry;
 pub mod restore;
+pub mod restore_handler;
+pub mod snapshot_aead;
+pub mod snapshot_handler;
+pub mod snapshot_store;
+pub mod snapshot_store_gcs;
+pub mod sweep;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,11 +41,26 @@ use crate::db::{Database, LATEST_MIGRATION_VERSION};
 use crate::persist::Persistence;
 use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
+use crate::restore_handler::{RealRestoreBackend, RestoreBackend};
+use crate::snapshot_aead::{AeadSnapshotStore, RootKek, ROOT_KEK_ENV};
+use crate::snapshot_handler::{ChRemoteClient, RealChRemoteClient};
+use crate::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
+use crate::snapshot_store_gcs::{GcsSnapshotStore, TieredSnapshotStore};
 
 /// Shared application state passed to every handler.
 #[allow(missing_debug_implementations)]
 pub struct AppState {
-    pub config: SandboxConfig,
+    /// A6b (deferred): restricted to `pub(crate)` because
+    /// `SandboxConfig.token: ApiToken` is the creator-side bearer that
+    /// authenticates every `/sandbox/*` request (see
+    /// `crates/sandbox/src/config.rs`). A `state.config = attacker_cfg`
+    /// swap could plant a known token or repoint
+    /// `nomad_addr`/`workspace_root` to an attacker-controlled host.
+    /// Out-of-crate callers use [`AppState::with_config`] to set the
+    /// field. Note: `SandboxConfig.token` itself is still a `pub` field
+    /// inside `config.rs` — narrowing that requires touching the
+    /// config-parse surface and is tracked separately (A7).
+    pub(crate) config: SandboxConfig,
     pub sandboxes: SandboxRegistry,
     pub backend: Backend,
     /// Mint-side rate limiter. `Some` in production; `None`
@@ -50,14 +72,37 @@ pub struct AppState {
     /// `SANDBOX_DATABASE_URL` is unset, so pg integration is off.
     /// The schema is brought to
     /// [`LATEST_MIGRATION_VERSION`] before this state ships.
-    pub database: Option<Arc<Database>>,
-    /// Shared sealed-record persistence handle, reused by startup
-    /// restore and post-takeover rehydrate.
+    ///
+    /// A6b (deferred): restricted to `pub(crate)` because the DSN held
+    /// inside `Database` carries an embedded pg password. A
+    /// `state.database = attacker_db` swap could redirect every
+    /// sandbox INSERT / heartbeat / takeover UPDATE to an
+    /// attacker-controlled postgres (silently exfiltrating sandbox
+    /// metadata and host topology). Out-of-crate callers use
+    /// [`AppState::with_database`] to set the field.
+    pub(crate) database: Option<Arc<Database>>,
+    /// Round-1 fixer / CRITICAL #4: shared sealed-record persistence
+    /// handle, plumbed for the Phase-2.5 takeover-rehydrate path.
     /// `None` mirrors the pre-fix disabled shape — the handle exists
     /// only when `SANDBOX_PERSIST_AUTH=1` was set and a key file is
     /// readable.
-    pub persist: Option<Arc<Persistence>>,
-    /// Graceful-shutdown flag observed
+    ///
+    /// A6 (api-surface-2026-05-24-r1): restricted to `pub(crate)` so
+    /// no out-of-crate caller can swap the handle for an attacker-
+    /// controlled `Persistence` carrying a different AEAD key. The
+    /// concrete attack: a hostile in-process caller plants a
+    /// `Persistence` whose `aead_key` is one the attacker knows, then
+    /// waits for the controller to seal a sandbox's signing key under
+    /// the planted key — disk read of the sealed file then yields the
+    /// signing key in clear. Tests and other in-crate constructors
+    /// set the field via the safe [`AppState::with_persistence`]
+    /// builder. The builder is a thin wrapper (no runtime check —
+    /// `Persistence` has no in-memory "is valid" beyond construction,
+    /// which `AeadKey::from_path` already enforces); the point is to
+    /// be the single legal write path, so the `state.persist =
+    /// attacker_handle` swap stops compiling out-of-crate.
+    pub(crate) persist: Option<Arc<Persistence>>,
+    /// Round-1 fixer / IMPORTANT #8: graceful-shutdown flag observed
     /// by the periodic background tasks (heartbeat, takeover-scan,
     /// health-probe). [`AppState::trigger_shutdown`] flips this to
     /// `true` and atomically marks the host row `'draining'` in pg
@@ -83,7 +128,35 @@ pub struct AppState {
     /// recover the bearer. (Live-process reads are still a concern,
     /// but the post-mortem surface is closed.) Mirrors the
     /// `config::ApiToken` treatment of `SANDBOX_TOKEN`.
-    pub admin_token: Option<zeroize::Zeroizing<String>>,
+    ///
+    /// A5 (api-surface-2026-05-24-r1): restricted to `pub(crate)` so
+    /// no out-of-crate caller can clobber the field with an empty
+    /// `Zeroizing<String>` (which would defeat the constant-time
+    /// compare — see `admin_handlers::admin_check`). Tests and other
+    /// in-crate constructors set the field via the safe
+    /// [`AppState::with_admin_token`] builder, which rejects empty
+    /// strings before they can reach the auth path.
+    pub(crate) admin_token: Option<zeroize::Zeroizing<String>>,
+
+    /// Phase-A snapshot/restore wiring: present (`Some`) only when
+    /// `config.snapshot_enabled = true`. The trio of stores +
+    /// clients construct together; either all three are populated
+    /// or none. Tests building `AppState` directly leave them
+    /// `None` — admin handlers fall back to 501 `feature_disabled`
+    /// in that case.
+    ///
+    /// A6b (deferred): restricted to `pub(crate)` because each is an
+    /// `Arc<dyn …>` trait object whose impl can carry arbitrary
+    /// credentials (GCS SA keys in `GcsSnapshotStore`, the `ch-remote`
+    /// binary path in `RealChRemoteClient`, Nomad creds in
+    /// `RealRestoreBackend`). A `state.snapshot_store = attacker_impl`
+    /// swap could exfiltrate every subsequent snapshot blob to an
+    /// attacker bucket. Out-of-crate callers use the
+    /// `with_snapshot_store` / `with_ch_remote` / `with_restore_backend`
+    /// builders to set these.
+    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) ch_remote: Option<Arc<dyn ChRemoteClient>>,
+    pub(crate) restore_backend: Option<Arc<dyn RestoreBackend>>,
 }
 
 impl AppState {
@@ -122,6 +195,215 @@ impl AppState {
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
     }
+
+    /// A5 (api-surface-2026-05-24-r1): safe builder for
+    /// `admin_token`. The field itself is `pub(crate)` so external
+    /// callers (notably integration tests in `crates/sandbox/tests/`)
+    /// cannot construct it directly — they go through this builder,
+    /// which rejects empty strings BEFORE they can reach
+    /// `admin_handlers::admin_check`.
+    ///
+    /// `admin_check` has a defense-in-depth empty check on the
+    /// expected token, but pushing the rejection to the only
+    /// out-of-crate entry point turns the footgun (the post-Round-4
+    /// review's `pub admin_token: Some(Zeroizing::new(String::new()))`
+    /// silent-auth-bypass shape) into a `Err(...)` at the call site.
+    ///
+    /// Semantics:
+    ///   - `token = None`  → clears the field (admin API disabled).
+    ///   - `token = Some("")` → `Err("admin_token must not be empty")`.
+    ///   - `token = Some(non-empty)` → wraps in `Zeroizing<String>`.
+    pub fn with_admin_token(
+        mut self,
+        token: Option<String>,
+    ) -> Result<Self, String> {
+        match token {
+            None => {
+                self.admin_token = None;
+                Ok(self)
+            }
+            Some(t) if t.is_empty() => {
+                Err("admin_token must not be empty".to_string())
+            }
+            Some(t) => {
+                self.admin_token = Some(zeroize::Zeroizing::new(t));
+                Ok(self)
+            }
+        }
+    }
+
+    /// Read-only accessor for the admin bearer. Returns the raw
+    /// string slice; callers MUST use constant-time comparison
+    /// (`subtle::ConstantTimeEq` via `admin_handlers::admin_check`)
+    /// rather than `==` against user-presented bytes. Mainly here
+    /// so integration tests can assert wiring without poking the
+    /// `pub(crate)` field.
+    pub fn admin_token(&self) -> Option<&str> {
+        self.admin_token.as_deref().map(|z| z.as_str())
+    }
+
+    /// A6 (api-surface-2026-05-24-r1): safe builder for `persist`.
+    /// The field is `pub(crate)` (see the `AppState::persist` doc
+    /// comment for the threat model — a planted `Persistence` with
+    /// an attacker-known AEAD key lets a later disk read recover
+    /// per-sandbox signing keys in clear). External callers must go
+    /// through this builder.
+    ///
+    /// The validation surface is intentionally thin: `Persistence`
+    /// has no in-memory "is valid" beyond construction. The
+    /// `AeadKey` length and key-file mode are already enforced
+    /// inside `AeadKey::from_path` / `AeadKey::from_bytes`; the
+    /// sealed-records dir is created on first seal. So unlike
+    /// [`AppState::with_admin_token`] (which has a real
+    /// empty-string footgun to reject), this builder is a thin
+    /// wrapper that exists for parity — it's the only legal way
+    /// for out-of-crate code to set `persist`, which closes the
+    /// `state.persist = …` swap path without requiring any new
+    /// runtime check.
+    ///
+    /// R3-Q2 (code-quality-r3): originally returned `Result<Self,
+    /// String>` for "future-proof symmetry"; flagged across r3/r4/r5
+    /// reviews as a signature smell because the body cannot fail and
+    /// every in-crate caller had to `.expect("infallible operation")`.
+    /// Now returns plain `Self`. Future invariants (e.g.
+    /// dir-writability probes, AEAD-key liveness pings) can switch
+    /// back to `Result` when they actually need it.
+    ///
+    /// Semantics:
+    ///   - `with_persistence(p)` → `self` with the field set to
+    ///     `Some(p)`. Replaces any prior value.
+    pub fn with_persistence(mut self, persist: Arc<Persistence>) -> Self {
+        self.persist = Some(persist);
+        self
+    }
+
+    /// Read-only accessor for the sealed-record persistence handle.
+    /// Mainly here so integration tests can assert wiring without
+    /// poking the `pub(crate)` field. The returned `&Arc` is a
+    /// borrow; callers wanting an owned clone go through `.clone()`
+    /// on the `Arc`, NOT through field access.
+    ///
+    /// `#[allow(dead_code)]`: today the in-crate uses access
+    /// `self.persist` directly (they were written before this
+    /// helper landed). The accessor exists for the in-crate
+    /// `persist_setter_tests` and as the canonical read path for
+    /// future code; widening to `pub` would let out-of-crate tests
+    /// assert wiring the same way `admin_token()` does, but the A6
+    /// task spec pinned this to `pub(crate)`.
+    #[allow(dead_code)]
+    pub(crate) fn persist(&self) -> Option<&Arc<Persistence>> {
+        self.persist.as_ref()
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // A6b (deferred backlog) — pub(crate)-restrict-and-builder pattern
+    // applied to the 5 remaining credential-carrying AppState fields:
+    // `config`, `database`, `snapshot_store`, `ch_remote`,
+    // `restore_backend`. Each builder consumes `self` and returns
+    // `Self` (or `Arc<Self>` via the caller's own wrap) — mirrors the
+    // A5 `with_admin_token` / A6 `with_persistence` shape. None of
+    // these can be "empty" in the same way the admin-token string can,
+    // so the builders are thin wrappers that exist purely to be the
+    // single legal out-of-crate write path. Tests in
+    // `field_setter_tests` below exercise the replace-existing
+    // semantics for each.
+    // ────────────────────────────────────────────────────────────────
+
+    /// A6b: safe builder for `config`. See the field doc for the
+    /// threat model (creator-side bearer + `nomad_addr` pivot via
+    /// `SandboxConfig.token`). Replaces any prior value.
+    pub fn with_config(mut self, config: SandboxConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// A6b: safe builder for `database`. See the field doc for the
+    /// threat model (DSN-embedded pg password). Replaces any prior
+    /// value.
+    pub fn with_database(mut self, database: Arc<Database>) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    /// A6b: read-only accessor for the pg-backed `Database` handle.
+    /// `pub` (not `pub(crate)`) because out-of-crate integration tests
+    /// in `crates/sandbox/tests/sandbox_pg_e2e.rs` need to read sandbox
+    /// rows back through the same handle they wired in. Mirrors the
+    /// `pub fn admin_token()` accessor in shape; the borrow can be
+    /// cloned by callers via `Arc::clone` if they need ownership.
+    pub fn database(&self) -> Option<&Arc<Database>> {
+        self.database.as_ref()
+    }
+
+    /// A6b: read-only accessor for the active `SandboxConfig`. `pub`
+    /// for the same reason as [`AppState::database`] — out-of-crate
+    /// integration tests sometimes need to read back `config.port`,
+    /// `config.snapshot_enabled`, etc. when asserting on test fixtures.
+    pub fn config(&self) -> &SandboxConfig {
+        &self.config
+    }
+
+    /// A6b: safe builder for `snapshot_store`. See the field doc for
+    /// the threat model (trait-object impl can carry GCS SA creds).
+    /// Replaces any prior value.
+    pub fn with_snapshot_store(
+        mut self,
+        store: Arc<dyn SnapshotStore>,
+    ) -> Self {
+        self.snapshot_store = Some(store);
+        self
+    }
+
+    /// A6b: safe builder for `ch_remote`. See the field doc for the
+    /// threat model (trait-object impl resolves `ch-remote` on PATH).
+    /// Replaces any prior value.
+    pub fn with_ch_remote(
+        mut self,
+        ch_remote: Arc<dyn ChRemoteClient>,
+    ) -> Self {
+        self.ch_remote = Some(ch_remote);
+        self
+    }
+
+    /// A6b: safe builder for `restore_backend`. See the field doc for
+    /// the threat model (trait-object impl holds Nomad creds).
+    /// Replaces any prior value.
+    pub fn with_restore_backend(
+        mut self,
+        restore_backend: Arc<dyn RestoreBackend>,
+    ) -> Self {
+        self.restore_backend = Some(restore_backend);
+        self
+    }
+
+    /// A5 (api-surface-2026-05-24-r1): public fixture constructor
+    /// for out-of-crate integration tests. Returns an `AppState`
+    /// with `admin_token = None` and the other "wiring" fields at
+    /// their disabled defaults (`database = None`, `persist = None`,
+    /// snapshot trio all `None`, fresh registry, fresh shutdown
+    /// flag, fresh `MintRateLimiter`). Tests chain the `with_*`
+    /// builders ([`AppState::with_admin_token`],
+    /// [`AppState::with_database`], [`AppState::with_snapshot_store`]
+    /// etc.) to populate the credential-carrying fields — direct
+    /// field assignment is blocked by the A5/A6/A6b `pub(crate)`
+    /// restrictions.
+    ///
+    /// Production code uses [`AppState::from_config`], not this.
+    pub fn new_fixture(config: SandboxConfig, backend: Backend) -> Self {
+        Self {
+            config,
+            sandboxes: SandboxRegistry::new(),
+            backend,
+            mint_rate_limiter: Some(MintRateLimiter::new()),
+            database: None,
+            persist: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            admin_token: None,
+            snapshot_store: None,
+            ch_remote: None,
+            restore_backend: None,
+        }
+    }
 }
 
 impl AppState {
@@ -144,7 +426,32 @@ impl AppState {
         let persist: Option<Arc<Persistence>> =
             Persistence::from_env()?.map(Arc::new);
 
-        // Build pg-backed state before the backend probe so
+        // R5-S1 (security-r5) / B21 cluster fix. Refuse to boot in the
+        // fail-OPEN configuration (snapshot enabled + persist disabled).
+        // See [`assert_persist_required_when_snapshot_enabled`] for the
+        // full rationale; the function is factored out so tests can
+        // exercise the assertion without spinning up a backend probe.
+        //
+        // R6-A1: the escape hatch env var is read here on the prod boot
+        // path, so its NAME has to scream "test-only". The original
+        // SANDBOX_PERSIST_NONE_OK was indistinguishable from real prod
+        // env vars (SANDBOX_PERSIST_AUTH, SANDBOX_PERSIST_DIR), making
+        // operator misconfiguration a silent fail-OPEN re-enable of the
+        // exact bug R5-S1 closed. Renamed with an explicit
+        // ZEROSHIP_SANDBOX_TEST_ prefix so it cannot be confused for
+        // a production setting.
+        let persist_test_override = matches!(
+            std::env::var("ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION")
+                .as_deref(),
+            Ok("1")
+        );
+        assert_persist_required_when_snapshot_enabled(
+            config.snapshot_enabled,
+            persist.is_some(),
+            persist_test_override,
+        )?;
+
+        // Phase-0 pg-backed state: build BEFORE the backend probe so
         // the schema reaches the right version before any backend op
         // could try to write.
         let database: Option<Arc<Database>> = match Database::from_env().await {
@@ -273,6 +580,170 @@ impl AppState {
         let admin_token = load_admin_token(admin_token_path.as_deref())?
             .map(zeroize::Zeroizing::new);
 
+        // Phase-A snapshot/restore wiring. When `snapshot_enabled =
+        // true`, construct the production trio:
+        //   - LocalDiskSnapshotStore at config.snapshot_l1_root
+        //     (optionally tier-wrapped with GcsSnapshotStore when
+        //     config.snapshot_use_gcs = true)
+        //   - RealChRemoteClient (resolves `ch-remote` on PATH at
+        //     construct time)
+        //   - RealRestoreBackend (Nomad submit + poll)
+        // When `snapshot_enabled = false` we leave them `None`;
+        // admin handlers see `None` and return 501 feature_disabled.
+        let (snapshot_store, ch_remote, restore_backend): (
+            Option<Arc<dyn SnapshotStore>>,
+            Option<Arc<dyn ChRemoteClient>>,
+            Option<Arc<dyn RestoreBackend>>,
+        ) = if config.snapshot_enabled {
+            let l1_root = config.snapshot_l1_root.clone();
+            // Idempotent — directory may already exist.
+            if let Err(e) = std::fs::create_dir_all(&l1_root) {
+                tracing::warn!(
+                    path = %l1_root.display(),
+                    error = %e,
+                    "snapshot wiring: L1 root mkdir failed (will surface on first put)"
+                );
+            }
+            let l1 = LocalDiskSnapshotStore::new(l1_root.clone());
+
+            // A1 (audit-r1): load the root KEK BEFORE composing the
+            // inner store so the wrap decision is visible in one place.
+            // `RootKek::from_env` returns:
+            //   - `Ok(Some(kek))` → `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` set
+            //     to a 32-byte, mode-0o400 file. AEAD is enabled.
+            //   - `Ok(None)` → env unset. AEAD passthrough — guest RAM
+            //     lands on L1 disk (and GCS, if tiered) in clear.
+            //   - `Err(_)` → env set but the file is missing/wrong mode/
+            //     wrong length. Fail boot — the operator's intent was
+            //     to enable AEAD; silently falling back to passthrough
+            //     would re-enable the exact CRITICAL fail-OPEN shape
+            //     this commit is closing.
+            let aead_root_kek: Option<RootKek> = RootKek::from_env()
+                .map_err(|e| format!("RootKek::from_env: {e}"))?;
+            let kek_present = aead_root_kek.is_some();
+
+            // Compose the inner store (L1-only or tiered L1+GCS), then
+            // wrap unconditionally in `AeadSnapshotStore`. When
+            // `aead_root_kek = None` the wrapper is in passthrough mode
+            // (verified by `AeadSnapshotStore::is_active() == false`);
+            // the boot log makes that posture explicit so the operator
+            // can't miss it in `journalctl`. Wrapping unconditionally
+            // (rather than branching `Arc<dyn SnapshotStore>` at the
+            // wrapper boundary) means the put/get paths run through the
+            // same code in both shapes — no second-class disabled path.
+            let store: Arc<dyn SnapshotStore> = if config.snapshot_use_gcs {
+                let bucket = config
+                    .snapshot_gcs_bucket
+                    .clone()
+                    .expect("SANDBOX_SNAPSHOT_GCS_BUCKET must be set when use_gcs=true (validated at config parse)");
+                let l2 = GcsSnapshotStore::new(bucket.clone(), "default");
+                let tiered = TieredSnapshotStore::new(l1, l2);
+                if kek_present {
+                    tracing::info!(
+                        l1_root = %l1_root.display(),
+                        gcs_bucket = %bucket,
+                        kek_env = ROOT_KEK_ENV,
+                        "snapshot_store: AEAD ENABLED (tiered L1+GCS)"
+                    );
+                } else {
+                    tracing::error!(
+                        l1_root = %l1_root.display(),
+                        gcs_bucket = %bucket,
+                        kek_env = ROOT_KEK_ENV,
+                        "snapshot_store: AEAD DISABLED — guest RAM \
+                         plaintext on disk + GCS (kek env unset). \
+                         Tiered L1+GCS without AEAD writes guest \
+                         memory in clear to the object store. Set the \
+                         kek env to a 32-byte mode-0o400 file."
+                    );
+                }
+                Arc::new(AeadSnapshotStore::new(tiered, aead_root_kek))
+            } else if kek_present {
+                tracing::info!(
+                    l1_root = %l1_root.display(),
+                    kek_env = ROOT_KEK_ENV,
+                    "snapshot_store: AEAD ENABLED (L1 disk-only)"
+                );
+                Arc::new(AeadSnapshotStore::new(l1, aead_root_kek))
+            } else {
+                tracing::warn!(
+                    l1_root = %l1_root.display(),
+                    kek_env = ROOT_KEK_ENV,
+                    "snapshot_store: AEAD DISABLED — guest RAM \
+                     plaintext on L1 disk (kek env unset). Set the \
+                     kek env to a 32-byte mode-0o400 file."
+                );
+                Arc::new(AeadSnapshotStore::new(l1, aead_root_kek))
+            };
+            let ch: Arc<dyn ChRemoteClient> =
+                Arc::new(RealChRemoteClient::new());
+            // B18 fix: share the create-side allocator with the
+            // restore-side reservations. Without this, a CREATE after
+            // a successful WAKE hands the same tap/IP to a fresh
+            // sandbox because the restored VM holds the slot in a
+            // private `VmIndexReservations` map invisible to
+            // `NomadCHBackend::vm_index_allocator`. Cluster smoke
+            // 2026-05-24 r4: 11/16 c=4 cycles failed with a
+            // stale-pubkey 401 once slots 1-6 had been used once.
+            let shared_allocator = backend.vm_index_allocator();
+            let nomad_handle = backend.nomad_ch_handle();
+            let rb_inner = RealRestoreBackend::new(
+                config.nomad_ch.clone(),
+                config.memory_mb,
+                config.cpus,
+            );
+            let rb_inner = match shared_allocator {
+                Some(a) => {
+                    tracing::info!(
+                        "snapshot wiring: shared vm_index allocator with backend (B18)"
+                    );
+                    rb_inner.with_shared_allocator(a)
+                }
+                None => {
+                    tracing::warn!(
+                        backend = %backend.name(),
+                        "snapshot wiring: backend has no vm_index allocator; \
+                         RealRestoreBackend falls back to private reservations \
+                         (B18 race possible if create + restore concurrent)"
+                    );
+                    rb_inner
+                }
+            };
+            // B19 fix: install the shared NomadCHBackend handle so the
+            // post-wake `register_restored` call lands the restored
+            // sandbox in the backend's in-memory state map. Without
+            // this, every post-wake exec/stop/delete returned "sandbox
+            // not found" and the vm_index slot leaked across the
+            // controller's uptime.
+            let rb_inner = match nomad_handle {
+                Some(h) => {
+                    tracing::info!(
+                        "snapshot wiring: shared NomadCHBackend handle for \
+                         register_restored (B19)"
+                    );
+                    rb_inner.with_nomad_handle(h)
+                }
+                None => {
+                    tracing::warn!(
+                        backend = %backend.name(),
+                        "snapshot wiring: backend has no NomadCHBackend \
+                         handle; register_restored will surface as a 500 on \
+                         every wake (B19 wiring missing)"
+                    );
+                    rb_inner
+                }
+            };
+            let rb: Arc<dyn RestoreBackend> = Arc::new(rb_inner);
+            tracing::info!(
+                ch_version = ch.version(),
+                kek_path = ?config.snapshot_root_kek_path,
+                "snapshot/restore wiring: enabled"
+            );
+            (Some(store), Some(ch), Some(rb))
+        } else {
+            (None, None, None)
+        };
+
         let state = Arc::new(Self {
             config,
             sandboxes: registry,
@@ -282,6 +753,9 @@ impl AppState {
             persist,
             shutdown: Arc::new(AtomicBool::new(false)),
             admin_token,
+            snapshot_store,
+            ch_remote,
+            restore_backend,
         });
         // Background re-probe so /readyz reflects current backend
         // state. Without this, the `is_healthy()` flag is set once
@@ -289,7 +763,37 @@ impl AppState {
         // the cluster goes unreachable.
         start_health_loop(state.clone());
 
-        // Periodic heartbeat task. Updates
+        // Phase-2 HA: register THIS controller's host row before
+        // spawning the heartbeat task. Without this, the FK on
+        // `sandbox.sandboxes.host_id REFERENCES sandbox.hosts(host_id)`
+        // rejects every sandbox INSERT and the heartbeat UPDATE
+        // affects 0 rows forever (peers eventually see `last_heartbeat`
+        // way in the past and would treat us as dead — except there's
+        // no row, so `dead_hosts()` skips us too: silent corruption).
+        // `upsert_host` is INSERT … ON CONFLICT DO UPDATE so a clean
+        // restart with the same persisted host_id refreshes the row
+        // rather than failing. Failure aborts boot — without a host
+        // row, no sandbox op can succeed; better to fail loud at boot.
+        // Hostname source: `SANDBOX_HOSTNAME` env (operator override)
+        // → `/proc/sys/kernel/hostname` (Linux) → "unknown". Region is
+        // read by `upsert_host` itself from `SANDBOX_REGION`. The
+        // backend label comes from the live `Backend` instance, so it
+        // matches the CHECK constraint by construction.
+        if let Some(db) = state.database.as_ref() {
+            let hostname = read_hostname();
+            let backend_name = state.backend.name();
+            if let Err(e) = db.upsert_host(&hostname, backend_name).await {
+                return Err(format!("upsert_host({hostname}, {backend_name}): {e}"));
+            }
+            tracing::info!(
+                hostname = %hostname,
+                backend = %backend_name,
+                host_id = %db.host_id(),
+                "sandbox HA: host row registered"
+            );
+        }
+
+        // Phase-2 HA: periodic heartbeat task — UPDATEs
         // `sandbox.hosts.last_heartbeat` so peers can tell whether
         // we're alive. The task self-runs forever; failure is
         // logged-and-continued (next tick retries).
@@ -305,11 +809,96 @@ impl AppState {
         {
             spawn_takeover_task(state.clone());
         }
+
+        // PR 3g: snapshot/restore sweep tasks (transient-state
+        // takeover + idle eviction). Both observe
+        // `state.shutdown_requested()` between iterations. The
+        // transient sweep runs unconditionally so a feature-flipped-
+        // on-then-off deploy still recovers in-flight transients;
+        // the idle-eviction sweep self-disables when
+        // `snapshot_enabled = false` or the threshold env is 0.
+        if state.database.is_some() {
+            sweep::spawn_transient_state_takeover(state.clone());
+        }
+        // T6: auto-spawn idle eviction sweep. Production now has all
+        // deps wired (snapshot_store + ch_remote + restore_backend
+        // populated above, Backend::lookup_source_vm_ops async lookup
+        // is in tree). `ControllerIdleSnapshotter` bridges the loop's
+        // `IdleSnapshotter` trait to `snapshot_handler::snapshot_sandbox`
+        // + post-snapshot teardown — same chain the admin endpoint
+        // drives. Gate: requires database + snapshot_enabled +
+        // SANDBOX_IDLE_SNAPSHOT_SECS > 0; `spawn_idle_eviction_sweep`
+        // re-checks all three internally and bails out cleanly.
+        if state.database.is_some() && state.config.snapshot_enabled {
+            let snapshotter: Arc<dyn sweep::IdleSnapshotter> = Arc::new(
+                sweep::ControllerIdleSnapshotter::new(state.clone()),
+            );
+            sweep::spawn_idle_eviction_sweep(state.clone(), snapshotter);
+        }
         Ok(state)
     }
 }
 
-/// Read the admin bearer once at
+/// R5-S1 (security-r5) / cluster bug #21. Refuse to boot the controller
+/// in the silent fail-OPEN configuration where snapshot/restore is
+/// enabled but no persistence layer is wired.
+///
+/// **Why this matters.** The wake path's `do_restore_inner` calls
+/// `Persistence::unseal` after `wait_for_livez` to recover the
+/// per-sandbox signing key, then hands the key bytes to
+/// `Backend::register_restored` to install the restored VM into the
+/// backend's in-memory state map. When `state.persist=None`, the wake
+/// path falls into a `tracing::warn!` skip branch — the wake still
+/// returns 200 but the state map gets no entry, so every subsequent
+/// `exec`/`stop`/`delete` returns `sandbox_not_found`, the `vm_index`
+/// allocator slot leaks across the controller's uptime, and the
+/// per-host pool saturates after a few wakes (cluster smoke 2026-05-23
+/// r5 Appendix D observed exactly this).
+///
+/// **What this checks.** When `snapshot_enabled=true`:
+///   - `persist=true` → `Ok(())` (the production-correct shape).
+///   - `persist=false` + `test_override=true` → `Ok(())` (the
+///     `ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1` escape hatch
+///     for dev fixtures that drive `StubRestoreBackend` without
+///     persistence).
+///   - `persist=false` + `test_override=false` → `Err(...)` (fail-CLOSED).
+///
+/// When `snapshot_enabled=false`, the persistence layer is optional;
+/// returns `Ok(())` regardless.
+///
+/// **Why the override env var has a `ZEROSHIP_SANDBOX_TEST_` prefix**
+/// (R6-A1). The env var is read on the production boot path (no
+/// `#[cfg(test)]` gate — the assertion itself runs in prod, so tests
+/// must be able to set the override at runtime without
+/// `unsafe { std::env::set_var(...) }`). The earlier name
+/// `SANDBOX_PERSIST_NONE_OK` was visually indistinguishable from
+/// real prod env vars (`SANDBOX_PERSIST_AUTH`, `SANDBOX_PERSIST_DIR`),
+/// so an operator who set it would silently re-enable the R5-S1
+/// fail-OPEN shape that was B21 in prod. The explicit
+/// `TEST_DISABLE_PERSIST_ASSERTION` suffix makes operator misuse
+/// obvious from one glance at the unit file's environment block.
+pub(crate) fn assert_persist_required_when_snapshot_enabled(
+    snapshot_enabled: bool,
+    persist_present: bool,
+    test_override: bool,
+) -> Result<(), String> {
+    if snapshot_enabled && !persist_present && !test_override {
+        return Err(
+            "FATAL: SANDBOX_SNAPSHOT_ENABLED=true but persistence is disabled \
+             (SANDBOX_PERSIST_AUTH != 1 or SANDBOX_AEAD_KEY_PATH unset). \
+             Restored sandboxes would silently fail to register in the \
+             backend state map (R5-S1 / cluster bug #21). \
+             Fix: set SANDBOX_PERSIST_AUTH=1 + SANDBOX_AEAD_KEY_PATH to a \
+             32-byte mode-0o400 file. \
+             Test-only override (NOT for production): \
+             ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Round-3 / Phase-3 CRITICAL #3: read the admin bearer ONCE at
 /// boot. Mirrors `Persistence::AeadKey::from_path`.
 ///
 /// This is a pure function over an optional path. The production
@@ -410,6 +999,28 @@ const DEFAULT_TAKEOVER_POLL_SECS: u64 = 30;
 /// `now() - last_heartbeat > lease_ttl` means the peer is considered
 /// dead. Default 60 s. Validated at boot.
 const DEFAULT_LEASE_TTL_SECS: u64 = 60;
+
+/// Best-effort hostname for `sandbox.hosts.hostname`. Operators can
+/// override via `SANDBOX_HOSTNAME` (useful in containers where the
+/// kernel hostname is the random container ID). Falls back to
+/// `/proc/sys/kernel/hostname` on Linux, then `"unknown"`. The column
+/// has no CHECK constraint — only NOT NULL — so any non-empty value
+/// is acceptable.
+fn read_hostname() -> String {
+    if let Ok(v) = std::env::var("SANDBOX_HOSTNAME") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let t = s.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    "unknown".to_string()
+}
 
 fn read_u64_env(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -879,6 +1490,481 @@ mod boot_loader_tests {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────
+// A5 (api-surface-2026-05-24-r1) — `AppState::with_admin_token`
+// builder semantics. Constructs a minimal in-crate state (where
+// `admin_token` is visible) and asserts the empty-string rejection
+// that turns the post-Round-4 footgun into a `Result::Err`.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod admin_token_setter_tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+
+    /// Minimal config that satisfies `Backend::from_config` for the
+    /// nomad-ch backend WITHOUT touching the network — the builder
+    /// only needs `SandboxConfig` to populate the field; no probe
+    /// runs here.
+    fn min_cfg() -> SandboxConfig {
+        SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: std::path::PathBuf::from(
+                    "/etc/zeroship/nomad-vm-wrapper.sh",
+                ),
+                runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: std::path::PathBuf::from(
+                    "/var/zeroship/ch/users",
+                ),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 120,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from(
+                "/var/zeroship/ch/snapshots",
+            ),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
+    fn min_state() -> AppState {
+        let cfg = min_cfg();
+        let backend = Backend::from_config(&cfg).expect("backend");
+        AppState::new_fixture(cfg, backend)
+    }
+
+    #[test]
+    fn admin_token_setter_rejects_empty() {
+        let state = min_state();
+        match state.with_admin_token(Some(String::new())) {
+            Ok(_) => panic!("empty string must yield Err"),
+            Err(e) => assert!(
+                e.contains("empty"),
+                "error message must mention 'empty'; got {e}"
+            ),
+        }
+    }
+
+    #[test]
+    fn admin_token_setter_accepts_non_empty() {
+        let state = min_state();
+        let state = match state
+            .with_admin_token(Some("operator-bearer-abcdef".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty string must be accepted: {e}"),
+        };
+        assert_eq!(
+            state.admin_token(),
+            Some("operator-bearer-abcdef"),
+            "the reader must surface the wrapped token"
+        );
+    }
+
+    #[test]
+    fn admin_token_setter_none_clears_field() {
+        // Set then clear — exercises the two-call flow that test
+        // fixtures use when toggling the bearer between cases.
+        let state = min_state();
+        let state = match state
+            .with_admin_token(Some("bearer-to-clear-aaaa".into()))
+        {
+            Ok(s) => s,
+            Err(e) => panic!("non-empty accepted: {e}"),
+        };
+        assert!(state.admin_token().is_some(), "precondition: set");
+        let state = match state.with_admin_token(None) {
+            Ok(s) => s,
+            Err(e) => panic!("None clears unconditionally: {e}"),
+        };
+        assert!(state.admin_token().is_none(), "None must clear the field");
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A6 (api-surface-2026-05-24-r1) — `AppState::with_persistence`
+// builder semantics. Mirrors the A5 admin-token tests above. The
+// field is `pub(crate)` so out-of-crate callers must route the
+// `Arc<Persistence>` through the builder; these tests assert that
+// the builder accepts the handle and that a subsequent call
+// replaces the previous one (so a re-wired test fixture doesn't
+// silently keep a stale persist).
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod persist_setter_tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+    use crate::persist::{AeadKey, Persistence};
+
+    /// Minimal config that satisfies `Backend::from_config` for the
+    /// nomad-ch backend WITHOUT touching the network. Mirrors the
+    /// fixture in `admin_token_setter_tests` — duplicated rather
+    /// than shared so each test module's helpers stay self-contained
+    /// (the alternative was widening `min_cfg` to `pub(super)`,
+    /// which leaks a test-only contract into the parent mod).
+    fn min_cfg() -> SandboxConfig {
+        SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: std::path::PathBuf::from(
+                    "/etc/zeroship/nomad-vm-wrapper.sh",
+                ),
+                runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: std::path::PathBuf::from(
+                    "/var/zeroship/ch/users",
+                ),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 120,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from(
+                "/var/zeroship/ch/snapshots",
+            ),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
+    fn min_state() -> AppState {
+        let cfg = min_cfg();
+        let backend = Backend::from_config(&cfg).expect("backend");
+        AppState::new_fixture(cfg, backend)
+    }
+
+    /// Build a fresh `Arc<Persistence>` against a unique temp dir so
+    /// the two tests don't share filesystem state.
+    fn fresh_persist(label: &str) -> Arc<Persistence> {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-persist-setter-{label}-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir tmpdir");
+        // 32 bytes of constant noise — `AeadKey::from_bytes` requires
+        // exactly AEAD_KEY_LEN; the cipher doesn't care about the
+        // distribution for a unit test that never decrypts.
+        let aead = AeadKey::from_bytes([0x5Au8; 32]);
+        Arc::new(Persistence::new(dir, aead))
+    }
+
+    #[test]
+    fn with_persistence_accepts_arc() {
+        let state = min_state();
+        assert!(
+            state.persist().is_none(),
+            "fixture must start with persist = None"
+        );
+        let p = fresh_persist("accepts");
+        let state = state.with_persistence(p.clone());
+        let stored = state.persist().expect("field populated");
+        assert!(
+            Arc::ptr_eq(stored, &p),
+            "stored handle must be the same Arc the builder received"
+        );
+    }
+
+    #[test]
+    fn with_persistence_replaces_existing() {
+        // Two distinct handles → second call wins. Without this,
+        // a test that re-wires a fixture could silently retain the
+        // first handle and seal under the wrong key.
+        let state = min_state();
+        let first = fresh_persist("replaces-first");
+        let second = fresh_persist("replaces-second");
+        let state = state.with_persistence(first.clone());
+        let state = state.with_persistence(second.clone());
+        let stored = state.persist().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A6b (deferred backlog) — builder semantics for the 5 remaining
+// credential-carrying fields. Each test follows the same shape as the
+// A5/A6 setter tests: build a fresh `min_state`, populate the field
+// twice with distinct values, assert the second wins. For the trait-
+// object fields (`snapshot_store`, `ch_remote`, `restore_backend`)
+// the test relies on `Arc::ptr_eq` against an upcast `Arc<dyn T>` —
+// the borrowed reference inside the field must point at the second
+// `Arc`. There is no empty-rejection test: `Arc<dyn T>` has no
+// "empty" shape, and `SandboxConfig` / `Arc<Database>` carry their
+// own construction invariants checked earlier in the boot chain.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod field_setter_tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+    use crate::db::Database;
+    use crate::restore_handler::StubRestoreBackend;
+    use crate::snapshot_handler::MockChRemoteClient;
+    use crate::snapshot_store::LocalDiskSnapshotStore;
+
+    /// Minimal config that satisfies `Backend::from_config` for the
+    /// nomad-ch backend WITHOUT touching the network. Duplicated from
+    /// the sibling test modules for self-containment (same rationale
+    /// as `persist_setter_tests::min_cfg`).
+    fn min_cfg() -> SandboxConfig {
+        SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: std::path::PathBuf::from(
+                    "/etc/zeroship/nomad-vm-wrapper.sh",
+                ),
+                runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: std::path::PathBuf::from(
+                    "/var/zeroship/ch/users",
+                ),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 120,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from(
+                "/var/zeroship/ch/snapshots",
+            ),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
+    fn min_state() -> AppState {
+        let cfg = min_cfg();
+        let backend = Backend::from_config(&cfg).expect("backend");
+        AppState::new_fixture(cfg, backend)
+    }
+
+    #[test]
+    fn with_config_replaces_existing() {
+        // The setter is the only legal out-of-crate write path to
+        // `config`; flip a discriminator (port number) to verify the
+        // new config landed.
+        let mut first = min_cfg();
+        first.port = 11111;
+        let backend = Backend::from_config(&first).expect("backend");
+        let state = AppState::new_fixture(first, backend);
+        assert_eq!(state.config.port, 11111, "fixture starts with first cfg");
+
+        let mut second = min_cfg();
+        second.port = 22222;
+        let state = state.with_config(second);
+        assert_eq!(
+            state.config.port, 22222,
+            "with_config must replace the prior SandboxConfig"
+        );
+    }
+
+    #[test]
+    fn with_database_replaces_existing() {
+        // `Arc::ptr_eq` proves the stored handle is the second Arc —
+        // not just an equal-by-value clone. `for_setter_test_only`
+        // is a sync, in-crate constructor that skips the pg pool
+        // (no live postgres required for this test).
+        let state = min_state();
+        assert!(
+            state.database.is_none(),
+            "fixture must start with database = None"
+        );
+        let first = Arc::new(Database::for_setter_test_only(
+            "postgres://first:nopass@localhost/sbx_a".into(),
+        ));
+        let second = Arc::new(Database::for_setter_test_only(
+            "postgres://second:nopass@localhost/sbx_b".into(),
+        ));
+        let state = state.with_database(first.clone());
+        let state = state.with_database(second.clone());
+        let stored = state.database.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+
+    #[test]
+    fn with_snapshot_store_replaces_existing() {
+        let state = min_state();
+        assert!(state.snapshot_store.is_none(), "fixture starts None");
+        let first: Arc<dyn SnapshotStore> = Arc::new(
+            LocalDiskSnapshotStore::new(std::path::PathBuf::from(
+                "/tmp/zsbx-snap-setter-first",
+            )),
+        );
+        let second: Arc<dyn SnapshotStore> = Arc::new(
+            LocalDiskSnapshotStore::new(std::path::PathBuf::from(
+                "/tmp/zsbx-snap-setter-second",
+            )),
+        );
+        let state = state.with_snapshot_store(first.clone());
+        let state = state.with_snapshot_store(second.clone());
+        let stored = state.snapshot_store.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+
+    #[test]
+    fn with_ch_remote_replaces_existing() {
+        let state = min_state();
+        assert!(state.ch_remote.is_none(), "fixture starts None");
+        let first: Arc<dyn ChRemoteClient> =
+            Arc::new(MockChRemoteClient::default());
+        let second: Arc<dyn ChRemoteClient> =
+            Arc::new(MockChRemoteClient::default());
+        let state = state.with_ch_remote(first.clone());
+        let state = state.with_ch_remote(second.clone());
+        let stored = state.ch_remote.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+
+    #[test]
+    fn with_restore_backend_replaces_existing() {
+        let state = min_state();
+        assert!(state.restore_backend.is_none(), "fixture starts None");
+        let first: Arc<dyn RestoreBackend> =
+            Arc::new(StubRestoreBackend::new(std::path::PathBuf::from(
+                "/tmp/zsbx-rb-setter-first",
+            )));
+        let second: Arc<dyn RestoreBackend> =
+            Arc::new(StubRestoreBackend::new(std::path::PathBuf::from(
+                "/tmp/zsbx-rb-setter-second",
+            )));
+        let state = state.with_restore_backend(first.clone());
+        let state = state.with_restore_backend(second.clone());
+        let stored = state.restore_backend.as_ref().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shutdown_tests {
     use super::*;
@@ -920,5 +2006,242 @@ mod shutdown_tests {
             final_iters <= pre_flip + 1,
             "loop must exit within one iteration of flag flip; pre={pre_flip}, post={final_iters}"
         );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// R5-S1 / cluster bug #21 — boot-time fail-CLOSED for the
+// `snapshot_enabled=true && persist=None` configuration. The helper is
+// a pure function over three booleans so we can pin every cell of the
+// truth table without spinning up a backend probe.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod persist_required_assertion_tests {
+    use super::assert_persist_required_when_snapshot_enabled as check;
+
+    #[test]
+    fn snapshot_off_persist_off_is_ok() {
+        // Phase-A feature-flagged off: persist is optional. The deferred
+        // persist=None shape is the historical default.
+        check(false, false, false).expect("snapshot disabled → persist optional");
+    }
+
+    #[test]
+    fn snapshot_off_persist_on_is_ok() {
+        // Snapshot off but operator wired persistence anyway (e.g. for
+        // restart-restore of long-lived sandboxes). Allowed.
+        check(false, true, false).expect("snapshot disabled + persist on → ok");
+    }
+
+    #[test]
+    fn snapshot_on_persist_on_is_ok() {
+        // The production-correct shape under Phase B. No assertion fires.
+        check(true, true, false).expect("snapshot+persist both on → ok");
+    }
+
+    #[test]
+    fn snapshot_on_persist_off_without_override_is_err() {
+        // The fail-OPEN configuration cluster bug #21 surfaced. MUST
+        // refuse to boot.
+        let err = check(true, false, false)
+            .expect_err("snapshot_enabled && persist=None must refuse to boot");
+        assert!(
+            err.contains("FATAL"),
+            "error must announce FATAL severity; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_PERSIST_AUTH"),
+            "error must mention the env var the operator must set; got: {err}"
+        );
+        assert!(
+            err.contains("R5-S1") || err.contains("#21"),
+            "error must reference the deferred entry / bug; got: {err}"
+        );
+    }
+
+    #[test]
+    fn snapshot_on_persist_off_with_test_override_is_ok() {
+        // Dev/test fixtures that drive `StubRestoreBackend` without a
+        // persistence layer use the explicit
+        // `ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1` escape
+        // hatch (R6-A1 renamed from the old `SANDBOX_PERSIST_NONE_OK`
+        // so operator misuse is obvious from a glance at a unit file).
+        // The override is intentional, named, and visible in the env
+        // block of any production unit it appears in.
+        check(true, false, true).expect(
+            "ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1 \
+             overrides the assertion",
+        );
+    }
+}
+
+
+// ────────────────────────────────────────────────────────────────────
+// A1 (audit-r1) — prod-shape AEAD wrap of the snapshot store.
+//
+// Verifies the wrap composition the production `AppState::from_config`
+// path produces when `RootKek::from_env` returns `Some(kek)`: the
+// resulting `Arc<dyn SnapshotStore>` round-trips put/get AND the bytes
+// landing on the L1 root are ciphertext (not plaintext).
+//
+// We don't re-test the cipher itself (covered exhaustively in
+// `snapshot_aead::tests`); we test that the WIRING produces the
+// expected on-disk shape. Without this assertion the prior wiring's
+// "AEAD never composed" footgun could regress silently — the
+// snapshot/restore round-trips through plaintext L1 just as cleanly as
+// through wrapped L1.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod prod_aead_wrap_tests {
+    use super::*;
+    use crate::snapshot_aead::{AeadSnapshotStore, RootKek};
+    use crate::snapshot_store::LocalDiskSnapshotStore;
+
+    /// Build the production wrap shape (L1-only branch) explicitly and
+    /// assert the on-L1 `memory-ranges` blob is ciphertext, not the
+    /// plaintext that was handed to `put`. This mirrors the wrap in
+    /// `from_config`'s `else` branch (kek_present, !use_gcs) so a
+    /// regression that drops the AEAD wrap fails this test loudly.
+    #[test]
+    fn prod_l1_wrap_produces_ciphertext_on_disk() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-a1-wrap-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir tmp root");
+        let l1_root = root.join("l1");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+
+        // CH artifact triple — config.json and state.json are plaintext;
+        // memory-ranges is the byte sequence we'll grep for post-put.
+        let plaintext_marker: Vec<u8> = (0u32..(64 * 1024))
+            .flat_map(|i| i.to_be_bytes().into_iter())
+            .collect();
+        std::fs::write(src.join("config.json"), b"{\"cfg\":1}").expect("write cfg");
+        std::fs::write(src.join("state.json"), b"{\"st\":2}").expect("write st");
+        std::fs::write(src.join("memory-ranges"), &plaintext_marker)
+            .expect("write mem");
+
+        let kek = RootKek::from_bytes([0xc3; 32]);
+        // EXACTLY the L1-only kek-present branch from `from_config`.
+        let inner = LocalDiskSnapshotStore::new(l1_root.clone());
+        let store: Arc<dyn SnapshotStore> =
+            Arc::new(AeadSnapshotStore::new(inner, Some(kek)));
+
+        let meta = store
+            .put("sbx_a1_wrap_l1", &src, "v51.1")
+            .expect("put round-trip");
+
+        // 1. ch_version is annotated by the AEAD layer when active —
+        //    proves the wrap is on the put path (vs. a passthrough or
+        //    bypassed wrap).
+        assert!(
+            meta.ch_version.contains("+aead-cc20p1305"),
+            "wrap must annotate ch_version with AEAD tag; got {}",
+            meta.ch_version
+        );
+
+        // 2. The L1 `memory-ranges` blob must NOT contain the plaintext
+        //    marker — if AEAD encryption ran, the ciphertext + header
+        //    bytes overwrite the raw pattern.
+        let l1_mr =
+            std::path::PathBuf::from(&meta.artifact_path).join("memory-ranges");
+        let on_disk = std::fs::read(&l1_mr).expect("read l1 memory-ranges");
+        assert!(
+            on_disk.len() >= 1024,
+            "on-disk blob shorter than expected: {}",
+            on_disk.len()
+        );
+        // The AEAD file magic confirms it's a wrapped artifact.
+        assert_eq!(
+            &on_disk[0..8],
+            b"ZSBXAEAD",
+            "L1 blob must begin with ZSBXAEAD magic; got {:?}",
+            &on_disk[0..8.min(on_disk.len())]
+        );
+        // Deep-window plaintext check: confirm a contiguous 256-byte
+        // slice of the plaintext does NOT appear anywhere in `on_disk`.
+        // The AEAD ciphertext is uniformly random; the chance of
+        // accidental collision is 2^-2048.
+        let needle = &plaintext_marker[1024..1024 + 256];
+        let found_plain = on_disk.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !found_plain,
+            "plaintext byte pattern must NOT appear in the L1 blob \
+             (AEAD wrap is the only thing standing between guest RAM \
+             and disk-resident plaintext)"
+        );
+
+        // 3. Round-trip: get must recover the plaintext byte-for-byte.
+        let target = root.join("target");
+        store
+            .get("sbx_a1_wrap_l1", &target, &meta.sha256)
+            .expect("get round-trip");
+        let restored = std::fs::read(target.join("memory-ranges"))
+            .expect("read restored memory-ranges");
+        assert_eq!(
+            restored, plaintext_marker,
+            "AEAD wrap must round-trip plaintext byte-for-byte"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The kek-absent branch — covers the dev-mode `Ok(None)` from
+    /// `RootKek::from_env` where the wrapper is composed but in
+    /// passthrough. Asserts the L1 blob is plaintext (proves the
+    /// kek_present=false branch in `from_config` is the dev shape and
+    /// nothing else).
+    ///
+    /// This is the "audit-trail-honest" half: when no key is wired the
+    /// wrap is structurally identical (still composed) but observably
+    /// transparent — so the boot log is the single source of truth on
+    /// the actual posture.
+    #[test]
+    fn prod_l1_wrap_passthrough_when_no_kek() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-a1-wrap-pt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir tmp root");
+        let l1_root = root.join("l1");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+
+        let plaintext_marker: Vec<u8> = (0u32..16_384)
+            .flat_map(|i| i.to_be_bytes().into_iter())
+            .collect();
+        std::fs::write(src.join("config.json"), b"{\"cfg\":1}").expect("write cfg");
+        std::fs::write(src.join("state.json"), b"{\"st\":2}").expect("write st");
+        std::fs::write(src.join("memory-ranges"), &plaintext_marker)
+            .expect("write mem");
+
+        let inner = LocalDiskSnapshotStore::new(l1_root.clone());
+        let store: Arc<dyn SnapshotStore> =
+            Arc::new(AeadSnapshotStore::new(inner, None));
+
+        let meta = store
+            .put("sbx_a1_wrap_pt", &src, "v51.1")
+            .expect("put passthrough");
+        assert!(
+            !meta.ch_version.contains("+aead"),
+            "passthrough must NOT annotate ch_version with AEAD tag; got {}",
+            meta.ch_version
+        );
+
+        let l1_mr =
+            std::path::PathBuf::from(&meta.artifact_path).join("memory-ranges");
+        let on_disk = std::fs::read(&l1_mr).expect("read l1 memory-ranges");
+        // Passthrough → bytes on disk match what we put in.
+        assert_eq!(
+            on_disk, plaintext_marker,
+            "passthrough must land plaintext on L1 — the kek_present=false \
+             warn log is the only signal an operator gets"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

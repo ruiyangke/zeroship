@@ -88,7 +88,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    if config.token.is_empty() {
+    if config.token().is_empty() {
         tracing::warn!("sandbox: SANDBOX_TOKEN not set — endpoints are unauthenticated");
     }
 
@@ -219,7 +219,21 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/admin/hosts")
                     .route(web::get().to(admin_handlers::list_hosts)),
             )
-            // Share-token mint/list/revoke (§ III). The
+            // Snapshot/restore admin routes (PR 2c stubs — return 501
+            // until SANDBOX_SNAPSHOT_ENABLED=true ships in PR 3+).
+            .service(
+                web::resource("/admin/sandboxes/{id}/snapshot")
+                    .route(web::post().to(admin_handlers::snapshot_sandbox)),
+            )
+            .service(
+                web::resource("/admin/sandboxes/{id}/wake")
+                    .route(web::post().to(admin_handlers::wake_sandbox)),
+            )
+            .service(
+                web::resource("/admin/sandboxes/{id}/cold-boot")
+                    .route(web::post().to(admin_handlers::cold_boot_sandbox)),
+            )
+            // Phase-3 share-token mint/list/revoke (§ III). The
             // `/share` resource is registered BEFORE the catch-all
             // `/preview/{port}/{path}*` so ntex matches the more
             // specific routes first.
