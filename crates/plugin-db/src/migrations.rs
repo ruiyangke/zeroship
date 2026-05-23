@@ -49,7 +49,9 @@ use serde_json::Value;
 use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
-use crate::backend::{LockManager, LockScope, NamespaceManager, PgSqlExecutor, SqlExecutor};
+use crate::backend::{
+    LockManager, LockScope, NamespaceManager, OwnedLockGuard, PgSqlExecutor, SqlExecutor,
+};
 use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
 
@@ -303,57 +305,67 @@ where
     // pair from those fields; the PG impl hashes through
     // `hashtext()` as before.
     //
-    // Post-P0 mop-up (MAJOR-R14-2): `LockManager::{try_acquire,
-    // release}` take `&LockScope`, so the binding survives the
-    // try-acquire await and is reused by the cancelled-refusal
-    // release below. The §10.5 invariant ("release uses the same
-    // keys as the acquire") lives in a single `LockScope` value
-    // instead of two textually-identical struct literals.
+    // arch r13 I-R13-2 (security [I3] structural fix): the
+    // acquisition + lifecycle now flow through
+    // [`OwnedLockGuard`] so any error path between acquisition and
+    // the slot-park `into_held()` below auto-releases the lock via
+    // session-end + emits a `tracing::warn`. The previous open-coded
+    // `try_acquire` + manual `release` pattern was structurally
+    // unsafe — see `docs/reviews/plugin-db-deferred.md` §[I3] and
+    // `docs/reviews/plugin-db-architecture-review-2026-05-22-r13.md`
+    // §I-R13-2 for the design rationale (sibling guard, not
+    // generic over client type).
     //
     // arch r13 I-R13-1 / api-surface r13 MINOR-R13-2: the `"mig:"`
     // prefix is encoded in `LockScope::migration` so the literal
     // lives in one place across the 3 acquire/release sites.
     let scope = LockScope::migration(app_id, name);
-    let got = backend
-        .try_acquire(&client, &scope)
+    // try_acquire semantics preserved: one-shot, contention maps to
+    // `err_already_running()` (JS-visible code
+    // `"migration_already_running"`). We do NOT use the bounded-retry
+    // `OwnedLockGuard::acquire` variant — that would map contention
+    // to `lock_not_available`, a different `.code` for the SDK.
+    // [I3] structural fix discipline: no JS-visible behaviour change.
+    let guard = match OwnedLockGuard::try_acquire(backend, client, scope, app_id, name)
         .await
-        .map_err(|e| coded_db("advisory_lock query", e))?;
-    if !got {
-        // Client drops here; backend session ends; no locks were held
-        // on it (since pg_try_advisory_lock returned false).
-        return Err(err_already_running());
-    }
+        .map_err(|e| coded_db("advisory_lock query", e))?
+    {
+        Some(g) => g,
+        None => {
+            // No guard built; client was dropped by try_acquire's
+            // None branch. Backend session ends; no lock held.
+            return Err(err_already_running());
+        }
+    };
 
     if reset {
         // Same generation bump as `exec_reset` — see Gap X.
-        crate::audit::reset_backfill_row(&client, app_id, collection, name)
+        crate::audit::reset_backfill_row(guard.client(), app_id, collection, name)
             .await
             .map_err(|e| coded_db("migration reset", e))?;
+        // ^ On Err: guard drops → owned-client session terminates →
+        //   PG auto-releases the advisory lock → operator sees a
+        //   `tracing::warn` from `OwnedLockGuard::drop` with the
+        //   F1 `{app_id, name, transition}` shape. Previously this
+        //   Err return leaked the lock until session-end, observably.
     }
 
-    let existing = crate::audit::find_latest_backfill_row(&client, app_id, collection, name)
+    let existing = crate::audit::find_latest_backfill_row(guard.client(), app_id, collection, name)
         .await
         .map_err(|e| coded_db("migration lookup", e))?;
 
     let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing {
         if row.status == "cancelled" {
-            // Refuse — operator must reset to clear state.
-            // Post-P0 mop-up (MAJOR-R14-2): the typed `LockScope` we
-            // built above for `try_acquire` is reused here by reference
-            // — no re-construction, no clone, single source of truth
-            // for the §10.5 key-derivation invariant.
-            if let Err(e) = backend.release(&client, &scope).await {
-                tracing::warn!(
-                    app_id,
-                    name,
-                    error = %e,
-                    "release_advisory_lock failed on cancelled-refusal path (lock auto-releases on session end)",
-                );
-            }
-            drop(client);
+            // Refuse — operator must reset to clear state. The guard's
+            // explicit `release().await` issues the unlock SQL +
+            // preserves the F1 warn-shape `{app_id, name, error}`
+            // on unlock-SQL failure (i6 snapshot test contract).
+            // The returned client is then dropped — session ends,
+            // belt-and-braces auto-release.
+            let _ = guard.release().await;
             return Err(err_cancelled_on_start());
         }
-        crate::audit::set_backfill_running(&client, app_id, row.id)
+        crate::audit::set_backfill_running(guard.client(), app_id, row.id)
             .await
             .map_err(|e| coded_db("migration set running", e))?;
         (row.id, row.cursor, row.processed, row.dead_letter_pks, row.audit_generation)
@@ -364,7 +376,7 @@ where
         let deploy_id = std::env::var("ZEROSHIP_DEPLOY_ID")
             .unwrap_or_else(|_| "cold_start".to_string());
         let id = crate::audit::insert_backfill_running(
-            &client,
+            guard.client(),
             app_id,
             collection,
             name,
@@ -385,6 +397,12 @@ where
         (id, 0i64, 0i64, Value::Array(vec![]), 0i64)
     };
 
+    // Hand the still-locked client off into the per-isolate slot for
+    // the next V8 call (`fetchBatch` / `commitBatch`) to re-wrap via
+    // `OwnedLockGuard::assume_held`. The guard's Drop is suppressed
+    // by `into_held`'s `released = true` flip — no warn fires on the
+    // happy path.
+    let client = guard.into_held();
     crate::context::with_mut(|c| {
         let _previous = c.set_mig_lock(MigrationLock {
             name: name.to_string(),
@@ -542,30 +560,43 @@ where
             "failed" => TerminalStatus::Failed,
             "cancelled" => TerminalStatus::Cancelled,
             other => {
-                // Reject up-front; mirror the §10.5 release shape used
-                // by the cancelled-refusal path in `exec_begin` so the
-                // advisory lock + the per-isolate `mig_lock` slot are
-                // both released. The dedicated client lives in the slot
-                // — take it, release the lock on it, drop it (session
-                // end is the belt-and-braces unlock), then clear the
-                // slot. F1 warn-shape (`{app_id, name, error}`) is
-                // preserved per i6 documentation snapshot.
+                // Reject up-front. The dedicated client lives in the
+                // slot — take it, wrap into an `OwnedLockGuard` so the
+                // unlock-SQL release + the slot teardown follow the
+                // same RAII discipline the [I3] structural fix
+                // installed across this file. The guard's Drop or
+                // `.release().await` both emit the F1 warn-shape
+                // (`{app_id, name, error}`) on unlock-SQL failure,
+                // preserving the i6 documentation snapshot contract.
                 //
                 // arch r13 I-R13-1 / api-surface r13 MINOR-R13-2:
                 // `LockScope::migration` centralises the `"mig:"`
                 // prefix invariant — shared with `exec_begin`'s
                 // acquisition and the `is_done` finalise path.
+                //
+                // arch r13 I-R13-2: per the user's [I3] plan
+                // (drain-cycle r18), this site uses the **guard's
+                // drop path** — no explicit `.release().await`. The
+                // owned client drops alongside the guard; the PG
+                // session terminates; the lock auto-releases as a
+                // *guaranteed* cleanup; the guard's Drop emits a
+                // `tracing::warn` with the F1 `{app_id, name,
+                // transition}` shape. This is correct (lock released,
+                // observable, no extra SQL round-trip) and parity-
+                // ready with the BEGIN/audit-lock/COMMIT failure
+                // rails below.
                 let release_scope = LockScope::migration(app_id, &name);
                 if let Some(client) = take_lock_client() {
-                    if let Err(e) = backend.release(&client, &release_scope).await {
-                        tracing::warn!(
-                            app_id,
-                            name,
-                            error = %e,
-                            "release_advisory_lock failed on terminalStatus pre-validation reject path (lock auto-releases on session end)",
-                        );
-                    }
-                    drop(client);
+                    let _guard: OwnedLockGuard<'_, B> = OwnedLockGuard::assume_held(
+                        backend,
+                        client,
+                        release_scope,
+                        app_id,
+                        &name,
+                    );
+                    // _guard drops here → warn + session-end + lock
+                    // auto-release. Explicit `drop(_guard)` would be
+                    // identical; the binding name documents intent.
                 }
                 crate::context::with_mut(|c| c.clear_mig_lock());
                 return Err(coded(
@@ -583,18 +614,81 @@ where
         coded("no_active_migration", "lock client missing", None)
     })?;
 
-    // Helper: rollback + restore the client to the per-isolate slot.
-    async fn rollback_and_return<B>(backend: &B, client: LockClient)
+    // arch r13 I-R13-2 (security [I3] structural fix): wrap the
+    // slot-held client into an `OwnedLockGuard` immediately. Every
+    // subsequent Err path that returns *without* calling
+    // `guard.into_held()` (to park the client back into the slot)
+    // drops the guard, which:
+    //
+    //   1. Logs a `tracing::warn!` with the F1 field shape
+    //      `{app_id, name, transition}` — operator observability
+    //      parity with the explicit-release sites elsewhere in this
+    //      file.
+    //   2. Drops the owned client — the compio-postgres connection
+    //      task terminates → PG session ends → the session-scoped
+    //      advisory lock auto-releases as a *guaranteed* cleanup
+    //      (no waiting for pool recycle).
+    //
+    // The lock scope mirrors `exec_begin`'s acquisition exactly via
+    // `LockScope::migration` (§10.5 invariant).
+    //
+    // The three Err rails explicitly called out by the [I3] fix
+    // (BEGIN failure, audit-lock-FOR-UPDATE failure, dry-run
+    // ROLLBACK / real-run COMMIT failure) previously left the lock
+    // held + the client parked back in the slot — now they release
+    // via guard drop and clear the slot. The SDK observing these
+    // errors will need to mint a fresh `Migration` wrapper (a fresh
+    // `migrations.start(spec)`) rather than blind-retrying the
+    // current commitBatch; the err codes are unchanged
+    // (transient/audit lock/migration COMMIT) so the SDK's retry
+    // discipline already covers this path.
+    let release_scope = LockScope::migration(app_id, &name);
+    let guard: OwnedLockGuard<'_, B> =
+        OwnedLockGuard::assume_held(backend, client, release_scope, app_id, &name);
+
+    // Helper: rollback + restore the client to the per-isolate slot
+    // for non-terminal Err paths (cancelled-mid-run, generation
+    // mismatch, parse errors, UPDATE-SQL failure, progress-UPDATE
+    // failure). These paths leave the migration in a state the SDK
+    // can either cancel or continue with a fresh wrapper, but the
+    // *current* in-flight slot stays so the SDK can call
+    // `migrations.status(...)` for diagnostics.
+    //
+    // The helper takes the guard by value and calls `into_held()`
+    // — suppressing the guard's Drop warn (this is the "happy"
+    // shape for these paths even though we return Err) and parking
+    // the client back into the slot. The lock stays held by the
+    // parked client's session; subsequent `commitBatch` / `cancel`
+    // calls on this wrapper re-wrap via `assume_held`.
+    async fn rollback_and_return<'b, B>(backend: &B, guard: OwnedLockGuard<'b, B>)
     where
-        B: SqlExecutor<Client = compio_postgres::Client>,
+        B: SqlExecutor<Client = compio_postgres::Client>
+            + LockManager<Client = compio_postgres::Client>,
     {
-        let _ = backend.client_exec(&client, "ROLLBACK", &[]).await;
+        // ROLLBACK runs on the same session as the guard's client;
+        // failure is best-effort (the slot still goes back populated,
+        // matching pre-[I3] behaviour exactly).
+        let _ = backend
+            .client_exec(guard.client(), "ROLLBACK", &[])
+            .await;
+        let client = guard.into_held();
         return_lock_client(client);
     }
 
-    // BEGIN
-    if let Err(e) = backend.client_exec(&client, "BEGIN", &[]).await {
-        return_lock_client(client);
+    // BEGIN — [I3] rail #1.
+    //
+    // On failure the guard drops here: warn + session-end +
+    // auto-release. We also clear the slot so the SDK's next call
+    // sees `has_mig_lock() == false` and routes through
+    // `migrations.start(...)` instead of trying to continue the
+    // wedged in-flight wrapper. Behaviour change documented in
+    // arch r13 I-R13-2: previously this path parked the client back
+    // in the slot with the lock still held (leak until isolate
+    // teardown); now the lock is reliably released and the slot is
+    // reset.
+    if let Err(e) = backend.client_exec(guard.client(), "BEGIN", &[]).await {
+        drop(guard);
+        crate::context::with_mut(|c| c.clear_mig_lock());
         return Err(coded_db("BEGIN", e));
     }
 
@@ -607,16 +701,26 @@ where
     // the batch's mutations, which means concurrent cancels block
     // until COMMIT — at which point they see `status='running'` flip
     // to whatever the SDK requested (or stay running for another pass).
-    let locked = match crate::audit::lock_audit_row_for_update(&client, app_id, audit_id).await {
+    //
+    // [I3] rail #2: a `lock_audit_row_for_update` failure (e.g.
+    // connection drop mid-SELECT-FOR-UPDATE) drops the guard →
+    // warn + session-end + auto-release + slot cleared. The
+    // BEGIN ROLLBACK is best-effort because the connection is
+    // already in a bad state at this point.
+    let locked = match crate::audit::lock_audit_row_for_update(guard.client(), app_id, audit_id).await {
         Ok(row) => row,
         Err(e) => {
-            rollback_and_return(backend, client).await;
+            // Best-effort ROLLBACK before drop; ignore errors (the
+            // session is about to end anyway).
+            let _ = backend.client_exec(guard.client(), "ROLLBACK", &[]).await;
+            drop(guard);
+            crate::context::with_mut(|c| c.clear_mig_lock());
             return Err(coded_db("audit lock", e));
         }
     };
     if let Some(row) = locked {
         if row.status == "cancelled" {
-            rollback_and_return(backend, client).await;
+            rollback_and_return(backend, guard).await;
             return Err(err_cancelled_mid_run());
         }
         // Gap X: an operator's `migrations.reset` bumps
@@ -624,7 +728,7 @@ where
         // advance the cursor past the new reset point — abort with a
         // coded error so the SDK mints a fresh wrapper.
         if row.audit_generation != start_generation {
-            rollback_and_return(backend, client).await;
+            rollback_and_return(backend, guard).await;
             return Err(err_reset_externally());
         }
     }
@@ -632,7 +736,7 @@ where
     // Apply each update.
     for upd in updates_arr {
         let Some(obj) = upd.as_object() else {
-            rollback_and_return(backend, client).await;
+            rollback_and_return(backend, guard).await;
             return Err(coded(
                 "invalid_argument",
                 "each update entry must be an object",
@@ -642,7 +746,7 @@ where
         let id = match obj.get("id").and_then(Value::as_i64) {
             Some(v) => v,
             None => {
-                rollback_and_return(backend, client).await;
+                rollback_and_return(backend, guard).await;
                 return Err(coded(
                     "invalid_argument",
                     "each update entry must have a numeric id",
@@ -686,8 +790,8 @@ where
             assignments.join(", ")
         );
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        if let Err(e) = backend.client_exec(&client, &sql, &param_refs).await {
-            rollback_and_return(backend, client).await;
+        if let Err(e) = backend.client_exec(guard.client(), &sql, &param_refs).await {
+            rollback_and_return(backend, guard).await;
             return Err(coded_db(&format!("migration row UPDATE (id={id})"), e));
         }
     }
@@ -704,7 +808,7 @@ where
     // fresh runs then resumed from the stale pre-clobber cursor.
     if !dry_run {
         if let Err(e) = crate::audit::update_backfill_progress(
-            &client,
+            guard.client(),
             app_id,
             audit_id,
             next_cursor,
@@ -713,7 +817,7 @@ where
         )
         .await
         {
-            rollback_and_return(backend, client).await;
+            rollback_and_return(backend, guard).await;
             return Err(coded_db("audit row update", e));
         }
     }
@@ -722,9 +826,15 @@ where
     // this transaction; if COMMIT fails, neither data UPDATEs nor cursor
     // advance — fresh attempts resume from the prior cursor without the
     // reset-clobber race.
+    //
+    // [I3] rail #3: COMMIT/ROLLBACK failure drops the guard →
+    // warn + session-end + auto-release + slot cleared. The dry-run
+    // path (`final_sql = "ROLLBACK"`) was the specific scenario the
+    // drain-cycle report flagged.
     let final_sql = if dry_run { "ROLLBACK" } else { "COMMIT" };
-    if let Err(e) = backend.client_exec(&client, final_sql, &[]).await {
-        return_lock_client(client);
+    if let Err(e) = backend.client_exec(guard.client(), final_sql, &[]).await {
+        drop(guard);
+        crate::context::with_mut(|c| c.clear_mig_lock());
         return Err(coded_db(&format!("migration {final_sql}"), e));
     }
 
@@ -743,7 +853,7 @@ where
         // stall; we still continue with lock release because the row
         // state is already as-good-as-it-gets at this point.
         if let Err(audit_err) =
-            crate::audit::finalise_backfill(&client, app_id, audit_id, terminal, error_message)
+            crate::audit::finalise_backfill(guard.client(), app_id, audit_id, terminal, error_message)
                 .await
         {
             // Field shape pinned by code-critique r11 MINOR-R11-1
@@ -767,36 +877,27 @@ where
             );
         }
 
-        // P0 PR 6: classified via `LockScope::GlobalApp` mirroring the
-        // `exec_begin`-side acquisition; `LockScope::to_keys` produces
-        // the matching `(key1, key2)` pair.
-        //
-        // Post-P0 mop-up (MAJOR-R14-2): `release` takes `&LockScope`,
-        // so the binding lives one statement. The `exec_begin` peer
-        // (the original acquisition) lives in a separate function and
-        // cannot share this binding directly — the §10.5 key-derivation
-        // convention (`name = "mig:{name}"`) is the cross-function
-        // contract here.
-        //
-        // arch r13 I-R13-1 / api-surface r13 MINOR-R13-2:
-        // `LockScope::migration` centralises the `"mig:"` prefix
-        // invariant shared with `exec_begin` + the pre-validation
-        // reject path above.
-        let release_scope = LockScope::migration(app_id, &name);
-        if let Err(e) = backend.release(&client, &release_scope).await {
-            tracing::warn!(
-                app_id,
-                name,
-                error = %e,
-                "release_advisory_lock failed on backfill-finalise path (lock auto-releases on session end)",
-            );
-        }
-        // Drop the client — backend session ends, releasing all locks.
-        drop(client);
+        // arch r13 I-R13-2 (security [I3] structural fix): the
+        // explicit unlock SQL flows through `OwnedLockGuard::release`
+        // — on success the returned client drops at end-of-scope
+        // (session ends, belt-and-braces auto-release); on unlock-SQL
+        // failure the guard emits a `tracing::warn!` with the F1
+        // field shape `{app_id, name, error}`, matching the i6
+        // documentation snapshot contract verbatim. The `guard`
+        // binding was set up at function start (immediately after
+        // `take_lock_client`), so the release scope is already
+        // bound to the same `LockScope::migration(app_id, &name)`
+        // used at acquisition in `exec_begin`.
+        let _ = guard.release().await;
         crate::context::with_mut(|c| c.clear_mig_lock());
         return Ok(serde_json::json!({ "committed": !dry_run, "done": true }).to_string());
     }
 
+    // Non-terminal happy path: park the client back into the slot
+    // for the next `commitBatch` / `fetchBatch` call. `into_held()`
+    // suppresses the guard's Drop warn (this is the success shape)
+    // and hands the still-locked client off to `return_lock_client`.
+    let client = guard.into_held();
     return_lock_client(client);
     Ok(serde_json::json!({ "committed": !dry_run, "done": false }).to_string())
 }
@@ -1109,21 +1210,34 @@ mod tests {
 
     // ----- [I6] release_advisory_lock warn-shape documentation ---------
     //
-    // Three `release_advisory_lock` callers in this file (lines 346,
-    // 561, and 787 at HEAD) emit `tracing::warn!` with the same field
-    // shape: `{app_id, name, error}` + a message identifying the call
-    // site (cancelled-refusal vs terminalStatus pre-validation reject
-    // vs backfill-finalise). Pin the shape so a future refactor of the
-    // unlock-SQL retry path doesn't drop a field that the runbook greps
-    // on. test-coverage r13 NEW-R13-2 + r18 NEW-R18-6 (the third
-    // pre-validation reject site was added by concurrency r13 NEW-R13-2
-    // via f2b66132 and the count was updated here).
+    // The `release_advisory_lock` warn-shape contract is now centralised
+    // in [`crate::backend::OwnedLockGuard::release`] (arch r13 I-R13-2 /
+    // security [I3] structural fix). The three pre-existing inline
+    // `tracing::warn!` sites in this file — cancelled-refusal,
+    // terminalStatus pre-validation reject, backfill-finalise — were
+    // replaced by `OwnedLockGuard::release()` calls; the guard's own
+    // `tracing::warn!` (on unlock-SQL failure) carries the same field
+    // shape `{app_id, name, error}` + a message containing
+    // "release_advisory_lock failed" + "lock auto-releases on session
+    // end". This snapshot test pins that contract from the migrations.rs
+    // side so a refactor of the guard's emit shape (e.g., reordering
+    // fields, dropping `error`) trips the test before reaching CI.
+    //
+    // Test-coverage history:
+    // - r13 NEW-R13-2 added the snapshot.
+    // - r18 NEW-R18-6 bumped the count when concurrency r13 added the
+    //   third inline site (f2b66132).
+    // - drain-cycle 2026-05-22 (security [I3]) replaced all three
+    //   inline sites with OwnedLockGuard::release; the warn shape is
+    //   now emitted from the guard, not inline. The snapshot test
+    //   continues to pin the format the guard emits — same fields,
+    //   same message substrings.
     //
     // Same caveat as the F1 documentation snapshot in
     // `orchestrator/register_model/apply.rs`: this test re-emits the
-    // SAME `tracing::warn!` syntax, so it does NOT drive the live
-    // unlock-SQL path — it only documents the shape contributors
-    // must keep aligned across the three sites. End-to-end coverage
+    // SAME `tracing::warn!` syntax `OwnedLockGuard::release` uses, so
+    // it does NOT drive the live unlock-SQL path — it only documents
+    // the shape contributors must keep aligned. End-to-end coverage
     // lives in `tests/integration.rs`.
 
     #[test]
@@ -1131,16 +1245,20 @@ mod tests {
         use crate::test_support::capture;
         use tracing::Level;
 
-        // The exact syntax from line 291 (cancelled-refusal path).
+        // Mirrors the `tracing::warn!` shape `OwnedLockGuard::release`
+        // emits on unlock-SQL failure. See
+        // `crates/plugin-db/src/backend/owned_lock_guard.rs` —
+        // `release()` body — for the live emit site.
         let app_id = "app_t";
         let name = "mig_2026_01";
         let e = "lock release failed: connection dropped";
         let ((), events) = capture(|| {
             tracing::warn!(
-                app_id,
-                name,
+                app_id = %app_id,
+                name = %name,
                 error = %e,
-                "release_advisory_lock failed on cancelled-refusal path (lock auto-releases on session end)",
+                "release_advisory_lock failed on OwnedLockGuard explicit release \
+                 (lock auto-releases on session end)",
             );
         });
 

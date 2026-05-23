@@ -68,9 +68,11 @@ use std::rc::Rc;
 use crate::error::DbError;
 
 pub(crate) mod lock_guard;
+pub(crate) mod owned_lock_guard;
 pub mod postgres;
 
 pub(crate) use lock_guard::LockGuard;
+pub(crate) use owned_lock_guard::OwnedLockGuard;
 pub use postgres::PostgresBackend;
 
 /// SQL execution capability — the "connection lifecycle + run a
