@@ -395,7 +395,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## NEW r7 ROUND FINDINGS (added by pilot cycle 2026-05-24)
 
-### [R7-S1] B22 `/_clock_resync` has replay-DoS risk — missing sandbox_id + per-restore challenge (CRITICAL, security-r7)
+### [R7-S1] (CLOSED at `e95baa89`) clock_resync body now binds sandbox_id + 32-byte challenge + LRU replay defense; rootfs v5 + controller v18 + wrapper SANDBOX_AGENT_SANDBOX_ID env injection needed for cluster smoke
 - **Source**: 2026-05-24 security-r7
 - **Files**: `crates/sandbox-agent/src/sig.rs:348-355` (nonce LRU not pre-loaded for resync) + `crates/sandbox-agent/src/handlers.rs::clock_resync` (canonical body `{"ts": <unix_secs>}` lacks sandbox_id)
 - **Symptom**: `/_clock_resync` is authenticated by same per-sandbox signing key as other RPCs (in-VM forgery impossible) AND the skew-bypass verifier runs nonce LRU + signature gates. BUT: canonical body has no sandbox_id and no per-restore controller challenge. The nonce LRU is the only replay defense, and because resync arrives POST-restore, no resync nonce is ever in any snapshot's LRU. A network-adjacent attacker who captured a cycle-N resync can race the controller's cycle-N+1 POST to set CLOCK_REALTIME to stale T_old → sustained 401 DoS on all strict-skew RPCs.
@@ -425,7 +425,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: post-`wait_for_livez` Ok now includes (unseal + clock_resync up to 10s ureq + register_restored + 2 pg awaits) — all unguarded. Drop creates new wedge state.
 - **Action**: same as C3 — scope guard around the restore-Ok section. Covers all 4 C3 widenings.
 
-### [R7-P1] Snapshot p50=50s root cause RE-CHARACTERIZED: NOT teardown but synchronous CH-pause + memory-dump + L1 put (CRITICAL, performance-r7)
+### [R7-P1] (CLOSED at `79428d53`) spawn_blocking on ch.pause/snapshot + store.put — A3 slice 4 complete; estimated snapshot p50 50s→10-15s at c=4 (pending cluster verification)
 - **File**: `crates/sandbox/src/snapshot_handler.rs:316-373,566-621`
 - **Symptom**: r6 root-causing was wrong — R6-P1 detach correctly removed the teardown wait but snapshot p50 stayed at 50s. Real cause: `ChRemoteClient::pause/snapshot` + `LocalDiskSnapshotStore::put` run synchronously on the async caller. Trait doc at `snapshot_store.rs:99` mandates `spawn_blocking`; no caller wraps. At c=4 on n2-standard-4, four sync 2GB-dumps contend on local SSD → ~40-50 MB/s per stream → matches observed 50s wall.
 - **Action**: wrap `ch.pause`, `ch.snapshot`, AND `LocalDiskSnapshotStore::put` in `compio::runtime::spawn_blocking`. Same shape as R5-P1b's spawn_blocking wrap on `store.get`. Estimated snapshot p50 reduction: 50s → 10-15s at c=4 (limited by SSD bandwidth at concurrency=4 × 2GB = 8GB).
