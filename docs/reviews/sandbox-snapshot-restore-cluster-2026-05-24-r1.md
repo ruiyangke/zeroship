@@ -174,3 +174,173 @@ any new GCP attempt.
 - `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v12` — broken
   binary, kept on bucket for forensic / fix-validation
 - Local: `target/release/zeroship-sandbox` (Nix-linked, do not re-upload)
+
+---
+
+## Appendix A — bug #16 fix attempt + re-run (2026-05-24 r2)
+
+**Build approach:** Docker cross-build in `rust:slim-bookworm` image
+(note: brief said `rust:bookworm-slim`, that tag does not exist on
+Docker Hub; the correct tag is `slim-bookworm`). Build invocation:
+
+```bash
+docker run --rm \
+  -v /home/ruiyang/Projects/appbase:/work \
+  -w /work/.worktrees/sandbox-snapshot-restore \
+  -e CARGO_TARGET_DIR=/work/.worktrees/sandbox-snapshot-restore/target/docker-build \
+  rust:slim-bookworm bash -c '
+    set -e
+    apt-get update -qq && apt-get install -y -qq pkg-config libssl-dev clang git
+    cargo build --release -p zeroship-sandbox --bin zeroship-sandbox
+  '
+```
+
+First-pass build SUCCESS on first try (no iteration needed). Compile
+time inside container: ~3 min (apt) + 49.54s (cargo) = ~4 min wall.
+
+**Binary verification:**
+
+```
+readelf -p .interp target/docker-build/release/zeroship-sandbox
+  → /lib64/ld-linux-x86-64.so.2     ← Debian 12 / Ubuntu standard
+file target/docker-build/release/zeroship-sandbox
+  → ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV),
+    dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2,
+    for GNU/Linux 3.2.0
+size: 15,676,656 bytes
+```
+
+Bug #16 root cause (Nix-store PT_INTERP) is **resolved** by this
+build approach.
+
+**Uploaded:** `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v13`
+(15.0 MiB, 2026-05-23T03:41:49Z).
+
+### Smoke (1+1, c=1) — PARTIAL PASS
+
+Cluster: `zsbx-smoke`, 1 server (n2-standard-4) + 1 worker
+(n2-standard-32), `asia-northeast3-a`. Provisioned with
+`CONTROLLER_OBJECT=zeroship-sandbox.snapshot-v13` via env override.
+
+- **Provision:** OK. Server sentinel hit in 60s, worker sentinel in 15s.
+- **Controller start:** **OK.** `systemctl is-active zsbx-ctl` →
+  `active`, `curl http://127.0.0.1:9091/livez` → `{"status":"ok"}`.
+  Controller stayed up 19+ minutes with no restarts. **Bug #16
+  verification: PASS.**
+- **Cycle outcome:** **FAIL** at wake step.
+- **Timings:**
+  - `create_ms`: 5295 (HTTP 201)
+  - `exec_pre_ms`: 8.6 (HTTP 200)
+  - `snapshot_ms`: 47794 (HTTP 200; artifact bytes=1073847160 = 1.07 GB,
+    sha256=`1ef33f…6764c`, ch-remote v51.1)
+  - `wake_ms`: 37422 (**HTTP 500**)
+  - `exec_post`, `stop_ms`: skipped (depend on wake)
+- **B15 verification:** **N/A this cycle.** Wake reached the restore
+  step but failed at the post-restore agent-liveness probe (a different
+  failure mode than B15). Cannot confirm B15 PASS until the new wake
+  bug is fixed.
+- **Wake failure (verbatim):**
+
+  ```
+  {"error":"restore_backend: restore: agent at http://10.99.101.2:7777
+   never returned 200 on /livez (last=http://10.99.101.2:7777/livez:
+   Connection Failed: Connect error: No route to host (os error 113))"}
+  ```
+
+- **Controller journal (verbatim, full):**
+
+  ```
+  May 23 03:44:20 zsbx-smoke-worker-1 systemd[1]: Started zsbx-ctl.service - zeroship-sandbox controller.
+  ```
+
+  That is the **only** line. The controller process is running
+  (`Main PID 13343 (zeroship-sandbo)`, 19min uptime, 1.2G memory) but
+  emits nothing to stdout/stderr (systemd journal capture). Either
+  logging is disabled, going to a file, or buffered. Worth investigating
+  separately (low priority — not a blocker).
+
+- **Nomad activity:**
+  - 1st alloc `ade5a44b-…` (CREATE+SNAPSHOT): completed normally,
+    GC'd via SIGINT after snapshot.
+  - 2nd alloc `4dde790b-…` (WAKE/RESTORE): started 04:03:20Z, GC'd
+    via SIGINT 32s later at 04:03:52Z. Exit code 130 = SIGINT (the
+    controller cancelled the alloc after the liveness-probe timeout).
+  - Both alloc stderr files already GC'd by the time of diagnostic
+    capture (controller GC ran on stop).
+
+### New bug — #17: agent unreachable after CH restore
+
+- **Source:** smoke c=1 (this appendix).
+- **Symptom:** After `ch-remote restore` succeeds and the VM resumes,
+  the controller probes `http://<vm-ip>:7777/livez` and gets
+  "No route to host (os error 113)" until the per-cycle wake timeout
+  (~37s).
+- **Hypothesis (not verified):**
+  1. The taprt/network namespace for the restored VM is not re-attached
+     correctly post-restore — VM is up, but its tap is unbridged.
+  2. The `nomad-vm-wrapper.sh` `restore` branch may be missing a
+     `tap up` / `ip link set zsbx-<idx> master zsbx-br0` step that
+     `start` has but `restore` doesn't.
+  3. The IP `10.99.101.2` falls in the platform's `vm-net` /10 — if
+     the wrapper restore-branch only does `cloud-hypervisor restore`
+     without re-asserting tap/bridge attachment, traffic has no path.
+  4. Alternative: the agent inside the VM is bound to the original
+     network interface that may not exist post-restore (rare but
+     possible if CH `restore` re-assigns the tap to a different
+     ifname).
+- **Why NEW (not B15):** B15 was "wake reaches restore_backend and
+  the restore_backend call fails (snapshot artifact issue)". This is
+  "restore_backend call succeeds, but the resulting VM is on a tap
+  with no path to the controller". Different layer.
+- **Status:** captured here; **do not implement this cycle** per
+  pilot constraints. Next cycle handles.
+- **Inputs to next cycle:**
+  - `crates/sandbox/scripts/nomad-vm-wrapper.sh` — diff `start` vs.
+    `restore` branches for tap/bridge setup.
+  - `crates/sandbox/src/backend/nomad_ch.rs` — does the restore path
+    re-emit the tap interface name into the alloc env?
+  - The 30+ second probe timeout is also worth tightening (or
+    immediate-retry-on-EHOSTUNREACH) so the failure surfaces fast.
+
+### Stress (3+5, c=20) — NOT RUN
+
+Smoke failed at wake; per the brief ("If smoke fails: tear down,
+document, exit"), stress phase skipped. Stress can re-run once #17
+is fixed (no need to rebuild controller — v13 is portable).
+
+### SLO comparison
+
+- Wake p50 target ≤ 1.0 s; observed: **N/A (all failed).**
+- Create p50: 5295 ms (target unknown for this phase; reference only).
+- Snapshot p50: 47794 ms (~48s for a 1.07 GB artifact; equivalent to
+  ~22 MB/s effective snapshot throughput).
+- **Verdict: smoke FAIL (wake unusable).** Re-run blocked on #17.
+
+### Cost estimate
+
+- Smoke cluster: 1 × n2-standard-4 + 1 × n2-standard-32, ~20 min total.
+- n2-standard-32 ≈ $1.55/hr, n2-standard-4 ≈ $0.19/hr.
+- Total: ≈ (1.55 + 0.19) × (20/60) ≈ **$0.58**.
+- Well under the $30 cap. ~$29 remaining budget for next cycle.
+
+### Teardown
+
+```
+[teardown] OK: cluster fully torn down
+remaining instances matching ^zsbx-: 0
+```
+
+No stragglers. Verified via `gcloud compute instances list
+--filter='name~"^zsbx-"'` (empty).
+
+### Files of interest (r2)
+
+- `/tmp/docker-build.log` — Docker cross-build transcript
+- `/tmp/provision-smoke-v13.log` — provision run with v13
+- `/tmp/smoke-result-v13.log` — smoke 1-cycle output incl. RAW_JSON
+- `/tmp/smoke-controller-state.log`, `/tmp/smoke-deep-diag.log` —
+  worker journal + systemctl + alloc state
+- `/tmp/teardown-smoke.log` — clean teardown
+- `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v13` —
+  portable controller, ready for re-use after #17 is fixed.
+

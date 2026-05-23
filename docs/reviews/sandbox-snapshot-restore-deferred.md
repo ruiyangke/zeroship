@@ -12,16 +12,26 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## CRITICAL (open blockers on Phase B cluster validation)
 
-### [B16] NixOS-built controller binary unrunnable on GCE Ubuntu workers
-- **Source**: cluster smoke 2026-05-24 03:15 UTC (see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r1.md`)
-- **Symptom**: `zsbx-ctl.service` exits 203/EXEC immediately; `/usr/local/bin/zeroship-sandbox: cannot execute: required file not found` (kernel's misleading text for missing PT_INTERP).
-- **Root cause**: `readelf -p .interp target/release/zeroship-sandbox` → `/nix/store/jms7zxzm7w1whczwny5m3gkgdjghmi2r-glibc-2.42-51/lib/ld-linux-x86-64.so.2`. The local NixOS-built binary's dynamic linker path is absent on GCE Ubuntu. Even with patchelf, glibc-2.42 ABI > Ubuntu 22.04's glibc-2.35 — version errors at runtime.
-- **Action plan (ranked)**:
-  - (A) Docker-based cross-build with `rust:bookworm-slim` image → Debian glibc-2.36 + x86_64 ELF interp at `/lib64/ld-linux-x86-64.so.2`. Ubuntu 22.04+ runs Debian-compiled binaries. Requires only `docker run -v $PWD:/work -w /work rust:bookworm-slim cargo build --release -p zeroship-sandbox --bin zeroship-sandbox`.
-  - (B) Add a `pkgs.pkgsStatic` or `pkgs.pkgsMusl` entry to `flake.nix` for a musl-static build — clean but bigger flake change.
-  - (C) Build inside a remote GCE Ubuntu instance and pull the binary back — last resort.
-- **Pre-flight gate**: add `readelf -l target/release/zeroship-sandbox | grep INTERP` to `provision-gcp-cluster.sh` that REFUSES upload if the interp path contains `/nix/`. Caught this would have saved 13min + $0.38 of provisioning.
-- **B14a/B14b status**: still demoted, still pending cluster smoke that actually reaches the wake path. Will re-evaluate after #16 closes.
+### [B16] (RESOLVED 2026-05-24 r2) NixOS-built controller binary unrunnable on GCE Ubuntu workers
+- **Status**: **CLOSED**. Verified fix via Docker cross-build (Option A from the action plan) in `rust:slim-bookworm` (note: brief said `rust:bookworm-slim`; correct Docker Hub tag is `slim-bookworm`). v13 binary uploaded to `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v13` with portable interp `/lib64/ld-linux-x86-64.so.2`. Controller starts and serves `/livez` on GCE Ubuntu. See cluster review Appendix A for full transcript.
+- **Original symptom**: `zsbx-ctl.service` exits 203/EXEC immediately; `/usr/local/bin/zeroship-sandbox: cannot execute: required file not found` (kernel's misleading text for missing PT_INTERP).
+- **Original root cause**: `readelf -p .interp target/release/zeroship-sandbox` → `/nix/store/jms7zxzm7w1whczwny5m3gkgdjghmi2r-glibc-2.42-51/lib/ld-linux-x86-64.so.2`. The local NixOS-built binary's dynamic linker path is absent on GCE Ubuntu.
+- **Pre-flight gate (still recommended)**: add `readelf -l target/release/zeroship-sandbox | grep INTERP` to `provision-gcp-cluster.sh` that REFUSES upload if the interp path contains `/nix/`. Cheap insurance for future cycles.
+- **B14a/B14b status**: still demoted. Wake path could not be exercised this cycle due to new bug #17 (see below). Will re-evaluate after #17 closes.
+
+### [B17] Restored VM agent unreachable post-CH-restore — `No route to host` (CRITICAL, open)
+- **Source**: cluster smoke 2026-05-24 r2 (see Appendix A in `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r1.md`).
+- **Symptom**: After successful CH `restore` of a 1.07 GB snapshot, controller probes `http://<vm-ip>:7777/livez` and gets `No route to host (os error 113)` continuously until the per-cycle wake timeout (~37s). Wake returns HTTP 500 with `restore_backend: restore: agent at http://10.99.101.2:7777 never returned 200 on /livez`.
+- **Hypothesis (not verified)**:
+  - The wrapper's `restore` branch may be missing a tap-up / bridge-attach step that the `start` branch has — VM resumes but its tap is unbridged.
+  - Alternatively the tap interface name post-restore differs from snapshot-time and the in-VM agent listens on the wrong interface.
+  - Worth diffing `start` vs. `restore` paths in `crates/sandbox/scripts/nomad-vm-wrapper.sh`, and checking `crates/sandbox/src/backend/nomad_ch.rs` for net-namespace emission on restore.
+- **Reproducer**: provision 1+1 cluster with `CONTROLLER_OBJECT=zeroship-sandbox.snapshot-v13`, run `snapshot_stress.py --cycles 1 --concurrency 1`. Cost ≈ $0.50.
+- **Inputs/tracing to add for next cycle**:
+  - Log the tap interface name + state (`ip link show zsbx-<idx>`) in the restore branch right after CH restore returns.
+  - Tighten the agent-livez probe loop to fail-fast on EHOSTUNREACH (currently retries for ~37s, which inflates the failure window).
+  - Capture wrapper stderr BEFORE Nomad GC's the alloc (e.g., copy stderr file to `/var/log/zsbx-restore/<sandbox_id>.log` from the wrapper itself).
+- **Why NEW (not B15)**: B15 was "wake reaches restore_backend and restore_backend fails" (snapshot artifact integrity). #17 is "restore_backend succeeds, VM is up, but its network is unbridged". Different layer entirely.
 
 ### [B14a] (DEMOTED) snap-stage `memory-ranges` absent at wake time → wrapper exits 1
 - **Status**: refuted by 2026-05-23 cycle. Controller `restore: post-store.get staged files` tracing confirms all three files (config.json=2804, memory-ranges=1073741824, state.json=~102K) are staged successfully. The wake fails AFTER staging because of bug-#15, not because the stage is empty.
