@@ -3,9 +3,9 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-24 (cycle r2: A2 + A5 closed; 3 round-2 reviews added; T6 regressions surfaced).
+Last updated: 2026-05-24 (cycle r3: B16 cluster closed via Docker build, B17 found; A6 + T7 closed; 4 round-2 reviews added).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `2e0d17f7` (A5 closed: admin_token pub(crate); A2 closed: GCS verify enforces SHA; T6 wired idle eviction; T3 bumped timeout; B15 fix at `eaf5ea83`).
+Branch HEAD at last update: `da220268` (T7 closed: sweep concurrency now real via join_all; A6 closed: persist pub(crate); B16 closed via 0061b96d; A2/A5 already closed prior cycle).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
@@ -63,11 +63,37 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: most sites emit `{"error":"<human prose>"}` (no `message`); preview sites emit `{"error":<code>,"code":<code>}` (duplicate, no message).
 - **Action**: introduce typed `ErrorEnvelope` helper in `crates/sandbox/src/error_envelope.rs`; replace all `err()` call sites; lock with a unit test per error site.
 
-### [A6] `pub persist: Option<Arc<Persistence>>` carries AEAD key material (CRITICAL, A5-fixer spotted)
-- **Source**: spotted while closing A5 (`2e0d17f7`)
-- **File**: `crates/sandbox/src/lib.rs:71`
-- **Symptom**: same exposure pattern as A5 — pub field, external code can clobber. `Persistence` carries sealed-record AEAD keys.
-- **Action**: same shape as A5: `pub(crate)`-restrict + add `with_persistence(...)` constructor that rejects empty/invalid `Arc<Persistence>`.
+### [A6b] Pub credential field exposures — 3 more siblings of A5/A6 (CRITICAL, api-surface-r2 + security-r2 + A6-fixer)
+- **Source**: 2026-05-24 api-surface-r2 + security-r2 + A6-fixer flagged identically
+- **Files**: `crates/sandbox/src/lib.rs`
+  - `pub config: SandboxConfig` — `SandboxConfig.token: ApiToken` is the creator-side bearer (`crates/sandbox/src/config.rs:19`). Swap-vulnerable.
+  - `pub database: Option<Arc<Database>>` (line 65) — DSN holds embedded pg password. Swap → exfiltrate per-sandbox state.
+  - `pub snapshot_store / ch_remote / restore_backend` (lib.rs:129-131) — trait objects. Swap to attacker impl → exfiltrate snapshot blobs / hijack restore.
+- **Action**: same shape as A5/A6 — `pub(crate)`-restrict + add `with_config` / `with_database` / `with_snapshot_store` / `with_ch_remote` / `with_restore_backend` builders. Or, since this is now a clear pattern, consider a `pub(crate)`-only struct + a single `AppStateBuilder` (typed-state builder) that gates field visibility entirely. Closes the pattern at the root.
+
+### [C2] (B15 regression) `stop_preserving_state` deletes sealed record unconditionally (CRITICAL, concurrency-r2)
+- **Source**: 2026-05-24 concurrency-r2; first cross-flagged in r2 round
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:1160-1168` (vs the `remove_host_dir` gate at line 1119)
+- **Symptom**: B15 fix added a `remove_host_dir: bool` to `stop_inner` that gates the `host_dir` rm at line 1119, but `persist.delete` (line ~1160-1168) still fires unconditionally on every snapshot teardown. Latent bug: bites the moment wake plumbs sealed-record-based key recovery (which the architecture-r1 finding flagged as a gap). For now snapshot wakes don't read the sealed record, so the bug is dormant.
+- **Action**: gate `persist.delete` on the same `remove_host_dir` bool. Add a unit test mirroring `stop_preserving_state_does_not_remove_host_dir` for the persist contract: `stop_preserving_state_does_not_delete_sealed_record`. Will close cleanly once wake → unsealed-record key recovery lands.
+
+### [C3] `do_restore_inner` is cancel-unsafe — wedge on future-drop (CRITICAL, concurrency-r2)
+- **Source**: 2026-05-24 concurrency-r2
+- **File**: `crates/sandbox/src/restore_handler.rs:286-412`
+- **Symptom**: if the surrounding handler future drops between `submit_restore_job` success and final `update_sandbox_status(Running)` await, the sandbox row wedges in `Restoring` state with `vm_index` leaked. The only recovery path is the transient-takeover sweep — **which is dead code per C1** ([C1] in this file). Two open critical issues compound: cancel-unsafe restore + no recovery sweep = permanent wedge.
+- **Action**: wrap the post-`submit_restore_job` section in a `pin_project` / scope guard that, on drop without success, marks the row `RestoringAborted` (or rolls back to `Snapshotted`) before yielding. Compio's cancellation semantics + a defer/scope-guard pattern from `crates/sandbox/src/admin_handlers.rs::with_lease` (if it exists; otherwise introduce).
+
+### [A2b] `verify` re-stream is 1 GB GCS egress on L1 eviction (CRITICAL, performance-r2)
+- **Source**: 2026-05-24 performance-r2 (a side-effect of the A2 fix at `f32507ce`)
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:586-611,920-930`
+- **Symptom**: A2 fix made `verify` re-stream the whole artifact and recompute SHA. Fine while L1 is warm. But `TieredSnapshotStore::verify` falls through to L2 the moment L1 is evicted, exposing operators to a sustained 1 GB GCS egress + a SHA-bound core whenever a periodic verify sweep lands on cold rows.
+- **Action**: add a `verify_metadata_only(&self, expected_sha256: &Hash)` fast-path that compares against the `x-goog-meta-sha256` header we set on put. The full re-stream stays as the "deep verify" mode. Periodic sweeps use fast-path; integrity audits (manual) use deep.
+
+### [W1] Wrapper unanchored `sed` rewrite of attacker-influenceable `config.json` (CRITICAL, security-r2 survived 2 rounds)
+- **Source**: 2026-05-24 security-r2 (also flagged in r1)
+- **File**: `crates/sandbox/scripts/nomad-vm-wrapper.sh:359`
+- **Symptom**: `sed -i "s|...|...|" config.json` where the substitution pattern includes user-influenceable fields. Unanchored, no escaping of `&`/`/`/`\`. With A1 still open (snapshot plaintext on GCS), an attacker with bucket-write could substitute a config.json whose sed-target field contains sed metacharacters, achieving code execution as raw_exec root. (Currently dormant because A1 is locally-mitigated by the worker-local L1 — but A1 will close to AEAD prod-wrap, which doesn't fix the wrapper sink.)
+- **Action**: replace `sed` with a Python or `jq`-based rewrite that validates each field is a JSON string (not metacharacter-bearing). If `jq` isn't in the rootfs (likely), use a small inline Python invocation (`/usr/bin/python3 -c '...'`). Or: switch to a Rust pre-stage step in the controller (the controller already does some path rewriting in `restore_handler::rewrite_config_json`).
 
 ### [C1] Lease-takeover sweep is dead code (CRITICAL, concurrency-r1 + arch-r1)
 - **Source**: 2026-05-24 concurrency review (corroborates 2026-05-23 architecture-r1)
@@ -78,12 +104,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ---
 
 ## IMPORTANT (T6 regressions — round-r2 reviewers flagged)
-
-### [T7] `per_iteration_concurrency` in sweep is a no-op (code-quality-r2)
-- **Source**: 2026-05-24 code-quality round-r2
-- **File**: `crates/sandbox/src/sweep.rs:443-468`
-- **Symptom**: both outer `for chunk in rows.chunks(cap)` AND inner `for r in chunk { .await }` are sequential despite the comment promising chunked concurrency. At 2.1 s/snapshot × 100 rows = ~210 s; threatens 300 s sweep interval.
-- **Action**: rewrite inner loop as `futures::future::join_all(chunk.iter().map(...))` or compio equivalent. Add a sweep-throughput test.
 
 ### [T8] `ControllerIdleSnapshotter` zero non-pg coverage (test-coverage-r2)
 - **Source**: 2026-05-24 test-coverage round-r2
