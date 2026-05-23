@@ -141,13 +141,32 @@ impl<'p> LockGuard<'p> {
     /// caller can keep a single binding (and reuse it if it ever
     /// needs to release outside the guard). The local `(key, tag)`
     /// cache below is still derived via [`LockScope::to_keys`].
+    ///
+    /// **Security [I43]** (cycle 18:17): the underlying acquisition
+    /// is now bounded — `LockManager::acquire`'s default impl loops
+    /// on `pg_try_advisory_lock` with a 0/50/200/500/1000ms schedule
+    /// (~1.75s worst case) and surfaces `DbError::LockContention`
+    /// on exhaustion. The previous direct call to
+    /// `acquire_advisory_lock` could stall indefinitely waiting on
+    /// `pg_advisory_lock`, giving any app that held its own lock
+    /// a within-app DoS lever against its own subsequent
+    /// `register_model` invocations. The guard's lifecycle invariants
+    /// are unaffected: on `Ok` the lock is held by `self.client` and
+    /// will be released via [`Self::release`] / [`Self::into_held`];
+    /// on `Err` no lock is held and `client` drops back to the pool.
     pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::Client>>(
         backend: &B,
         client: PooledClient<'p>,
         scope: &LockScope,
     ) -> Result<Self, DbError> {
         let (key, tag) = scope.to_keys();
-        backend.acquire_advisory_lock(&client, &key, &tag).await?;
+        // Route through the typed `LockManager::acquire` surface,
+        // which (post-[I43]) dispatches to `try_acquire_with_backoff`
+        // — bounded retry instead of the legacy blocking
+        // `acquire_advisory_lock` primitive. Construction shape is
+        // otherwise unchanged: on Err the lock was never held and
+        // `client` will drop back to the pool at the error site.
+        backend.acquire(&client, scope).await?;
         Ok(Self {
             client: Some(client),
             key,

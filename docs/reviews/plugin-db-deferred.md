@@ -8,7 +8,7 @@ Auto-managed by the pilot-cron-worker. Last reviewed: 2026-05-22 17:47 (post-P0 
 
 **Cycle 18:17 closures (2 verifications + 1 reprioritisation)**: [S11] AuditExecutor Boxes futures — verified CLOSED at HEAD (perf r15). [S10] broker per-subscriber HashMap clone half — verified CLOSED by commit chain `c54a9f15` → `0e58c4e8` (perf r15); Vec-alloc-on-publish half remains pending bench. [I43] blocking pg_advisory_lock — graduated to ACTIONABLE NOW per security r13 (~80 LOC PR sketched in security r13 §[I43]). 4 reviewers returned: code-critique r15 = 88 (+1); concurrency r13 = 87 (−2, NEW-R13-1+R13-2 surfaced); security r13 = 87 (+1, §1.3 audit defense-in-depth gap); performance r15 = 82 (±0, no forcing function this cycle).
 
-**Post-P0 backlog re-evaluation** (key items): I-R11-1 (more `pub(crate)` demotion) — superseded by P0 (capability traits replaced the surface). I-R11-2 (set_pool constructs PostgresBackend) — superseded; `set_pool` now wraps in `BackendHandle::Postgres`. I-R11-3 (create_ad_hoc_backend test escape hatch) — UNCHANGED, still in test-helpers. [I43] backend/postgres.rs:118 blocking pg_advisory_lock — UNCHANGED.
+**Post-P0 backlog re-evaluation** (key items): I-R11-1 (more `pub(crate)` demotion) — superseded by P0 (capability traits replaced the surface). I-R11-2 (set_pool constructs PostgresBackend) — superseded; `set_pool` now wraps in `BackendHandle::Postgres`. I-R11-3 (create_ad_hoc_backend test escape hatch) — UNCHANGED, still in test-helpers. [I43] backend/postgres.rs:118 blocking pg_advisory_lock — **CLOSED this cycle** (see SUPERSEDED §[S89]); the typed `LockManager::acquire` now routes via the new `try_acquire_with_backoff` bounded-retry loop instead of `acquire_advisory_lock`.
 
 
 
@@ -368,18 +368,16 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ---
 
-### [I43] bootstrap.rs still uses blocking pg_advisory_lock (security r4 IMPORTANT)
-- **Source**: `plugin-db-security-2026-05-22-r4.md` §"sharpened IMPORTANT"; `plugin-db-security-2026-05-22-r13.md` §[I43] (fix sketch + ~80 LOC estimate)
-- **File**: `crates/plugin-db/src/backend/postgres.rs:118` (always-compiled; corrected from prior `bootstrap.rs` location per security r11)
-- **Description**: Backend's `acquire_dedicated_client` uses blocking `pg_advisory_lock` with no try-with-deadline / per-app cap. `migrations.rs` uses `try_acquire_advisory_lock`. Cross-tenant pool starvation risk remains: one app blocked on its lock holds a connection that other apps can't reach.
-- **Blocker**: ACTIONABLE NOW — security r13 confirms P0 stabilised the surface; estimated ~80 LOC PR per security r13's fix-sketch (see report §[I43]). The five-cycle blocker ("trait surface unstable" / "design-pending" / "deferred during redesign") cleared with P0 PR 6.
-- **Fix sketch** (per security r13): add `try_acquire_with_backoff` returning `DbError::LockContention { code: "lock_not_available" }` on exhaustion; swap `LockGuard::acquire` and the default impl at `backend/mod.rs:271-274`.
-- **Effort**: small (~80 LOC PR per security r13).
-- **Pickable this cycle**: ACTIONABLE NOW (next cycle pickup) — re-prioritised from "design-pending" to top of the IMPORTANT queue.
-
----
-
 ## SUPERSEDED (already fixed; remove next cycle)
+
+### [S89] IMPORTANT (security r13 §[I43]; cycle 18:17) — blocking pg_advisory_lock replaced with bounded retry
+- **Closed by**: `plugin-db/backend: replace blocking pg_advisory_lock with bounded retry (security [I43])` (this commit)
+- **Risk closed**: a malicious app holding its own session-scoped advisory lock could stall every subsequent `register_model` / migration acquisition for the SAME app until the holding session terminated (within-app DoS). The carry note across 5+ cycles framed this as "design-pending" while the capability-trait split was in motion; P0 PR 6 stabilised the typed `LockManager::acquire` surface, making the fix a small drop-in.
+- **Shape of fix**: added new trait method `LockManager::try_acquire_with_backoff(&client, &scope)` with a default impl that loops on `try_acquire_advisory_lock` per the schedule `0 / 50 / 200 / 500 / 1000 ms` (5 attempts; ~1.75s worst case). On exhaustion returns `DbError::LockContention { message }`, which `to_op_error` maps to JS-visible `code = "lock_not_available"` with the canonical retry hint. The typed `LockManager::acquire` default impl and `LockGuard::acquire` (the only production callers of the previously-blocking path) now route through the bounded loop. The legacy `acquire_advisory_lock` primitive stays as the trait surface but is no longer dispatched through by any production path — it kept `#[doc(hidden)]` and is eligible for removal in a follow-up.
+- **Cancel-safety**: the retry loop only awaits `try_acquire_advisory_lock` (one server RTT) and `compio::time::sleep` (cancellable). Dropping the future mid-loop leaves no client-side state behind; the underlying PG advisory lock is only granted via `Ok(true)` from `try_acquire_advisory_lock`, never partially.
+- **Tracing**: each contended attempt emits `tracing::warn!` with `scope_app_id` / `scope_name` / `attempt` / `pre_wait_ms`; exhaustion emits a final summary warn. Operator-greppable identifier: `bounded-retry exhausted` + `security [I43]`.
+- **Test added**: `backend::tests::try_acquire_with_backoff_exhaustion_yields_lock_contention` — drives a mock `LockManager` whose `try_acquire_advisory_lock` always returns `Ok(false)`; asserts 5 attempts execute, the typed variant is `DbError::LockContention`, the message names the scope, and the wire envelope's `code` is `lock_not_available`. Test counts: 367 → 368 (default), 391 → 392 (hardening).
+- **Caller audit**: `LockGuard::acquire` (sole `register_model` caller) and `LockManager::acquire` default impl (no other in-tree callers) both now dispatch via the bounded loop. `bootstrap.rs:132` propagates the resulting `DbError::LockContention` to the SDK verbatim via its `other => other` arm. `migrations.rs` continues to use `LockManager::try_acquire` (non-blocking, immediate `already running` on contention) and is unaffected. Integration test `b1_advisory_lock_prevents_concurrent_runs` calls raw `pg_advisory_lock` SQL directly (not the trait method) and is also unaffected.
 
 ### [S88] IMPORTANT (performance r4 N4-I3; cycle 13:17) — [I35] row_to_json O(N²) per row in column count
 - **Closed by**: `251d53b4 plugin-db/v8_bridge: row_to_json O(N²) → O(N) via index lookup (I35)`

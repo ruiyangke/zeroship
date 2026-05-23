@@ -240,27 +240,49 @@ impl LockScope {
 /// **Two-tier surface** (P0 PR 6):
 ///
 /// - The **typed API** ([`Self::acquire`] / [`Self::try_acquire`] /
-///   [`Self::release`]) takes a [`LockScope`] enum. This is the
-///   shape every new call site should adopt — it carries an
-///   explicit classification of the lock's visibility (cluster-wide
-///   vs in-process) and centralises key derivation per §10.
+///   [`Self::release`] / [`Self::try_acquire_with_backoff`]) takes a
+///   [`LockScope`] enum. This is the shape every new call site
+///   should adopt — it carries an explicit classification of the
+///   lock's visibility (cluster-wide vs in-process) and centralises
+///   key derivation per §10.
 ///
 /// - The **legacy string-key API**
 ///   ([`Self::acquire_advisory_lock`] /
 ///   [`Self::try_acquire_advisory_lock`] /
 ///   [`Self::release_advisory_lock`]) takes raw `(key1, key2)`
-///   strings. These remain as the underlying primitive — the typed
-///   API's default impls dispatch through them, and the PG impl's
-///   `hashtext()` SQL lives at this layer. Marked
-///   `#[doc(hidden)]` and `pub(crate)` (via a sealed trait extension)
-///   so external consumers see only the typed surface; eager
-///   removal is deferred to P1+.
+///   strings. The `try_*` / `release_*` halves remain the underlying
+///   primitives the typed API dispatches through, and the PG impl's
+///   `hashtext()` SQL lives at this layer. `acquire_advisory_lock`
+///   itself is **no longer routed through** by the typed surface —
+///   security [I43] (cycle 18:17) replaced
+///   `LockManager::acquire`'s indefinite-wait `acquire_advisory_lock`
+///   dispatch with the bounded
+///   [`Self::try_acquire_with_backoff`] loop. All three legacy
+///   methods stay `#[doc(hidden)]`; eager removal of
+///   `acquire_advisory_lock` is now unblocked but deferred to a
+///   separate cleanup PR.
 pub trait LockManager: SqlExecutor {
     /// Acquire a session-scoped advisory lock for the given
-    /// [`LockScope`]. Typed wrapper over the legacy
-    /// [`Self::acquire_advisory_lock`] primitive — the default impl
-    /// derives the `(key1, key2)` pair per §7.2 / §10.5
-    /// ([`LockScope::to_keys`]) and dispatches.
+    /// [`LockScope`], bounded by a short retry loop on
+    /// `pg_try_advisory_lock` (never the indefinitely-waiting
+    /// `pg_advisory_lock`). The default impl delegates to
+    /// [`Self::try_acquire_with_backoff`].
+    ///
+    /// **Cancel-safety**: every await point inside the retry loop is
+    /// safe to cancel — the underlying `try_acquire_advisory_lock`
+    /// only mutates server-side state if it returns `Ok(true)`, and
+    /// the next iteration's sleep is cancellable. Dropping the future
+    /// mid-await leaks no client-side state.
+    ///
+    /// **Security [I43]** (cycle 18:17): the previous version called
+    /// `acquire_advisory_lock`, which on PG issues `pg_advisory_lock`
+    /// — a server-side wait that has no timeout. A malicious app
+    /// holding its own register-model lock indefinitely could stall
+    /// every subsequent `register_model` / migration call for that
+    /// same app until the holding session terminated. The retry loop
+    /// caps the wait at ~1.75s and surfaces
+    /// `DbError::LockContention` (wire code `lock_not_available`)
+    /// on exhaustion so the caller decides how to react.
     ///
     /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so call
     /// sites can construct a single binding and pass it to both
@@ -269,8 +291,102 @@ pub trait LockManager: SqlExecutor {
     /// impl only needs `&self` on the scope (it calls `to_keys`).
     #[allow(async_fn_in_trait)]
     async fn acquire(&self, client: &Self::Client, scope: &LockScope) -> Result<(), DbError> {
+        self.try_acquire_with_backoff(client, scope).await
+    }
+
+    /// Bounded-retry acquisition for the given [`LockScope`]. Loops
+    /// on [`Self::try_acquire_advisory_lock`] with the schedule
+    /// `0ms, 50ms, 200ms, 500ms, 1000ms` (5 attempts total, ~1.75s
+    /// worst-case wall time). On exhaustion returns
+    /// [`DbError::LockContention`] — the JS-visible `.code` is
+    /// `lock_not_available` (set by
+    /// [`DbError::to_op_error`](crate::error::DbError::to_op_error)).
+    ///
+    /// The default impl is the only impl call sites should ever need
+    /// — backends do not override this. They supply the underlying
+    /// non-blocking primitive via
+    /// [`Self::try_acquire_advisory_lock`]; the retry/backoff policy
+    /// lives in this default body.
+    ///
+    /// **Cancel-safety**: identical to [`Self::acquire`] — each
+    /// `try_acquire_advisory_lock` await is one server RTT, and the
+    /// `compio::time::sleep` between attempts is cancellable. No
+    /// client-side lock state survives a dropped future.
+    ///
+    /// **Why this schedule**: the contended window is operator-set
+    /// (a held migration / register-model lock) so we want a hard
+    /// upper bound, not exponential growth. The schedule trades 5
+    /// PG round-trips against the longest legitimate hold time we
+    /// observe (~1s for a slow `CREATE INDEX CONCURRENTLY`
+    /// pre-pivot); a stuck migration that takes > 1.75s correctly
+    /// surfaces as contention so the SDK can retry / circuit-break.
+    #[allow(async_fn_in_trait)]
+    async fn try_acquire_with_backoff(
+        &self,
+        client: &Self::Client,
+        scope: &LockScope,
+    ) -> Result<(), DbError> {
+        // Backoff schedule per §[I43] (security r13). Attempts 1..=5
+        // with the listed `pre-wait` (the first attempt waits 0).
+        // Tuple shape `(attempt_idx, pre_wait_ms)` is read off in the
+        // loop body so a future contributor sees the cumulative
+        // budget without re-deriving it: 0+50+200+500+1000 = 1750ms.
+        const SCHEDULE: &[(u32, u64)] = &[
+            (1, 0),
+            (2, 50),
+            (3, 200),
+            (4, 500),
+            (5, 1000),
+        ];
         let (k1, k2) = scope.to_keys();
-        self.acquire_advisory_lock(client, &k1, &k2).await
+        for (attempt, pre_wait_ms) in SCHEDULE.iter().copied() {
+            if pre_wait_ms > 0 {
+                compio::time::sleep(std::time::Duration::from_millis(pre_wait_ms)).await;
+            }
+            match self.try_acquire_advisory_lock(client, &k1, &k2).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    // Lock currently held by another acquirer. Trace
+                    // each retry so operators correlating "register_model
+                    // slow" reports against `pg_locks` can see the
+                    // wait-pattern client-side.
+                    tracing::warn!(
+                        scope_app_id = %scope.app_id(),
+                        scope_name = %scope.name(),
+                        attempt,
+                        pre_wait_ms,
+                        "advisory lock contended; retrying after backoff (security [I43] bounded loop)"
+                    );
+                }
+                Err(e) => {
+                    // SQL-level failure (connection drop, server error)
+                    // — surface immediately, don't retry. The caller
+                    // sees the typed `DbError` exactly as
+                    // `try_acquire_advisory_lock` produced it.
+                    return Err(e);
+                }
+            }
+        }
+        // All attempts exhausted. Emit a single structured trace at
+        // exhaustion so the operator-facing log has both the per-retry
+        // warns and a final summary. `DbError::LockContention` carries
+        // an informative message; `to_op_error` maps it to
+        // `code = "lock_not_available"` with a retry hint.
+        tracing::warn!(
+            scope_app_id = %scope.app_id(),
+            scope_name = %scope.name(),
+            "advisory lock contention bounded-retry exhausted (5 attempts, ~1.75s); \
+             returning LockContention to caller (security [I43])"
+        );
+        Err(DbError::LockContention {
+            message: format!(
+                "advisory lock held by another acquirer (scope={}/{}); \
+                 bounded retry of 5 attempts at 0/50/200/500/1000ms exhausted. \
+                 Hint: retry or check for a stuck migration / register_model holder.",
+                scope.app_id(),
+                scope.name(),
+            ),
+        })
     }
 
     /// Try to acquire a session-scoped advisory lock for the given
@@ -304,10 +420,11 @@ pub trait LockManager: SqlExecutor {
         self.release_advisory_lock(client, &k1, &k2).await
     }
 
-    /// **Legacy string-key primitive**: acquire a session-scoped
-    /// advisory lock on `(key1, key2)` against the given client.
-    /// Blocks if another holder exists; the lock releases when the
-    /// client is dropped or the backend session ends.
+    /// **Legacy string-key primitive — DO NOT CALL FROM NEW CODE.**
+    /// Acquire a session-scoped advisory lock on `(key1, key2)` against
+    /// the given client. Blocks (server-side, indefinitely) if another
+    /// holder exists; the lock releases when the client is dropped or
+    /// the backend session ends.
     ///
     /// Postgres maps this to
     /// `SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)`.
@@ -315,13 +432,23 @@ pub trait LockManager: SqlExecutor {
     /// sqlite has no advisory locks — that backend would need a
     /// `BEGIN EXCLUSIVE` or a sentinel table).
     ///
-    /// Prefer [`Self::acquire`] at new call sites — this method is
-    /// the underlying primitive the typed API dispatches through,
-    /// retained for the in-place lifecycle owned by
-    /// [`crate::backend::lock_guard::LockGuard`]. Eager removal of
-    /// the three legacy methods is deferred to P1+ (per
-    /// `docs/proposals/p0-implementation-plan.md` §"PR 6"
-    /// step 4).
+    /// **Security [I43]** (cycle 18:17): the indefinite-wait shape
+    /// is a within-app DoS vector — a malicious app holding its own
+    /// session-scoped advisory lock stalls every subsequent
+    /// `register_model` / migration call for that same app. The
+    /// typed [`Self::acquire`] surface no longer dispatches through
+    /// this method; it routes via [`Self::try_acquire_with_backoff`]
+    /// instead. This method is retained as the trait primitive only
+    /// because (a) some future backend may want to expose the
+    /// indefinite-wait shape behind a feature gate, and (b) the
+    /// integration test `b1_advisory_lock_prevents_concurrent_runs`
+    /// at `tests/integration.rs` still calls
+    /// `pg_advisory_lock` SQL directly to exercise the contended
+    /// branch. **No production caller** invokes it as of [I43]
+    /// closure.
+    ///
+    /// Prefer [`Self::acquire`] / [`Self::try_acquire_with_backoff`]
+    /// at every call site.
     #[doc(hidden)]
     #[allow(async_fn_in_trait)]
     async fn acquire_advisory_lock(
@@ -971,6 +1098,166 @@ mod tests {
             name: "mig:add_archived_flag".into(),
         };
         backend.try_acquire(client, &local).await
+    }
+
+    /// **Security [I43]** (cycle 18:17): exhaust the bounded-retry
+    /// loop in [`LockManager::try_acquire_with_backoff`] against a
+    /// mock backend whose `try_acquire_advisory_lock` always returns
+    /// `Ok(false)` (perpetual contention). The result must be a
+    /// `DbError::LockContention` whose
+    /// [`crate::error::DbError::to_op_error`] mapping produces the
+    /// JS-visible `code = "lock_not_available"` envelope.
+    ///
+    /// The test pins:
+    ///
+    /// - the exhaustion path *does* surface (the loop never silently
+    ///   returns Ok);
+    /// - the typed error variant survives the trait dispatch
+    ///   (variant-preserving, no flatten to `Internal`);
+    /// - the wire mapping produces the canonical contention code;
+    /// - the message body carries the scope identity so an operator
+    ///   greps `lock_not_available` and sees which scope contended.
+    ///
+    /// The mock implements the smallest possible
+    /// [`SqlExecutor`] + [`LockManager`] surface — every other
+    /// method is unreachable in this test path.
+    #[test]
+    fn try_acquire_with_backoff_exhaustion_yields_lock_contention() {
+        use std::cell::Cell;
+
+        // Mock client — opaque marker; the mock never reads it.
+        struct MockClient;
+
+        // Mock backend that records attempt count and always returns
+        // `Ok(false)` from `try_acquire_advisory_lock`. The retry
+        // loop should call this exactly 5 times (the
+        // [(1,0),(2,50),(3,200),(4,500),(5,1000)] schedule).
+        struct ContendingMock {
+            attempts: Cell<u32>,
+        }
+
+        impl SqlExecutor for ContendingMock {
+            type Client = MockClient;
+
+            async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
+                unreachable!("not exercised by try_acquire_with_backoff")
+            }
+
+            async fn pool_exec(
+                &self,
+                _sql: &str,
+                _params: &[&str],
+            ) -> Result<u64, DbError> {
+                unreachable!("not exercised by try_acquire_with_backoff")
+            }
+
+            async fn client_exec(
+                &self,
+                _client: &Self::Client,
+                _sql: &str,
+                _params: &[&str],
+            ) -> Result<u64, DbError> {
+                unreachable!("not exercised by try_acquire_with_backoff")
+            }
+        }
+
+        impl LockManager for ContendingMock {
+            async fn acquire_advisory_lock(
+                &self,
+                _client: &Self::Client,
+                _k1: &str,
+                _k2: &str,
+            ) -> Result<(), DbError> {
+                unreachable!(
+                    "[I43]: typed acquire surface MUST route through \
+                     try_acquire_with_backoff, never the legacy blocking \
+                     acquire_advisory_lock primitive"
+                )
+            }
+
+            async fn try_acquire_advisory_lock(
+                &self,
+                _client: &Self::Client,
+                _k1: &str,
+                _k2: &str,
+            ) -> Result<bool, DbError> {
+                self.attempts.set(self.attempts.get() + 1);
+                // Perpetual contention — every attempt observes the lock
+                // held by some other (imaginary) acquirer.
+                Ok(false)
+            }
+
+            async fn release_advisory_lock(
+                &self,
+                _client: &Self::Client,
+                _k1: &str,
+                _k2: &str,
+            ) -> Result<(), DbError> {
+                unreachable!("not exercised by try_acquire_with_backoff")
+            }
+        }
+
+        let mock = ContendingMock {
+            attempts: Cell::new(0),
+        };
+        let client = MockClient;
+        let scope = LockScope::GlobalApp {
+            app_id: "app_contention_test".into(),
+            name: "register_model".into(),
+        };
+
+        // Drive the future on a fresh compio runtime — the test must
+        // tolerate the ~1.75s real-time worst-case schedule
+        // (0+50+200+500+1000ms). Acceptable for a unit test; the
+        // alternative (injecting a sleep hook) would couple the
+        // backoff schedule to a test-only API.
+        let result = compio::runtime::Runtime::new()
+            .expect("compio runtime")
+            .block_on(async { mock.try_acquire_with_backoff(&client, &scope).await });
+
+        // Attempt count: the schedule has 5 entries — the loop must
+        // exhaust all of them before returning.
+        assert_eq!(
+            mock.attempts.get(),
+            5,
+            "bounded retry loop must execute exactly 5 attempts \
+             (schedule = 0/50/200/500/1000ms)"
+        );
+
+        // Variant-preserving error surface.
+        let err = result.expect_err("perpetual contention must error");
+        match &err {
+            DbError::LockContention { message } => {
+                assert!(
+                    message.contains("app_contention_test"),
+                    "message must name the scope app_id, got: {message}"
+                );
+                assert!(
+                    message.contains("register_model"),
+                    "message must name the scope name, got: {message}"
+                );
+                assert!(
+                    message.contains("5 attempts"),
+                    "message must document the retry budget, got: {message}"
+                );
+            }
+            other => panic!("expected DbError::LockContention, got {other:?}"),
+        }
+
+        // Wire envelope shape: the JS-visible code must be the
+        // canonical contention code. Pinning this here means a
+        // regression renaming the variant or routing it through a
+        // different mapping trips the test immediately.
+        let op_err = err.to_op_error();
+        let code = match op_err.kind {
+            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => code,
+            other => panic!("expected CodedError, got {other:?}"),
+        };
+        assert_eq!(
+            code, "lock_not_available",
+            "JS-visible code for bounded-retry exhaustion must be \
+             `lock_not_available` (the canonical contention identifier)"
+        );
     }
 
     #[test]
