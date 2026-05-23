@@ -283,7 +283,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## NEW r4/r5 ROUND FINDINGS (added by pilot cycle 2026-05-23)
 
-### [R4-S1] `Backend::vm_index_allocator()` is `pub` on `pub mod backend` (CRITICAL, api-surface-r4)
+### [R4-S1] (CLOSED at `93348b91`) `Backend::vm_index_allocator()` pub→pub(crate)
 - **File**: `crates/sandbox/src/backend/mod.rs:440-447`
 - **Symptom**: B18 added `vm_index_allocator()` accessor exposing the worker slot-pool `Arc<Mutex<VmIndexAllocator>>` externally. Zero out-of-crate callers; downstream code could `.lock()` it and deadlock create/restore.
 - **Action**: `pub(crate)`-restrict the accessor on Backend. Verify no out-of-crate uses first.
@@ -320,12 +320,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ### [R5-S4] (CLOSED at `4fd92bef`) A4 admin sites leaked raw driver-error strings — sanitized via `err_safe()` helper
 
-### [R5-API1] `Backend::register_restored` is `pub` + accepts raw `[u8; 32]` SK bytes (CRITICAL, api-surface-r5)
+### [R5-API1] (CLOSED at `93348b91`) `Backend::register_restored` pub→pub(crate) + dead-code anchored
 - **File**: `crates/sandbox/src/backend/mod.rs:487-505`
 - **Symptom**: B19 added `register_restored` to the public Backend enum surface. It takes raw `[u8; 32]` signing-key bytes by value — bypasses the create-path key-minting + sealed-record contract. Zero out-of-crate callers; pub leak.
 - **Action**: `pub(crate)`-restrict the method on Backend. Verify no out-of-crate uses first. Pair with R4-S1 (same pattern for `vm_index_allocator()`).
 
-### [R5-API2] `Backend::nomad_ch_handle()` returns `Arc<NomadCHBackend>` on pub surface (CRITICAL, api-surface-r5)
+### [R5-API2] (CLOSED at `93348b91`) `Backend::nomad_ch_handle()` pub→pub(crate)
 - **File**: `crates/sandbox/src/backend/mod.rs:467-474`
 - **Symptom**: B19 added escape hatch to lift the Arc-wrapped backend internals out of the enum. Voids the "enum dispatch is the only contract" module promise (l. 34-40).
 - **Action**: `pub(crate)`-restrict. The shared-allocator + register-restored use sites are all in-crate.
@@ -360,3 +360,33 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **File**: `crates/sandbox/src/restore_handler.rs:1322-1341` (unsigned probe) vs `crates/sandbox/src/backend/nomad_ch.rs:2767+` (signed `wait_for_agent_livez`)
 - **Note**: post-B19, `signing_key_bytes` is in scope at `restore_handler.rs:451`. Use it to call `wait_for_agent_livez` instead of the unsigned variant.
 - **Status**: 39 production callsites sanitized; 5 new tests pin no-leak invariant; raw errors now log via tracing::error! for operator debug, never on wire.
+
+---
+
+## NEW r6 ROUND FINDINGS (added by pilot cycle 2026-05-23/24)
+
+### [R6-#22-RC] Bug #22 root cause CONVERGED: guest wall-clock skew on CH --restore (CRITICAL, security-r6 + concurrency-r6)
+- **Source**: 2026-05-24 security-r6 + concurrency-r6 independently converged on same root cause.
+- **Files**: `crates/sandbox-agent/src/sig.rs:312-316,565-570` (5s skew check + raw `SystemTime::now()`); `crates/sandbox/scripts/nomad-vm-wrapper.sh:388-419` (restore branch resumes vCPU + tap but never step-syncs guest clock).
+- **Root cause**: CH `--restore` resumes kvm-clock from the snapshot-frozen TSC; wrapper restore branch issues `ch-remote resume` but no `clock_settime` / VSOCK time bridge / chronyd makestep. Agent `unix_now()` lags real wall time by `snapshot_age + wake_latency` (≥9.7s observed). `sig.rs:313-316` rejects with `SkewTooLarge` → 401.
+- **Refuted alternatives**: agent never rotates signing keypair (sandbox-agent/src/auth.rs:1-148 holds only controller pubkey); cmdline pubkey ≡ sealed signing_key_bytes by construction (nomad_ch.rs:626-637,867-873).
+- **Diagnostic**: `journalctl -u sandbox-agent | grep auth_fail` reads the `AuthFail` discriminator. `skew-too-large` confirms hypothesis.
+- **Action**: in wrapper restore branch post-`ch-remote resume`, issue clock sync via (a) VSOCK time bridge from host; (b) `chronyd makestep`; (c) `hwclock --hctosys` if RTC available; or (d) controller writes fresh ts to /workspace pre-resume and init.sh reads it. (c) is simplest.
+- **Sister concern**: nonce LRU survives snapshot (sig.rs:228 Mutex<LruCache> in guest RAM); will be the next failure once skew closes. Wake-time LRU clear is a one-line fix in init.sh post-resume.
+
+### [R6-P1] Snapshot p50 root cause: teardown_source_for_snapshot host-fence dominates 90% (CRITICAL, perf-r6)
+- **Source**: 2026-05-24 perf-r6 root-causing snapshot p50=50307ms.
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:1029-1123` (teardown_source_for_snapshot — host_fence + wait_for_job_gone) + `crates/sandbox/src/admin_handlers.rs:1289-1299` (sync await on response path).
+- **Symptom**: 90% of snapshot p50 is the synchronous wait for Nomad alloc-terminal status (up to 30s wait_for_job_gone + ~20s host-fence per inline comment).
+- **Action (single-step win)**: detach teardown into `compio::runtime::spawn` post-CAS, return 200 immediately. Expected snapshot p50: 50s → 3-5s. Big-win small-LOC.
+
+### [R6-A1] SANDBOX_PERSIST_NONE_OK escape hatch on prod boot path (CRITICAL, api-surface-r6)
+- **Source**: 2026-05-24 api-surface-r6 (R5-S1 sister-finding).
+- **File**: `crates/sandbox/src/lib.rs:435-441`
+- **Symptom**: R5-S1 added a test escape hatch read on prod boot path with NO `#[cfg(test)]` gate. Naming convention indistinguishable from other prod env vars (`SANDBOX_PERSIST_AUTH`, `SANDBOX_PERSIST_DIR`). Operator misconfiguration could silently re-enable the R5-S1 fail-OPEN that was the production bug B21.
+- **Action**: gate the escape hatch on `#[cfg(test)]` so it cannot be set from prod binary. Alternative: rename to `_TEST_ONLY_DISABLE_PERSIST_ASSERTION`.
+
+### [R6-C1] B17 wrapper background subshell un-reaped across 5 rounds (IMPORTANT, concurrency-r6)
+- **File**: `crates/sandbox/scripts/nomad-vm-wrapper.sh:388-419`
+- **Symptom**: B17 fix added a `( ... ) &` background subshell for ch-remote-ping polling. No `BG_PID=$!`, no `wait` in cleanup trap. Re-flagged across r3/r4/r5/r6 — 4 review rounds without a fix.
+- **Action (3-line shell fix)**: capture `RESUME_PID=$!`; add `kill -TERM $RESUME_PID 2>/dev/null; wait $RESUME_PID 2>/dev/null` to the cleanup trap.
