@@ -446,7 +446,14 @@ impl Backend {
     /// Returns `None` for backends that don't have a slot pool
     /// (Docker, K8s — they map sandboxes to ephemeral container/Pod
     /// IPs assigned by the host runtime).
-    pub fn vm_index_allocator(
+    ///
+    /// `pub(crate)` because the returned `Arc<Mutex<>>` is a footgun on
+    /// the public surface — downstream code could `.lock()` it and
+    /// deadlock create/restore. The only legitimate caller is
+    /// `crate::restore_handler::RealRestoreBackend::with_shared_allocator`
+    /// inside `crate::AppState::from_config`. Sandbox v1 has no
+    /// out-of-crate consumer.
+    pub(crate) fn vm_index_allocator(
         &self,
     ) -> Option<std::sync::Arc<std::sync::Mutex<nomad_ch::VmIndexAllocator>>> {
         match self {
@@ -464,7 +471,15 @@ impl Backend {
     /// delete all returned "sandbox not found" + leaked the slot.
     /// Returns `None` for Docker/K8s (those backends don't expose
     /// a restore registry surface today).
-    pub fn nomad_ch_handle(
+    ///
+    /// `pub(crate)` because handing out a concrete
+    /// `Arc<NomadCHBackend>` bypasses the "enum dispatch is the only
+    /// contract" promise — out-of-crate callers could reach past the
+    /// `Backend` enum and call backend-specific methods directly,
+    /// stranding the trait surface. The only legitimate caller is
+    /// `crate::restore_handler::RealRestoreBackend::with_nomad_handle`
+    /// inside `crate::AppState::from_config`.
+    pub(crate) fn nomad_ch_handle(
         &self,
     ) -> Option<std::sync::Arc<nomad_ch::NomadCHBackend>> {
         match self {
@@ -484,7 +499,26 @@ impl Backend {
     /// vm_index, the per-sandbox signing key (already unsealed), the
     /// agent URL (already derived), and the user id (from the snapshot
     /// row).
-    pub fn register_restored(
+    ///
+    /// `pub(crate)` because the signature takes raw `[u8; 32]` SK bytes
+    /// — a key-material footgun that does not belong on the public
+    /// surface. The only legitimate caller is
+    /// `crate::restore_handler::RealRestoreBackend::register_restored`
+    /// (via the trait), which itself routes through the
+    /// `nomad_ch_handle()`-borrowed `Arc<NomadCHBackend>`. Out-of-crate
+    /// code must drive restore through `crate::AppState`, not by
+    /// hand-rolling state-map inserts.
+    ///
+    /// `#[allow(dead_code)]`: the trait-dispatch path in
+    /// `restore_handler::RealRestoreBackend::register_restored` calls
+    /// `NomadCHBackend::register_restored` directly off the
+    /// `nomad_ch_handle()`-borrowed `Arc`, bypassing this enum-level
+    /// delegator. Kept for symmetry with the other `Backend::*` variants
+    /// and for the eventual Docker/K8s restore impls — when those land,
+    /// restore_handler can switch back to the enum surface and drop this
+    /// allow.
+    #[allow(dead_code)]
+    pub(crate) fn register_restored(
         &self,
         sandbox_id: Uuid,
         vm_index: u16,
