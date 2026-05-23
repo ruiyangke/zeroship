@@ -47,6 +47,12 @@ pub struct BootstrapOutcome {
     /// encryption. Read only via the SECURITY DEFINER
     /// `get_column_key` function below.
     pub created_column_keys_table: bool,
+    /// **P5 PR 4** — created the `__zeroship_admin.pitr_targets`
+    /// table that records the operator's PITR replay target per
+    /// app. The `Backup::pitr_replay` PG impl writes a row here;
+    /// the actual WAL recovery is performed out-of-band via
+    /// `recovery.conf` (P5 ships the API surface only).
+    pub created_pitr_targets_table: bool,
     /// True if the bootstrap function had to insert an initial HMAC
     /// key (no `current` key existed at boot time).
     pub minted_initial_hmac_key: bool,
@@ -62,6 +68,7 @@ impl BootstrapOutcome {
             "createdNoncesTable":       self.created_nonces_table,
             "createdSessionCtxTable":   self.created_session_ctx_table,
             "createdColumnKeysTable":   self.created_column_keys_table,
+            "createdPitrTargetsTable":  self.created_pitr_targets_table,
             "mintedInitialHmacKey":     self.minted_initial_hmac_key,
         })
         .to_string()
@@ -165,6 +172,11 @@ pub async fn ensure_admin_schema(pool: &Pool) -> Result<BootstrapOutcome, DbErro
     // **P5 PR 2** — column-encryption key table. Bytes never reach
     // app code; only `__zeroship_admin.get_column_key(text)` does.
     out.created_column_keys_table = ensure_column_keys_table(pool).await?;
+    // **P5 PR 4** — PITR target log. The PG `Backup::pitr_replay`
+    // shim writes (app_id, target, recorded_at) rows here; the
+    // actual WAL recovery is operator-driven via `recovery.conf`.
+    // P5 ships the API surface only.
+    out.created_pitr_targets_table = ensure_pitr_targets_table(pool).await?;
 
     // ---- functions ----
     install_const_eq_function(pool).await?;
@@ -375,6 +387,62 @@ async fn ensure_column_keys_table(pool: &Pool) -> Result<bool, DbError> {
     )
     .await
     .map_err(|e| coded_sql("REVOKE column_keys", e))?;
+    Ok(true)
+}
+
+/// **P5 PR 4** — `__zeroship_admin.pitr_targets` (app_id text PK,
+/// target text, recorded_at timestamptz). One row per app; the
+/// `Backup::pitr_replay` PG shim upserts on the PK so the latest
+/// target wins.
+///
+/// `target` is the stringified form of [`crate::backend::PitrTarget`]
+/// — either `"LSN:0/16B1234"` or `"TIME_MS:1700000000000"`. The
+/// platform doesn't replay WAL from a client connection (that
+/// requires server-level `recovery.conf` setup); this table is the
+/// queue dashboards / the maintenance cron read to surface "PITR
+/// recovery pending for `<app_id>`".
+///
+/// REVOKEd from PUBLIC at the SELECT level, but INSERT/UPDATE/SELECT
+/// is GRANTed to PUBLIC so apps (with the platform role granted)
+/// can write through. The operator runs the actual recovery.
+async fn ensure_pitr_targets_table(pool: &Pool) -> Result<bool, DbError> {
+    let exists: bool = !pool
+        .query_text_params(
+            "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'pitr_targets'",
+            &[&ADMIN_SCHEMA],
+        )
+        .await
+        .map_err(|e| coded_sql("probe pitr_targets", e))?
+        .is_empty();
+    if exists {
+        return Ok(false);
+    }
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{ADMIN_SCHEMA}".pitr_targets (
+                app_id      TEXT PRIMARY KEY,
+                target      TEXT NOT NULL,
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("CREATE TABLE pitr_targets", e))?;
+    pool.execute(
+        &format!(r#"REVOKE ALL ON "{ADMIN_SCHEMA}".pitr_targets FROM PUBLIC"#),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("REVOKE pitr_targets", e))?;
+    pool.execute(
+        &format!(
+            r#"GRANT INSERT, UPDATE, SELECT ON "{ADMIN_SCHEMA}".pitr_targets TO PUBLIC"#
+        ),
+        &[],
+    )
+    .await
+    .map_err(|e| coded_sql("GRANT pitr_targets", e))?;
     Ok(true)
 }
 
@@ -1162,6 +1230,7 @@ mod tests {
             created_nonces_table: true,
             created_session_ctx_table: true,
             created_column_keys_table: true,
+            created_pitr_targets_table: true,
             minted_initial_hmac_key: true,
         };
         let v: serde_json::Value = serde_json::from_str(&o.to_json()).unwrap();
@@ -1172,6 +1241,7 @@ mod tests {
         assert_eq!(v["createdNoncesTable"], true);
         assert_eq!(v["createdSessionCtxTable"], true);
         assert_eq!(v["createdColumnKeysTable"], true);
+        assert_eq!(v["createdPitrTargetsTable"], true);
         assert_eq!(v["mintedInitialHmacKey"], true);
     }
 

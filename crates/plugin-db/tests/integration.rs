@@ -3700,6 +3700,7 @@ async fn b8c_bootstrap_is_idempotent_and_creates_objects() {
     assert!(!second.created_hmac_keys_table);
     assert!(!second.created_nonces_table);
     assert!(!second.created_session_ctx_table);
+    assert!(!second.created_pitr_targets_table);
     assert!(!second.created_platform_role);
     assert!(!second.created_app_role_template);
     assert!(!second.minted_initial_hmac_key);
@@ -6128,4 +6129,382 @@ async fn encrypted_column_missing_key_typed_error() {
         }
         other => panic!("expected Configuration column_key_not_configured, got {other:?}"),
     }
+}
+
+// ===========================================================================
+// P5 PR 4 — PG `Backup` impl (pg_dump / pg_restore shell-out + PITR
+// placeholder)
+// ===========================================================================
+//
+// Four tests covering the deliverables in plan §9 PR 4:
+//
+//   1. `snapshot_restore_round_trip_pg` — P5 gate #4. Insert N rows;
+//      `snapshot()` to a tempfile-backed `file://` URI; truncate via
+//      raw `DROP/CREATE`; `restore()`; assert rows recovered.
+//      `#[ignore]`-d when `pg_dump` / `pg_restore` are not on PATH
+//      (CI minimal images don't always carry them).
+//   2. `pitr_pg_records_target` — companion to the SQLite
+//      `pitr_pg_only_*` test. Call `pitr_replay(LSN)`; assert row in
+//      `__zeroship_admin.pitr_targets`. No subprocess — runs everywhere.
+//   3. `snapshot_during_migration_returns_typed_error` — acquire the
+//      `register_model` mig-lock manually; attempt `snapshot()`;
+//      expect `Coded { code: "migration_in_progress" }`. No subprocess.
+//   4. `snapshot_uri_content_hash_round_trip` — `snapshot()` →
+//      `SnapshotHandle.content_hash` matches SHA-256 of the on-disk
+//      dump file. `#[ignore]`-d for the same reason as #1.
+
+use zeroship_plugin_db::backend::{
+    Backup as _, BusyPolicy as BackupBusyPolicy, LockScope, PitrTarget, SnapshotOpts,
+};
+
+/// Best-effort probe for `pg_dump`/`pg_restore` on PATH. The
+/// snapshot/restore round-trip tests `#[ignore]` themselves
+/// statically (the runner's `--ignored` flag re-enables them); this
+/// helper is for tests that can short-circuit at runtime if the
+/// binaries aren't available without failing the suite. Cheap — does
+/// not actually spawn the binary.
+fn pg_dump_on_path() -> bool {
+    std::process::Command::new("pg_dump")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// **P5 PR 4 — gate #2**: `pitr_replay` records the target row in
+/// `__zeroship_admin.pitr_targets`. The actual WAL recovery is
+/// operator-driven (PR 4 ships the API surface only); this test
+/// pins the placeholder shape: `INSERT … ON CONFLICT (app_id) DO
+/// UPDATE …` upserts the latest target.
+#[compio::test]
+async fn pitr_pg_records_target() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    // PITR-targets table lives in `__zeroship_admin`; the auth
+    // bootstrap creates it. Idempotent on a populated cluster.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure_admin_schema");
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let app_id = "p5_pr4_pitr_app";
+
+    // Clean any stale row from a prior run so the assertion sees
+    // exactly the row we just inserted.
+    pool.execute(
+        "DELETE FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
+        &[&app_id],
+    )
+    .await
+    .unwrap();
+
+    // 1) LSN target.
+    backend
+        .pitr_replay(app_id, PitrTarget::Lsn("0/16B1234".to_string()))
+        .await
+        .expect("pitr_replay(LSN) records the target");
+
+    let rows = pool
+        .query_text_params(
+            "SELECT target FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one row per app_id (ON CONFLICT upsert)");
+    let target: String = rows[0].get::<_, String>("target");
+    assert_eq!(target, "LSN:0/16B1234");
+
+    // 2) Upsert with a TimeMillis target — the same app_id row is
+    //    overwritten (ON CONFLICT (app_id) DO UPDATE).
+    backend
+        .pitr_replay(app_id, PitrTarget::TimeMillis(1_700_000_000_000))
+        .await
+        .expect("pitr_replay(TimeMillis) upserts the target");
+
+    let rows = pool
+        .query_text_params(
+            "SELECT target FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "still one row after upsert");
+    let target: String = rows[0].get::<_, String>("target");
+    assert_eq!(target, "TIME_MS:1700000000000");
+
+    // Cleanup so a re-run starts fresh.
+    pool.execute(
+        "DELETE FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
+        &[&app_id],
+    )
+    .await
+    .unwrap();
+}
+
+/// **P5 PR 4 — fence**: when the per-app `register_model` advisory
+/// lock is held by another caller, `snapshot()` surfaces a typed
+/// `Coded { code: "migration_in_progress" }` rather than blocking
+/// indefinitely or returning an opaque LockContention. Pins the
+/// pre-flight interlock the snapshot impl runs before invoking
+/// `pg_dump`.
+#[compio::test]
+async fn snapshot_during_migration_returns_typed_error() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure_admin_schema");
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let app_id = "p5_pr4_miglock_app";
+
+    // Acquire the register_model lock on a dedicated standalone
+    // connection (not a pooled client) so the lock is held for the
+    // entire test without competing with the pool. The lock is
+    // session-scoped, so it auto-releases when this client drops at
+    // end-of-scope. We don't go through `LockGuard` because that
+    // type is `pub(crate)` and unreachable from integration tests.
+    let (lock_client, lock_conn) = compio_postgres::connect(&url, NoTls)
+        .await
+        .expect("hold-lock dedicated connect");
+    let lock_conn_task = compio::runtime::spawn(async move {
+        let _ = lock_conn.run().await;
+    });
+    // Mirror `LockScope::GlobalApp { app_id, name: "register_model" }
+    // .to_keys()` exactly so the underlying `(key1, key2)` pair
+    // matches what the snapshot's pre-flight will try to acquire.
+    let scope = LockScope::GlobalApp {
+        app_id: app_id.to_string(),
+        name: "register_model".to_string(),
+    };
+    let (key1, key2) = scope.to_keys();
+    lock_client
+        .query_text_params(
+            "SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[key1.as_str(), key2.as_str()],
+        )
+        .await
+        .expect("acquire register_model lock on dedicated session");
+
+    // Snapshot dest URI doesn't need to be real — we expect the
+    // call to refuse at the pre-flight stage, before pg_dump runs.
+    let dest = "file:///tmp/p5_pr4_miglock_should_not_exist.dump";
+    let err = backend
+        .snapshot(app_id, dest, SnapshotOpts { if_busy: BackupBusyPolicy::Abort })
+        .await
+        .expect_err("snapshot must refuse while register_model lock is held");
+    match err {
+        DbError::Coded { code, .. } => {
+            assert_eq!(
+                code, "migration_in_progress",
+                "expected Coded migration_in_progress, got code={code:?}"
+            );
+        }
+        other => panic!(
+            "expected Coded {{ code: \"migration_in_progress\", .. }}, got {other:?}"
+        ),
+    }
+
+    // The destination file MUST NOT have been created — the
+    // pre-flight refusal runs before any disk I/O.
+    let path = std::path::Path::new("/tmp/p5_pr4_miglock_should_not_exist.dump");
+    assert!(
+        !path.exists(),
+        "snapshot must not write to disk when refused at pre-flight"
+    );
+
+    // Drop the dedicated client; PG releases the session-scoped
+    // advisory lock when the backend session terminates.
+    drop(lock_client);
+    lock_conn_task.detach();
+}
+
+/// **P5 PR 4 — gate #1**: round-trip snapshot+restore. Insert rows
+/// into a per-app schema, snapshot to a `file://` URI, drop the
+/// schema's table contents, restore, assert the rows are back.
+///
+/// `#[ignore]`-d statically because `pg_dump` / `pg_restore` aren't
+/// available in every test environment. Run with
+/// `cargo test … snapshot_restore_round_trip_pg -- --ignored`.
+#[compio::test]
+#[ignore = "needs pg_dump/pg_restore on PATH"]
+async fn snapshot_restore_round_trip_pg() {
+    let url = require_pg().await;
+    if !pg_dump_on_path() {
+        eprintln!("Skipping — pg_dump not on PATH");
+        return;
+    }
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure_admin_schema");
+
+    // Per-app schema fresh every run.
+    let app_id = "p5_pr4_roundtrip_app";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app_id}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            r#"CREATE TABLE "{app_id}"."notes" (
+                id   INTEGER PRIMARY KEY,
+                body TEXT NOT NULL
+            )"#
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Seed deterministic rows. Bind both columns as text — the
+    // `$1::int` cast on the SQL side mirrors the `app_role` /
+    // `users` test pattern used throughout this file.
+    const ROW_COUNT: usize = 5;
+    for i in 0..ROW_COUNT {
+        let id_s = i.to_string();
+        let body = format!("row-{i}");
+        pool.query_text_params(
+            &format!(
+                r#"INSERT INTO "{app_id}"."notes" (id, body) VALUES ($1::int, $2)"#
+            ),
+            &[id_s.as_str(), body.as_str()],
+        )
+        .await
+        .unwrap();
+    }
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+
+    // Snapshot to a tempdir-backed file:// URI.
+    let dir = tempfile::tempdir().unwrap();
+    let dest_path = dir.path().join("snapshot.dump");
+    let dest_uri = format!("file://{}", dest_path.to_string_lossy());
+
+    let handle = backend
+        .snapshot(
+            app_id,
+            &dest_uri,
+            SnapshotOpts { if_busy: BackupBusyPolicy::Abort },
+        )
+        .await
+        .expect("snapshot");
+    assert!(dest_path.exists(), "dump file must exist on disk after snapshot");
+    assert_eq!(handle.uri, dest_uri);
+
+    // Drop-and-recreate to a clean schema (simulates data loss).
+    pool.execute(&format!("DROP SCHEMA \"{app_id}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app_id}\""), &[])
+        .await
+        .unwrap();
+    let rows = pool
+        .query_text_params(
+            "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'notes'",
+            &[&app_id],
+        )
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "post-drop: notes table must be absent");
+
+    // Restore — the impl re-drops/recreates the schema itself, then
+    // runs pg_restore over the captured dump file.
+    backend.restore(app_id, &handle).await.expect("restore");
+
+    // Verify the row set is recovered. Cast id to text on the
+    // server so `Row::get<String>` decodes uniformly without
+    // dragging in the `query_text_params` int-decode shape.
+    let rows = pool
+        .query_text_params(
+            &format!(r#"SELECT id::text AS id, body FROM "{app_id}"."notes" ORDER BY id"#),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), ROW_COUNT, "all rows must be recovered");
+    for (i, row) in rows.iter().enumerate() {
+        let id: String = row.get::<_, String>("id");
+        assert_eq!(id, i.to_string());
+        let body: String = row.get::<_, String>("body");
+        assert_eq!(body, format!("row-{i}"));
+    }
+
+    // Cleanup so a re-run starts fresh.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
+        .await
+        .unwrap();
+}
+
+/// **P5 PR 4 — fence**: the `SnapshotHandle.content_hash` returned by
+/// `snapshot()` must equal the SHA-256 of the on-disk dump bytes.
+/// This is the integrity contract the `restore()` path relies on —
+/// any drift here would let a corrupt dump pass restore's hash
+/// check.
+///
+/// `#[ignore]`-d statically because `pg_dump` isn't always on PATH.
+#[compio::test]
+#[ignore = "needs pg_dump on PATH"]
+async fn snapshot_uri_content_hash_round_trip() {
+    let url = require_pg().await;
+    if !pg_dump_on_path() {
+        eprintln!("Skipping — pg_dump not on PATH");
+        return;
+    }
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .expect("ensure_admin_schema");
+
+    let app_id = "p5_pr4_hash_app";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app_id}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app_id}"."t" (id INT PRIMARY KEY)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    pool.execute(
+        &format!(r#"INSERT INTO "{app_id}"."t" (id) VALUES (1), (2), (3)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let dest_path = dir.path().join("hash_check.dump");
+    let dest_uri = format!("file://{}", dest_path.to_string_lossy());
+
+    let handle = backend
+        .snapshot(
+            app_id,
+            &dest_uri,
+            SnapshotOpts { if_busy: BackupBusyPolicy::Abort },
+        )
+        .await
+        .expect("snapshot");
+
+    // Recompute SHA-256 over the on-disk file via an independent
+    // implementation so the assertion pins the byte format.
+    use sha2::Digest;
+    let bytes = std::fs::read(&dest_path).expect("read dump file");
+    let observed: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+    assert_eq!(
+        handle.content_hash, observed,
+        "SnapshotHandle.content_hash must match SHA-256 of on-disk bytes"
+    );
+
+    // Cleanup.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
+        .await
+        .unwrap();
 }

@@ -1443,8 +1443,9 @@ pub enum EncryptionMode {
 /// trait is routed through the `BackendHandle::as_backup_*`
 /// accessors rather than joining the [`Backend`] super-trait. App
 /// code never reaches this; only the platform's backup orchestrator
-/// does. PR 4 (PG) and PR 5 (SQLite) backfill the real bodies; PR 1
-/// stubs return `p5_pr2_stub`.
+/// does. PR 4 (PG) ships `pg_dump`/`pg_restore` shell-out + PITR
+/// placeholder under `hardening`; PR 5 (SQLite) ships `VACUUM INTO`
+/// + atomic-rename restore + `pitr_pg_only` refusal.
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
     /// `dest_uri`. Returns a handle with the content hash for
@@ -1940,9 +1941,15 @@ impl BackendHandle {
 
     /// Borrow a [`Backup`] capability over the PG arm.
     ///
-    /// **P5 PR 1**: returns `Some(&PostgresBackend)` on the PG arm.
-    /// PR 4 backfills the `pg_dump` / `pg_restore` shell-out + PITR
-    /// placeholder.
+    /// **P5 PR 4**: returns `Some(&PostgresBackend)` on the PG arm.
+    /// The real `Backup` impl (pg_dump/pg_restore shell-out + PITR
+    /// placeholder) is gated on `feature = "hardening"` because the
+    /// PITR placeholder writes to the `__zeroship_admin.pitr_targets`
+    /// table (also `hardening`). Without `hardening`, callers can
+    /// still construct the reference but reaching `.snapshot(...)` /
+    /// `.restore(...)` won't satisfy the trait bound at the call
+    /// site. Mirrors the [`Self::as_encrypted_column_pg`] gating
+    /// shape.
     ///
     /// Returns `Some` on the PG arm; `None` on the SQLite arm.
     #[cfg(feature = "pg")]
@@ -2165,10 +2172,15 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// Compile-time (P5 PR 1): `PostgresBackend` satisfies [`Backup`].
-    /// PR 4 backfills the `pg_dump`/`pg_restore` shell-out body.
+    /// Compile-time (P5 PR 4): `PostgresBackend` satisfies [`Backup`]
+    /// when the `hardening` feature is active. PR 4 backfills the
+    /// `pg_dump`/`pg_restore` shell-out body; the impl is gated on
+    /// `hardening` because the PITR placeholder writes to the
+    /// `__zeroship_admin.pitr_targets` table (also `hardening`).
+    /// Mirrors the `_assert_postgres_backend_impls_encrypted_column`
+    /// shape above.
     #[allow(dead_code)]
-    #[cfg(feature = "pg")]
+    #[cfg(all(feature = "pg", feature = "hardening"))]
     fn _assert_postgres_backend_impls_backup() {
         fn assert_impl<T: Backup>() {}
         assert_impl::<PostgresBackend>();
