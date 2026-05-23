@@ -161,14 +161,14 @@ HEAD at triage time: `5be3c1a1`. Recent fix-wave commits absorbed: `a00c41fd`, `
 
 ### [I3] Migration advisory lock has no RAII guard (security DoS)
 - **Source**: `plugin-db-security-2026-05-22-r1.md` §2 "Advisory-lock DoS via stalled migration client"; `plugin-db-concurrency-2026-05-22-r2.md` §2 "exec_commit_batch leaves mig_lock slot occupied on dry-run COMMIT network failure"
-- **File**: `crates/plugin-db/src/migrations.rs:548-553` (dry-run ROLLBACK path); migration `mig_lock` lifecycle in `IsolateDbContext`
-- **Description**: `exec_commit_batch` for `dry_run=true` issues ROLLBACK; if that call returns Err, `return_lock_client(client)` is not called and `mig_lock` slot remains `Some` without a client. Subsequent calls see `has_mig_lock() == true`, attempt `take_lock_client()` → None, trigger `"lock client missing"`. Same shape on real-run COMMIT failure. Not a silent data-corruption risk (self-consistent), but observable as a stuck migration that only clears on isolate teardown. The register_model path got its RAII unlock fix (`apply.rs`, commit `37a0ef76`), but the migration backfill path did not.
-- **Status as of 2026-05-22 00:17**:
-  - Code still exists? Yes. `migrations.rs:548-553` shows the dry-run ROLLBACK branch returning Err without resetting `mig_lock`.
-  - Blocker: small design touch — needs an RAII guard analogous to `SuppressGuard` (wal_consumer.rs) to release lock client + slot on Drop.
-  - Already-superseded-by: N/A
-- **Effort**: medium (needs an RAII type or manual finally-style cleanup at every return site)
-- **Pickable this cycle**: yes if a single-file fix is acceptable; the RAII path is multi-file.
+- **File**: `crates/plugin-db/src/migrations.rs` — `exec_begin` (`try_acquire` at line 317), `exec_commit_batch` (`release` at line 738 in the `is_done` branch), `exec_begin` cancelled-refusal `release` at line 344. Slot lifecycle in `IsolateDbContext::mig_lock`.
+- **Description**: `exec_commit_batch` for `dry_run=true` issues ROLLBACK; if that call returns Err, `return_lock_client(client)` is not called and `mig_lock` slot remains `Some` without a client. Subsequent calls see `has_mig_lock() == true`, attempt `take_lock_client()` → None, trigger `"lock client missing"`. Same shape on real-run COMMIT failure. Not a silent data-corruption risk (self-consistent), but observable as a stuck migration that only clears on isolate teardown. The register_model path got its RAII unlock fix (`backend/lock_guard.rs::LockGuard`, P0 PR 6 commit `9a241f58`), but the migration backfill path did not — `migrations.rs` still calls `backend.try_acquire(...)` / `backend.release(...)` (the typed `LockManager` surface from P0 PR 6) directly, with no RAII wrapper.
+- **Status as of 2026-05-22 (post-P0 PR 6)**:
+  - Code still exists? Yes. `migrations.rs` has zero `LockGuard` mentions; raw `backend.try_acquire` at L317 and raw `backend.release` at L344 (cancelled-refusal) + L738 (backfill-finalise). The dry-run ROLLBACK / COMMIT-failure path still goes `return_lock_client(client)` → early Err with `mig_lock` slot un-cleared.
+  - Blocker: **structural — `LockGuard` is not directly reusable here**. `LockGuard<'p>` wraps a `PooledClient<'p>` whose lock lives for one Rust function's scope; the migration path uses an **owned** `compio_postgres::Client` from `acquire_dedicated_client` parked in `MigrationLock::client: Option<compio_postgres::Client>` and held across many V8-driven calls (`begin` → `fetchBatch`*N → `commitBatch`*N). The RAII boundary is the **per-isolate `mig_lock` slot**, not a function-local guard. Fix needs either (a) a separate slot-scoped RAII type (Drop releases the slot + best-effort schedules unlock SQL via tracing log on the catastrophic path, mirroring `LockGuard`'s sync-Drop limitation), or (b) a structural refactor of `exec_begin`/`exec_commit_batch` so all error paths converge on a single `clear_mig_lock()` finally-style site. The previous blocker note ("trait surface unstable") is obsolete — P0 PR 6 stabilised `LockManager::{try_acquire, release}`.
+  - Already-superseded-by: N/A — P0 PR 6 fixed the *register_model* path, not this one.
+- **Effort**: medium (slot-scoped guard type, or structural cleanup-site refactor across `exec_begin` / `exec_commit_batch` / `exec_fetch_batch`)
+- **Pickable this cycle**: deferred — needs a slot-scoped guard analogous to but distinct from `LockGuard`. Flagging as next-cycle pickup; not safe as a one-line drain.
 
 ---
 
