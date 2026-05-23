@@ -2394,10 +2394,14 @@ async fn gap_i_migration_finalizer_churn() {
     }
 
     // (c) No advisory locks linger for this app's lock-key family.
-    // `zs_mig:<app>` keys are int4 hashtext'd; we test by trying to
-    // grab one fresh — it must succeed if and only if no prior session
-    // is still holding it. Each i-th key was held on a different
-    // backend session, so all N should now be re-acquirable.
+    // Per P0 PR 6 (commit 9a241f58) the keys derive from
+    // `LockScope::GlobalApp { app_id, name: format!("mig:{name}") }`,
+    // which `LockScope::to_keys` (src/backend/mod.rs:205-211) renders as
+    // (`"{app_id}:mig:{name}"`, `"mig:{name}"`). Both are int4 hashtext'd
+    // in pg_advisory_lock. We test by trying to grab one fresh — it must
+    // succeed if and only if no prior session is still holding it. Each
+    // i-th key was held on a different backend session, so all N should
+    // now be re-acquirable.
     //
     // We just sample i=0 and i=N-1 (the bounds) — exhaustive scan
     // would cost N round-trips for a probabilistic guarantee that's
@@ -2405,23 +2409,29 @@ async fn gap_i_migration_finalizer_churn() {
     // lock is still held, *something* didn't release.
     for i in [0, N - 1] {
         let name = format!("churn_{i:04}");
+        // Lock-key shape MUST match LockScope::to_keys in src/backend/mod.rs — see commit 9a241f58.
+        // Production classifies this site as `LockScope::GlobalApp { app_id,
+        // name: format!("mig:{name}") }`; `to_keys` returns
+        // (`"{app_id}:mig:{name}"`, `"mig:{name}"`).
+        let key1 = format!("{app}:mig:{name}");
+        let key2 = format!("mig:{name}");
         let probe_rows = pool
             .query_text_params(
-                "SELECT pg_try_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4) AS got",
-                &[app, name.as_str()],
+                "SELECT pg_try_advisory_lock(hashtext($1)::int4, hashtext($2)::int4) AS got",
+                &[key1.as_str(), key2.as_str()],
             )
             .await
             .unwrap();
         let got: bool = probe_rows[0].get("got");
         assert!(
             got,
-            "iter {i}: advisory lock zs_mig:{app}/{name} still held after churn (finalizer leaked)"
+            "iter {i}: advisory lock {key1}/{key2} still held after churn (finalizer leaked)"
         );
         // Release the lock the probe just took.
         let _ = pool
             .query_text_params(
-                "SELECT pg_advisory_unlock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)",
-                &[app, name.as_str()],
+                "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)",
+                &[key1.as_str(), key2.as_str()],
             )
             .await
             .unwrap();
@@ -2475,10 +2485,16 @@ async fn b1_advisory_lock_prevents_concurrent_runs() {
     })
     .detach();
 
+    // Lock-key shape MUST match LockScope::to_keys in src/backend/mod.rs — see commit 9a241f58.
+    // Production classifies this site as `LockScope::GlobalApp { app_id,
+    // name: format!("mig:{name}") }`; `to_keys` returns
+    // (`"{app_id}:mig:{name}"`, `"mig:{name}"`).
+    let lock_key1 = format!("{app}:mig:backfill_role");
+    let lock_key2 = "mig:backfill_role";
     let _ = sibling
         .query_text_params(
-            "SELECT pg_advisory_lock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)",
-            &[app, "backfill_role"],
+            "SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[lock_key1.as_str(), lock_key2],
         )
         .await
         .unwrap();
@@ -2497,10 +2513,11 @@ async fn b1_advisory_lock_prevents_concurrent_runs() {
     );
 
     // Release sibling lock.
+    // Lock-key shape MUST match LockScope::to_keys in src/backend/mod.rs — see commit 9a241f58.
     let _ = sibling
         .query_text_params(
-            "SELECT pg_advisory_unlock(hashtext('zs_mig:' || $1)::int4, hashtext($2)::int4)",
-            &[app, "backfill_role"],
+            "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)",
+            &[lock_key1.as_str(), lock_key2],
         )
         .await;
     drop(sibling);
