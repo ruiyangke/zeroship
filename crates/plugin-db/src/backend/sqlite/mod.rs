@@ -172,37 +172,86 @@ impl SqlExecutor for SqliteBackend {
 }
 
 impl LockManager for SqliteBackend {
-    // The default-impl methods (`acquire`, `try_acquire`,
-    // `release`, `try_acquire_with_backoff`) inherit through the
-    // trait. PR 4 wires the three legacy string-key primitives below
-    // through `InProcessLockRegistry`; until then they return the
-    // PR-2+ stub sentinel.
+    // The default-impl methods (`acquire`, `try_acquire`, `release`,
+    // `try_acquire_with_backoff`) inherit through the trait. The three
+    // legacy string-key primitives below route through
+    // `InProcessLockRegistry`:
+    //
+    // - `acquire_advisory_lock`: per plan §3.3, this method is
+    //   essentially unused in production — every typed `acquire` call
+    //   site routes through `try_acquire_with_backoff` (since [I43]).
+    //   We implement it for completeness with a bounded
+    //   try-then-sleep loop (20ms tick) that mirrors the PG arm's
+    //   "indefinite wait" surface without the PG arm's server-side
+    //   `pg_advisory_lock`. The loop has no cap — it polls forever
+    //   until acquisition succeeds, matching the legacy contract.
+    //
+    // - `try_acquire_advisory_lock`: synchronous registry call —
+    //   borrow-and-return inside one expression so the `RefCell`
+    //   borrow never crosses an `.await`.
+    //
+    // - `release_advisory_lock`: same shape; the registry handles
+    //   "release-on-unheld" as a `tracing::warn` no-op so we always
+    //   return `Ok(())`.
+    //
+    // The `_client` argument is ignored on every primitive — design
+    // §7.2: "SQLite ignores the argument". The single-writer actor
+    // serialises every lock-state read/write through the same Rust
+    // process, so the client identity carries no information at the
+    // lock layer.
 
     async fn acquire_advisory_lock(
         &self,
         _client: &Self::Client,
-        _key1: &str,
-        _key2: &str,
+        key1: &str,
+        key2: &str,
     ) -> Result<(), DbError> {
-        Err(pr_stub("acquire_advisory_lock"))
+        // 20ms poll cadence — same magnitude as the typed
+        // `try_acquire_with_backoff`'s first non-zero retry step. The
+        // loop is uncapped to match the legacy `pg_advisory_lock`
+        // contract; typed call sites should be using
+        // `try_acquire_with_backoff` (bounded at 5 attempts / ~1.75s)
+        // instead. No production caller invokes this method.
+        let k = (key1.to_string(), key2.to_string());
+        loop {
+            // Borrow scope confined to a single statement — the
+            // `RefCell` is released before the `await` below.
+            if self.lock_registry.try_acquire(k.clone()) {
+                return Ok(());
+            }
+            compio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     async fn try_acquire_advisory_lock(
         &self,
         _client: &Self::Client,
-        _key1: &str,
-        _key2: &str,
+        key1: &str,
+        key2: &str,
     ) -> Result<bool, DbError> {
-        Err(pr_stub("try_acquire_advisory_lock"))
+        // Synchronous registry call. The `RefCell` borrow is contained
+        // inside the `try_acquire` body and is released before this
+        // function returns — there is no `.await` between borrow and
+        // release.
+        Ok(self
+            .lock_registry
+            .try_acquire((key1.to_string(), key2.to_string())))
     }
 
     async fn release_advisory_lock(
         &self,
         _client: &Self::Client,
-        _key1: &str,
-        _key2: &str,
+        key1: &str,
+        key2: &str,
     ) -> Result<(), DbError> {
-        Err(pr_stub("release_advisory_lock"))
+        // `release` is infallible at the registry layer — unheld /
+        // unknown slots emit a `tracing::warn` and no-op. Returning
+        // `Ok(())` unconditionally matches the legacy PG-arm contract:
+        // a release on a session whose lock has already auto-released
+        // (because the connection died) is also benign there.
+        self.lock_registry
+            .release((key1.to_string(), key2.to_string()));
+        Ok(())
     }
 }
 
@@ -290,23 +339,273 @@ impl SchemaIntrospect for SqliteBackend {
     // teaching about the new vocabulary follows in a later PR.
     type LiveSchema = crate::diff::LiveSchema;
 
-    async fn introspect_schema(&self, _app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        // PR 4: PRAGMA walk over `sqlite_master`, `PRAGMA table_info`,
-        // `PRAGMA index_list` / `index_info`, `PRAGMA foreign_key_list`,
-        // collapsed into a single `spawn_blocking` so the round-trip
-        // count stays one.
-        Err(pr_stub("introspect_schema"))
+    /// Walk the SQLite catalog for `app_id`'s attached database and
+    /// produce a [`crate::diff::LiveSchema`] in the same shape the PG
+    /// impl emits — populated via four PRAGMA round-trips per table:
+    ///
+    /// 1. `SELECT name FROM "<app_id>".sqlite_master WHERE type='table'`
+    ///    — table list, filtered to user tables (`sqlite_*` system
+    ///    tables and our `__zs_*` bookkeeping tables are excluded).
+    /// 2. `PRAGMA "<app_id>".table_info("<collection>")` — columns:
+    ///    name, type, notnull (0/1), dflt_value, pk.
+    /// 3. `PRAGMA "<app_id>".index_list("<collection>")` — indexes:
+    ///    seq, name, unique (0/1), origin, partial. The PG impl
+    ///    excludes the primary-key index (`indisprimary`); we mirror
+    ///    that by skipping indexes whose `origin = 'pk'`.
+    /// 4. For each non-PK index: `PRAGMA "<app_id>".index_info(...)` —
+    ///    the index's column list in seqno order.
+    /// 5. `PRAGMA "<app_id>".foreign_key_list("<collection>")` —
+    ///    FKs: id, seq, table (target), from, to, on_update,
+    ///    on_delete, match.
+    ///
+    /// Per plan §3.4 each PRAGMA flows through the session actor's
+    /// `Query` command (one round-trip per call); the totals stay
+    /// bounded at `1 + 4N` for N tables, which is fine at dev scale
+    /// where this code path runs. The PG impl achieves the same with
+    /// 3 SQL statements; folding the SQLite walk into a single SQL
+    /// statement isn't possible (PRAGMA is non-composable), but the
+    /// per-table count stays well below the orchestrator's budget for
+    /// a registration round-trip.
+    ///
+    /// **System-table filter** (plan §3.4): drop any name beginning
+    /// with `sqlite_` (engine-internal) or `__zs_` (our bookkeeping —
+    /// migrations / audit / replication). The diff classifier consumes
+    /// only user-declared tables; surfacing system tables would
+    /// trigger spurious "drop table" classifications.
+    async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
+        let mut out = crate::diff::LiveSchema::default();
+
+        // 1. Table list. The `app_id` is interpolated as a quoted
+        //    identifier — the dialect's `quote_ident` doubles embedded
+        //    `"`s; PRAGMA / sqlite_master both accept the dotted form
+        //    `"app_id".sqlite_master`.
+        let q_app = self.quote_ident(app_id);
+        let tables_sql = format!(
+            "SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name"
+        );
+        let table_rows = self.session.query(&tables_sql, &[]).await?;
+        let mut user_tables: Vec<String> = Vec::with_capacity(table_rows.len());
+        for row in &table_rows {
+            let name = row
+                .first()
+                .and_then(|c| c.clone())
+                .unwrap_or_default();
+            // Filter out system + bookkeeping tables (plan §3.4).
+            if name.starts_with("sqlite_") || name.starts_with("__zs_") {
+                continue;
+            }
+            user_tables.push(name);
+        }
+
+        for collection in &user_tables {
+            let q_coll = self.quote_ident(collection);
+
+            // 2. Columns via `PRAGMA table_info`.
+            //
+            //    PRAGMA columns: 0=cid, 1=name, 2=type, 3=notnull,
+            //    4=dflt_value, 5=pk. The cell shape is `Option<String>`
+            //    uniformly (the session materialises every value as a
+            //    stringified `Option<String>`), so we read positionally
+            //    and parse the `notnull` "0"/"1" into a bool.
+            let table_info_sql = format!("PRAGMA {q_app}.table_info({q_coll})");
+            let col_rows = self.session.query(&table_info_sql, &[]).await?;
+            let mut col_map = std::collections::HashMap::new();
+            for row in &col_rows {
+                let name = row
+                    .get(1)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let pg_type = row
+                    .get(2)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let not_null = row
+                    .get(3)
+                    .and_then(|c| c.as_deref())
+                    .map(|s| s != "0")
+                    .unwrap_or(false);
+                let default_expr = row.get(4).and_then(|c| c.clone());
+                col_map.insert(
+                    name,
+                    crate::diff::ColumnInfo {
+                        pg_type,
+                        not_null,
+                        default_expr,
+                        // SQLite expression defaults are stored as raw
+                        // text without a volatility tag (the engine has
+                        // no `pg_proc.provolatile` analogue). Leaving
+                        // this `None` matches what the PG side sets for
+                        // literal defaults; the diff classifier reads
+                        // `default_volatility` only when the default
+                        // looks like a function call. Future PRs can
+                        // pattern-match on common volatile defaults
+                        // (`CURRENT_TIMESTAMP`, `(unixepoch())`, etc.).
+                        default_volatility: None,
+                    },
+                );
+            }
+            if !col_map.is_empty() {
+                out.tables.insert(collection.clone(), col_map);
+            }
+
+            // 3. Indexes via `PRAGMA index_list` + `PRAGMA index_info`.
+            //
+            //    `index_list` columns: 0=seq, 1=name, 2=unique,
+            //    3=origin, 4=partial. We exclude `origin='pk'` to match
+            //    the PG impl's `NOT i.indisprimary` filter.
+            let index_list_sql = format!("PRAGMA {q_app}.index_list({q_coll})");
+            let idx_rows = self.session.query(&index_list_sql, &[]).await?;
+            let mut idx_map = std::collections::HashMap::new();
+            for row in &idx_rows {
+                let idx_name = row
+                    .get(1)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let is_unique = row
+                    .get(2)
+                    .and_then(|c| c.as_deref())
+                    .map(|s| s != "0")
+                    .unwrap_or(false);
+                let origin = row
+                    .get(3)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                if origin == "pk" {
+                    // PG impl skips primary-key indexes; we mirror.
+                    // The auto-generated `sqlite_autoindex_*` names
+                    // also appear here, and they all carry origin='pk'
+                    // or 'u' (unique constraint). We surface 'u'-origin
+                    // indexes because they correspond to declared
+                    // UNIQUE columns the diff engine cares about.
+                    continue;
+                }
+
+                // 4. Columns for this index via `PRAGMA index_info`.
+                //    Returns: 0=seqno, 1=cid, 2=name.
+                let q_idx = self.quote_ident(&idx_name);
+                let index_info_sql = format!("PRAGMA {q_app}.index_info({q_idx})");
+                let info_rows = self.session.query(&index_info_sql, &[]).await?;
+                let mut columns = Vec::with_capacity(info_rows.len());
+                for info_row in &info_rows {
+                    let col_name = info_row
+                        .get(2)
+                        .and_then(|c| c.clone())
+                        .unwrap_or_default();
+                    columns.push(col_name);
+                }
+
+                idx_map.insert(
+                    idx_name,
+                    crate::diff::IndexInfo {
+                        is_unique,
+                        columns,
+                        // SQLite indexes are always considered valid
+                        // once `CREATE INDEX` returns — there is no
+                        // analogue to PG's `indisvalid` (which can be
+                        // false after a failed `CREATE INDEX
+                        // CONCURRENTLY`). Mark every observed index
+                        // valid; PR 5's IndexBuilder retry logic does
+                        // not need a tri-state.
+                        is_valid: true,
+                    },
+                );
+            }
+            if !idx_map.is_empty() {
+                out.indexes.insert(collection.clone(), idx_map);
+            }
+
+            // 5. Foreign keys via `PRAGMA foreign_key_list`.
+            //
+            //    Columns: 0=id, 1=seq, 2=table (target),
+            //    3=from (local column), 4=to (target column),
+            //    5=on_update, 6=on_delete, 7=match.
+            //
+            //    We synthesise a `constraint_name` from the FK id +
+            //    local column (SQLite doesn't expose user-given FK
+            //    names through PRAGMA — only the implicit auto-name).
+            //    The PG impl uses `pg_constraint.conname` directly.
+            let fk_sql = format!("PRAGMA {q_app}.foreign_key_list({q_coll})");
+            let fk_rows = self.session.query(&fk_sql, &[]).await?;
+            let mut fk_map = std::collections::HashMap::new();
+            for row in &fk_rows {
+                let fk_id = row
+                    .first()
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let target_table = row
+                    .get(2)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let from_col = row
+                    .get(3)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let target_column = row
+                    .get(4)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let on_update = row
+                    .get(5)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let on_delete = row
+                    .get(6)
+                    .and_then(|c| c.clone())
+                    .unwrap_or_default();
+                let constraint_name = format!("fk_{fk_id}_{from_col}");
+                fk_map.insert(
+                    from_col.clone(),
+                    crate::diff::ForeignKeyInfo {
+                        constraint_name,
+                        column: from_col,
+                        target_table,
+                        target_column,
+                        // SQLite's PRAGMA already emits the upper-case
+                        // SQL form ("CASCADE", "SET NULL", "NO
+                        // ACTION", …); no decode step needed (contrast
+                        // PG's single-char code).
+                        on_delete,
+                        on_update,
+                        // SQLite FKs do not surface a deferrable bit
+                        // through PRAGMA. The engine supports
+                        // `DEFERRABLE INITIALLY DEFERRED` syntax but
+                        // doesn't echo it back via foreign_key_list;
+                        // default to `false` to match the PG impl's
+                        // bool shape.
+                        deferrable: false,
+                    },
+                );
+            }
+            if !fk_map.is_empty() {
+                out.foreign_keys.insert(collection.clone(), fk_map);
+            }
+        }
+
+        Ok(out)
     }
 
-    async fn estimate_row_count(
-        &self,
-        _app_id: &str,
-        _collection: &str,
-    ) -> Result<i64, DbError> {
-        // PR 4: SQLite has no `reltuples` analogue — `SELECT COUNT(*)`
-        // is fine because the only consumer needs the 0 / non-0
-        // distinction (NOT NULL classifier).
-        Err(pr_stub("estimate_row_count"))
+    /// Cheap row-count probe for the NOT-NULL-on-empty-table
+    /// classifier branch.
+    ///
+    /// SQLite has no `pg_class.reltuples` analogue — every
+    /// `SELECT COUNT(*)` is a full scan. The only consumer
+    /// (`diff::classify_add_column`) needs the 0 / non-0
+    /// distinction, so the scan cost is acceptable at dev scale
+    /// (the orchestrator already holds the advisory lock — see plan
+    /// §3.4). Future PRs can plug a `MAX(rowid)`-based fast path
+    /// here if the dev-scale cost becomes an issue.
+    async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
+        let q_app = self.quote_ident(app_id);
+        let q_coll = self.quote_ident(collection);
+        let sql = format!("SELECT COUNT(*) FROM {q_app}.{q_coll}");
+        let rows = self.session.query(&sql, &[]).await?;
+        let n = rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|c| c.as_deref())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(n)
     }
 }
 

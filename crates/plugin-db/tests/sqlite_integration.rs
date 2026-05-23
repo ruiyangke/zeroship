@@ -19,7 +19,10 @@
 use std::path::PathBuf;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
-use zeroship_plugin_db::backend::{NamespaceManager, SqlExecutor};
+use zeroship_plugin_db::backend::{
+    LockManager, LockScope, NamespaceManager, SchemaIntrospect, SqlExecutor,
+};
+use zeroship_plugin_db::error::DbError;
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -264,5 +267,287 @@ fn ensure_app_schema_isolates_per_app() {
             rows_b.is_empty(),
             "app_b must not see app_a's tables; got {rows_b:?}"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P1 PR 4 — LockManager (in-process registry) + SchemaIntrospect
+// (PRAGMA-walk) integration tests.
+//
+// The lock-side tests exercise the three legacy primitive routes
+// (`acquire_advisory_lock` / `try_acquire_advisory_lock` /
+// `release_advisory_lock`) and the typed `try_acquire_with_backoff`
+// surface, end-to-end against the same `InProcessLockRegistry` the
+// SqliteBackend owns. The introspect-side tests exercise the
+// PRAGMA-walk catalog inspection: empty schema → empty LiveSchema, and
+// CREATE TABLE round-trip → declared columns appear with correct types
+// + nullability.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lock_try_acquire_blocks_second() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        // First acquire on a fresh registry must succeed — the legacy
+        // primitive returns Ok(()) per the `acquire_advisory_lock`
+        // contract.
+        backend
+            .acquire_advisory_lock(&client, "key1", "key2")
+            .await
+            .expect("first acquire_advisory_lock");
+
+        // A try_acquire with the same `(key1, key2)` must observe the
+        // slot as held — `Ok(false)` is the contended return. We use
+        // a fresh handle (from `acquire_dedicated_client`) to mirror
+        // the "different client, same keys" intent of the plan spec;
+        // SqliteBackend ignores the client argument by design (§7.2)
+        // but the call shape stays faithful to the PG side.
+        let other_client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire other client");
+        let got = backend
+            .try_acquire_advisory_lock(&other_client, "key1", "key2")
+            .await
+            .expect("try_acquire_advisory_lock");
+        assert!(
+            !got,
+            "second try_acquire on a held slot must return Ok(false) (got = {got})"
+        );
+    });
+}
+
+#[test]
+fn lock_release_unblocks() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        backend
+            .acquire_advisory_lock(&client, "key1", "key2")
+            .await
+            .expect("first acquire");
+        backend
+            .release_advisory_lock(&client, "key1", "key2")
+            .await
+            .expect("release");
+        // After release the slot is free — try_acquire flips it back
+        // to held and returns Ok(true).
+        let got = backend
+            .try_acquire_advisory_lock(&client, "key1", "key2")
+            .await
+            .expect("try_acquire after release");
+        assert!(
+            got,
+            "try_acquire after release must return Ok(true) (got = {got})"
+        );
+    });
+}
+
+#[test]
+fn lock_acquire_with_backoff_exhausts_into_contention_error() {
+    // Per plan §2.4 + spec: hold a slot, then call the typed
+    // `try_acquire_with_backoff` against the same scope. The
+    // five-attempt schedule (0/50/200/500/1000ms = ~1.75s) must
+    // exhaust and surface `DbError::LockContention`, which `to_op_error`
+    // maps to the wire-code `lock_not_available`.
+    //
+    // We use `LockScope::GlobalApp` (the only production-shaped
+    // variant) so the `to_keys` derivation matches what
+    // register-model bootstrap would emit; `LockScope::LocalApp`
+    // would derive identical keys (the visibility class is a
+    // backend-arm classification, not a key-shape one — see the
+    // `LockScope::to_keys` rustdoc).
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let scope = LockScope::GlobalApp {
+            app_id: "app_demo".to_string(),
+            name: "register_model".to_string(),
+        };
+
+        // Hold the slot via the underlying primitive — the typed
+        // `try_acquire_with_backoff` will then loop against a
+        // permanently-held registry slot.
+        let (k1, k2) = scope.to_keys();
+        let got = backend
+            .try_acquire_advisory_lock(&client, &k1, &k2)
+            .await
+            .expect("hold slot via try_acquire_advisory_lock");
+        assert!(got, "initial hold must succeed");
+
+        // Now exercise the typed surface — it loops 5 times on
+        // try_acquire_advisory_lock (which observes the held slot →
+        // Ok(false)), then surfaces LockContention. The whole call
+        // takes ~1.75s in the worst case; the test budget is fine
+        // with that.
+        let err = backend
+            .try_acquire_with_backoff(&client, &scope)
+            .await
+            .expect_err("backoff loop must exhaust into contention error");
+        match err {
+            DbError::LockContention { message } => {
+                assert!(
+                    message.contains("app_demo"),
+                    "contention message should mention the scope's app_id: {message}"
+                );
+                assert!(
+                    message.contains("register_model"),
+                    "contention message should mention the scope name: {message}"
+                );
+            }
+            other => panic!(
+                "expected DbError::LockContention after backoff exhaustion, got {other:?}"
+            ),
+        }
+
+        // Sanity: the wire code surfaces as `lock_not_available`
+        // through `to_op_error`. We don't reach into `to_op_error`
+        // here (it's a private mapping) — the message-shape assertion
+        // above is the test-level invariant; the
+        // `lock_not_available` mapping is covered by the lib-level
+        // `op_code` tests in `crate::error`.
+    });
+}
+
+#[test]
+fn introspect_empty_schema_yields_empty_live_schema() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect_schema on empty namespace");
+        // No user tables → empty `tables` / `indexes` / `foreign_keys`.
+        // The `LiveSchema` shape uses HashMap so "empty" is `is_empty()`.
+        assert!(
+            live.tables.is_empty(),
+            "empty namespace must yield empty `tables`; got {:?}",
+            live.tables.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            live.indexes.is_empty(),
+            "empty namespace must yield empty `indexes`"
+        );
+        assert!(
+            live.foreign_keys.is_empty(),
+            "empty namespace must yield empty `foreign_keys`"
+        );
+    });
+}
+
+#[test]
+fn introspect_after_create_table_round_trip() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+
+        // Create a small table with a mix of NULL and NOT NULL
+        // columns, plus a non-PK index, so the introspect output
+        // exercises every PRAGMA branch.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        backend
+            .client_exec(
+                &client,
+                "CREATE TABLE \"app_demo\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL, \
+                     payload TEXT\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+        backend
+            .client_exec(
+                &client,
+                "CREATE INDEX \"app_demo\".\"items_name_idx\" ON \"items\"(name)",
+                &[],
+            )
+            .await
+            .expect("CREATE INDEX items_name_idx");
+
+        let live = backend
+            .introspect_schema("app_demo")
+            .await
+            .expect("introspect_schema after CREATE TABLE");
+
+        // Table must be observed.
+        let cols = live
+            .tables
+            .get("items")
+            .expect("items table must be present in LiveSchema");
+        assert_eq!(cols.len(), 3, "items has 3 columns, got {:?}", cols.keys().collect::<Vec<_>>());
+
+        // Type strings: SQLite returns the declared affinity uppercase
+        // ("INTEGER" / "TEXT"). The diff classifier reads these
+        // stringly — the PG impl populates `format_type(...)` results
+        // here; SQLite populates the affinity name directly per plan
+        // §3.4 ("populate `pg_type` with SQLite affinity names").
+        let id_col = cols.get("id").expect("id column");
+        assert_eq!(id_col.pg_type, "INTEGER");
+        // `id INTEGER PRIMARY KEY` is a special SQLite case — it's an
+        // alias for ROWID, NOT-NULL-implicit only when the row has a
+        // value. PRAGMA `table_info.notnull` returns 0 here even
+        // though the column is effectively NOT NULL; we faithfully
+        // report what the engine surfaces.
+        assert!(
+            !id_col.not_null,
+            "PRAGMA table_info reports notnull=0 for INTEGER PRIMARY KEY (ROWID alias)"
+        );
+
+        let name_col = cols.get("name").expect("name column");
+        assert_eq!(name_col.pg_type, "TEXT");
+        assert!(name_col.not_null, "name was declared NOT NULL");
+
+        let payload_col = cols.get("payload").expect("payload column");
+        assert_eq!(payload_col.pg_type, "TEXT");
+        assert!(!payload_col.not_null, "payload was declared nullable");
+
+        // Index must be observed — the non-PK `items_name_idx` should
+        // appear; the implicit `sqlite_autoindex_*` for `INTEGER
+        // PRIMARY KEY` does NOT appear because INTEGER PRIMARY KEY
+        // uses the ROWID and doesn't create an autoindex entry.
+        let idxs = live
+            .indexes
+            .get("items")
+            .expect("items must have an index map");
+        let idx_info = idxs
+            .get("items_name_idx")
+            .expect("items_name_idx must be present");
+        assert!(!idx_info.is_unique, "items_name_idx is non-unique");
+        assert_eq!(idx_info.columns, vec!["name".to_string()]);
+
+        // No FKs declared → no FK entries.
+        assert!(
+            live.foreign_keys.get("items").is_none(),
+            "items has no declared FKs"
+        );
+
+        // estimate_row_count on the empty table is 0.
+        let n = backend
+            .estimate_row_count("app_demo", "items")
+            .await
+            .expect("estimate_row_count");
+        assert_eq!(n, 0, "freshly-created table has 0 rows");
     });
 }

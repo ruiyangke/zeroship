@@ -77,10 +77,10 @@ pub(crate) enum Command {
         reply: flume::Sender<Result<u64, DbError>>,
     },
     /// Run a row-returning statement; reply with the materialised
-    /// rows. Only used by PR 4's PRAGMA-walk introspection path; PR 2
-    /// wires the variant + helper but no consumer routes through it
-    /// yet.
-    #[allow(dead_code)]
+    /// rows. PR 4 routes
+    /// [`super::SqliteBackend::introspect_schema`] +
+    /// [`super::SqliteBackend::estimate_row_count`] through this
+    /// variant for the PRAGMA-walk catalog inspection.
     Query {
         sql: String,
         params: Vec<String>,
@@ -276,7 +276,12 @@ impl SqliteSession {
     }
 
     /// Send a `Query` command and await the materialised row slice.
-    #[allow(dead_code)]
+    ///
+    /// **PR 4** consumer: [`super::SqliteBackend::introspect_schema`]
+    /// + [`super::SqliteBackend::estimate_row_count`] route through
+    /// this method to read PRAGMA / COUNT(*) results. Each call is one
+    /// round-trip through the actor's mpsc queue + one
+    /// `rusqlite::Statement` lifecycle on the worker thread.
     pub(crate) async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<Vec<Row>, DbError>>(1);
         let cmd = Command::Query {
