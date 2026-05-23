@@ -262,20 +262,20 @@ impl AppState {
     /// `state.persist = …` swap path without requiring any new
     /// runtime check.
     ///
-    /// Returning `Result<_, String>` rather than `Self` is
-    /// deliberate symmetry: future invariants (e.g. dir-writability
-    /// probes, AEAD-key liveness pings) can be added without a
-    /// signature break.
+    /// R3-Q2 (code-quality-r3): originally returned `Result<Self,
+    /// String>` for "future-proof symmetry"; flagged across r3/r4/r5
+    /// reviews as a signature smell because the body cannot fail and
+    /// every in-crate caller had to `.expect("infallible operation")`.
+    /// Now returns plain `Self`. Future invariants (e.g.
+    /// dir-writability probes, AEAD-key liveness pings) can switch
+    /// back to `Result` when they actually need it.
     ///
     /// Semantics:
-    ///   - `with_persistence(p)` → `Ok(self)` with the field set
-    ///     to `Some(p)`. Replaces any prior value.
-    pub fn with_persistence(
-        mut self,
-        persist: Arc<Persistence>,
-    ) -> Result<Self, String> {
+    ///   - `with_persistence(p)` → `self` with the field set to
+    ///     `Some(p)`. Replaces any prior value.
+    pub fn with_persistence(mut self, persist: Arc<Persistence>) -> Self {
         self.persist = Some(persist);
-        Ok(self)
+        self
     }
 
     /// Read-only accessor for the sealed-record persistence handle.
@@ -1607,9 +1607,7 @@ mod persist_setter_tests {
             "fixture must start with persist = None"
         );
         let p = fresh_persist("accepts");
-        let state = state
-            .with_persistence(p.clone())
-            .expect("builder accepts Arc<Persistence>");
+        let state = state.with_persistence(p.clone());
         let stored = state.persist().expect("field populated");
         assert!(
             Arc::ptr_eq(stored, &p),
@@ -1625,12 +1623,8 @@ mod persist_setter_tests {
         let state = min_state();
         let first = fresh_persist("replaces-first");
         let second = fresh_persist("replaces-second");
-        let state = state
-            .with_persistence(first.clone())
-            .expect("first call");
-        let state = state
-            .with_persistence(second.clone())
-            .expect("second call");
+        let state = state.with_persistence(first.clone());
+        let state = state.with_persistence(second.clone());
         let stored = state.persist().expect("field populated");
         assert!(
             !Arc::ptr_eq(stored, &first),
