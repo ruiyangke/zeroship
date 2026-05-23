@@ -190,9 +190,33 @@ fn dispatch_by_spec<'s>(
         // Unwrap the PG arm via `as_postgres` so the per-op `.await`
         // below doesn't have to live inside a `with_postgres`
         // closure — every migration RPC is PG-only in P0.
-        let pg = backend
-            .as_postgres()
-            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        //
+        // Post-P0 mop-up (MAJOR-R14-1): map the `None` arm to a typed
+        // `backend_unsupported` `OpError` so the SDK sees a coded
+        // promise rejection instead of an aborted compio task on a
+        // future SQLite arm.
+        let pg = match backend.as_postgres() {
+            Some(pg) => pg,
+            None => {
+                return OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::RejectError(
+                        crate::error::DbError::Configuration {
+                            code: "backend_unsupported",
+                            message:
+                                "db: migration RPC requires the Postgres backend"
+                                    .to_string(),
+                            hint: Some(
+                                "SQLite backend support is not yet implemented for migrations"
+                                    .to_string(),
+                            ),
+                        }
+                        .to_op_error(),
+                    ),
+                    request_id,
+                };
+            }
+        };
         let result = match op {
             MigrationOp::Status => {
                 crate::migrations::exec_status(pg, &app_id, &name, &collection).await

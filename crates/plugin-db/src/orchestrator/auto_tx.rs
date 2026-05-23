@@ -35,6 +35,7 @@
 
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
+use crate::backend::SqlExecutor;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 use crate::v8_bridge::{get_i64_arg, get_string_arg, setup_js_promise};
@@ -192,22 +193,26 @@ async fn exec_auto_begin(kind: Option<&str>, isolation: Option<&str>) -> Result<
     }
 
     // Open a dedicated connection (same pattern as user-driven
-    // `begin_transaction`). compio-postgres splits the connection into
-    // (Client, Connection); spawn the run loop on a detached task, hold
-    // the Client in the per-isolate transaction slot.
-    let url = crate::context::with(|c| c.db_url())
+    // `begin_transaction`).
+    //
+    // **Post-P0 mop-up (I-R12-1)**: routed through
+    // [`SqlExecutor::acquire_dedicated_client`] so the
+    // `compio_postgres::connect` + `connection.run()` spawn lives in
+    // exactly one place (the PG impl in `backend/postgres.rs`).
+    // Operator-facing prefix ("auto-tx connect failed") preserved.
+    let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
-        .await
-        .map_err(|e| DbError::Transient {
-            message: format!("db: auto-tx connect failed: {e}"),
-        })?;
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            tracing::error!(error = ?e, "db: auto-tx connection task error");
-        }
-    })
-    .detach();
+    let pg = backend.as_postgres().ok_or_else(|| DbError::Configuration {
+        code: "backend_unsupported",
+        message: "db: auto-tx requires the Postgres backend".to_string(),
+        hint: None,
+    })?;
+    let client = pg.acquire_dedicated_client().await.map_err(|e| match e {
+        DbError::Transient { message } => DbError::Transient {
+            message: format!("db: auto-tx connect failed: {message}"),
+        },
+        other => other,
+    })?;
 
     client
         .execute(&sql, &[])

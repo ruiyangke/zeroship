@@ -15,6 +15,7 @@
 
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
+use crate::backend::SqlExecutor;
 use crate::error::DbError;
 use crate::exec::clear_pending_emits;
 use crate::v8_bridge::runtime_state;
@@ -139,23 +140,30 @@ async fn exec_begin(isolation_level: Option<&str>) -> Result<(), DbError> {
     };
 
     // Open a dedicated connection (not from pool — we need to hold it).
-    // compio-postgres splits a connection into (Client, Connection); we spawn
-    // the Connection on a detached task so its run loop drives I/O, and store
-    // the Client in `IsolateDbContext::tx_conn`. When the Client is eventually
-    // dropped, the task terminates gracefully.
-    let url = crate::context::with(|c| c.db_url())
+    //
+    // **Post-P0 mop-up (I-R12-1)**: routed through
+    // [`SqlExecutor::acquire_dedicated_client`] so the
+    // `compio_postgres::connect` + `connection.run()` spawn lives in
+    // exactly one place (the PG impl in `backend/postgres.rs`).
+    // Previously this site open-coded the connect; the error rail
+    // is the same (`DbError::Transient` with the "tx connect failed"
+    // operator-facing prefix), but the inline `connect(&url, NoTls)`
+    // call is gone.
+    let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
-    let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
-        .await
-        .map_err(|e| DbError::Transient {
-            message: format!("db: tx connect failed: {e}"),
-        })?;
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            tracing::error!(error = ?e, "db: tx connection task error");
-        }
-    })
-    .detach();
+    let pg = backend.as_postgres().ok_or_else(|| DbError::Configuration {
+        code: "backend_unsupported",
+        message: "db: beginTransaction requires the Postgres backend".to_string(),
+        hint: None,
+    })?;
+    let client = pg.acquire_dedicated_client().await.map_err(|e| match e {
+        // Preserve the operator-facing `"tx connect failed"` prefix
+        // the prior inline shape used so log greps stay valid.
+        DbError::Transient { message } => DbError::Transient {
+            message: format!("db: tx connect failed: {message}"),
+        },
+        other => other,
+    })?;
 
     client
         .execute(&begin_sql, &[])

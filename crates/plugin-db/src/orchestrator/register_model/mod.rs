@@ -133,9 +133,18 @@ async fn exec_register_model(
     // of the enum via `as_postgres()` for the duration of the
     // `run_pipeline` await — async-friendly shape (closure-based
     // `with_postgres` can't span `.await` ergonomically).
-    let pg = backend
-        .as_postgres()
-        .expect("PostgresBackend arm — register_model is PG-only in P0");
+    //
+    // Post-P0 mop-up (MAJOR-R14-1): map the `None` arm to a typed
+    // `backend_unsupported` `DbError::Configuration` so a future SQLite
+    // arm surfaces a coded SDK-visible error rather than aborting the
+    // spawned compio task via `.expect()` panic.
+    let pg = backend.as_postgres().ok_or_else(|| DbError::Configuration {
+        code: "backend_unsupported",
+        message: "db: register_model requires the Postgres backend".to_string(),
+        hint: Some(
+            "SQLite backend support is not yet implemented for register_model".to_string(),
+        ),
+    })?;
 
     let deploy_id =
         std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());

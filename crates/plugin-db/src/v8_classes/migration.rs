@@ -174,9 +174,7 @@ impl Migration {
                 .to_op_error()
             })?;
         let backend = ensure_backend().await?;
-        let pg = backend
-            .as_postgres()
-            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        let pg = backend.as_postgres().ok_or_else(unsupported_backend_op_error)?;
         crate::migrations::exec_status(pg, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(JsonValue)
@@ -197,9 +195,7 @@ impl Migration {
             .take()
             .ok_or_else(crate::migrations::err_not_active)?;
         let backend = ensure_backend().await?;
-        let pg = backend
-            .as_postgres()
-            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        let pg = backend.as_postgres().ok_or_else(unsupported_backend_op_error)?;
         crate::migrations::exec_cancel(pg, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
@@ -217,9 +213,7 @@ impl Migration {
             .take()
             .ok_or_else(crate::migrations::err_not_active)?;
         let backend = ensure_backend().await?;
-        let pg = backend
-            .as_postgres()
-            .expect("PostgresBackend arm — migration RPC is PG-only in P0");
+        let pg = backend.as_postgres().ok_or_else(unsupported_backend_op_error)?;
         crate::migrations::exec_reset(pg, &owner.app_id, &owner.name, &owner.collection)
             .await
             .map(|_| ())
@@ -293,6 +287,26 @@ async fn ensure_backend() -> Result<crate::backend::BackendHandle, OpError> {
         crate::error::DbError::config("backend_not_initialized", "db: backend not initialized")
             .to_op_error()
     })
+}
+
+/// Build the typed `OpError` returned when [`crate::backend::BackendHandle::as_postgres`]
+/// produces `None` — i.e. the active backend is not the Postgres arm.
+///
+/// **Post-P0 mop-up (MAJOR-R14-1)**: the previous `.expect("PostgresBackend
+/// arm — … is PG-only in P0")` call sites converted the `None` arm
+/// into a runtime panic in async-spawned compio tasks. The SDK saw an
+/// unstructured promise rejection with no `.code` / `.hint` attached.
+/// `as_postgres` was specifically shaped as `Option<&_>` so async sites
+/// could `?`-propagate a typed error; this helper closes that loop.
+fn unsupported_backend_op_error() -> OpError {
+    crate::error::DbError::Configuration {
+        code: "backend_unsupported",
+        message: "db: migration RPC requires the Postgres backend".to_string(),
+        hint: Some(
+            "SQLite backend support is not yet implemented for migrations".to_string(),
+        ),
+    }
+    .to_op_error()
 }
 
 /// Coerce a JS number to a finite, integer-valued `i64`. Used by
@@ -426,9 +440,16 @@ fn commit_batch_with_spec<'s>(
                 };
             }
         };
-        let pg = backend
-            .as_postgres()
-            .expect("PostgresBackend arm — commitBatch is PG-only in P0");
+        let pg = match backend.as_postgres() {
+            Some(pg) => pg,
+            None => {
+                return OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::RejectError(unsupported_backend_op_error()),
+                    request_id,
+                };
+            }
+        };
         let terminal_status_opt = spec.terminal_status.as_deref();
         let error_message_opt = spec.error_message.as_deref();
         let result = crate::migrations::exec_commit_batch(
@@ -698,9 +719,17 @@ pub(crate) fn migration_start_with_spec<'s>(
                 };
             }
         };
-        let pg = backend
-            .as_postgres()
-            .expect("PostgresBackend arm — migration.start is PG-only in P0");
+        let pg = match backend.as_postgres() {
+            Some(pg) => pg,
+            None => {
+                drop(migration_global);
+                return OpResult::JsValue {
+                    resolver: resolver_global,
+                    value: ResolveValue::RejectError(unsupported_backend_op_error()),
+                    request_id,
+                };
+            }
+        };
         match crate::migrations::exec_begin(
             pg, &app_id, &name, &collection, dry_run, reset,
         )

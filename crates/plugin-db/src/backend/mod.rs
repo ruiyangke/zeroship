@@ -261,8 +261,14 @@ pub trait LockManager: SqlExecutor {
     /// [`Self::acquire_advisory_lock`] primitive — the default impl
     /// derives the `(key1, key2)` pair per §7.2 / §10.5
     /// ([`LockScope::to_keys`]) and dispatches.
+    ///
+    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so call
+    /// sites can construct a single binding and pass it to both
+    /// `try_acquire` / `acquire` and the matching `release` without
+    /// either cloning or rebuilding the struct literal. The default
+    /// impl only needs `&self` on the scope (it calls `to_keys`).
     #[allow(async_fn_in_trait)]
-    async fn acquire(&self, client: &Self::Client, scope: LockScope) -> Result<(), DbError> {
+    async fn acquire(&self, client: &Self::Client, scope: &LockScope) -> Result<(), DbError> {
         let (k1, k2) = scope.to_keys();
         self.acquire_advisory_lock(client, &k1, &k2).await
     }
@@ -270,8 +276,15 @@ pub trait LockManager: SqlExecutor {
     /// Try to acquire a session-scoped advisory lock for the given
     /// [`LockScope`]; `Ok(false)` if another holder already owns it.
     /// Typed wrapper over [`Self::try_acquire_advisory_lock`].
+    ///
+    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` — see
+    /// [`Self::acquire`].
     #[allow(async_fn_in_trait)]
-    async fn try_acquire(&self, client: &Self::Client, scope: LockScope) -> Result<bool, DbError> {
+    async fn try_acquire(
+        &self,
+        client: &Self::Client,
+        scope: &LockScope,
+    ) -> Result<bool, DbError> {
         let (k1, k2) = scope.to_keys();
         self.try_acquire_advisory_lock(client, &k1, &k2).await
     }
@@ -279,8 +292,14 @@ pub trait LockManager: SqlExecutor {
     /// Release a session-scoped advisory lock previously acquired via
     /// [`Self::acquire`] / [`Self::try_acquire`]. Typed wrapper over
     /// [`Self::release_advisory_lock`].
+    ///
+    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so the
+    /// release site can reuse the same binding the acquisition used
+    /// — the §10.5 key-derivation invariant lives in the single
+    /// `LockScope` value, not in textual identity across two struct
+    /// literals.
     #[allow(async_fn_in_trait)]
-    async fn release(&self, client: &Self::Client, scope: LockScope) -> Result<(), DbError> {
+    async fn release(&self, client: &Self::Client, scope: &LockScope) -> Result<(), DbError> {
         let (k1, k2) = scope.to_keys();
         self.release_advisory_lock(client, &k1, &k2).await
     }
@@ -599,16 +618,18 @@ pub trait Backend:
 ///   `dyn` without losing the concrete client type that
 ///   [`LockManager::acquire_advisory_lock`] and the audit-row helpers
 ///   take by `&Self::Client` reference.
-/// - The set of backends is closed (PG today; SQLite under
-///   `#[cfg(feature = "sqlite")]` for P1). An enum is the canonical
-///   shape for a closed sum.
+/// - The set of backends is closed (PG today; SQLite reserved for P1).
+///   An enum is the canonical shape for a closed sum.
 ///
-/// **Feature gating** (Open Q6 resolution): the `pg` arm is always
-/// compiled in default builds; the `sqlite` arm is gated behind the
-/// `sqlite` Cargo feature and will not be wired up until P1 lands
-/// `crate::backend::sqlite`. A build with `--no-default-features` is
-/// expected to fail at compile time (no backend arm) — the failure
-/// mode is meaningful, not a silent miscompile.
+/// **Single-arm enum in P0**: the SQLite arm and its `sqlite` Cargo
+/// feature were declared in r14 but the underlying
+/// `crate::backend::sqlite` module never landed, so `--features sqlite`
+/// failed to compile (E0433). The arm and the feature were removed in
+/// the P0 mop-up cycle (post-r14) — both will be re-introduced
+/// atomically with the `crate::backend::sqlite::SqliteBackend` impl in
+/// P1. A build with `--no-default-features` is expected to fail at
+/// compile time (no backend arm) — the failure mode is meaningful,
+/// not a silent miscompile.
 #[derive(Clone)]
 pub enum BackendHandle {
     /// Postgres backend handle. Wraps an [`Rc<PostgresBackend>`] so
@@ -617,13 +638,6 @@ pub enum BackendHandle {
     /// migrates to this arm one-to-one.
     #[cfg(feature = "pg")]
     Postgres(Rc<PostgresBackend>),
-    /// SQLite backend handle — reserved for P1. The variant is
-    /// declared (with the cfg gate) so the enum stays exhaustive
-    /// under `--features sqlite` and consumer-side `match` arms
-    /// document the future shape; the inner `SqliteBackend` type
-    /// won't exist until P1 creates `crate::backend::sqlite`.
-    #[cfg(feature = "sqlite")]
-    Sqlite(Rc<crate::backend::sqlite::SqliteBackend>),
 }
 
 impl BackendHandle {
@@ -636,18 +650,14 @@ impl BackendHandle {
     /// did when the field was `Option<Rc<PostgresBackend>>`. No
     /// allocation, no vtable, no per-call overhead.
     ///
-    /// Panics under `--features sqlite` if the handle is the SQLite
-    /// arm — the per-isolate context's discriminator selects the arm
-    /// at [`crate::context::IsolateDbContext::set_pool`] time, and the
-    /// PG-only consumer paths (every site in P0) only ever observe
-    /// the `Postgres` variant. Consumers that need a different arm
-    /// should `match` on the enum directly.
+    /// P0 has only the [`Self::Postgres`] arm so the match is
+    /// trivially exhaustive; when the SQLite arm returns in P1 a
+    /// second match arm will be added explicitly so consumers stop
+    /// on a typed error rather than panicking.
     #[cfg(feature = "pg")]
     pub fn with_postgres<R>(&self, f: impl FnOnce(&PostgresBackend) -> R) -> R {
         match self {
             Self::Postgres(b) => f(b),
-            #[cfg(feature = "sqlite")]
-            _ => panic!("with_postgres called on non-Postgres BackendHandle arm"),
         }
     }
 
@@ -664,22 +674,24 @@ impl BackendHandle {
     /// the returned `&PostgresBackend` directly:
     ///
     /// ```ignore
-    /// let backend = context::with(|c| c.backend());
-    /// let pg = backend.as_ref().and_then(BackendHandle::as_postgres)
-    ///     .expect("PostgresBackend arm");
+    /// let backend = ensure_backend().await?;
+    /// let pg = backend
+    ///     .as_postgres()
+    ///     .ok_or_else(unsupported_backend_op_error)?;
     /// crate::migrations::exec_status(pg, …).await
     /// ```
     ///
-    /// Returns `None` under `--features sqlite` if the handle is the
-    /// SQLite arm — analogous to [`Self::with_postgres`]'s panic, but
-    /// shaped as `Option<&_>` so async sites can map / `?`-propagate
-    /// without a panicking unwrap.
+    /// Returns `Some(&PostgresBackend)` unconditionally in P0 (the
+    /// enum has a single arm). The `Option`-shaped signature is the
+    /// stable consumer contract — when the SQLite arm returns in P1
+    /// this accessor will continue to return `None` on the SQLite arm
+    /// so the existing `ok_or_else(...)?` consumer sites map the
+    /// non-PG case to a typed `backend_unsupported` error rather than
+    /// a panic. See the P0 mop-up commit and MAJOR-R14-1.
     #[cfg(feature = "pg")]
     pub fn as_postgres(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
-            #[cfg(feature = "sqlite")]
-            _ => None,
         }
     }
 }
@@ -948,9 +960,9 @@ mod tests {
             app_id: "app_t".into(),
             name: "register_model".into(),
         };
-        let _ = backend.try_acquire(client, global.clone()).await?;
-        let _ = backend.acquire(client, global.clone()).await?;
-        backend.release(client, global).await?;
+        let _ = backend.try_acquire(client, &global).await?;
+        let _ = backend.acquire(client, &global).await?;
+        backend.release(client, &global).await?;
 
         // LocalApp arm — same dispatch surface (variant classifies
         // visibility, not key layout).
@@ -958,7 +970,7 @@ mod tests {
             app_id: "app_t".into(),
             name: "mig:add_archived_flag".into(),
         };
-        backend.try_acquire(client, local).await
+        backend.try_acquire(client, &local).await
     }
 
     #[test]

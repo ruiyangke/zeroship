@@ -136,10 +136,15 @@ impl<'p> LockGuard<'p> {
     /// §10.5); we cache the derived pair locally so `release()`'s
     /// `pg_advisory_unlock` matches the acquisition exactly even if
     /// `LockScope::to_keys` ever changed shape.
+    ///
+    /// **Post-P0 mop-up (MAJOR-R14-2)**: takes `&LockScope` so the
+    /// caller can keep a single binding (and reuse it if it ever
+    /// needs to release outside the guard). The local `(key, tag)`
+    /// cache below is still derived via [`LockScope::to_keys`].
     pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::Client>>(
         backend: &B,
         client: PooledClient<'p>,
-        scope: LockScope,
+        scope: &LockScope,
     ) -> Result<Self, DbError> {
         let (key, tag) = scope.to_keys();
         backend.acquire_advisory_lock(&client, &key, &tag).await?;

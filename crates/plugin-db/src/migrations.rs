@@ -302,12 +302,19 @@ where
     // `LockScope::to_keys` derives the underlying `(key1, key2)`
     // pair from those fields; the PG impl hashes through
     // `hashtext()` as before.
+    //
+    // Post-P0 mop-up (MAJOR-R14-2): `LockManager::{try_acquire,
+    // release}` take `&LockScope`, so the binding survives the
+    // try-acquire await and is reused by the cancelled-refusal
+    // release below. The §10.5 invariant ("release uses the same
+    // keys as the acquire") lives in a single `LockScope` value
+    // instead of two textually-identical struct literals.
     let scope = LockScope::GlobalApp {
         app_id: app_id.to_string(),
         name: format!("mig:{name}"),
     };
     let got = backend
-        .try_acquire(&client, scope)
+        .try_acquire(&client, &scope)
         .await
         .map_err(|e| coded_db("advisory_lock query", e))?;
     if !got {
@@ -330,14 +337,11 @@ where
     let (audit_id, cursor, processed, dead_letter_pks, start_generation) = if let Some(row) = existing {
         if row.status == "cancelled" {
             // Refuse — operator must reset to clear state.
-            // P0 PR 6: re-construct the typed `LockScope` (the prior
-            // `try_acquire` moved the original by value); the derived
-            // `(key1, key2)` pair is identical.
-            let release_scope = LockScope::GlobalApp {
-                app_id: app_id.to_string(),
-                name: format!("mig:{name}"),
-            };
-            if let Err(e) = backend.release(&client, release_scope).await {
+            // Post-P0 mop-up (MAJOR-R14-2): the typed `LockScope` we
+            // built above for `try_acquire` is reused here by reference
+            // — no re-construction, no clone, single source of truth
+            // for the §10.5 key-derivation invariant.
+            if let Err(e) = backend.release(&client, &scope).await {
                 tracing::warn!(
                     app_id,
                     name,
@@ -720,11 +724,18 @@ where
         // P0 PR 6: classified via `LockScope::GlobalApp` mirroring the
         // `exec_begin`-side acquisition; `LockScope::to_keys` produces
         // the matching `(key1, key2)` pair.
+        //
+        // Post-P0 mop-up (MAJOR-R14-2): `release` takes `&LockScope`,
+        // so the binding lives one statement. The `exec_begin` peer
+        // (the original acquisition) lives in a separate function and
+        // cannot share this binding directly — the §10.5 key-derivation
+        // convention (`name = "mig:{name}"`) is the cross-function
+        // contract here.
         let release_scope = LockScope::GlobalApp {
             app_id: app_id.to_string(),
             name: format!("mig:{name}"),
         };
-        if let Err(e) = backend.release(&client, release_scope).await {
+        if let Err(e) = backend.release(&client, &release_scope).await {
             tracing::warn!(
                 app_id,
                 name,

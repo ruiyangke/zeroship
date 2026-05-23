@@ -67,16 +67,17 @@ name = "bench_first_row_or_null"
 harness = false
 
 [features]
-# Default backends — `pg` is the only backend implemented in P0. The
-# `sqlite` feature is reserved for P1 (see
-# `docs/proposals/p0-implementation-plan.md` §"PR 5", Open Q6
-# resolution). Adding the cfg gates now lets the SQLite arm of
-# `BackendHandle` (`backend/mod.rs`) compile-time-detect a stray
-# `--features sqlite` build before the `crate::backend::sqlite`
-# module exists, instead of silently miscompiling later.
+# Default backends — `pg` is the only backend implemented in P0.
+#
+# A `sqlite = []` feature was declared in r14 alongside a
+# `BackendHandle::Sqlite(Rc<crate::backend::sqlite::SqliteBackend>)`
+# enum arm, but the underlying `crate::backend::sqlite` module does
+# not exist, so `--features sqlite` failed to compile (E0433). The
+# P0-mop-up cycle (post-r14) removed both the feature declaration and
+# the enum arm — they will be re-introduced atomically with the
+# `crate::backend::sqlite::SqliteBackend` impl in P1.
 default = ["pg"]
 pg = []
-sqlite = []
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via

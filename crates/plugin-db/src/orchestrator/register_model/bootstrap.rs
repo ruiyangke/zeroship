@@ -129,7 +129,7 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend>(
         app_id: app_id.to_string(),
         name: LOCK_TAG.to_string(),
     };
-    let guard = LockGuard::acquire(backend, lock_client, scope)
+    let guard = LockGuard::acquire(backend, lock_client, &scope)
         .await
         .map_err(|e| match e {
             // Preserve the operator-facing prefix when the lock attempt
