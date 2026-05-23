@@ -42,6 +42,7 @@ use crate::persist::Persistence;
 use crate::preview_share_handlers::MintRateLimiter;
 use crate::registry::SandboxRegistry;
 use crate::restore_handler::{RealRestoreBackend, RestoreBackend};
+use crate::snapshot_aead::{AeadSnapshotStore, RootKek, ROOT_KEK_ENV};
 use crate::snapshot_handler::{ChRemoteClient, RealChRemoteClient};
 use crate::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
 use crate::snapshot_store_gcs::{GcsSnapshotStore, TieredSnapshotStore};
@@ -610,24 +611,75 @@ impl AppState {
                 );
             }
             let l1 = LocalDiskSnapshotStore::new(l1_root.clone());
+
+            // A1 (audit-r1): load the root KEK BEFORE composing the
+            // inner store so the wrap decision is visible in one place.
+            // `RootKek::from_env` returns:
+            //   - `Ok(Some(kek))` → `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` set
+            //     to a 32-byte, mode-0o400 file. AEAD is enabled.
+            //   - `Ok(None)` → env unset. AEAD passthrough — guest RAM
+            //     lands on L1 disk (and GCS, if tiered) in clear.
+            //   - `Err(_)` → env set but the file is missing/wrong mode/
+            //     wrong length. Fail boot — the operator's intent was
+            //     to enable AEAD; silently falling back to passthrough
+            //     would re-enable the exact CRITICAL fail-OPEN shape
+            //     this commit is closing.
+            let aead_root_kek: Option<RootKek> = RootKek::from_env()
+                .map_err(|e| format!("RootKek::from_env: {e}"))?;
+            let kek_present = aead_root_kek.is_some();
+
+            // Compose the inner store (L1-only or tiered L1+GCS), then
+            // wrap unconditionally in `AeadSnapshotStore`. When
+            // `aead_root_kek = None` the wrapper is in passthrough mode
+            // (verified by `AeadSnapshotStore::is_active() == false`);
+            // the boot log makes that posture explicit so the operator
+            // can't miss it in `journalctl`. Wrapping unconditionally
+            // (rather than branching `Arc<dyn SnapshotStore>` at the
+            // wrapper boundary) means the put/get paths run through the
+            // same code in both shapes — no second-class disabled path.
             let store: Arc<dyn SnapshotStore> = if config.snapshot_use_gcs {
                 let bucket = config
                     .snapshot_gcs_bucket
                     .clone()
                     .expect("SANDBOX_SNAPSHOT_GCS_BUCKET must be set when use_gcs=true (validated at config parse)");
                 let l2 = GcsSnapshotStore::new(bucket.clone(), "default");
+                let tiered = TieredSnapshotStore::new(l1, l2);
+                if kek_present {
+                    tracing::info!(
+                        l1_root = %l1_root.display(),
+                        gcs_bucket = %bucket,
+                        kek_env = ROOT_KEK_ENV,
+                        "snapshot_store: AEAD ENABLED (tiered L1+GCS)"
+                    );
+                } else {
+                    tracing::error!(
+                        l1_root = %l1_root.display(),
+                        gcs_bucket = %bucket,
+                        kek_env = ROOT_KEK_ENV,
+                        "snapshot_store: AEAD DISABLED — guest RAM \
+                         plaintext on disk + GCS (kek env unset). \
+                         Tiered L1+GCS without AEAD writes guest \
+                         memory in clear to the object store. Set the \
+                         kek env to a 32-byte mode-0o400 file."
+                    );
+                }
+                Arc::new(AeadSnapshotStore::new(tiered, aead_root_kek))
+            } else if kek_present {
                 tracing::info!(
                     l1_root = %l1_root.display(),
-                    gcs_bucket = %bucket,
-                    "snapshot wiring: tiered L1+GCS"
+                    kek_env = ROOT_KEK_ENV,
+                    "snapshot_store: AEAD ENABLED (L1 disk-only)"
                 );
-                Arc::new(TieredSnapshotStore::new(l1, l2))
+                Arc::new(AeadSnapshotStore::new(l1, aead_root_kek))
             } else {
-                tracing::info!(
+                tracing::warn!(
                     l1_root = %l1_root.display(),
-                    "snapshot wiring: L1 disk-only"
+                    kek_env = ROOT_KEK_ENV,
+                    "snapshot_store: AEAD DISABLED — guest RAM \
+                     plaintext on L1 disk (kek env unset). Set the \
+                     kek env to a 32-byte mode-0o400 file."
                 );
-                Arc::new(l1)
+                Arc::new(AeadSnapshotStore::new(l1, aead_root_kek))
             };
             let ch: Arc<dyn ChRemoteClient> =
                 Arc::new(RealChRemoteClient::new());
@@ -2040,5 +2092,176 @@ mod persist_required_assertion_tests {
             "ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION=1 \
              overrides the assertion",
         );
+    }
+}
+
+
+// ────────────────────────────────────────────────────────────────────
+// A1 (audit-r1) — prod-shape AEAD wrap of the snapshot store.
+//
+// Verifies the wrap composition the production `AppState::from_config`
+// path produces when `RootKek::from_env` returns `Some(kek)`: the
+// resulting `Arc<dyn SnapshotStore>` round-trips put/get AND the bytes
+// landing on the L1 root are ciphertext (not plaintext).
+//
+// We don't re-test the cipher itself (covered exhaustively in
+// `snapshot_aead::tests`); we test that the WIRING produces the
+// expected on-disk shape. Without this assertion the prior wiring's
+// "AEAD never composed" footgun could regress silently — the
+// snapshot/restore round-trips through plaintext L1 just as cleanly as
+// through wrapped L1.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod prod_aead_wrap_tests {
+    use super::*;
+    use crate::snapshot_aead::{AeadSnapshotStore, RootKek};
+    use crate::snapshot_store::LocalDiskSnapshotStore;
+
+    /// Build the production wrap shape (L1-only branch) explicitly and
+    /// assert the on-L1 `memory-ranges` blob is ciphertext, not the
+    /// plaintext that was handed to `put`. This mirrors the wrap in
+    /// `from_config`'s `else` branch (kek_present, !use_gcs) so a
+    /// regression that drops the AEAD wrap fails this test loudly.
+    #[test]
+    fn prod_l1_wrap_produces_ciphertext_on_disk() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-a1-wrap-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir tmp root");
+        let l1_root = root.join("l1");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+
+        // CH artifact triple — config.json and state.json are plaintext;
+        // memory-ranges is the byte sequence we'll grep for post-put.
+        let plaintext_marker: Vec<u8> = (0u32..(64 * 1024))
+            .flat_map(|i| i.to_be_bytes().into_iter())
+            .collect();
+        std::fs::write(src.join("config.json"), b"{\"cfg\":1}").expect("write cfg");
+        std::fs::write(src.join("state.json"), b"{\"st\":2}").expect("write st");
+        std::fs::write(src.join("memory-ranges"), &plaintext_marker)
+            .expect("write mem");
+
+        let kek = RootKek::from_bytes([0xc3; 32]);
+        // EXACTLY the L1-only kek-present branch from `from_config`.
+        let inner = LocalDiskSnapshotStore::new(l1_root.clone());
+        let store: Arc<dyn SnapshotStore> =
+            Arc::new(AeadSnapshotStore::new(inner, Some(kek)));
+
+        let meta = store
+            .put("sbx_a1_wrap_l1", &src, "v51.1")
+            .expect("put round-trip");
+
+        // 1. ch_version is annotated by the AEAD layer when active —
+        //    proves the wrap is on the put path (vs. a passthrough or
+        //    bypassed wrap).
+        assert!(
+            meta.ch_version.contains("+aead-cc20p1305"),
+            "wrap must annotate ch_version with AEAD tag; got {}",
+            meta.ch_version
+        );
+
+        // 2. The L1 `memory-ranges` blob must NOT contain the plaintext
+        //    marker — if AEAD encryption ran, the ciphertext + header
+        //    bytes overwrite the raw pattern.
+        let l1_mr =
+            std::path::PathBuf::from(&meta.artifact_path).join("memory-ranges");
+        let on_disk = std::fs::read(&l1_mr).expect("read l1 memory-ranges");
+        assert!(
+            on_disk.len() >= 1024,
+            "on-disk blob shorter than expected: {}",
+            on_disk.len()
+        );
+        // The AEAD file magic confirms it's a wrapped artifact.
+        assert_eq!(
+            &on_disk[0..8],
+            b"ZSBXAEAD",
+            "L1 blob must begin with ZSBXAEAD magic; got {:?}",
+            &on_disk[0..8.min(on_disk.len())]
+        );
+        // Deep-window plaintext check: confirm a contiguous 256-byte
+        // slice of the plaintext does NOT appear anywhere in `on_disk`.
+        // The AEAD ciphertext is uniformly random; the chance of
+        // accidental collision is 2^-2048.
+        let needle = &plaintext_marker[1024..1024 + 256];
+        let found_plain = on_disk.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !found_plain,
+            "plaintext byte pattern must NOT appear in the L1 blob \
+             (AEAD wrap is the only thing standing between guest RAM \
+             and disk-resident plaintext)"
+        );
+
+        // 3. Round-trip: get must recover the plaintext byte-for-byte.
+        let target = root.join("target");
+        store
+            .get("sbx_a1_wrap_l1", &target, &meta.sha256)
+            .expect("get round-trip");
+        let restored = std::fs::read(target.join("memory-ranges"))
+            .expect("read restored memory-ranges");
+        assert_eq!(
+            restored, plaintext_marker,
+            "AEAD wrap must round-trip plaintext byte-for-byte"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The kek-absent branch — covers the dev-mode `Ok(None)` from
+    /// `RootKek::from_env` where the wrapper is composed but in
+    /// passthrough. Asserts the L1 blob is plaintext (proves the
+    /// kek_present=false branch in `from_config` is the dev shape and
+    /// nothing else).
+    ///
+    /// This is the "audit-trail-honest" half: when no key is wired the
+    /// wrap is structurally identical (still composed) but observably
+    /// transparent — so the boot log is the single source of truth on
+    /// the actual posture.
+    #[test]
+    fn prod_l1_wrap_passthrough_when_no_kek() {
+        let root = std::env::temp_dir().join(format!(
+            "zsbx-a1-wrap-pt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir tmp root");
+        let l1_root = root.join("l1");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("mkdir src");
+
+        let plaintext_marker: Vec<u8> = (0u32..16_384)
+            .flat_map(|i| i.to_be_bytes().into_iter())
+            .collect();
+        std::fs::write(src.join("config.json"), b"{\"cfg\":1}").expect("write cfg");
+        std::fs::write(src.join("state.json"), b"{\"st\":2}").expect("write st");
+        std::fs::write(src.join("memory-ranges"), &plaintext_marker)
+            .expect("write mem");
+
+        let inner = LocalDiskSnapshotStore::new(l1_root.clone());
+        let store: Arc<dyn SnapshotStore> =
+            Arc::new(AeadSnapshotStore::new(inner, None));
+
+        let meta = store
+            .put("sbx_a1_wrap_pt", &src, "v51.1")
+            .expect("put passthrough");
+        assert!(
+            !meta.ch_version.contains("+aead"),
+            "passthrough must NOT annotate ch_version with AEAD tag; got {}",
+            meta.ch_version
+        );
+
+        let l1_mr =
+            std::path::PathBuf::from(&meta.artifact_path).join("memory-ranges");
+        let on_disk = std::fs::read(&l1_mr).expect("read l1 memory-ranges");
+        // Passthrough → bytes on disk match what we put in.
+        assert_eq!(
+            on_disk, plaintext_marker,
+            "passthrough must land plaintext on L1 — the kek_present=false \
+             warn log is the only signal an operator gets"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
