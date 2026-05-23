@@ -550,6 +550,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: a non-root attacker who can pre-create a chmod-400 file at the KEK path before systemd starts can supply a known-key to the controller, breaking confidentiality of all future snapshots.
 - **Action**: add `metadata().uid() == 0` check; refuse to load otherwise. Cheap insurance.
 
+### [R9-S4b] Sibling: `persist.rs::AeadKey::from_path` has identical mode-only-no-uid bug (IMPORTANT, security-r9)
+- **Source**: 2026-05-25 r2 sweep — found by R9-S4 fixer as a sibling instance that was OUT-OF-SCOPE for the R9-S4 commit (`cca1e74d`).
+- **File**: `crates/sandbox/src/persist.rs::AeadKey::from_path` (~line 326-354)
+- **Symptom**: same vulnerability shape as R9-S4 but on `SANDBOX_AEAD_KEY_PATH` (the sealed-records persistence AEAD key, distinct from the snapshot-store root KEK). Mode 0o400 checked but uid not — non-root attacker who pre-creates the file at the path before systemd starts can supply a known key for sealed-record encryption.
+- **Action**: same one-line `metadata().uid() == 0` fix as R9-S4. Mirror the test pattern from `snapshot_aead.rs` (`from_path_rejects_non_root_owned_file`).
+
 ### [R9-S5] Restore-branch wrapper handles ZSBX_SANDBOX_ID asymmetrically vs cold-boot (informational, hides pre-R7-S1-snapshot wedge mode) (IMPORTANT, security-r9)
 - **Source**: 2026-05-25 security-r9
 - **Files**: `crates/sandbox/scripts/nomad-vm-wrapper.sh` (restore branch ~366-419 vs cold-boot branch ~140-170) + `crates/sandbox/src/backend/nomad_ch.rs::build_restore_nomad_job_json`
@@ -633,10 +639,17 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/restore_handler.rs::RealRestoreBackend::derive_agent_url` + `crates/sandbox/src/backend/nomad_ch.rs::NomadCHBackend::derive_agent_url`
 - **Action**: add a test that constructs both backends with same inputs + asserts the URLs are byte-equal. Closes the silent-drift risk.
 
-### [R9-T7] `init_sandbox_id_from_env` has zero direct tests (IMPORTANT, test-coverage-r9)
+### [R9-T7] (CLOSED at `<R9-T7-COMMIT>`) `init_sandbox_id_from_env` has zero direct tests
 - **Source**: 2026-05-25 test-coverage-r9
-- **File**: `crates/sandbox-agent/src/handlers.rs` (now pub(crate) after R8-API1 full close at `10bddc20`)
-- **Action**: add direct tests for env-var path / file fallback / empty-id guard / typed_id-shape guard. Existing tests use `test_set_sandbox_id` which bypasses these arms.
+- **File**: `crates/sandbox-agent/src/handlers.rs`
+- **Resolution**: extracted the parsing slice into `read_sandbox_id_from_sources(fallback_path)` — pure helper, no OnceLock touch, behaviour-identical when called with the production fallback constant. 8 new lib tests pin: env-var happy-path (32-hex), empty-env rejected, arbitrary-string accepted (no shape guard — see R9-T7-FOLLOWUP below), hyphenated UUID accepted (no .simple() normalisation), file-fallback used when env absent (trailing newline trimmed), no-env + missing-file returns Err naming both sources, file-fallback empty-after-trim rejected, and an e2e `init_sandbox_id_from_env` call that asserts OnceLock wiring. Tests serialised via a module-local `Mutex` (`SANDBOX_ID_ENV_LOCK`) with an `EnvGuard` RAII so a panicking test restores the prior env. `cargo test -p zeroship-sandbox-agent --lib`: 231 → 239 (no regression, no flake across two runs).
+
+### [R9-T7-FOLLOWUP] (NEW, IMPORTANT) `init_sandbox_id_from_env` accepts any non-empty string — no typed_id / UUID shape guard
+- **Source**: R9-T7 fixer investigation 2026-05-25
+- **File**: `crates/sandbox-agent/src/handlers.rs::read_sandbox_id_from_sources`
+- **Surprise**: the R9-T7 brief assumed B24 had landed a typed_id-shape guard (32-hex or hyphenated UUID). Reading the actual code shows there is NO such guard — only `id.is_empty()` after `.trim()`. A wrapper that misconfigures `SANDBOX_AGENT_SANDBOX_ID="not-a-uuid"` will boot the agent with that exact string and the `/_clock_resync` handler will compare it byte-equal against the controller-signed body's `sandbox_id` field. The hardening surface is: a typo-d wrapper deployment silently weakens the cluster-wake replay defence to "any agreed-upon string".
+- **Pinned by**: `r9t7_read_env_var_arbitrary_string_accepted_no_shape_guard` — the test name flags the gap so a future tightening PR breaks the pin and must update both the guard and the test.
+- **Action (deferred — out of scope for R9-T7 fixer)**: add UUID-shape validation via `uuid::Uuid::parse_str` at boot, return Err with a clear "not a UUID" message. Coordinate with the controller side, which already canonicalises hyphenated form for `TEST_SANDBOX_ID`. Update both the production code and the R9-T7 pin in the same PR.
 
 ### [R9-T8] (MINOR) Sweep recovery end-to-end pinned only for Snapshotting, not Restoring/RestoringCold
 

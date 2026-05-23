@@ -107,14 +107,43 @@ pub(crate) fn init_sandbox_id_from_env() -> Result<(), String> {
     if SANDBOX_ID.get().is_some() {
         return Ok(());
     }
+    let id = read_sandbox_id_from_sources(SANDBOX_ID_FALLBACK_PATH)?;
+    // OnceLock::set returns Err if already set — that's a no-op here
+    // (we checked above). Tolerate the race for symmetry.
+    let _ = SANDBOX_ID.set(id);
+    Ok(())
+}
+
+/// Production fallback path for the sandbox id when the env var is
+/// unset. Mounted by the wrapper at the same place as the controller
+/// pubkey. Lives in a constant so tests can address it (the test
+/// helper uses a temp path via [`read_sandbox_id_from_sources`]).
+const SANDBOX_ID_FALLBACK_PATH: &str = "/run/keys/sandbox-id";
+
+/// Read the sandbox id from the env var (preferred) or the supplied
+/// fallback file path. Returns the trimmed id string or an error
+/// describing which source failed. **Pure** — does not touch the
+/// [`SANDBOX_ID`] OnceLock. Factored out of [`init_sandbox_id_from_env`]
+/// so the parsing/fallback/empty-id branches can be exercised by direct
+/// tests without burning the global OnceLock on every test.
+///
+/// Behaviour parity with the previous inline body:
+///   - env var wins when present (even when empty — the empty-id guard
+///     then trips)
+///   - on env-var absent (`VarError::NotPresent`), read the file; map
+///     any IO error to a single descriptive string
+///   - file contents are trimmed (drops trailing newline from the
+///     wrapper's `echo "$id" >` pattern)
+///   - empty id (from either source) → error
+fn read_sandbox_id_from_sources(fallback_path: &str) -> Result<String, String> {
     let id = if let Ok(v) = std::env::var("SANDBOX_AGENT_SANDBOX_ID") {
         v
     } else {
         // Fallback: a small file mounted by the wrapper. Same path
         // convention as the pubkey mount.
-        std::fs::read_to_string("/run/keys/sandbox-id")
+        std::fs::read_to_string(fallback_path)
             .map_err(|e| format!(
-                "SANDBOX_AGENT_SANDBOX_ID env unset and /run/keys/sandbox-id read failed: {e}"
+                "SANDBOX_AGENT_SANDBOX_ID env unset and {fallback_path} read failed: {e}"
             ))?
             .trim()
             .to_string()
@@ -122,10 +151,7 @@ pub(crate) fn init_sandbox_id_from_env() -> Result<(), String> {
     if id.is_empty() {
         return Err("sandbox_id is empty".to_string());
     }
-    // OnceLock::set returns Err if already set — that's a no-op here
-    // (we checked above). Tolerate the race for symmetry.
-    let _ = SANDBOX_ID.set(id);
-    Ok(())
+    Ok(id)
 }
 
 /// Test-only setter for the boot-time sandbox_id. Idempotent across
@@ -2007,4 +2033,192 @@ mod tests {
         assert!(body["message"].as_str().unwrap().contains("invalid JSON"));
     }
 
+    // ─── R9-T7: direct tests for sandbox_id init ────────────────────
+    //
+    // Coverage gap: prior tests only set the boot-time sandbox_id via
+    // `test_set_sandbox_id` (which pokes the OnceLock directly), so
+    // the env-var / file-fallback / empty-id branches inside
+    // [`init_sandbox_id_from_env`] had zero exercise. We can't drive
+    // [`init_sandbox_id_from_env`] for every branch because the
+    // [`SANDBOX_ID`] OnceLock is write-once per process — once any
+    // earlier test sets it, init short-circuits at the get() check.
+    //
+    // The pure parsing/fallback/empty-id slice was therefore factored
+    // out of init into [`read_sandbox_id_from_sources`] (no behaviour
+    // change — init still calls it with the production
+    // `/run/keys/sandbox-id` fallback). These tests exercise that
+    // helper directly with a temp fallback path, plus one
+    // [`init_sandbox_id_from_env`] end-to-end test that verifies the
+    // OnceLock-set wiring on a known-good input.
+    //
+    // **Serialization**: env-var mutation (`std::env::set_var`) is
+    // process-global and not thread-safe. The crate doesn't carry
+    // `serial_test` and shouldn't grow a dev-dep just for this; we
+    // serialize via a module-local Mutex (same pattern as
+    // `REAPER_STATE_LOCK` re-exported earlier in this module).
+
+    use std::sync::Mutex as StdMutex;
+
+    /// Serializes every test that touches `SANDBOX_AGENT_SANDBOX_ID`.
+    /// Tests of [`read_sandbox_id_from_sources`] / [`init_sandbox_id_from_env`]
+    /// all take this lock first.
+    static SANDBOX_ID_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Save-and-restore RAII for the env var. Drop restores the prior
+    /// value so a panicking test doesn't poison the global env for
+    /// the rest of the suite.
+    struct EnvGuard {
+        prior: Option<String>,
+    }
+    impl EnvGuard {
+        fn new() -> Self {
+            let prior = std::env::var("SANDBOX_AGENT_SANDBOX_ID").ok();
+            std::env::remove_var("SANDBOX_AGENT_SANDBOX_ID");
+            Self { prior }
+        }
+        fn set(&self, v: &str) {
+            std::env::set_var("SANDBOX_AGENT_SANDBOX_ID", v);
+        }
+        fn unset(&self) {
+            std::env::remove_var("SANDBOX_AGENT_SANDBOX_ID");
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => std::env::set_var("SANDBOX_AGENT_SANDBOX_ID", v),
+                None => std::env::remove_var("SANDBOX_AGENT_SANDBOX_ID"),
+            }
+        }
+    }
+
+    /// Path to a fallback file that does NOT exist on disk. Used by
+    /// tests that want the file-read fork of
+    /// [`read_sandbox_id_from_sources`] to fail.
+    fn missing_fallback_path() -> std::path::PathBuf {
+        unique_dir("noexist").join("does-not-exist")
+    }
+
+    #[test]
+    fn r9t7_read_env_var_happy_path_32hex() {
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        // typed_id "simple" form — 32 lowercase hex chars, no hyphens.
+        let id = "01900000000070008000000000000001";
+        env.set(id);
+        let got = read_sandbox_id_from_sources(&missing_fallback_path().to_string_lossy())
+            .expect("32-hex id should be accepted");
+        assert_eq!(got, id, "id should round-trip from env var unchanged");
+    }
+
+    #[test]
+    fn r9t7_read_env_var_empty_string_rejected() {
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        // Setting to "" is observable as VarError::NotUnicode-free Ok("");
+        // the empty-id guard MUST trip before any caller stores "".
+        env.set("");
+        let r = read_sandbox_id_from_sources(&missing_fallback_path().to_string_lossy());
+        assert!(r.is_err(), "empty env var must be rejected");
+        assert_eq!(r.unwrap_err(), "sandbox_id is empty");
+    }
+
+    #[test]
+    fn r9t7_read_env_var_arbitrary_string_accepted_no_shape_guard() {
+        // SURPRISE PINNED HERE. The task brief assumed a typed_id /
+        // UUID shape guard inside the init path; reading the code
+        // shows there is none — only an empty-id check. Any non-empty
+        // string is accepted. We pin the actual behaviour so any
+        // future shape-tightening change shows up as a test break
+        // (forcing the author to update both the guard and this pin).
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        env.set("not-a-uuid");
+        let got = read_sandbox_id_from_sources(&missing_fallback_path().to_string_lossy())
+            .expect("any non-empty string is currently accepted — see R9-T7-FOLLOWUP");
+        assert_eq!(got, "not-a-uuid");
+    }
+
+    #[test]
+    fn r9t7_read_env_var_hyphenated_uuid_accepted() {
+        // The clock_resync test suite uses the hyphenated form
+        // "01900000-0000-7000-8000-000000000000" via TEST_SANDBOX_ID,
+        // so the controller-signed body's `sandbox_id` field is
+        // expected to be hyphenated. Pin that the env-var read does
+        // NOT normalise to .simple() — hyphens survive verbatim.
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        let id = "01900000-0000-7000-8000-000000000000";
+        env.set(id);
+        let got = read_sandbox_id_from_sources(&missing_fallback_path().to_string_lossy())
+            .expect("hyphenated UUID accepted");
+        assert_eq!(got, id, "hyphens preserved — no .simple()/.hyphenated() normalisation");
+    }
+
+    #[test]
+    fn r9t7_read_file_fallback_used_when_env_absent() {
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        env.unset();
+        // Write a valid id (with a trailing newline — wrappers
+        // commonly use `echo "$id" > …`; the helper must trim it).
+        let dir = unique_dir("r9t7_fb");
+        let file = dir.join("sandbox-id");
+        std::fs::write(&file, "01900000000070008000000000000002\n").unwrap();
+        let got = read_sandbox_id_from_sources(&file.to_string_lossy())
+            .expect("file-fallback read should succeed");
+        assert_eq!(got, "01900000000070008000000000000002",
+            "trailing newline must be trimmed");
+    }
+
+    #[test]
+    fn r9t7_read_no_env_no_file_returns_err() {
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        env.unset();
+        let nowhere = missing_fallback_path();
+        let r = read_sandbox_id_from_sources(&nowhere.to_string_lossy());
+        let err = r.expect_err("no env + missing file must error");
+        // Error message names BOTH sources so the operator can see
+        // why init failed without grepping the binary for context.
+        assert!(err.contains("SANDBOX_AGENT_SANDBOX_ID env unset"),
+            "err names the env var: {err}");
+        assert!(err.contains(nowhere.to_str().unwrap()),
+            "err names the file path: {err}");
+    }
+
+    #[test]
+    fn r9t7_read_file_fallback_empty_after_trim_rejected() {
+        // Wrapper writes an empty file (or just a newline) → trimmed
+        // to "" → empty-id guard trips. Distinct from the no-env
+        // case because here the file EXISTS but yields nothing
+        // usable; the helper must not silently accept "".
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        env.unset();
+        let dir = unique_dir("r9t7_emptyfile");
+        let file = dir.join("sandbox-id");
+        std::fs::write(&file, "\n").unwrap();
+        let r = read_sandbox_id_from_sources(&file.to_string_lossy());
+        assert_eq!(r.unwrap_err(), "sandbox_id is empty");
+    }
+
+    #[test]
+    fn r9t7_init_sandbox_id_from_env_e2e_wires_to_oncelock() {
+        // End-to-end: drives [`init_sandbox_id_from_env`] itself
+        // (not the extracted helper) to confirm the OnceLock wiring
+        // is intact. The OnceLock is process-global and likely
+        // already set by an earlier clock_resync test that called
+        // `ensure_test_sandbox_id`; in that case init short-circuits
+        // and returns Ok without re-reading env. Either way the
+        // post-condition is the same: SANDBOX_ID.get() is Some and
+        // boot_sandbox_id() yields a non-empty string.
+        let _lock = SANDBOX_ID_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let env = EnvGuard::new();
+        env.set("01900000000070008000000000000003");
+        let r = init_sandbox_id_from_env();
+        assert!(r.is_ok(), "init should succeed (env-var or already-set fast path)");
+        let id = boot_sandbox_id().expect("OnceLock must be populated post-init");
+        assert!(!id.is_empty(), "boot_sandbox_id never returns an empty string");
+    }
 }
