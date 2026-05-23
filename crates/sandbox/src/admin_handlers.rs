@@ -1431,5 +1431,112 @@ mod tests {
         let expected = b"y";
         assert!(!constant_time_bearer_eq(&presented, expected));
     }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ─────────────────
+    //
+    // Coverage for admin_handlers.rs error sites. ~50 call sites
+    // funnel through `err()`, `feature_disabled`, or
+    // `map_{snapshot,restore}_error`; testing each helper once is
+    // sufficient to prevent a regression that drops the `message`
+    // field at every call site that flows through it.
+
+    use crate::error_envelope::test_helpers::body_json;
+    use crate::restore_handler::RestoreHandlerError;
+    use crate::snapshot_handler::SnapshotHandlerError;
+
+    #[compio::test]
+    async fn a4_admin_unauthorized_envelope() {
+        let resp = unauthorized();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+    }
+
+    #[compio::test]
+    async fn a4_admin_err_helper_envelope_all_statuses() {
+        let resp = err(400, "invalid_user_id", "invalid user_id filter");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_user_id");
+        assert_eq!(body["message"], "invalid user_id filter");
+
+        let resp = err(404, "sandbox_not_found", "sandbox not found");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "sandbox_not_found");
+        assert_eq!(body["message"], "sandbox not found");
+
+        let resp = err(500, "pg_query_failed", "query: connection refused");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "pg_query_failed");
+        assert_eq!(body["message"], "query: connection refused");
+
+        let resp = err(503, "pg_disabled", "pg integration disabled");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "pg_disabled");
+        assert_eq!(body["message"], "pg integration disabled");
+    }
+
+    #[compio::test]
+    async fn a4_feature_disabled_envelope() {
+        let resp = feature_disabled();
+        assert_eq!(resp.status().as_u16(), 501);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "feature_disabled");
+        assert!(body["message"]
+            .as_str()
+            .unwrap()
+            .contains("SANDBOX_SNAPSHOT_ENABLED"));
+    }
+
+    #[compio::test]
+    async fn a4_map_snapshot_error_state_mismatch_envelope() {
+        let resp = map_snapshot_error(SnapshotHandlerError::StateMismatch {
+            current: "snapshotted",
+        });
+        assert_eq!(resp.status().as_u16(), 409);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "state_mismatch");
+        assert!(body["message"].is_string(), "missing `message` per §10.0");
+        // §10.0 table — kind-specific extras must round-trip.
+        assert_eq!(body["expected"], "running");
+        assert_eq!(body["current"], "snapshotted");
+    }
+
+    #[compio::test]
+    async fn a4_map_snapshot_error_not_found_envelope() {
+        let resp = map_snapshot_error(SnapshotHandlerError::NotFound(
+            "sbx_abc".to_string(),
+        ));
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert!(body["message"].is_string());
+        assert_eq!(body["sandbox_id"], "sbx_abc");
+    }
+
+    #[compio::test]
+    async fn a4_map_restore_error_vm_index_unavailable_envelope() {
+        let resp = map_restore_error(RestoreHandlerError::VmIndexUnavailable {
+            requested: 7,
+        });
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "vm_index_unavailable");
+        assert!(body["message"].is_string());
+        assert_eq!(body["requested"], 7);
+    }
+
+    #[compio::test]
+    async fn a4_map_restore_error_state_mismatch_envelope() {
+        let resp = map_restore_error(RestoreHandlerError::StateMismatch {
+            current: "running",
+        });
+        assert_eq!(resp.status().as_u16(), 409);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "state_mismatch");
+        assert!(body["message"].is_string());
+        assert_eq!(body["expected"], "snapshotted");
+        assert_eq!(body["current"], "running");
+    }
 }
 

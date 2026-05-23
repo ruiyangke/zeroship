@@ -1210,4 +1210,75 @@ mod tests {
             CreateOutcome::Ok { .. } => panic!("expected failure"),
         }
     }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ──────────────────
+    //
+    // One test per group of error sites in this file. Each test
+    // synthesises the helper and asserts the response carries BOTH
+    // `error` (machine-readable kind) AND `message` (human prose) —
+    // pre-A4 the response only had `error` (with human prose
+    // inside), violating proposal § 10.0.
+
+    use crate::error_envelope::test_helpers::body_json;
+
+    #[compio::test]
+    async fn a4_unauthorized_helper_has_error_and_message() {
+        let resp = unauthorized();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string(), "missing `message` field");
+    }
+
+    #[compio::test]
+    async fn a4_err_400_emits_code_and_message() {
+        let resp = err(400, "invalid_user_id", "invalid user_id");
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_user_id");
+        assert_eq!(body["message"], "invalid user_id");
+    }
+
+    #[compio::test]
+    async fn a4_err_404_emits_code_and_message() {
+        let resp = err(404, "sandbox_not_found", "sandbox not found");
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "sandbox_not_found");
+        assert_eq!(body["message"], "sandbox not found");
+    }
+
+    #[compio::test]
+    async fn a4_err_500_emits_code_and_message() {
+        let resp = err(500, "backend_exec_failed", "backend.exec: timed out");
+        assert_eq!(resp.status().as_u16(), 500);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "backend_exec_failed");
+        assert_eq!(body["message"], "backend.exec: timed out");
+    }
+
+    #[compio::test]
+    async fn a4_err_503_emits_code_and_message() {
+        let resp = err(
+            503,
+            "create_retry_budget_exhausted",
+            "backend.create: retry budget exhausted after 3 attempt(s)",
+        );
+        assert_eq!(resp.status().as_u16(), 503);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "create_retry_budget_exhausted");
+        assert!(
+            body["message"].as_str().unwrap().contains("budget exhausted"),
+            "human prose lives in `message`, not `error`",
+        );
+    }
+
+    #[compio::test]
+    async fn a4_parse_sandbox_id_failure_is_envelope_compliant() {
+        let result = parse_sandbox_id_to_uuid("not-a-uuid");
+        let resp = result.expect_err("malformed id must error");
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_sandbox_id");
+        assert!(body["message"].is_string());
+    }
 }

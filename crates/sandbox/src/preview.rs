@@ -913,4 +913,72 @@ mod tests {
         let b = mint_nonce();
         assert_ne!(a, b);
     }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ─────────────────
+    //
+    // Coverage for preview.rs error sites. Pre-A4 these emitted
+    // `{"error":<prose>,"code":<code>}` or `{"error":<code>,
+    // "code":<code>}` (duplicate, no message). Now they funnel
+    // through `error_response` / `ErrorEnvelope` and the envelope
+    // carries `error` (code) + `message` (human prose) per §10.0.
+
+    use crate::error_envelope::test_helpers::body_json;
+    use crate::preview_share::TokenError;
+
+    #[compio::test]
+    async fn a4_uniform_401_envelope() {
+        let resp = uniform_401();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+        // §10.0 has no `code` field — `error` IS the code.
+        assert!(body.get("code").is_none(), "duplicate `code` field removed");
+    }
+
+    #[compio::test]
+    async fn a4_uniform_404_envelope() {
+        let resp = uniform_404();
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert!(body["message"].is_string());
+        assert!(body.get("code").is_none());
+    }
+
+    #[compio::test]
+    async fn a4_uniform_413_envelope() {
+        let resp = uniform_413();
+        assert_eq!(resp.status().as_u16(), 413);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "payload_too_large");
+        assert!(body["message"].is_string());
+    }
+
+    #[compio::test]
+    async fn a4_err_with_code_envelope() {
+        let resp = err_with_code(StatusCode::BAD_GATEWAY, "agent_unreachable");
+        assert_eq!(resp.status().as_u16(), 502);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "agent_unreachable");
+        assert!(body["message"].is_string());
+        // Pre-A4 emitted {"error":<code>,"code":<code>} — duplicate
+        // `code` field MUST be gone.
+        assert!(body.get("code").is_none(), "duplicate `code` field removed");
+    }
+
+    #[compio::test]
+    async fn a4_token_error_response_envelope() {
+        let resp = token_error_response(TokenError::Expired);
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "expired");
+        assert!(body["message"].is_string());
+
+        let resp = token_error_response(TokenError::ScopeForbidden);
+        assert_eq!(resp.status().as_u16(), 403);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "scope_forbidden");
+        assert!(body["message"].is_string());
+    }
 }

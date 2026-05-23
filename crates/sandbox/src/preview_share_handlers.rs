@@ -538,4 +538,42 @@ mod tests {
         );
         assert_eq!(sandbox_slug("ABC-123"), "abc123");
     }
+
+    // ─── A4: §10.0 ErrorEnvelope wire-shape pins ─────────────────
+    //
+    // Coverage for preview_share_handlers.rs error sites. Pre-A4
+    // these emitted `{"error":<prose>,"code":<code>}`; now they
+    // funnel through `error_response` / `ErrorEnvelope` carrying
+    // `error` (code) + `message` (human prose) per §10.0.
+
+    use crate::error_envelope::test_helpers::body_json;
+
+    #[compio::test]
+    async fn a4_share_unauthorized_envelope() {
+        let resp = unauthorized();
+        assert_eq!(resp.status().as_u16(), 401);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "unauthorized");
+        assert!(body["message"].is_string());
+        assert!(body.get("code").is_none(), "duplicate `code` field removed");
+    }
+
+    #[compio::test]
+    async fn a4_share_not_found_envelope() {
+        let resp = not_found();
+        assert_eq!(resp.status().as_u16(), 404);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "not_found");
+        assert!(body["message"].is_string());
+        assert!(body.get("code").is_none());
+    }
+
+    #[compio::test]
+    async fn a4_share_bad_request_envelope() {
+        let resp = bad_request("invalid_expires", "expires_in_secs out of range");
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "invalid_expires");
+        assert_eq!(body["message"], "expires_in_secs out of range");
+    }
 }
