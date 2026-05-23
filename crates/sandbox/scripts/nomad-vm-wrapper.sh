@@ -369,13 +369,48 @@ if [ -n "${ZSBX_RESTORE_FROM:-}" ]; then
     > "$ZSBX_RUNTIME/ch.log" 2>&1 &
   CH_PID=$!
 
-  # Bug-#14b speculative fix: re-up the tap after CH spawn. CH's
-  # `--restore` re-attaches to the tap by name; depending on driver
-  # behaviour the tap can end up admin-DOWN even though we set it UP
-  # pre-spawn. A small poll loop (idempotent) ensures the tap is UP
-  # by the time the guest tries to send. Log state at 0/1/3s post-
-  # spawn so the next cluster cycle has empirical evidence.
+  # Bug #17 fix (B17, 2026-05-24): CH `--restore` brings the VM back
+  # in a **paused** state — vCPUs are not running until something
+  # explicitly resumes them. Without `ch-remote resume` after restore
+  # the guest's eth0 never replies to ARP and the controller's
+  # /livez probe gets EHOSTUNREACH ("No route to host"). CH's
+  # documented snapshot/restore protocol since v23: caller must
+  # `ch-remote resume` after `--restore`. See CH docs
+  # `docs/snapshot-restore.md` § "Restore from a VM snapshot".
+  #
+  # The cold-boot path doesn't need this: a normal `cloud-hypervisor
+  # --kernel ...` starts the VM running from boot.
+  #
+  # We poll the API socket first (CH may take up to ~1s to bind it
+  # after mmap'ing the snapshot memory), then issue the resume. Both
+  # steps are bounded; total budget ~10s. If resume fails the
+  # subsequent /livez probe in the controller will surface it.
   (
+    # Wait for the CH HTTP API socket to appear + accept connections.
+    # `ch-remote ping` is the lightweight liveness probe.
+    for attempt in $(seq 1 50); do
+      if [ -S "$API_SOCK" ] && \
+         ch-remote --api-socket "$API_SOCK" ping >/dev/null 2>&1; then
+        echo "[wrapper] restore: ch-remote api ready (attempt=$attempt)" >&2
+        break
+      fi
+      sleep 0.2
+    done
+    # Issue resume. CH returns success even if VM is already running,
+    # so this is idempotent on re-wakes.
+    if ch-remote --api-socket "$API_SOCK" resume 2>&1 | \
+         sed 's/^/[wrapper] restore: ch-remote resume: /' >&2; then
+      echo "[wrapper] restore: VM resumed" >&2
+    else
+      echo "[wrapper] restore: WARN ch-remote resume failed; /livez probe will surface it" >&2
+    fi
+
+    # Bug-#14b speculative fix kept as defensive belt-and-braces:
+    # re-up the tap after CH spawn. CH's `--restore` re-attaches to
+    # the tap by name; depending on driver behaviour the tap can end
+    # up admin-DOWN even though we set it UP pre-spawn. Log state at
+    # 0/1/3s post-spawn so the next cluster cycle has empirical
+    # evidence.
     for delay in 0.3 1 3; do
       sleep "$delay"
       ip -br link show "$TAP" 2>&1 | sed "s/^/[wrapper] restore: tap@+${delay}s   /" >&2 || true

@@ -3,7 +3,7 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-24 (cycle r3: B16 cluster closed via Docker build, B17 found; A6 + T7 closed; 4 round-2 reviews added).
+Last updated: 2026-05-24 (cycle r4: B17 CLOSED via wrapper `ch-remote resume` fix; B15 verified PASS on cluster; B14a/B14b CLOSED — wrapper restore branch now exercised end-to-end and tap-state evidence captured; new bug #18 surfaced on slot-reuse, deferred).
 Branch HEAD at seed: `fce3e208`.
 Branch HEAD at last update: `da220268` (T7 closed: sweep concurrency now real via join_all; A6 closed: persist pub(crate); B16 closed via 0061b96d; A2/A5 already closed prior cycle).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
@@ -17,29 +17,34 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Original symptom**: `zsbx-ctl.service` exits 203/EXEC immediately; `/usr/local/bin/zeroship-sandbox: cannot execute: required file not found` (kernel's misleading text for missing PT_INTERP).
 - **Original root cause**: `readelf -p .interp target/release/zeroship-sandbox` → `/nix/store/jms7zxzm7w1whczwny5m3gkgdjghmi2r-glibc-2.42-51/lib/ld-linux-x86-64.so.2`. The local NixOS-built binary's dynamic linker path is absent on GCE Ubuntu.
 - **Pre-flight gate (still recommended)**: add `readelf -l target/release/zeroship-sandbox | grep INTERP` to `provision-gcp-cluster.sh` that REFUSES upload if the interp path contains `/nix/`. Cheap insurance for future cycles.
-- **B14a/B14b status**: still demoted. Wake path could not be exercised this cycle due to new bug #17 (see below). Will re-evaluate after #17 closes.
+- **B14a/B14b status**: **CLOSED** (see below). Wake path now exercised end-to-end after B17 fix.
 
-### [B17] Restored VM agent unreachable post-CH-restore — `No route to host` (CRITICAL, open)
-- **Source**: cluster smoke 2026-05-24 r2 (see Appendix A in `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r1.md`).
-- **Symptom**: After successful CH `restore` of a 1.07 GB snapshot, controller probes `http://<vm-ip>:7777/livez` and gets `No route to host (os error 113)` continuously until the per-cycle wake timeout (~37s). Wake returns HTTP 500 with `restore_backend: restore: agent at http://10.99.101.2:7777 never returned 200 on /livez`.
-- **Hypothesis (not verified)**:
-  - The wrapper's `restore` branch may be missing a tap-up / bridge-attach step that the `start` branch has — VM resumes but its tap is unbridged.
-  - Alternatively the tap interface name post-restore differs from snapshot-time and the in-VM agent listens on the wrong interface.
-  - Worth diffing `start` vs. `restore` paths in `crates/sandbox/scripts/nomad-vm-wrapper.sh`, and checking `crates/sandbox/src/backend/nomad_ch.rs` for net-namespace emission on restore.
-- **Reproducer**: provision 1+1 cluster with `CONTROLLER_OBJECT=zeroship-sandbox.snapshot-v13`, run `snapshot_stress.py --cycles 1 --concurrency 1`. Cost ≈ $0.50.
-- **Inputs/tracing to add for next cycle**:
-  - Log the tap interface name + state (`ip link show zsbx-<idx>`) in the restore branch right after CH restore returns.
-  - Tighten the agent-livez probe loop to fail-fast on EHOSTUNREACH (currently retries for ~37s, which inflates the failure window).
-  - Capture wrapper stderr BEFORE Nomad GC's the alloc (e.g., copy stderr file to `/var/log/zsbx-restore/<sandbox_id>.log` from the wrapper itself).
-- **Why NEW (not B15)**: B15 was "wake reaches restore_backend and restore_backend fails" (snapshot artifact integrity). #17 is "restore_backend succeeds, VM is up, but its network is unbridged". Different layer entirely.
+### [B17] (CLOSED 2026-05-24 r4) Restored VM agent unreachable post-CH-restore — `No route to host`
+- **Status**: **CLOSED**. Root cause: CH `--restore` brings the VM back in a paused state; without `ch-remote resume` the vCPUs never run and the guest's virtio-net never replies to ARP, surfacing as EHOSTUNREACH. Fix: poll the CH API socket post-spawn with `ch-remote ping`, then issue `ch-remote resume`. Cluster smoke c=1 PASS (wake 200 OK in 9.5s); c=4 PASS for all 5 cycles that reached snapshot (5/5 wake). The 11/16 c=4 create failures are a separate bug (#18 below), not a wake regression.
+- **Hypothesis history (refuted)**: tap/bridge attachment — there is no bridge in this architecture; the model is /30-per-tap with host as gateway. The wrapper's pre-branch tap-up sequence is identical for cold-boot and restore; the missing step was vCPU resume, not network plumbing.
+- **Evidence**: wrapper stderr captured `tap … <NO-CARRIER>` before resume, `tap … <LOWER_UP>` after resume — exactly matches "vCPUs were paused, the virtio-net device was attached but no traffic was flowing".
+- **Files**: `crates/sandbox/scripts/nomad-vm-wrapper.sh` (lines 366-419, restore branch).
 
-### [B14a] (DEMOTED) snap-stage `memory-ranges` absent at wake time → wrapper exits 1
-- **Status**: refuted by 2026-05-23 cycle. Controller `restore: post-store.get staged files` tracing confirms all three files (config.json=2804, memory-ranges=1073741824, state.json=~102K) are staged successfully. The wake fails AFTER staging because of bug-#15, not because the stage is empty.
-- **Disposition**: leave listed as a watch-item; re-test once #16 closes. If the wrapper's restore-branch instrumentation never fires in the next smoke, this is fully closed.
+### [B14a] (CLOSED 2026-05-24 r4) snap-stage `memory-ranges` absent at wake time
+- **Status**: **CLOSED**. Cluster smoke shows wrapper restore-branch executes the full file-staging path (`ls -la $ZSBX_RESTORE_FROM` reports memory-ranges=1073741824, config.json=3813, state.json=102535) and proceeds to CH `--restore` successfully. No `FATAL: ZSBX_RESTORE_FROM=… missing` events observed across c=4.
 
-### [B14b] (DEMOTED) tap `NO-CARRIER` after CH `--restore` → No route to host
-- **Status**: not reproduced in 2026-05-23 cycle. The wrapper never gets past the workspace.img gate, so we never observe CH `--restore` proceeding to net-device resume. The previously-observed NO-CARRIER could be a real second-order bug or could have been a one-off; can't tell from current evidence.
-- **Disposition**: same — re-test once #16 closes. The speculative tap-up retry loop (lines 378-384 of nomad-vm-wrapper.sh) is harmless; keep it.
+### [B14b] (CLOSED 2026-05-24 r4) tap `NO-CARRIER` after CH `--restore`
+- **Status**: **CLOSED**. The NO-CARRIER was a real second-order observation of the B17 root cause: CH `--restore` attaches the tap but the VM is paused, so no LOWER_UP. Post-resume the tap transitions to `<BROADCAST,MULTICAST,UP,LOWER_UP>` as expected. The speculative tap-up retry loop at lines 414-418 stays as belt-and-braces.
+
+### [B18] Stale controller pubkey on VM slot reuse — create-side 401 (CRITICAL, open)
+- **Source**: cluster smoke c=4 2026-05-24 r4 (see `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md`).
+- **Symptom**: After the vm_index ceiling is exhausted by one round of create+snapshot+stop cycles, the next create on a reused slot fails with: `backend.create: 3 attempts failed; last error: stale agent at http://10.99.10X.2:7777: /version returned 401 (agent is verifying with a different controller pubkey); expected fp=<hex>`. 11/16 of the c=4 cycles hit this once slot 1-6 had been used once. **Blocks scaling smoke past ~6 cycles per worker** (vm_index ceiling default = 12, but the issue surfaces well before exhaustion).
+- **Hypotheses**:
+  - Per-sandbox signing keys: each new sandbox generates a fresh pubkey (recorded in pg via `persist`); the wrapper injects the new pubkey via `zsbx_pubkey=<hex>` cmdline. If the in-VM `/sbin/init` doesn't unconditionally re-write `/keys/controller-pubkey` from the cmdline (e.g., if `[ ! -f /keys/controller-pubkey ]` skips the write when a stale file from prior boot exists), the agent verifies against the old key.
+  - **But** rootfs.img is per-NOMAD_TASK_DIR (the wrapper `cp`s fresh from `$ZSBX_ARTIFACT_DIR/rootfs-slim.img` if not present in the task dir), so the rootfs SHOULD be fresh — unless something stamps `/keys/controller-pubkey` in the source rootfs template.
+  - Alternative: the workspace.img is **per-sandbox** (`<host_state_dir>/<sandbox_id>/workspace.img`), so should be fresh per sandbox. The user-home.img is **per-user** (shared) — if /keys is mounted from the userhome that would explain stickiness.
+- **Reproducer**: provision 1+1, run `snapshot_stress.py --concurrency 4 --cycles 4`. Expect 5/16 OK (the first batch of 4 + one more) and 11/16 with the 401 signature.
+- **Inputs/tracing for next cycle**:
+  - `crates/sandbox/src/backend/nomad_ch.rs` — find where `expected_fp` is computed; verify it's reading the **new** sandbox's persisted pubkey, not a cached value.
+  - `crates/sandbox/src/persist.rs` — check whether signing keys are generated per-sandbox or per-user.
+  - The in-VM `/sbin/init` script (in the rootfs-slim.img.virtio-blk-v3 source) — does it unconditionally write `/keys/controller-pubkey` from cmdline?
+  - Capture the per-VM agent's `/version` signature payload to see WHICH pubkey it's actually using.
+- **Note**: this bug exists because B17 is now closed and we can finally run multiple cycles on the same slot. Pre-B17, every cycle hit a "fresh" alloc that failed at wake; the create-side never had to deal with slot reuse.
 
 ### [A1] AEAD never wraps prod snapshot store (CRITICAL, security-r1)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)
