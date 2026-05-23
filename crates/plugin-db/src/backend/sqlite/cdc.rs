@@ -256,10 +256,14 @@ fn preupdate_callback(
     case: &PreUpdateCase,
     buffer: &Arc<Mutex<CdcTxBuffer>>,
 ) {
-    // Filter system / bookkeeping relations. PR 3 will widen this set
-    // (MV shadow, audit) per plan §6; PR 2 only needs to keep
-    // `sqlite_*` engine tables and our `__zs_*` audit tables out of
-    // the broker.
+    // Filter system / bookkeeping relations. PR 2 wired the full filter
+    // set already (per plan §6: MV shadow, audit, migrations,
+    // `__zs_*`, `sqlite_*`); PR 3 only adds the integration coverage +
+    // the SDK-boundary refusal that keeps subscribers from opening on
+    // `__zeroship_mv_*` names. This early-return is FIRST after the
+    // action discriminant on purpose: filtered relations must never
+    // build a `PendingEvent`, never touch the buffer mutex, never
+    // increment any per-tx counters.
     if is_filtered_relation(table) {
         return;
     }

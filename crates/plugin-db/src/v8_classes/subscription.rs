@@ -138,6 +138,84 @@ impl Subscription {
 }
 
 // ---------------------------------------------------------------------------
+// MV-name refusal — SDK boundary gate (P2 PR 3)
+// ---------------------------------------------------------------------------
+
+/// Refuse `openSubscription` on materialised-view shadow collection
+/// names.
+///
+/// MV refreshes write to `__zeroship_mv_<name>` tables. The CDC
+/// dispatcher's relation filter (`is_filtered_relation` in
+/// `backend/sqlite/cdc.rs` / the equivalent PG publication scope) drops
+/// those writes before they reach the broker, so a subscription opened
+/// on an MV shadow name would silently never fire. We refuse at the
+/// SDK boundary so callers see a loud error rather than a permanently-
+/// empty stream — per design §13.5 and the P2 PR 3 gate
+/// `mv_subscribe_rejected_at_sdk`.
+///
+/// Returns `Some(OpError)` for refused names and `None` for OK names.
+/// Used by both `Db::open_subscription` (path `db.openSubscription(...)`)
+/// and `Collection::open_subscription` (path
+/// `db.collection(...).openSubscription()`). The wire `code` is
+/// `invalid_collection` — the same code
+/// `query::QueryError::InvalidCollection` flows through
+/// (`crate::error::From<QueryError> for DbError`), so SDK callers
+/// branch on a single stable string.
+pub(crate) fn refuse_mv_subscription(collection: &str) -> Option<OpError> {
+    if collection.starts_with("__zeroship_mv_") {
+        return Some(OpError::coded(
+            "invalid_collection",
+            format!(
+                "openSubscription: collection \"{collection}\" is a materialised-view \
+                 shadow table; subscribe to the source collection instead. MV refreshes \
+                 are filtered upstream of the broker."
+            ),
+            Some(
+                "Subscribe to the collection the view is derived from (or call \
+                 db.materializedView(name).refresh() on demand and re-read).".to_string(),
+            ),
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod mv_refusal_tests {
+    //! Unit-level coverage for the MV-name refusal at the SDK boundary.
+    //! The `tests/sqlite_integration.rs::mv_subscribe_rejected_at_sdk`
+    //! gate pins the same invariant end-to-end; this module pins the
+    //! pure-Rust predicate so a regression surfaces without compiling
+    //! the integration target.
+
+    use super::refuse_mv_subscription;
+
+    #[test]
+    fn refuses_zeroship_mv_prefix() {
+        let err = refuse_mv_subscription("__zeroship_mv_orders")
+            .expect("MV-prefixed name must refuse");
+        // `OpError::coded` stamps `code` onto a `CodedError` variant —
+        // we don't reach into the variant body here (it's exposed via
+        // the JS bridge layer); the existence of `Some(_)` is the
+        // unit invariant. The integration test pins `e.code` from JS.
+        let _ = err;
+    }
+
+    #[test]
+    fn accepts_user_collections() {
+        assert!(refuse_mv_subscription("users").is_none());
+        assert!(refuse_mv_subscription("orders").is_none());
+        // Edge: a user table whose name happens to start with
+        // `__zeroship_m` (but not `__zeroship_mv_`) must NOT refuse.
+        // The underscore-after-`mv` is the discriminator.
+        assert!(refuse_mv_subscription("__zeroship_metrics").is_none());
+        // Edge: the bare prefix without a suffix is still refused —
+        // a `db.materializedView("")` callsite would land here and we
+        // want it loud, not silently delivering empty.
+        assert!(refuse_mv_subscription("__zeroship_mv_").is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mint_subscription — build a wrapper from a fresh broker entry
 // ---------------------------------------------------------------------------
 

@@ -1146,3 +1146,319 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P2 PR 3 — relation filter gates (MV/audit) + subscription fan-out under
+// load. The relation filter itself was already wired in PR 2's
+// `cdc.rs::preupdate_callback` (first early-return after the action
+// discriminant). PR 3 adds the integration coverage that pins the
+// filter's behaviour end-to-end + the broker primitive
+// `Broker::resume_app_with_resync` (unit-covered in `broker.rs`).
+//
+// Test budget: each test stays well under 2s on the CI workers — the
+// fan-out test uses 10 subscribers × 100 rows (NOT the plan §8
+// 100 × 1000, which would saturate dev hardware; the buffer-index
+// ordering invariant is identical at smaller scale).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subscription_fanout_under_load() {
+    // Plan §8 / §9 PR 3 gate: a single COMMIT of N rows must reach every
+    // active subscriber in INSERT order. Scaled down to 10×100 per the
+    // task spec ("100 subscribers × 1000 rows would saturate dev
+    // hardware; scale down to 10 × 100 for CI sanity"). The default
+    // queue depth is 1024 (`broker::DEFAULT_QUEUE_DEPTH`), so 100 rows
+    // fit comfortably without triggering the overflow-to-Resync path.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_fanout")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_fanout\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        // Subscribe 10 times to the same (app, collection). Each
+        // returned `Subscription` is a fresh routing-table entry — the
+        // broker fans the same Rc<ChangeEvent> out to each.
+        let subs: Vec<Subscription> =
+            (0..10).map(|_| subscribe_local("app_fanout", "items")).collect();
+
+        // BEGIN; 100×INSERT; COMMIT. Each statement routes through the
+        // session actor in order, so the buffer accumulates events in
+        // INSERT order. The commit_hook then ships one CommitPacket
+        // with all 100 events; the publisher iterates and fans out.
+        backend
+            .pool_exec("BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        for i in 0..100 {
+            let sql = format!(
+                "INSERT INTO \"app_fanout\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
+            );
+            backend
+                .pool_exec(&sql, &[])
+                .await
+                .expect("INSERT inside tx");
+        }
+        backend
+            .pool_exec("COMMIT", &[])
+            .await
+            .expect("COMMIT");
+
+        // Generous drain — 100 publishes × 10 subscribers under the
+        // single-threaded compio runtime + one PRAGMA round-trip on
+        // first touch. 200ms is comfortably above the in-process
+        // upper bound on dev hardware.
+        compio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        for (i, sub) in subs.iter().enumerate() {
+            let msgs = drain(sub);
+            assert_eq!(
+                msgs.len(),
+                100,
+                "subscriber #{i} should observe 100 events; got {} ({msgs:?})",
+                msgs.len()
+            );
+            // Buffer-index ordering invariant from PR 2: events appear
+            // in the order they fired against the preupdate hook,
+            // which matches statement order under SQLite's
+            // single-writer execution.
+            for (idx, msg) in msgs.iter().enumerate() {
+                match msg {
+                    SubscriptionMessage::Change(ev) => {
+                        assert_eq!(
+                            ev.op,
+                            ChangeOp::Insert,
+                            "subscriber #{i} event {idx} must be Insert; got {:?}",
+                            ev.op
+                        );
+                        // The `id` column carries the per-row index. We
+                        // assert ordering through that field.
+                        let id_str = ev
+                            .new_tuple
+                            .get("id")
+                            .unwrap_or_else(|| panic!(
+                                "subscriber #{i} event {idx} missing `id`: {:?}",
+                                ev.new_tuple
+                            ));
+                        let id: i64 = id_str
+                            .parse()
+                            .unwrap_or_else(|_| panic!("non-numeric id: {id_str}"));
+                        assert_eq!(
+                            id, idx as i64,
+                            "subscriber #{i} event {idx} must carry id={idx}; got id={id}"
+                        );
+                    }
+                    other => panic!(
+                        "subscriber #{i} event {idx} must be Change; got {other:?}"
+                    ),
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn mv_refresh_does_not_emit_change_events() {
+    // Plan §6 + §9 PR 3 gate: writes to `__zeroship_mv_*` shadow tables
+    // must be filtered upstream of the broker. The plan acknowledges
+    // (§9 PR 3) that the `db.materializedView(...).refresh()` SDK
+    // primitive does not exist yet, so we exercise the filter directly
+    // by writing to a shadow table whose name matches the filter
+    // prefix — the dispatcher cannot distinguish a "real" MV refresh
+    // from a hand-rolled shadow write.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_mv")
+            .await
+            .expect("ensure_app_schema");
+        // Create a shadow table that mimics what an MV refresh would
+        // emit. The CREATE itself only touches sqlite_master (already
+        // filtered); the INSERT below is the gate.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_mv\".\"__zeroship_mv_demo\" (\
+                     id INTEGER PRIMARY KEY, \
+                     v TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE __zeroship_mv_demo");
+
+        // Subscribe to the shadow table directly so we'd observe any
+        // event that leaked past the filter. (The SDK boundary refuses
+        // such a subscription via `Db::open_subscription`; the broker
+        // primitive does NOT, and we exercise the broker level here.)
+        let sub = subscribe_local("app_mv", "__zeroship_mv_demo");
+
+        // INSERT into the shadow — this is the write the filter must
+        // drop. The preupdate hook fires, `is_filtered_relation`
+        // returns `true`, no event is buffered, no packet ships.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_mv\".\"__zeroship_mv_demo\" (id, v) VALUES (1, 'a')",
+                &[],
+            )
+            .await
+            .expect("INSERT into shadow");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert!(
+            msgs.is_empty(),
+            "writes to __zeroship_mv_* must not reach the broker; got {msgs:?}"
+        );
+    });
+}
+
+#[test]
+fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
+    // Variant of the previous gate: when a transaction touches BOTH a
+    // shadow table AND a regular collection, the shadow writes are
+    // filtered and the regular writes pass through. The regular
+    // subscriber observes exactly the regular events; the shadow
+    // subscriber observes zero events.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_mv_mixed")
+            .await
+            .expect("ensure_app_schema");
+        // Regular collection.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_mv_mixed\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+        // Shadow table.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_mv_mixed\".\"__zeroship_mv_items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     v TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE __zeroship_mv_items");
+
+        let regular_sub = subscribe_local("app_mv_mixed", "items");
+        let shadow_sub = subscribe_local("app_mv_mixed", "__zeroship_mv_items");
+
+        // Single transaction touching both tables. The shadow write
+        // is filtered at the hook; the regular write reaches the broker.
+        backend
+            .pool_exec("BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_mv_mixed\".\"items\" (id, name) VALUES (1, 'alice')",
+                &[],
+            )
+            .await
+            .expect("INSERT items");
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_mv_mixed\".\"__zeroship_mv_items\" (id, v) VALUES (1, 'a')",
+                &[],
+            )
+            .await
+            .expect("INSERT shadow");
+        backend
+            .pool_exec("COMMIT", &[])
+            .await
+            .expect("COMMIT");
+
+        drain_publisher().await;
+
+        let regular_msgs = drain(&regular_sub);
+        let shadow_msgs = drain(&shadow_sub);
+
+        assert_eq!(
+            regular_msgs.len(),
+            1,
+            "regular collection should observe exactly 1 INSERT; got {regular_msgs:?}"
+        );
+        match &regular_msgs[0] {
+            SubscriptionMessage::Change(ev) => {
+                assert_eq!(ev.op, ChangeOp::Insert);
+                assert_eq!(ev.collection, "items");
+                assert_eq!(
+                    ev.new_tuple.get("name"),
+                    Some(&"alice".to_string()),
+                    "regular collection event must carry the inserted name; got {:?}",
+                    ev.new_tuple
+                );
+            }
+            other => panic!("expected Change event on regular collection, got {other:?}"),
+        }
+        assert!(
+            shadow_msgs.is_empty(),
+            "shadow collection must observe zero events; got {shadow_msgs:?}"
+        );
+    });
+}
+
+#[test]
+fn audit_table_writes_do_not_emit_events() {
+    // The `is_filtered_relation` predicate covers `__zeroship_audit_*`
+    // alongside `__zeroship_mv_*`. The PR 2 unit test in
+    // `cdc.rs::tests::is_filtered_relation_excludes_system_tables`
+    // already pins the predicate; this gate exercises the filter
+    // end-to-end so a regression that drops the audit-prefix arm of the
+    // predicate would fail here at the integration boundary.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_audit")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_audit\".\"__zeroship_audit_users\" (\
+                     id INTEGER PRIMARY KEY, \
+                     event TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE __zeroship_audit_users");
+
+        let sub = subscribe_local("app_audit", "__zeroship_audit_users");
+
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_audit\".\"__zeroship_audit_users\" \
+                 (id, event) VALUES (1, 'delete')",
+                &[],
+            )
+            .await
+            .expect("INSERT audit row");
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        assert!(
+            msgs.is_empty(),
+            "writes to __zeroship_audit_* must not reach the broker; got {msgs:?}"
+        );
+    });
+}

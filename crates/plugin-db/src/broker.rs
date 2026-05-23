@@ -565,6 +565,46 @@ impl Broker {
             }
         }
     }
+
+    /// Push a `Resync` to every active subscription registered for
+    /// `app_id`.
+    ///
+    /// Invoked from [`crate::backend::BrokerPauseGuard::drop`] (after a
+    /// backfill window) and
+    /// [`crate::backend::SchemaPendingGuard::drop`] (after the
+    /// schema-pending decoder window ends) per design §16.7. P2 PR 3
+    /// adds the primitive so PR 4 can wire the guards' `Drop` impls
+    /// without touching the broker again — and so the load-fanout
+    /// integration test can pin the resync codepath compiles +
+    /// dispatches correctly.
+    ///
+    /// **Idempotent on a per-call basis.** Calling
+    /// `resume_app_with_resync` N times pushes N `Resync` messages onto
+    /// every active subscription's queue. Subscribers dedup: when
+    /// [`Subscription::pop`] yields a `Resync` the iterator refetches
+    /// and resets its state, so back-to-back `Resync` messages collapse
+    /// at the consumer. Closed subscriptions are skipped; the routing
+    /// table is not GC'd here (that happens lazily in
+    /// [`Self::publish`]).
+    ///
+    /// Apps with no active subscriptions are a fast no-op — the
+    /// two-level map lookup misses and the function returns immediately.
+    pub fn resume_app_with_resync(&mut self, app_id: &str) {
+        let Some(by_collection) = self.by_key.get(app_id) else {
+            return;
+        };
+        // Iterate by &collection_name → &Vec<Subscription>. The push
+        // path is `Subscription::push`, which short-circuits on
+        // `inner.closed`, so we don't need to filter closed entries
+        // up-front — the per-entry check is the cheaper of the two
+        // choices (closed entries are rare; the bucket already prunes
+        // them in `publish`).
+        for subs in by_collection.values() {
+            for s in subs.iter() {
+                s.push(SubscriptionMessage::Resync);
+            }
+        }
+    }
 }
 
 impl Default for Broker {
@@ -1219,6 +1259,75 @@ mod tests {
         assert!(s1.is_closed());
         assert!(s2.is_closed());
         assert!(!s3.is_closed());
+    }
+
+    // ---------- resume_app_with_resync (P2 PR 3) ----------
+
+    #[test]
+    fn resume_app_with_resync_pushes_one_resync_to_each_subscription() {
+        // The P2 PR 4 guards' Drop impls call this primitive after a
+        // backfill window / schema-pending window. Every active
+        // subscription on the app should observe a single Resync.
+        let mut b = Broker::new();
+        let s1 = b.subscribe("a", "messages");
+        let s2 = b.subscribe("a", "channels");
+        let s3 = b.subscribe("b", "messages"); // other app — unaffected.
+
+        b.resume_app_with_resync("a");
+
+        assert!(matches!(s1.pop(), Some(SubscriptionMessage::Resync)));
+        assert!(matches!(s2.pop(), Some(SubscriptionMessage::Resync)));
+        // Per-app isolation: app "b" sees nothing.
+        assert!(s3.pop().is_none());
+    }
+
+    #[test]
+    fn resume_app_with_resync_is_idempotent_pushes_multiple_resyncs() {
+        // Plan §9: "calling multiple times pushes multiple resyncs;
+        // subscribers dedup." Verify the broker side faithfully pushes
+        // one Resync per call (consumer-side dedup is a Subscription
+        // pop-time concern not exercised here).
+        let mut b = Broker::new();
+        let s = b.subscribe("a", "messages");
+        b.resume_app_with_resync("a");
+        b.resume_app_with_resync("a");
+        b.resume_app_with_resync("a");
+        assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
+        assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
+        assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
+        assert!(s.pop().is_none());
+    }
+
+    #[test]
+    fn resume_app_with_resync_skips_closed_subscriptions() {
+        // `Subscription::push` short-circuits on `inner.closed`, so a
+        // closed subscription must NOT observe the Resync. The routing
+        // table still contains the closed entry (only `publish` GCs it),
+        // but the push path bails out.
+        let mut b = Broker::new();
+        let s1 = b.subscribe("a", "messages");
+        let s2 = b.subscribe("a", "messages");
+        s1.close();
+        // Drain s1's `Closed` message so the only thing left to observe
+        // would be the Resync push (which must be skipped on closed).
+        assert!(matches!(s1.pop(), Some(SubscriptionMessage::Closed)));
+        b.resume_app_with_resync("a");
+        assert!(s1.pop().is_none(), "closed subscription must not receive Resync");
+        assert!(matches!(s2.pop(), Some(SubscriptionMessage::Resync)));
+    }
+
+    #[test]
+    fn resume_app_with_resync_no_op_when_app_unknown() {
+        // Apps with no active subscriptions are a fast no-op. The
+        // routing table lookup misses and the function returns
+        // immediately — no panic, no allocation.
+        let mut b = Broker::new();
+        let _s = b.subscribe("a", "messages");
+        // App "missing" has no entry — must not panic.
+        b.resume_app_with_resync("missing");
+        // The unrelated app's subscription is untouched.
+        let s = _s;
+        assert!(s.pop().is_none());
     }
 
     // ---------- has_subscribers gate (alloc-free WAL fan-out probe) ----------

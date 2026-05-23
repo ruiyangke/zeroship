@@ -328,12 +328,23 @@ impl Collection {
     /// [`super::subscription::Subscription`] wrapper bound to this
     /// collection. Synchronous mint; broker entry released by the
     /// wrapper's Weak finalizer (or `.close()`).
+    ///
+    /// **P2 PR 3** — refuses materialised-view shadow names
+    /// (`__zeroship_mv_*`) at the SDK boundary. The CDC dispatcher's
+    /// relation filter drops MV writes before they reach the broker, so
+    /// a subscription on an MV shadow name would silently never fire;
+    /// we surface a `code = "invalid_collection"` error instead. The
+    /// same refusal lives on `Db::open_subscription`; the two paths
+    /// share `super::subscription::refuse_mv_subscription`.
     #[v8_method]
     #[v8_name = "openSubscription"]
     fn open_subscription<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        if let Some(refusal) = super::subscription::refuse_mv_subscription(&self.name) {
+            return Err(refusal);
+        }
         let obj = super::subscription::mint_subscription(scope, &self.app_id, &self.name)?;
         Ok(obj.into())
     }

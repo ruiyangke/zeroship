@@ -41,6 +41,7 @@ use crate::orchestrator::transaction::begin_transaction_dispatch;
 use crate::replication_ops::start_replication_consumer_dispatch;
 use crate::v8_bridge::{read_json_arg, v8_value_to_serde_json};
 use crate::v8_classes::collection::mint_collection;
+use crate::v8_classes::subscription::refuse_mv_subscription;
 
 // ---------------------------------------------------------------------------
 // Db state
@@ -219,6 +220,19 @@ impl Db {
             return Err(OpError::type_error(
                 "db.openSubscription: collection must be a non-empty string",
             ));
+        }
+        // P2 PR 3 — reject MV shadow names at the SDK boundary.
+        // Materialised-view refreshes write to `__zeroship_mv_<name>`
+        // tables; the CDC dispatcher's relation filter
+        // (`is_filtered_relation` in `backend/sqlite/cdc.rs`) drops
+        // those writes before they reach the broker. A subscription on
+        // an MV shadow name would therefore silently never fire — a
+        // loud refusal at the SDK boundary is the better UX. The error
+        // code matches `query::QueryError::InvalidCollection` so SDK
+        // callers can branch on `e.code === "invalid_collection"`
+        // (`crate::error::DbError::ValidationFailed::code`).
+        if let Some(refusal) = refuse_mv_subscription(&collection) {
+            return Err(refusal);
         }
         let obj = super::subscription::mint_subscription(scope, &self.app_id, &collection)?;
         Ok(obj.into())
