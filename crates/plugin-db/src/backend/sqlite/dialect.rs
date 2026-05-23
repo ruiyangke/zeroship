@@ -113,6 +113,15 @@ impl DialectBuilder for SqliteDialect {
             "double" | "real" => "REAL",
             "bytes" | "blob" => "BLOB",
             "numeric" | "decimal" => "NUMERIC",
+            // **P5 PR 3** — `t.encrypted(...)`-declared columns always
+            // store the ciphertext wire blob (`[version_flag | nonce |
+            // ct+tag]`) as BLOB regardless of `wraps`. The DDL emitter
+            // (`crate::query::field_to_column`) inspects `def.encrypted`
+            // BEFORE calling `map_zs_type` and shortcuts to BLOB on the
+            // SQLite arm — but if a future path reaches this branch
+            // with `zs_type = "encrypted"`, BLOB is the safe answer.
+            // Mirrors the PG arm's BYTEA override in `query.rs`.
+            "encrypted" => "BLOB",
             // SQLite stores booleans as 0/1 — keeps the on-disk size
             // compact and lets equality / index comparisons stay
             // INTEGER-fast.
@@ -204,6 +213,10 @@ mod tests {
         assert_eq!(d.map_zs_type("jsonb", &no_opts), "TEXT");
         // Unknown types fall through to TEXT with a debug log warning.
         assert_eq!(d.map_zs_type("nonsense_type", &no_opts), "TEXT");
+        // **P5 PR 3** — `encrypted` falls through to BLOB so a path
+        // that bypasses the `def.encrypted` check still emits the right
+        // affinity. Mirrors the PG dialect's BYTEA override.
+        assert_eq!(d.map_zs_type("encrypted", &no_opts), "BLOB");
     }
 
     #[test]

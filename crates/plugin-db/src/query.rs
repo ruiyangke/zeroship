@@ -929,6 +929,33 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, Query
     // regardless of `wraps`. The encryption pass swaps the plaintext
     // out before the INSERT/UPDATE, and the SQL builder casts the
     // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
+    //
+    // **P5 PR 3** — emit a `/* zsenc:{mode}:{keyId}:{wraps} */` sentinel
+    // comment alongside the column type so the SQLite-arm introspector
+    // can regex-recover the encryption metadata from `sqlite_master.sql`.
+    // PG ignores SQL comments at parse time (the type is still BYTEA);
+    // SQLite stores the original CREATE TABLE text verbatim. SQLite's
+    // type affinity treats "BYTEA" as NUMERIC (no INT/CHAR/TEXT/BLOB/
+    // FLOA/REAL/DOUB substring match), which still accepts BLOB values
+    // — same column shape both engines see byte-identical inserts.
+    // Sentinel-on-DDL is the same regex-on-DDL pattern P4 PR 4 used for
+    // vector dims; sidecar `__zs_schema_meta` is the upgrade path
+    // (Q-P5 deferred). See
+    // `docs/proposals/p5-encryption-backup-implementation-plan.md` §5.
+    let enc_comment_owned;
+    let enc_comment: &str = if let Some(enc) = def.get("encrypted").and_then(|v| v.as_object()) {
+        let mode = enc.get("mode").and_then(|v| v.as_str()).unwrap_or("randomised");
+        // Normalise legacy `"randomized"` (US spelling) to the canonical
+        // `randomised` so the introspector regex (which accepts only the
+        // canonical spelling) round-trips cleanly.
+        let mode_norm = if mode == "randomized" { "randomised" } else { mode };
+        let key_id = enc.get("keyId").and_then(|v| v.as_str()).unwrap_or("default");
+        let wraps = enc.get("wraps").and_then(|v| v.as_str()).unwrap_or("string");
+        enc_comment_owned = format!(" /* zsenc:{mode_norm}:{key_id}:{wraps} */");
+        &enc_comment_owned
+    } else {
+        ""
+    };
     let pg_type: &str = if def.get("encrypted").is_some() {
         "BYTEA"
     } else if zs_type == Some("vector") {
@@ -964,7 +991,19 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, Query
         def_to_pg_type(def)
     };
     let constraints = def_to_constraints(field, def);
-    Ok(format!("{} {} {}", quote_ident(field), pg_type, constraints).trim().to_string())
+    // The sentinel comment (when present) sits between the type and the
+    // constraints so the parsed shape is `"<col>" BYTEA /* zsenc:... */
+    // <constraints>`. PG ignores the comment; SQLite preserves it in
+    // `sqlite_master.sql` for the introspector regex.
+    Ok(format!(
+        "{} {}{} {}",
+        quote_ident(field),
+        pg_type,
+        enc_comment,
+        constraints
+    )
+    .trim()
+    .to_string())
 }
 
 /// C2 — emit per-variant CHECK constraints for a flat-expanded

@@ -151,6 +151,13 @@ pub struct SqliteBackend {
     /// an `&self` receiver. Single-threaded per worker, no atomics
     /// needed.
     nonce_cache: Rc<RefCell<session_minter::NonceCache>>,
+    /// **P5 PR 3** — per-backend column-key cache. Resolves
+    /// `(app_id, key_id) → AeadKey` via the `ZEROSHIP_COLUMN_KEY_<KEYID>`
+    /// env var (the only sourcing variant on the SQLite arm — no
+    /// admin-schema sidecar; mirrors the session-minter pattern from
+    /// P3). Single-threaded (`RefCell` inside `KeyStore`) since every
+    /// `SqliteBackend` is owned by a single compio thread.
+    key_store: crate::encryption::KeyStore,
 }
 
 impl std::fmt::Debug for SqliteBackend {
@@ -264,6 +271,16 @@ impl SqliteBackend {
             };
         let nonce_cache = session_minter::NonceCache::new_shared(nonce_capacity);
 
+        // **P5 PR 3** — wire the column-key store. SQLite has no
+        // admin-schema sidecar (no SECURITY DEFINER getter equivalent),
+        // so the only sourcing variant is `EnvVar` — mirrors the
+        // session-minter pattern (P3) where the secret comes from
+        // `ZEROSHIP_SESSION_SECRET`. Cache lives for the lifetime of
+        // the backend; clears on backend drop.
+        let key_store = crate::encryption::KeyStore::new(
+            crate::encryption::KeySource::EnvVar,
+        );
+
         Ok(Self {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
@@ -273,6 +290,7 @@ impl SqliteBackend {
             minter_secret,
             minter_secret_prev,
             nonce_cache,
+            key_store,
         })
     }
 
@@ -307,6 +325,13 @@ impl SqliteBackend {
         let nonce_cache =
             session_minter::NonceCache::new_shared(session_minter::DEFAULT_NONCE_CAPACITY);
 
+        // **P5 PR 3** — same `KeyStore::EnvVar` shape as `new()`. The
+        // test helper diverges only on the session-minter secret; the
+        // column-key store reads from env vars regardless.
+        let key_store = crate::encryption::KeyStore::new(
+            crate::encryption::KeySource::EnvVar,
+        );
+
         Ok(Self {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
@@ -316,6 +341,7 @@ impl SqliteBackend {
             minter_secret: Some(secret),
             minter_secret_prev: secret_prev,
             nonce_cache,
+            key_store,
         })
     }
 }
@@ -603,6 +629,37 @@ impl SchemaIntrospect for SqliteBackend {
             //    and parse the `notnull` "0"/"1" into a bool.
             let table_info_sql = format!("PRAGMA {q_app}.table_info({q_coll})");
             let col_rows = self.session.query(&table_info_sql, &[]).await?;
+
+            // **P5 PR 3** — pull the original `CREATE TABLE` text from
+            // `sqlite_master.sql` so we can recover per-column
+            // encryption metadata from the `/* zsenc:<mode>:<keyId>:
+            // <wraps> */` sentinel the DDL emitter writes for every
+            // `t.encrypted(...)`-declared column (see
+            // `crate::query::field_to_column`). PRAGMA `table_info`
+            // surfaces the declared type but strips comments; the
+            // sentinel only survives in `sqlite_master.sql`.
+            //
+            // Acknowledge: regex-on-DDL is fragile — a future SDK that
+            // emits column DDL with multiple comments or non-trivial
+            // line breaks could trip the per-column attachment. The
+            // sidecar `__zs_schema_meta` table is the upgrade path
+            // (Q-P5 deferred); same regex-on-DDL pattern as P4 PR 4's
+            // vector-dims introspection.
+            let master_sql_query = format!(
+                "SELECT sql FROM {q_app}.sqlite_master \
+                 WHERE type = 'table' AND name = ?"
+            );
+            let master_rows = self
+                .session
+                .query(&master_sql_query, &[collection.as_str()])
+                .await?;
+            let create_table_text: String = master_rows
+                .first()
+                .and_then(|r| r.first())
+                .and_then(|c| c.clone())
+                .unwrap_or_default();
+            let encryption_by_col = parse_encryption_sentinels(&create_table_text);
+
             let mut col_map = std::collections::HashMap::new();
             for row in &col_rows {
                 let name = row
@@ -619,6 +676,7 @@ impl SchemaIntrospect for SqliteBackend {
                     .map(|s| s != "0")
                     .unwrap_or(false);
                 let default_expr = row.get(4).and_then(|c| c.clone());
+                let encryption = encryption_by_col.get(&name).cloned();
                 col_map.insert(
                     name,
                     crate::diff::ColumnInfo {
@@ -638,6 +696,7 @@ impl SchemaIntrospect for SqliteBackend {
                         // P4 PR 1: new fields default; PR 5 populates
                         // `vector_dims` / `is_fts_source` / `is_geopoint`
                         // from `sqlite_master.sql` introspection regexes.
+                        encryption,
                         ..Default::default()
                     },
                 );
@@ -1826,50 +1885,214 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 }
 
 // ===========================================================================
-// P5 PR 1 — EncryptedColumn + Backup stub impls on SqliteBackend
+// P5 PR 3 — Real EncryptedColumn impl on SqliteBackend
 // ===========================================================================
 //
-// Symmetric to the PG-side stubs in `backend/postgres.rs`. Both impls
-// return `Configuration { code: "p5_pr2_stub" }` via the local
-// `p5_pr2_stub` helper. PR 3 backfills `EncryptedColumn` against
-// env-var key sourcing + `crate::encryption::aead`; PR 5 backfills
-// `Backup` against `VACUUM INTO` + atomic-rename restore.
+// Symmetric to the PG-side impl in `backend/postgres.rs` (which landed
+// in PR 2). Crypto math is shared with PG via `crate::encryption::aead`;
+// key sourcing diverges: SQLite is env-var-only (`KeySource::EnvVar`)
+// because there's no admin-schema sidecar (no SECURITY DEFINER getter
+// equivalent on SQLite). Mirrors the session-minter pattern (P3) where
+// the secret comes from `ZEROSHIP_SESSION_SECRET`.
 //
-// Unlike PG, neither impl is gated on `hardening` — SQLite has no
-// admin-schema sidecar, so env-var key sourcing is the only path. The
-// `sqlite` feature gate already restricts the file to SQLite-enabled
-// builds.
+// Unlike PG, this impl is NOT gated on `hardening` — env-var sourcing
+// is the only path on SQLite, and the `sqlite` feature gate on this
+// file already restricts the build to SQLite-enabled targets.
 
+// **P5 PR 3** — Real `EncryptedColumn` body. Delegates to the workspace
+// `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
+// agnostic on decrypt because the wire format carries the nonce). Key
+// resolution goes through `self.key_store` (env-var-only on SQLite).
 impl crate::backend::EncryptedColumn for SqliteBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
     async fn resolve_key(
         &self,
-        _app_id: &str,
-        _key_id: &str,
+        app_id: &str,
+        key_id: &str,
     ) -> Result<Self::KeyHandle, DbError> {
-        Err(p5_pr2_stub("EncryptedColumn::resolve_key (SQLite)"))
+        self.key_store.resolve(app_id, key_id).await
     }
 
     fn encrypt(
         &self,
-        _key: &Self::KeyHandle,
-        _mode: crate::backend::EncryptionMode,
-        _plaintext: &[u8],
-        _aad: &[u8],
+        key: &Self::KeyHandle,
+        mode: crate::backend::EncryptionMode,
+        plaintext: &[u8],
+        aad: &[u8],
     ) -> Result<Vec<u8>, DbError> {
-        Err(p5_pr2_stub("EncryptedColumn::encrypt (SQLite)"))
+        match mode {
+            crate::backend::EncryptionMode::Randomised => {
+                crate::encryption::aead::encrypt_randomised(key, plaintext, aad)
+            }
+            crate::backend::EncryptionMode::Deterministic => {
+                crate::encryption::aead::encrypt_deterministic(key, plaintext, aad)
+            }
+        }
     }
 
     fn decrypt(
         &self,
-        _key: &Self::KeyHandle,
+        key: &Self::KeyHandle,
         _mode: crate::backend::EncryptionMode,
-        _ciphertext: &[u8],
-        _aad: &[u8],
+        ciphertext: &[u8],
+        aad: &[u8],
     ) -> Result<Vec<u8>, DbError> {
-        Err(p5_pr2_stub("EncryptedColumn::decrypt (SQLite)"))
+        // Decrypt is mode-agnostic: the wire format carries the nonce,
+        // and AES-GCM verifies the tag regardless of how the nonce was
+        // produced on the write side. The caller picks the
+        // mode-appropriate AAD (Camp A: row_pk in AAD for Randomised,
+        // omitted for Deterministic) — see
+        // `crate::crud::encryption_pass`.
+        crate::encryption::aead::decrypt(key, ciphertext, aad)
     }
+}
+
+/// **P5 PR 3** — recover per-column encryption metadata from the
+/// `/* zsenc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
+/// emitter writes into the `CREATE TABLE` text (see
+/// `crate::query::field_to_column`).
+///
+/// Returns a map from column name → [`crate::diff::EncryptionMeta`].
+/// Columns without an attached sentinel are absent from the map (which
+/// is the same shape `EncryptionMeta` round-trips through —
+/// `ColumnInfo::encryption = None` for plain columns).
+///
+/// **Implementation note**: this is a tiny hand-rolled parser instead
+/// of a `regex` dep — the workspace doesn't carry `regex` for plugin-db
+/// and the sentinel format is fixed enough that a few `.split` /
+/// `.find` calls cover every case the DDL emitter produces. The
+/// canonical regex equivalent is
+/// `/"([^"]+)"\s+\w+\s*\/\* zsenc:(randomised|deterministic):
+/// ([A-Za-z0-9_]+):(string|number|bytes) \*\//` — every column DDL the
+/// emitter writes for an encrypted field is of the shape
+/// `"<col>" BYTEA /* zsenc:<mode>:<keyId>:<wraps> */ <constraints>`,
+/// so we walk the CREATE TABLE body finding `/* zsenc:...` markers and
+/// rewind to the preceding double-quoted identifier.
+///
+/// **Sidecar upgrade path**: regex-on-DDL is fragile — a future SDK
+/// that emits column DDL with non-trivial line breaks or stacked
+/// comments could trip per-column attachment. The plan §11 Q-P5 calls
+/// out a sidecar `__zs_schema_meta` table as the eventual upgrade;
+/// PR 3 ships the regex per the implementation plan's §5
+/// trade-off acknowledgement.
+fn parse_encryption_sentinels(
+    create_table_text: &str,
+) -> std::collections::HashMap<String, crate::diff::EncryptionMeta> {
+    use crate::diff::{EncryptionMeta, WrappedType};
+    let mut out = std::collections::HashMap::new();
+    // Walk the body, finding each `/* zsenc:...` marker. For each one,
+    // rewind to the most recent double-quoted identifier to recover the
+    // column name. The emitter always emits the column name as the
+    // first token in the column DDL (e.g. `"ssn" BYTEA /* zsenc:...`),
+    // so the rewind is unambiguous.
+    const MARKER: &str = "/* zsenc:";
+    let mut search_pos = 0usize;
+    while let Some(found) = create_table_text[search_pos..].find(MARKER) {
+        let abs_marker = search_pos + found;
+        // Find the matching `*/` after the marker.
+        let body_start = abs_marker + MARKER.len();
+        let Some(end_rel) = create_table_text[body_start..].find("*/") else {
+            break; // unterminated comment — bail out of the walk
+        };
+        let body = &create_table_text[body_start..body_start + end_rel];
+        let body_trim = body.trim();
+        // body = "<mode>:<keyId>:<wraps>"
+        let parts: Vec<&str> = body_trim.split(':').collect();
+        if parts.len() == 3 {
+            let mode = match parts[0] {
+                "randomised" | "randomized" => Some(crate::backend::EncryptionMode::Randomised),
+                "deterministic" => Some(crate::backend::EncryptionMode::Deterministic),
+                _ => None,
+            };
+            let key_id = parts[1];
+            let wraps = match parts[2] {
+                "string" => Some(WrappedType::String),
+                "number" => Some(WrappedType::Number),
+                "bytes" => Some(WrappedType::Bytes),
+                _ => None,
+            };
+            // Validate the key_id alphabet ([A-Za-z0-9_]) — matches
+            // the SDK's `encrypted_invalid_key_id` guard. A malformed
+            // key id would have been rejected at register time; here
+            // we just guard against parsing garbage from a hand-edited
+            // DDL.
+            let key_id_ok = !key_id.is_empty()
+                && key_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+            if let (Some(mode), Some(wraps), true) = (mode, wraps, key_id_ok) {
+                // Rewind from `abs_marker` to find the column name. The
+                // column name is the most recent `"…"` token before the
+                // marker — scan backwards for the closing `"` then the
+                // opening `"`.
+                let before = &create_table_text[..abs_marker];
+                if let Some(col_name) = recover_preceding_quoted_ident(before) {
+                    out.insert(
+                        col_name,
+                        EncryptionMeta {
+                            mode,
+                            key_id: key_id.to_string(),
+                            wraps,
+                        },
+                    );
+                }
+            }
+        }
+        search_pos = body_start + end_rel + "*/".len();
+    }
+    out
+}
+
+/// Find the most recent double-quoted identifier in `text`, returning
+/// the identifier's contents (with `""` un-escaped to `"`). Returns
+/// `None` if no closing-then-opening `"` pair is found.
+fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
+    // Scan from the right for a closing `"`, then for the matching
+    // opening `"`. Handles the SQL `""` doubled-quote escape: a
+    // sequence like `"foo""bar"` is one ident "foo\"bar". We do not
+    // attempt full SQL parsing — the DDL emitter's column names are
+    // already validated to `[A-Za-z0-9_]` via `validate_field_name`,
+    // so the simple "last `"` token before the marker" rule is exact.
+    let bytes = text.as_bytes();
+    // Find closing `"`.
+    let mut close = None;
+    for i in (0..bytes.len()).rev() {
+        if bytes[i] == b'"' {
+            close = Some(i);
+            break;
+        }
+    }
+    let close = close?;
+    // Find opening `"`. Doubled-quote escape (`""`) must be a single
+    // logical quote — but our emitter validates field names to
+    // `[A-Za-z0-9_]` so doubled quotes can't appear in a real column
+    // name. We tolerate them defensively by skipping pairs.
+    let mut open = None;
+    let mut i = close;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'"' {
+            // Check for an escaped doubled quote: if the character
+            // immediately before is ALSO `"`, this is part of an escape
+            // sequence and we should continue past both.
+            if i > 0 && bytes[i - 1] == b'"' {
+                i -= 1;
+                continue;
+            }
+            open = Some(i);
+            break;
+        }
+    }
+    let open = open?;
+    if open + 1 >= close {
+        return None;
+    }
+    let raw = &text[open + 1..close];
+    // Un-escape doubled quotes (`""` → `"`). Field names won't contain
+    // them in practice; this is defensive.
+    Some(raw.replace("\"\"", "\""))
 }
 
 impl crate::backend::Backup for SqliteBackend {
@@ -2039,6 +2262,133 @@ mod tests {
     fn assert_sqlite_client_pinned_to_session_handle() {
         fn assert_impl<T: SqlExecutor<Client = SqliteSessionHandle>>() {}
         assert_impl::<SqliteBackend>();
+    }
+
+    // -----------------------------------------------------------------
+    // P5 PR 3 — encryption sentinel parser unit tests
+    // -----------------------------------------------------------------
+
+    /// Round-trip a single encrypted column: emitter shape → parser
+    /// extracts `(mode, key_id, wraps)` correctly.
+    #[test]
+    fn parse_encryption_sentinel_single_column() {
+        let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
+            id SERIAL PRIMARY KEY,\n  \
+            \"ssn\" BYTEA /* zsenc:randomised:default:string */  NOT NULL,\n  \
+            \"name\" TEXT \n)";
+        let got = parse_encryption_sentinels(ddl);
+        let m = got.get("ssn").expect("ssn must be parsed");
+        assert!(matches!(m.mode, crate::backend::EncryptionMode::Randomised));
+        assert_eq!(m.key_id, "default");
+        assert!(matches!(m.wraps, crate::diff::WrappedType::String));
+        assert!(got.get("name").is_none(), "non-encrypted col must be absent");
+        assert!(got.get("id").is_none());
+    }
+
+    /// Deterministic mode + non-string wraps + custom key id.
+    #[test]
+    fn parse_encryption_sentinel_deterministic_number_custom_key() {
+        let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
+            \"salary\" BYTEA /* zsenc:deterministic:payroll_v2:number */ NOT NULL\n)";
+        let got = parse_encryption_sentinels(ddl);
+        let m = got.get("salary").expect("salary must be parsed");
+        assert!(matches!(
+            m.mode,
+            crate::backend::EncryptionMode::Deterministic
+        ));
+        assert_eq!(m.key_id, "payroll_v2");
+        assert!(matches!(m.wraps, crate::diff::WrappedType::Number));
+    }
+
+    /// US spelling `randomized` round-trips as canonical Randomised
+    /// (the DDL emitter normalises but a hand-edited DDL could carry
+    /// the US form).
+    #[test]
+    fn parse_encryption_sentinel_accepts_us_spelling() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomized:default:bytes */)";
+        let got = parse_encryption_sentinels(ddl);
+        let m = got.get("a").expect("a must be parsed");
+        assert!(matches!(m.mode, crate::backend::EncryptionMode::Randomised));
+        assert!(matches!(m.wraps, crate::diff::WrappedType::Bytes));
+    }
+
+    /// Multiple encrypted columns in one CREATE TABLE — each attaches
+    /// to its own column name.
+    #[test]
+    fn parse_encryption_sentinel_multiple_columns() {
+        let ddl = "CREATE TABLE \"app\".\"u\" (\n  \
+            \"ssn\" BYTEA /* zsenc:randomised:default:string */,\n  \
+            \"tin\" BYTEA /* zsenc:deterministic:tax:string */\n)";
+        let got = parse_encryption_sentinels(ddl);
+        assert_eq!(got.len(), 2);
+        assert!(matches!(
+            got["ssn"].mode,
+            crate::backend::EncryptionMode::Randomised
+        ));
+        assert!(matches!(
+            got["tin"].mode,
+            crate::backend::EncryptionMode::Deterministic
+        ));
+        assert_eq!(got["tin"].key_id, "tax");
+    }
+
+    /// Malformed sentinel — wrong number of parts → ignored (the
+    /// column ends up without metadata; no panic).
+    #[test]
+    fn parse_encryption_sentinel_rejects_malformed() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:only_one_part */)";
+        let got = parse_encryption_sentinels(ddl);
+        assert!(got.is_empty());
+    }
+
+    /// Unknown mode / wraps → ignored.
+    #[test]
+    fn parse_encryption_sentinel_rejects_unknown_mode() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:hashed:default:string */)";
+        let got = parse_encryption_sentinels(ddl);
+        assert!(got.is_empty());
+    }
+
+    /// Invalid key_id alphabet → ignored.
+    #[test]
+    fn parse_encryption_sentinel_rejects_invalid_key_id() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomised:bad key:string */)";
+        let got = parse_encryption_sentinels(ddl);
+        assert!(got.is_empty());
+    }
+
+    /// DDL with no sentinels → empty map (no allocations beyond the
+    /// HashMap itself).
+    #[test]
+    fn parse_encryption_sentinel_empty_when_no_marker() {
+        let ddl = "CREATE TABLE t (\"a\" TEXT, \"b\" INTEGER)";
+        let got = parse_encryption_sentinels(ddl);
+        assert!(got.is_empty());
+    }
+
+    /// Unterminated comment doesn't loop forever; we bail out.
+    #[test]
+    fn parse_encryption_sentinel_handles_unterminated_comment() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomised:default:string";
+        let got = parse_encryption_sentinels(ddl);
+        assert!(got.is_empty());
+    }
+
+    /// `recover_preceding_quoted_ident` finds the most recent quoted
+    /// token before the marker position.
+    #[test]
+    fn recover_preceding_quoted_ident_picks_last_token() {
+        let text = "CREATE TABLE \"app\".\"users\" ( \"ssn\" BYTEA ";
+        assert_eq!(
+            recover_preceding_quoted_ident(text).as_deref(),
+            Some("ssn")
+        );
+    }
+
+    #[test]
+    fn recover_preceding_quoted_ident_handles_empty() {
+        assert!(recover_preceding_quoted_ident("").is_none());
+        assert!(recover_preceding_quoted_ident("no quotes here").is_none());
     }
 
     #[test]

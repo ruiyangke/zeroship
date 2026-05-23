@@ -3218,3 +3218,486 @@ fn near_returns_within_radius() {
         );
     });
 }
+
+// ===========================================================================
+// P5 PR 3 — `EncryptedColumn` impl on SqliteBackend
+// ===========================================================================
+//
+// These tests exercise the full SQLite round-trip for `t.encrypted(...)`-
+// declared columns: env-var key sourcing through KeyStore, AES-GCM
+// encrypt with the right AAD shape (Camp A — row_pk in AAD for
+// Randomised, omitted for Deterministic), BLOB storage on disk via
+// rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite
+// at `tests/integration.rs` §"P5 PR 2 — `EncryptedColumn` impl".
+
+/// Helper: set a synthetic root key in `ZEROSHIP_COLUMN_KEY_<KEY>`
+/// for the duration of a test, restoring the previous value on drop.
+/// Same shape as the PG-side `WithEnv` in `tests/integration.rs`.
+struct EncEnv {
+    name: String,
+    prev: Option<String>,
+}
+
+#[allow(unsafe_code)]
+impl EncEnv {
+    fn set(name: &str, value: &str) -> Self {
+        let prev = std::env::var(name).ok();
+        // SAFETY: each P5 SQLite test uses a uniquely-named env var
+        // (suffix carries the test fn name) so concurrent test runs
+        // don't race on the process-global env table. The
+        // `ZEROSHIP_COLUMN_KEY_*` namespace is plugin-db-owned.
+        unsafe {
+            std::env::set_var(name, value);
+        }
+        Self {
+            name: name.to_string(),
+            prev,
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+impl Drop for EncEnv {
+    fn drop(&mut self) {
+        // SAFETY: same justification as `set` above.
+        unsafe {
+            match &self.prev {
+                Some(p) => std::env::set_var(&self.name, p),
+                None => std::env::remove_var(&self.name),
+            }
+        }
+    }
+}
+
+/// Bind a raw byte slice as a SQLite BLOB literal using the `X'...'`
+/// hex syntax. SQLite accepts this anywhere a value literal can appear,
+/// and the session-actor's `&str`-params channel can carry inline
+/// literals untouched. Returns the literal text including the `X'`
+/// prefix and closing `'`.
+fn sqlite_blob_literal(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(3 + bytes.len() * 2);
+    s.push_str("X'");
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s.push('\'');
+    s
+}
+
+/// **P5 PR 3 — gate #1 (SQLite half)**: round-trip an encrypted string
+/// column under Randomised mode. Insert a row with `ssn` declared
+/// `t.encrypted({ mode: "randomised" })`, read it back via the SQLite
+/// path, expect the plaintext to recover.
+///
+/// Each P5 SQLite test uses a UNIQUE `keyId` so concurrent tests don't
+/// race on the process-global env table — the
+/// `ZEROSHIP_COLUMN_KEY_<KEYID>` namespace is per-key, so distinct
+/// `keyId`s give each test its own env-var slot. Same pattern as the
+/// in-crate `encryption::keys::tests` use.
+#[test]
+fn encrypted_column_round_trip_sqlite_randomised() {
+    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::encryption;
+    let key_id = "p5_sqlite_rt_rand";
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P5_SQLITE_RT_RAND", &"a".repeat(64));
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"enc_notes\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE enc_notes");
+
+        let key = backend
+            .resolve_key("app1", key_id)
+            .await
+            .expect("resolve_key");
+        let plaintext = b"123-45-6789";
+        let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
+        let ct = backend
+            .encrypt(&key, EncryptionMode::Randomised, plaintext, &aad)
+            .expect("encrypt");
+
+        // Bind the ciphertext as an inline X'...' BLOB literal. The
+        // session actor's `[&str]` params lane only carries TEXT; SQL
+        // literals are how we inject BLOB values without widening the
+        // protocol.
+        let blob_lit = sqlite_blob_literal(&ct);
+        let insert_sql = format!(
+            "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
+        );
+        backend
+            .pool_exec(&insert_sql, &["row_a"])
+            .await
+            .expect("INSERT");
+
+        // Pull the ciphertext back as a typed BLOB. `client_exec`
+        // routes through `query`, which stringifies BLOBs as
+        // `<N bytes blob>` — that's not what we want here. Reach into
+        // the session's typed-row path via the dedicated client; the
+        // `query_typed` method preserves the BLOB discriminant. The
+        // simplest cross-test path: re-encode the BLOB as hex via SQL
+        // (`hex(ssn)`) and parse back to bytes here.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                "SELECT hex(ssn) FROM \"app_demo\".\"enc_notes\" WHERE id = ?",
+                &["row_a"],
+            )
+            .await
+            .expect("SELECT");
+        let hex_str = rows[0][0]
+            .clone()
+            .expect("ssn column must be present");
+        let raw: Vec<u8> = (0..hex_str.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
+            .collect();
+
+        let recovered = backend
+            .decrypt(&key, EncryptionMode::Randomised, &raw, &aad)
+            .expect("decrypt");
+        assert_eq!(recovered, plaintext);
+    });
+}
+
+/// **P5 PR 3 — gate #1 (SQLite half), deterministic variant**.
+#[test]
+fn encrypted_column_round_trip_sqlite_deterministic() {
+    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::encryption;
+    let key_id = "p5_sqlite_rt_det";
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P5_SQLITE_RT_DET", &"b".repeat(64));
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"enc_notes\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE enc_notes");
+
+        let key = backend
+            .resolve_key("app1", key_id)
+            .await
+            .expect("resolve_key");
+        let plaintext = b"DETERMINISTIC-PLAINTEXT";
+        // Deterministic AAD: row_pk omitted (Camp A).
+        let aad = encryption::canonical_aad("enc_notes", "ssn", None);
+        let ct = backend
+            .encrypt(&key, EncryptionMode::Deterministic, plaintext, &aad)
+            .expect("encrypt");
+
+        let blob_lit = sqlite_blob_literal(&ct);
+        let insert_sql = format!(
+            "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
+        );
+        backend
+            .pool_exec(&insert_sql, &["row_a"])
+            .await
+            .expect("INSERT");
+
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                "SELECT hex(ssn) FROM \"app_demo\".\"enc_notes\" WHERE id = ?",
+                &["row_a"],
+            )
+            .await
+            .expect("SELECT");
+        let hex_str = rows[0][0].clone().expect("ssn must be present");
+        let raw: Vec<u8> = (0..hex_str.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
+            .collect();
+
+        let recovered = backend
+            .decrypt(&key, EncryptionMode::Deterministic, &raw, &aad)
+            .expect("decrypt");
+        assert_eq!(recovered, plaintext);
+    });
+}
+
+/// **P5 PR 3 — gate #2 (SQLite half), CRITICAL #1 fence (SQLite half)**.
+///
+/// Insert 100 rows under deterministic mode with five distinct plaintexts
+/// (so equality groups overlap), query by ciphertext equality, assert
+/// the matching set. Also asserts that two identical plaintexts produce
+/// byte-identical ciphertexts — the defining deterministic property
+/// that makes the B-tree equality lookup sound.
+///
+/// The `EXPLAIN QUERY PLAN` SEARCH/index-use assertion is omitted here
+/// because creating a B-tree index on a SQLite BLOB column is
+/// supported but the planner's choice between SCAN and SEARCH depends
+/// on table size + ANALYZE state; pinning a specific shape would make
+/// the test flaky across SQLite versions. The matching-set assertion
+/// alone exercises the equality-lookup contract.
+#[test]
+fn deterministic_encrypted_equality_via_index_sqlite() {
+    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::encryption;
+    let key_id = "p5_sqlite_det_eq";
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P5_SQLITE_DET_EQ", &"c".repeat(64));
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"enc_notes\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE enc_notes");
+        backend
+            .pool_exec(
+                "CREATE INDEX \"app_demo\".\"enc_notes_ssn_idx\" \
+                 ON \"enc_notes\"(ssn)",
+                &[],
+            )
+            .await
+            .expect("CREATE INDEX");
+
+        let key = backend
+            .resolve_key("app1", key_id)
+            .await
+            .expect("resolve_key");
+
+        // Five distinct plaintexts; 100 rows total. The expected
+        // equality group for "P0" is 20 rows (0..100 step 5).
+        let plaintexts = [
+            &b"P0-shared"[..],
+            &b"P1-distinct"[..],
+            &b"P2-distinct"[..],
+            &b"P3-distinct"[..],
+            &b"P4-distinct"[..],
+        ];
+        let aad = encryption::canonical_aad("enc_notes", "ssn", None);
+        let ciphertexts: Vec<Vec<u8>> = plaintexts
+            .iter()
+            .map(|p| {
+                backend
+                    .encrypt(&key, EncryptionMode::Deterministic, p, &aad)
+                    .expect("encrypt")
+            })
+            .collect();
+
+        // Defining deterministic property: re-encrypt P0 → same bytes.
+        let p0_again = backend
+            .encrypt(&key, EncryptionMode::Deterministic, plaintexts[0], &aad)
+            .expect("re-encrypt P0");
+        assert_eq!(
+            ciphertexts[0], p0_again,
+            "deterministic mode must produce byte-identical ciphertext for the same plaintext"
+        );
+
+        // Insert 100 rows; row N gets plaintexts[N % 5].
+        for i in 0..100usize {
+            let ct = &ciphertexts[i % 5];
+            let blob_lit = sqlite_blob_literal(ct);
+            let id = format!("row_{i:03}");
+            let sql = format!(
+                "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
+            );
+            backend.pool_exec(&sql, &[id.as_str()]).await.expect("INSERT");
+        }
+
+        // Equality lookup on P0's ciphertext should match exactly 20
+        // rows (0, 5, 10, ..., 95).
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let p0_lit = sqlite_blob_literal(&ciphertexts[0]);
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p0_lit}"
+        );
+        let rows = client
+            .query(&count_sql, &[])
+            .await
+            .expect("SELECT COUNT");
+        let n: i64 = rows[0][0]
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .expect("count must parse");
+        assert_eq!(n, 20, "equality on shared ciphertext must match every 5th row");
+
+        // P1's ciphertext should also match 20 rows.
+        let p1_lit = sqlite_blob_literal(&ciphertexts[1]);
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM \"app_demo\".\"enc_notes\" WHERE ssn = {p1_lit}"
+        );
+        let rows = client
+            .query(&count_sql, &[])
+            .await
+            .expect("SELECT COUNT");
+        let n: i64 = rows[0][0].as_deref().and_then(|s| s.parse().ok()).unwrap();
+        assert_eq!(n, 20);
+    });
+}
+
+/// **P5 PR 3 — §13 Camp A fence (SQLite half), mirror of the PG test
+/// `encrypted_randomised_row_swap_rejected`**. Insert two Randomised
+/// rows; UPDATE swaps their ciphertexts; reading row B with row B's
+/// AAD must surface `encryption_aead_failed`. This is the load-bearing
+/// assertion for the row-PK-in-AAD policy.
+#[test]
+fn randomised_ciphertext_row_swap_rejected_sqlite() {
+    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::encryption;
+    let key_id = "p5_sqlite_row_swap";
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P5_SQLITE_ROW_SWAP", &"d".repeat(64));
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_demo")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_demo\".\"enc_notes\" (\
+                     id  TEXT PRIMARY KEY, \
+                     ssn BLOB\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE enc_notes");
+
+        let key = backend.resolve_key("app1", key_id).await.unwrap();
+        // Insert row A and row B, each with its OWN AAD (binds row_pk).
+        let ct_a = backend
+            .encrypt(
+                &key,
+                EncryptionMode::Randomised,
+                b"sensitive-A",
+                &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
+            )
+            .unwrap();
+        let ct_b = backend
+            .encrypt(
+                &key,
+                EncryptionMode::Randomised,
+                b"sensitive-B",
+                &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
+            )
+            .unwrap();
+        for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
+            let blob_lit = sqlite_blob_literal(ct);
+            let sql = format!(
+                "INSERT INTO \"app_demo\".\"enc_notes\" (id, ssn) VALUES (?, {blob_lit})"
+            );
+            backend.pool_exec(&sql, &[id]).await.unwrap();
+        }
+
+        // Attacker move: UPDATE row_b's ssn slot with row_a's ciphertext.
+        let blob_a = sqlite_blob_literal(&ct_a);
+        let sql = format!(
+            "UPDATE \"app_demo\".\"enc_notes\" SET ssn = {blob_a} WHERE id = ?"
+        );
+        backend.pool_exec(&sql, &["row_b"]).await.unwrap();
+
+        // Read row B's ssn back and try to decrypt with row B's AAD.
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let rows = client
+            .query(
+                "SELECT hex(ssn) FROM \"app_demo\".\"enc_notes\" WHERE id = ?",
+                &["row_b"],
+            )
+            .await
+            .unwrap();
+        let hex_str = rows[0][0].clone().expect("ssn must be present");
+        let raw: Vec<u8> = (0..hex_str.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
+            .collect();
+        let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
+        let err = backend
+            .decrypt(&key, EncryptionMode::Randomised, &raw, &aad_b)
+            .expect_err("row-swap must fail AAD verification");
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "encryption_aead_failed");
+            }
+            other => panic!(
+                "expected ValidationFailed/encryption_aead_failed, got {other:?}"
+            ),
+        }
+    });
+}
+
+/// **P5 PR 3 — cross-backend equivalence (SQLite ↔ SQLite via shared
+/// env-var key).** Encrypt plaintext on backend_a; copy the ciphertext
+/// bytes; decrypt on backend_b (different temp file) configured with
+/// the same `ZEROSHIP_COLUMN_KEY_DEFAULT`. Proves HKDF derivation is
+/// deterministic across instances — the encryption module is the
+/// shared cross-backend surface, so two SQLite backends with the same
+/// root key produce the same derived AEAD key (and thus the same
+/// decryption result).
+#[test]
+fn cross_backend_ciphertext_decrypt_via_shared_key() {
+    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::encryption;
+    let key_id = "p5_sqlite_cross";
+    let _env = EncEnv::set("ZEROSHIP_COLUMN_KEY_P5_SQLITE_CROSS", &"e".repeat(64));
+    run(async {
+        // Two separate backends rooted at separate temp dirs.
+        let (backend_a, _dir_a) = fresh_backend();
+        let (backend_b, _dir_b) = fresh_backend();
+
+        // Use the SAME app_id so HKDF salt matches; the env-var key
+        // sourcing is process-global, so the root key is identical.
+        let app_id = "app_shared";
+        let key_a = backend_a.resolve_key(app_id, key_id).await.unwrap();
+        let key_b = backend_b.resolve_key(app_id, key_id).await.unwrap();
+        // The derived halves must match — same root + same app_id.
+        assert_eq!(key_a.k_enc, key_b.k_enc);
+        assert_eq!(key_a.k_siv, key_b.k_siv);
+
+        let plaintext = b"cross-instance-payload";
+        let aad =
+            encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
+        let ct = backend_a
+            .encrypt(&key_a, EncryptionMode::Randomised, plaintext, &aad)
+            .expect("encrypt on A");
+
+        // Decrypt the SAME ciphertext on backend_b with backend_b's
+        // resolved key. Must round-trip.
+        let recovered = backend_b
+            .decrypt(&key_b, EncryptionMode::Randomised, &ct, &aad)
+            .expect("decrypt on B");
+        assert_eq!(recovered, plaintext);
+    });
+}

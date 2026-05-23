@@ -1333,14 +1333,36 @@ async fn apply_encryption_on_read(
             return Ok(rows);
         }
     }
+    // SQLite CRUD-path wiring is a follow-up — see
+    // `encryption_pass_dispatch` rustdoc. The `EncryptedColumn` trait
+    // is reachable directly (e.g. tests/sqlite_integration.rs P5 suite)
+    // but the row-decode shape on the SQLite side surfaces BYTEA via
+    // `<N bytes blob>` placeholder strings rather than the PG hex-text
+    // shape `decrypt_row_on_read` parses. Routing SQLite reads through
+    // the same decrypt helper would need a SQLite-specific byte-
+    // extraction path; deferred.
     let _ = backend; // silence unused under feature combinations
     Ok(rows)
 }
 
-/// Run the write-side encryption pass over `doc` using the PG-arm
-/// `EncryptedColumn` impl. Gated on `feature = "pg" + hardening`;
-/// builds without those features short-circuit (no encrypted columns
-/// can reach this path because the SDK builder is also gated).
+/// Run the write-side encryption pass over `doc` using the
+/// backend-arm `EncryptedColumn` impl. PG arm is gated on `feature =
+/// "pg" + hardening`. Builds without those features short-circuit (no
+/// encrypted columns can reach this path because the SDK builder is
+/// also gated).
+///
+/// **SQLite scope** (P5 PR 3): the `EncryptedColumn` trait impl on
+/// `SqliteBackend` is wired (env-var key sourcing, env-var-only — no
+/// admin schema), and the integration tests at
+/// `tests/sqlite_integration.rs` pin the trait surface end-to-end. The
+/// full CRUD-layer wiring on SQLite still requires the SQL builder
+/// (`build_insert` / `build_update_*`) to learn SQLite-flavoured BLOB
+/// binding — the current builder emits PG-only `decode($N,
+/// 'base64')::bytea` syntax that SQLite would reject. Until that
+/// builder split lands, the SQLite arm is reachable via the trait
+/// directly (Rust callers) but not via the SDK's CRUD path on SQLite.
+/// Surface a typed Configuration error here so a SQLite app with an
+/// encrypted-column schema fails loud rather than emitting broken SQL.
 #[allow(unused_variables)]
 async fn encryption_pass_dispatch(
     app_id: &str,
@@ -1360,18 +1382,20 @@ async fn encryption_pass_dispatch(
             .await;
         }
     }
-    // No `hardening`-gated PG arm available — encrypted columns
-    // declared in the schema would reach a write site that has no
-    // encryption surface. Surface a typed Configuration error so the
-    // SDK can branch on `.code` rather than silently writing
-    // plaintext to a BYTEA column.
+    // No backend-arm with an `EncryptedColumn` CRUD-path wire available —
+    // encrypted columns declared in the schema would reach a write site
+    // that has no encryption surface (PG without `hardening`) OR that
+    // has the trait but not the SQL builder (SQLite, P5 PR 3 → follow-
+    // up). Surface a typed Configuration error so the SDK can branch
+    // on `.code` rather than silently writing plaintext to a BYTEA/BLOB
+    // column.
     if schema_has_encrypted_columns(schema) {
         return Err(DbError::Configuration {
             code: "column_encryption_unavailable",
             message:
-                "db: column encryption requires the `hardening` Cargo feature on this build"
+                "db: column encryption CRUD path requires the `hardening` Cargo feature on this build"
                     .to_string(),
-            hint: Some("rebuild with `--features hardening`".to_string()),
+            hint: Some("rebuild with `--features hardening` (PG); SQLite CRUD wiring is a follow-up".to_string()),
         });
     }
     Ok(())
