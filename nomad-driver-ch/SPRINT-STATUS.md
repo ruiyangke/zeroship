@@ -22,8 +22,18 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## In progress
 
-- (none)
+- T-8a (deploy artifacts staged) — driver side landed; sandbox-side commit lands in the sandbox worktree under the same sprint header
+  - `scripts/build-binary.sh` produces `dist/nomad-driver-ch` (stripped, CGO_ENABLED=0, `-trimpath`, `-X main.gitSHA=<short-sha>`). Verified reproducible: SHA stable across rebuilds of the same commit.
+  - `scripts/upload-to-gcs.sh <tag>` is a dry-run printer — emits the `gcloud storage cp` invocation but never runs it (cost-control until release pipeline lands).
+  - `cmd/nomad-driver-ch/main.go`: `var gitSHA = "dev"` overridable via `-ldflags="-X main.gitSHA=<sha>"`; `--version` prints `nomad-driver-ch <sha>` and exits 0 before plugins.Serve.
+  - Tests: 63 → 64 PASS (+1 = `TestVersionFlag` exercises default + ldflags-override builds).
+  - Static-link check: `file dist/nomad-driver-ch` → `... statically linked, ... stripped`. Size 19.3 MB (well under the 28 MB sprint upper bound).
+  - Live cluster smoke is T-8b, dispatched separately on explicit OK.
 
 ## Up next
 
-- T-8: Cluster cutover (drop bash wrapper, flip `SANDBOX_TASK_DRIVER=ch_plugin` as the controller default after smoke validation)
+- T-8b: Live cluster cutover. With T-8a artifacts staged:
+  1. Operator runs `scripts/upload-to-gcs.sh v1` output manually to push `nomad-driver-ch.v1` to `gs://suger-dev-zsbx-artifacts/`.
+  2. Provision a worker fleet with `INSTALL_CH_PLUGIN_DRIVER=1` (env var consumed by the sandbox-side `gcp-worker-startup.sh` patch landed in this sprint) — pulls the binary, drops a plugin-dir HCL stanza, sets `SANDBOX_TASK_DRIVER=ch_plugin` on `zsbx-ctl.service`, restarts nomad + controller.
+  3. Run smoke (full snap/wake cycle) end-to-end through the Go plugin.
+  4. On green: drop `nomad-vm-wrapper.sh` from the sandbox crate's scripts and remove the `raw_exec` branch from `nomad_ch.rs::build_nomad_job_json`.
