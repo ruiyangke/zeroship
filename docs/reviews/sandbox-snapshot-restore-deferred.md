@@ -3,9 +3,9 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-24 (cycle r4: B17 CLOSED via wrapper `ch-remote resume` fix; B15 verified PASS on cluster; B14a/B14b CLOSED — wrapper restore branch now exercised end-to-end and tap-state evidence captured; new bug #18 surfaced on slot-reuse, deferred).
+Last updated: 2026-05-24 (cycle r4: B17 CLOSED via `ch-remote resume`, B15 verified PASS on cluster, B14a/B14b CLOSED; C2 + A6b closed in-code; A7 (config.token) + 9 round-r3 findings added; new bug B18 (slot-reuse pubkey) blocks B-SLO stress).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `da220268` (T7 closed: sweep concurrency now real via join_all; A6 closed: persist pub(crate); B16 closed via 0061b96d; A2/A5 already closed prior cycle).
+Branch HEAD at last update: `dec489a1` (B17 closed via wrapper resume; A6b at `2380605e` closes 5 pub fields; C2 at `78320b56` gates persist.delete; T7 at `da220268`; A6 at `d9b95c2e`; B16 at `0061b96d`).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
@@ -68,19 +68,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: most sites emit `{"error":"<human prose>"}` (no `message`); preview sites emit `{"error":<code>,"code":<code>}` (duplicate, no message).
 - **Action**: introduce typed `ErrorEnvelope` helper in `crates/sandbox/src/error_envelope.rs`; replace all `err()` call sites; lock with a unit test per error site.
 
-### [A6b] Pub credential field exposures — 3 more siblings of A5/A6 (CRITICAL, api-surface-r2 + security-r2 + A6-fixer)
-- **Source**: 2026-05-24 api-surface-r2 + security-r2 + A6-fixer flagged identically
-- **Files**: `crates/sandbox/src/lib.rs`
-  - `pub config: SandboxConfig` — `SandboxConfig.token: ApiToken` is the creator-side bearer (`crates/sandbox/src/config.rs:19`). Swap-vulnerable.
-  - `pub database: Option<Arc<Database>>` (line 65) — DSN holds embedded pg password. Swap → exfiltrate per-sandbox state.
-  - `pub snapshot_store / ch_remote / restore_backend` (lib.rs:129-131) — trait objects. Swap to attacker impl → exfiltrate snapshot blobs / hijack restore.
-- **Action**: same shape as A5/A6 — `pub(crate)`-restrict + add `with_config` / `with_database` / `with_snapshot_store` / `with_ch_remote` / `with_restore_backend` builders. Or, since this is now a clear pattern, consider a `pub(crate)`-only struct + a single `AppStateBuilder` (typed-state builder) that gates field visibility entirely. Closes the pattern at the root.
-
-### [C2] (B15 regression) `stop_preserving_state` deletes sealed record unconditionally (CRITICAL, concurrency-r2)
-- **Source**: 2026-05-24 concurrency-r2; first cross-flagged in r2 round
-- **Files**: `crates/sandbox/src/backend/nomad_ch.rs:1160-1168` (vs the `remove_host_dir` gate at line 1119)
-- **Symptom**: B15 fix added a `remove_host_dir: bool` to `stop_inner` that gates the `host_dir` rm at line 1119, but `persist.delete` (line ~1160-1168) still fires unconditionally on every snapshot teardown. Latent bug: bites the moment wake plumbs sealed-record-based key recovery (which the architecture-r1 finding flagged as a gap). For now snapshot wakes don't read the sealed record, so the bug is dormant.
-- **Action**: gate `persist.delete` on the same `remove_host_dir` bool. Add a unit test mirroring `stop_preserving_state_does_not_remove_host_dir` for the persist contract: `stop_preserving_state_does_not_delete_sealed_record`. Will close cleanly once wake → unsealed-record key recovery lands.
+### [A7] `SandboxConfig.token` is `pub` — last credential field exposure (CRITICAL, A6b-fixer spotted)
+- **Source**: 2026-05-24 A6b-fixer report (`2380605e`)
+- **File**: `crates/sandbox/src/config.rs:19` — `pub token: ApiToken` on `SandboxConfig`
+- **Symptom**: with A6b closing the 5 `AppState` fields, the last creator-side credential field that still allows external clobber lives on the embedded `SandboxConfig`. `ApiToken` is the bearer for creator-facing endpoints; swap = bypass-auth.
+- **Action**: same shape as A5/A6/A6b — `pub(crate)`-restrict the field + add `with_token(...)` builder on `SandboxConfig`. Add a setter test mirroring `admin_token_setter_tests`. Migrate any out-of-crate write-sites (likely test-only).
 
 ### [C3] `do_restore_inner` is cancel-unsafe — wedge on future-drop (CRITICAL, concurrency-r2)
 - **Source**: 2026-05-24 concurrency-r2
@@ -105,6 +97,60 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/db.rs:2305` (`update_lessee` — zero callers); `crates/sandbox/src/db.rs:1712-1724` (`update_sandbox_status` never sets `lessee_updated_at`); `crates/sandbox/src/db.rs:2361` (sweep query filter `WHERE lessee_updated_at IS NOT NULL` excludes every real transient row)
 - **Symptom**: §6.1 crash recovery never fires. Under a controller crash mid-Snapshotting/Restoring, the sandbox row is stuck in transient state forever.
 - **Action**: either (a) wire `update_lessee` into every state transition that crosses transient boundaries OR (b) remove the dead code + redesign §6.1 around `updated_at` timestamps with a separate `transient_since` column.
+
+---
+
+## IMPORTANT (round-r3 reviewers — structural decay + T6/T7 regressions)
+
+### [R3-A1] Backend enum masquerades as trait — 4 methods return Err for 2/3 variants (IMPORTANT, arch-r3)
+- **File**: `crates/sandbox/src/backend/mod.rs:166-497`
+- **Symptom**: `Backend` enum has 19 methods; four (`lookup_source_vm_ops`, `teardown_source_for_snapshot`, `restore_from_sealed`, `restore_from_pg_and_sealed`) return `Err("backend X doesn't support …")` for two of three variants. Compile-time-checkable design hole.
+- **Action**: split `SnapshotCapableBackend` trait. Only `NomadCHBackend` implements it. Use `&dyn SnapshotCapableBackend` at call sites that need the surface.
+
+### [R3-A2] `restore_handler` is silently a second NomadCHBackend implementation (IMPORTANT, arch-r3)
+- **File**: `crates/sandbox/src/restore_handler.rs` (full)
+- **Symptom**: restore lifecycle logic lives outside `nomad_ch.rs` despite being nomad-ch-specific. Two seams to keep in sync.
+- **Action**: move the body of `restore_handler::do_restore_inner` into `NomadCHBackend::do_restore_inner` (or a sibling private fn in `nomad_ch.rs`). The HTTP handler in `restore_handler.rs` becomes a thin shim.
+
+### [R3-A3] Wrapper bash should move to Rust sidecar (IMPORTANT, arch-r3; closes W1 structurally)
+- **File**: `crates/sandbox/scripts/nomad-vm-wrapper.sh` (421 LOC bash)
+- **Symptom**: bash does JSON surgery (`sed -i`), cmdline building, and now CH-API polling. Each new feature adds bash. Eventually rewrites in Rust.
+- **Action**: extract a small Rust binary `zsbx-vm-wrapper` (or fold into `zeroship-sandbox` as a subcommand) that handles the per-VM ops. Bash shrinks to `exec zsbx-vm-wrapper "$@"`. Bonus: closes W1 (sed code-exec sink) structurally.
+
+### [R3-A4] `StopDisposition` enum would prevent C2-class bugs (IMPORTANT, arch-r3)
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs` (`stop_inner(_, remove_host_dir: bool)`)
+- **Symptom**: bool flags accumulate (B15 added `remove_host_dir`, C2 reused it; future may add `cleanup_metrics`, `cancel_alloc`, etc.). Bool-soup signature.
+- **Action**: introduce `enum StopDisposition { TearDown, PreserveForSnapshotWake }` (or similar). Methods take the enum; the boolean knobs become exhaustive match arms.
+
+### [R3-Q1] `run_idle_eviction_once` lies about `attempted` on graceful shutdown (CRITICAL, code-quality-r3)
+- **File**: `crates/sandbox/src/sweep.rs:443-446`
+- **Symptom**: `attempted = rows.clone()` is computed BEFORE the chunk loop. Under graceful shutdown (`shutdown.is_shutting_down()` check inside the loop), the function silently lies about which rows it actually tried — contradicts the function's own doc.
+- **Action**: track the actual attempted set during the chunk loop. Return the truthful list. Add a test: `idle_sweep_attempted_reflects_partial_shutdown`.
+
+### [R3-Q2] A6 added infallible `Result<Self, String>` builder signatures (MINOR, code-quality-r3)
+- **File**: `crates/sandbox/src/lib.rs:272` (`with_persistence -> Result<Self, String>`)
+- **Symptom**: `Result<Self, String>` that cannot fail forces in-crate callers to `.expect()` on an infallible operation. Signature smell.
+- **Action**: change to `pub fn with_persistence(self, p: Arc<Persistence>) -> Self`. Future invariants can switch to `Result` when they actually need it. Same shape applies to A6b's 5 new builders — review them.
+
+### [R3-Q3] Stale `alloc_running_timeout_secs: 60` in 11+ test fixtures post-T3 (MINOR, code-quality-r3)
+- **Files**: 11 test fixtures across `crates/sandbox/src/config.rs:744`, `backend/docker.rs:832`, `backend/nomad_ch.rs:3449`, 4 e2e tests; plus A6 newly copy-pasted `60` at `lib.rs:1267,1399`
+- **Symptom**: T3 bumped production default 60→120 but synthetic test fixtures stayed at 60. Not a bug today (fixtures don't exercise the default-loading path) but a noise source for grep-based refactors.
+- **Action**: bulk-update fixture literals 60→120. One-line per fixture. No test logic change.
+
+### [R3-T1] T7 wall-time bound is CI-flaky-prone (IMPORTANT, test-coverage-r3)
+- **File**: `crates/sandbox/src/sweep.rs::sweep_concurrency_is_actually_concurrent`
+- **Symptom**: 200ms ideal, asserted < 500ms. On a loaded CI runner that's still tight; could flake.
+- **Action**: either (a) raise the threshold to 1000ms (still proves concurrency vs 800ms serial floor) OR (b) track `max_in_flight` explicitly (already done in the test's eprintln) and assert on THAT instead of wall-time.
+
+### [R3-T2] A5/A6/A6b builders cover happy/empty only — no fuzz/edge (MINOR, test-coverage-r3)
+- **Files**: `lib.rs::admin_token_setter_tests` + `persist_setter_tests` + new `field_setter_tests`
+- **Symptom**: no all-whitespace, NUL-byte, oversized-input, or fuzz coverage. Edge cases that production input validators usually need to catch.
+- **Action**: add `quickcheck` or `proptest` to `dev-dependencies`; lock builders against pathological inputs (e.g., 1 MB token, NUL-embedded token).
+
+### [R3-T3] Wrapper still zero in-repo coverage despite B17 (CRITICAL, test-coverage-r3)
+- **File**: `crates/sandbox/scripts/nomad-vm-wrapper.sh` (421 LOC bash; B17 closed by editing lines 366-419, no test)
+- **Symptom**: no `shellcheck`, no `bats`, no `bash -n` gate in CI. B17 (and prior B12/B13) were caught at cluster smoke — i.e., $0.50+ per discovery instead of pre-commit.
+- **Action**: add `shellcheck crates/sandbox/scripts/*.sh` to the workspace CI. Optionally add `bats` smoke tests that exercise the wrapper's path-handling without spawning CH.
 
 ---
 
@@ -133,8 +179,8 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ## IMPORTANT (Phase B follow-ups; blocked on #14 closing)
 
 ### [B-SLO] 5-worker × 20-cycle SLO empirical validation
-- **Blocked-by**: B14a + B14b
-- **Action**: once smoke wake ≥ 3/4, scale to 3+5 + run cluster stress; capture create / snapshot / wake / post-exec / stop p50/p95/p99/max; compare wake p50 to 4243ms cold-boot baseline (§ 10.2 SLO targets: p50 ≤ 1.0s; p95 ≤ 1.5s; p99 ≤ 2.0s; p99.9 ≤ 6.0s).
+- **Blocked-by**: **B18** (slot-reuse pubkey 401 — blocks scale past ~6 cycles per worker). B14a/B14b/B17 all closed.
+- **Action**: close B18 first. Then scale to 3+5 + run cluster stress; capture create / snapshot / wake / post-exec / stop p50/p95/p99/max; compare wake p50 (this cycle measured 9.5s on c=1 single-cycle) to 4243ms cold-boot baseline (§ 10.2 SLO targets: p50 ≤ 1.0s; p95 ≤ 1.5s; p99 ≤ 2.0s; p99.9 ≤ 6.0s). Note: 9.5s p50 is FAR worse than the 1.0s target — likely improvable once A3 (sync I/O on compio worker) closes; document the gap when stress lands.
 
 ---
 
