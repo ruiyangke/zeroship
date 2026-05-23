@@ -273,33 +273,28 @@ func SetShutdownForTest(fn func(c *Client, socketPath string) error) func(*Clien
 	return prev
 }
 
-// removeTapFn is the package-level seam for `ip link delete <tap>`. Default
-// shells to /sbin/ip; tests override to a recorder.
-var removeTapFn = removeTapDefault
+// removeTapFn is the package-level seam for tap teardown. Retained as a
+// thin alias over teardownTapFn (T-3) so the existing stop_task.go call
+// site and the SetRemoveTapForTest test API don't churn. T-3 owns the
+// underlying impl in net.go.
+//
+// Reads and writes here MUST funnel through teardownTapFn under the hood
+// so a test that sets one seam doesn't silently bypass the other.
+var removeTapFn = func(tapName string) error {
+	return teardownTap(tapName)
+}
 
 // SetRemoveTapForTest replaces the tap-down seam. Returns the previous fn.
+// Today this is the SAME seam as SetTeardownTapForTest, just under the
+// historical name the T-2 tests use. New tests should prefer
+// SetTeardownTapForTest; this one is preserved verbatim so the T-2 suite
+// still drives the same code path.
 func SetRemoveTapForTest(fn func(tapName string) error) func(string) error {
 	prev := removeTapFn
 	if fn != nil {
 		removeTapFn = fn
 	}
 	return prev
-}
-
-// removeTapDefault is the production implementation: shell to
-// `ip link delete <tap>`. Best-effort — if the device is already gone the
-// command's stderr is "Cannot find device", which we surface as a non-fatal
-// note. Caller (DestroyTask cleanup) treats any error as advisory.
-func removeTapDefault(tapName string) error {
-	if tapName == "" {
-		return errors.New("empty tap name")
-	}
-	cmd := exec.Command("ip", "link", "delete", tapName)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ip link delete %s: %w (output=%q)", tapName, err, string(out))
-	}
-	return nil
 }
 
 // VMInfo is the decoded shape of CH's `GET /api/v1/vm.info` payload. Only

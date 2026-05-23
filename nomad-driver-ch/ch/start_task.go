@@ -143,16 +143,32 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	//   MAC=12:34:56:78:9b:${VMIndex hex}
 	tapName, netSpec := resolveNet(&driverConfig)
 
-	// Tap re-up. The wrapper requires the tap to be pre-created; this
-	// driver inherits the same expectation (T-3 owns deeper provisioning).
-	// `ip link set up` is idempotent; failure is non-fatal here because
-	// the operator may be running on a host where the tap is brought up
-	// by a separate systemd unit and the process is non-root.
-	if err := ensureTapUp(tapName); err != nil {
-		// Tap setup failure is FATAL in the wrapper. We mirror that.
-		// T-3 will replace this with rtnetlink + auto-creation; today
-		// the message tells the operator to check the host setup script.
-		return nil, nil, fmt.Errorf("ch: StartTask: tap %s not ready: %w", tapName, err)
+	// Tap setup (T-3). Replaces T-1's "expect the operator pre-created
+	// the tap" stub with a full per-VM /30 host-side plumbing:
+	//   ip tuntap add dev <tap> mode tap user nobody
+	//   ip addr add  <host_ip>/30 dev <tap>
+	//   ip link set  dev <tap> up
+	// Idempotent on each step — a Nomad-client restart that left a tap
+	// behind doesn't fail StartTask. Operator-supplied Net entries
+	// short-circuit to the legacy "operator owns the tap, we just bring
+	// it up" path so an externally-managed network config still works.
+	if len(driverConfig.Net) > 0 {
+		// Operator provided an explicit Net entry — trust them. Best-
+		// effort up-the-link (the tap may already be up; ip link set is
+		// idempotent). Failure is FATAL: an operator-pinned tap that
+		// isn't routable is a configuration bug we want surfaced in the
+		// task log, not silently smoothed over.
+		if err := ensureTapUp(tapName); err != nil {
+			return nil, nil, fmt.Errorf("ch: StartTask: tap %s not ready: %w", tapName, err)
+		}
+	} else {
+		base := uint8(driverConfig.SubnetBaseOctet)
+		if driverConfig.SubnetBaseOctet == 0 {
+			base = defaultSubnetBaseOctet
+		}
+		if _, err := setupTapForVM(driverConfig.VMIndex, base); err != nil {
+			return nil, nil, fmt.Errorf("ch: StartTask: setup tap for vm_index=%d: %w", driverConfig.VMIndex, err)
+		}
 	}
 
 	// Build the kernel cmdline. If the operator already supplied one,

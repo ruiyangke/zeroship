@@ -10,6 +10,7 @@ Auto-maintained by the 10-minute cron + sprint fixers.
   - `9f1a7e49` — `nomad-driver-ch: cmd/main.go go-plugin entry point (T-0.5 part 2)`
 - [x] T-1 (StartTask cold-boot CH spawn) — `6a8d2fcf` (`nomad-driver-ch/start_task: implement cold-boot CH spawn (T-1)`)
 - [x] T-2 (graceful stop ladder + DestroyTask + SignalTask) — `dd017c23` (`nomad-driver-ch/stop_task: graceful-stop ladder (T-2)`)
+- [x] T-3 (per-VM /30 tap setup + teardown) — `31e05a3c` (`nomad-driver-ch/start_task,stop_task: per-VM /30 tap setup + teardown (T-3)`)
 
 ## In progress
 
@@ -17,4 +18,4 @@ Auto-maintained by the 10-minute cron + sprint fixers.
 
 ## Up next
 
-- T-3: per-VM /30 tap network plumbing (new file `ch/net.go` or split into `ch/net/`)
+- T-4: RecoverTask (re-attach to running CH after Nomad-client restart; persists TaskState round-trip; pid liveness + ch.sock probe)

@@ -63,3 +63,42 @@ func SetEnsureTapUpForTest(fn func(tapName string) error) func(string) error {
 	}
 	return prev
 }
+
+// ComputeTapAddresses is the test entry point for the per-VM /30 subnet
+// arithmetic in net.go. Pure function; tests can pin the layout without
+// invoking StartTask or shelling to `ip`.
+//
+// Returns (tapName, hostIP, guestIP, subnet, err). See computeTapAddresses
+// for the contract.
+func ComputeTapAddresses(idx uint16, subnetBaseOctet uint8) (string, string, string, string, error) {
+	return computeTapAddresses(idx, subnetBaseOctet)
+}
+
+// SetRunIPForTest swaps the `ip` exec seam in net.go so tests can drive
+// realSetupTap / realTeardownTap with fake stderr shapes — exercising the
+// idempotency branches without root. Returns the previous fn.
+//
+// The fn receives the argv (minus the leading "ip") and must return
+// (combined-output, exec-error). To simulate `ip` exiting non-zero,
+// return a non-nil error; the stderr-pattern matcher then inspects the
+// returned bytes.
+func SetRunIPForTest(fn func(args ...string) ([]byte, error)) func(...string) ([]byte, error) {
+	prev := runIP
+	if fn != nil {
+		runIP = fn
+	}
+	return prev
+}
+
+// CallRealSetupTap drives the production setup path with the seam'd `ip`
+// command for testing. Bypasses setupTapFn so tests can exercise
+// realSetupTap's branching directly without re-implementing it.
+func CallRealSetupTap(idx uint16, subnetBaseOctet uint8) (string, error) {
+	return realSetupTap(idx, subnetBaseOctet)
+}
+
+// CallRealTeardownTap is the test entry point for realTeardownTap. See
+// CallRealSetupTap.
+func CallRealTeardownTap(tapName string) error {
+	return realTeardownTap(tapName)
+}
