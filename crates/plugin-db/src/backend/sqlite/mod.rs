@@ -50,6 +50,13 @@ pub(crate) mod dialect;
 pub(crate) mod error;
 pub(crate) mod lock;
 pub(crate) mod session;
+// P3 PR 3: SQLite-side `SessionMinter` helpers — HMAC-SHA256 +
+// bounded LRU nonce cache. The `impl SessionMinter for
+// SqliteBackend` block lives at the bottom of THIS file (mirrors
+// the AuditWriter/IndexBuilder convention); the helpers live in
+// `session_minter.rs` so the cryptography stays out of the
+// orchestration body.
+pub(crate) mod session_minter;
 // `fk_parse` was lifted out of this cfg-gated subtree in P1 PR 5 — the
 // cross-app FK check applies on BOTH backends (PG and SQLite) so it
 // lives at `crate::cross_app_fk` and is compiled unconditionally. The
@@ -104,6 +111,23 @@ pub struct SqliteBackend {
     /// `Drop` cancels the task per the `async-task` contract (see
     /// `async_task::Task` rustdoc).
     _publisher: compio::runtime::JoinHandle<()>,
+    /// **P3 PR 3** — active HMAC secret for the `SessionMinter`
+    /// trait impl. `None` if `ZEROSHIP_SESSION_SECRET` wasn't set
+    /// at `new()` time; in that case `mint_session_token` /
+    /// `init_session` fail with
+    /// `DbError::Configuration { code: "not_configured" }` on
+    /// first use (lazy failure — see plan §11 Q-P3-H).
+    minter_secret: Option<Vec<u8>>,
+    /// **P3 PR 3** — previous-generation HMAC secret for the
+    /// rotation grace window. `None` if `ZEROSHIP_SESSION_SECRET_PREV`
+    /// isn't set. When `Some`, `verify_signature` always evaluates
+    /// both keys (no short-circuit) so timing leaks neither.
+    minter_secret_prev: Option<Vec<u8>>,
+    /// **P3 PR 3** — bounded LRU cache for nonce-replay detection.
+    /// `Rc<RefCell<…>>` because the trait impl mutates it through
+    /// an `&self` receiver. Single-threaded per worker, no atomics
+    /// needed.
+    nonce_cache: Rc<RefCell<session_minter::NonceCache>>,
 }
 
 impl std::fmt::Debug for SqliteBackend {
@@ -202,12 +226,73 @@ impl SqliteBackend {
         // commit veto).
         let _publisher = cdc::spawn_publisher(session.clone(), packet_rx);
 
+        // **P3 PR 3** — SessionMinter env-var read. Missing
+        // `ZEROSHIP_SESSION_SECRET` is NOT a `new()` failure: a
+        // backend without an auth secret can still serve plain
+        // DB ops. The lazy failure (`code: "not_configured"`)
+        // surfaces on first `mint_session_token` / `init_session`
+        // call. The `nonce_capacity` env override only applies
+        // when the secret IS set; otherwise we provision the
+        // default-capacity cache (cheap — empty `VecDeque`).
+        let (minter_secret, minter_secret_prev, nonce_capacity) =
+            match session_minter::SqliteSessionMinterConfig::from_env() {
+                Ok(cfg) => (Some(cfg.secret), cfg.secret_prev, cfg.nonce_capacity),
+                Err(_) => (None, None, session_minter::DEFAULT_NONCE_CAPACITY),
+            };
+        let nonce_cache = session_minter::NonceCache::new_shared(nonce_capacity);
+
         Ok(Self {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
             _publisher,
+            minter_secret,
+            minter_secret_prev,
+            nonce_cache,
+        })
+    }
+
+    /// **P3 PR 3 test helper** — construct a backend with the
+    /// HMAC secret(s) supplied explicitly, bypassing the env-var
+    /// read. Used by deterministic fixtures (
+    /// `tests/sqlite_integration.rs` session_*` tests, the
+    /// cross-backend equivalence test). Nonce-cache capacity
+    /// defaults to [`session_minter::DEFAULT_NONCE_CAPACITY`].
+    ///
+    /// Gated to `#[cfg(any(test, feature = "test-helpers"))]` so
+    /// the production binary doesn't carry the explicit-secret
+    /// entry point — production paths must route through env vars
+    /// so the secret bytes don't enter the crate's public API.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn new_with_secrets(
+        db_dir: PathBuf,
+        secret: Vec<u8>,
+        secret_prev: Option<Vec<u8>>,
+    ) -> Result<Self, DbError> {
+        let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
+
+        let session_path = db_dir.join("zs-control.sqlite");
+        let session = Rc::new(SqliteSession::open(
+            &session_path,
+            None,
+            Some(packet_tx),
+        )?);
+
+        let _publisher = cdc::spawn_publisher(session.clone(), packet_rx);
+
+        let nonce_cache =
+            session_minter::NonceCache::new_shared(session_minter::DEFAULT_NONCE_CAPACITY);
+
+        Ok(Self {
+            session,
+            lock_registry: Rc::new(InProcessLockRegistry::new()),
+            db_dir,
+            app_id_cache: RefCell::new(HashSet::new()),
+            _publisher,
+            minter_secret: Some(secret),
+            minter_secret_prev: secret_prev,
+            nonce_cache,
         })
     }
 }
@@ -939,6 +1024,183 @@ impl DialectBuilder for SqliteBackend {
 // without any further per-trait wiring.
 impl Backend for SqliteBackend {}
 
+// ---------------------------------------------------------------------------
+// P3 PR 3 — `SessionMinter` impl
+// ---------------------------------------------------------------------------
+//
+// SQLite session-minter: in-memory HMAC-SHA256 + bounded LRU
+// nonce cache, no persistent state. Both methods share the
+// `canonical_payload` format with PG so cross-backend equivalence
+// is byte-for-byte (pinned by PR 4).
+//
+// The cryptography and replay-detection lives in
+// `session_minter.rs`; this block is pure orchestration:
+//   - `mint_session_token`: nonce gen → payload build → HMAC.
+//   - `init_session`: 5 checks (expiry, actor_kind, nonce length,
+//     replay, signature) in PG-matched order.
+
+impl crate::backend::SessionMinter for SqliteBackend {
+    async fn mint_session_token(
+        &self,
+        init: crate::backend::SessionInit,
+        ttl_secs: Option<i64>,
+    ) -> Result<crate::backend::MintedToken, DbError> {
+        // Secret is required at mint time — lazy failure per plan
+        // §11 Q-P3-H. A backend booted without
+        // `ZEROSHIP_SESSION_SECRET` set still serves plain DB
+        // ops; only the SessionMinter surface is degraded.
+        let secret = self.minter_secret.as_ref().ok_or_else(|| DbError::Configuration {
+            code: "not_configured",
+            message: "SQLite SessionMinter not configured (set ZEROSHIP_SESSION_SECRET)"
+                .into(),
+            hint: Some(
+                "Generate a 32-byte hex secret with `openssl rand -hex 32` and \
+                 export it as ZEROSHIP_SESSION_SECRET."
+                    .into(),
+            ),
+        })?;
+
+        let ttl = ttl_secs.unwrap_or(crate::auth::util::DEFAULT_TOKEN_TTL_SECS);
+
+        // 32-byte nonce. `/dev/urandom` preferred; the
+        // time-perturbed fallback in `getrandom_or_fallback`
+        // logs a warning on misses — production deployments
+        // notice if entropy goes missing.
+        let mut nonce = vec![0u8; 32];
+        crate::auth::util::getrandom_or_fallback(&mut nonce);
+
+        let expires_at_iso = crate::auth::util::iso_timestamp_after(ttl);
+
+        // Canonical payload: byte-for-byte equivalent to PG's
+        // `__zeroship_admin.sign_session` body. Empty
+        // `actor_id` / `pid` mirror PG's `COALESCE(..., '')`
+        // (actor_id) / the `init.pid.as_deref().unwrap_or("")`
+        // contract for the new `pid` field.
+        let payload = session_minter::canonical_payload(
+            &init.actor_kind,
+            init.actor_id.as_deref().unwrap_or(""),
+            init.pid.as_deref().unwrap_or(""),
+            &nonce,
+            &expires_at_iso,
+        );
+
+        let signature = session_minter::compute_signature(secret, &payload);
+
+        Ok(crate::backend::MintedToken {
+            app_id: init.app_id,
+            actor_kind: init.actor_kind,
+            actor_id: init.actor_id,
+            pid: init.pid,
+            // SQLite has no PG-style backend PID. Always 0 per
+            // the cross-backend `MintedToken` contract — PG uses
+            // this for SECURITY DEFINER `p_pid`; SQLite binds
+            // via `pid` instead.
+            backend_pid: 0,
+            nonce,
+            expires_at_iso,
+            signature,
+        })
+    }
+
+    async fn init_session(
+        &self,
+        token: &crate::backend::MintedToken,
+    ) -> Result<(), DbError> {
+        // Secret required at verify time too. Same lazy-failure
+        // contract as `mint_session_token`.
+        let secret = self.minter_secret.as_ref().ok_or_else(|| DbError::Configuration {
+            code: "not_configured",
+            message: "SQLite SessionMinter not configured (set ZEROSHIP_SESSION_SECRET)"
+                .into(),
+            hint: None,
+        })?;
+
+        // -- Step 1: expiry. The signed payload includes
+        // `expires_at_iso`, so any tamper would fail signature
+        // verify — but we check expiry FIRST because an expired
+        // legitimate token shouldn't even reach the HMAC path.
+        // The 5 reject codes match PG's SECURITY DEFINER
+        // `init_session` DETAIL tags 1-for-1.
+        let exp_ms = session_minter::parse_iso_to_millis(&token.expires_at_iso)
+            .ok_or_else(|| {
+                DbError::validation(
+                    "session_invalid_signature",
+                    "malformed expires_at in token",
+                )
+            })?;
+        let now_ms = session_minter::current_unix_millis();
+        if exp_ms < now_ms {
+            return Err(DbError::validation(
+                "session_signature_expired",
+                "session-init signature expired",
+            ));
+        }
+
+        // -- Step 2: actor_kind allowlist. The allowlist matches
+        // the PG SECURITY DEFINER `init_session` literal list
+        // (`auth/bootstrap.rs::install_init_session_function`):
+        // `('auto','user','operator','ai-builder','platform')`.
+        const ALLOWED_ACTOR_KINDS: [&str; 5] =
+            ["auto", "user", "operator", "ai-builder", "platform"];
+        if !ALLOWED_ACTOR_KINDS.contains(&token.actor_kind.as_str()) {
+            return Err(DbError::validation(
+                "session_invalid_actor_kind",
+                format!("invalid actor_kind: {}", token.actor_kind),
+            ));
+        }
+
+        // -- Step 3: nonce length. PG checks
+        // `octet_length(p_nonce) < 16`. The `getrandom_or_fallback`
+        // path always produces 32 bytes; this guards against
+        // hand-crafted forgeries with a too-short nonce.
+        if token.nonce.len() < 16 {
+            return Err(DbError::validation(
+                "session_nonce_too_short",
+                "nonce too short (need >=16 bytes)",
+            ));
+        }
+
+        // -- Step 4: nonce replay. Inserted BEFORE the HMAC
+        // verify so a forged token doesn't fill the cache more
+        // cheaply than a real one — same ordering as the PG
+        // SECURITY DEFINER (the INSERT INTO session_nonces
+        // happens before the verify_signature call).
+        self.nonce_cache
+            .borrow_mut()
+            .insert_if_fresh(&token.nonce, exp_ms)?;
+
+        // -- Step 5: HMAC verify. Constant-time. When
+        // `minter_secret_prev` is `Some(...)`, BOTH branches
+        // always run — `verify_signature` is structured so the
+        // wall-clock time doesn't reveal which key matched.
+        let payload = session_minter::canonical_payload(
+            &token.actor_kind,
+            token.actor_id.as_deref().unwrap_or(""),
+            token.pid.as_deref().unwrap_or(""),
+            &token.nonce,
+            &token.expires_at_iso,
+        );
+        let ok = session_minter::verify_signature(
+            secret,
+            self.minter_secret_prev.as_deref(),
+            &payload,
+            &token.signature,
+        );
+        if !ok {
+            return Err(DbError::validation(
+                "session_invalid_signature",
+                "invalid session-init signature",
+            ));
+        }
+
+        // SQLite has no `session_ctx` table — there is no per-PID
+        // session-context concept here. Downstream audit-write
+        // paths (when ported to SQLite) bind context through the
+        // session actor's per-call state instead.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Compile-time trait-shape assertions, mirroring the PR-0 set
@@ -1006,6 +1268,14 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
+    /// P3 PR 3: `SessionMinter` capability — pin the SQLite-arm
+    /// impl wire so a future refactor that detaches the trait-impl
+    /// block fails compilation here.
+    fn assert_sqlite_backend_impls_session_minter() {
+        fn assert_impl<T: crate::backend::SessionMinter>() {}
+        assert_impl::<SqliteBackend>();
+    }
+
     /// P2 PR 1: pin the SQLite-arm [`ChangeStream`] adapter
     /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
     /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
@@ -1045,6 +1315,7 @@ mod tests {
         let _ = assert_sqlite_backend_impls_index_builder as fn();
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
         let _ = assert_sqlite_backend_impls_audit_writer as fn();
+        let _ = assert_sqlite_backend_impls_session_minter as fn();
         let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();
