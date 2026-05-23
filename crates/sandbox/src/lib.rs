@@ -68,7 +68,22 @@ pub struct AppState {
     /// `None` mirrors the pre-fix disabled shape — the handle exists
     /// only when `SANDBOX_PERSIST_AUTH=1` was set and a key file is
     /// readable.
-    pub persist: Option<Arc<Persistence>>,
+    ///
+    /// A6 (api-surface-2026-05-24-r1): restricted to `pub(crate)` so
+    /// no out-of-crate caller can swap the handle for an attacker-
+    /// controlled `Persistence` carrying a different AEAD key. The
+    /// concrete attack: a hostile in-process caller plants a
+    /// `Persistence` whose `aead_key` is one the attacker knows, then
+    /// waits for the controller to seal a sandbox's signing key under
+    /// the planted key — disk read of the sealed file then yields the
+    /// signing key in clear. Tests and other in-crate constructors
+    /// set the field via the safe [`AppState::with_persistence`]
+    /// builder. The builder is a thin wrapper (no runtime check —
+    /// `Persistence` has no in-memory "is valid" beyond construction,
+    /// which `AeadKey::from_path` already enforces); the point is to
+    /// be the single legal write path, so the `state.persist =
+    /// attacker_handle` swap stops compiling out-of-crate.
+    pub(crate) persist: Option<Arc<Persistence>>,
     /// Round-1 fixer / IMPORTANT #8: graceful-shutdown flag observed
     /// by the periodic background tasks (heartbeat, takeover-scan,
     /// health-probe). [`AppState::trigger_shutdown`] flips this to
@@ -197,6 +212,59 @@ impl AppState {
     /// `pub(crate)` field.
     pub fn admin_token(&self) -> Option<&str> {
         self.admin_token.as_deref().map(|z| z.as_str())
+    }
+
+    /// A6 (api-surface-2026-05-24-r1): safe builder for `persist`.
+    /// The field is `pub(crate)` (see the `AppState::persist` doc
+    /// comment for the threat model — a planted `Persistence` with
+    /// an attacker-known AEAD key lets a later disk read recover
+    /// per-sandbox signing keys in clear). External callers must go
+    /// through this builder.
+    ///
+    /// The validation surface is intentionally thin: `Persistence`
+    /// has no in-memory "is valid" beyond construction. The
+    /// `AeadKey` length and key-file mode are already enforced
+    /// inside `AeadKey::from_path` / `AeadKey::from_bytes`; the
+    /// sealed-records dir is created on first seal. So unlike
+    /// [`AppState::with_admin_token`] (which has a real
+    /// empty-string footgun to reject), this builder is a thin
+    /// wrapper that exists for parity — it's the only legal way
+    /// for out-of-crate code to set `persist`, which closes the
+    /// `state.persist = …` swap path without requiring any new
+    /// runtime check.
+    ///
+    /// Returning `Result<_, String>` rather than `Self` is
+    /// deliberate symmetry: future invariants (e.g. dir-writability
+    /// probes, AEAD-key liveness pings) can be added without a
+    /// signature break.
+    ///
+    /// Semantics:
+    ///   - `with_persistence(p)` → `Ok(self)` with the field set
+    ///     to `Some(p)`. Replaces any prior value.
+    pub fn with_persistence(
+        mut self,
+        persist: Arc<Persistence>,
+    ) -> Result<Self, String> {
+        self.persist = Some(persist);
+        Ok(self)
+    }
+
+    /// Read-only accessor for the sealed-record persistence handle.
+    /// Mainly here so integration tests can assert wiring without
+    /// poking the `pub(crate)` field. The returned `&Arc` is a
+    /// borrow; callers wanting an owned clone go through `.clone()`
+    /// on the `Arc`, NOT through field access.
+    ///
+    /// `#[allow(dead_code)]`: today the in-crate uses access
+    /// `self.persist` directly (they were written before this
+    /// helper landed). The accessor exists for the in-crate
+    /// `persist_setter_tests` and as the canonical read path for
+    /// future code; widening to `pub` would let out-of-crate tests
+    /// assert wiring the same way `admin_token()` does, but the A6
+    /// task spec pinned this to `pub(crate)`.
+    #[allow(dead_code)]
+    pub(crate) fn persist(&self) -> Option<&Arc<Persistence>> {
+        self.persist.as_ref()
     }
 
     /// A5 (api-surface-2026-05-24-r1): public fixture constructor
@@ -1266,6 +1334,149 @@ mod admin_token_setter_tests {
             Err(e) => panic!("None clears unconditionally: {e}"),
         };
         assert!(state.admin_token().is_none(), "None must clear the field");
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// A6 (api-surface-2026-05-24-r1) — `AppState::with_persistence`
+// builder semantics. Mirrors the A5 admin-token tests above. The
+// field is `pub(crate)` so out-of-crate callers must route the
+// `Arc<Persistence>` through the builder; these tests assert that
+// the builder accepts the handle and that a subsequent call
+// replaces the previous one (so a re-wired test fixture doesn't
+// silently keep a stale persist).
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod persist_setter_tests {
+    use super::*;
+    use crate::backend::Backend;
+    use crate::config::{ApiToken, K8sConfig, NomadCHConfig, SandboxConfig};
+    use crate::persist::{AeadKey, Persistence};
+
+    /// Minimal config that satisfies `Backend::from_config` for the
+    /// nomad-ch backend WITHOUT touching the network. Mirrors the
+    /// fixture in `admin_token_setter_tests` — duplicated rather
+    /// than shared so each test module's helpers stay self-contained
+    /// (the alternative was widening `min_cfg` to `pub(super)`,
+    /// which leaks a test-only contract into the parent mod).
+    fn min_cfg() -> SandboxConfig {
+        SandboxConfig {
+            port: 9091,
+            token: ApiToken::new("ignored-creator-token"),
+            backend: "nomad-ch".into(),
+            image: "img".into(),
+            workspace_root: std::path::PathBuf::from("/var/zeroship/projects"),
+            network: "n".into(),
+            memory_mb: 1024,
+            cpus: 2.0,
+            idle_timeout_secs: 1800,
+            max_lifetime_secs: 28800,
+            auto_pull: false,
+            k8s: K8sConfig {
+                namespace: "default".into(),
+                image: "i".into(),
+                runtime_class: "kvm-sandbox".into(),
+                ready_timeout_secs: 120,
+                use_port_forward: false,
+                port_forward_start: 18000,
+                user_home_size: "5Gi".into(),
+                user_home_storage_class: None,
+                startup_orphan_cleanup: false,
+            },
+            nomad_ch: NomadCHConfig {
+                nomad_addr: "http://127.0.0.1:4646".into(),
+                datacenter: "dc1".into(),
+                wrapper_path: std::path::PathBuf::from(
+                    "/etc/zeroship/nomad-vm-wrapper.sh",
+                ),
+                runtime_dir: std::path::PathBuf::from("/var/lib/zeroship/ch"),
+                host_state_dir: std::path::PathBuf::from("/var/zeroship/ch"),
+                user_home_dir_root: std::path::PathBuf::from(
+                    "/var/zeroship/ch/users",
+                ),
+                vm_index_floor: 1,
+                vm_index_ceil: 200,
+                alloc_running_timeout_secs: 60,
+                agent_livez_timeout_secs: 30,
+                host_fence_timeout_secs: 30,
+                startup_orphan_cleanup: false,
+                subnet_second_octet: 99,
+            },
+            create_retry_max: 2,
+            create_retry_total_timeout_secs: 90,
+            snapshot_enabled: false,
+            snapshot_l1_root: std::path::PathBuf::from(
+                "/var/zeroship/ch/snapshots",
+            ),
+            snapshot_use_gcs: false,
+            snapshot_gcs_bucket: None,
+            snapshot_root_kek_path: None,
+            workspace_image_size_gb: 20,
+        }
+    }
+
+    fn min_state() -> AppState {
+        let cfg = min_cfg();
+        let backend = Backend::from_config(&cfg).expect("backend");
+        AppState::new_fixture(cfg, backend)
+    }
+
+    /// Build a fresh `Arc<Persistence>` against a unique temp dir so
+    /// the two tests don't share filesystem state.
+    fn fresh_persist(label: &str) -> Arc<Persistence> {
+        let dir = std::env::temp_dir().join(format!(
+            "zsbx-persist-setter-{label}-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir tmpdir");
+        // 32 bytes of constant noise — `AeadKey::from_bytes` requires
+        // exactly AEAD_KEY_LEN; the cipher doesn't care about the
+        // distribution for a unit test that never decrypts.
+        let aead = AeadKey::from_bytes([0x5Au8; 32]);
+        Arc::new(Persistence::new(dir, aead))
+    }
+
+    #[test]
+    fn with_persistence_accepts_arc() {
+        let state = min_state();
+        assert!(
+            state.persist().is_none(),
+            "fixture must start with persist = None"
+        );
+        let p = fresh_persist("accepts");
+        let state = state
+            .with_persistence(p.clone())
+            .expect("builder accepts Arc<Persistence>");
+        let stored = state.persist().expect("field populated");
+        assert!(
+            Arc::ptr_eq(stored, &p),
+            "stored handle must be the same Arc the builder received"
+        );
+    }
+
+    #[test]
+    fn with_persistence_replaces_existing() {
+        // Two distinct handles → second call wins. Without this,
+        // a test that re-wires a fixture could silently retain the
+        // first handle and seal under the wrong key.
+        let state = min_state();
+        let first = fresh_persist("replaces-first");
+        let second = fresh_persist("replaces-second");
+        let state = state
+            .with_persistence(first.clone())
+            .expect("first call");
+        let state = state
+            .with_persistence(second.clone())
+            .expect("second call");
+        let stored = state.persist().expect("field populated");
+        assert!(
+            !Arc::ptr_eq(stored, &first),
+            "second call must overwrite the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(stored, &second),
+            "stored handle must be the second Arc"
+        );
     }
 }
 
