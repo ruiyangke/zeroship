@@ -567,9 +567,11 @@ out of the box — see [`docs/runbooks/docker-compose.md`](../runbooks/docker-co
 for the operator-action runbook.
 
 On SQLite (dev/sandbox/test only) FTS5 is in the bundled build, so
-there is no extra setup. Vector / geo use pure-Rust flat scans (no C
-extension dependency, no `bundled` fork) — see "Backend coverage"
-below for the dev-scale ceiling.
+there is no extra setup. Vector search routes through the
+`sqlite-vec` extension (statically compiled via the `sqlite-vec`
+Rust crate — no `.so` shipping, no amalgamation fork; the bundled
+SQLite invariant is preserved). Geo search uses a pure-Rust haversine
+flat scan — see "Backend coverage" below for the dev-scale ceiling.
 
 ### Vector search
 
@@ -613,9 +615,10 @@ const { data, error } = await db.docs.search({
 
 `_distance` is a synthetic column the row carries back from the scan.
 On PG this is `col <-> $query` (pgvector's distance operator
-specialised to the metric). On SQLite this is the per-row distance
-computed by the Rust flat scan (`bytemuck::cast_slice` over the
-column's `BLOB`).
+specialised to the metric). On SQLite this is the distance reported
+by the `sqlite-vec` `vec0` virtual table — the `MATCH` operator
+returns rows joined back to the base collection by `rowid`, with
+`v.distance` aliased as `_distance`.
 
 ### Full-text search
 
@@ -714,12 +717,19 @@ production-scale geo workload.
 
 - **PG vector** — `pgvector` `ivfflat` index built CONCURRENTLY.
   Production-grade; scales to millions of rows.
-- **SQLite vector** — pure-Rust flat scan over a `BLOB` column
-  (`bytemuck::cast_slice` to `&[f32]`; `cosine_distance` /
-  `l2_distance` / `neg_inner_product` in ~50 LOC). **Dev/sandbox/
-  test only.** Degrades past ~50k rows; an HNSW / `sqlite-vec`
-  backend is deferred (see `docs/proposals/db-system-design.md` §4
-  row 7 amendment).
+- **SQLite vector** — `sqlite-vec` `vec0` virtual table, statically
+  compiled into the binary via the `sqlite-vec` Rust crate (no `.so`
+  shipping; the bundled-SQLite invariant is preserved). SIMD distance
+  + native dimension validation + `MATCH` query operator. The base
+  collection keeps a `BLOB` column for the vector payload; AFTER
+  triggers mirror writes into the `<collection>__vec_<column>` vec0
+  vtable so reads can JOIN base ⟷ vec0 on `rowid` and rank by
+  `MATCH` distance. Metric is pinned at vtable-creation time
+  (`distance_metric=cosine|l2`); **inner product is not supported on
+  SQLite** — vec0 supports cosine + L2 only, and `metric:
+  "inner_product"` surfaces as a typed `vector_unsupported_metric`
+  error. Use PG (pgvector `vector_ip_ops`) for production inner-
+  product workloads.
 - **PG FTS** — hidden `tsvector` column + GIN; `plainto_tsquery` with
   the language passed at schema time.
 - **SQLite FTS** — FTS5 external-content vtable + AFTER triggers; the

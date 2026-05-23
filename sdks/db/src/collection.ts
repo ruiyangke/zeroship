@@ -1218,8 +1218,11 @@ export class Collection<
    *   `ivfflat` index on the column.
    * - **PG text** — routes through `FullTextIndex::fts_search`
    *   (tsvector + GIN, language from `.fts(language)`).
-   * - **SQLite vector** — pure-Rust flat scan (`bytemuck::cast_slice` over
-   *   `BLOB`). Dev-tier only — degrades past ~50k rows.
+   * - **SQLite vector** — `sqlite-vec` `vec0` virtual table
+   *   (statically compiled via the `sqlite-vec` Rust crate; no `.so`
+   *   shipping). Dev-tier only. `metric: "inner_product"` is not
+   *   supported on SQLite — vec0 supports `cosine` + `l2` only;
+   *   inner-product workloads run on PG (pgvector `vector_ip_ops`).
    * - **SQLite text** — FTS5 virtual table with the bundled
    *   language-agnostic Unicode tokenizer (the `language` argument is
    *   ignored).

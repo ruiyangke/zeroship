@@ -2365,24 +2365,25 @@ fn session_canonical_payload_byte_pin() {
 }
 
 // ---------------------------------------------------------------------------
-// P4 PR 4 — SQLite VectorIndex (pure-Rust flat scan) integration tests.
+// P4 PR 7 — SQLite VectorIndex (`sqlite-vec` `vec0` virtual table)
+// integration tests.
+//
+// Supersedes the P4 PR 4 pure-Rust flat scan tests at the same point
+// in this file (see `docs/proposals/p4-search-implementation-plan.md`
+// §10 2026-05-24 reassessment). The membership-set assertions are
+// preserved byte-for-byte; only the underlying storage layer changed.
 //
 // Mirrors the PG arm's `vector_search_returns_k_nearest` /
 // `vector_dimension_mismatch_rejected_at_insert` /
 // `vector_search_respects_filter` structurally so a reviewer can
-// diff the two suites side-by-side as the SQLite arm grows.
+// diff the two suites side-by-side.
 //
-// Storage: BLOB column packed as native little-endian `[f32]` via
-// `bytemuck::cast_slice`; dimension contract enforced by the
-// `CHECK(length("col") = 4 * dims)` constraint emitted by
-// `vector::sqlite_vector_column_ddl`.
-//
-// We construct CREATE TABLE inline (matching every other test in this
-// file — the orchestrator's column-DDL emitter is PG-flavoured today;
-// a follow-up PR teaches `register_model::apply` to dispatch by
-// dialect). INSERT writes the vector via SQLite's hex-blob literal
-// `x'<hex>'` so we avoid plumbing typed BLOB params through the
-// session actor's `&[String]` surface for these tests.
+// Storage: base-table BLOB column with a CHECK constraint (the
+// dimension contract at write time) + a `vec0` virtual table created
+// by `ensure_vector_index` + AFTER triggers that mirror the BLOB
+// column into vec0 on INSERT/UPDATE/DELETE. INSERTs use SQLite's
+// hex-blob literal `x'<hex>'` so we avoid plumbing typed BLOB params
+// through the session actor's `&[String]` surface.
 // ---------------------------------------------------------------------------
 
 use zeroship_plugin_db::backend::VectorIndex;
@@ -2390,9 +2391,9 @@ use zeroship_plugin_db::backend::VectorMetric;
 
 /// Encode a `Vec<f32>` as a SQLite `x'<hex>'` blob literal.
 ///
-/// The bytes are native-endian per `bytemuck::cast_slice`; all
-/// platforms we target are LE, so this matches what
-/// `vector::blob_from_vec` would produce.
+/// The bytes are native-endian f32 (4 bytes per dim); all platforms
+/// we target are little-endian, so this matches what `vec_to_le_bytes`
+/// in `backend/sqlite/vector.rs` produces.
 fn vec_to_hex_lit(v: &[f32]) -> String {
     let mut hex = String::with_capacity(v.len() * 8 + 4);
     hex.push_str("x'");
@@ -2434,7 +2435,10 @@ fn vector_search_returns_k_nearest_sqlite() {
             .await
             .expect("ensure_app_schema");
 
-        // CREATE TABLE with the documented BLOB + CHECK shape.
+        // CREATE TABLE with the BLOB column the SDK's `t.vector(dims)`
+        // lowering emits. The CHECK constraint pins the write-side
+        // dimension contract; vec0's own dimension check is the
+        // second line of defence (trigger-time).
         let dims = 8usize;
         backend
             .pool_exec(
@@ -2447,17 +2451,18 @@ fn vector_search_returns_k_nearest_sqlite() {
             .await
             .expect("CREATE TABLE docs");
 
-        // ensure_vector_index is a no-op on SQLite (flat scan). Calling
-        // it pins the trait surface and ensures we don't accidentally
-        // panic in the impl.
+        // Create the vec0 vtable + mirror triggers BEFORE inserting
+        // rows. With the triggers in place, every INSERT into the
+        // base table fans out into the vec0 index inside the same
+        // transaction; vector_search joins on rowid.
         backend
             .ensure_vector_index("vector_topk", "docs", "embedding", 8, VectorMetric::Cosine)
             .await
-            .expect("ensure_vector_index is a no-op");
+            .expect("ensure_vector_index creates vec0 vtable + triggers");
 
-        // Insert 100 deterministic unit vectors. Hex-literal INSERT
-        // avoids needing typed BLOB params through the session actor's
-        // text-only surface.
+        // Insert 100 deterministic unit vectors. Each INSERT fires
+        // the `docs__vec_embedding_ai` trigger which mirrors
+        // `(rowid, embedding)` into the vec0 index.
         for i in 0..100usize {
             let v = mk_unit_vec(i, dims);
             let hex = vec_to_hex_lit(&v);
@@ -2590,6 +2595,13 @@ fn vector_search_respects_filter_sqlite() {
             .await
             .expect("CREATE TABLE docs");
 
+        // Create vec0 + triggers BEFORE inserts so the mirror fires
+        // for every row.
+        backend
+            .ensure_vector_index("vector_filter", "docs", "embedding", 4, VectorMetric::Cosine)
+            .await
+            .expect("ensure_vector_index");
+
         // Insert 10 rows in tenant "a" and 10 rows in tenant "b".
         // The first row of each tenant uses an identical query
         // vector so the filter discriminates BY tenant, not by
@@ -2658,8 +2670,12 @@ fn vector_search_respects_filter_sqlite() {
 #[test]
 fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
     // Sanity check on the math: for unit vectors, ||a-b||² = 2 * (1 - cos θ)
-    // = 2 * cos_distance. This isn't a search test — it's a regression
-    // catch for a future refactor of the `distance` dispatcher.
+    // = 2 * cos_distance. With vec0 the metric is pinned at vtable
+    // creation time, so we declare TWO vector columns (one cosine,
+    // one L2) sharing the same source rows. The two `ensure_vector_index`
+    // calls produce two paired vec0 vtables (`docs__vec_emb_cos` /
+    // `docs__vec_emb_l2`); the AFTER triggers mirror BOTH columns on
+    // every INSERT.
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -2671,20 +2687,32 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             .pool_exec(
                 "CREATE TABLE \"vector_math\".\"docs\" (\
                    id INTEGER PRIMARY KEY AUTOINCREMENT, \
-                   embedding BLOB CHECK(length(embedding) = 16) NOT NULL\
+                   emb_cos BLOB CHECK(length(emb_cos) = 16) NOT NULL, \
+                   emb_l2  BLOB CHECK(length(emb_l2)  = 16) NOT NULL\
                  )",
                 &[],
             )
             .await
             .expect("CREATE TABLE docs");
 
+        backend
+            .ensure_vector_index("vector_math", "docs", "emb_cos", 4, VectorMetric::Cosine)
+            .await
+            .expect("ensure_vector_index cos");
+        backend
+            .ensure_vector_index("vector_math", "docs", "emb_l2", 4, VectorMetric::L2)
+            .await
+            .expect("ensure_vector_index l2");
+
         let v1 = mk_unit_vec(0, 4);
         let v2 = mk_unit_vec(1, 4);
+        let hex1 = vec_to_hex_lit(&v1);
+        let hex2 = vec_to_hex_lit(&v2);
         backend
             .pool_exec(
                 &format!(
-                    "INSERT INTO \"vector_math\".\"docs\" (embedding) VALUES ({})",
-                    vec_to_hex_lit(&v1)
+                    "INSERT INTO \"vector_math\".\"docs\" (emb_cos, emb_l2) \
+                     VALUES ({hex1}, {hex1})"
                 ),
                 &[],
             )
@@ -2693,8 +2721,8 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         backend
             .pool_exec(
                 &format!(
-                    "INSERT INTO \"vector_math\".\"docs\" (embedding) VALUES ({})",
-                    vec_to_hex_lit(&v2)
+                    "INSERT INTO \"vector_math\".\"docs\" (emb_cos, emb_l2) \
+                     VALUES ({hex2}, {hex2})"
                 ),
                 &[],
             )
@@ -2706,7 +2734,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             .vector_search(
                 "vector_math",
                 "docs",
-                "embedding",
+                "emb_cos",
                 &v1,
                 2,
                 VectorMetric::Cosine,
@@ -2718,7 +2746,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             .vector_search(
                 "vector_math",
                 "docs",
-                "embedding",
+                "emb_l2",
                 &v1,
                 2,
                 VectorMetric::L2,

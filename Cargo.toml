@@ -70,6 +70,13 @@ percent-encoding = "2"
 # we'll wire in P2. Optional throughout — only `zeroship-plugin-db`
 # pulls it in under its `sqlite` feature.
 rusqlite = { version = "0.39", features = ["bundled", "preupdate_hook"] }
+# **P4 PR 7** — `sqlite-vec` statically compiles the C `vec0` extension
+# into the binary and registers it via `sqlite3_auto_extension`. NO
+# `.so` ships; preserves the bundled-SQLite invariant (design §1). The
+# Rust crate exposes `sqlite3_vec_init` which rusqlite's `ffi`
+# re-export of `sqlite3_auto_extension` hooks once per process. Gated
+# to `plugin-db`'s `sqlite` feature.
+sqlite-vec = "0.1"
 
 # IDs
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -91,11 +98,6 @@ thiserror = "2"
 
 # Utilities
 bytes = "1"
-# `bytemuck` powers the zero-copy `&[f32] ↔ &[u8]` round-trip the SQLite
-# pure-Rust vector path uses (`crates/plugin-db/src/backend/sqlite/vector.rs`).
-# Gated to `plugin-db`'s `sqlite` feature today — only one consumer in
-# the workspace until other compio/runtime paths grow a similar need.
-bytemuck = "1"
 hex = "0.4"
 lru = "0.12"
 memmap2 = "0.9"

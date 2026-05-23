@@ -5,7 +5,27 @@
 **Closes** (from `docs/reviews/plugin-db-deferred.md`): [C1] (Backend trait
 half-applied, §7); [I20] (WAL replication cross-tenant isolation, §17 +
 §19 P6); [I31]/F1 (§10 + §18); [I32]/F2 (§10 + §18).
-**Last updated**: 2026-05-23 (amended for P4 pure-Rust SQLite vector backend).
+**Last updated**: 2026-05-24 (SQLite vector backend swapped to sqlite-vec).
+
+<!-- 2026-05-24 amendment: SQLite vector backend swapped to sqlite-vec -->
+**Changelog — 2026-05-24 amendment (P4 PR 7).** SQLite vector storage
+and search now route through the `sqlite-vec` extension (statically
+compiled via the `sqlite-vec` Rust crate; `sqlite3_auto_extension`
+hook registered once per process at `SqliteSession::open`). The
+earlier "pure-Rust flat scan" decision documented in the prior P4
+amendment block (2026-05-23 below) is **superseded**. Preserves the
+bundled-SQLite invariant §1 — the C source is compiled into the
+binary, no `.so` ships, no amalgamation fork. vec0 gives SIMD
+distance, native dimension validation, and `MATCH` query syntax; net
+code surface is smaller than the pure-Rust impl. Open question §18
+Q7 was re-opened then closed the same day with the swap landed. See
+`docs/proposals/p4-search-implementation-plan.md` §10 (2026-05-24
+reassessment block) for the rationale-correction trail. Mechanically:
+§4 row 7 SQLite cell now reads `vec0 virtual table via sqlite-vec
+extension (statically compiled; SIMD-accelerated)`; §6.2 row
+`Vector(n)` SQLite cell now reads `vec0 (sqlite-vec extension;
+statically compiled)`; §7 vector-trait narrative switches to "vec0
+virtual table" wording.
 
 <!-- preupdate_hook amendment -->
 **Changelog — 2026-05-22 amendment.** Swapped trigger+outbox SQLite
@@ -139,7 +159,7 @@ subscriptions + optimistic concurrency); analytics (MV); AI/RAG (vector
 | 4 | Pessimistic locking | `SELECT … FOR UPDATE` | `BEGIN IMMEDIATE` for the whole tx (coarser; §8.5) |
 | 5 | Optimistic concurrency (CAS) | `UPDATE … WHERE id=? AND version=? RETURNING` | identical |
 | 6 | Full-text search | `tsvector` + GIN | FTS5 vtable maintained by triggers (NOT a column type; §6.2) |
-| 7 | Vector search | pgvector HNSW | pure-Rust flat scan (dev scale ≤50k rows); HNSW deferred (see P4 plan §10) |
+| 7 | Vector search | pgvector HNSW | vec0 virtual table via sqlite-vec extension (statically compiled; SIMD-accelerated) |
 | 8 | Geospatial | PostGIS GiST | R-tree on bbox + Rust Haversine post-filter |
 | 9 | JSON columns + path queries | JSONB + `->`/`->>` | TEXT (CHECK `json_valid`) + `json_extract` |
 | 10 | Time-series range queries | B-tree + BRIN | B-tree only |
@@ -253,7 +273,7 @@ SQLite's WAL journal and POSIX file locks.
 | `Uuid` | `UUID` | `TEXT` (CHECK shape) |
 | `Bytes` | `BYTEA` | `BLOB` |
 | `Decimal(p,s)` | `NUMERIC(p,s)` | `TEXT`, see §6.2.1 |
-| `Vector(n)` | `vector(n)` (pgvector) | `BLOB` (pure-Rust flat scan; see §4 row 7 amendment) |
+| `Vector(n)` | `vector(n)` (pgvector) | vec0 (sqlite-vec extension; statically compiled) |
 | `GeoPoint` | `geography(POINT, 4326)` | `BLOB` 16 bytes packed `(lat, lng)` + Rust Haversine post-filter (see P4 plan §4.3) |
 | `Array(T)` | `T[]` native | `TEXT` (JSON-encoded) |
 
@@ -403,19 +423,22 @@ exposes `record`/`check_quota`/`flush`. Decorator-not-subtrait:
 metering arithmetic is backend-agnostic and a sub-trait would force
 each backend to re-implement and entangle policy.
 
-<!-- preupdate_hook amendment -->
+<!-- 2026-05-24 amendment: vector now routes through sqlite-vec vec0 -->
 **`VectorIndex`, `FullTextIndex`, `SpatialIndex`** — parallel shape:
 per-collection index creation + search. PG wraps pgvector / tsvector /
-PostGIS; SQLite uses **pure-Rust flat scan** (vector; see §4 row 7
-amendment) / FTS5 / packed-BLOB+Haversine (see §6.2 amendment).
-Search accepts the same filter object as `find` (`near(point) AND
-status = "open"`). SQLite caveat: `sqlite3_preupdate_hook` fires on
-rowid tables only, not vtables (FTS5). Acceptable — the change-event
-path keys off mutations to the **base** collection; FTS5 vtable
-updates are an implementation detail driven by AFTER triggers, which
-user code does not subscribe to. Vector and geo storage are plain
-BLOB columns on the base collection (no vtable), so the preupdate
-hook sees their mutations natively.
+PostGIS; SQLite uses the **sqlite-vec extension (statically compiled
+via sqlite-vec crate; vec0 virtual table)** for vector, FTS5 for
+full-text, and packed-BLOB+Haversine for spatial (see §6.2). Search
+accepts the same filter object as `find` (`near(point) AND status =
+"open"`). SQLite caveat: `sqlite3_preupdate_hook` fires on rowid
+tables only, not vtables (FTS5, vec0). Acceptable — the change-event
+path keys off mutations to the **base** collection; vtable updates
+are an implementation detail driven by AFTER triggers (FTS5 + vec0
+both follow the same trigger-mirror pattern), which user code does
+not subscribe to. The base collection still holds a canonical `BLOB`
+column for the vector payload (CDC preupdate observes it natively;
+the trigger fans the row into vec0). Geo storage is a plain BLOB
+column on the base collection (no vtable).
 
 <!-- preupdate_hook amendment -->
 **`MaterializedView`** — ensure-and-refresh of cached aggregates. PG:
@@ -1378,9 +1401,13 @@ trust boundary; SQLite is not a production multi-tenant backend.
 7. **`sqlite-vec`**: `bundled` vs runtime extension load.
    **CLOSED 2026-05-23 (P4)** — neither. Shipped pure-Rust flat scan
    instead; both options conflicted with the bundled-SQLite
-   invariant (§1). See the 2026-05-23 P4 amendment block at the top
-   of this doc and `docs/proposals/p4-search-implementation-plan.md`
-   §10.
+   invariant (§1). **RE-OPENED 2026-05-24 then CLOSED 2026-05-24** —
+   swapped to sqlite-vec per user decision; see P4 PR 7 +
+   `docs/proposals/p4-search-implementation-plan.md` §10
+   reassessment. The earlier analysis was wrong: the `sqlite-vec`
+   Rust crate statically compiles the C source and hooks every
+   rusqlite connection via `sqlite3_auto_extension` — no `.so`
+   ships, no amalgamation fork, the bundled invariant is preserved.
 8. **SQLite pool sizing**: 1 writer + 4 readers (separate Connection
    handles in WAL mode). Independent of compio blocking-pool size — a
    separate runtime tunable (§18A).

@@ -41,12 +41,57 @@
 
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Once;
 
 use rusqlite::Connection;
 
 use crate::backend::sqlite::cdc::CommitPacket;
 use crate::backend::sqlite::error::from_sqlite;
 use crate::error::DbError;
+
+/// One-shot `sqlite-vec` auto-extension registration.
+///
+/// **P4 PR 7**: `sqlite_vec::sqlite3_vec_init` is the C extension's
+/// initialiser; `rusqlite::ffi::sqlite3_auto_extension` registers a
+/// callback that fires for every subsequent `sqlite3_open*` call in the
+/// process. The hook IS process-global by design (it lives inside the
+/// linked SQLite amalgamation's auto-extension table), so we register
+/// exactly ONCE at the first `SqliteSession::open` and rely on every
+/// subsequent connection (writer, future readers) inheriting the
+/// extension automatically.
+///
+/// **Safety**: `sqlite3_auto_extension` is FFI-unsafe — the C signature
+/// is `int (*)(sqlite3*, char**, const sqlite3_api_routines*)` and we
+/// cast `sqlite3_vec_init` (whose signature matches the C contract per
+/// the upstream `sqlite-vec` crate) through `std::mem::transmute`. The
+/// cast is documented in the upstream Rust example at
+/// `examples/simple-rust/demo.rs` and is the canonical integration
+/// pattern.
+static VEC_INIT: Once = Once::new();
+
+#[allow(unsafe_code)]
+fn register_sqlite_vec_once() {
+    VEC_INIT.call_once(|| {
+        // SAFETY: `sqlite3_vec_init` matches the auto-extension callback
+        // signature expected by the linked SQLite amalgamation (see
+        // the upstream `sqlite-vec` crate's `examples/simple-rust/demo.rs`
+        // — that file is the canonical integration recipe). The
+        // registration is process-global and fires for every connection
+        // opened thereafter; see the module-level rustdoc on `VEC_INIT`.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut std::os::raw::c_char,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> std::os::raw::c_int,
+            >(
+                sqlite_vec::sqlite3_vec_init as *const ()
+            )));
+        }
+    });
+}
 
 /// One row of a `Query` result. Each cell is captured as a UTF-8
 /// string so the result is `Send` (rusqlite's native value types
@@ -64,12 +109,12 @@ pub type Row = Vec<Option<String>>;
 
 /// A typed SQLite cell — preserves the underlying storage-class
 /// discriminator across the actor boundary instead of collapsing every
-/// value to `Option<String>`. **P4 PR 4** introduces this for the
-/// vector flat-scan path: `vector_search` needs the raw BLOB bytes for
-/// `bytemuck` decoding, and the surrounding non-vector columns benefit
-/// from typed (numeric / boolean) round-tripping so the `_distance`-
-/// annotated JSON rows the trait surface returns are reasonable
-/// `serde_json::Value`s (not "everything is a string").
+/// value to `Option<String>`. Introduced in P4 PR 4 (then carried
+/// across the PR 7 vec0 swap), this is the row-decoder shape the
+/// `vector_search` / `fts_search` / `spatial_near` paths consume: each
+/// emits `_distance` / `_rank` annotated JSON rows whose non-vector
+/// columns benefit from typed (numeric / boolean) round-tripping so
+/// the SDK doesn't see "everything is a string".
 #[derive(Debug, Clone)]
 pub enum TypedCell {
     /// SQLite `NULL`.
@@ -89,13 +134,15 @@ pub enum TypedCell {
 }
 
 /// A typed row + column names, returned by the `QueryTyped` command
-/// variant the **P4 PR 4** vector path consumes.
+/// variant. Consumers: [`super::SqliteBackend::vector_search`] (P4
+/// PR 7 vec0 JOIN result), `fts_search` (PR 5), `spatial_near`
+/// (PR 5).
 ///
-/// Column names are carried alongside the cells so the
-/// `vector_search` caller can build a `serde_json::Value` row map
-/// without re-issuing a `PRAGMA table_info` round-trip. The names live
-/// once per result-set in `columns`, not per row — the worker copies
-/// from `stmt.column_names()` once before the row loop.
+/// Column names are carried alongside the cells so each caller can
+/// build a `serde_json::Value` row map without re-issuing a `PRAGMA
+/// table_info` round-trip. The names live once per result-set in
+/// `columns`, not per row — the worker copies from
+/// `stmt.column_names()` once before the row loop.
 #[derive(Debug, Clone)]
 pub struct TypedRows {
     /// Column names in result-set order. Length matches every row's
@@ -131,10 +178,12 @@ pub(crate) enum Command {
         reply: flume::Sender<Result<Vec<Row>, DbError>>,
     },
     /// Run a row-returning statement; reply with typed rows + column
-    /// names. **P4 PR 4** consumer:
-    /// [`super::SqliteBackend::vector_search`] (the flat-scan path
-    /// needs the BLOB column's raw bytes for `bytemuck` decoding, and
-    /// the surrounding columns benefit from typed round-tripping).
+    /// names. Consumers (added in P4 PR 4 / PR 5):
+    /// [`super::SqliteBackend::vector_search`] (the vec0 JOIN result
+    /// path; PR 7 retained the typed surface for the post-search row
+    /// re-emission to JSON), `fts_search` (FTS5 + bm25 ranking),
+    /// `spatial_near` (haversine distance ordering). All three need
+    /// numeric / blob / NULL discrimination at the row-out boundary.
     QueryTyped {
         sql: String,
         params: Vec<String>,
@@ -247,6 +296,13 @@ impl SqliteSession {
         let worker = std::thread::Builder::new()
             .name("sqlite-session".to_string())
             .spawn(move || {
+            // 0. Register `sqlite-vec` as a SQLite auto-extension. This
+            //    fires once per process; every connection opened
+            //    thereafter (including the one a few lines below) loads
+            //    the `vec0` virtual table module + the `vec_*` scalar
+            //    functions automatically. See `VEC_INIT` rustdoc.
+            register_sqlite_vec_once();
+
             // 1. Open the connection. Any failure here is reported
             //    via the startup channel and the worker exits.
             let conn = match Connection::open(&db_path) {
@@ -399,12 +455,11 @@ impl SqliteSession {
 
     /// Send a `QueryTyped` command and await typed rows + column names.
     ///
-    /// **P4 PR 4** consumer: [`super::SqliteBackend::vector_search`].
-    /// The flat-scan path needs the BLOB cell's raw bytes; we preserve
-    /// the SQLite storage-class discriminant through the
-    /// [`TypedCell`] enum so the downstream JSON encoder sees the
-    /// shape it expects (integers as numbers, blobs as bytes, etc.).
-    #[allow(dead_code)]
+    /// Consumers: [`super::SqliteBackend::vector_search`] (P4 PR 7
+    /// vec0 JOIN row decode), `fts_search` (PR 5 bm25 + row re-emit),
+    /// `spatial_near` (PR 5 haversine distance + row re-emit). The
+    /// [`TypedCell`] discriminant lets each caller branch on
+    /// numeric / blob / NULL at the JSON encoder layer.
     pub(crate) async fn query_typed(
         &self,
         sql: &str,
