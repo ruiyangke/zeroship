@@ -3,9 +3,9 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-24 (cluster smoke aborted at controller-start — bug #16 found; T3/T6 closed; 4 new reviewer rounds added).
+Last updated: 2026-05-24 (cycle r2: A2 + A5 closed; 3 round-2 reviews added; T6 regressions surfaced).
 Branch HEAD at seed: `fce3e208`.
-Branch HEAD at last update: `4a7e8e03` (T6 wired idle eviction sweep; T3 bumped alloc_running_timeout 60→120; B15 fix at `eaf5ea83`).
+Branch HEAD at last update: `2e0d17f7` (A5 closed: admin_token pub(crate); A2 closed: GCS verify enforces SHA; T6 wired idle eviction; T3 bumped timeout; B15 fix at `eaf5ea83`).
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ---
@@ -37,12 +37,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: production builds bare `LocalDiskSnapshotStore` or `TieredSnapshotStore<LocalDisk, Gcs>`; `AeadSnapshotStore` never composed. `snapshot_handler.rs:358` still stamps `snapshot_aead_dek_id="v1"` into pg, so operators see "encrypted" in the audit trail while guest RAM hits GCS in plaintext.
 - **Action**: wrap the inner store in `AeadSnapshotStore` if `SANDBOX_SNAPSHOT_AEAD_ENABLED=1` (or unconditionally for prod). Add a startup log line stating the effective AEAD posture. Add an integration test that asserts get/put roundtrip through AEAD layer.
 
-### [A2] `GcsSnapshotStore::verify()` discards `expected_sha256` (CRITICAL, security-r1)
-- **Source**: 2026-05-24 security review
-- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:660-682`
-- **Symptom**: `let _ = expected_sha256;` — the integrity gate is a no-op. An attacker with bucket-write can substitute snapshots and the get-path will accept them.
-- **Action**: implement the SHA-256 compare; surface mismatch as `SnapshotIntegrityError`; add a tampered-blob unit test.
-
 ### [A3] 1 GB sync I/O on compio worker (CRITICAL, perf-r1 + concurrency-r1)
 - **Source**: 2026-05-24 performance + concurrency reviews
 - **Files**:
@@ -59,17 +53,45 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: most sites emit `{"error":"<human prose>"}` (no `message`); preview sites emit `{"error":<code>,"code":<code>}` (duplicate, no message).
 - **Action**: introduce typed `ErrorEnvelope` helper in `crates/sandbox/src/error_envelope.rs`; replace all `err()` call sites; lock with a unit test per error site.
 
-### [A5] `AppState.admin_token` is `pub` (CRITICAL, api-surface-r1)
-- **Source**: 2026-05-24 api-surface review
-- **File**: `crates/sandbox/src/lib.rs:98`
-- **Symptom**: pub field — `admin_handlers.rs:128-136` documents the footgun (empty `Zeroizing<String>` defeats bearer compare). Field needs `pub(crate)` + constructor.
-- **Action**: `pub(crate)`-restrict + add `AppState::with_admin_token(...)` constructor that rejects empty tokens at compile-time-of-call.
+### [A6] `pub persist: Option<Arc<Persistence>>` carries AEAD key material (CRITICAL, A5-fixer spotted)
+- **Source**: spotted while closing A5 (`2e0d17f7`)
+- **File**: `crates/sandbox/src/lib.rs:71`
+- **Symptom**: same exposure pattern as A5 — pub field, external code can clobber. `Persistence` carries sealed-record AEAD keys.
+- **Action**: same shape as A5: `pub(crate)`-restrict + add `with_persistence(...)` constructor that rejects empty/invalid `Arc<Persistence>`.
 
 ### [C1] Lease-takeover sweep is dead code (CRITICAL, concurrency-r1 + arch-r1)
 - **Source**: 2026-05-24 concurrency review (corroborates 2026-05-23 architecture-r1)
 - **Files**: `crates/sandbox/src/db.rs:2305` (`update_lessee` — zero callers); `crates/sandbox/src/db.rs:1712-1724` (`update_sandbox_status` never sets `lessee_updated_at`); `crates/sandbox/src/db.rs:2361` (sweep query filter `WHERE lessee_updated_at IS NOT NULL` excludes every real transient row)
 - **Symptom**: §6.1 crash recovery never fires. Under a controller crash mid-Snapshotting/Restoring, the sandbox row is stuck in transient state forever.
 - **Action**: either (a) wire `update_lessee` into every state transition that crosses transient boundaries OR (b) remove the dead code + redesign §6.1 around `updated_at` timestamps with a separate `transient_since` column.
+
+---
+
+## IMPORTANT (T6 regressions — round-r2 reviewers flagged)
+
+### [T7] `per_iteration_concurrency` in sweep is a no-op (code-quality-r2)
+- **Source**: 2026-05-24 code-quality round-r2
+- **File**: `crates/sandbox/src/sweep.rs:443-468`
+- **Symptom**: both outer `for chunk in rows.chunks(cap)` AND inner `for r in chunk { .await }` are sequential despite the comment promising chunked concurrency. At 2.1 s/snapshot × 100 rows = ~210 s; threatens 300 s sweep interval.
+- **Action**: rewrite inner loop as `futures::future::join_all(chunk.iter().map(...))` or compio equivalent. Add a sweep-throughput test.
+
+### [T8] `ControllerIdleSnapshotter` zero non-pg coverage (test-coverage-r2)
+- **Source**: 2026-05-24 test-coverage round-r2
+- **File**: `crates/sandbox/src/sweep.rs:292-383` (90 LOC of new prod code)
+- **Symptom**: pg-gated tests exercise only `RecordingIdleSnapshotter`. The real prod implementation that bridges to `snapshot_handler::snapshot_sandbox` has no unit test.
+- **Action**: add a non-pg unit test using a `MockSnapshotSandbox` trait/fake. Mirror `RecordingIdleSnapshotter`'s pattern but for production code paths.
+
+### [T9] `ControllerIdleSnapshotter` duplicates `admin_handlers` orchestration (architecture-r2)
+- **Source**: 2026-05-24 architecture round-r2
+- **Files**: `crates/sandbox/src/sweep.rs:283-407` vs `crates/sandbox/src/admin_handlers.rs:1109-1206`
+- **Symptom**: near-byte-for-byte parallel orchestrator — same `lookup_source_vm_ops` preflight, same `snap_stage_dir` resolution, same post-snapshot best-effort `teardown_source_for_snapshot`, same `StateMismatch` race tolerance. Private `ResolvedSourceVmOps` struct is byte-identical between the two files.
+- **Action**: extract shared orchestrator function `pub(crate) fn perform_snapshot(...)` in a new `crates/sandbox/src/snapshot_orchestrator.rs`; both callers invoke it. Move `ResolvedSourceVmOps` to a `pub(crate)` location.
+
+### [T10] `ControllerIdleSnapshotter` holds `Arc<AppState>` with 4-field reach (architecture-r2)
+- **Source**: 2026-05-24 architecture round-r2
+- **Files**: `crates/sandbox/src/sweep.rs:283-294` + `crates/sandbox/src/lib.rs:449-454`
+- **Symptom**: the bridge reaches into `state.backend`, `state.config`, `state.database`, `state.snapshot_store` from sweep — turning what was a pure DB→CAS sweep module into an AppState god-Arc consumer. Layering escape hatch.
+- **Action**: pass the required fields explicitly via a small constructor-bound struct (`SnapshotterDeps { backend, config, database, snapshot_store }`). Sweep then doesn't need `AppState`. Easier to unit-test.
 
 ---
 
