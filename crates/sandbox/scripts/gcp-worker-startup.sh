@@ -299,6 +299,34 @@ cat > "$ART/sandbox-db.env" <<EOF
 SANDBOX_DATABASE_URL=postgres://postgres:$PG_PASSWORD@$PG_HOST:5432/zeroship
 EOF
 chmod 0400 "$ART/sandbox-db.env"
+
+# Persistence AEAD key (B21 fix / R5-S1 piggyback). `Persistence::from_env`
+# requires `SANDBOX_PERSIST_AUTH=1` AND a file-mounted 32-byte AEAD key at
+# `SANDBOX_AEAD_KEY_PATH` (round-6 H8: env-var sourcing forbidden because
+# `/proc/<pid>/environ` leaks). Without the AEAD key, `from_env()` returns
+# `Ok(None)`, `state.persist` is `None`, and `do_restore_inner`'s post-livez
+# `register_restored` call falls into the warn-skip branch — every wake
+# returns 200 but the state map gets no entry; downstream exec/stop/delete
+# return "sandbox not found" and the vm_index allocator slot leaks. After
+# B21 fix lands (with the corresponding `AppState::from_config` assertion
+# from R5-S1), the controller will refuse to boot in that misconfigured
+# shape, so this provisioning step is mandatory once `SNAPSHOT_ENABLED=true`.
+#
+# AEAD key file MUST be exactly 32 bytes with mode 0o400 (the controller
+# `AeadKey::from_path` refuses anything else). Generated once at startup;
+# idempotent so reboots reuse the same key (and any sealed records written
+# under it stay readable). DO NOT log or echo the contents.
+AEAD_KEY_PATH="$ART/sandbox-aead-key"
+if [ ! -s "$AEAD_KEY_PATH" ]; then
+  ( umask 077; head -c 32 /dev/urandom > "$AEAD_KEY_PATH" )
+  chmod 0400 "$AEAD_KEY_PATH"
+  echo "[startup] generated AEAD key at $AEAD_KEY_PATH (32 bytes, 0400)"
+else
+  # Re-tighten mode in case a previous run left it wider.
+  chmod 0400 "$AEAD_KEY_PATH"
+  echo "[startup] reusing AEAD key at $AEAD_KEY_PATH"
+fi
+mkdir -p /var/lib/zeroship/sandbox/sealed-records
 umask 022
 
 # ───── 6. zsbx-ctl systemd unit ────────────────────────────────
@@ -347,6 +375,17 @@ Environment=SANDBOX_SNAPSHOT_ENABLED=true
 Environment=SANDBOX_SNAPSHOT_L1_ROOT=/var/zeroship/ch/snapshots
 Environment=SANDBOX_SNAPSHOT_USE_GCS=true
 Environment=SANDBOX_SNAPSHOT_GCS_BUCKET=$SNAPSHOT_BUCKET
+
+# Sealed-record persistence (B21 fix / R5-S1 piggyback). Required when
+# SNAPSHOT_ENABLED=true — without it, the post-wake register_restored
+# call falls into the warn-skip branch (state.persist=None), leaving
+# the restored VM out of the backend's in-memory state map. The boot
+# assertion in AppState::from_config refuses to start the controller
+# if SNAPSHOT_ENABLED && persist.is_none(), so this triplet is now
+# mandatory for production worker hosts.
+Environment=SANDBOX_PERSIST_AUTH=1
+Environment=SANDBOX_AEAD_KEY_PATH=$AEAD_KEY_PATH
+Environment=SANDBOX_PERSIST_DIR=/var/lib/zeroship/sandbox
 
 # Admin token file
 Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
