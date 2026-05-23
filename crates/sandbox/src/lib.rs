@@ -427,6 +427,19 @@ impl AppState {
         let persist: Option<Arc<Persistence>> =
             Persistence::from_env()?.map(Arc::new);
 
+        // R5-S1 (security-r5) / B21 cluster fix. Refuse to boot in the
+        // fail-OPEN configuration (snapshot enabled + persist disabled).
+        // See [`assert_persist_required_when_snapshot_enabled`] for the
+        // full rationale; the function is factored out so tests can
+        // exercise the assertion without spinning up a backend probe.
+        let persist_test_override =
+            matches!(std::env::var("SANDBOX_PERSIST_NONE_OK").as_deref(), Ok("1"));
+        assert_persist_required_when_snapshot_enabled(
+            config.snapshot_enabled,
+            persist.is_some(),
+            persist_test_override,
+        )?;
+
         // Phase-0 pg-backed state: build BEFORE the backend probe so
         // the schema reaches the right version before any backend op
         // could try to write. Pg-required features stay dormant in
@@ -766,6 +779,50 @@ impl AppState {
         }
         Ok(state)
     }
+}
+
+/// R5-S1 (security-r5) / cluster bug #21. Refuse to boot the controller
+/// in the silent fail-OPEN configuration where snapshot/restore is
+/// enabled but no persistence layer is wired.
+///
+/// **Why this matters.** The wake path's `do_restore_inner` calls
+/// `Persistence::unseal` after `wait_for_livez` to recover the
+/// per-sandbox signing key, then hands the key bytes to
+/// `Backend::register_restored` to install the restored VM into the
+/// backend's in-memory state map. When `state.persist=None`, the wake
+/// path falls into a `tracing::warn!` skip branch — the wake still
+/// returns 200 but the state map gets no entry, so every subsequent
+/// `exec`/`stop`/`delete` returns `sandbox_not_found`, the `vm_index`
+/// allocator slot leaks across the controller's uptime, and the
+/// per-host pool saturates after a few wakes (cluster smoke 2026-05-23
+/// r5 Appendix D observed exactly this).
+///
+/// **What this checks.** When `snapshot_enabled=true`:
+///   - `persist=true` → `Ok(())` (the production-correct shape).
+///   - `persist=false` + `test_override=true` → `Ok(())` (the
+///     `SANDBOX_PERSIST_NONE_OK=1` escape hatch for dev fixtures that
+///     drive `StubRestoreBackend` without persistence).
+///   - `persist=false` + `test_override=false` → `Err(...)` (fail-CLOSED).
+///
+/// When `snapshot_enabled=false`, the persistence layer is optional;
+/// returns `Ok(())` regardless.
+pub(crate) fn assert_persist_required_when_snapshot_enabled(
+    snapshot_enabled: bool,
+    persist_present: bool,
+    test_override: bool,
+) -> Result<(), String> {
+    if snapshot_enabled && !persist_present && !test_override {
+        return Err(
+            "FATAL: SANDBOX_SNAPSHOT_ENABLED=true but persistence is disabled \
+             (SANDBOX_PERSIST_AUTH != 1 or SANDBOX_AEAD_KEY_PATH unset). \
+             Restored sandboxes would silently fail to register in the \
+             backend state map (R5-S1 / cluster bug #21). \
+             Fix: set SANDBOX_PERSIST_AUTH=1 + SANDBOX_AEAD_KEY_PATH to a \
+             32-byte mode-0o400 file. Test override: SANDBOX_PERSIST_NONE_OK=1."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Round-3 / Phase-3 CRITICAL #3: read the admin bearer ONCE at
@@ -1890,5 +1947,66 @@ mod shutdown_tests {
             final_iters <= pre_flip + 1,
             "loop must exit within one iteration of flag flip; pre={pre_flip}, post={final_iters}"
         );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// R5-S1 / cluster bug #21 — boot-time fail-CLOSED for the
+// `snapshot_enabled=true && persist=None` configuration. The helper is
+// a pure function over three booleans so we can pin every cell of the
+// truth table without spinning up a backend probe.
+// ────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod persist_required_assertion_tests {
+    use super::assert_persist_required_when_snapshot_enabled as check;
+
+    #[test]
+    fn snapshot_off_persist_off_is_ok() {
+        // Phase-A feature-flagged off: persist is optional. The deferred
+        // persist=None shape is the historical default.
+        check(false, false, false).expect("snapshot disabled → persist optional");
+    }
+
+    #[test]
+    fn snapshot_off_persist_on_is_ok() {
+        // Snapshot off but operator wired persistence anyway (e.g. for
+        // restart-restore of long-lived sandboxes). Allowed.
+        check(false, true, false).expect("snapshot disabled + persist on → ok");
+    }
+
+    #[test]
+    fn snapshot_on_persist_on_is_ok() {
+        // The production-correct shape under Phase B. No assertion fires.
+        check(true, true, false).expect("snapshot+persist both on → ok");
+    }
+
+    #[test]
+    fn snapshot_on_persist_off_without_override_is_err() {
+        // The fail-OPEN configuration cluster bug #21 surfaced. MUST
+        // refuse to boot.
+        let err = check(true, false, false)
+            .expect_err("snapshot_enabled && persist=None must refuse to boot");
+        assert!(
+            err.contains("FATAL"),
+            "error must announce FATAL severity; got: {err}"
+        );
+        assert!(
+            err.contains("SANDBOX_PERSIST_AUTH"),
+            "error must mention the env var the operator must set; got: {err}"
+        );
+        assert!(
+            err.contains("R5-S1") || err.contains("#21"),
+            "error must reference the deferred entry / bug; got: {err}"
+        );
+    }
+
+    #[test]
+    fn snapshot_on_persist_off_with_test_override_is_ok() {
+        // Dev/test fixtures that drive `StubRestoreBackend` without a
+        // persistence layer use the explicit `SANDBOX_PERSIST_NONE_OK=1`
+        // escape hatch. The override is intentional, named, and visible
+        // in the env block of any production unit it appears in.
+        check(true, false, true)
+            .expect("SANDBOX_PERSIST_NONE_OK=1 overrides the assertion");
     }
 }
