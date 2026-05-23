@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
-use crate::backend::{IndexBuilder, LockGuard, PgSqlExecutor, VectorIndex};
+use crate::backend::{FullTextIndex, IndexBuilder, LockGuard, PgSqlExecutor, SpatialIndex, VectorIndex};
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
 use crate::error::DbError;
 use crate::query::IndexKind;
@@ -42,7 +42,7 @@ use crate::query::IndexKind;
 /// `IndexBuilder` carries the `create_index_with_recovery` call used
 /// by Pass 2. See `docs/proposals/p0-implementation-plan.md` §"PR 2"
 /// and `docs/proposals/db-system-design.md` §7.
-pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex>(
+pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex + FullTextIndex + SpatialIndex>(
     backend: &B,
     ctx: RegisterContext,
     lock_guard: LockGuard<'p>,
@@ -189,23 +189,34 @@ pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex>(
                                 )
                                 .await
                         }
-                        IndexKind::Fts { .. } | IndexKind::Spatial => {
-                            // FTS / Spatial dispatch lands in P4 PR 3.
-                            // Surface as a configuration error so a
-                            // build that emits one of these specs
-                            // today gets a clear refusal rather than
-                            // silently no-opping.
-                            Err(DbError::Configuration {
-                                code: "index_kind_pending",
-                                message: format!(
-                                    "db: {:?} index kind is not yet implemented (P4 PR 3+)",
-                                    spec.kind
-                                ),
-                                hint: Some(
-                                    "FTS/Spatial dispatch lands in P4 PR 3 (PG) / PR 5 (SQLite)"
-                                        .to_string(),
-                                ),
-                            })
+                        IndexKind::Fts { language } => {
+                            // **P4 PR 3** — composite FTS index. The
+                            // builder accumulated every `.fts()`-marked
+                            // column in `spec.columns`; the PG impl
+                            // materialises `__fts tsvector` + GIN +
+                            // trigger.
+                            backend
+                                .ensure_fts_index(
+                                    &app_id,
+                                    &op.collection,
+                                    &spec.columns,
+                                    language,
+                                )
+                                .await
+                        }
+                        IndexKind::Spatial => {
+                            // **P4 PR 3** — spatial index over a
+                            // `geography(POINT, 4326)` column. The PG
+                            // impl probes PostGIS and routes through
+                            // the audited CIC retry loop.
+                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
+                            backend
+                                .ensure_spatial_index(
+                                    &app_id,
+                                    &op.collection,
+                                    column,
+                                )
+                                .await
                         }
                     }
                 } else {

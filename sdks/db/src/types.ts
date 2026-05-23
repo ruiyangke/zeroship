@@ -346,7 +346,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  * "literal" (C2 discriminator constant), and "union" (C2 discriminated
  * union document shape — proposal §C2).
  */
-export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector";
+export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint";
 
 /**
  * **P4 PR 2** — distance metric for `t.vector(...)` fields. The three
@@ -493,6 +493,24 @@ export interface FieldDef {
    * ivfflat index and the operator for ORDER BY at search time.
    */
   vectorMetric?: VectorMetric;
+  /**
+   * **P4 PR 3** — full-text-search marker. Set to `true` by the
+   * `.fts(language?)` modifier on a `t.string()` field. Every field
+   * carrying this flag is folded into a single composite FTS index per
+   * collection (Q-P4-B); the index emitter (`build_create_indexes` on
+   * the Rust side) walks all `fts === true` fields and emits one
+   * `IndexSpec { kind: Fts { language } }` covering them in declared
+   * order. Reject on non-string fields with code `fts_on_non_string`.
+   */
+  fts?: boolean;
+  /**
+   * **P4 PR 3** — tsvector configuration language for an FTS-marked
+   * column. Honoured on PG (`to_tsvector('pg_catalog.<lang>', ...)`);
+   * SQLite FTS5 default tokenizer is language-agnostic Unicode and
+   * ignores it. Defaults to `"english"` when `.fts()` is called without
+   * an explicit argument.
+   */
+  ftsLanguage?: string;
 }
 
 /**
@@ -562,6 +580,52 @@ export class TypeBuilder<T = unknown, R extends boolean = false> {
   /** For strings: a RegExp the value must match. */
   pattern(re: RegExp): this {
     this._def.pattern = re;
+    return this;
+  }
+
+  /**
+   * **P4 PR 3** — mark this field as a source for the per-collection
+   * composite full-text-search index. Only valid on `t.string()` fields;
+   * called on any other type throws synchronously with code
+   * `fts_on_non_string`.
+   *
+   * ```ts
+   * const fields = {
+   *   title: t.string().required().fts(),
+   *   body:  t.string().required().fts(),
+   *   lang:  t.string(),  // not searchable
+   * };
+   * ```
+   *
+   * All `.fts()`-marked columns on the same collection are folded into a
+   * single composite tsvector + GIN index on PG (Q-P4-B). The optional
+   * `language` argument selects the tsvector configuration (`"english"`,
+   * `"simple"`, …) — defaults to `"english"`; honoured on PG, ignored on
+   * SQLite FTS5 (its default tokenizer is language-agnostic Unicode).
+   *
+   * Search: `await collection.search({ text: "rust async" })` returns
+   * rows ordered by relevance with a synthetic `_rank` column.
+   */
+  fts(language?: string): this {
+    if (this._def.type !== "string") {
+      throw Object.assign(
+        new Error(
+          `.fts(): only valid on t.string() fields, got "${this._def.type}"`,
+        ),
+        { code: "fts_on_non_string" as const },
+      );
+    }
+    const lang = language ?? "english";
+    if (typeof lang !== "string" || lang.length === 0 || !/^[A-Za-z0-9_]+$/.test(lang)) {
+      throw Object.assign(
+        new Error(
+          `.fts(language): language must be a [A-Za-z0-9_]+ token (e.g. "english", "simple"), got "${String(lang)}"`,
+        ),
+        { code: "fts_invalid_language" as const },
+      );
+    }
+    this._def.fts = true;
+    this._def.ftsLanguage = lang;
     return this;
   }
 }
@@ -755,6 +819,29 @@ export const t = {
       vectorDims: dims,
       vectorMetric: metric,
     });
+  },
+  /**
+   * **P4 PR 3** — geographic point field (WGS84, EPSG:4326). Stored as
+   * PostGIS's `geography(POINT, 4326)` column on PG; on SQLite (P4 PR 5)
+   * a `BLOB` packed `(lat, lng)` × `f64` = 16 bytes.
+   *
+   * ```ts
+   * const fields = {
+   *   location: t.geoPoint().required(),
+   * };
+   * // Insert / read shape: { lat: number, lng: number }
+   * await db.places.insert({ location: { lat: 51.5074, lng: -0.1278 } });
+   * ```
+   *
+   * Query via `collection.near({ field, point, radius })` for spatial
+   * within-radius search. `radius` is in metres on both backends.
+   *
+   * **Note on PG**: the column type requires PostGIS to be installed on
+   * the database; the runtime probes `pg_extension WHERE extname='postgis'`
+   * and surfaces a typed `postgis_extension_missing` error when absent.
+   */
+  geoPoint(): TypeBuilder<{ lat: number; lng: number }> {
+    return new TypeBuilder<{ lat: number; lng: number }>({ type: "geoPoint" });
   },
   /**
    * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and

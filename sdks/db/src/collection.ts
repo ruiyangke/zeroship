@@ -1137,11 +1137,10 @@ export class Collection<
   }
 
   /**
-   * **P4 PR 2** — vector-nearest-neighbour search. Returns the `k`
-   * closest rows (default 10) ordered by distance ascending; each row
-   * carries a synthetic `_distance` field carrying the metric-specific
-   * distance value.
+   * **P4 PR 2-3** — vector-nearest-neighbour OR full-text search,
+   * discriminated by the presence of `vector` vs. `text` in `args`.
    *
+   * Vector branch:
    * ```ts
    * const { data } = await db.docs.search({
    *   vector: queryEmbedding,   // number[] (length must match the
@@ -1152,17 +1151,28 @@ export class Collection<
    *   column: "embedding",      // default — the vector column name
    *   filter: { language: "en" },// optional WHERE clause
    * });
+   * // Each row carries a synthetic `_distance` field.
+   * ```
+   *
+   * Full-text branch (**P4 PR 3**):
+   * ```ts
+   * const { data } = await db.posts.search({
+   *   text: "rust async",
+   *   limit: 10,
+   *   filter: { lang: "en" },
+   * });
+   * // Each row carries a synthetic `_rank` field (PG: ts_rank).
    * ```
    *
    * Backend coverage:
-   * - **PG** — routes to pgvector via `VectorIndex::vector_search`.
+   * - **PG vector** — routes to pgvector via `VectorIndex::vector_search`.
    *   Errors: `vector_extension_missing` when the database lacks the
-   *   `vector` extension (typed `Error.code`); standard SQLSTATE codes
-   *   for query-time failures.
-   * - **SQLite** — surfaces `vector_unsupported` until P4 PR 4 lands
-   *   the pure-Rust flat-scan impl.
-   *
-   * **FTS** (`{ text }`) lands in P4 PR 3.
+   *   `vector` extension; standard SQLSTATE codes for query-time
+   *   failures.
+   * - **PG text** — routes through `FullTextIndex::fts_search` (tsvector
+   *   + GIN). No extension needed (FTS ships with core PG).
+   * - **SQLite** — surfaces `vector_unsupported` (P4 PR 4) and
+   *   `fts_unsupported` (P4 PR 5) until those PRs land the SQLite impls.
    */
   async search(
     args:
@@ -1173,17 +1183,18 @@ export class Collection<
           column?: string;
           filter?: Filter<S>;
         }
-      | { text: string; k?: number; filter?: Filter<S> },
+      | { text: string; limit?: number; k?: number; filter?: Filter<S> },
   ): Promise<Result<(Row<S> & { _distance?: number; _rank?: number })[]>> {
     trackCollectionAccess(this._name);
     return this._run(async () => {
       // Discriminator: presence of `vector` selects the pgvector path;
-      // `text` is reserved for FTS in PR 3. The native side does the
+      // `text` selects the FTS path (P4 PR 3). The native side does the
       // real dispatch — we keep the SDK layer thin.
       const nativeArgs: {
         vector?: number[];
         text?: string;
         k?: number;
+        limit?: number;
         metric?: import("./types.js").VectorMetric;
         column?: string;
         filter?: ZeroshipDbFilter;
@@ -1202,12 +1213,21 @@ export class Collection<
           nativeArgs.column = this._toColumn(args.column);
         }
       } else if ("text" in args && args.text !== undefined) {
+        if (typeof args.text !== "string") {
+          throw new ValidationError({
+            text: { path: "text", message: "search: `text` must be a string" },
+          });
+        }
         nativeArgs.text = args.text;
+        // FTS uses `limit` (and tolerates `k` as the legacy alias).
+        if ((args as { limit?: number }).limit !== undefined) {
+          nativeArgs.limit = (args as { limit?: number }).limit;
+        }
       } else {
         throw new ValidationError({
           args: {
             path: "args",
-            message: "search: args must include `vector` (P4 PR 2) or `text` (P4 PR 3+)",
+            message: "search: args must include `vector` (P4 PR 2) or `text` (P4 PR 3)",
           },
         });
       }
@@ -1230,6 +1250,100 @@ export class Collection<
         (d) => mapResultDoc(d as PlainObject, this._toField) as Row<S> & {
           _distance?: number;
           _rank?: number;
+        },
+      );
+    });
+  }
+
+  /**
+   * **P4 PR 3** — spatial within-radius search.
+   *
+   * ```ts
+   * const { data } = await db.places.near({
+   *   field: "location",                    // a t.geoPoint() field
+   *   point: { lat: 51.5074, lng: -0.1278 }, // query centre (WGS84)
+   *   radius: 1000,                         // metres
+   *   filter: { category: "cafe" },         // optional WHERE clause
+   *   limit: 50,                            // optional, default 100
+   * });
+   * // Each row carries a synthetic `_distance_m` field (metres).
+   * ```
+   *
+   * Backend coverage:
+   * - **PG** — routes to PostGIS via `SpatialIndex::spatial_near`
+   *   (`ST_DWithin` + `ST_Distance`). Errors: `postgis_extension_missing`
+   *   when the database lacks PostGIS.
+   * - **SQLite** — surfaces `spatial_unsupported` until P4 PR 5 lands
+   *   the haversine impl.
+   */
+  async near(args: {
+    field: keyof S & string;
+    point: { lat: number; lng: number };
+    radius: number;
+    filter?: Filter<S>;
+    limit?: number;
+  }): Promise<Result<(Row<S> & { _distance_m: number })[]>> {
+    trackCollectionAccess(this._name);
+    return this._run(async () => {
+      if (typeof args.field !== "string" || args.field.length === 0) {
+        throw new ValidationError({
+          field: { path: "field", message: "near: `field` must be a non-empty string" },
+        });
+      }
+      if (
+        args.point === null ||
+        typeof args.point !== "object" ||
+        typeof args.point.lat !== "number" ||
+        typeof args.point.lng !== "number"
+      ) {
+        throw new ValidationError({
+          point: { path: "point", message: "near: `point` must be `{ lat: number, lng: number }`" },
+        });
+      }
+      if (args.point.lat < -90 || args.point.lat > 90) {
+        throw new ValidationError({
+          "point.lat": { path: "point.lat", message: "near: `point.lat` must be in [-90, 90]" },
+        });
+      }
+      if (args.point.lng < -180 || args.point.lng > 180) {
+        throw new ValidationError({
+          "point.lng": { path: "point.lng", message: "near: `point.lng` must be in [-180, 180]" },
+        });
+      }
+      if (typeof args.radius !== "number" || !Number.isFinite(args.radius) || args.radius <= 0) {
+        throw new ValidationError({
+          radius: { path: "radius", message: "near: `radius` must be a positive finite number (metres)" },
+        });
+      }
+
+      const nativeArgs: {
+        field: string;
+        point: { lat: number; lng: number };
+        radius: number;
+        filter?: ZeroshipDbFilter;
+        limit?: number;
+      } = {
+        field: this._toColumn(args.field as string),
+        point: { lat: args.point.lat, lng: args.point.lng },
+        radius: args.radius,
+      };
+      if (args.limit !== undefined) nativeArgs.limit = args.limit;
+      if (args.filter !== undefined) {
+        const mapped = this._mergeFilter(
+          mapFilterOutbound(args.filter as ZeroshipDbFilter, this._toColumn),
+        );
+        nativeArgs.filter = mapped;
+      } else if (this._softDelete) {
+        nativeArgs.filter = this._mergeFilter({});
+      }
+
+      const colAny = this._nativeCollection() as unknown as {
+        near: (a: typeof nativeArgs) => Promise<PlainObject[]>;
+      };
+      const results = await colAny.near(nativeArgs);
+      return (results ?? []).map(
+        (d) => mapResultDoc(d as PlainObject, this._toField) as Row<S> & {
+          _distance_m: number;
         },
       );
     });

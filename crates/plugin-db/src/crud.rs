@@ -590,18 +590,102 @@ pub(crate) fn dispatch_search<'s>(
     }
 
     if has_text && !has_vector {
-        // FTS path — PR 3.
-        let err = DbError::Configuration {
-            code: "fts_unsupported",
-            message: "search({text}) is not yet implemented (P4 PR 3+)".to_string(),
-            hint: Some("text search lands in P4 PR 3".to_string()),
+        // **P4 PR 3** — FTS branch. Pull the query string, limit, and
+        // filter from args; route to `FullTextIndex::fts_search` on the
+        // PG arm; SQLite returns `fts_unsupported` until PR 5 lands.
+        let text_query = match args.get("text").and_then(Value::as_str) {
+            Some(s) => s.to_string(),
+            None => {
+                let err = DbError::Configuration {
+                    code: "invalid_text_arg",
+                    message: "search: `text` must be a string".to_string(),
+                    hint: None,
+                };
+                let op_err: OpError = err.to_op_error();
+                state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                    zeroship_runtime::state::OpResult::JsValue {
+                        resolver,
+                        value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                        request_id,
+                    }
+                }));
+                return promise;
+            }
         };
-        let op_err: OpError = err.to_op_error();
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .or_else(|| {
+                // Accept the SDK's `k` alias too — the vector branch
+                // uses `k` and the SDK passes the same name through for
+                // FTS in some cases. The native trait signature carries
+                // `limit: Option<usize>` either way.
+                args.get("k").and_then(Value::as_u64).map(|n| n as usize)
+            });
+        let filter = args
+            .get("filter")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+        let app = app_id.to_string();
+        let coll = collection.to_string();
+
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                request_id,
+            let backend = crate::context::with(|c| c.backend());
+            let result: Result<Vec<Value>, DbError> = async {
+                let backend = backend.ok_or_else(|| {
+                    DbError::config("not_configured", "db: backend not initialized".to_string())
+                })?;
+                #[cfg(feature = "sqlite")]
+                {
+                    if backend.as_sqlite().is_some() {
+                        return Err(DbError::Configuration {
+                            code: "fts_unsupported",
+                            message:
+                                "db: full-text search is not implemented on the SQLite backend yet"
+                                    .to_string(),
+                            hint: Some("SQLite FTS lands in P4 PR 5".to_string()),
+                        });
+                    }
+                }
+                #[cfg(feature = "pg")]
+                {
+                    let pg = backend
+                        .as_postgres()
+                        .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
+                    use crate::backend::FullTextIndex as _;
+                    return pg.fts_search(&app, &coll, &text_query, &filter, limit).await;
+                }
+                #[cfg(not(feature = "pg"))]
+                {
+                    Err(DbError::Configuration {
+                        code: "fts_unsupported",
+                        message:
+                            "db: full-text search requires the `pg` Cargo feature on this build"
+                                .to_string(),
+                        hint: Some(
+                            "rebuild with `--features pg` or use the SQLite arm (P4 PR 5)"
+                                .to_string(),
+                        ),
+                    })
+                }
+            }
+            .await;
+
+            match result {
+                Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::Json(
+                        Value::Array(rows).to_string(),
+                    ),
+                    request_id,
+                },
+                Err(e) => zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                },
             }
         }));
         return promise;
@@ -734,6 +818,166 @@ pub(crate) fn dispatch_search<'s>(
                 }
             }
             pg_path().await
+        }
+        .await;
+
+        match result {
+            Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
+                resolver,
+                value: zeroship_runtime::state::ResolveValue::Json(
+                    Value::Array(rows).to_string(),
+                ),
+                request_id,
+            },
+            Err(e) => zeroship_runtime::state::OpResult::JsValue {
+                resolver,
+                value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
+
+    promise
+}
+
+/// Shared dispatch for the `Collection.near()` v8_method (P4 PR 3 — PG arm).
+///
+/// `args` shape (validated SDK-side):
+/// ```js
+/// { field: "location",
+///   point: { lat: 51.5, lng: -0.1 },
+///   radius: 1000,           // metres
+///   filter?: {...},
+///   limit?: 100 }
+/// ```
+///
+/// Routes to `SpatialIndex::spatial_near` on the PG arm. SQLite returns
+/// `spatial_unsupported` until P4 PR 5 lands the haversine impl. Each
+/// returned row carries a synthetic `_distance_m` (`f64`) column.
+pub(crate) fn dispatch_near<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    args: Value,
+) -> v8::Local<'s, v8::Promise> {
+    use zeroship_runtime::state::OpError;
+
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    // Local helper macro: reject the freshly-allocated promise with a
+    // typed `DbError` and return early. We use a macro instead of a
+    // closure because each call site needs to MOVE `resolver` (V8
+    // `Global<PromiseResolver>` is not `Copy`) into the spawned future,
+    // and the macro lets us early-return the same `promise` value the
+    // outer scope keeps a reference to.
+    macro_rules! reject_sync {
+        ($err:expr) => {{
+            let op_err: OpError = $err.to_op_error();
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                    request_id,
+                }
+            }));
+            return promise;
+        }};
+    }
+
+    let field = match args.get("field").and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => reject_sync!(DbError::Configuration {
+            code: "invalid_near_args",
+            message: "near: `field` must be a non-empty string".to_string(),
+            hint: Some("pass `{ field, point, radius, filter?, limit? }`".to_string()),
+        }),
+    };
+
+    let point_obj = args.get("point");
+    let lat = point_obj.and_then(|p| p.get("lat")).and_then(Value::as_f64);
+    let lng = point_obj.and_then(|p| p.get("lng")).and_then(Value::as_f64);
+    let (lat, lng) = match (lat, lng) {
+        (Some(la), Some(ln)) => (la, ln),
+        _ => reject_sync!(DbError::Configuration {
+            code: "invalid_near_args",
+            message: "near: `point` must be `{ lat: number, lng: number }`".to_string(),
+            hint: None,
+        }),
+    };
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
+        reject_sync!(DbError::Configuration {
+            code: "invalid_near_args",
+            message: format!(
+                "near: `point` out of range: lat must be in [-90,90] and lng in [-180,180], got lat={lat} lng={lng}"
+            ),
+            hint: None,
+        });
+    }
+
+    let radius_m = match args.get("radius").and_then(Value::as_f64) {
+        Some(r) if r > 0.0 && r.is_finite() => r,
+        _ => reject_sync!(DbError::Configuration {
+            code: "invalid_near_args",
+            message: "near: `radius` must be a positive number (metres)".to_string(),
+            hint: None,
+        }),
+    };
+
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+    let filter = args
+        .get("filter")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    let app = app_id.to_string();
+    let coll = collection.to_string();
+    let point = crate::backend::GeoPoint { lat, lng };
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let backend = crate::context::with(|c| c.backend());
+        let result: Result<Vec<Value>, DbError> = async {
+            let backend = backend.ok_or_else(|| {
+                DbError::config("not_configured", "db: backend not initialized".to_string())
+            })?;
+            #[cfg(feature = "sqlite")]
+            {
+                if backend.as_sqlite().is_some() {
+                    return Err(DbError::Configuration {
+                        code: "spatial_unsupported",
+                        message:
+                            "db: spatial search is not implemented on the SQLite backend yet"
+                                .to_string(),
+                        hint: Some("SQLite spatial lands in P4 PR 5".to_string()),
+                    });
+                }
+            }
+            #[cfg(feature = "pg")]
+            {
+                let pg = backend
+                    .as_postgres()
+                    .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
+                use crate::backend::SpatialIndex as _;
+                return pg
+                    .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
+                    .await;
+            }
+            #[cfg(not(feature = "pg"))]
+            {
+                Err(DbError::Configuration {
+                    code: "spatial_unsupported",
+                    message:
+                        "db: spatial search requires the `pg` Cargo feature on this build"
+                            .to_string(),
+                    hint: Some(
+                        "rebuild with `--features pg` or use the SQLite arm (P4 PR 5)"
+                            .to_string(),
+                    ),
+                })
+            }
         }
         .await;
 

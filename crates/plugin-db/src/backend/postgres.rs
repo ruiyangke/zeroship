@@ -17,8 +17,9 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
-    PgLockManager, PgSqlExecutor, SchemaIntrospect, SqlExecutor, VectorIndex, VectorMetric,
+    AuditWriter, Backend, DialectBuilder, FullTextIndex, GeoPoint, IndexBuilder, LockManager,
+    NamespaceManager, PgLockManager, PgSqlExecutor, SchemaIntrospect, SpatialIndex, SqlExecutor,
+    VectorIndex, VectorMetric,
 };
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
@@ -45,6 +46,17 @@ pub struct PostgresBackend {
     /// because every `PostgresBackend` is owned by a single
     /// compio thread.
     pgvector_available: RefCell<Option<bool>>,
+    /// **P4 PR 3** — cached PostGIS extension presence probe.
+    ///
+    /// Same shape and lifetime semantics as [`Self::pgvector_available`]:
+    /// `None` until the first `SpatialIndex::ensure_spatial_index` or
+    /// `SpatialIndex::spatial_near` call probes `pg_extension WHERE
+    /// extname='postgis'`; `Some(true)` / `Some(false)` after. Cached
+    /// for the life of the backend (PostGIS is provisioned at admin
+    /// time and stays present). Absence surfaces as
+    /// `DbError::Configuration { code: "postgis_extension_missing", … }`
+    /// from both entry points so the SDK can branch on `.code`.
+    postgis_available: RefCell<Option<bool>>,
 }
 
 impl std::fmt::Debug for PostgresBackend {
@@ -60,6 +72,7 @@ impl PostgresBackend {
             pool,
             url,
             pgvector_available: RefCell::new(None),
+            postgis_available: RefCell::new(None),
         }
     }
 
@@ -434,6 +447,306 @@ impl VectorIndex for PostgresBackend {
         )
         .map_err(DbError::from)?;
 
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let rows = self
+            .pool
+            .query_text_params(&bq.sql, &param_refs)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        Ok(crate::v8_bridge::rows_to_json_value(&rows))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FullTextIndex — P4 PR 3 (tsvector + GIN + tsvector_update_trigger)
+// ---------------------------------------------------------------------------
+//
+// Two methods:
+//   * `ensure_fts_index` — four idempotent statements:
+//       1. ADD COLUMN IF NOT EXISTS "__fts" tsvector
+//       2. backfill the column for rows where it's NULL
+//       3. CREATE INDEX CONCURRENTLY IF NOT EXISTS "..."__fts_idx
+//          USING GIN ("__fts")
+//       4. CREATE TRIGGER "..."__fts_trg BEFORE INSERT OR UPDATE OF
+//          <cols> EXECUTE FUNCTION tsvector_update_trigger(...)
+//   * `fts_search` — `WHERE __fts @@ plainto_tsquery($1) ORDER BY
+//     ts_rank(__fts, plainto_tsquery($1)) DESC LIMIT $2`.
+//
+// No extension probe: tsvector + GIN + plainto_tsquery +
+// tsvector_update_trigger are all part of core Postgres — they ship in
+// every supported PG image, including the `postgres:16` default. No
+// `CREATE EXTENSION` needed.
+// ---------------------------------------------------------------------------
+
+impl FullTextIndex for PostgresBackend {
+    async fn ensure_fts_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        columns: &[String],
+        language: &str,
+    ) -> Result<(), DbError> {
+        if columns.is_empty() {
+            // Nothing to index. Refuse loudly so a SDK bug emitting an
+            // empty FTS index spec gets surfaced rather than silently
+            // becoming a no-op (which would later present as "search
+            // returns nothing" without any logged cause).
+            return Err(DbError::Configuration {
+                code: "fts_no_columns",
+                message: "db: ensure_fts_index requires at least one source column"
+                    .to_string(),
+                hint: Some(
+                    "mark at least one t.string() field with `.fts()` in the schema"
+                        .to_string(),
+                ),
+            });
+        }
+
+        // Whitelist the language token against the same character set we
+        // allow in identifiers — splicing it into a SQL literal is safe
+        // because plainto_tsquery accepts it verbatim, but we still
+        // reject anything that smells of injection. The SDK already
+        // restricts the language token at validate time; this is
+        // defense-in-depth.
+        if language.is_empty()
+            || !language
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(DbError::Configuration {
+                code: "fts_invalid_language",
+                message: format!(
+                    "db: ensure_fts_index language {language:?} must be [A-Za-z0-9_]+"
+                ),
+                hint: Some("use a tsvector configuration name such as 'english' or 'simple'".to_string()),
+            });
+        }
+
+        let qschema = self.quote_ident(app_id);
+        let qcoll = self.quote_ident(collection);
+        let qtable = format!("{qschema}.{qcoll}");
+        let idx_name = format!("{collection}__fts_idx");
+        let trg_name = format!("{collection}__fts_trg");
+        let qidx = self.quote_ident(&idx_name);
+        let qtrg = self.quote_ident(&trg_name);
+        let qfts_col = self.quote_ident("__fts");
+
+        // For the tsvector backfill + trigger we need both the unquoted
+        // form (passed as a positional arg to `tsvector_update_trigger`)
+        // and the safely-quoted form (spliced into the UPDATE / column
+        // list). The trigger function only accepts column NAMES (not
+        // dotted identifiers), so the unquoted form is what PG expects
+        // there.
+        let qcols_csv: String = columns
+            .iter()
+            .map(|c| self.quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let unquoted_cols_csv: String = columns.join(", ");
+        let coalesce_concat: String = columns
+            .iter()
+            .map(|c| format!("coalesce({}, '')", self.quote_ident(c)))
+            .collect::<Vec<_>>()
+            .join(" || ' ' || ");
+
+        let empty: Vec<&str> = Vec::new();
+
+        // 1. Add the tsvector column. Idempotent via IF NOT EXISTS.
+        let add_col_sql =
+            format!("ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS {qfts_col} tsvector");
+        self.pool
+            .query_text_params(&add_col_sql, &empty)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+
+        // 2. Backfill rows where the tsvector column is still NULL.
+        //    A second registerModel call after schema change re-runs the
+        //    backfill on any rows where new source columns nulled the
+        //    derived value, but typical case is the post-ADD-COLUMN seed.
+        let backfill_sql = format!(
+            "UPDATE {qtable} SET {qfts_col} = to_tsvector('pg_catalog.{language}', {coalesce_concat}) WHERE {qfts_col} IS NULL"
+        );
+        self.pool
+            .query_text_params(&backfill_sql, &empty)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+
+        // 3. CREATE INDEX CONCURRENTLY. We do NOT route through the
+        //    audited retry loop here because the GIN over tsvector index
+        //    cannot land INVALID the same way ivfflat can (no NULL-key
+        //    edge cases). Idempotent via IF NOT EXISTS.
+        let cic_sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {qidx} ON {qtable} USING GIN ({qfts_col})"
+        );
+        self.pool
+            .query_text_params(&cic_sql, &empty)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+
+        // 4. CREATE TRIGGER. Idempotent via DROP TRIGGER IF EXISTS +
+        //    CREATE TRIGGER (PG 14+ supports `CREATE OR REPLACE TRIGGER`
+        //    but we stay compatible with PG 13/14 minimum since the
+        //    rest of the codebase doesn't pin a higher minimum).
+        let drop_trg_sql = format!("DROP TRIGGER IF EXISTS {qtrg} ON {qtable}");
+        self.pool
+            .query_text_params(&drop_trg_sql, &empty)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        // tsvector_update_trigger args:
+        //   1. target column NAME (unquoted, but the trigger function
+        //      tokenises by identifier rules — quoting with the standard
+        //      identifier syntax is safe).
+        //   2. text-cast config name (we pin pg_catalog.<lang> so the
+        //      config resolution is deterministic regardless of search_path).
+        //   3..n. source column names (unquoted; the trigger reads the
+        //      NEW row by name).
+        let create_trg_sql = format!(
+            "CREATE TRIGGER {qtrg} BEFORE INSERT OR UPDATE OF {qcols_csv} \
+             ON {qtable} FOR EACH ROW EXECUTE FUNCTION \
+             tsvector_update_trigger(__fts, 'pg_catalog.{language}', {unquoted_cols_csv})"
+        );
+        self.pool
+            .query_text_params(&create_trg_sql, &empty)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+
+        Ok(())
+    }
+
+    async fn fts_search(
+        &self,
+        app_id: &str,
+        collection: &str,
+        query: &str,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        let bq = crate::query::build_fts_search(app_id, collection, query, filter, limit)
+            .map_err(DbError::from)?;
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let rows = self
+            .pool
+            .query_text_params(&bq.sql, &param_refs)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        Ok(crate::v8_bridge::rows_to_json_value(&rows))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpatialIndex — P4 PR 3 (PostGIS adapter)
+// ---------------------------------------------------------------------------
+//
+// Two methods:
+//   * `ensure_spatial_index` — `CREATE INDEX CONCURRENTLY … USING GIST
+//     ("col")`. Routes through the audited CIC retry loop like the
+//     vector adapter does — same INVALID-on-cancel / data-violation /
+//     transient classification machinery.
+//   * `spatial_near` — `WHERE ST_DWithin(col, ST_MakePoint(lng, lat)::
+//     geography, radius) ORDER BY ST_Distance(...) LIMIT $4`.
+//
+// Both probe `pg_extension WHERE extname='postgis'` on first call and
+// cache on `postgis_available`. Absence surfaces as
+// `DbError::Configuration { code: "postgis_extension_missing", ... }`.
+// ---------------------------------------------------------------------------
+
+impl PostgresBackend {
+    /// Check (and cache) whether the `postgis` extension is installed on
+    /// the connected database. Mirrors [`Self::ensure_pgvector_available`]
+    /// — the probe runs at most once per backend; PostGIS is
+    /// provisioned at admin time and stays present.
+    async fn ensure_postgis_available(&self) -> Result<(), DbError> {
+        if let Some(present) = *self.postgis_available.borrow() {
+            if present {
+                return Ok(());
+            }
+            return Err(DbError::config_hinted(
+                "postgis_extension_missing",
+                "PostGIS is not installed on this database",
+                "run `CREATE EXTENSION postgis;` (Postgres superuser) or \
+                 swap the database image to a PostGIS-bundled variant \
+                 (see docs/runbooks/docker-compose.md)",
+            ));
+        }
+
+        let empty: Vec<&str> = Vec::new();
+        let rows = self
+            .pool
+            .query_text_params(
+                "SELECT 1 FROM pg_extension WHERE extname='postgis'",
+                &empty,
+            )
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        let present = !rows.is_empty();
+        *self.postgis_available.borrow_mut() = Some(present);
+        if present {
+            Ok(())
+        } else {
+            Err(DbError::config_hinted(
+                "postgis_extension_missing",
+                "PostGIS is not installed on this database",
+                "run `CREATE EXTENSION postgis;` (Postgres superuser) or \
+                 swap the database image to a PostGIS-bundled variant \
+                 (see docs/runbooks/docker-compose.md)",
+            ))
+        }
+    }
+}
+
+impl SpatialIndex for PostgresBackend {
+    async fn ensure_spatial_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+    ) -> Result<(), DbError> {
+        self.ensure_postgis_available().await?;
+
+        let idx_name = crate::query::index_name(collection, &[column], /* unique = */ false);
+        let sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {}.{} USING GIST ({})",
+            self.quote_ident(&idx_name),
+            self.quote_ident(app_id),
+            self.quote_ident(collection),
+            self.quote_ident(column),
+        );
+
+        let spec = crate::query::IndexSpec {
+            name: idx_name,
+            columns: vec![column.to_string()],
+            unique: false,
+            sql,
+            kind: crate::query::IndexKind::Spatial,
+        };
+
+        create_index_with_recovery_audited(
+            &self.pool,
+            app_id,
+            collection,
+            &spec,
+            "p4_spatial_index",
+            0,
+        )
+        .await
+    }
+
+    async fn spatial_near(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        point: GeoPoint,
+        radius_m: f64,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        self.ensure_postgis_available().await?;
+
+        let bq = crate::query::build_spatial_near(
+            app_id, collection, column, point, radius_m, filter, limit,
+        )
+        .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let rows = self
             .pool

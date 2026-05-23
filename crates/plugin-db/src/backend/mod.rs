@@ -1399,6 +1399,8 @@ pub trait RegisterBackend:
     + IndexBuilder
     + PgLockManager
     + VectorIndex
+    + FullTextIndex
+    + SpatialIndex
 {
 }
 
@@ -1410,6 +1412,8 @@ impl<T> RegisterBackend for T where
         + IndexBuilder
         + PgLockManager
         + VectorIndex
+        + FullTextIndex
+        + SpatialIndex
 {
 }
 

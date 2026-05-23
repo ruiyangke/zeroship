@@ -534,7 +534,56 @@ pub fn build_create_indexes(
 
     let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
 
+    // **P4 PR 3** — accumulate FTS-marked columns into a single composite
+    // index per collection (Q-P4-B from the design plan). The SDK's
+    // `.fts()` per-field modifier sets `def.fts = true; def.ftsLanguage =
+    // <lang>` on each text column; we collect those into one
+    // `IndexSpec { kind: Fts { language } }` after the per-field loop.
+    //
+    // **Language**: every `.fts()`-marked column must agree on the
+    // language token (a single `__fts` tsvector column can only carry
+    // one config). We pick the first non-empty language we see and
+    // ignore mismatches at this layer; the SDK is expected to validate
+    // language consistency at schema-definition time. If no language is
+    // declared the fallback is `english`.
+    let mut fts_cols: Vec<String> = Vec::new();
+    let mut fts_language: Option<String> = None;
+
     for (field, def) in obj {
+        // **P4 PR 3** — geoPoint fields always emit an
+        // `IndexKind::Spatial` spec regardless of the `index`/`unique`
+        // markers. The impl builds the `USING GIST` DDL itself; the
+        // `sql` field stays empty (same shape as the Vector branch).
+        if def.get("type").and_then(|t| t.as_str()) == Some("geoPoint") {
+            let name = index_name(collection, &[field.as_str()], /* unique = */ false);
+            out.push(IndexSpec {
+                name,
+                columns: vec![field.clone()],
+                unique: false,
+                sql: String::new(),
+                kind: IndexKind::Spatial,
+            });
+            continue;
+        }
+
+        // **P4 PR 3** — collect FTS-marked text columns. A column is
+        // FTS-marked when `def.fts === true`; the language defaults to
+        // `english` (matches the SDK default in `t.string().fts()`).
+        if def.get("fts").and_then(|v| v.as_bool()) == Some(true) {
+            fts_cols.push(field.clone());
+            if fts_language.is_none() {
+                if let Some(lang) = def.get("ftsLanguage").and_then(|v| v.as_str()) {
+                    if !lang.is_empty() {
+                        fts_language = Some(lang.to_string());
+                    }
+                }
+            }
+            // Fall through — an FTS-marked column can also carry an
+            // `index: true` or `unique: true` modifier and the user
+            // still wants the B-tree alongside the FTS index. The
+            // composite FTS index is emitted once after the loop.
+        }
+
         // **P4 PR 2** — vector fields always emit an `IndexKind::Vector`
         // spec regardless of the `index`/`unique` markers; the SDK's
         // `t.vector()` builder doesn't expose those modifiers (they
@@ -624,6 +673,22 @@ pub fn build_create_indexes(
                 kind: IndexKind::BTree,
             });
         }
+    }
+
+    // **P4 PR 3** — emit a single composite FTS spec covering every
+    // `.fts()`-marked column on this collection (Q-P4-B). The PG impl
+    // builds the `__fts tsvector` column + GIN index + trigger; the
+    // `sql` field stays empty because the impl builds its own DDL.
+    if !fts_cols.is_empty() {
+        let language = fts_language.unwrap_or_else(|| "english".to_string());
+        let name = format!("{collection}__fts_idx");
+        out.push(IndexSpec {
+            name,
+            columns: fts_cols,
+            unique: false,
+            sql: String::new(),
+            kind: IndexKind::Fts { language },
+        });
     }
 
     Ok(out)
@@ -819,7 +884,8 @@ fn short_hash_base32(input: &str) -> String {
 fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, QueryError> {
     validate_field_name(field)?;
     let pg_type_owned;
-    let pg_type: &str = if def.get("type").and_then(|t| t.as_str()) == Some("vector") {
+    let zs_type = def.get("type").and_then(|t| t.as_str());
+    let pg_type: &str = if zs_type == Some("vector") {
         // **P4 PR 2** — pgvector column type is parameterised by dims:
         // `vector(768)`. The SDK validates `vectorDims` is `1..=16000`
         // before sending; we treat a missing field as a schema bug and
@@ -836,6 +902,18 @@ fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, Query
         } else {
             "vector"
         }
+    } else if zs_type == Some("geoPoint") {
+        // **P4 PR 3** — `t.geoPoint()` materialises as PostGIS
+        // `geography(POINT, 4326)`. We hand-code the PG type here rather
+        // than wiring it through `def_to_pg_type` because the type is
+        // PostGIS-extension-dependent, not a core PG type, and we want
+        // the DDL emitter to remain functional regardless of whether
+        // PostGIS is installed (the PostGIS probe lives on the runtime
+        // `SpatialIndex` path; a registerModel against a non-PostGIS
+        // database will fail at CREATE TABLE time with a clear
+        // "type geography does not exist" error rather than at
+        // index-build time).
+        "geography(POINT, 4326)"
     } else {
         def_to_pg_type(def)
     };
@@ -1929,6 +2007,139 @@ pub(crate) fn build_vector_search(
         sql.push_str(&where_clause);
     }
     sql.push_str(&format!(" ORDER BY {col} {op} $1::vector LIMIT $2"));
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// Build the SQL + bind parameters for a full-text search (P4 PR 3 — PG arm).
+///
+/// Shape:
+/// ```sql
+/// SELECT *, ts_rank("__fts", plainto_tsquery('pg_catalog.english', $1)) AS _rank
+/// FROM "<app>"."<coll>"
+/// WHERE "__fts" @@ plainto_tsquery('pg_catalog.english', $1) AND <filter>
+/// ORDER BY _rank DESC
+/// LIMIT $2
+/// ```
+///
+/// **Language**: we always render `'pg_catalog.english'` here at the
+/// builder level — the per-collection `FullTextIndex::ensure_fts_index`
+/// call wires the trigger with the schema-declared language, so query-
+/// time text decomposition matches the index-time decomposition. A
+/// future PR may thread the per-collection language through the builder
+/// for non-English schemas; PR 3 deliberately ships only English to keep
+/// the wire path narrow (PG itself ships configs for many languages, so
+/// the upgrade is one `language: &str` parameter away).
+///
+/// **Parameter binding**: `$1` is the query text (bound as TEXT, not
+/// cast — `plainto_tsquery(regconfig, text)` takes the text verbatim);
+/// `$2` is the LIMIT. Filter parameters start at `$3` for the same
+/// reason as [`build_vector_search`].
+///
+/// Pulls in the standard `build_where` helper for filter composition —
+/// any operator the rest of the read path supports works inside an FTS
+/// query too (`{lang: "en"}`, `{$and: [...]}`, etc.).
+pub(crate) fn build_fts_search(
+    app_id: &str,
+    collection: &str,
+    query: &str,
+    filter: &Value,
+    limit: Option<usize>,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+    let fts_col = quote_ident("__fts");
+
+    // Default LIMIT — 100 is large enough for typical "top results" UIs
+    // without dragging the whole table into memory if the caller forgets
+    // a `.limit()`.
+    let limit = limit.unwrap_or(100);
+
+    let mut params: Vec<String> = Vec::with_capacity(2 + 4);
+    params.push(query.to_string());
+    params.push(limit.to_string());
+
+    let where_clause = build_where(filter, &mut params)?;
+
+    let mut sql = format!(
+        "SELECT *, ts_rank({fts_col}, plainto_tsquery('pg_catalog.english', $1)) AS _rank \
+         FROM {schema}.{table} \
+         WHERE {fts_col} @@ plainto_tsquery('pg_catalog.english', $1)"
+    );
+    if !where_clause.is_empty() {
+        sql.push_str(" AND ");
+        sql.push_str(&where_clause);
+    }
+    sql.push_str(" ORDER BY _rank DESC LIMIT $2");
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// Build the SQL + bind parameters for a spatial within-radius search
+/// (P4 PR 3 — PostGIS arm).
+///
+/// Shape:
+/// ```sql
+/// SELECT *, ST_Distance("col", ST_MakePoint($1, $2)::geography) AS _distance_m
+/// FROM "<app>"."<coll>"
+/// WHERE ST_DWithin("col", ST_MakePoint($1, $2)::geography, $3) AND <filter>
+/// ORDER BY _distance_m
+/// LIMIT $4
+/// ```
+///
+/// **Parameter order**: `$1 = lng`, `$2 = lat` — `ST_MakePoint(x, y)` is
+/// `(lng, lat)` in PostGIS, the inverse of the SDK's `{lat, lng}` shape.
+/// The Rust trait surface ([`crate::backend::GeoPoint`]) keeps the
+/// `{lat, lng}` shape; the swap happens here at the SQL boundary so the
+/// JS/Rust contract stays in `(lat, lng)` order. `$3 = radius_m`,
+/// `$4 = limit`. Filter parameters start at `$5`.
+///
+/// **Column type**: the indexed column must be
+/// `geography(POINT, 4326)`. The PG DDL emitter ([`field_to_column`])
+/// wires this when the schema field type is `geoPoint`.
+pub(crate) fn build_spatial_near(
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    point: crate::backend::GeoPoint,
+    radius_m: f64,
+    filter: &Value,
+    limit: Option<usize>,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+    validate_field_name(column)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+    let col = quote_ident(column);
+
+    let limit = limit.unwrap_or(100);
+
+    // Bind order: (lng, lat, radius_m, limit). Note the swap: ST_MakePoint
+    // takes (x, y) = (lng, lat), the inverse of the SDK's {lat, lng}
+    // input shape.
+    let mut params: Vec<String> = Vec::with_capacity(4 + 4);
+    params.push(point.lng.to_string());
+    params.push(point.lat.to_string());
+    params.push(radius_m.to_string());
+    params.push(limit.to_string());
+
+    let where_clause = build_where(filter, &mut params)?;
+
+    let mut sql = format!(
+        "SELECT *, ST_Distance({col}, ST_MakePoint($1, $2)::geography) AS _distance_m \
+         FROM {schema}.{table} \
+         WHERE ST_DWithin({col}, ST_MakePoint($1, $2)::geography, $3)"
+    );
+    if !where_clause.is_empty() {
+        sql.push_str(" AND ");
+        sql.push_str(&where_clause);
+    }
+    sql.push_str(" ORDER BY _distance_m LIMIT $4");
 
     Ok(BuiltQuery { sql, params })
 }

@@ -5283,3 +5283,504 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
         "error message must mention dim mismatch: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P4 PR 3 — FullTextIndex + SpatialIndex (PG arm) test gates.
+//
+// FTS tests run unconditionally: tsvector / GIN / plainto_tsquery /
+// tsvector_update_trigger are all core PG (no extension needed).
+//
+// Spatial tests require PostGIS. The default `pg-test` container
+// (`postgres:16`) doesn't bundle PostGIS, so the spatial gates are
+// `#[ignore]`-marked and run via `--ignored` against a PostGIS-bundled
+// image — see docs/runbooks/docker-compose.md and the open question
+// at the bottom of the report.
+// ---------------------------------------------------------------------------
+
+async fn postgis_available(pool: &Pool) -> bool {
+    // Try a no-op `CREATE EXTENSION` so the test environment that ships
+    // PostGIS but doesn't pre-install it still picks it up. If the
+    // extension isn't shipped at all the call fails and we fall back
+    // to the probe (which will return empty rows → false).
+    let _ = pool
+        .execute("CREATE EXTENSION IF NOT EXISTS postgis", &[])
+        .await;
+    let rows = pool
+        .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &[])
+        .await
+        .unwrap_or_default();
+    !rows.is_empty()
+}
+
+/// **P4 PR 3 test gate** — `fts_search_matches_substring`.
+///
+/// Inserts 5 rows whose `bio` column matches different keyword sets;
+/// asserts `fts_search("rust")` returns the membership set we expect
+/// (the rows containing "rust" anywhere — bare "rust", "rust async",
+/// and any phrase variant). Set membership, not ordinal positions.
+#[compio::test]
+async fn fts_search_matches_substring() {
+    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "fts_substring";
+    let coll = "people";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               bio TEXT NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+
+    // Build the FTS index (tsvector column + GIN + trigger). The
+    // trigger fires on subsequent INSERTs, so we wire it BEFORE
+    // inserting the seed rows so the tsvector column gets populated
+    // by the trigger rather than the backfill UPDATE.
+    FullTextIndex::ensure_fts_index(
+        &backend,
+        app,
+        coll,
+        &["bio".to_string()],
+        "english",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("ensure_fts_index failed: {e:?}"));
+
+    let seeds = [
+        "Loves rust and systems programming",
+        "Building async services",
+        "rust async fan",
+        "Python developer",
+        "Ruby on Rails dev",
+    ];
+    for s in &seeds {
+        pool.execute(
+            &format!("INSERT INTO \"{app}\".\"{coll}\" (bio) VALUES ($1)"),
+            &[s as &(dyn compio_postgres::types::ToSql + Sync)],
+        )
+        .await
+        .unwrap();
+    }
+
+    let rows = FullTextIndex::fts_search(
+        &backend,
+        app,
+        coll,
+        "rust",
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("fts_search failed: {e:?}"));
+
+    // "rust" tokenises to "rust" — matches rows 1 and 3 ("rust",
+    // "rust async"). The english stemmer leaves "rust" untouched
+    // (it's already the root form).
+    let bios: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.get("bio").and_then(serde_json::Value::as_str).map(str::to_string))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected 2 rust-matching rows, got {} ({bios:?})",
+        rows.len()
+    );
+    assert!(
+        bios.iter().any(|b| b.contains("rust and systems")),
+        "expected the 'rust and systems' row in {bios:?}"
+    );
+    assert!(
+        bios.iter().any(|b| b.contains("rust async fan")),
+        "expected the 'rust async fan' row in {bios:?}"
+    );
+    // Every row must carry the synthetic `_rank` column.
+    for r in &rows {
+        assert!(r.get("_rank").is_some(), "row missing _rank: {r}");
+    }
+}
+
+/// **P4 PR 3 test gate** — `fts_and_filter_compose`.
+///
+/// FTS `MATCH` composed via `AND` with a regular column filter must
+/// intersect — assert the final set is exactly the rows matching both
+/// conditions.
+#[compio::test]
+async fn fts_and_filter_compose() {
+    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "fts_compose";
+    let coll = "people";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               bio TEXT NOT NULL, \
+               lang TEXT NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    FullTextIndex::ensure_fts_index(
+        &backend,
+        app,
+        coll,
+        &["bio".to_string()],
+        "english",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("ensure_fts_index failed: {e:?}"));
+
+    let seeds = [
+        ("Loves rust and systems programming", "en"),
+        ("rust async runtimes", "en"),
+        ("python developer", "en"),
+        ("rust fan", "de"),
+        ("rust crab", "de"),
+    ];
+    for (bio, lang) in &seeds {
+        pool.execute(
+            &format!("INSERT INTO \"{app}\".\"{coll}\" (bio, lang) VALUES ($1, $2)"),
+            &[
+                bio as &(dyn compio_postgres::types::ToSql + Sync),
+                lang as &(dyn compio_postgres::types::ToSql + Sync),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    // FTS for "rust" filtered to lang="en" — must hit exactly rows 1 + 2
+    // (the two "rust" bios with lang="en"), not 4/5 (rust bios in de).
+    let rows = FullTextIndex::fts_search(
+        &backend,
+        app,
+        coll,
+        "rust",
+        &serde_json::json!({ "lang": "en" }),
+        None,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("fts_search failed: {e:?}"));
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected exactly 2 (rust ∩ en) rows, got {}",
+        rows.len()
+    );
+    for r in &rows {
+        assert_eq!(
+            r.get("lang").and_then(serde_json::Value::as_str),
+            Some("en"),
+            "filter must restrict to lang=en: {r}"
+        );
+    }
+}
+
+/// **P4 PR 3 test gate (bonus)** — `fts_trigger_keeps_index_in_sync_after_update`.
+///
+/// Insert a row, search for token "alpha" — must hit. Update the row to
+/// replace "alpha" with "beta" and search for "alpha" again — must
+/// MISS, while a search for "beta" must hit. This exercises the
+/// `tsvector_update_trigger` rather than just the initial backfill.
+#[compio::test]
+async fn fts_trigger_keeps_index_in_sync_after_update() {
+    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "fts_trigger";
+    let coll = "docs";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               body TEXT NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    FullTextIndex::ensure_fts_index(
+        &backend,
+        app,
+        coll,
+        &["body".to_string()],
+        "english",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("ensure_fts_index failed: {e:?}"));
+
+    let alpha = "alpha test content";
+    pool.execute(
+        &format!("INSERT INTO \"{app}\".\"{coll}\" (body) VALUES ($1)"),
+        &[&alpha as &(dyn compio_postgres::types::ToSql + Sync)],
+    )
+    .await
+    .unwrap();
+
+    let hits = FullTextIndex::fts_search(
+        &backend,
+        app,
+        coll,
+        "alpha",
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits.len(), 1, "expected 1 alpha hit pre-update, got {}", hits.len());
+
+    let beta = "beta different content";
+    pool.execute(
+        &format!("UPDATE \"{app}\".\"{coll}\" SET body = $1 WHERE id = 1"),
+        &[&beta as &(dyn compio_postgres::types::ToSql + Sync)],
+    )
+    .await
+    .unwrap();
+
+    let alpha_hits = FullTextIndex::fts_search(
+        &backend,
+        app,
+        coll,
+        "alpha",
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        alpha_hits.len(),
+        0,
+        "trigger must invalidate alpha after UPDATE, got {} hits",
+        alpha_hits.len()
+    );
+
+    let beta_hits = FullTextIndex::fts_search(
+        &backend,
+        app,
+        coll,
+        "beta",
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        beta_hits.len(),
+        1,
+        "trigger must surface beta after UPDATE, got {} hits",
+        beta_hits.len()
+    );
+}
+
+/// **P4 PR 3 test gate** — `near_returns_within_radius`.
+///
+/// 10 points around London at varying distances from the centre
+/// `(51.5074, -0.1278)`. `near()` with a 1km radius returns only the
+/// points actually within 1km (assert by membership set, not strict
+/// ordering — ST_Distance is FP-deterministic in modern PostGIS but we
+/// don't pin the order).
+///
+/// **`#[ignore]`** until the test environment swaps to a PostGIS-bundled
+/// image. See `postgis_available` probe — the test self-skips if the
+/// extension isn't present, but the `#[ignore]` keeps default `cargo
+/// test` runs from probing at all.
+#[compio::test]
+#[ignore = "requires PostGIS — swap `pg-test` image to a PostGIS-bundled variant"]
+async fn near_returns_within_radius() {
+    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !postgis_available(&pool).await {
+        eprintln!("Skipping: PostGIS not installed in test environment");
+        return;
+    }
+
+    let app = "near_radius";
+    let coll = "places";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(
+            "CREATE TABLE \"{app}\".\"{coll}\" (\
+               id SERIAL PRIMARY KEY, \
+               location geography(POINT, 4326) NOT NULL\
+             )"
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
+    // 10 points: 5 within ~1km of London (small lat/lng offsets) and
+    // 5 well outside (several km away). One degree of latitude is
+    // ~111km, so 0.005 deg ≈ 555m and 0.05 deg ≈ 5.5km.
+    let offsets: Vec<(f64, f64, bool)> = vec![
+        (0.0, 0.0, true),       // dead-centre
+        (0.001, 0.001, true),   // ~140m
+        (0.003, 0.003, true),   // ~420m
+        (-0.005, 0.0, true),    // ~555m south
+        (0.0, 0.005, true),     // ~350m east (cos(51.5°) ≈ 0.62)
+        (0.05, 0.0, false),     // ~5.5km north
+        (-0.05, 0.0, false),    // ~5.5km south
+        (0.0, 0.05, false),     // ~3.5km east
+        (0.0, -0.05, false),    // ~3.5km west
+        (0.1, 0.1, false),      // ~11km NE
+    ];
+    let mut expected_within: Vec<i64> = Vec::new();
+    for (i, (dlat, dlng, within_1km)) in offsets.iter().enumerate() {
+        let lng = london.lng + dlng;
+        let lat = london.lat + dlat;
+        let lit = format!("POINT({lng} {lat})");
+        pool.execute(
+            &format!(
+                "INSERT INTO \"{app}\".\"{coll}\" (location) VALUES (ST_GeogFromText($1))"
+            ),
+            &[&lit as &(dyn compio_postgres::types::ToSql + Sync)],
+        )
+        .await
+        .unwrap();
+        if *within_1km {
+            expected_within.push((i + 1) as i64);
+        }
+    }
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let rows = SpatialIndex::spatial_near(
+        &backend,
+        app,
+        coll,
+        "location",
+        london,
+        1000.0,
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
+
+    let returned_ids: std::collections::BTreeSet<i64> = rows
+        .iter()
+        .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+        .collect();
+    let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
+    assert_eq!(
+        returned_ids, expected,
+        "near(1km) membership mismatch: returned={returned_ids:?} expected={expected:?}"
+    );
+    for r in &rows {
+        assert!(r.get("_distance_m").is_some(), "row missing _distance_m: {r}");
+    }
+}
+
+/// **P4 PR 3 test gate** — `postgis_extension_missing_reports_typed_error`.
+///
+/// When the database has no PostGIS, both `ensure_spatial_index` and
+/// `spatial_near` must surface `DbError::Configuration { code:
+/// "postgis_extension_missing", .. }`. Same shape as
+/// `pgvector_extension_missing_reports_typed_error`.
+#[compio::test]
+async fn postgis_extension_missing_reports_typed_error() {
+    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
+    use zeroship_plugin_db::error::DbError;
+
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    // Best-effort drop. If this fails (e.g. extension in use), we
+    // re-check via the probe and self-skip the assertion.
+    let _ = pool
+        .execute("DROP EXTENSION IF EXISTS postgis CASCADE", &[])
+        .await;
+
+    let still_present = pool
+        .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &[])
+        .await
+        .map(|rows| !rows.is_empty())
+        .unwrap_or(false);
+    if still_present {
+        eprintln!("Skipping: could not drop postgis extension (likely in use by other objects)");
+        return;
+    }
+
+    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let err = SpatialIndex::ensure_spatial_index(&backend, "postgis_missing", "any", "any")
+        .await
+        .expect_err("missing PostGIS must yield a typed error");
+    match err {
+        DbError::Configuration { code, message, hint } => {
+            assert_eq!(code, "postgis_extension_missing", "got {message}");
+            assert!(
+                hint.as_deref()
+                    .map(|h| h.contains("CREATE EXTENSION"))
+                    .unwrap_or(false),
+                "hint must mention `CREATE EXTENSION postgis;`: {hint:?}"
+            );
+        }
+        other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
+    }
+
+    let err = SpatialIndex::spatial_near(
+        &backend,
+        "postgis_missing",
+        "any",
+        "any",
+        GeoPoint { lat: 0.0, lng: 0.0 },
+        1000.0,
+        &serde_json::Value::Null,
+        None,
+    )
+    .await
+    .expect_err("missing PostGIS must yield a typed error on near too");
+    match err {
+        DbError::Configuration { code, .. } => {
+            assert_eq!(code, "postgis_extension_missing");
+        }
+        other => panic!("expected Configuration {{ postgis_extension_missing }}, got {other:?}"),
+    }
+}
