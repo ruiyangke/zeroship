@@ -439,7 +439,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: r6 root-causing was wrong — R6-P1 detach correctly removed the teardown wait but snapshot p50 stayed at 50s. Real cause: `ChRemoteClient::pause/snapshot` + `LocalDiskSnapshotStore::put` run synchronously on the async caller. Trait doc at `snapshot_store.rs:99` mandates `spawn_blocking`; no caller wraps. At c=4 on n2-standard-4, four sync 2GB-dumps contend on local SSD → ~40-50 MB/s per stream → matches observed 50s wall.
 - **Action**: wrap `ch.pause`, `ch.snapshot`, AND `LocalDiskSnapshotStore::put` in `compio::runtime::spawn_blocking`. Same shape as R5-P1b's spawn_blocking wrap on `store.get`. Estimated snapshot p50 reduction: 50s → 10-15s at c=4 (limited by SSD bandwidth at concurrency=4 × 2GB = 8GB).
 
-### [R7-P2] `TieredSnapshotStore::put` detaches L2 GCS via `compio::runtime::spawn` (not `spawn_blocking`) (IMPORTANT, performance-r7)
+### [R7-P2] (CLOSED at 6f314025) `TieredSnapshotStore::put` detaches L2 GCS via `compio::runtime::spawn` (not `spawn_blocking`) (IMPORTANT, performance-r7)
 - **File**: `crates/sandbox/src/snapshot_store_gcs.rs:832`
 - **Symptom**: 1GB GCS PUT runs on a regular compio task, parking a runtime worker. While next snapshot's `ch.snapshot` writes the same SSD, the L2 PUT competes for both compio worker + SSD bandwidth.
 - **Action**: change `spawn(...)` → `spawn_blocking(...)`. Frees the compio worker; SSD still contends, but compio scheduler can serve `/livez` etc.
@@ -584,12 +584,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/snapshot_aead.rs:363-449` + `crates/sandbox/src/snapshot_store.rs:184-223` + `crates/sandbox/src/snapshot_store_gcs.rs:539-622`
 - **Symptom**: 5 passes: (1) encrypt-in-place input read, (2) L1 SHA, (3) L2 canonical SHA, (4) L2 per-file SHA, (5) L2 upload stream. Fusable to 2.
 - **Action**: implement streaming `EncryptingHashWriter` (subsumes R9-P3) + plumb `SnapshotStore::put` to accept a precomputed sha256 (R10-P4). Estimated savings ~1.5-2.5 s/snapshot at single-stream SSD; unknown at c=N.
-
-### [R10-P2] `TieredSnapshotStore::put` uses `compio::runtime::spawn` (not `spawn_blocking`) — confirms R7-P2 still open (CRITICAL, performance-r10)
-- **Source**: 2026-05-25 performance-r10
-- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:1066`
-- **Symptom**: file has an inline TODO comment saying "wrap in spawn_blocking like the rest of the controller" but uses `spawn(...)`. Sync ureq HTTP PUT runs on a compio executor thread, parking it for the full GCS PUT duration.
-- **Action**: 2-line change `spawn(...)` → `spawn_blocking(...)`. Closes R7-P2 + R10-P2 together.
 
 ### [R10-P3] `cipher.encrypt`/`decrypt` allocate fresh 1-MiB Vec per chunk — 2048 heap allocs per AEAD round-trip (IMPORTANT, performance-r10)
 - **Source**: 2026-05-25 performance-r10
