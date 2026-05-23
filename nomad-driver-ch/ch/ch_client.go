@@ -256,6 +256,66 @@ func (c *Client) Resume(socketPath string) error {
 	return errors.New("ch: T-6: Client.Resume not implemented")
 }
 
+// Probe is a composite liveness check used by RecoverTask (T-4) to decide
+// whether a persisted task can be re-attached: it confirms the API socket
+// file exists on disk AND that `ch-remote --api-socket <p> info` returns
+// success (which only happens when CH is actively serving on that socket
+// and the VM is in a non-degenerate state).
+//
+// The two-step design (file-stat THEN ch-remote) is deliberate:
+//
+//  1. The stat gives a clean, fast "socket file missing on disk" error
+//     — the most common post-crash residual where CH died before unlinking
+//     its socket OR where the alloc dir was rotated. We surface this as
+//     a distinct error message so the operator log shows the precise
+//     cause rather than an opaque ch-remote dial failure.
+//  2. The ch-remote info call exercises the actual control channel. CH
+//     binds the socket eagerly at startup, so a stale socket left by a
+//     crashed CH will fail at ch-remote (connection refused on dial) —
+//     which is the discriminator we want against the "socket file exists
+//     but CH is dead" case.
+//
+// Surfaces ch-remote's stderr verbatim on failure (matches the Shutdown
+// idiom) so an operator can tell EACCES from ECONNREFUSED.
+func (c *Client) Probe(socketPath string) error {
+	if socketPath == "" {
+		return errors.New("ch: Probe: empty socket path")
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("ch: Probe: api socket %s does not exist", socketPath)
+		}
+		return fmt.Errorf("ch: Probe: stat api socket %s: %w", socketPath, err)
+	}
+	chRemote := c.CHRemoteBin()
+	if chRemote == "" {
+		return errors.New("ch: Probe: ch-remote binary not resolved")
+	}
+	cmd := exec.Command(chRemote, "--api-socket", socketPath, "info")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ch: Probe: ch-remote info: %w (output=%q)", err, string(out))
+	}
+	return nil
+}
+
+// probeFn is the package-level seam tests swap to fake ch-remote info
+// without spawning a real binary. Default delegates to Client.Probe.
+// Mirrors the shutdownFn pattern.
+var probeFn = func(c *Client, socketPath string) error {
+	return c.Probe(socketPath)
+}
+
+// SetProbeForTest replaces the ch-remote probe seam. Returns the previous
+// fn so the caller can restore it on cleanup.
+func SetProbeForTest(fn func(c *Client, socketPath string) error) func(*Client, string) error {
+	prev := probeFn
+	if fn != nil {
+		probeFn = fn
+	}
+	return prev
+}
+
 // shutdownFn is the package-level seam that tests swap to fake ch-remote
 // without spawning a real binary. Default delegates to Client.Shutdown.
 // Mirrors the ensureTapUpFn pattern from start_task.go.
