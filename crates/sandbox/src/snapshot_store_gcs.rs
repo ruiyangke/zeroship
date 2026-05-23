@@ -13,8 +13,11 @@
 //!     chunks) for memory-ranges (≈ 1 GB).
 //!   - `get`: streamed download to disk, sha256 verified post-pull.
 //!   - `delete`: idempotent per-file delete (404 → Ok).
-//!   - `verify`: HEAD on each artifact; compares `x-goog-hash`
-//!     metadata to `expected_sha256`.
+//!   - `verify`: streams each artifact from GCS and recomputes the
+//!     canonical SHA-256 over plaintext bytes; mismatch surfaces as
+//!     `SnapshotError::ChecksumMismatch`. We intentionally do NOT
+//!     trust bucket-side `x-goog-hash` metadata — an attacker with
+//!     bucket-write could substitute both the body and the metadata.
 //!
 //! - [`TieredSnapshotStore`]: production composition. L1 = local
 //!   disk (PR 3a), L2 = GCS (this file). Reads always hit L1 first;
@@ -415,83 +418,6 @@ impl GcsSnapshotStore {
         }
     }
 
-    /// HEAD a file to inspect its `x-goog-hash` metadata. Returns
-    /// the parsed sha256 (or NotFound on 404). Used by `verify`.
-    fn head_object_sha256(
-        &self,
-        sandbox_id: &str,
-        file: &str,
-    ) -> Result<[u8; 32], SnapshotError> {
-        let token = self.access_token()?;
-        let object = self.object_name(sandbox_id, file);
-        let url = format!(
-            "https://storage.googleapis.com/{}/{}",
-            self.bucket,
-            urlencoding(&object)
-        );
-        let resp = ureq::request("HEAD", &url)
-            .set("authorization", &format!("Bearer {token}"))
-            .timeout(Duration::from_secs(10))
-            .call();
-        let header_resp = match resp {
-            Ok(r) if r.status() == 200 => r,
-            Ok(r) if r.status() == 404 => {
-                return Err(SnapshotError::NotFound(format!("{sandbox_id}/{file}")))
-            }
-            Ok(r) => {
-                return Err(SnapshotError::InvalidArtifact(format!(
-                    "GCS HEAD {object}: status {}",
-                    r.status()
-                )))
-            }
-            Err(ureq::Error::Status(404, _)) => {
-                return Err(SnapshotError::NotFound(format!("{sandbox_id}/{file}")))
-            }
-            Err(ureq::Error::Status(code, _)) => {
-                return Err(SnapshotError::InvalidArtifact(format!(
-                    "GCS HEAD {object}: status {code}"
-                )))
-            }
-            Err(e) => {
-                return Err(SnapshotError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("GCS HEAD {object}: {e}"),
-                )))
-            }
-        };
-        let hash_hdr = header_resp.header("x-goog-hash").ok_or_else(|| {
-            SnapshotError::InvalidArtifact(format!(
-                "GCS HEAD {object}: no x-goog-hash header"
-            ))
-        })?;
-        // Header format: "crc32c=<...>,sha256=<...>" or just "sha256=<...>"
-        let mut sha = None;
-        for part in hash_hdr.split(',') {
-            let part = part.trim();
-            if let Some(rest) = part.strip_prefix("sha256=") {
-                sha = Some(rest.to_string());
-                break;
-            }
-        }
-        let Some(sha_b64) = sha else {
-            return Err(SnapshotError::InvalidArtifact(format!(
-                "GCS HEAD {object}: x-goog-hash has no sha256 component ({hash_hdr})"
-            )));
-        };
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(sha_b64.as_bytes())
-            .map_err(|e| SnapshotError::InvalidArtifact(format!("decode sha256: {e}")))?;
-        if bytes.len() != 32 {
-            return Err(SnapshotError::InvalidArtifact(format!(
-                "GCS HEAD {object}: sha256 length {}, expected 32",
-                bytes.len()
-            )));
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        Ok(out)
-    }
-
     fn delete_object(&self, sandbox_id: &str, file: &str) -> Result<(), SnapshotError> {
         let token = self.access_token()?;
         let object = self.object_name(sandbox_id, file);
@@ -662,23 +588,140 @@ impl SnapshotStore for GcsSnapshotStore {
         sandbox_id: &str,
         expected_sha256: &[u8; 32],
     ) -> Result<(), SnapshotError> {
-        // Verify by streaming each file's HEAD x-goog-hash sha256.
-        // Integrity model: per-file hashes can't be combined into the
-        // canonical-concatenation hash without re-reading the bytes,
-        // so this method is "bytes haven't been corrupted at rest"
-        // not "the canonical hash matches `expected_sha256`."
-        // Operators who need the canonical check call `get` and
-        // verify post-download.
+        // Integrity gate: stream each artifact file's bytes from GCS
+        // through the canonical hasher (name || len_be || bytes per
+        // ARTIFACT_FILES order) and compare to `expected_sha256`.
         //
-        // We still touch `expected_sha256` so a caller's intent is
-        // observable in logs/metrics; the sha is currently
-        // unused-but-recorded for traceability.
-        let _ = expected_sha256;
-        for &name in ARTIFACT_FILES {
-            // head fetch — propagates NotFound if any file missing.
-            let _ = self.head_object_sha256(sandbox_id, name)?;
+        // Why we re-stream rather than trust GCS-side metadata:
+        // `x-goog-hash` is per-file, so per-file hashes can't be
+        // combined into the canonical concatenation hash without
+        // re-reading the bytes. Trusting bucket-side metadata is also
+        // unsafe against an attacker with bucket-write — they can
+        // substitute both the bytes and the metadata. The canonical
+        // SHA-256 over plaintext is the authentic gate (§ 4.3 trust
+        // chain), so this method recomputes it end-to-end.
+        //
+        // Bandwidth cost: one full artifact read (~ 1 GB for memory-
+        // ranges). Callers should reach for `verify` sparingly — e.g.
+        // periodic L2 sweep, not per-restore (the `get` path verifies
+        // post-download for free).
+        verify_canonical_sha256_from_streams(expected_sha256, |name| {
+            self.open_object_stream(sandbox_id, name)
+        })
+    }
+}
+
+/// Streamed canonical-hash check over the three artifact files.
+///
+/// Returns the bytes via the `open` callback so the unit test can
+/// inject in-memory readers; production passes GCS-backed readers via
+/// [`GcsSnapshotStore::open_object_stream`]. Surfaces mismatch as
+/// [`SnapshotError::ChecksumMismatch`] — the integrity-mismatch
+/// envelope the trait already exposes.
+fn verify_canonical_sha256_from_streams<F>(
+    expected_sha256: &[u8; 32],
+    mut open: F,
+) -> Result<(), SnapshotError>
+where
+    F: FnMut(&'static str) -> Result<(u64, Box<dyn Read + Send>), SnapshotError>,
+{
+    let mut hasher = Sha256::new();
+    for &name in ARTIFACT_FILES {
+        let (len, mut reader) = open(name)?;
+        hasher.update(name.as_bytes());
+        hasher.update(len.to_be_bytes());
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut read_total: u64 = 0;
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            read_total = read_total.checked_add(n as u64).ok_or_else(|| {
+                SnapshotError::InvalidArtifact("verify: read overflow".into())
+            })?;
         }
-        Ok(())
+        if read_total != len {
+            // GCS declared a content-length we didn't match — treat
+            // as integrity failure (the body was truncated, padded,
+            // or content-length lied).
+            return Err(SnapshotError::InvalidArtifact(format!(
+                "verify {name}: read {read_total} bytes, expected {len}"
+            )));
+        }
+    }
+    let h = hasher.finalize();
+    let mut actual = [0u8; 32];
+    actual.copy_from_slice(&h);
+    if &actual != expected_sha256 {
+        return Err(SnapshotError::ChecksumMismatch {
+            expected: *expected_sha256,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+impl GcsSnapshotStore {
+    /// Open a streamed read of a single artifact object. Returns
+    /// `(content_length, reader)`. Errors:
+    /// - 404 → [`SnapshotError::NotFound`]
+    /// - missing/invalid content-length → [`SnapshotError::InvalidArtifact`]
+    /// - transport → [`SnapshotError::Io`]
+    fn open_object_stream(
+        &self,
+        sandbox_id: &str,
+        file: &'static str,
+    ) -> Result<(u64, Box<dyn Read + Send>), SnapshotError> {
+        let token = self.access_token()?;
+        let object = self.object_name(sandbox_id, file);
+        let url = format!(
+            "https://storage.googleapis.com/{}/{}",
+            self.bucket,
+            urlencoding(&object)
+        );
+        let resp = ureq::get(&url)
+            .set("authorization", &format!("Bearer {token}"))
+            .timeout(self.request_timeout)
+            .call();
+        let r = match resp {
+            Ok(r) if r.status() == 200 => r,
+            Ok(r) if r.status() == 404 => {
+                return Err(SnapshotError::NotFound(format!("{sandbox_id}/{file}")));
+            }
+            Ok(r) => {
+                return Err(SnapshotError::InvalidArtifact(format!(
+                    "GCS verify-stream {object}: status {}, body={}",
+                    r.status(),
+                    r.into_string().unwrap_or_default()
+                )))
+            }
+            Err(ureq::Error::Status(404, _)) => {
+                return Err(SnapshotError::NotFound(format!("{sandbox_id}/{file}")));
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                return Err(SnapshotError::InvalidArtifact(format!(
+                    "GCS verify-stream {object}: status {code}, body={}",
+                    r.into_string().unwrap_or_default()
+                )))
+            }
+            Err(e) => {
+                return Err(SnapshotError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("GCS verify-stream {object}: {e}"),
+                )));
+            }
+        };
+        let len: u64 = r
+            .header("content-length")
+            .and_then(|h| h.parse().ok())
+            .ok_or_else(|| {
+                SnapshotError::InvalidArtifact(format!(
+                    "GCS verify-stream {object}: missing/invalid content-length"
+                ))
+            })?;
+        Ok((len, Box::new(r.into_reader())))
     }
 }
 
@@ -1114,6 +1157,89 @@ mod tests {
         assert_eq!(super::urlencoding("abc-123_xyz.~"), "abc-123_xyz.~");
     }
 
+    /// `verify` must reject a substituted payload. We can't stand up
+    /// a real GCS server in unit tests, but the integrity gate lives
+    /// in the pure-Rust helper `verify_canonical_sha256_from_streams`
+    /// — the GCS impl is just a transport adapter that hands it
+    /// (len, reader) pairs. So we exercise the helper directly with
+    /// two scenarios:
+    ///
+    ///   1. Honest payload + matching expected_sha256 → Ok.
+    ///   2. Honest payload + an attacker-substituted expected_sha256
+    ///      (or equivalently: tampered bytes against the honest hash)
+    ///      → ChecksumMismatch.
+    ///
+    /// Closes A2 from sandbox-snapshot-restore-deferred.md:
+    /// `GcsSnapshotStore::verify` previously discarded `expected_
+    /// sha256`, making the integrity gate a no-op.
+    #[test]
+    fn gcs_verify_rejects_tampered_payload() {
+        // Honest payload, canonical-hashed as L1 does.
+        let bodies: std::collections::HashMap<&'static str, Vec<u8>> = ARTIFACT_FILES
+            .iter()
+            .map(|&n| (n, format!("honest-bytes-of-{n}").into_bytes()))
+            .collect();
+
+        // Compute the *true* canonical hash over the honest payload
+        // so we have something legitimate to substitute against.
+        let mut hasher = sha2::Sha256::new();
+        for &name in ARTIFACT_FILES {
+            let b = &bodies[name];
+            hasher.update(name.as_bytes());
+            hasher.update((b.len() as u64).to_be_bytes());
+            hasher.update(b);
+        }
+        let honest_hash: [u8; 32] = {
+            let mut o = [0u8; 32];
+            o.copy_from_slice(&hasher.finalize());
+            o
+        };
+
+        // 1. Honest read with honest expected_sha256 → Ok.
+        let result_ok = verify_canonical_sha256_from_streams(&honest_hash, |name| {
+            let bytes = bodies[name].clone();
+            let len = bytes.len() as u64;
+            Ok((len, Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read + Send>))
+        });
+        assert!(result_ok.is_ok(), "honest verify should pass: {result_ok:?}");
+
+        // 2. Attacker substitutes the snapshot body in GCS — we model
+        // this by feeding `verify` a *different* payload than the one
+        // the metadata row (`expected_sha256` = honest_hash) was
+        // computed over. The integrity gate must reject.
+        let tampered: std::collections::HashMap<&'static str, Vec<u8>> = ARTIFACT_FILES
+            .iter()
+            .map(|&n| (n, format!("EVIL-SUBSTITUTED-{n}").into_bytes()))
+            .collect();
+        let result_bad = verify_canonical_sha256_from_streams(&honest_hash, |name| {
+            let bytes = tampered[name].clone();
+            let len = bytes.len() as u64;
+            Ok((len, Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read + Send>))
+        });
+        match result_bad {
+            Err(SnapshotError::ChecksumMismatch { expected, actual }) => {
+                assert_eq!(expected, honest_hash);
+                assert_ne!(actual, honest_hash, "tampered hash must differ");
+            }
+            other => panic!("expected ChecksumMismatch on tampered payload, got {other:?}"),
+        }
+
+        // 3. Truncation attack: declared content-length larger than
+        // the body the reader yields. Must surface as an integrity
+        // error (we treat short reads as InvalidArtifact, not a
+        // silent "almost matched").
+        let result_trunc = verify_canonical_sha256_from_streams(&honest_hash, |name| {
+            let bytes = bodies[name].clone();
+            // Lie about the length — claim 1 more byte than we serve.
+            let len = bytes.len() as u64 + 1;
+            Ok((len, Box::new(std::io::Cursor::new(bytes)) as Box<dyn Read + Send>))
+        });
+        assert!(
+            matches!(result_trunc, Err(SnapshotError::InvalidArtifact(_))),
+            "expected InvalidArtifact on short read, got {result_trunc:?}"
+        );
+    }
+
     /// Live GCS round-trip — gated on `GCS_TEST_BUCKET` env var.
     /// Requires the test runner's process to have GCE metadata
     /// server access (running on a GCE VM with a service account
@@ -1145,7 +1271,7 @@ mod tests {
         for &name in ARTIFACT_FILES {
             assert!(target.join(name).is_file(), "{name} must round-trip");
         }
-        // verify: HEAD-only check.
+        // verify: re-streams artifact and recomputes canonical sha256.
         store.verify(&sid, &meta.sha256).expect("verify must succeed");
         // delete: idempotent.
         store.delete(&sid).expect("delete must succeed");
