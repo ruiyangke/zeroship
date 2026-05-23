@@ -39,6 +39,13 @@ use crate::backend::{
 use crate::error::DbError;
 use crate::query::IndexSpec;
 
+// `cdc` is the P2 PR-1+ home for the SQLite-side `ChangeStream`
+// adapter (the `preupdate_hook` install + worker→compio publisher
+// integration lands in PR 2; PR 1 ships the stub). Crate-private —
+// the public consumer surface is
+// `BackendHandle::as_change_stream_sqlite()` (mirroring the
+// `as_postgres` / `as_sqlite` accessor shape).
+pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
 pub(crate) mod lock;
@@ -917,6 +924,19 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
+    /// P2 PR 1: pin the SQLite-arm [`ChangeStream`] adapter
+    /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
+    /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
+    /// regression that detaches the impl block — or renames the
+    /// associated type — trips here, not at the
+    /// `BackendHandle::as_change_stream_sqlite()` accessor.
+    fn assert_sqlite_change_stream_impls_change_stream() {
+        use crate::backend::ChangeStream;
+        use crate::backend::sqlite::cdc::{SqliteChangeStream, SqliteConsumerHandle};
+        fn assert_impl<T: ChangeStream<ConsumerHandle = SqliteConsumerHandle>>() {}
+        assert_impl::<SqliteChangeStream>();
+    }
+
     fn assert_sqlite_backend_is_static() {
         fn assert_static<T: 'static>() {}
         assert_static::<SqliteBackend>();
@@ -943,6 +963,7 @@ mod tests {
         let _ = assert_sqlite_backend_impls_index_builder as fn();
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
         let _ = assert_sqlite_backend_impls_audit_writer as fn();
+        let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();
     }

@@ -817,6 +817,178 @@ pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
     ) -> Result<compio_postgres::PooledClient<'p>, DbError>;
 }
 
+/// Change-stream capability — the "produce CDC events for an app" slice
+/// of the data-store boundary.
+///
+/// Introduced in **P2 PR 1** as the cross-backend surface for SQLite's
+/// `preupdate_hook`-driven CDC arm (`docs/proposals/p2-sqlite-cdc-implementation-plan.md`
+/// §2.1, §2.5). PG and SQLite both implement this on adapter types
+/// (`change_stream_pg::PgChangeStream` and
+/// `backend::sqlite::cdc::SqliteChangeStream`) rather than on the
+/// backend itself so the `ConsumerHandle` associated type can diverge
+/// across arms without bleeding into the per-isolate `BackendHandle`
+/// enum.
+///
+/// **Why not on [`Backend`] super-bound** (plan §2.1): consumers route
+/// via `BackendHandle::as_change_stream_pg(...)` /
+/// `as_change_stream_sqlite(...)` accessors that mirror
+/// [`BackendHandle::as_postgres`] / [`BackendHandle::as_sqlite`]. The
+/// associated `ConsumerHandle` type (concrete `WalConsumerHandle` for
+/// PG, `SqliteConsumerHandle` for SQLite) is the load-bearing reason
+/// not to dyn-erase — `async fn` + an associated type is not object-safe
+/// without `Box<dyn Future>` per call, and the consumer surface (a
+/// detached `compio::runtime::spawn` task on PG, an actor-driven flume
+/// channel on SQLite) doesn't naturally share an erased shape.
+///
+/// **Guards in PR 1 are no-ops** — they exist so call sites can adopt
+/// the shape today; the real Drop bodies that wire into
+/// `wal_consumer::suppress_app` / `broker::resume_app_with_resync`
+/// land in PR 4.
+// `#[allow(dead_code)]` on the trait: PR 1 ships the surface with
+// only `spawn_consumer` invoked from
+// `replication_ops::start_replication_consumer_dispatch` (the no-op
+// marker call). `provision` / `deprovision` / `pause_broker` /
+// `engage_schema_pending` are part of the stable trait surface PR 4
+// wires up — `migrations.run` will pull `pause_broker`, the
+// `bundle_invalidated` control-event will pull `engage_schema_pending`,
+// and per-app deletion (future PR) will pull `deprovision`. Removing
+// the allow once those callers exist.
+#[allow(dead_code)]
+pub trait ChangeStream: 'static {
+    /// Concrete handle representing a spawned-but-still-running
+    /// consumer. PG: a task handle / supervisor handle; SQLite: a
+    /// session marker the actor uses to track that hooks are armed.
+    /// Type erased per-impl (associated type) so we don't pay the
+    /// `Box<dyn Future>` price the dyn-safe shape would force.
+    type ConsumerHandle: 'static;
+
+    /// Idempotently provision the CDC infrastructure for `app_id`. On
+    /// PG this creates the publication + logical replication slot;
+    /// on SQLite it ensures the per-app session has the
+    /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet armed.
+    /// Safe to call multiple times for the same `app_id`.
+    #[allow(async_fn_in_trait)]
+    async fn provision(&self, app_id: &str) -> Result<(), DbError>;
+
+    /// Idempotently tear down the CDC infrastructure for `app_id`.
+    /// Counterpart to [`Self::provision`] used during app deletion;
+    /// PG drops the publication + slot, SQLite disarms hooks.
+    #[allow(async_fn_in_trait)]
+    async fn deprovision(&self, app_id: &str) -> Result<(), DbError>;
+
+    /// Spawn the long-running consumer task for `app_id`. The returned
+    /// [`Self::ConsumerHandle`] represents the running consumer; the
+    /// orchestrator does not currently join it (PG detaches; SQLite
+    /// runs in the session actor) but the handle exists so PR 4+ can
+    /// implement explicit shutdown when needed.
+    #[allow(async_fn_in_trait)]
+    async fn spawn_consumer(&self, app_id: &str) -> Result<Self::ConsumerHandle, DbError>;
+
+    /// Pause broker delivery for `app_id` during a backfill window.
+    /// Returns a [`BrokerPauseGuard`] whose `Drop` resumes delivery
+    /// and emits a `Resync` to every active subscriber (§16.7).
+    ///
+    /// **PR 1**: the guard's `Drop` is a no-op (tracing::trace! only);
+    /// PR 4 wires it through `wal_consumer::suppress_app` /
+    /// `broker::resume_app_with_resync`.
+    fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard;
+
+    /// Engage the schema-pending decoder for `app_id`. Returns a
+    /// [`SchemaPendingGuard`] whose `Drop` disengages the decoder and
+    /// emits a `Resync` per §16.7. While engaged,
+    /// `Broker::subscribe(app_id, …)` rejects new subscriptions with
+    /// `DbError::Conflict { code: "schema_pending" }`.
+    ///
+    /// **PR 1**: the guard's `Drop` is a no-op (tracing::trace! only);
+    /// PR 4 wires both halves (subscribe-rejection + resync-on-drop).
+    fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard;
+}
+
+/// RAII guard returned by [`ChangeStream::pause_broker`]. Resuming the
+/// broker for `app_id` (and emitting one `Resync` per active
+/// subscription) happens on `Drop`.
+///
+/// **P2 PR 1**: `Drop` is a no-op except for a single
+/// `tracing::trace!` so integration tests can observe the guard
+/// boundary. The real implementation that calls
+/// `wal_consumer::unsuppress_app(app_id)` +
+/// `broker::resume_app_with_resync(app_id)` lands in PR 4 per the
+/// implementation plan §9.
+///
+/// The `#[must_use]` annotation prevents accidental inline drop at
+/// the call site — the pause/resume contract is the *duration* of the
+/// guard's binding, not its construction.
+#[must_use = "BrokerPauseGuard releases the pause on Drop — bind it to a name to keep the broker paused for the surrounding scope"]
+#[allow(dead_code)] // PR 1: guard is constructible but no consumer yet — PR 4 wires migrations.run / register-model entries.
+pub struct BrokerPauseGuard {
+    app_id: String,
+}
+
+impl BrokerPauseGuard {
+    /// Construct a guard for `app_id`. Internal to the
+    /// [`ChangeStream`] impls (PG adapter + SQLite arm).
+    #[allow(dead_code)] // PR 1: only the trait impls invoke this — no orchestrator-side caller until PR 4.
+    pub(crate) fn new(app_id: String) -> Self {
+        Self { app_id }
+    }
+}
+
+impl Drop for BrokerPauseGuard {
+    fn drop(&mut self) {
+        // PR 1: no-op + trace. PR 4 wires the real
+        // `unsuppress_app` + `resume_app_with_resync` calls here so
+        // every existing call site (migrations.run, register_model)
+        // can adopt the guard shape today without changing behaviour.
+        tracing::trace!(
+            app_id = %self.app_id,
+            "BrokerPauseGuard dropped (P2 PR1 no-op; PR 4 wires real impl)"
+        );
+    }
+}
+
+/// RAII guard returned by [`ChangeStream::engage_schema_pending`].
+/// Disengaging the schema-pending decoder (and emitting one `Resync`
+/// per active subscription) happens on `Drop`.
+///
+/// **P2 PR 1**: `Drop` is a no-op except for a single
+/// `tracing::trace!` so integration tests can observe the guard
+/// boundary. The real implementation that clears the
+/// thread-local `schema_pending_apps` set and calls
+/// `broker::resume_app_with_resync(app_id)` lands in PR 4 per the
+/// implementation plan §9. The matching `subscribe()` rejection
+/// branch lands in PR 4 too (broker.rs gains a thread-local
+/// `schema_pending_apps` set + a check in `subscribe`).
+///
+/// The `#[must_use]` annotation prevents accidental inline drop at
+/// the call site — the engage/disengage contract is the *duration*
+/// of the guard's binding, not its construction.
+#[must_use = "SchemaPendingGuard disengages the decoder on Drop — bind it to a name to keep the schema-pending state engaged for the surrounding scope"]
+#[allow(dead_code)] // PR 1: guard is constructible but no consumer yet — PR 4 wires the bundle_invalidated control-event handler.
+pub struct SchemaPendingGuard {
+    app_id: String,
+}
+
+impl SchemaPendingGuard {
+    /// Construct a guard for `app_id`. Internal to the
+    /// [`ChangeStream`] impls (PG adapter + SQLite arm).
+    #[allow(dead_code)] // PR 1: only the trait impls invoke this — no orchestrator-side caller until PR 4.
+    pub(crate) fn new(app_id: String) -> Self {
+        Self { app_id }
+    }
+}
+
+impl Drop for SchemaPendingGuard {
+    fn drop(&mut self) {
+        // PR 1: no-op + trace. PR 4 wires the real `schema_pending_apps`
+        // removal + `resume_app_with_resync` here, and broker.rs gains
+        // the matching subscribe-time rejection check.
+        tracing::trace!(
+            app_id = %self.app_id,
+            "SchemaPendingGuard dropped (P2 PR1 no-op; PR 4 wires real impl)"
+        );
+    }
+}
+
 /// Marker super-trait composing every capability the register-model
 /// pipeline needs from a backend, so the `bootstrap` / `run_pipeline`
 /// signatures can write `B: RegisterBackend` instead of restating the
@@ -1053,6 +1225,59 @@ impl BackendHandle {
             Self::Sqlite(b) => Some(b),
         }
     }
+
+    /// Borrow a [`ChangeStream`] adapter over the PG arm — returns the
+    /// thin [`crate::change_stream_pg::PgChangeStream`] wrapper that
+    /// re-routes `ensure_publication_and_slot` /
+    /// `wal_consumer::run_supervised` through the trait surface.
+    ///
+    /// **P2 PR 1**: introduced alongside the [`ChangeStream`] trait.
+    /// Associated types (`type ConsumerHandle`) block dyn dispatch, so
+    /// the consumer migration path mirrors the `as_postgres` /
+    /// `as_sqlite` accessor shape rather than a `with_change_stream`
+    /// visitor returning `R` (see the trait doc-comment for the dyn
+    /// vs. concrete-accessor rationale).
+    ///
+    /// Returns `Some` on the PG arm; `None` on the SQLite arm.
+    ///
+    /// The adapter holds an `Rc<PostgresBackend>` (Rc-cloned from the
+    /// arm's inner value); see [`crate::change_stream_pg::PgChangeStream`]
+    /// for the lifetime / ownership rationale.
+    #[cfg(feature = "pg")]
+    pub fn as_change_stream_pg(&self) -> Option<crate::change_stream_pg::PgChangeStream> {
+        match self {
+            Self::Postgres(b) => Some(crate::change_stream_pg::PgChangeStream::new(b.clone())),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(_) => None,
+        }
+    }
+
+    /// Borrow a [`ChangeStream`] adapter over the SQLite arm —
+    /// returns the [`crate::backend::sqlite::cdc::SqliteChangeStream`]
+    /// wrapper that PR 2+ fills with `preupdate_hook`/`commit_hook`
+    /// integration.
+    ///
+    /// **P2 PR 1**: stub. The returned adapter's
+    /// `provision`/`deprovision`/`spawn_consumer` are `Ok(())`/unit
+    /// returns; `pause_broker` / `engage_schema_pending` return no-op
+    /// guards. PR 2 wires the real session-hook installation.
+    ///
+    /// Returns `Some` on the SQLite arm; `None` on the PG arm.
+    ///
+    /// The adapter holds an `Rc<SqliteBackend>` (Rc-cloned from the
+    /// arm's inner value); see
+    /// [`crate::backend::sqlite::cdc::SqliteChangeStream`] for the
+    /// lifetime / ownership rationale.
+    #[cfg(feature = "sqlite")]
+    pub fn as_change_stream_sqlite(
+        &self,
+    ) -> Option<crate::backend::sqlite::cdc::SqliteChangeStream> {
+        match self {
+            #[cfg(feature = "pg")]
+            Self::Postgres(_) => None,
+            Self::Sqlite(b) => Some(crate::backend::sqlite::cdc::SqliteChangeStream::new(b.clone())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1167,6 +1392,24 @@ mod tests {
     fn assert_postgres_backend_impls_register_backend() {
         fn assert_impl<T: RegisterBackend>() {}
         assert_impl::<PostgresBackend>();
+    }
+
+    /// Compile-time: the PG-arm [`ChangeStream`] adapter
+    /// [`crate::change_stream_pg::PgChangeStream`] satisfies the
+    /// [`ChangeStream`] trait with the agreed
+    /// `ConsumerHandle = WalConsumerHandle` shape (P2 PR 1). A
+    /// regression that detaches the impl block from `PgChangeStream`
+    /// — or that renames the associated type away from the agreed
+    /// shape — trips compilation here rather than at the
+    /// `BackendHandle::as_change_stream_pg()` accessor or its
+    /// consumers.
+    #[cfg(feature = "pg")]
+    fn assert_pg_change_stream_impls_change_stream() {
+        fn assert_impl<
+            T: ChangeStream<ConsumerHandle = crate::change_stream_pg::WalConsumerHandle>,
+        >() {
+        }
+        assert_impl::<crate::change_stream_pg::PgChangeStream>();
     }
 
     /// Compile-time: the associated types stay anchored to the concrete
@@ -1507,6 +1750,8 @@ mod tests {
         let _ = assert_postgres_backend_impls_pg_sql_executor as fn();
         let _ = assert_postgres_backend_impls_pg_lock_manager as fn();
         let _ = assert_postgres_backend_impls_register_backend as fn();
+        #[cfg(feature = "pg")]
+        let _ = assert_pg_change_stream_impls_change_stream as fn();
         let _ = assert_associated_types_pinned as fn();
         let _ = assert_backend_is_static as fn();
         let _ = assert_backend_handle_clone_static as fn();

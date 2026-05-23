@@ -52,6 +52,7 @@
 
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
+use crate::backend::ChangeStream;
 use crate::exec::ensure_pool;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
@@ -229,6 +230,60 @@ pub fn start_replication_consumer_dispatch<'s>(
                     value: ResolveValue::RejectError(e.to_op_error()),
                     request_id,
                 }
+            }
+        };
+
+        // Step 1b: route the consumer-spawn handshake through the new
+        // `ChangeStream` capability adapter (P2 PR 1 mechanical
+        // refactor — `docs/proposals/p2-sqlite-cdc-implementation-plan.md`
+        // §2.5, §9 PR 1). The PG-arm `spawn_consumer` is a no-op
+        // marker today (the actual `compio::runtime::spawn` of
+        // `run_supervised` stays at this dispatcher because the
+        // `ConsumerRunningGuard` claim needs the spawn-closure capture);
+        // routing through the trait surface here proves the adapter is
+        // reachable from a `BackendHandle`-routed call shape and
+        // gives PR 4 a stable site to migrate the spawn into.
+        //
+        // **PG behaviour unchanged**: the call does not provision (the
+        // direct `ensure_publication_and_slot` call above already did
+        // that with the `SetupOutcome` we need for the response
+        // envelope), does not allocate any background task, and the
+        // returned `WalConsumerHandle` is intentionally unused at
+        // this PR.
+        let backend = match crate::context::with(|c| c.backend()) {
+            Some(b) => b,
+            None => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(
+                        crate::error::DbError::config(
+                            "backend_not_initialized",
+                            "db: backend not initialized",
+                        )
+                        .to_op_error(),
+                    ),
+                    request_id,
+                };
+            }
+        };
+        let Some(change_stream) = backend.as_change_stream_pg() else {
+            return OpResult::JsValue {
+                resolver,
+                value: ResolveValue::RejectError(
+                    crate::error::DbError::backend_unsupported("startReplicationConsumer")
+                        .to_op_error(),
+                ),
+                request_id,
+            };
+        };
+        let _consumer_handle = match change_stream.spawn_consumer(&app_id).await {
+            Ok(h) => h,
+            Err(e) => {
+                return OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                };
             }
         };
 

@@ -88,6 +88,16 @@ pub(crate) mod diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 
+// `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
+// capability declared in `crate::backend::mod`. Crate-private — the
+// stable consumer surface is the `BackendHandle::as_change_stream_pg`
+// accessor (mirroring the `as_postgres` / `as_sqlite` shape). Behind
+// `cfg(feature = "pg")` because the adapter borrows `PostgresBackend`
+// and the underlying replication helpers (`replication.rs` /
+// `wal_consumer.rs`) are PG-only.
+#[cfg(feature = "pg")]
+pub(crate) mod change_stream_pg;
+
 // Crate-private in release, pub under `test-helpers` (for tests/integration.rs):
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod audit;
