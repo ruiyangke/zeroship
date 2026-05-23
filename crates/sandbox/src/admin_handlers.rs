@@ -63,10 +63,12 @@
 use std::sync::Arc;
 
 use compio_postgres::Pool;
+use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
+use crate::error_envelope::{error_response, ErrorEnvelope};
 use crate::AppState;
 
 type State = web::types::State<Arc<AppState>>;
@@ -147,8 +149,11 @@ pub(crate) fn admin_check(
     let expected: &Zeroizing<String> = match state.admin_token.as_ref() {
         Some(t) => t,
         None => {
-            return Err(HttpResponse::ServiceUnavailable()
-                .json(&serde_json::json!({"error": "admin api disabled"})));
+            return Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admin_api_disabled",
+                "admin api disabled (SANDBOX_ADMIN_TOKEN_PATH not configured)",
+            ));
         }
     };
     let expected_bytes: &[u8] = expected.as_bytes();
@@ -177,23 +182,22 @@ pub(crate) fn admin_check(
 }
 
 fn unauthorized() -> HttpResponse {
-    HttpResponse::Unauthorized()
-        .json(&serde_json::json!({"error": "unauthorized"}))
+    error_response(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "authentication required",
+    )
 }
 
-fn err(status: u16, msg: impl Into<String>) -> HttpResponse {
+/// Render a §10.0-compliant error envelope for admin endpoints.
+fn err(status: u16, code: &'static str, msg: impl Into<String>) -> HttpResponse {
     let s = msg.into();
     if status >= 500 {
-        tracing::error!(status, error = %s, "sandbox/admin");
+        tracing::error!(status, code, error = %s, "sandbox/admin");
     }
-    let mut resp = match status {
-        400 => HttpResponse::BadRequest(),
-        404 => HttpResponse::NotFound(),
-        500 => HttpResponse::InternalServerError(),
-        503 => HttpResponse::ServiceUnavailable(),
-        _ => HttpResponse::InternalServerError(),
-    };
-    resp.json(&serde_json::json!({"error": s}))
+    let sc = StatusCode::from_u16(status)
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    error_response(sc, code, s)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -235,10 +239,10 @@ pub struct AdminSandboxRow {
 
 async fn open_app_pool(state: &AppState) -> Result<Pool, HttpResponse> {
     let Some(db) = state.database.as_ref() else {
-        return Err(err(503, "pg integration disabled"));
+        return Err(err(503, "pg_disabled", "pg integration disabled"));
     };
     db.pool_app().await.map_err(|e| {
-        err(503, format!("admin api: pool_app: {e}"))
+        err(503, "pg_pool_unavailable", format!("admin api: pool_app: {e}"))
     })
 }
 
@@ -273,23 +277,23 @@ pub async fn list_all_sandboxes(
     // a malformed filter results in 400 rather than a 500 from pg.
     if let Some(ref u) = q.user_id {
         if zeroship_core::typed_id::parse_with_prefix(u, "usr").is_err() {
-            return err(400, "invalid user_id filter");
+            return err(400, "invalid_user_id", "invalid user_id filter");
         }
     }
     if let Some(ref h) = q.host_id {
         if zeroship_core::typed_id::parse_with_prefix(h, "hst").is_err() {
-            return err(400, "invalid host_id filter");
+            return err(400, "invalid_host_id", "invalid host_id filter");
         }
     }
     if let Some(ref s) = q.status {
         if !is_known_status(s) {
-            return err(400, "invalid status filter");
+            return err(400, "invalid_status", "invalid status filter");
         }
     }
 
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
     };
 
     // Single SQL with three optional WHERE predicates; pg's planner
@@ -315,7 +319,7 @@ pub async fn list_all_sandboxes(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
     };
 
     let mut out: Vec<AdminSandboxRow> = Vec::with_capacity(rows.len());
@@ -387,15 +391,15 @@ pub async fn get_sandbox_detail(
     let raw = path.into_inner();
     let uuid = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
         Ok(u) => u,
-        Err(_) => return err(400, "invalid sandbox_id"),
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
     };
     let Some(db) = state.database.as_ref() else {
-        return err(503, "pg integration disabled");
+        return err(503, "pg_disabled", "pg integration disabled");
     };
     let row = match db.get_sandbox_row(uuid).await {
         Ok(Some(r)) => r,
-        Ok(None) => return err(404, "sandbox not found"),
-        Err(e) => return err(500, format!("get_sandbox_row: {e}")),
+        Ok(None) => return err(404, "sandbox_not_found", "sandbox not found"),
+        Err(e) => return err(500, "pg_query_failed", format!("get_sandbox_row: {e}")),
     };
 
     let in_memory_info = state.sandboxes.get(&uuid);
@@ -444,7 +448,7 @@ pub async fn list_user_sandboxes(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let mut q = query.into_inner();
     q.user_id = Some(user_id);
@@ -467,7 +471,7 @@ async fn list_all_sandboxes_inner(
     let offset = clamp_offset(q.offset);
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
     };
     let rows = client
         .query(
@@ -489,7 +493,7 @@ async fn list_all_sandboxes_inner(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
     };
     let mut out: Vec<AdminSandboxRow> = Vec::with_capacity(rows.len());
     for r in rows {
@@ -537,7 +541,7 @@ pub async fn list_user_shares(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let pool = match open_app_pool(&state).await {
         Ok(p) => p,
@@ -545,7 +549,7 @@ pub async fn list_user_shares(
     };
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
     };
     let rows = client
         .query(
@@ -567,7 +571,7 @@ pub async fn list_user_shares(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
     };
     let out: Vec<serde_json::Value> = rows
         .into_iter()
@@ -611,7 +615,7 @@ pub async fn list_hosts(
     };
     let client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
     };
     let rows = client
         .query(
@@ -628,7 +632,7 @@ pub async fn list_hosts(
         .await;
     let rows = match rows {
         Ok(r) => r,
-        Err(e) => return err(500, format!("query: {e}")),
+        Err(e) => return err(500, "pg_query_failed", format!("query: {e}")),
     };
     let out: Vec<serde_json::Value> = rows
         .into_iter()
@@ -674,7 +678,7 @@ pub async fn export_user(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let pool = match open_app_pool(&state).await {
         Ok(p) => p,
@@ -682,17 +686,17 @@ pub async fn export_user(
     };
     let mut client = match pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(503, format!("pool acquire: {e}")),
+        Err(e) => return err(503, "pg_pool_unavailable", format!("pool acquire: {e}")),
     };
     let tx = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return err(500, format!("begin tx: {e}")),
+        Err(e) => return err(500, "pg_tx_begin_failed", format!("begin tx: {e}")),
     };
     if let Err(e) = tx
         .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
     {
-        return err(500, format!("set tx isolation: {e}"));
+        return err(500, "pg_tx_isolation_failed", format!("set tx isolation: {e}"));
     }
 
     let sandboxes_json = match tx
@@ -704,7 +708,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export sandboxes: {e}")),
+        Err(e) => return err(500, "export_sandboxes_failed", format!("export sandboxes: {e}")),
     };
     let shares_json = match tx
         .query_one(
@@ -717,7 +721,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export shares: {e}")),
+        Err(e) => return err(500, "export_shares_failed", format!("export shares: {e}")),
     };
     // Cap events at 10k. Order by ts so the truncation is a tail-cut
     // (operator gets the most recent 10k).
@@ -751,7 +755,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export events: {e}")),
+        Err(e) => return err(500, "export_events_failed", format!("export events: {e}")),
     };
     let events_count: i64 = match tx
         .query_one(
@@ -763,7 +767,7 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get(0),
-        Err(e) => return err(500, format!("count events: {e}")),
+        Err(e) => return err(500, "count_events_failed", format!("count events: {e}")),
     };
     let deleted_json = match tx
         .query_one(
@@ -774,10 +778,10 @@ pub async fn export_user(
         .await
     {
         Ok(r) => r.get::<_, String>(0),
-        Err(e) => return err(500, format!("export tombstones: {e}")),
+        Err(e) => return err(500, "export_tombstones_failed", format!("export tombstones: {e}")),
     };
     if let Err(e) = tx.commit().await {
-        return err(500, format!("commit: {e}"));
+        return err(500, "pg_commit_failed", format!("commit: {e}"));
     }
 
     let exported_at_secs = std::time::SystemTime::now()
@@ -842,24 +846,24 @@ pub async fn delete_user(
     }
     let user_id = path.into_inner();
     if zeroship_core::typed_id::parse_with_prefix(&user_id, "usr").is_err() {
-        return err(400, "invalid user_id");
+        return err(400, "invalid_user_id", "invalid user_id");
     }
     let Some(db) = state.database.as_ref() else {
-        return err(503, "pg integration disabled");
+        return err(503, "pg_disabled", "pg integration disabled");
     };
 
     // Use the gdpr-role pool. Single connection — the cascade is one TX.
     let gdpr_pool = match db.pool_gdpr().await {
         Ok(p) => p,
-        Err(e) => return err(503, format!("pool_gdpr: {e}")),
+        Err(e) => return err(503, "pg_pool_gdpr_unavailable", format!("pool_gdpr: {e}")),
     };
     let mut client = match gdpr_pool.get().await {
         Ok(c) => c,
-        Err(e) => return err(500, format!("pool_gdpr acquire: {e}")),
+        Err(e) => return err(500, "pg_pool_gdpr_acquire_failed", format!("pool_gdpr acquire: {e}")),
     };
     let tx = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return err(500, format!("begin tx: {e}")),
+        Err(e) => return err(500, "pg_tx_begin_failed", format!("begin tx: {e}")),
     };
 
     // Cross-user-leak guard: the `WHERE user_id = $1` predicate is on
@@ -874,7 +878,7 @@ pub async fn delete_user(
         .await
     {
         Ok(rows) => rows.into_iter().map(|r| r.get::<_, String>(0)).collect(),
-        Err(e) => return err(500, format!("collect ids: {e}")),
+        Err(e) => return err(500, "gdpr_collect_ids_failed", format!("collect ids: {e}")),
     };
 
     let events_deleted: i64 = match tx
@@ -885,7 +889,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("delete events: {e}")),
+        Err(e) => return err(500, "gdpr_delete_events_failed", format!("delete events: {e}")),
     };
     let shares_deleted: i64 = match tx
         .execute(
@@ -898,7 +902,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("delete shares: {e}")),
+        Err(e) => return err(500, "gdpr_delete_shares_failed", format!("delete shares: {e}")),
     };
     let tombstoned: i64 = match tx
         .execute(
@@ -912,7 +916,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("tombstone: {e}")),
+        Err(e) => return err(500, "gdpr_tombstone_failed", format!("tombstone: {e}")),
     };
     let sandboxes_deleted: i64 = match tx
         .execute(
@@ -922,7 +926,7 @@ pub async fn delete_user(
         .await
     {
         Ok(n) => n as i64,
-        Err(e) => return err(500, format!("delete sandboxes: {e}")),
+        Err(e) => return err(500, "gdpr_delete_sandboxes_failed", format!("delete sandboxes: {e}")),
     };
     // Audit row inside the same TX. The sandbox_gdpr role has INSERT
     // grant on events for exactly this audit row (§ 13.2).
@@ -960,11 +964,11 @@ pub async fn delete_user(
         )
         .await
     {
-        return err(500, format!("audit insert: {e}"));
+        return err(500, "audit_insert_failed", format!("audit insert: {e}"));
     }
 
     if let Err(e) = tx.commit().await {
-        return err(500, format!("commit: {e}"));
+        return err(500, "pg_commit_failed", format!("commit: {e}"));
     }
 
     // Sealed-record cleanup outside the TX. Best-effort + idempotent —
@@ -1042,11 +1046,11 @@ use uuid::Uuid;
 
 fn feature_disabled() -> HttpResponse {
     // 501 Not Implemented — matches § 10.0's `feature_disabled` envelope.
-    let mut resp = HttpResponse::NotImplemented();
-    resp.json(&serde_json::json!({
-        "error": "feature_disabled",
-        "message": "snapshot/restore feature is not enabled (SANDBOX_SNAPSHOT_ENABLED=false)"
-    }))
+    error_response(
+        StatusCode::NOT_IMPLEMENTED,
+        "feature_disabled",
+        "snapshot/restore feature is not enabled (SANDBOX_SNAPSHOT_ENABLED=false)",
+    )
 }
 
 /// Wire envelope for snapshot/wake errors. Maps the typed handler
@@ -1054,48 +1058,65 @@ fn feature_disabled() -> HttpResponse {
 fn map_snapshot_error(e: SnapshotHandlerError) -> HttpResponse {
     match e {
         SnapshotHandlerError::FeatureDisabled => feature_disabled(),
-        SnapshotHandlerError::StateMismatch { current } => {
-            HttpResponse::Conflict().json(&serde_json::json!({
-                "error": "state_mismatch",
-                "current": current,
-                "expected": "running",
-            }))
-        }
-        SnapshotHandlerError::NotFound(id) => HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "not_found", "sandbox_id": id})),
-        SnapshotHandlerError::ChRemote(s) => err(500, format!("ch_remote: {s}")),
-        SnapshotHandlerError::Store(s) => err(500, format!("snapshot_store: {s}")),
-        SnapshotHandlerError::Database(d) => err(500, format!("database: {d}")),
-        SnapshotHandlerError::Internal(s) => err(500, format!("internal: {s}")),
+        SnapshotHandlerError::StateMismatch { current } => ErrorEnvelope::new(
+            StatusCode::CONFLICT,
+            "state_mismatch",
+            format!("sandbox is in state {current:?}; snapshot requires \"running\""),
+        )
+        .with_extra(serde_json::json!({
+            "current": current,
+            "expected": "running",
+        }))
+        .into_response(),
+        SnapshotHandlerError::NotFound(id) => ErrorEnvelope::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "sandbox not found",
+        )
+        .with_extra(serde_json::json!({"sandbox_id": id}))
+        .into_response(),
+        SnapshotHandlerError::ChRemote(s) => err(500, "ch_remote_failed", format!("ch_remote: {s}")),
+        SnapshotHandlerError::Store(s) => err(500, "snapshot_store_failed", format!("snapshot_store: {s}")),
+        SnapshotHandlerError::Database(d) => err(500, "database_failed", format!("database: {d}")),
+        SnapshotHandlerError::Internal(s) => err(500, "internal_error", format!("internal: {s}")),
     }
 }
 
 fn map_restore_error(e: RestoreHandlerError) -> HttpResponse {
     match e {
         RestoreHandlerError::FeatureDisabled => feature_disabled(),
-        RestoreHandlerError::StateMismatch { current } => {
-            HttpResponse::Conflict().json(&serde_json::json!({
-                "error": "state_mismatch",
-                "current": current,
-                "expected": "snapshotted",
-            }))
-        }
-        RestoreHandlerError::NotFound(id) => HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "not_found", "sandbox_id": id})),
-        RestoreHandlerError::VmIndexUnavailable { requested } => {
-            HttpResponse::ServiceUnavailable().json(&serde_json::json!({
-                "error": "vm_index_unavailable",
-                "requested": requested,
-            }))
-        }
+        RestoreHandlerError::StateMismatch { current } => ErrorEnvelope::new(
+            StatusCode::CONFLICT,
+            "state_mismatch",
+            format!("sandbox is in state {current:?}; wake requires \"snapshotted\""),
+        )
+        .with_extra(serde_json::json!({
+            "current": current,
+            "expected": "snapshotted",
+        }))
+        .into_response(),
+        RestoreHandlerError::NotFound(id) => ErrorEnvelope::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "sandbox not found",
+        )
+        .with_extra(serde_json::json!({"sandbox_id": id}))
+        .into_response(),
+        RestoreHandlerError::VmIndexUnavailable { requested } => ErrorEnvelope::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "vm_index_unavailable",
+            "no vm_index available to host the restored sandbox",
+        )
+        .with_extra(serde_json::json!({"requested": requested}))
+        .into_response(),
         RestoreHandlerError::SnapshotCorrupt => {
-            err(500, "snapshot_corrupt: row marked snapshotted_suspect")
+            err(500, "snapshot_corrupt", "snapshot_corrupt: row marked snapshotted_suspect")
         }
-        RestoreHandlerError::Store(s) => err(500, format!("snapshot_store: {s}")),
-        RestoreHandlerError::Backend(s) => err(500, format!("restore_backend: {s}")),
-        RestoreHandlerError::ConfigRewrite(s) => err(500, format!("config_rewrite: {s}")),
-        RestoreHandlerError::Database(d) => err(500, format!("database: {d}")),
-        RestoreHandlerError::Internal(s) => err(500, format!("internal: {s}")),
+        RestoreHandlerError::Store(s) => err(500, "snapshot_store_failed", format!("snapshot_store: {s}")),
+        RestoreHandlerError::Backend(s) => err(500, "restore_backend_failed", format!("restore_backend: {s}")),
+        RestoreHandlerError::ConfigRewrite(s) => err(500, "config_rewrite_failed", format!("config_rewrite: {s}")),
+        RestoreHandlerError::Database(d) => err(500, "database_failed", format!("database: {d}")),
+        RestoreHandlerError::Internal(s) => err(500, "internal_error", format!("internal: {s}")),
     }
 }
 
@@ -1147,7 +1168,7 @@ pub async fn snapshot_sandbox(
     let raw = path.into_inner();
     let sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
         Ok(u) => u,
-        Err(_) => return err(400, "invalid sandbox_id"),
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
     };
 
     // The store + ch + db handles are present iff snapshot_enabled.
@@ -1156,7 +1177,7 @@ pub async fn snapshot_sandbox(
         state.ch_remote.as_ref(),
         state.database.as_ref(),
     ) else {
-        return err(503, "snapshot wiring not initialized (database/store/ch_remote None)");
+        return err(503, "snapshot_wiring_unavailable", "snapshot wiring not initialized (database/store/ch_remote None)");
     };
 
     // Resolve the source VM identity BEFORE the destructive CAS so a
@@ -1172,10 +1193,11 @@ pub async fn snapshot_sandbox(
                 error = %e,
                 "admin/snapshot: lookup_source_vm_ops failed; refusing snapshot"
             );
-            return HttpResponse::ServiceUnavailable().json(&serde_json::json!({
-                "error": "source_vm_unavailable",
-                "message": e,
-            }));
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "source_vm_unavailable",
+                e,
+            );
         }
     };
 
@@ -1249,7 +1271,7 @@ pub async fn wake_sandbox(
     let raw = path.into_inner();
     let sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&raw, "sbx") {
         Ok(u) => u,
-        Err(_) => return err(400, "invalid sandbox_id"),
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
     };
     let (Some(store), Some(rb), Some(db)) = (
         state.snapshot_store.as_ref(),
@@ -1258,6 +1280,7 @@ pub async fn wake_sandbox(
     ) else {
         return err(
             503,
+            "wake_wiring_unavailable",
             "wake wiring not initialized (database/store/restore_backend None)",
         );
     };
