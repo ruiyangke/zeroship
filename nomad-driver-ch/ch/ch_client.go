@@ -211,16 +211,95 @@ func (c *Client) Info(socketPath string) (*VMInfo, error) {
 	return &info, nil
 }
 
-// Shutdown sends `PUT /api/v1/vm.shutdown` to the VM at socketPath.
-// Stubbed until T-2 wires up the graceful-stop ladder.
+// Shutdown asks the running CH instance at socketPath to perform a graceful
+// VMM shutdown by invoking `ch-remote --api-socket <socketPath> shutdown-vmm`.
+//
+// We shell out to ch-remote (rather than issue the HTTP PUT directly the way
+// Info does) because:
+//
+//  1. ch-remote's CLI validates argument shape and emits the exact error text
+//     the bash wrapper consumes today; staying on the same wire keeps cluster
+//     behaviour identical (the wrapper's cleanup trap uses kill, but the
+//     controller path that calls /shutdown ultimately reaches the same CH
+//     control channel).
+//  2. The shutdown-vmm semantic (terminate the VMM process gracefully) is
+//     subtly different from vm.shutdown (power-off the guest, leave the VMM
+//     running) and shutdown-vmm is the operation the proposal § 7 calls for
+//     in the StopTask ladder.
+//
+// Behaviour:
+//   - Returns nil if ch-remote exits 0.
+//   - Returns an error (containing the combined output) on non-zero exit, on
+//     missing ch-remote binary, or on empty socketPath.
+//
+// Note: ch-remote returns success the moment CH acknowledges the request;
+// the actual process exit is observed by StopTask waiting on runner.Wait().
 func (c *Client) Shutdown(socketPath string) error {
-	return errors.New("ch: T-2: Client.Shutdown not implemented")
+	if socketPath == "" {
+		return errors.New("ch: Shutdown: empty socket path")
+	}
+	chRemote := c.CHRemoteBin()
+	if chRemote == "" {
+		return errors.New("ch: Shutdown: ch-remote binary not resolved")
+	}
+	cmd := exec.Command(chRemote, "--api-socket", socketPath, "shutdown-vmm")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ch: Shutdown: ch-remote shutdown-vmm: %w (output=%q)", err, string(out))
+	}
+	return nil
 }
 
 // Resume sends `PUT /api/v1/vm.resume` to the VM at socketPath.
-// Stubbed until T-2 implements the restore path.
+// Stubbed until T-6 implements the restore path.
 func (c *Client) Resume(socketPath string) error {
-	return errors.New("ch: T-2: Client.Resume not implemented")
+	return errors.New("ch: T-6: Client.Resume not implemented")
+}
+
+// shutdownFn is the package-level seam that tests swap to fake ch-remote
+// without spawning a real binary. Default delegates to Client.Shutdown.
+// Mirrors the ensureTapUpFn pattern from start_task.go.
+var shutdownFn = func(c *Client, socketPath string) error {
+	return c.Shutdown(socketPath)
+}
+
+// SetShutdownForTest replaces the ch-remote shutdown seam. Returns the
+// previous fn so the caller can restore it on cleanup.
+func SetShutdownForTest(fn func(c *Client, socketPath string) error) func(*Client, string) error {
+	prev := shutdownFn
+	if fn != nil {
+		shutdownFn = fn
+	}
+	return prev
+}
+
+// removeTapFn is the package-level seam for `ip link delete <tap>`. Default
+// shells to /sbin/ip; tests override to a recorder.
+var removeTapFn = removeTapDefault
+
+// SetRemoveTapForTest replaces the tap-down seam. Returns the previous fn.
+func SetRemoveTapForTest(fn func(tapName string) error) func(string) error {
+	prev := removeTapFn
+	if fn != nil {
+		removeTapFn = fn
+	}
+	return prev
+}
+
+// removeTapDefault is the production implementation: shell to
+// `ip link delete <tap>`. Best-effort — if the device is already gone the
+// command's stderr is "Cannot find device", which we surface as a non-fatal
+// note. Caller (DestroyTask cleanup) treats any error as advisory.
+func removeTapDefault(tapName string) error {
+	if tapName == "" {
+		return errors.New("empty tap name")
+	}
+	cmd := exec.Command("ip", "link", "delete", tapName)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ip link delete %s: %w (output=%q)", tapName, err, string(out))
+	}
+	return nil
 }
 
 // VMInfo is the decoded shape of CH's `GET /api/v1/vm.info` payload. Only

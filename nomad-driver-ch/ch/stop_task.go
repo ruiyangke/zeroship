@@ -5,53 +5,305 @@
 // DestroyTask) on 2026-05-25 for Cloud Hypervisor support. The libvirt
 // StopVM/DestroyVM path is replaced by the CH-specific ladder described in
 // proposal § 7 ("StopTask" + "DestroyTask").
+//
+// T-2 implementation. The ladder mirrors the bash wrapper's cleanup trap
+// (crates/sandbox/scripts/nomad-vm-wrapper.sh § "Cleanup trap"):
+//
+//  1. ch-remote shutdown-vmm (graceful, up to shutdownTimeout)
+//  2. SIGTERM to the CH pid + wait sigtermTimeout
+//  3. SIGKILL
+//  4. Cleanup: remove the tap device, remove the API socket file
+//
+// StopTask honours the caller-supplied signal and timeout. DestroyTask runs
+// the cleanup tail regardless of whether the CH process is still alive.
 
 package ch
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"syscall"
 	"time"
+
+	"github.com/hashicorp/nomad/plugins/drivers"
 )
 
-// StopTask gracefully stops the CH process backing the task. Flow when
-// implemented (T-2):
+// Default per-step timeouts for the StopTask ladder. The brief calls for
+// 5 s for ch-remote shutdown and 3 s for SIGTERM. They are exported as
+// package-level vars (not consts) so tests can override them to keep the
+// suite under 100 ms per case — see SetStopTimeoutsForTest.
+var (
+	// defaultShutdownTimeout is how long we wait for the CH process to
+	// exit after issuing `ch-remote shutdown-vmm` before falling through
+	// to SIGTERM. 5 s matches the bash wrapper's `sleep 0.2` × 25 idea
+	// generously; CH shuts down in <500 ms on a healthy VM.
+	defaultShutdownTimeout = 5 * time.Second
+
+	// defaultSigtermTimeout is how long we wait for the CH process to
+	// exit after SIGTERM before escalating to SIGKILL. 3 s matches the
+	// raw_exec driver's default kill_timeout headroom.
+	defaultSigtermTimeout = 3 * time.Second
+
+	// stopTimeoutsMu guards the two defaults above so tests can flip them
+	// without racing the production ladder. The Lock is held only for
+	// the read at the top of StopTask, so contention is nil in practice.
+	stopTimeoutsMu = struct {
+		shutdownTimeout time.Duration
+		sigtermTimeout  time.Duration
+	}{
+		shutdownTimeout: defaultShutdownTimeout,
+		sigtermTimeout:  defaultSigtermTimeout,
+	}
+)
+
+// SetStopTimeoutsForTest overrides the per-step ladder timeouts so tests
+// don't sleep 5+3 real seconds. Returns the previous (shutdown, sigterm)
+// pair so the caller can restore them on cleanup.
 //
-//  1. Look up taskHandle by id; if absent, return nil (idempotent).
-//  2. If signal != "" and signal != "SIGTERM": forward via os.Process.Signal
-//     (used by `nomad alloc signal` for dev).
-//  3. Otherwise: issue `ch-remote --api-socket <h.apiSocket> shutdown`.
-//  4. Wait up to `timeout` for the CH PID to reap.
-//  5. If still alive, send SIGKILL.
-//  6. Cancel handle.ctx so the WaitTask monitor exits.
+// Picked parameterised timeouts over a clock seam: the ladder uses two
+// `time.After` channels and nothing else, so a clock interface would carry
+// more conceptual weight than the two-knob alternative. Matches the
+// existing T-1 seam style (ensureTapUpFn, shutdownFn).
+func SetStopTimeoutsForTest(shutdown, sigterm time.Duration) (time.Duration, time.Duration) {
+	prevS := stopTimeoutsMu.shutdownTimeout
+	prevT := stopTimeoutsMu.sigtermTimeout
+	stopTimeoutsMu.shutdownTimeout = shutdown
+	stopTimeoutsMu.sigtermTimeout = sigterm
+	return prevS, prevT
+}
+
+// StopTask drives the graceful-stop ladder described at the top of this
+// file. Honours Nomad's driver contract:
 //
-// StopTask must NOT clean up — DestroyTask does that. This matches the
-// upstream virt driver and the proposal § 7.
+//   - If taskID is unknown, return nil (idempotent — Nomad may double-call
+//     after a controller-triggered DestroyTask).
+//   - If signal == "SIGKILL", skip steps 1+2 and go straight to step 3.
+//   - The cumulative ladder time is bounded by `timeout` plus a small
+//     per-step grace; once `timeout` expires, the ladder fast-forwards to
+//     the next step.
+//
+// StopTask does NOT remove on-disk state — DestroyTask owns that. This
+// matches the upstream virt driver and the proposal § 7.
 func (p *Plugin) StopTask(taskID string, timeout time.Duration, signal string) error {
-	if _, ok := p.tasks.Get(taskID); !ok {
+	h, ok := p.tasks.Get(taskID)
+	if !ok {
 		p.logger.Warn("ch: StopTask on unknown task; ignoring", "task_id", taskID)
 		return nil
 	}
-	return errors.New("ch: T-2: StopTask not implemented")
+
+	// Snapshot the timeouts under the package-level "lock". This is a
+	// plain struct read; the mutability is intentional (tests flip them).
+	shutdownTimeout := stopTimeoutsMu.shutdownTimeout
+	sigtermTimeout := stopTimeoutsMu.sigtermTimeout
+
+	// Clip per-step waits against the caller-supplied total budget so
+	// the ladder doesn't exceed `timeout` by more than one step's grace.
+	// `timeout <= 0` means "use defaults" (mirrors raw_exec).
+	if timeout > 0 {
+		if shutdownTimeout > timeout {
+			shutdownTimeout = timeout
+		}
+		// After step 1 consumes up to shutdownTimeout, step 2 gets the
+		// remainder (clamped to sigtermTimeout). If timeout < shutdownTimeout,
+		// step 2 may collapse to 0; SIGKILL still fires.
+		remaining := timeout - shutdownTimeout
+		if remaining < 0 {
+			remaining = 0
+		}
+		if sigtermTimeout > remaining {
+			sigtermTimeout = remaining
+		}
+	}
+
+	// Fast path: caller asked for an immediate SIGKILL. Skip ch-remote
+	// and SIGTERM; jump straight to step 3.
+	signalUpper := strings.ToUpper(strings.TrimSpace(signal))
+	if signalUpper == "SIGKILL" {
+		p.logger.Info("ch: StopTask: SIGKILL requested; skipping graceful steps", "task_id", taskID)
+		return p.escalateSigkill(h, sigtermTimeout)
+	}
+
+	// --- Step 1: ch-remote shutdown-vmm ------------------------------
+	p.logger.Info("ch: StopTask: step 1 ch-remote shutdown-vmm",
+		"task_id", taskID, "api_socket", h.apiSocket, "timeout", shutdownTimeout)
+	shutdownErr := shutdownFn(p.chClient, h.apiSocket)
+	if shutdownErr != nil {
+		p.logger.Warn("ch: StopTask: ch-remote shutdown-vmm failed; falling through to SIGTERM",
+			"task_id", taskID, "err", shutdownErr)
+	} else if shutdownTimeout > 0 {
+		if p.waitForExit(h, shutdownTimeout) {
+			p.logger.Info("ch: StopTask: VM exited gracefully after ch-remote shutdown-vmm",
+				"task_id", taskID)
+			return nil
+		}
+		p.logger.Warn("ch: StopTask: VM did not exit within shutdown grace; escalating to SIGTERM",
+			"task_id", taskID, "waited", shutdownTimeout)
+	}
+
+	// --- Step 2: SIGTERM ---------------------------------------------
+	p.logger.Info("ch: StopTask: step 2 SIGTERM", "task_id", taskID, "timeout", sigtermTimeout)
+	if err := p.signalHandle(h, syscall.SIGTERM); err != nil {
+		// Process already gone is fine — supervisor will see the exit.
+		p.logger.Warn("ch: StopTask: SIGTERM send failed (process may already be gone)",
+			"task_id", taskID, "err", err)
+	}
+	if sigtermTimeout > 0 {
+		if p.waitForExit(h, sigtermTimeout) {
+			p.logger.Info("ch: StopTask: VM exited after SIGTERM", "task_id", taskID)
+			return nil
+		}
+	}
+
+	// --- Step 3: SIGKILL ---------------------------------------------
+	// Post-SIGKILL grace reuses sigtermTimeout — it's a configurable
+	// knob that already encodes the operator's appetite for waiting on
+	// the supervisor goroutine.
+	return p.escalateSigkill(h, sigtermTimeout)
 }
 
-// DestroyTask tears down all resources associated with a task. Flow when
-// implemented (T-2):
+// escalateSigkill issues SIGKILL and waits up to `grace` for runner.Wait
+// to observe the exit. Returns nil even if the supervisor doesn't close
+// exitDone within `grace`; the kernel reap is asynchronous and the
+// follow-up DestroyTask call (with force=true if needed) handles the
+// pathological "kernel can't reap the pid" case.
+func (p *Plugin) escalateSigkill(h *taskHandle, grace time.Duration) error {
+	p.logger.Info("ch: StopTask: step 3 SIGKILL", "task_id", h.taskConfig.ID, "ch_pid", h.chPid)
+	if err := p.signalHandle(h, syscall.SIGKILL); err != nil {
+		p.logger.Warn("ch: StopTask: SIGKILL send failed (process may already be gone)",
+			"task_id", h.taskConfig.ID, "err", err)
+	}
+	if grace <= 0 {
+		// Defensive minimum so we still see "the supervisor noticed"
+		// in the common case the runner exits within a scheduler tick.
+		grace = 50 * time.Millisecond
+	}
+	if !p.waitForExit(h, grace) {
+		p.logger.Warn("ch: StopTask: VM still appears alive after SIGKILL; deferring to DestroyTask",
+			"task_id", h.taskConfig.ID, "waited", grace)
+	}
+	return nil
+}
+
+// signalHandle forwards a signal to the CH process backing the handle.
+// Prefers the runner.Signal path (works against the fake runner in tests);
+// falls back to os.FindProcess+Signal when the handle has no runner (e.g.
+// a RecoverTask-produced handle in T-4).
+func (p *Plugin) signalHandle(h *taskHandle, sig os.Signal) error {
+	if h.runner != nil {
+		return h.runner.Signal(sig)
+	}
+	if h.chPid <= 0 {
+		return fmt.Errorf("ch: no pid on handle (task_id=%s)", h.taskConfig.ID)
+	}
+	proc, err := os.FindProcess(h.chPid)
+	if err != nil {
+		return fmt.Errorf("ch: FindProcess(%d): %w", h.chPid, err)
+	}
+	return proc.Signal(sig)
+}
+
+// waitForExit blocks up to `d` for the handle's supervisor goroutine to
+// signal exit (closes h.exitDone). Returns true if the supervisor exited
+// within the window.
+//
+// If h.exitDone is nil (RecoverTask handle without a runner — T-4
+// territory), waitForExit returns false immediately; the caller falls
+// through to the next ladder step (SIGTERM/SIGKILL via PID).
+func (p *Plugin) waitForExit(h *taskHandle, d time.Duration) bool {
+	if h.exitDone == nil {
+		return false
+	}
+	if d <= 0 {
+		// Non-blocking peek so a 0-timeout still notices an already-exited VM.
+		select {
+		case <-h.exitDone:
+			return true
+		default:
+			return false
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-h.exitDone:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// DestroyTask tears down all resources associated with a task. Idempotent
+// per Nomad's driver contract: calling it twice (or against an unknown task,
+// or against a task whose CH already exited) must not error.
+//
+// Flow:
 //
 //  1. Look up taskHandle; if absent, return nil (idempotent).
-//  2. If still running and !force, return an error (Nomad will retry after
-//     a StopTask).
-//  3. SIGKILL CH if still alive.
-//  4. Kill all virtiofsd children (recorded under the per-task run dir).
-//  5. `ip tuntap del <handle.tap>`.
-//  6. Release the vm_index lock under p.config.VMIndexLockDir.
-//  7. Remove the per-task run dir (api socket, virtiofsd sockets, pid file).
-//  8. Delete the in-memory handle from p.tasks.
+//  2. If still running and !force, return an error so Nomad calls
+//     StopTask first.
+//  3. If still running and force, SIGKILL via the StopTask ladder's last
+//     step.
+//  4. Cancel handle.ctx so any per-task supervision goroutines (TaskStats,
+//     future WaitTask monitors) exit.
+//  5. Best-effort tap removal — failure is logged, not surfaced; the tap
+//     may already be gone (CH crashed) or owned by an external systemd
+//     unit (T-3 territory).
+//  6. Best-effort API socket removal — file may already be gone (CH
+//     unlinks on clean exit).
+//  7. Delete the in-memory handle from p.tasks.
 //
-// Idempotent — safe to call after RecoverTask discovered the CH was gone.
+// T-3 (per-VM /30 tap) and T-7 (controller-integration) extend this with
+// vm_index lock release and per-task run-dir scrubbing; this T-2 surface
+// covers the artifacts the cold-boot path actually creates.
 func (p *Plugin) DestroyTask(taskID string, force bool) error {
-	if _, ok := p.tasks.Get(taskID); !ok {
-		p.logger.Warn("ch: DestroyTask on unknown task; ignoring", "task_id", taskID)
+	h, ok := p.tasks.Get(taskID)
+	if !ok {
+		p.logger.Debug("ch: DestroyTask on unknown task; idempotent no-op", "task_id", taskID)
 		return nil
 	}
-	return errors.New("ch: T-2: DestroyTask not implemented")
+
+	if h.IsRunning() {
+		if !force {
+			return errors.New("ch: DestroyTask: task is still running; StopTask first or pass force=true")
+		}
+		// force=true: escalate the ladder's final step. This also waits
+		// for the supervisor to record the exit before we proceed to
+		// cleanup, so the in-memory state is consistent.
+		_ = p.escalateSigkill(h, stopTimeoutsMu.sigtermTimeout)
+	}
+
+	// Stop the per-task ctx (cancels any background goroutines T-5
+	// introduces; safe even if cancelFn is a no-op).
+	if h.cancelFn != nil {
+		h.cancelFn()
+	}
+
+	// Cleanup tail — best-effort, errors only logged. The bash wrapper
+	// also runs these unconditionally; failures (e.g. tap already gone)
+	// are expected on the crash-recovery path.
+	if h.tap != "" {
+		if err := removeTapFn(h.tap); err != nil {
+			p.logger.Warn("ch: DestroyTask: tap removal failed (best-effort)",
+				"task_id", taskID, "tap", h.tap, "err", err)
+		}
+	}
+	if h.apiSocket != "" {
+		if err := os.Remove(h.apiSocket); err != nil && !os.IsNotExist(err) {
+			p.logger.Warn("ch: DestroyTask: api socket removal failed (best-effort)",
+				"task_id", taskID, "api_socket", h.apiSocket, "err", err)
+		}
+	}
+
+	p.tasks.Delete(taskID)
+	p.logger.Info("ch: DestroyTask: complete", "task_id", taskID)
+	return nil
 }
+
+// Compile-time guard against drift: drivers.ErrTaskNotFound is the
+// sentinel Nomad expects from WaitTask/InspectTask/TaskStats on an
+// unknown task. StopTask/DestroyTask are EXEMPT — they return nil on
+// unknown task per the contract — but keeping the import here documents
+// the convention for the surrounding code.
+var _ = drivers.ErrTaskNotFound

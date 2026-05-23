@@ -16,7 +16,9 @@ package ch
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -282,12 +284,91 @@ func (p *Plugin) ExecTask(taskID string, cmd []string, timeout time.Duration) (*
 	return nil, errors.New("ch: ExecTask is not supported (capability Exec=false)")
 }
 
-// SignalTask is wired to forward POSIX signals to the CH process.
-// Implemented inline because it's trivial; T-2 (StopTask) will share the
-// underlying os.Process lookup.
+// SignalTask forwards a POSIX signal (named per Nomad's `nomad alloc signal`
+// contract — "SIGUSR1", "SIGHUP", …) to the CH process backing the task.
+//
+// Resolution:
+//
+//  1. Parse the signal name via signalLookup (case-insensitive; tolerates
+//     both "SIGUSR1" and "USR1"). Unknown names default to syscall.SIGINT
+//     with a warning, matching raw_exec's behaviour.
+//  2. Prefer handle.runner.Signal (live in T-1's processRunner seam, used
+//     by fake runners in tests). Fall back to os.FindProcess+Signal when
+//     no runner is attached (RecoverTask handles in T-4).
+//
+// Capability claim SendSignals=true (see Capabilities) is the wire promise
+// behind this method.
 func (p *Plugin) SignalTask(taskID string, signal string) error {
-	// T-2: stub. Forward to handle.Signal once taskHandle owns the *os.Process.
-	return errors.New("ch: SignalTask not implemented (T-2)")
+	h, ok := p.tasks.Get(taskID)
+	if !ok {
+		return drivers.ErrTaskNotFound
+	}
+	sig, ok := signalLookup(signal)
+	if !ok {
+		p.logger.Warn("ch: SignalTask: unknown signal name; defaulting to SIGINT",
+			"task_id", taskID, "signal", signal)
+		sig = syscall.SIGINT
+	}
+	return p.signalHandle(h, sig)
+}
+
+// signalLookup resolves a Nomad-style signal name ("SIGUSR1" or "USR1") to
+// the matching syscall.Signal. Returns (sig, true) on hit; (0, false) on
+// miss so the caller can decide the fallback policy.
+//
+// The table covers the subset Nomad clients actually emit (`nomad alloc
+// signal`'s -s flag accepts these by name); host-only signals (SIGCHLD,
+// SIGURG) are intentionally omitted.
+func signalLookup(name string) (syscall.Signal, bool) {
+	n := strings.ToUpper(strings.TrimSpace(name))
+	n = strings.TrimPrefix(n, "SIG")
+	switch n {
+	case "HUP":
+		return syscall.SIGHUP, true
+	case "INT":
+		return syscall.SIGINT, true
+	case "QUIT":
+		return syscall.SIGQUIT, true
+	case "ILL":
+		return syscall.SIGILL, true
+	case "TRAP":
+		return syscall.SIGTRAP, true
+	case "ABRT", "IOT":
+		return syscall.SIGABRT, true
+	case "BUS":
+		return syscall.SIGBUS, true
+	case "FPE":
+		return syscall.SIGFPE, true
+	case "KILL":
+		return syscall.SIGKILL, true
+	case "USR1":
+		return syscall.SIGUSR1, true
+	case "SEGV":
+		return syscall.SIGSEGV, true
+	case "USR2":
+		return syscall.SIGUSR2, true
+	case "PIPE":
+		return syscall.SIGPIPE, true
+	case "ALRM":
+		return syscall.SIGALRM, true
+	case "TERM":
+		return syscall.SIGTERM, true
+	case "STOP":
+		return syscall.SIGSTOP, true
+	case "TSTP":
+		return syscall.SIGTSTP, true
+	case "CONT":
+		return syscall.SIGCONT, true
+	case "WINCH":
+		return syscall.SIGWINCH, true
+	case "IO":
+		return syscall.SIGIO, true
+	case "PWR":
+		return syscall.SIGPWR, true
+	case "SYS":
+		return syscall.SIGSYS, true
+	}
+	return 0, false
 }
 
 // taskStore is the in-process registry of running tasks. Methods are
