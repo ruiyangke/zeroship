@@ -2541,6 +2541,127 @@ async fn b1_reset_clears_state() {
     assert_eq!(st["processed"], 0);
 }
 
+// 41. concurrency r13 NEW-R13-2 — `exec_commit_batch` with
+// `is_done=true` and an unknown `terminalStatus` literal MUST reject
+// up-front (before BEGIN/UPDATE/COMMIT) and release the advisory lock
+// + clear the per-isolate `mig_lock` slot. Pre-fix, the validation ran
+// AFTER COMMIT landed, so the dedicated client stayed parked in
+// `mig_lock` and the advisory lock stayed held until isolate teardown
+// — a real lock-leak path.
+//
+// Verifies:
+//   1. The call returns `Err(invalid_argument)` with the unknown-status
+//      message.
+//   2. The advisory lock is released — a subsequent `exec_begin` for
+//      the same (app, name) acquires the lock without needing isolate
+//      teardown.
+//   3. The `mig_lock` slot is cleared (a fresh `exec_begin` does not
+//      observe a shadow-replace).
+//
+// The audit row's status was set to 'running' by the matching
+// `exec_begin` and is NOT advanced by the reject path (no audit-state
+// transitions before the validation fails). The next `exec_begin` on
+// the same row treats it as resumable (any status except 'cancelled'
+// is resumable, per migrations::exec_begin), confirming the row is in
+// a clean operator-recoverable state.
+#[compio::test]
+async fn b1_commit_batch_unknown_terminal_status_rejects_and_releases_lock() {
+    let url = require_pg().await;
+    zeroship_plugin_db::set_db_url_for_tests(&url);
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+
+    let app = "b1_term_reject";
+    b1_setup_users(&pool, app, 5, false).await;
+
+    // Open a migration normally (acquires advisory lock + parks client).
+    let _ = mig::exec_begin_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "backfill_role",
+        "users",
+        false,
+        false,
+    )
+    .await
+    .expect("exec_begin");
+
+    // Drive one commit with `is_done=true` and an unknown terminalStatus.
+    // Pre-fix: this would return Err but leave the lock + slot occupied.
+    // Post-fix: it rejects up-front and tears down cleanly.
+    let err = mig::exec_commit_batch_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        &Value::Array(vec![]),
+        &Value::Array(vec![]),
+        0,
+        0,
+        true,
+        Some("not_a_real_status"),
+        None,
+    )
+    .await
+    .expect_err("unknown terminalStatus must reject");
+
+    // (1) JS-visible error envelope shape preserved.
+    match &err.kind {
+        zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+            assert_eq!(
+                code, "invalid_argument",
+                "expected invalid_argument coded error, got {err:?}"
+            );
+        }
+        other => panic!("expected CodedError, got {other:?}"),
+    }
+    assert!(
+        err.message.contains("unknown terminalStatus")
+            && err.message.contains("not_a_real_status"),
+        "error message must name the bad literal: {}",
+        err.message,
+    );
+
+    // (2) `mig_lock` slot is cleared — exec_begin on the SAME name
+    // succeeds without needing isolate teardown. Pre-fix, this would
+    // either trip the shadow-replace path (slot still occupied with
+    // a now-stale client) or fail to acquire the advisory lock.
+    //
+    // NOTE: we explicitly do NOT call `clear_migration_lock_for_tests`
+    // between the reject and the re-begin — the whole point is that
+    // the production reject path already cleared the slot.
+    let begin2 = mig::exec_begin_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "backfill_role",
+        "users",
+        false,
+        false,
+    )
+    .await
+    .expect("re-begin after reject must succeed (lock + slot released)");
+    // The audit row is treated as resumable (status=='running'); we
+    // just need the call to land — the exact cursor/processed shape is
+    // covered by other tests.
+    let _parsed = parse(&begin2);
+
+    // Clean up: drive the migration to a real terminal status so the
+    // test leaves no stale advisory lock for the next test.
+    let _ = mig::exec_commit_batch_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        &Value::Array(vec![]),
+        &Value::Array(vec![]),
+        0,
+        0,
+        true,
+        Some("applied"),
+        None,
+    )
+    .await
+    .expect("clean-up commit");
+
+    zeroship_plugin_db::clear_migration_lock_for_tests().await;
+}
+
 // ---------------------------------------------------------------------------
 // B2 — typed cross-table relations: foreign keys at the DB level
 // ---------------------------------------------------------------------------

@@ -524,6 +524,58 @@ where
         coded("invalid_argument", "updates must be a JSON array", None)
     })?;
 
+    // Concurrency r13 NEW-R13-2: pre-validate `terminalStatus` BEFORE
+    // any BEGIN/UPDATE/COMMIT work happens. The previous structure
+    // validated the enum AFTER the SQL COMMIT had already landed; an
+    // unknown literal then returned an error while the dedicated lock
+    // client was parked back in `mig_lock` and the advisory lock stayed
+    // held — only isolate teardown could recover the lock. By validating
+    // up-front and rejecting with the same "release advisory lock + drop
+    // client + clear mig_lock slot" pattern as the cancelled-refusal
+    // path in `exec_begin`, the JS-visible error envelope is unchanged
+    // but the in-flight lock is now reliably released.
+    let terminal_for_done: Option<TerminalStatus> = if is_done {
+        Some(match terminal_status.unwrap_or("applied") {
+            "applied" => TerminalStatus::Applied,
+            "applied_with_dead_letter" => TerminalStatus::AppliedWithDeadLetter,
+            "failed" => TerminalStatus::Failed,
+            "cancelled" => TerminalStatus::Cancelled,
+            other => {
+                // Reject up-front; mirror the §10.5 release shape used
+                // by the cancelled-refusal path in `exec_begin` so the
+                // advisory lock + the per-isolate `mig_lock` slot are
+                // both released. The dedicated client lives in the slot
+                // — take it, release the lock on it, drop it (session
+                // end is the belt-and-braces unlock), then clear the
+                // slot. F1 warn-shape (`{app_id, name, error}`) is
+                // preserved per i6 documentation snapshot.
+                let release_scope = LockScope::GlobalApp {
+                    app_id: app_id.to_string(),
+                    name: format!("mig:{name}"),
+                };
+                if let Some(client) = take_lock_client() {
+                    if let Err(e) = backend.release(&client, &release_scope).await {
+                        tracing::warn!(
+                            app_id,
+                            name,
+                            error = %e,
+                            "release_advisory_lock failed on terminalStatus pre-validation reject path (lock auto-releases on session end)",
+                        );
+                    }
+                    drop(client);
+                }
+                crate::context::with_mut(|c| c.clear_mig_lock());
+                return Err(coded(
+                    "invalid_argument",
+                    &format!("unknown terminalStatus '{other}'"),
+                    None,
+                ));
+            }
+        })
+    } else {
+        None
+    };
+
     let client = take_lock_client().ok_or_else(|| {
         coded("no_active_migration", "lock client missing", None)
     })?;
@@ -674,22 +726,13 @@ where
     }
 
     // Terminal handling — if isDone, drive the row to a terminal status
-    // and release the lock.
+    // and release the lock. `terminalStatus` was pre-validated above
+    // (concurrency r13 NEW-R13-2) so this branch is infallible on the
+    // enum-mapping front; an unknown literal would have rejected before
+    // BEGIN/UPDATE/COMMIT touched the database.
     if is_done {
-        let terminal = match terminal_status.unwrap_or("applied") {
-            "applied" => TerminalStatus::Applied,
-            "applied_with_dead_letter" => TerminalStatus::AppliedWithDeadLetter,
-            "failed" => TerminalStatus::Failed,
-            "cancelled" => TerminalStatus::Cancelled,
-            other => {
-                return_lock_client(client);
-                return Err(coded(
-                    "invalid_argument",
-                    &format!("unknown terminalStatus '{other}'"),
-                    None,
-                ));
-            }
-        };
+        let terminal = terminal_for_done
+            .expect("terminal_for_done populated when is_done=true (pre-validated above)");
 
         // Discarding finalise_backfill errors silently can leave the
         // audit row stuck in Running (migration-pipeline r5 R5-M7,
