@@ -24,11 +24,12 @@
 //! protection is mediated by `__zeroship_admin.session_nonces` with
 //! PRIMARY KEY conflict surface as `nonce replay detected`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use compio_postgres::{Client, Pool};
 
-use super::{ADMIN_SCHEMA, DEFAULT_TOKEN_TTL_SECS};
+use super::ADMIN_SCHEMA;
+use crate::auth::util::{
+    getrandom_or_fallback, hex_decode, hex_encode, iso_timestamp_after, DEFAULT_TOKEN_TTL_SECS,
+};
 use crate::error::DbError;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
@@ -300,112 +301,13 @@ pub async fn mint_and_init_via_pool(
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-/// Best-effort random fill — prefers `/dev/urandom`; falls back to a
-/// time-perturbed XOR stream if unavailable. The XOR fallback is good
-/// enough for "nonce" uniqueness (the proposal's threat model assumes
-/// the HMAC key, not the nonce, is the secret) but logs a warning so
-/// production deployments notice the missing entropy source.
-fn getrandom_or_fallback(buf: &mut [u8]) {
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        if f.read_exact(buf).is_ok() {
-            return;
-        }
-    }
-    // Fallback — never expected in production. The proposal requires
-    // pgcrypto for the HMAC key (which IS the secret); the nonce only
-    // needs to be unique within the retention window.
-    tracing::error!("auth/session: /dev/urandom unavailable, using time-perturbed fallback");
-    let mut t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    for b in buf.iter_mut() {
-        t = t.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        *b = (t >> 33) as u8;
-    }
-}
-
-/// ISO-8601 with millisecond precision in UTC — matches the SQL
-/// format string `YYYY-MM-DD"T"HH24:MI:SS.MS`.
-fn iso_timestamp_after(ttl_secs: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let total_ms = now + ttl_secs.saturating_mul(1000);
-    format_unix_millis(total_ms)
-}
-
-/// Format a Unix-millisecond timestamp as `YYYY-MM-DDTHH:MM:SS.mmm`
-/// in UTC. We roll our own to avoid pulling chrono into plugin-db's
-/// dependency graph (the rest of the crate gets by without it).
-fn format_unix_millis(ms: i64) -> String {
-    // Algorithm: Howard Hinnant's "days_from_civil" inversion.
-    let secs = ms / 1000;
-    let ms_frac = (ms % 1000).abs();
-    let days = secs.div_euclid(86_400);
-    let time_in_day = secs.rem_euclid(86_400);
-    let h = time_in_day / 3600;
-    let m = (time_in_day % 3600) / 60;
-    let s = time_in_day % 60;
-
-    let (y, mo, d) = civil_from_days(days);
-    format!(
-        "{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}.{ms_frac:03}",
-    )
-}
-
-/// Convert days-since-Unix-epoch to (year, month, day) — Hinnant's
-/// algorithm. Handles negative inputs (we never see those, but the
-/// math is the same).
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = (yoe as i64) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = (y + i64::from(m <= 2)) as i32;
-    (year, m as u32, d as u32)
-}
-
-fn hex_encode(b: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(b.len() * 2);
-    for &x in b {
-        out.push(HEX[(x >> 4) as usize] as char);
-        out.push(HEX[(x & 0xF) as usize] as char);
-    }
-    out
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if s.len() % 2 != 0 {
-        return Err("odd-length hex string".into());
-    }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    for i in (0..bytes.len()).step_by(2) {
-        let hi = hex_nibble(bytes[i])?;
-        let lo = hex_nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-fn hex_nibble(c: u8) -> Result<u8, String> {
-    match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(format!("invalid hex digit {:?}", c as char)),
-    }
-}
+//
+// TTL default, getrandom fallback, ISO timestamp formatter, and hex
+// codec used to live here. They were relocated to `crate::auth::util`
+// in P3 PR 1 so the SQLite `SessionMinter` impl (gated only by the
+// `sqlite` feature) can reuse them without dragging the rest of the
+// PG-only `auth::*` surface behind `hardening`. See
+// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6 (H-1).
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -415,53 +317,9 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn hex_roundtrip() {
-        let a = [0xde, 0xad, 0xbe, 0xef, 0x00, 0xff, 0x42];
-        let s = hex_encode(&a);
-        assert_eq!(s, "deadbeef00ff42");
-        assert_eq!(hex_decode(&s).unwrap(), a);
-    }
-
-    #[test]
-    fn hex_decode_rejects_odd_length() {
-        assert!(hex_decode("abc").is_err());
-    }
-
-    #[test]
-    fn hex_decode_rejects_garbage() {
-        assert!(hex_decode("xy").is_err());
-    }
-
-    #[test]
-    fn iso_format_unix_epoch() {
-        assert_eq!(format_unix_millis(0), "1970-01-01T00:00:00.000");
-    }
-
-    #[test]
-    fn iso_format_known_value() {
-        // 2026-05-07T00:00:00.000 UTC = 1_778_112_000_000 ms since epoch.
-        let ms: i64 = 1_778_112_000_000;
-        let s = format_unix_millis(ms);
-        assert_eq!(s, "2026-05-07T00:00:00.000");
-    }
-
-    #[test]
-    fn iso_format_includes_milliseconds() {
-        let ms: i64 = 1_778_112_000_123;
-        assert!(
-            format_unix_millis(ms).ends_with(".123"),
-            "got: {}",
-            format_unix_millis(ms)
-        );
-    }
-
-    #[test]
-    fn nonce_random_bytes_are_not_all_zero() {
-        let mut b = [0u8; 32];
-        getrandom_or_fallback(&mut b);
-        assert!(b.iter().any(|&x| x != 0), "got all-zero nonce");
-    }
+    // Helper-level tests (hex_roundtrip, iso_format_*,
+    // nonce_random_bytes_are_not_all_zero, etc.) moved to
+    // `crate::auth::util::tests` alongside the helper bodies in P3 PR 1.
 
     #[test]
     fn token_struct_shape_has_required_fields() {

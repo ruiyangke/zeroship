@@ -104,9 +104,17 @@ pub(crate) mod audit;
 #[cfg(feature = "test-helpers")]
 pub mod audit;
 
-#[cfg(all(feature = "hardening", not(feature = "test-helpers")))]
+// P3 PR 1 (H-1): the `auth` module itself is gated to
+// `any(feature = "hardening", feature = "sqlite")` so the
+// `auth::util` shared-helper subtree is reachable for the upcoming
+// SQLite `SessionMinter` impl without forcing dev builds to enable
+// `hardening`. The PG-side submodules (`bootstrap`, `keys`,
+// `session`) stay individually gated on `hardening` inside
+// `auth/mod.rs`. See
+// `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6.
+#[cfg(all(any(feature = "hardening", feature = "sqlite"), not(feature = "test-helpers")))]
 pub(crate) mod auth;
-#[cfg(all(feature = "hardening", feature = "test-helpers"))]
+#[cfg(all(any(feature = "hardening", feature = "sqlite"), feature = "test-helpers"))]
 pub mod auth;
 
 #[cfg(not(feature = "test-helpers"))]

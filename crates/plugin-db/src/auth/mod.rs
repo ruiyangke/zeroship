@@ -70,12 +70,30 @@
 //! runtime opt-in once this module ships; it is NOT how the subtree
 //! is currently gated.
 
+// `util` is reachable whenever the `auth` module itself is reachable
+// (`any(feature = "hardening", feature = "sqlite")`). It owns the
+// helpers — TTL default, getrandom fallback, ISO timestamp formatter,
+// hex codec — that BOTH the PG free fns in `session.rs` and the
+// upcoming SQLite `SessionMinter` impl in `backend/sqlite/session_minter.rs`
+// need. See `docs/proposals/p3-sqlite-auth-implementation-plan.md` §6
+// (H-1).
+pub mod util;
+
+// The PG-side `bootstrap` / `keys` / `session` modules stay gated to
+// the `hardening` feature: they speak SECURITY DEFINER + `compio_postgres`
+// and aren't reachable from the SQLite arm.
+#[cfg(feature = "hardening")]
 pub mod bootstrap;
+#[cfg(feature = "hardening")]
 pub mod keys;
+#[cfg(feature = "hardening")]
 pub mod session;
 
+#[cfg(feature = "hardening")]
 pub use bootstrap::{ensure_admin_schema, BootstrapOutcome};
+#[cfg(feature = "hardening")]
 pub use keys::{rotate_session_keys, RotationOutcome};
+#[cfg(feature = "hardening")]
 pub use session::{init_session, mint_session_token, MintedToken, SessionInit};
 
 // Re-export the schema/role names so other modules (replication.rs,
@@ -97,15 +115,8 @@ pub const PLATFORM_ROLE: &str = "__zeroship_platform_role";
 /// P8c's scope.
 pub const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 
-/// Default lifetime for a minted session token. The signed payload
-/// includes `expires_at`, so an HTTP-roundtripped token that misses
-/// this window is rejected by `init_session`. Five minutes is enough
-/// for any sane connection-acquire round-trip and short enough that a
-/// captured token can't be replayed long.
-pub const DEFAULT_TOKEN_TTL_SECS: i64 = 300;
-
-/// How long the nonce-replay-protection table retains a row. Must
-/// outlive `DEFAULT_TOKEN_TTL_SECS` plus the key-rotation grace window
-/// so a captured-and-late-arriving signature cannot bypass replay
-/// detection by being delayed past the nonce's GC.
-pub const NONCE_RETENTION_SECS: i64 = 25 * 3600;
+// Token-lifetime / nonce-retention constants moved to
+// `crate::auth::util` in P3 PR 1 so they're reachable from both the
+// PG arm (gated by `hardening`) and the SQLite arm (gated by `sqlite`).
+// Re-exported here for back-compat with existing in-crate callers.
+pub use util::{DEFAULT_TOKEN_TTL_SECS, NONCE_RETENTION_SECS};
