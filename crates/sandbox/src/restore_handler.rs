@@ -199,7 +199,7 @@ pub trait RestoreBackend: Send + Sync {
 pub async fn restore_sandbox(
     db: &Database,
     store: Arc<dyn SnapshotStore>,
-    backend: &dyn RestoreBackend,
+    backend: Arc<dyn RestoreBackend>,
     persist: Option<&crate::persist::Persistence>,
     sandbox_id: Uuid,
     snapshot_enabled: bool,
@@ -247,8 +247,16 @@ pub async fn restore_sandbox(
         .await?;
 
     // From here on use a closure + rollback semantics.
-    let result =
-        do_restore_inner(db, Arc::clone(&store), backend, persist, sandbox_id, &snap, g1).await;
+    let result = do_restore_inner(
+        db,
+        Arc::clone(&store),
+        Arc::clone(&backend),
+        persist,
+        sandbox_id,
+        &snap,
+        g1,
+    )
+    .await;
 
     match result {
         Ok((vm_index, g2)) => Ok(RestoreOutcome { sandbox_id, vm_index, generation: g2 }),
@@ -344,7 +352,7 @@ async fn read_snapshot_row(
 async fn do_restore_inner(
     db: &Database,
     store: Arc<dyn SnapshotStore>,
-    backend: &dyn RestoreBackend,
+    backend: Arc<dyn RestoreBackend>,
     persist: Option<&crate::persist::Persistence>,
     sandbox_id: Uuid,
     snap: &SnapshotRowMeta,
@@ -460,14 +468,54 @@ async fn do_restore_inner(
         .map_err(RestoreHandlerError::ConfigRewrite)?;
 
     // 6. Submit the restore job.
-    backend
-        .submit_restore_job(sandbox_id, snap.vm_index, &alloc_dir, &snap.user_id)
+    //
+    // R8-A3-5 (perf-r8): `submit_restore_job` on `RealRestoreBackend`
+    // is internally sync — it POSTs to Nomad over a blocking ureq
+    // client, then `std::thread::sleep(250ms)`-polls allocations
+    // until the alloc reaches `running` (typically 2-4 s, deadline
+    // up to `restore_job_timeout`). Running it on the async caller
+    // parked the ntex worker for the entire duration. Per perf-r8
+    // this was the single largest remaining wake-path target (wake
+    // p50 ~9.2 s, ~5-8 s of which was this call). Hop through
+    // `compio::runtime::spawn_blocking` so the worker can serve
+    // other RPCs while Nomad churns. Pattern mirrors R7-P1
+    // (79428d53) on snapshot's ch.pause + ch.snapshot and R5-P1b
+    // (cdd2e677) on store.get.
+    {
+        let backend_clone = Arc::clone(&backend);
+        let alloc_dir_owned = alloc_dir.clone();
+        let user_id_owned = snap.user_id.clone();
+        let vm_index = snap.vm_index;
+        compio::runtime::spawn_blocking(move || {
+            backend_clone.submit_restore_job(
+                sandbox_id,
+                vm_index,
+                &alloc_dir_owned,
+                &user_id_owned,
+            )
+        })
+        .await
+        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
         .map_err(RestoreHandlerError::Backend)?;
+    }
 
     // 7. Wait for /livez.
-    backend
-        .wait_for_livez(sandbox_id, snap.vm_index)
+    //
+    // R8-A3-5 (perf-r8): `wait_for_livez` is also sync — it polls
+    // the in-VM agent's `/livez` with `std::thread::sleep(250ms)`
+    // between attempts until the agent answers 200 or the deadline
+    // hits (typically 1-3 s post-`running`). Same blocking-poll
+    // shape as `submit_restore_job`; same spawn_blocking treatment.
+    {
+        let backend_clone = Arc::clone(&backend);
+        let vm_index = snap.vm_index;
+        compio::runtime::spawn_blocking(move || {
+            backend_clone.wait_for_livez(sandbox_id, vm_index)
+        })
+        .await
+        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
         .map_err(RestoreHandlerError::Backend)?;
+    }
 
     // 7b (B19 fix, cluster smoke 2026-05-23 r4). Install the restored
     //    VM into the backend's in-memory state map. Without this step
