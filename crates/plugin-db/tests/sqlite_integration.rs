@@ -27,7 +27,7 @@ use zeroship_plugin_db::backend::{
 };
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
 use zeroship_plugin_db::error::DbError;
-use zeroship_plugin_db::query::IndexSpec;
+use zeroship_plugin_db::query::{IndexKind, IndexSpec};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
 ///
@@ -638,6 +638,7 @@ fn create_index_succeeds() {
             columns: vec!["name".to_string()],
             unique: false,
             sql: String::new(),
+            kind: IndexKind::BTree,
         };
 
         backend
@@ -706,6 +707,7 @@ fn create_unique_index_fails_on_duplicate_with_envelope() {
             columns: vec!["email".to_string()],
             unique: true,
             sql: String::new(),
+            kind: IndexKind::BTree,
         };
 
         let err = backend

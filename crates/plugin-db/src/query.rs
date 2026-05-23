@@ -434,7 +434,16 @@ pub fn build_add_column(
 /// `unique` is exposed so callers can apply different recovery policies for
 /// unique-index failures (which surface `23505 unique_violation` errors that
 /// must not be retried — see proposal A1 INVALID-index recovery).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **P4 PR 1**: `kind` carries the index *shape* — B-tree (the default for
+/// every P0-P3 call site), vector (pgvector / Rust flat-scan), full-text
+/// (tsvector+GIN on PG, FTS5 on SQLite), or spatial (PostGIS GIST on PG,
+/// haversine post-filter on SQLite). The default is [`IndexKind::BTree`]
+/// so existing call sites that build B-tree indexes (`build_create_indexes`,
+/// `build_named_indexes`) need no churn — they construct with explicit
+/// fields including `kind: IndexKind::BTree` to stay readable, but
+/// `..Default::default()` would also work given the `#[derive(Default)]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IndexSpec {
     /// Deterministic index identifier (unquoted).
     pub name: String,
@@ -444,6 +453,55 @@ pub struct IndexSpec {
     pub unique: bool,
     /// `CREATE …` DDL ready for execution.
     pub sql: String,
+    /// Index shape — selects the backend builder branch. P4 PR 1
+    /// introduces the field; P4 PR 2-5 wire `Vector` / `Fts` /
+    /// `Spatial` dispatch through the `register_model::apply` Pass 2.
+    pub kind: IndexKind,
+}
+
+/// Index shape — the closed sum over the four kinds of indexes
+/// `registerModel` can materialise.
+///
+/// **P4 PR 1** (`docs/proposals/p4-search-implementation-plan.md` §2).
+/// The default is [`IndexKind::BTree`] so every P0-P3 call site keeps
+/// the same observable behaviour; PR 2/3 wire `Vector` / `Fts` /
+/// `Spatial` dispatch through the `register_model::apply` Pass 2.
+///
+/// **Why an enum, not a string**: same rationale as
+/// [`crate::backend::VectorMetric`] — the rustc exhaustiveness check
+/// trips every match arm if a future PR adds a fifth kind, rather
+/// than a default branch silently routing the new kind to the B-tree
+/// builder.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum IndexKind {
+    /// Plain B-tree index over the listed columns. PG: `CREATE INDEX
+    /// … (col1, col2, …)`. SQLite: same shape via the sqlite dialect.
+    /// The default for every column with the `index` / `unique`
+    /// modifier in the SDK schema DSL.
+    #[default]
+    BTree,
+    /// Vector (ANN) index. `dims` is the declared vector dimensionality;
+    /// `metric` selects the distance function. PG: `USING ivfflat`
+    /// with the metric-appropriate opclass. SQLite: no actual index
+    /// (flat scan); the kind value still flows through so the column
+    /// DDL emits a `length("col") = 4 * dims` CHECK constraint.
+    Vector {
+        /// Declared vector dimensionality (e.g. 768 for `text-embedding-3-small`).
+        dims: i32,
+        /// Distance metric — see [`crate::backend::VectorMetric`].
+        metric: crate::backend::VectorMetric,
+    },
+    /// Full-text index. `language` is the tsvector configuration
+    /// (`english`, `simple`, …) on PG; SQLite FTS5 ignores it (its
+    /// default tokenizer is language-agnostic Unicode).
+    Fts {
+        /// Tokeniser language. Honoured on PG; ignored on SQLite.
+        language: String,
+    },
+    /// Spatial index over a `geography(POINT, 4326)` (PG) or BLOB-
+    /// packed `(lat, lng)` (SQLite) column. PG: `USING GIST`;
+    /// SQLite: no actual index (haversine post-filter).
+    Spatial,
 }
 
 /// Build the set of `CREATE INDEX CONCURRENTLY` statements for a schema.
@@ -501,6 +559,7 @@ pub fn build_create_indexes(
                 columns: vec![field.clone()],
                 unique: true,
                 sql,
+                kind: IndexKind::BTree,
             });
         } else if wants_index {
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
@@ -516,6 +575,7 @@ pub fn build_create_indexes(
                 columns: vec![field.clone()],
                 unique: false,
                 sql,
+                kind: IndexKind::BTree,
             });
         }
     }
@@ -614,7 +674,7 @@ pub fn build_named_indexes(
             table_qualified,
             quoted.join(", "),
         );
-        out.push(IndexSpec { name: pg_name, columns, unique, sql });
+        out.push(IndexSpec { name: pg_name, columns, unique, sql, kind: IndexKind::BTree });
     }
 
     Ok(out)

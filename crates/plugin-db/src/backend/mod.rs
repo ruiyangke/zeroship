@@ -1088,6 +1088,229 @@ impl Drop for BrokerPauseGuard {
     }
 }
 
+/// Vector-index capability — the "build an ANN index over a `float[]`
+/// column and run a top-k nearest-neighbour query" slice of the
+/// data-store boundary.
+///
+/// Introduced in **P4 PR 1** (`docs/proposals/p4-search-implementation-plan.md`
+/// §2). The PG impl (PR 2) wraps `pgvector` (`CREATE INDEX … USING
+/// ivfflat`, `<->` / `<#>` / `<=>` operators by metric). The SQLite
+/// impl (PR 4) is a pure-Rust flat scan over a `BLOB` column holding
+/// little-endian `[f32]` payloads — dev tier only, ≤50k rows, ≤1024
+/// dims, HNSW deferred (riskiest-decision Q-P4-D, plan §10).
+///
+/// ## Why not on [`Backend`] super-bound
+///
+/// Same rationale as [`ChangeStream`] / [`SessionMinter`] (plan §2):
+/// consumers route via concrete-backend accessors —
+/// [`BackendHandle::as_postgres`] / [`BackendHandle::as_sqlite`] —
+/// because `async fn` in trait position is dyn-incompatible. Adding
+/// `VectorIndex` to the omnibus `Backend` super-trait would force
+/// every backend to implement it (including hypothetical future
+/// arms that have no vector primitive), and the consumer migration
+/// path on PR 2-5 will go through the same `as_*()?.vector_search(...)`
+/// shape the [`AuditWriter`] / `SessionMinter` consumers already use.
+///
+/// ## Method signatures
+///
+/// Both methods are `async`, take `&self`, and return `Result<…, DbError>`
+/// — the same shape as the other capability traits. `app_id` /
+/// `collection` / `column` are unquoted identifiers; impls call
+/// through their dialect's `quote_ident` before splicing into SQL.
+///
+/// `dims` is the declared vector dimensionality (per SDK
+/// `t.vector(dims)`); impls fail-fast on a dim mismatch at insert
+/// time via a `vector_dimension_mismatch` typed error. `metric`
+/// selects the distance function — see [`VectorMetric`] for the
+/// canonical operator mapping.
+///
+/// `filter` is the standard `$op`-shaped JSON predicate the rest of
+/// the crate already understands (passes through `query.rs` builders).
+/// The vector search returns rows ordered by `_distance` ASC; the
+/// synthetic `_distance` column is `f64` and lives on the returned
+/// JSON `Value`s. The SDK strips the leading `_` from user-visible
+/// columns (Q-P4-I) so this prefix is reserved for engine annotations.
+///
+/// Not `Send + Sync` — same Open Q4 reasoning as the rest of the
+/// capability traits.
+pub trait VectorIndex: 'static {
+    /// Idempotently create the vector index. PG: `CREATE INDEX
+    /// CONCURRENTLY IF NOT EXISTS … USING ivfflat ("col" vector_{metric}_ops)`.
+    /// SQLite: no-op (flat scan needs no index; PR 4 wires the
+    /// CHECK constraint at column-DDL time instead).
+    #[allow(async_fn_in_trait)]
+    async fn ensure_vector_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        dims: i32,
+        metric: VectorMetric,
+    ) -> Result<(), DbError>;
+
+    /// Return the top-`k` rows ordered by distance ASC. `query` is the
+    /// query vector (length must match the column's declared `dims`
+    /// or impls return a `vector_dimension_mismatch` typed error).
+    /// `filter` is composed via `AND` with the distance ordering.
+    /// Each returned `Value` is an object including a synthetic
+    /// `"_distance"` field (`f64`).
+    #[allow(async_fn_in_trait)]
+    async fn vector_search(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        metric: VectorMetric,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DbError>;
+}
+
+/// Distance metric for [`VectorIndex`]. The three metrics map 1:1 to
+/// pgvector's operator class set (`vector_cosine_ops`,
+/// `vector_l2_ops`, `vector_ip_ops`) and the SQLite Rust-side distance
+/// functions (`cosine_distance`, `l2_distance`, `neg_inner_product`).
+///
+/// **Why an enum, not a string** (plan §2): the SDK validates against
+/// a closed three-element set; carrying it through the Rust surface
+/// as an enum trips the rustc exhaustiveness checker if a future PR
+/// adds a fourth metric — every match arm in the impl flags rather
+/// than the new metric silently routing to a default branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMetric {
+    /// Cosine distance: `1 - (a · b) / (||a|| · ||b||)`. PG operator
+    /// `<=>`, opclass `vector_cosine_ops`. The default for embedding
+    /// models that produce L2-normalised vectors.
+    Cosine,
+    /// Euclidean (L2) distance: `sqrt(Σ (a_i - b_i)^2)`. PG operator
+    /// `<->`, opclass `vector_l2_ops`.
+    L2,
+    /// Negative inner product: `- (a · b)`. PG operator `<#>`,
+    /// opclass `vector_ip_ops`. The "negative" framing makes "smaller
+    /// is better" hold across all three metrics, so a single ORDER BY
+    /// clause works.
+    InnerProduct,
+}
+
+/// Full-text search index capability — the "build a tokeniser-backed
+/// inverted index over one or more text columns and run a phrase /
+/// proximity query" slice of the data-store boundary.
+///
+/// Introduced in **P4 PR 1** (plan §2). The PG impl (PR 3) maintains
+/// a generated `__fts tsvector` column + GIN index + an `AFTER
+/// INSERT/UPDATE` trigger calling `tsvector_update_trigger(...)`.
+/// The SQLite impl (PR 5) uses FTS5 external-content virtual tables
+/// keyed by `rowid` with `AFTER` triggers mirroring writes.
+///
+/// `language` is honoured on PG (selects the tsvector configuration —
+/// `english`, `simple`, …); SQLite FTS5's default tokenizer is
+/// language-agnostic Unicode and ignores the parameter today (plan §9).
+///
+/// `filter` composes with `MATCH` via `AND`. Results are returned
+/// ordered by relevance DESC — PG: `ts_rank`; SQLite: `bm25`. Each
+/// returned `Value` includes a synthetic `"_rank"` field (`f64`).
+///
+/// **One composite index per collection** (Q-P4-B): the SDK's
+/// `.fts()` per-field modifier collects every flagged column into a
+/// single `__fts` index — `columns: &[String]` carries the ordered
+/// list.
+pub trait FullTextIndex: 'static {
+    /// Idempotently create the FTS index. PG: emits the `__fts`
+    /// column + GIN index + trigger. SQLite: creates the
+    /// `<coll>__fts` external-content virtual table + the
+    /// INSERT/UPDATE/DELETE mirror triggers.
+    #[allow(async_fn_in_trait)]
+    async fn ensure_fts_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        columns: &[String],
+        language: &str,
+    ) -> Result<(), DbError>;
+
+    /// Run the FTS query and return matching rows ordered by relevance
+    /// DESC. `limit` of `None` defers to the impl's default (today: no
+    /// explicit limit — caller must guard against `O(table)` results).
+    /// Each returned `Value` includes a synthetic `"_rank"` field.
+    #[allow(async_fn_in_trait)]
+    async fn fts_search(
+        &self,
+        app_id: &str,
+        collection: &str,
+        query: &str,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError>;
+}
+
+/// Spatial-index capability — the "build an R-tree-like index over a
+/// `geography(POINT)` column and run a within-radius point query"
+/// slice of the data-store boundary.
+///
+/// Introduced in **P4 PR 1** (plan §2). The PG impl (PR 3) wraps
+/// PostGIS (`geography(POINT, 4326)` column type, `GIST` index,
+/// `ST_DWithin` / `ST_MakePoint` operators). The SQLite impl (PR 5)
+/// is a pure-Rust haversine within-radius post-filter over a `BLOB`
+/// column packed as `(lat, lng)` little-endian `f64` × 2 = 16 bytes —
+/// dev tier only, no R-tree (Q-P4-C: polygon ops PG-only).
+///
+/// `point` is the query centre. `radius_m` is in metres on both
+/// backends (PG geography type works in metres; SQLite haversine
+/// returns metres directly). `filter` composes with the
+/// within-radius predicate via `AND`. Each returned `Value` includes
+/// a synthetic `"_distance_m"` field (`f64`).
+///
+/// **`spatial_near` only** in P4 (Q-P4-C): polygon ops (`within`,
+/// `intersects`) are deferred. The SQLite impl rejects polygon
+/// input with `Configuration { code: "polygon_ops_pg_only" }`.
+pub trait SpatialIndex: 'static {
+    /// Idempotently create the spatial index. PG: `CREATE INDEX
+    /// CONCURRENTLY … USING GIST ("col")`. SQLite: no-op (haversine
+    /// full-scan needs no index).
+    #[allow(async_fn_in_trait)]
+    async fn ensure_spatial_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+    ) -> Result<(), DbError>;
+
+    /// Return rows within `radius_m` of `point` ordered by distance
+    /// ASC. `limit` of `None` defers to the impl's default.
+    #[allow(async_fn_in_trait)]
+    async fn spatial_near(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        point: GeoPoint,
+        radius_m: f64,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError>;
+}
+
+/// A geographic point in WGS84 (EPSG:4326). Used by [`SpatialIndex`]
+/// for query input.
+///
+/// **Field order**: `lat` then `lng` — matches the SDK shape
+/// (`{ lat: number, lng: number }`) and the GeoJSON convention.
+/// Note that PostGIS `ST_MakePoint` takes `(lng, lat)`; the PG impl
+/// (PR 3) reorders at the SQL boundary.
+///
+/// `Copy` because it's two `f64`s — passing by value is cheaper than
+/// borrowing.
+#[derive(Debug, Clone, Copy)]
+pub struct GeoPoint {
+    /// Latitude in degrees, range `[-90, 90]`. SDK validate rejects
+    /// out-of-range values before the trait method is called.
+    pub lat: f64,
+    /// Longitude in degrees, range `[-180, 180]`. SDK validate
+    /// rejects out-of-range values before the trait method is called.
+    pub lng: f64,
+}
+
 /// RAII guard returned by [`ChangeStream::engage_schema_pending`].
 /// Disengaging the schema-pending decoder (and emitting one `Resync`
 /// per active subscription) happens on `Drop`.
@@ -1574,6 +1797,29 @@ mod tests {
         }
         assert_impl::<crate::change_stream_pg::PgChangeStream>();
     }
+
+    /// Compile-time (P4 PR 1): the [`VectorIndex`] trait's shape is
+    /// pinned. PR 1 ships no impl — neither [`PostgresBackend`] nor
+    /// [`SqliteBackend`] yet satisfies the trait, so this assertion
+    /// only checks that the trait *itself* compiles (object-safety,
+    /// `async fn` placement, signature shape). PR 2/4 will instantiate
+    /// this against the concrete backends.
+    #[allow(dead_code)]
+    fn _assert_vector_index<T: VectorIndex>() {}
+
+    /// Compile-time (P4 PR 1): the [`FullTextIndex`] trait's shape is
+    /// pinned. PR 1 ships no impl — neither backend yet satisfies the
+    /// trait. PR 3/5 will instantiate this against the concrete
+    /// backends.
+    #[allow(dead_code)]
+    fn _assert_fts_index<T: FullTextIndex>() {}
+
+    /// Compile-time (P4 PR 1): the [`SpatialIndex`] trait's shape is
+    /// pinned. PR 1 ships no impl — neither backend yet satisfies the
+    /// trait. PR 3/5 will instantiate this against the concrete
+    /// backends.
+    #[allow(dead_code)]
+    fn _assert_spatial_index<T: SpatialIndex>() {}
 
     /// Compile-time: the associated types stay anchored to the concrete
     /// `compio_postgres::Client` / `crate::diff::LiveSchema`. A

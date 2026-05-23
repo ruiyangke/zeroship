@@ -153,6 +153,48 @@ pub struct ColumnInfo {
     /// the default is a function call. `i`/`s`/`v`. `None` if the default
     /// is a plain literal.
     pub default_volatility: Option<char>,
+    /// **P4 PR 1** — vector dimensionality observed from the live
+    /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
+    /// BLOB column with a `length("col") = 4 * N` CHECK constraint
+    /// (SQLite); `None` otherwise (the default — every existing
+    /// non-vector column). PR 4/5 populate this from
+    /// `information_schema` / `sqlite_master.sql` introspection
+    /// (Q-P4-A — regex on DDL today, sidecar `__zs_schema_meta` is
+    /// the upgrade path).
+    pub vector_dims: Option<i32>,
+    /// **P4 PR 1** — whether this column is enrolled in the
+    /// collection's composite FTS index (one composite index per
+    /// collection, per Q-P4-B). PG: presence of the column in the
+    /// `tsvector_update_trigger(__fts, ...)` arg list. SQLite:
+    /// presence in the `<coll>__fts` external-content vtable's
+    /// column list. `false` for every existing column at HEAD.
+    pub is_fts_source: bool,
+    /// **P4 PR 1** — whether this column is a `geography(POINT,
+    /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
+    /// CHECK constraint (SQLite). `false` for every existing column
+    /// at HEAD; PR 4/5 populate this from live-schema introspection.
+    pub is_geopoint: bool,
+}
+
+impl Default for ColumnInfo {
+    /// **P4 PR 1** — `Default` impl so call sites can use
+    /// `..Default::default()` for the new vector/FTS/geopoint fields
+    /// without restating the pre-P4 field defaults. The B-tree column
+    /// shape is: empty type string, nullable, no default, no
+    /// volatility, no vector dimension, not an FTS source, not a
+    /// geopoint. Every existing introspection / test site overrides
+    /// `pg_type` + `not_null` explicitly.
+    fn default() -> Self {
+        Self {
+            pg_type: String::new(),
+            not_null: false,
+            default_expr: None,
+            default_volatility: None,
+            vector_dims: None,
+            is_fts_source: false,
+            is_geopoint: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +285,9 @@ SELECT c.relname AS table_name,
                 not_null,
                 default_expr,
                 default_volatility,
+                // P4 PR 1: new fields default; PR 4/5 populate from
+                // `information_schema` + `pg_indexes` introspection.
+                ..Default::default()
             },
         );
     }
@@ -786,6 +831,7 @@ mod tests {
                 not_null: true,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         cols.insert(
@@ -795,6 +841,7 @@ mod tests {
                 not_null: false,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         cols.insert(
@@ -804,6 +851,7 @@ mod tests {
                 not_null: false,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         cols.insert(
@@ -813,6 +861,7 @@ mod tests {
                 not_null: false,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         live.tables.insert("posts".to_string(), cols);
@@ -859,6 +908,7 @@ mod tests {
                 not_null: true,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         cols.insert(
@@ -868,6 +918,7 @@ mod tests {
                 not_null: false,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         live.tables.insert("posts".to_string(), cols);
@@ -897,6 +948,7 @@ mod tests {
                 not_null: true,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         cols.insert(
@@ -906,6 +958,7 @@ mod tests {
                 not_null: false,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         live.tables.insert("posts".to_string(), cols);
@@ -946,6 +999,7 @@ mod tests {
                 not_null: false,
                 default_expr: None,
                 default_volatility: None,
+                ..Default::default()
             },
         );
         live.tables.insert("posts".to_string(), cols);
@@ -1014,6 +1068,7 @@ mod tests {
                     not_null: false,
                     default_expr: None,
                     default_volatility: None,
+                    ..Default::default()
                 },
             );
         }
@@ -1076,6 +1131,7 @@ mod tests {
                     not_null: false,
                     default_expr: None,
                     default_volatility: None,
+                    ..Default::default()
                 },
             );
         }

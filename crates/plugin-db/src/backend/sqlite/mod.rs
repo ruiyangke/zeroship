@@ -612,6 +612,10 @@ impl SchemaIntrospect for SqliteBackend {
                         // pattern-match on common volatile defaults
                         // (`CURRENT_TIMESTAMP`, `(unixepoch())`, etc.).
                         default_volatility: None,
+                        // P4 PR 1: new fields default; PR 5 populates
+                        // `vector_dims` / `is_fts_source` / `is_geopoint`
+                        // from `sqlite_master.sql` introspection regexes.
+                        ..Default::default()
                     },
                 );
             }

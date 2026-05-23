@@ -117,7 +117,7 @@ subscriptions + optimistic concurrency); analytics (MV); AI/RAG (vector
 | 4 | Pessimistic locking | `SELECT … FOR UPDATE` | `BEGIN IMMEDIATE` for the whole tx (coarser; §8.5) |
 | 5 | Optimistic concurrency (CAS) | `UPDATE … WHERE id=? AND version=? RETURNING` | identical |
 | 6 | Full-text search | `tsvector` + GIN | FTS5 vtable maintained by triggers (NOT a column type; §6.2) |
-| 7 | Vector search | pgvector HNSW | `sqlite-vec` (bundled at compile time) |
+| 7 | Vector search | pgvector HNSW | pure-Rust flat scan (dev scale ≤50k rows); HNSW deferred (see P4 plan §10) |
 | 8 | Geospatial | PostGIS GiST | R-tree on bbox + Rust Haversine post-filter |
 | 9 | JSON columns + path queries | JSONB + `->`/`->>` | TEXT (CHECK `json_valid`) + `json_extract` |
 | 10 | Time-series range queries | B-tree + BRIN | B-tree only |
