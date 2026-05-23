@@ -1541,9 +1541,12 @@ async fn clock_resync_post_restore(
     let url_for_blocking = url.clone();
     // R7-S1: bind the sandbox UUID into the signed body so the agent's
     // handler can assert it matches its own boot-time-known id. We
-    // capture by value (`to_string`) because spawn_blocking takes
-    // `'static` closures.
-    let sandbox_id_str = sandbox_id.to_string();
+    // capture by value because spawn_blocking takes `'static` closures.
+    // B24-FOLLOWUP: use .simple() (32-char hex, no hyphens) to match
+    // the canonical form the wrapper validator accepts and that the
+    // agent reads from SANDBOX_AGENT_SANDBOX_ID. Hyphenated form would
+    // 401 every clock_resync on the restore path.
+    let sandbox_id_str = sandbox_id.simple().to_string();
     compio::runtime::spawn_blocking(move || {
         // Use std::time directly here (mirror of `unix_now` in
         // nomad_ch.rs) — clock_resync targets `CLOCK_REALTIME` so
