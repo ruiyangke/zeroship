@@ -706,6 +706,15 @@ impl NomadCHBackend {
         //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
 
         // 5. Build + submit the Nomad job spec.
+        //
+        // B24 / R8-DEPLOY1: the sandbox_id flows into
+        // `ZSBX_SANDBOX_ID`, which the wrapper embeds VERBATIM in
+        // the guest's kernel cmdline. The wrapper's validator
+        // (nomad-vm-wrapper.sh:222) rejects any character outside
+        // `[0-9a-zA-Z_]` — that's hyphens too. Uuid's hyphenated
+        // form (`to_string()`) would fail it; `.simple()` (32-hex,
+        // no hyphens) passes and matches the format the rest of
+        // this file already uses for `job_id` and `host_dir`.
         let job_json = build_nomad_job_json(
             job_id,
             &self.cfg,
@@ -715,7 +724,7 @@ impl NomadCHBackend {
             &pubkey_hex,
             user_id,
             project_id,
-            &sandbox_id.to_string(),
+            &sandbox_id.simple().to_string(),
         );
         submit_nomad_job(&self.cfg.nomad_ch.nomad_addr, &job_json)
             .await
@@ -2261,6 +2270,22 @@ pub(crate) fn build_nomad_job_json(
                         // the controller dials.
                         "ZSBX_SUBNET_BASE_OCTET":
                             cfg.nomad_ch.subnet_second_octet.to_string(),
+                        // B24 / R8-DEPLOY1: the wrapper's cold-boot
+                        // env validator (nomad-vm-wrapper.sh:153)
+                        // hard-errors when ZSBX_SANDBOX_ID is unset;
+                        // missing it terminated cluster-smoke allocs
+                        // ~50ms into spawn (0/16 CREATE at HEAD
+                        // cf702457). The value is embedded VERBATIM
+                        // in the guest's kernel cmdline as
+                        // `SANDBOX_AGENT_SANDBOX_ID=<value>` (wrapper
+                        // line 641) and feeds the in-VM agent's
+                        // `init_sandbox_id_from_env` (R7-S1). The
+                        // wrapper's `[!0-9a-zA-Z_]` validator at
+                        // line 222 rejects hyphens, so the caller
+                        // passes Uuid::simple() (32-hex, no hyphens)
+                        // — matching the format used by job_id and
+                        // host_dir derivation elsewhere in this file.
+                        "ZSBX_SANDBOX_ID": sandbox_id,
                     },
                     "Resources": {
                         // CPU MHz is advisory under raw_exec + CH —
@@ -3735,6 +3760,73 @@ mod tests {
         assert_eq!(
             v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"]["ZSBX_SUBNET_BASE_OCTET"],
             "50"
+        );
+    }
+
+    /// B24 / R8-DEPLOY1 regression pin: the wrapper's cold-boot
+    /// env-validator (nomad-vm-wrapper.sh:153) hard-errors when
+    /// `ZSBX_SANDBOX_ID` is unset — cluster smoke at cf702457
+    /// failed 0/16 CREATE because the controller's Nomad task
+    /// template never set it. This test fails if the env entry is
+    /// ever removed, AND asserts the value passes the wrapper's
+    /// `[0-9a-zA-Z_]+` character-set validator (line 222) by
+    /// rejecting hyphens. The hyphenated Uuid form would corrupt
+    /// the kernel cmdline that embeds the value verbatim as
+    /// `SANDBOX_AGENT_SANDBOX_ID=<value>`.
+    #[test]
+    fn nomad_job_spec_includes_sandbox_id_env() {
+        let cfg = make_cfg();
+        // Use the same encoding the production caller uses
+        // (`sandbox_id.simple().to_string()`) so the test pins
+        // both that the entry exists AND that we pass it in the
+        // wrapper-validator-safe shape.
+        let sandbox_id = Uuid::now_v7();
+        let sandbox_id_simple = sandbox_id.simple().to_string();
+        let v = build_nomad_job_json(
+            "zsbx-r8",
+            &cfg,
+            3,
+            Path::new("/var/zeroship/ch/r8/workspace.img"),
+            Path::new("/var/zeroship/ch/users/alice/home.img"),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "alice",
+            "proj1",
+            &sandbox_id_simple,
+        );
+        let env = &v["Job"]["TaskGroups"][0]["Tasks"][0]["Env"];
+        // 1. The entry exists and equals the passed value.
+        assert_eq!(
+            env["ZSBX_SANDBOX_ID"],
+            sandbox_id_simple,
+            "ZSBX_SANDBOX_ID must be wired through verbatim — wrapper \
+             line 153 hard-errors otherwise (B24 / R8-DEPLOY1)"
+        );
+        // 2. The value passes the wrapper's character-set
+        //    validator at line 222 (`*[!0-9a-zA-Z_]*` rejects
+        //    anything outside that class). simple() produces 32
+        //    hex chars, no hyphens — should pass.
+        let val = env["ZSBX_SANDBOX_ID"].as_str().expect("string env value");
+        assert!(
+            val.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "ZSBX_SANDBOX_ID='{val}' contains chars outside [0-9a-zA-Z_] — \
+             would be rejected by nomad-vm-wrapper.sh:222 and corrupt the \
+             kernel cmdline"
+        );
+        // 3. Defense-in-depth: Uuid::simple() is exactly 32 hex chars.
+        //    If a future refactor swaps to hyphenated `to_string()`
+        //    (36 chars w/ 4 hyphens) this catches it.
+        assert_eq!(
+            val.len(),
+            32,
+            "ZSBX_SANDBOX_ID should be Uuid::simple() form (32 hex chars), \
+             got {} chars: '{val}'",
+            val.len(),
+        );
+        assert!(
+            !val.contains('-'),
+            "ZSBX_SANDBOX_ID must not contain hyphens — \
+             nomad-vm-wrapper.sh:222 would reject"
         );
     }
 
