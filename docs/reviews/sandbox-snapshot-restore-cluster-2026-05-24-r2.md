@@ -836,3 +836,165 @@ Deleted [.../regions/.../addresses/zsbx-diag-server-1-ip].
 - **Close B20** in deferred backlog. The cluster c=4 evidence is unambiguous (0/16 → 11/16; same shape as v14 c=4).
 - **Promote B19 to "PARTIALLY VERIFIED on cluster"** in deferred backlog. The plumbing reaches the wake path; the post-livez register call is gated on bug #21.
 - **Open bug #21** for the next cycle: add `SANDBOX_PERSIST_AUTH=1` + key material to the controller systemd Environment block in `gcp-worker-startup.sh`.
+
+# Appendix E — B21 fix + R5-S1 boot assertion + bug #22 (post-wake agent 401)
+
+**Branch HEAD pre-fix:** `1066a319`.
+**Controller binary:** `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v16` (rebuilt; v16 carries the boot-time fail-CLOSED assertion).
+**Worker startup script:** post-fix carries the `Environment=SANDBOX_PERSIST_AUTH=1` triplet + provisions a 32-byte 0o400 AEAD key file at `/etc/zeroship/sandbox-aead-key`.
+**Cluster shape:** 1 server + 1 worker (smoke scope per brief).
+**Wall time:** ~6 min (provision 2 min + c=4 smoke ~4 min + observation 30 s + teardown 30 s).
+
+## Fix shape
+
+### Script change — `crates/sandbox/scripts/gcp-worker-startup.sh`
+
+1. **AEAD key provisioning step** (section 5, before the systemd unit):
+   - Generates a 32-byte key at `$AEAD_KEY_PATH=/etc/zeroship/sandbox-aead-key` via `head -c 32 /dev/urandom`.
+   - `chmod 0400` to satisfy `AeadKey::from_path`'s mode check (round-6 H8 enforcement).
+   - Idempotent: a non-empty file is reused so reboots keep sealed records readable.
+   - `mkdir -p /var/lib/zeroship/sandbox/sealed-records` so the boot-time restore loop finds the dir on a fresh host.
+
+2. **Three new `Environment=` lines** in the controller systemd unit:
+   ```
+   Environment=SANDBOX_PERSIST_AUTH=1
+   Environment=SANDBOX_AEAD_KEY_PATH=/etc/zeroship/sandbox-aead-key
+   Environment=SANDBOX_PERSIST_DIR=/var/lib/zeroship/sandbox
+   ```
+
+### Lib change — `crates/sandbox/src/lib.rs`
+
+R5-S1 boot-time fail-CLOSED. Factored into a pure helper for testability:
+
+```rust
+pub(crate) fn assert_persist_required_when_snapshot_enabled(
+    snapshot_enabled: bool,
+    persist_present: bool,
+    test_override: bool,
+) -> Result<(), String> {
+    if snapshot_enabled && !persist_present && !test_override {
+        return Err("FATAL: SANDBOX_SNAPSHOT_ENABLED=true but persistence is disabled ...".to_string());
+    }
+    Ok(())
+}
+```
+
+`AppState::from_config` calls it immediately after `Persistence::from_env()?.map(Arc::new)`. The escape hatch `SANDBOX_PERSIST_NONE_OK=1` lets test/dev fixtures drive `StubRestoreBackend` without persistence.
+
+### Test coverage
+
+5 new unit tests pin every cell of the truth table (snap=off/on × persist=off/on × override=off/on). Total: **275 → 280 sandbox lib tests PASS** (`cargo test -p zeroship-sandbox --lib` → `280 passed; 0 failed; 1 ignored`).
+
+## Cluster validation — smoke c=4 cycles=4 (N=16)
+
+### Boot evidence
+
+Controller `active`, `/livez` = 200, env block confirmed:
+```
+=== controller env (from systemd) ===
+Environment=SANDBOX_PERSIST_AUTH=1
+Environment=SANDBOX_AEAD_KEY_PATH=/etc/zeroship/sandbox-aead-key
+Environment=SANDBOX_PERSIST_DIR=/var/lib/zeroship/sandbox
+
+=== persist log lines ===
+{"level":"INFO","message":"sandbox persist: pg + sealed restore starting",
+ "persist_dir":"/var/lib/zeroship/sandbox", ...}
+{"level":"INFO","message":"sandbox persist: restore done",
+ "seen":0, "restored":0, ...}
+{"level":"INFO","message":"snapshot wiring: shared NomadCHBackend handle for register_restored (B19)"}
+```
+
+R5-S1 assertion did not fire (snap on + persist on = legal). Had `SANDBOX_PERSIST_AUTH=1` not been set, the controller would have refused to boot — the new boot-time check is the operational safety net for this misconfig class.
+
+### Smoke c=4 outcome (N=16)
+
+```
+CREATE OK:    12/16
+SNAPSHOT OK:   9/12  (3 timeouts at 60s)
+WAKE OK:       9/9   (100%)
+POST-WAKE EXEC: 0/9  (every call: agent /exec status 401 unauthorized) ← NEW bug #22
+STOP OK:       9/16
+```
+
+Timing (ms):
+- create  p50=15400 p95=22488 p99=24997 max=24997
+- snapshot p50=50307 p95=58080 p99=58080 max=58080
+- wake     p50=9729  p95=13442 p99=13442 max=13442
+- stop     p50=19    p95=23    p99=23    max=23
+
+### B-SLO measurement
+
+- Wake p50 = 9729 ms. SLO target ≤ 1000 ms; **MISS by 8.7×**. (Most of the wake-time is `store.get` 1 GB SHA + AEAD decrypt — the deferred-A3 sync I/O issue. See deferred A3 / R5-P1 in progress.)
+- Snapshot p50 = 50.3 s. SLO target ≤ 2.0 s; **MISS by 25×**. (Bulk of the time is the GCS put — 1 GB at sustained ~20 MB/s tail latency. Same A3 root cause + sync on compio worker.)
+- Stop p50 = 19 ms. No SLO target documented; observed performance is healthy.
+- B-SLO measurements at c=20/3-worker scale not collected — bug #22 saturates the c=4 pool so a wider stress wouldn't generate meaningful additional signal until the agent-401 is fixed.
+
+### Verdict
+
+- **B21 → CLOSED.** Controller log no longer carries `register_restored skipped — persist=None` on any of the 9 wakes; the warn-skip branch is unreachable in this configuration. `do_restore_inner` step 7b's `unseal + register_restored` path is exercised end-to-end.
+- **R5-S1 → CLOSED.** Boot-time fail-CLOSED guard lands in `AppState::from_config`. The lib tests pin every cell of the truth table. The dangerous misconfig (`snap=on, persist=off`) now produces a hard boot failure with a remediation message rather than a silent fail-OPEN at wake-time.
+- **B19 → PARTIALLY VERIFIED still.** Wake delivers 200 and the post-livez register chain executes (no more "sandbox not found" 500s). But every post-wake agent `/exec` returns 401 — see bug #22 below. Full B19 cluster verdict (exec_post 200 + slot release after stop) is gated on #22.
+- **B-SLO → DEFERRED.** Wake p50 misses target by ~9×, snapshot p50 by ~25×. Both attributable to the open A3 sync-I/O issue. Re-measure once A3 lands (R5-P1 fixer's BufReader + spawn_blocking patch).
+
+## Bug #22 (NEW, post-wake agent 401) — agent rejects every post-wake `/exec`
+
+- **Source:** Appendix E cluster smoke 2026-05-23 r6 (B21 fixer cycle).
+- **Symptom:** every successful wake (9/9, 100%) is followed by an `/exec` that returns `agent /exec status 401: {"error":"unauthorized"}`. Controller log lines: `"sandbox/nomad-ch agent error","op":"exec","status":401`. The wake itself returns 200; `register_restored` clearly ran (otherwise the 500 would be `sandbox_not_found`, not a downstream agent 401).
+- **Hypothesis:**
+  1. (most likely) The signing key the controller hands to `register_restored` does NOT match what the restored agent in the VM holds. The CH `snapshot` captures guest memory at pause-time, including the agent's in-process verifying key. On wake, the controller installs the SAME sealed signing key into its state map — but the agent inside the resumed VM may have crashed / restarted / re-derived its keypair after wake-time. If the agent comes back with a fresh keypair, the controller's signed RPC won't validate.
+  2. (alternative) `register_restored` installs the right key but the per-sandbox `SandboxAuth::pubkey_fp` doesn't match the agent's runtime key. The agent's `/livez` check is unsigned and would happily 200; only `/exec` (signed) reveals the mismatch.
+  3. (alternative) The boot_id field on the sealed record doesn't survive restore and re-seal cycles correctly, causing the agent's pubkey-fp validation to drift.
+- **Cluster evidence:** every post-wake exec_post = 500/401 across all 9 wakes; identical error message; signature failure happens AT the agent (its 401, not the controller's auth). The 401 body is verbatim `{"error":"unauthorized"}` which matches `sandbox-agent`'s sig-verify reject path.
+- **Not investigated this cycle** per the brief's "If a NEW bug surfaces (#22+): capture verbatim, do NOT start fixing" rule.
+- **Recommended next cycle:**
+  - SSH into a worker, dump the agent's in-VM key (`/etc/zeroship-agent/...` or wherever the agent persists it) before and after a snapshot/wake cycle.
+  - Compare `SealedAuth::signing_key_bytes` to what the agent has.
+  - Inspect `crates/sandbox-agent/src/sig.rs` for any key-rotation-on-boot logic that would invalidate the snapshot's stored verifying key.
+  - Also revisit T5 (signed `/version` fingerprint check during wait_for_livez) — that test would have caught the mismatch DURING the wake path, surfacing as a wake-failure rather than a downstream exec-failure.
+
+## vm_index allocator behavior
+
+The 4 failed creates at idx=12..15 hit `vm-index allocator exhausted (floor=1, ceil=12)` because:
+1. Concurrency 4 + cycles 4 = 16 ops issued in parallel waves.
+2. First 12 creates land successfully (floor=1..ceil=12).
+3. Snapshots run; 3 hit 60-second snapshot timeout (leaving the live sandbox holding its slot).
+4. Wakes succeed but DON'T release the slot (the wake CONSUMES the snapshot slot).
+5. Stop releases the slot (verified — `vm_index released` log line on every stop).
+
+But the **stop happens AFTER the next-cycle create has already been attempted**, so the burst of 4 creates at idx=12..15 raced against the in-flight stops and lost. This is a concurrency burst issue, not a slot leak — controller log confirms every stop calls `vm_index released`. **NOT bug #22; this is the pre-existing cap=12 limit on a single-worker smoke.** Scale to 5 workers (the deferred B-SLO config) and a c=4 stress should fit comfortably.
+
+## Teardown
+
+```
+[teardown] project=suger-dev zone=asia-northeast3-a prefix=zsbx-smoke
+[teardown] deleting instances: zsbx-smoke-server-1 zsbx-smoke-worker-1
+Deleted [...zones/.../instances/zsbx-smoke-server-1].
+Deleted [...zones/.../instances/zsbx-smoke-worker-1].
+[teardown] releasing internal addresses: zsbx-smoke-server-1-ip
+Deleted [.../regions/.../addresses/zsbx-smoke-server-1-ip].
+[teardown] remaining instances matching ^zsbx-smoke-: 0
+[teardown] OK: cluster fully torn down
+```
+
+`gcloud compute instances list --filter='name~"^zsbx-"'` → empty.
+
+## Estimated cost
+
+- Cluster wall-time: ~6 min (provision 2 min + c=4 smoke 4 min + observation 30 s + teardown 30 s).
+- n2-standard-32 worker @ ~$1.55/hr × 6/60 = **$0.155**.
+- n2-standard-4 server @ ~$0.17/hr × 6/60 = **$0.017**.
+- **Total: ~$0.17**. Well under the $30 cap.
+
+## Files of interest (B21 + R5-S1)
+
+- `crates/sandbox/scripts/gcp-worker-startup.sh` — AEAD key gen block + 3 new `Environment=` lines + `mkdir -p /var/lib/zeroship/sandbox/sealed-records`.
+- `crates/sandbox/src/lib.rs` — new helper `assert_persist_required_when_snapshot_enabled` (~50 lines incl. docstring) + 5 unit tests pinning the truth table.
+- `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v16` — controller binary (rebuilt via Docker rust:slim-bookworm).
+- `/tmp/provision-b21.log` — provision transcript.
+- `/tmp/smoke-b21-c4.log` — c=4 smoke transcript (raw JSON included).
+
+## Lessons / scope
+
+- The fail-OPEN → fail-CLOSED conversion (R5-S1) is the right shape: the next time an operator misconfigures the env block, the controller refuses to boot with a clear remediation message instead of producing 9 wakes that silently break the state map.
+- B21's lesson: cluster script changes need feature-flag-aware gating. The script now provisions PERSIST_AUTH unconditionally on every worker, which is correct ONLY because snapshot is always enabled on Phase B prod hosts. If we later introduce a feature flag for snapshot, the script needs matching logic.
+- Bug #22 (agent 401 on post-wake exec) was masked by bug #21. Closing #21 surfaced it. This is the chain we expected — the cluster diagnostic loop is doing its job. Next cycle's focus should be agent-key persistence across CH snapshot/wake.
