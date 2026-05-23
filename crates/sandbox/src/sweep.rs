@@ -11,8 +11,9 @@
 //!    `db.idle_eligible_sandboxes` and drives each row through
 //!    `snapshot_handler::snapshot_sandbox`. Throttled to
 //!    `SANDBOX_SNAPSHOT_PER_WORKER_CONCURRENCY` (default 2)
-//!    concurrent snapshots per sweep iteration — v1 keeps it simple
-//!    by running serially in batches of N, no semaphore.
+//!    concurrent snapshots per chunk via `futures::future::join_all`
+//!    — chunks themselves run serially so peak parallel work stays
+//!    bounded at `N` regardless of batch size.
 //!
 //! 2. [`spawn_transient_state_takeover`] — every 30s reads
 //!    `db.transient_state_lease_expired_sandboxes` and CASes each
@@ -55,11 +56,14 @@ pub const DEFAULT_IDLE_SWEEP_SECS: u64 = 300;
 /// mode).
 pub const DEFAULT_IDLE_THRESHOLD_SECS: i64 = 1800;
 
-/// `SANDBOX_SNAPSHOT_PER_WORKER_CONCURRENCY`. Per-iteration cap on
-/// concurrent snapshot operations. v1 runs them in serial batches
-/// of this size — compio doesn't ship a `Semaphore` we need, and
-/// the actual snapshot wall (~2.1s + L2 upload) means batches of 2
-/// at 5-min cadence saturate the design budget without contention.
+/// `SANDBOX_SNAPSHOT_PER_WORKER_CONCURRENCY`. Per-chunk cap on
+/// concurrent snapshot operations. The sweep loop runs each chunk's
+/// rows through `futures::future::join_all` (single compio task, no
+/// spawn — `IdleSnapshotter::snapshot_one` futures are intentionally
+/// !Send under compio) and processes chunks back-to-back, so peak
+/// parallel snapshot work is bounded at this number. The actual
+/// snapshot wall (~2.1 s + L2 upload) means a default of 2 saturates
+/// the design budget without contention at the 5-min sweep cadence.
 pub const DEFAULT_PER_WORKER_CONCURRENCY: usize = 2;
 
 /// `SANDBOX_TRANSIENT_STATE_TIMEOUT_SECS`. § 6.1 default 120 s.
@@ -435,39 +439,71 @@ pub async fn run_idle_eviction_once(
     if rows.is_empty() {
         return Vec::new();
     }
-    // v1 throttling: snapshot at most `per_iteration_concurrency` at
-    // a time. Compio doesn't ship a Semaphore; we just chunk the
-    // rows and process each chunk sequentially. The wall-time
-    // estimate is ~2.1s/snapshot, so a chunk of 2 takes ~4 s; idle-
-    // sweep cadence is 5 min so this fits comfortably.
     let cap = per_iteration_concurrency.max(1);
     let attempted: Vec<SandboxRow> = rows.clone();
+    let shutdown_flag = || state.shutdown_requested();
+    snapshot_rows_chunked(&rows, snapshotter, cap, &shutdown_flag).await;
+    attempted
+}
+
+/// Snapshot a batch of rows in chunks of `cap`, running the
+/// per-row `snapshot_one` calls within each chunk concurrently and
+/// the chunks themselves serially. Concurrency is `futures::future::
+/// join_all` over a single compio task — no spawn, no Send bound on
+/// the per-row futures (T6 left them !Send because compio is
+/// single-threaded). The chunks-serial / within-chunk-concurrent
+/// shape caps peak parallel snapshot work to `cap` while letting an
+/// in-flight L2 upload overlap with another row's `snapshot_sandbox`
+/// CPU work — wall-time on a 100-row sweep drops from ~210 s
+/// (serial) to ~210/cap s.
+///
+/// Factored out of `run_idle_eviction_once` so the unit test can
+/// pin the actually-concurrent behaviour without needing a
+/// `Database` fixture.
+async fn snapshot_rows_chunked(
+    rows: &[SandboxRow],
+    snapshotter: &dyn IdleSnapshotter,
+    cap: usize,
+    shutdown: &dyn Fn() -> bool,
+) {
     for chunk in rows.chunks(cap) {
-        if state.shutdown_requested() {
+        if shutdown() {
             break;
         }
-        for r in chunk {
-            let sid = match parse_sbx_uuid(&r.sandbox_id) {
-                Ok(u) => u,
+        // Parse typed-ids first; log + drop any that fail. The
+        // surviving (row, uuid) pairs feed `join_all` so the actual
+        // snapshot work overlaps within the chunk.
+        let parsed: Vec<(&SandboxRow, Uuid)> = chunk
+            .iter()
+            .filter_map(|r| match parse_sbx_uuid(&r.sandbox_id) {
+                Ok(u) => Some((r, u)),
                 Err(e) => {
                     tracing::warn!(
                         sandbox_id = %r.sandbox_id,
                         error = %e,
                         "sandbox idle-eviction: bad typed-id"
                     );
-                    continue;
+                    None
                 }
-            };
-            if let Err(e) = snapshotter.snapshot_one(sid).await {
+            })
+            .collect();
+        if parsed.is_empty() {
+            continue;
+        }
+        let results = futures::future::join_all(
+            parsed.iter().map(|(_, uuid)| snapshotter.snapshot_one(*uuid)),
+        )
+        .await;
+        for ((row, _), result) in parsed.iter().zip(results) {
+            if let Err(e) = result {
                 tracing::warn!(
-                    sandbox_id = %r.sandbox_id,
+                    sandbox_id = %row.sandbox_id,
                     error = %e,
                     "sandbox idle-eviction: snapshot_one failed (next tick retries)"
                 );
             }
         }
     }
-    attempted
 }
 
 /// Spawn the idle-eviction loop on the compio runtime. Disabled if
@@ -558,6 +594,110 @@ fn _db_anchor(_: &Database) {}
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    /// Recording snapshotter that sleeps a configurable duration
+    /// per call. Used to pin the wall-time of `snapshot_rows_chunked`
+    /// so a regression to serial execution shows up as a multiplied
+    /// wall-time.
+    struct SleepingSnapshotter {
+        per_row: Duration,
+        max_in_flight: AtomicUsize,
+        in_flight: AtomicUsize,
+    }
+    impl SleepingSnapshotter {
+        fn new(per_row: Duration) -> Self {
+            Self {
+                per_row,
+                max_in_flight: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl IdleSnapshotter for SleepingSnapshotter {
+        fn snapshot_one<'a>(
+            &'a self,
+            _sandbox_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>> {
+            Box::pin(async move {
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+                compio::time::sleep(self.per_row).await;
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    fn row_with_id(id: String) -> SandboxRow {
+        SandboxRow {
+            sandbox_id: id,
+            user_id: "usr_aaaaaaaaaaaaaaaaaaaa".into(),
+            project_id: "prj_bbbbbbbbbbbbbbbbbbbb".into(),
+            backend: "nomad-ch".into(),
+            vm_index: Some(7),
+            agent_url: None,
+            host_id: "hst_cccccccccccccccccccc".into(),
+            generation: 0,
+            status: SandboxStatus::Running,
+            key_fp: "0123456789abcdef0123456789abcdef".into(),
+            created_at_secs: 1_700_000_000,
+            started_at_secs: Some(1_700_000_001),
+            stopped_at_secs: None,
+            last_used_at_secs: 1_700_000_500,
+        }
+    }
+
+    /// T7 (code-quality-r2): the per-iteration concurrency knob must
+    /// actually overlap snapshot work within a chunk. Pre-T7 the
+    /// inner loop was sequential under `for r in chunk { .await }`,
+    /// so 8 rows × 100 ms slept ~800 ms regardless of cap. With
+    /// `futures::future::join_all` driving each chunk, cap=4 over
+    /// 8 rows should sleep ~200 ms (two chunks of four, ~100 ms each).
+    ///
+    /// Asserts:
+    ///   1. wall-time < 500 ms (well under the 800 ms serial floor),
+    ///   2. `max_in_flight >= cap` — proving the futures are
+    ///      actually polled concurrently, not just sequenced faster.
+    #[compio::test]
+    async fn sweep_concurrency_is_actually_concurrent() {
+        let per_row = Duration::from_millis(100);
+        let cap = 4usize;
+        let n_rows = 8usize;
+        let snapshotter = SleepingSnapshotter::new(per_row);
+        let rows: Vec<SandboxRow> = (0..n_rows)
+            .map(|_| row_with_id(zeroship_core::typed_id::generate("sbx")))
+            .collect();
+        let no_shutdown: &dyn Fn() -> bool = &|| false;
+
+        let start = Instant::now();
+        snapshot_rows_chunked(&rows, &snapshotter, cap, no_shutdown).await;
+        let elapsed = start.elapsed();
+
+        let max_concurrent = snapshotter.max_in_flight.load(Ordering::SeqCst);
+        eprintln!(
+            "sweep_concurrency_is_actually_concurrent: elapsed={elapsed:?} \
+             max_in_flight={max_concurrent} (cap={cap}, n_rows={n_rows}, \
+             per_row={per_row:?})"
+        );
+        assert!(
+            max_concurrent >= cap,
+            "futures::join_all must overlap within a chunk: \
+             max_in_flight={max_concurrent} < cap={cap} (regressed to serial?)"
+        );
+        // Serial would sleep n_rows * per_row = 800 ms. Concurrent at
+        // cap=4 sleeps (n_rows/cap) * per_row = 200 ms. The slack
+        // covers CI scheduling jitter without re-admitting the
+        // regression we're guarding against.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "chunked-concurrent sweep took {elapsed:?}; \
+             serial floor is {:?}, expected ~{:?}",
+            per_row * n_rows as u32,
+            per_row * (n_rows as u32 / cap as u32),
+        );
+    }
 
     #[test]
     fn recovery_target_pins_proposal_table() {
