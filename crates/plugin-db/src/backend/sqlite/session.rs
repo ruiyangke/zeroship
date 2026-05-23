@@ -62,6 +62,49 @@ use crate::error::DbError;
 #[allow(dead_code)]
 pub type Row = Vec<Option<String>>;
 
+/// A typed SQLite cell — preserves the underlying storage-class
+/// discriminator across the actor boundary instead of collapsing every
+/// value to `Option<String>`. **P4 PR 4** introduces this for the
+/// vector flat-scan path: `vector_search` needs the raw BLOB bytes for
+/// `bytemuck` decoding, and the surrounding non-vector columns benefit
+/// from typed (numeric / boolean) round-tripping so the `_distance`-
+/// annotated JSON rows the trait surface returns are reasonable
+/// `serde_json::Value`s (not "everything is a string").
+#[derive(Debug, Clone)]
+pub enum TypedCell {
+    /// SQLite `NULL`.
+    Null,
+    /// `INTEGER` storage class. `i64` covers the full 8-byte SQLite
+    /// integer range.
+    Integer(i64),
+    /// `REAL` storage class. SQLite reals are 8-byte IEEE-754.
+    Real(f64),
+    /// `TEXT` storage class. Decoded to UTF-8; non-UTF-8 TEXT surfaces
+    /// as a `DbError::Internal` at the worker (matches the existing
+    /// `run_query` behaviour at session.rs:516-522).
+    Text(String),
+    /// `BLOB` storage class. Owned bytes — copied out of the
+    /// rusqlite-managed buffer at decode time so the reply is `Send`.
+    Blob(Vec<u8>),
+}
+
+/// A typed row + column names, returned by the `QueryTyped` command
+/// variant the **P4 PR 4** vector path consumes.
+///
+/// Column names are carried alongside the cells so the
+/// `vector_search` caller can build a `serde_json::Value` row map
+/// without re-issuing a `PRAGMA table_info` round-trip. The names live
+/// once per result-set in `columns`, not per row — the worker copies
+/// from `stmt.column_names()` once before the row loop.
+#[derive(Debug, Clone)]
+pub struct TypedRows {
+    /// Column names in result-set order. Length matches every row's
+    /// cell count.
+    pub columns: Vec<String>,
+    /// One [`TypedCell`] per cell, row-major.
+    pub rows: Vec<Vec<TypedCell>>,
+}
+
 /// Commands queued onto the [`SqliteSession`] actor.
 ///
 /// Every variant carries a `flume::Sender<…>` reply head; the caller
@@ -86,6 +129,16 @@ pub(crate) enum Command {
         sql: String,
         params: Vec<String>,
         reply: flume::Sender<Result<Vec<Row>, DbError>>,
+    },
+    /// Run a row-returning statement; reply with typed rows + column
+    /// names. **P4 PR 4** consumer:
+    /// [`super::SqliteBackend::vector_search`] (the flat-scan path
+    /// needs the BLOB column's raw bytes for `bytemuck` decoding, and
+    /// the surrounding columns benefit from typed round-tripping).
+    QueryTyped {
+        sql: String,
+        params: Vec<String>,
+        reply: flume::Sender<Result<TypedRows, DbError>>,
     },
     /// `ATTACH DATABASE 'file:{db_path}' AS '<app_id>'`. Variant lands
     /// in PR 2 (so the enum shape is final) but the
@@ -269,6 +322,10 @@ impl SqliteSession {
                         let result = run_query(&conn, &sql, &params);
                         let _ = reply.send(result);
                     }
+                    Command::QueryTyped { sql, params, reply } => {
+                        let result = run_query_typed(&conn, &sql, &params);
+                        let _ = reply.send(result);
+                    }
                     Command::Attach { app_id, db_path, reply } => {
                         let result = run_attach(&conn, &app_id, &db_path);
                         let _ = reply.send(result);
@@ -332,6 +389,29 @@ impl SqliteSession {
     pub(crate) async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<Vec<Row>, DbError>>(1);
         let cmd = Command::Query {
+            sql: sql.to_string(),
+            params: params.iter().map(|s| s.to_string()).collect(),
+            reply: reply_tx,
+        };
+        self.send(cmd).await?;
+        recv_reply(reply_rx).await?
+    }
+
+    /// Send a `QueryTyped` command and await typed rows + column names.
+    ///
+    /// **P4 PR 4** consumer: [`super::SqliteBackend::vector_search`].
+    /// The flat-scan path needs the BLOB cell's raw bytes; we preserve
+    /// the SQLite storage-class discriminant through the
+    /// [`TypedCell`] enum so the downstream JSON encoder sees the
+    /// shape it expects (integers as numbers, blobs as bytes, etc.).
+    #[allow(dead_code)]
+    pub(crate) async fn query_typed(
+        &self,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<TypedRows, DbError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<TypedRows, DbError>>(1);
+        let cmd = Command::QueryTyped {
             sql: sql.to_string(),
             params: params.iter().map(|s| s.to_string()).collect(),
             reply: reply_tx,
@@ -526,6 +606,61 @@ fn run_query(
         out.push(cells);
     }
     Ok(out)
+}
+
+/// Typed row materialisation — the **P4 PR 4** vector path's
+/// row-decoder. Preserves SQLite's storage-class discriminator so the
+/// BLOB column reaches the caller as `Vec<u8>` (not the `<N bytes
+/// blob>` placeholder string `run_query` emits at session.rs:522).
+fn run_query_typed(
+    conn: &Connection,
+    sql: &str,
+    params: &[String],
+) -> Result<TypedRows, DbError> {
+    let mut stmt = conn.prepare(sql).map_err(from_sqlite)?;
+    let column_count = stmt.column_count();
+    // `column_names` borrows from the statement; copy to owned `String`
+    // BEFORE the row loop so the reply doesn't borrow from `stmt`.
+    let columns: Vec<String> = (0..column_count)
+        .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+        .collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let mut rows = stmt.query(refs.as_slice()).map_err(from_sqlite)?;
+    let mut out = Vec::<Vec<TypedCell>>::new();
+    while let Some(row) = rows.next().map_err(from_sqlite)? {
+        let mut cells = Vec::with_capacity(column_count);
+        for i in 0..column_count {
+            use rusqlite::types::ValueRef;
+            let value_ref = row.get_ref(i).map_err(from_sqlite)?;
+            let cell = match value_ref {
+                ValueRef::Null => TypedCell::Null,
+                ValueRef::Integer(n) => TypedCell::Integer(n),
+                ValueRef::Real(f) => TypedCell::Real(f),
+                ValueRef::Text(bytes) => TypedCell::Text(
+                    std::str::from_utf8(bytes)
+                        .map_err(|e| {
+                            DbError::internal(format!(
+                                "sqlite TEXT cell is not valid UTF-8: {e}"
+                            ))
+                        })?
+                        .to_string(),
+                ),
+                // Copy the BLOB bytes into an owned `Vec<u8>` so the
+                // reply crossing the actor boundary doesn't borrow from
+                // rusqlite's statement-owned buffer.
+                ValueRef::Blob(bytes) => TypedCell::Blob(bytes.to_vec()),
+            };
+            cells.push(cell);
+        }
+        out.push(cells);
+    }
+    Ok(TypedRows {
+        columns,
+        rows: out,
+    })
 }
 
 fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbError> {

@@ -91,6 +91,11 @@ thiserror = "2"
 
 # Utilities
 bytes = "1"
+# `bytemuck` powers the zero-copy `&[f32] ↔ &[u8]` round-trip the SQLite
+# pure-Rust vector path uses (`crates/plugin-db/src/backend/sqlite/vector.rs`).
+# Gated to `plugin-db`'s `sqlite` feature today — only one consumer in
+# the workspace until other compio/runtime paths grow a similar need.
+bytemuck = "1"
 hex = "0.4"
 lru = "0.12"
 memmap2 = "0.9"

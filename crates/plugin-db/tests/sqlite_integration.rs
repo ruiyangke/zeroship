@@ -2363,3 +2363,386 @@ fn session_canonical_payload_byte_pin() {
         assert_eq!(expected.len(), 32, "HMAC-SHA256 is always 32 bytes");
     });
 }
+
+// ---------------------------------------------------------------------------
+// P4 PR 4 — SQLite VectorIndex (pure-Rust flat scan) integration tests.
+//
+// Mirrors the PG arm's `vector_search_returns_k_nearest` /
+// `vector_dimension_mismatch_rejected_at_insert` /
+// `vector_search_respects_filter` structurally so a reviewer can
+// diff the two suites side-by-side as the SQLite arm grows.
+//
+// Storage: BLOB column packed as native little-endian `[f32]` via
+// `bytemuck::cast_slice`; dimension contract enforced by the
+// `CHECK(length("col") = 4 * dims)` constraint emitted by
+// `vector::sqlite_vector_column_ddl`.
+//
+// We construct CREATE TABLE inline (matching every other test in this
+// file — the orchestrator's column-DDL emitter is PG-flavoured today;
+// a follow-up PR teaches `register_model::apply` to dispatch by
+// dialect). INSERT writes the vector via SQLite's hex-blob literal
+// `x'<hex>'` so we avoid plumbing typed BLOB params through the
+// session actor's `&[String]` surface for these tests.
+// ---------------------------------------------------------------------------
+
+use zeroship_plugin_db::backend::VectorIndex;
+use zeroship_plugin_db::backend::VectorMetric;
+
+/// Encode a `Vec<f32>` as a SQLite `x'<hex>'` blob literal.
+///
+/// The bytes are native-endian per `bytemuck::cast_slice`; all
+/// platforms we target are LE, so this matches what
+/// `vector::blob_from_vec` would produce.
+fn vec_to_hex_lit(v: &[f32]) -> String {
+    let mut hex = String::with_capacity(v.len() * 8 + 4);
+    hex.push_str("x'");
+    for f in v {
+        for byte in f.to_le_bytes() {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+    }
+    hex.push('\'');
+    hex
+}
+
+/// Deterministic pseudo-random unit vector — same construction as the
+/// PG arm's `vector_search_returns_k_nearest` so the membership
+/// expectations match across backends (modulo FP non-determinism in
+/// low significand bits, which the test asserts as set membership
+/// rather than ordinal positions).
+fn mk_unit_vec(i: usize, dims: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; dims];
+    for (j, slot) in v.iter_mut().enumerate().take(dims) {
+        let x = (i.wrapping_mul(2_654_435_761)) ^ (j.wrapping_mul(40_503));
+        *slot = ((x & 0xffff) as f32 / 65_536.0) - 0.5;
+    }
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+    v
+}
+
+#[test]
+fn vector_search_returns_k_nearest_sqlite() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("vector_topk")
+            .await
+            .expect("ensure_app_schema");
+
+        // CREATE TABLE with the documented BLOB + CHECK shape.
+        let dims = 8usize;
+        backend
+            .pool_exec(
+                "CREATE TABLE \"vector_topk\".\"docs\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   embedding BLOB CHECK(length(embedding) = 32) NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE docs");
+
+        // ensure_vector_index is a no-op on SQLite (flat scan). Calling
+        // it pins the trait surface and ensures we don't accidentally
+        // panic in the impl.
+        backend
+            .ensure_vector_index("vector_topk", "docs", "embedding", 8, VectorMetric::Cosine)
+            .await
+            .expect("ensure_vector_index is a no-op");
+
+        // Insert 100 deterministic unit vectors. Hex-literal INSERT
+        // avoids needing typed BLOB params through the session actor's
+        // text-only surface.
+        for i in 0..100usize {
+            let v = mk_unit_vec(i, dims);
+            let hex = vec_to_hex_lit(&v);
+            let sql =
+                format!("INSERT INTO \"vector_topk\".\"docs\" (embedding) VALUES ({hex})");
+            backend.pool_exec(&sql, &[]).await.expect("INSERT");
+        }
+
+        // Query with row #0's exact vector — its own row must be in
+        // the top-10. Assert MEMBERSHIP (not strict order) to mirror
+        // the PG arm's relaxed expectation.
+        let query = mk_unit_vec(0, dims);
+        let rows = backend
+            .vector_search(
+                "vector_topk",
+                "docs",
+                "embedding",
+                &query,
+                10,
+                VectorMetric::Cosine,
+                &serde_json::Value::Null,
+            )
+            .await
+            .expect("vector_search");
+
+        assert_eq!(rows.len(), 10, "expected k=10 rows, got {}", rows.len());
+        let ids: Vec<i64> = rows
+            .iter()
+            .filter_map(|r| r.get("id").and_then(serde_json::Value::as_i64))
+            .collect();
+        // SQLite's INTEGER PRIMARY KEY AUTOINCREMENT starts at 1; row
+        // 1 is the i=0 insert, which has zero cosine distance to its
+        // own query vector.
+        assert!(
+            ids.contains(&1),
+            "exact-match row #1 must be in top-10, got ids={ids:?}"
+        );
+        for r in &rows {
+            let d = r
+                .get("_distance")
+                .and_then(serde_json::Value::as_f64)
+                .expect("row must carry _distance");
+            assert!(d.is_finite(), "_distance must be finite, got {d}");
+            assert!(d >= 0.0, "cosine distance is non-negative, got {d}");
+        }
+        // Row #1 should be the nearest (distance ~ 0).
+        let first_id = rows[0]
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .expect("first row id");
+        assert_eq!(
+            first_id, 1,
+            "exact-match query must place its own row first"
+        );
+        let first_d = rows[0]
+            .get("_distance")
+            .and_then(serde_json::Value::as_f64)
+            .expect("first row _distance");
+        assert!(
+            first_d.abs() < 1e-5,
+            "exact-match distance must be ~0, got {first_d}"
+        );
+    });
+}
+
+#[test]
+fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("vector_dim")
+            .await
+            .expect("ensure_app_schema");
+
+        // 128-d column = 512-byte CHECK.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"vector_dim\".\"docs\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   embedding BLOB CHECK(length(embedding) = 512) NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE docs");
+
+        // Insert a 256-d vector into a 128-d column. The CHECK
+        // constraint must reject — the SqlExecutor surface should
+        // surface a SchemaRefused {check_violation} typed error.
+        let oversized = mk_unit_vec(0, 256);
+        let hex = vec_to_hex_lit(&oversized);
+        let sql = format!("INSERT INTO \"vector_dim\".\"docs\" (embedding) VALUES ({hex})");
+        let err = backend
+            .pool_exec(&sql, &[])
+            .await
+            .expect_err("256-d into 128-d column must fail");
+        match err {
+            DbError::SchemaRefused { code, .. } => {
+                assert_eq!(
+                    code, "check_violation",
+                    "expected check_violation, got {code}"
+                );
+            }
+            other => panic!(
+                "expected SchemaRefused {{ check_violation }}, got {other:?}"
+            ),
+        }
+    });
+}
+
+#[test]
+fn vector_search_respects_filter_sqlite() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("vector_filter")
+            .await
+            .expect("ensure_app_schema");
+
+        // 4-d column = 16-byte CHECK.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"vector_filter\".\"docs\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   tenant TEXT NOT NULL, \
+                   embedding BLOB CHECK(length(embedding) = 16) NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE docs");
+
+        // Insert 10 rows in tenant "a" and 10 rows in tenant "b".
+        // The first row of each tenant uses an identical query
+        // vector so the filter discriminates BY tenant, not by
+        // proximity.
+        for i in 0..10usize {
+            let v = mk_unit_vec(i, 4);
+            let hex = vec_to_hex_lit(&v);
+            backend
+                .pool_exec(
+                    &format!(
+                        "INSERT INTO \"vector_filter\".\"docs\" \
+                           (tenant, embedding) VALUES ('a', {hex})"
+                    ),
+                    &[],
+                )
+                .await
+                .expect("INSERT a");
+            backend
+                .pool_exec(
+                    &format!(
+                        "INSERT INTO \"vector_filter\".\"docs\" \
+                           (tenant, embedding) VALUES ('b', {hex})"
+                    ),
+                    &[],
+                )
+                .await
+                .expect("INSERT b");
+        }
+
+        // Query with tenant='a' filter — every returned row must
+        // have tenant='a'. The filter uses the `$eq` operator the
+        // SDK already emits.
+        let query = mk_unit_vec(0, 4);
+        let filter = serde_json::json!({ "tenant": { "$eq": "a" } });
+        let rows = backend
+            .vector_search(
+                "vector_filter",
+                "docs",
+                "embedding",
+                &query,
+                10,
+                VectorMetric::Cosine,
+                &filter,
+            )
+            .await
+            .expect("vector_search with filter");
+
+        assert!(!rows.is_empty(), "filter must not exclude every row");
+        assert!(
+            rows.len() <= 10,
+            "k=10 with 10 candidate rows yields at most 10 results"
+        );
+        for r in &rows {
+            let tenant = r
+                .get("tenant")
+                .and_then(serde_json::Value::as_str)
+                .expect("row must carry tenant");
+            assert_eq!(
+                tenant, "a",
+                "vector_search with tenant=a filter returned tenant={tenant}: {r}"
+            );
+        }
+    });
+}
+
+#[test]
+fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
+    // Sanity check on the math: for unit vectors, ||a-b||² = 2 * (1 - cos θ)
+    // = 2 * cos_distance. This isn't a search test — it's a regression
+    // catch for a future refactor of the `distance` dispatcher.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("vector_math")
+            .await
+            .expect("ensure_app_schema");
+
+        backend
+            .pool_exec(
+                "CREATE TABLE \"vector_math\".\"docs\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   embedding BLOB CHECK(length(embedding) = 16) NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE docs");
+
+        let v1 = mk_unit_vec(0, 4);
+        let v2 = mk_unit_vec(1, 4);
+        backend
+            .pool_exec(
+                &format!(
+                    "INSERT INTO \"vector_math\".\"docs\" (embedding) VALUES ({})",
+                    vec_to_hex_lit(&v1)
+                ),
+                &[],
+            )
+            .await
+            .expect("INSERT v1");
+        backend
+            .pool_exec(
+                &format!(
+                    "INSERT INTO \"vector_math\".\"docs\" (embedding) VALUES ({})",
+                    vec_to_hex_lit(&v2)
+                ),
+                &[],
+            )
+            .await
+            .expect("INSERT v2");
+
+        // Query the cosine distance from row 1 (v1) to v2.
+        let cos_rows = backend
+            .vector_search(
+                "vector_math",
+                "docs",
+                "embedding",
+                &v1,
+                2,
+                VectorMetric::Cosine,
+                &serde_json::Value::Null,
+            )
+            .await
+            .expect("cosine search");
+        let l2_rows = backend
+            .vector_search(
+                "vector_math",
+                "docs",
+                "embedding",
+                &v1,
+                2,
+                VectorMetric::L2,
+                &serde_json::Value::Null,
+            )
+            .await
+            .expect("l2 search");
+
+        // The row with id=2 (the OTHER unit vector) must appear in
+        // both result sets; its cosine and L2 distances must satisfy
+        // L2² ≈ 2 * cos_distance.
+        let find = |rows: &[serde_json::Value], target_id: i64| -> f64 {
+            rows.iter()
+                .find(|r| r.get("id").and_then(serde_json::Value::as_i64) == Some(target_id))
+                .and_then(|r| r.get("_distance").and_then(serde_json::Value::as_f64))
+                .expect("row with target id must be present")
+        };
+        let cos_d = find(&cos_rows, 2);
+        let l2_d = find(&l2_rows, 2);
+        let lhs = l2_d * l2_d;
+        let rhs = 2.0 * cos_d;
+        assert!(
+            (lhs - rhs).abs() < 1e-3,
+            "||v1-v2||^2 = {lhs}, 2 * cos_d = {rhs}"
+        );
+    });
+}

@@ -33,6 +33,11 @@ sha2 = { workspace = true }
 #   queue — we just opt in optionally here.
 rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"], optional = true }
 flume = { workspace = true, optional = true }
+# **P4 PR 4** — SQLite pure-Rust vector path uses `bytemuck::cast_slice`
+# for the `&[f32] ↔ &[u8]` round-trip. Optional + gated under the
+# `sqlite` feature umbrella below — the PG arm round-trips pgvector
+# blobs as `BYTEA` through `compio-postgres` without a Rust-side cast.
+bytemuck = { workspace = true, optional = true }
 # **P3 PR 3** — SQLite SessionMinter uses HMAC-SHA256. `sha2` is
 # already an unconditional dep (used for the auto-generated index
 # name suffix). `hmac` is sqlite-only — the PG arm signs via
@@ -125,7 +130,7 @@ pg = []
 # `DbError::Internal { message: "P1 PR2+ stub" }` or `unimplemented!`);
 # real behaviour lands across PR 2-5 per
 # `docs/proposals/p1-sqlite-implementation-plan.md` §9.
-sqlite = ["dep:rusqlite", "dep:flume", "dep:hmac"]
+sqlite = ["dep:rusqlite", "dep:flume", "dep:hmac", "dep:bytemuck"]
 # `test-helpers` exposes the `*_for_tests` / `*_with_pool` symbols to
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via

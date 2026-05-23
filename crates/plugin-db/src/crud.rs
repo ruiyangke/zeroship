@@ -803,18 +803,19 @@ pub(crate) fn dispatch_search<'s>(
                     })
                 }
             };
-            // SQLite arm — surface a typed error until P4 PR 4 lands
-            // the pure-Rust flat-scan impl.
+            // **P4 PR 4** — SQLite arm routes through the pure-Rust
+            // flat-scan `VectorIndex` impl on `SqliteBackend`. We
+            // short-circuit BEFORE the PG path so a build with both
+            // arms compiled in (`--features "pg sqlite"` for tests)
+            // dispatches based on which arm the runtime is bound to,
+            // not on Cargo-feature ordering.
             #[cfg(feature = "sqlite")]
             {
-                if backend.as_sqlite().is_some() {
-                    return Err(DbError::Configuration {
-                        code: "vector_unsupported",
-                        message:
-                            "db: vector search is not implemented on the SQLite backend yet"
-                                .to_string(),
-                        hint: Some("SQLite vector lands in P4 PR 4".to_string()),
-                    });
+                if let Some(sq) = backend.as_sqlite() {
+                    use crate::backend::VectorIndex as _;
+                    return sq
+                        .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                        .await;
                 }
             }
             pg_path().await

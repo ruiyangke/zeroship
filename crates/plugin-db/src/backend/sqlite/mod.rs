@@ -50,6 +50,12 @@ pub(crate) mod dialect;
 pub(crate) mod error;
 pub(crate) mod lock;
 pub(crate) mod session;
+// **P4 PR 4** — pure-Rust vector primitives (`bytemuck` round-trip +
+// the three distance functions). The `impl VectorIndex for
+// SqliteBackend` block at the bottom of this file routes the
+// flat-scan path through this module; the SQL composition stays here
+// so the cryptography-of-math stays unit-testable in `vector.rs`.
+pub(crate) mod vector;
 // P3 PR 3: SQLite-side `SessionMinter` helpers — HMAC-SHA256 +
 // bounded LRU nonce cache. The `impl SessionMinter for
 // SqliteBackend` block lives at the bottom of THIS file (mirrors
@@ -1205,6 +1211,216 @@ impl crate::backend::SessionMinter for SqliteBackend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P4 PR 4 — `VectorIndex` impl (pure-Rust flat scan + bytemuck)
+// ---------------------------------------------------------------------------
+//
+// Pure-Rust over `sqlite-vec` per the riskiest-decision Q-P4-D (plan
+// §10). The flat scan is acceptable at dev scale (≤50k rows, ≤1024
+// dims, ≤100ms latency); production vector workloads use pgvector
+// on the PG arm. Storage layout: `BLOB` column packed as native
+// little-endian `[f32]` via `bytemuck::cast_slice`; CHECK constraint
+// at column-DDL time enforces `length("col") = 4 * <dims>` so the
+// engine rejects wrong-dim INSERTs before they reach Rust.
+//
+// Two methods:
+//   * `ensure_vector_index` — no-op. Flat scan needs no index
+//     structure; the CHECK constraint is emitted by
+//     [`crate::backend::sqlite::vector::sqlite_vector_column_ddl`] at
+//     column-DDL time instead.
+//   * `vector_search` — SELECT all rows matching `filter` via the
+//     session actor's typed `query_typed`, decode each row's BLOB
+//     column via `vector::vec_from_blob`, compute the requested
+//     distance against the query vector, sort ASC, take top-k, and
+//     re-emit the rows as `serde_json::Value` with an extra
+//     `_distance: f32` synthetic field.
+
+impl crate::backend::VectorIndex for SqliteBackend {
+    /// SQLite flat scan needs no index structure — returns `Ok(())`
+    /// immediately. The dimension contract is enforced at column-DDL
+    /// time via the CHECK constraint `length("col") = 4 * <dims>` (see
+    /// [`vector::sqlite_vector_column_ddl`]); the metric is consumed
+    /// only by `vector_search`, where the per-row distance function
+    /// dispatches on it directly.
+    ///
+    /// The arguments are intentionally accepted (vs. an underscored
+    /// signature) so the trait shape stays uniform across backends —
+    /// a future PR that introduces an actual index structure (e.g.
+    /// an HNSW persistence file in `db_dir`) repoints THIS method
+    /// without re-shaping callers.
+    async fn ensure_vector_index(
+        &self,
+        _app_id: &str,
+        _collection: &str,
+        _column: &str,
+        _dims: i32,
+        _metric: crate::backend::VectorMetric,
+    ) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    /// Flat-scan vector search. Reads every row matching `filter` via
+    /// the session actor's `query_typed`, decodes the BLOB column
+    /// into `Vec<f32>` via [`vector::vec_from_blob`], computes the
+    /// distance against `query` per `metric`, sorts ASC, and returns
+    /// the top-`k` rows as `serde_json::Value`s with a synthetic
+    /// `"_distance"` field appended.
+    ///
+    /// **Filter composition**: routes through
+    /// [`crate::query::build_find`] (the SQLite-on-PG-SQL path —
+    /// SQLite supports `$N` numeric-named bind parameters with
+    /// positional binding, see SQLite docs on parameters). The
+    /// builder doesn't know about the BLOB column at the SQL layer;
+    /// we read all matching rows and post-filter by distance in Rust
+    /// (acceptable at dev scale per plan §10).
+    ///
+    /// **Dimension enforcement**: every row's BLOB length is checked
+    /// against `query.len()` by `vec_from_blob`. A mismatch surfaces
+    /// as a typed `DbError::ValidationFailed { code:
+    /// "dimension_mismatch", ... }` — the same wire `.code` the SDK
+    /// already branches on for pgvector.
+    async fn vector_search(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        metric: crate::backend::VectorMetric,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        // Build the WHERE clause via the same machinery `dispatch_find`
+        // uses. The builder emits `$N` numeric-named placeholders —
+        // SQLite + rusqlite handle these via positional bind by index
+        // (each `$N` becomes named-param N; positional binding fills
+        // index 1..M from the params slice in order). No ORDER BY at
+        // the SQL layer — we sort in Rust by computed distance.
+        let bq = crate::query::build_find(
+            app_id,
+            collection,
+            filter,
+            /* limit  */ None,
+            /* offset */ None,
+            /* order_by */ None,
+            /* select   */ None,
+        )
+        .map_err(DbError::from)?;
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let typed = self.session.query_typed(&bq.sql, &param_refs).await?;
+
+        // Locate the BLOB column. Cache the index outside the row
+        // loop so we don't scan `columns` per row.
+        let col_idx = typed
+            .columns
+            .iter()
+            .position(|name| name == column)
+            .ok_or_else(|| {
+                DbError::validation(
+                    "invalid_vector_arg",
+                    format!(
+                        "db: vector column '{column}' not found in result row \
+                         (have: {:?})",
+                        typed.columns
+                    ),
+                )
+            })?;
+
+        let expected_dims: i32 = query
+            .len()
+            .try_into()
+            .map_err(|_| DbError::internal(
+                "vector_search: query vector dim exceeds i32 range",
+            ))?;
+
+        // Compute distances. `(f32, row_idx)` so we don't pay to
+        // re-serialise unselected rows; the top-k pick walks the
+        // distance array.
+        let mut scored: Vec<(f32, usize)> = Vec::with_capacity(typed.rows.len());
+        for (idx, row) in typed.rows.iter().enumerate() {
+            let cell = row.get(col_idx).ok_or_else(|| {
+                DbError::internal(
+                    "vector_search: typed row cell-count mismatch",
+                )
+            })?;
+            let blob_bytes: &[u8] = match cell {
+                session::TypedCell::Blob(b) => b.as_slice(),
+                session::TypedCell::Null => {
+                    // NULL vector — skip this row from the candidate
+                    // set. pgvector behaves the same (`<=>` returns
+                    // NULL for a NULL operand, and `ORDER BY` sorts
+                    // NULLs to the END by default — they never reach
+                    // top-k of a non-empty result).
+                    continue;
+                }
+                other => {
+                    return Err(DbError::validation(
+                        "invalid_vector_arg",
+                        format!(
+                            "db: vector column '{column}' is not a BLOB (saw {:?})",
+                            std::mem::discriminant(other)
+                        ),
+                    ));
+                }
+            };
+            let vec = vector::vec_from_blob(blob_bytes, expected_dims)?;
+            let d = vector::distance(metric, query, &vec);
+            scored.push((d, idx));
+        }
+        // Sort ASC by distance. `total_cmp` handles NaN deterministically
+        // (NaN sorts to the end), unlike `partial_cmp` which would
+        // require an `expect`.
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+        scored.truncate(k);
+
+        // Build the JSON rows. Each row carries every selected column
+        // PLUS a synthetic `_distance` field (per the `VectorIndex`
+        // trait doc-comment at backend/mod.rs:1129).
+        let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
+        for (d, idx) in scored {
+            let row = &typed.rows[idx];
+            let mut obj = serde_json::Map::with_capacity(typed.columns.len() + 1);
+            for (i, name) in typed.columns.iter().enumerate() {
+                let cell = &row[i];
+                let val = match cell {
+                    session::TypedCell::Null => serde_json::Value::Null,
+                    session::TypedCell::Integer(n) => {
+                        serde_json::Value::Number(serde_json::Number::from(*n))
+                    }
+                    session::TypedCell::Real(f) => serde_json::Number::from_f64(*f)
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                    session::TypedCell::Text(s) => serde_json::Value::String(s.clone()),
+                    session::TypedCell::Blob(b) => {
+                        // BLOB cells (vector and otherwise) surface as
+                        // an array of byte integers — the SDK only
+                        // needs the vector column for distance ranking,
+                        // and the BLOB-as-string surface (`format!(<N
+                        // bytes blob>)`) the untyped path uses would
+                        // be unhelpful here. Future PRs may switch to
+                        // base64; today the SDK's `t.vector()` type
+                        // contract documents the vector column as
+                        // engine-internal at the row-out boundary.
+                        serde_json::Value::Array(
+                            b.iter()
+                                .map(|byte| {
+                                    serde_json::Value::Number(serde_json::Number::from(*byte))
+                                })
+                                .collect(),
+                        )
+                    }
+                };
+                obj.insert(name.clone(), val);
+            }
+            obj.insert(
+                "_distance".to_string(),
+                serde_json::Number::from_f64(f64::from(d))
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
+            );
+            out.push(serde_json::Value::Object(obj));
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Compile-time trait-shape assertions, mirroring the PR-0 set
@@ -1280,6 +1496,15 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
+    /// P4 PR 4: `VectorIndex` capability — pin the SQLite-arm impl
+    /// wire so the pure-Rust flat-scan path's trait composition
+    /// regresses at compile time if the impl block is detached or
+    /// the method shape drifts from the trait surface.
+    fn assert_sqlite_backend_impls_vector_index() {
+        fn assert_impl<T: crate::backend::VectorIndex>() {}
+        assert_impl::<SqliteBackend>();
+    }
+
     /// P2 PR 1: pin the SQLite-arm [`ChangeStream`] adapter
     /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
     /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
@@ -1320,6 +1545,7 @@ mod tests {
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
         let _ = assert_sqlite_backend_impls_audit_writer as fn();
         let _ = assert_sqlite_backend_impls_session_minter as fn();
+        let _ = assert_sqlite_backend_impls_vector_index as fn();
         let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();
