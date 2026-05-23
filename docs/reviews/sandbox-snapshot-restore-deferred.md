@@ -562,17 +562,9 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: wire is sanitized but journald log line embeds up to 256 chars of arbitrary agent-controlled response body. Information leak to a non-root reader of journald.
 - **Action**: truncate to 64 chars + force-ascii-printable in the log line.
 
-### [R10-C1] `teardown_restore` releases vm_index but does NOT remove the state-map entry (CRITICAL, concurrency-r10)
-- **Source**: 2026-05-25 concurrency-r10
-- **File**: `crates/sandbox/src/backend/nomad_ch.rs::teardown_restore` (locate via grep)
-- **Symptom**: after `register_restored` inserts into state map + `update_sandbox_status(Running)` returns CasLost (legitimate, e.g., parallel admin stop), `teardown_restore` rolls back vm_index but the state-map entry survives. Next create reuses the vm_index → second sandbox in state map at same slot; ghost's eventual stop_inner releases the live tenant's vm_index → three sandboxes can share one slot. Subsumed by R4-A2 RAII when that lands, but a 1-line state-map remove() in teardown_restore is the cheap interim.
-- **Action**: 1-line `state_map.remove(&sandbox_id)` in `teardown_restore` before the vm_index release. Add a regression test that asserts state-map empty after a teardown_restore call.
+### [R10-C1] (CLOSED at `be246395`) `teardown_restore` now removes the state-map entry before vm_index release via `NomadCHBackend::unregister_restored`; 4 regression tests pin the symmetric inverse (in-module unit + cross-module integration, plus early-rollback idempotency). Structural cure via R4-A2 LeasedVmSlot RAII remains follow-up.
 
-### [R10-C2] `teardown_restore` is a SYNC fn called from async `do_restore_inner` — blocks ntex worker up to 10s on ureq DELETE (CRITICAL, concurrency-r10)
-- **Source**: 2026-05-25 concurrency-r10
-- **File**: `crates/sandbox/src/restore_handler.rs:274` (call site) + `crates/sandbox/src/backend/nomad_ch.rs::teardown_restore` (callee is sync fn)
-- **Symptom**: R8-A3-5 wrapped submit/livez in spawn_blocking but missed the rollback path. teardown_restore is not even drop-cancellable (sync fn, not async). Under controller restart mid-rollback, the future drop doesn't reach the teardown.
-- **Action**: change `teardown_restore` to `async fn` + wrap the ureq DELETE in `compio::runtime::spawn_blocking`. Or call site wraps the sync fn in spawn_blocking (cleaner: keep callee sync, wrap at call site, matching R5-P1b pattern).
+### [R10-C2] (CLOSED at `be246395`) Rollback call at `restore_handler.rs:274` now wrapped in `compio::runtime::spawn_blocking` (option b2: call site wrap, keep callee sync — `RestoreBackend` trait stays sync so the in-crate `StubRestoreBackend` test scaffolding doesn't propagate `async fn`). Structural include_str! regression test pins the wrap shape. Sibling `snapshot_handler.rs:424 vm_ops.teardown_source` has the same sync-on-async shape, NOT fixed in this commit (separate scope).
 
 ### [R10-I1] Drop ordering on final CAS Err leaves state-map entry + (with R10-C1) ghost (IMPORTANT, concurrency-r10)
 - **Source**: 2026-05-25 concurrency-r10
