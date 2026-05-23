@@ -34,7 +34,7 @@ use std::rc::Rc;
 
 use compio_postgres::{Client, Pool};
 
-use crate::backend::{BackendHandle, PostgresBackend};
+use crate::backend::{BackendHandle, BrokerPauseGuard, PostgresBackend};
 use crate::broker::ChangeEvent;
 
 /// Lock state for the in-flight migration. The `client` is held in
@@ -60,6 +60,39 @@ pub(crate) struct MigrationLock {
     /// `exec_commit_batch` reads it without an extra round-trip.
     pub(crate) start_generation: i64,
     pub(crate) client: Option<Client>,
+    /// Backfill-window broker-pause guard (P2 tail — wires the
+    /// [`BrokerPauseGuard`] into the migration orchestrator per design
+    /// §16.7 / plan §7). Acquired by `exec_begin` immediately after
+    /// the advisory lock is parked into [`Self::client`]; released
+    /// when the slot itself drops (terminal `exec_commit_batch` or any
+    /// error rail that calls `clear_mig_lock`).
+    ///
+    /// **Lifecycle choice (option A)**: the guard's lifetime spans the
+    /// *whole* migration window — from `exec_begin` through the final
+    /// `exec_commit_batch{is_done=true}` (or a `clear_mig_lock` driven
+    /// error path). Backfill is the "design treats this as a known DDL
+    /// + bulk-write window" case; subscribers see exactly one `Resync`
+    /// when the guard drops (§16.7). Holding it across many V8-driven
+    /// `fetchBatch`/`commitBatch` calls is intentional: legitimate
+    /// user CRUD writes overlapping the migration would also have
+    /// their CDC events suppressed and folded into the single closing
+    /// `Resync`, which matches §16.7's "one resync ends the window"
+    /// contract.
+    ///
+    /// `Option<_>` to support `pause_broker_for_tests`-style fixtures
+    /// that synthesise a [`MigrationLock`] without going through
+    /// `exec_begin` (e.g. the warn-shape-pin unit tests in
+    /// [`context.rs`] below). Production `exec_begin` populates this
+    /// unconditionally.
+    //
+    // Compiler can't see the load-bearing `Drop` semantics — the field
+    // is "written but never read" from the type-checker's point of view,
+    // yet the Drop is the entire contract (unsuppress flag + emit
+    // Resync). The `#[allow]` here parallels the one previously on
+    // `BrokerPauseGuard` itself; removing it would trip
+    // `-D unused_fields` builds.
+    #[allow(dead_code)]
+    pub(crate) broker_pause: Option<BrokerPauseGuard>,
 }
 
 /// Per-isolate DB plug-in state. One instance per worker thread, held
@@ -832,6 +865,11 @@ mod tests {
             dry_run,
             start_generation: 7,
             client: None,
+            // Unit-test fixture skips the BrokerPauseGuard wire-up; the
+            // slot-state-machine assertions below don't depend on the
+            // guard's suppression behaviour. P2-tail orchestrator-side
+            // verification lives in the `sqlite_integration` test.
+            broker_pause: None,
         }
     }
 

@@ -934,7 +934,12 @@ pub trait ChangeStream: 'static {
 /// the call site — the pause/resume contract is the *duration* of the
 /// guard's binding, not its construction.
 #[must_use = "BrokerPauseGuard releases the pause on Drop — bind it to a name to keep the broker paused for the surrounding scope"]
-#[allow(dead_code)] // No orchestrator-side caller yet — wired by `migrations.run` + `register_model` Pass 1 in a follow-up.
+// P2 tail — wired by `migrations::exec_begin` (option A lifecycle:
+// guard parked in the `MigrationLock` slot for the whole migration
+// window; released by `clear_mig_lock` on terminal `exec_commit_batch`
+// or any error rail). `register_model` Pass 1 is the remaining follow-up
+// caller — when that lands the construction site list will gain a
+// second member but the `pub(crate)` constructor stays internal.
 pub struct BrokerPauseGuard {
     app_id: String,
 }

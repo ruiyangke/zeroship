@@ -18,9 +18,12 @@
 
 use std::path::PathBuf;
 
+use std::rc::Rc;
+
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
-    IndexBuilder, LockManager, LockScope, NamespaceManager, SchemaIntrospect, SqlExecutor,
+    BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope, NamespaceManager,
+    SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
 use zeroship_plugin_db::error::DbError;
@@ -1759,6 +1762,149 @@ fn schema_pending_decoder_drops_then_resyncs() {
         assert_eq!(
             pre_disengage_changes, 0,
             "no pre-disengage Change events must reach the subscriber; got {pre_disengage_changes}"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// P2 tail — orchestrator-driven BrokerPauseGuard fence.
+//
+// `backfill_run_pauses_broker_and_emits_one_resync` (above) exercises the
+// guard via `SqliteBackend::pause_broker_for_tests` — the test-helper
+// `pub(crate)` shortcut. This second fence exercises the SAME guard
+// behaviour but through `BackendHandle::as_change_stream_sqlite()
+// .pause_broker(app_id)` — the API the migration orchestrator
+// (`crate::migrations::exec_begin` / `exec_commit_batch`, P2 tail
+// wire-up) calls into. A regression that detaches the orchestrator-side
+// `ChangeStream::pause_broker` trait method from the underlying
+// `BrokerPauseGuard` construction (e.g. someone "optimises" the trait
+// to return a no-op guard while leaving the test helper intact) would
+// pass the existing fence but fail here.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
+    // Plan §7 + §9 — backfill pause rail driven through the orchestrator's
+    // ChangeStream trait surface:
+    //
+    // 1. ensure_app_schema + CREATE TABLE.
+    // 2. Wrap the backend in a `BackendHandle::Sqlite(Rc<...>)` — the
+    //    same enum shape the per-isolate context owns. Subscribe BEFORE
+    //    the pause window so `resume_app_with_resync` sees the
+    //    subscription on guard drop.
+    // 3. Acquire `BrokerPauseGuard` via
+    //    `BackendHandle::as_change_stream_sqlite()
+    //    .pause_broker(app_id)` — the canonical path
+    //    `migrations::exec_begin` reaches the guard through (P2 tail).
+    // 4. INSERT 100 rows. The preupdate hook still fires + buffers,
+    //    the commit_hook ships packets, BUT the publisher's per-event
+    //    `is_app_suppressed` check drops each one.
+    // 5. Drop the guard. `unsuppress_app` clears the flag +
+    //    `resume_app_with_resync` pushes ONE `Resync` per active
+    //    subscription.
+    // 6. Drain the subscriber → exactly ONE `Resync`, ZERO `Change`.
+    //
+    // The orchestrator wire-up (`migrations::exec_begin`) is PG-only
+    // because `exec_begin` takes a `compio_postgres::Client` directly;
+    // we cannot drive the full migration loop against SQLite without
+    // re-platforming the orchestrator. What we CAN — and must — pin
+    // here is that the same `ChangeStream::pause_broker` API the
+    // orchestrator depends on still routes through the
+    // `wal_consumer::suppress_app` + `broker::resume_app_with_resync`
+    // primitives this rail's contract is built on.
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("app_orch")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_orch\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        // Move the backend into the `BackendHandle::Sqlite` arm — the
+        // shape the per-isolate context's `ctx.backend()` accessor
+        // returns. `as_change_stream_sqlite()` then yields the
+        // `SqliteChangeStream` adapter whose `pause_broker(app_id)`
+        // mints the same `BrokerPauseGuard` `exec_begin` will mint at
+        // PG-side once the SQLite-flavoured orchestrator lands.
+        let handle = BackendHandle::Sqlite(Rc::new(backend));
+
+        let sub = subscribe_local("app_orch", "items");
+
+        // Engage backfill pause through the trait-method API. The
+        // adapter holds an Rc-clone of the backend so subsequent
+        // `pool_exec` calls below route through the same dispatcher.
+        let cs = handle
+            .as_change_stream_sqlite()
+            .expect("BackendHandle::Sqlite must expose ChangeStream");
+        let guard = cs.pause_broker("app_orch");
+
+        // Pull a Rc-clone of the inner backend so we can issue the
+        // 100 INSERTs against it. (The `BackendHandle::Sqlite` arm owns
+        // the master Rc; `as_sqlite()` returns a borrow.)
+        let backend_ref = handle
+            .as_sqlite()
+            .expect("BackendHandle::Sqlite::as_sqlite");
+
+        // INSERT 100 rows under the suppression window. The orchestrator-
+        // owned guard's contract: the publisher drops every packet for
+        // `app_orch` until the guard's Drop runs.
+        for i in 0..100 {
+            let sql = format!(
+                "INSERT INTO \"app_orch\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
+            );
+            backend_ref
+                .pool_exec(&sql, &[])
+                .await
+                .expect("INSERT under orchestrator-driven backfill pause");
+        }
+
+        // Give the publisher time to drain the 100 dropped packets
+        // BEFORE the guard drops — same determinism rationale as the
+        // sibling fence above (the suppression flag is per-packet, so
+        // dropping the guard before the publisher finishes draining
+        // would still drop every in-flight packet, but the `Resync` we
+        // assert on must arrive AFTER the last dropped packet for
+        // `len == 1` to hold).
+        drain_publisher_long().await;
+
+        // Drop the guard — calls `unsuppress_app` + emits one Resync
+        // onto every active subscription on `app_orch`. This is the
+        // orchestrator-shaped lifecycle: `exec_commit_batch{is_done=true}`
+        // → `clear_mig_lock()` → `MigrationLock::drop` → `broker_pause`
+        // field drops → `BrokerPauseGuard::drop`.
+        drop(guard);
+
+        let msgs = drain(&sub);
+
+        assert_eq!(
+            msgs.len(),
+            1,
+            "expected exactly one Resync after orchestrator-driven pause + drop; \
+             got {} messages: {msgs:?}",
+            msgs.len()
+        );
+        assert!(
+            matches!(msgs[0], SubscriptionMessage::Resync),
+            "the single message must be Resync; got {:?}",
+            msgs[0]
+        );
+        let change_count = msgs
+            .iter()
+            .filter(|m| matches!(m, SubscriptionMessage::Change(_)))
+            .count();
+        assert_eq!(
+            change_count, 0,
+            "no Change events must reach the subscriber during an \
+             orchestrator-driven backfill window; got {change_count}"
         );
     });
 }

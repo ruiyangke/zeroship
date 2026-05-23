@@ -50,7 +50,8 @@ use zeroship_runtime::state::OpError;
 
 use crate::audit::TerminalStatus;
 use crate::backend::{
-    LockManager, LockScope, NamespaceManager, OwnedLockGuard, PgSqlExecutor, SqlExecutor,
+    BrokerPauseGuard, LockManager, LockScope, NamespaceManager, OwnedLockGuard, PgSqlExecutor,
+    SqlExecutor,
 };
 use crate::context::MigrationLock;
 use crate::query::{quote_ident, validate_collection};
@@ -403,6 +404,38 @@ where
     // by `into_held`'s `released = true` flip — no warn fires on the
     // happy path.
     let client = guard.into_held();
+
+    // P2 tail — engage the backfill broker-pause for the window.
+    //
+    // Lifecycle (option A — plan §7 + design §16.7): the
+    // [`BrokerPauseGuard`] is constructed AFTER the advisory lock is
+    // owned + the audit row is in `running` state, so that any error
+    // path that prevented us reaching this line did NOT silence
+    // legitimate CDC events. The guard is parked in the same
+    // [`MigrationLock`] slot as the dedicated PG client; its lifetime
+    // is the *whole* migration window. Drop is driven by
+    // `clear_mig_lock` — fired by the terminal happy path in
+    // `exec_commit_batch{is_done=true}`, by every error rail that
+    // clears the slot, and by `release_active_lock` on worker
+    // shutdown. On Drop the guard calls
+    // [`crate::wal_consumer::unsuppress_app`] + emits one `Resync`
+    // per active subscription via
+    // [`crate::broker::Broker::resume_app_with_resync`].
+    //
+    // Why this constructor (not `BackendHandle::as_change_stream_pg()`):
+    // `migrations.rs` is generic over the carved capability bounds
+    // (`PgSqlExecutor` + `LockManager` + `NamespaceManager`) — none of
+    // those expose [`crate::backend::ChangeStream`]. Reaching the
+    // guard via the trait method would require adding `ChangeStream`
+    // to the generic bound for a single call site that only needs the
+    // engine-agnostic flag toggle (the guard's body is identical
+    // across backends — `wal_consumer::suppress_app(app_id)` is
+    // engine-agnostic; the SQLite publisher and the PG `emit_local`
+    // both honour the same thread-local flag set). Direct
+    // `pub(crate)` construction matches the SQLite test helper
+    // (`pause_broker_for_tests`).
+    let broker_pause = BrokerPauseGuard::new(app_id.to_string());
+
     crate::context::with_mut(|c| {
         let _previous = c.set_mig_lock(MigrationLock {
             name: name.to_string(),
@@ -411,6 +444,7 @@ where
             dry_run,
             start_generation,
             client: Some(client),
+            broker_pause: Some(broker_pause),
         });
         debug_assert!(
             _previous.is_none(),
