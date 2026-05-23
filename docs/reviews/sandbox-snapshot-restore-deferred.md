@@ -401,12 +401,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: `/_clock_resync` is authenticated by same per-sandbox signing key as other RPCs (in-VM forgery impossible) AND the skew-bypass verifier runs nonce LRU + signature gates. BUT: canonical body has no sandbox_id and no per-restore controller challenge. The nonce LRU is the only replay defense, and because resync arrives POST-restore, no resync nonce is ever in any snapshot's LRU. A network-adjacent attacker who captured a cycle-N resync can race the controller's cycle-N+1 POST to set CLOCK_REALTIME to stale T_old → sustained 401 DoS on all strict-skew RPCs.
 - **Action**: bind `sandbox_id` + a per-restore controller-issued challenge into the canonical body. Verifier checks the challenge matches the controller's pre-shared nonce for this restore.
 
-### [R7-S2] `derive_agent_url` trait default returns `http://127.0.0.1:0` silently (CRITICAL, security-r7 + api-surface-r7)
+### [R7-S2] (CLOSED at `f572a135`) `derive_agent_url` default removed — required trait method now compile-time-enforced
 - **File**: `crates/sandbox/src/restore_handler.rs:182-184`
 - **Symptom**: B22 added a trait method `derive_agent_url` with a Default impl that returns `http://127.0.0.1:0`. A bogus URL that resolves but answers nothing — silent fail-OPEN.
 - **Action**: change default to `panic!` or `Err`. Either way the implementor MUST provide a real URL.
 
-### [R7-API1] `Verifier::verify_kind_skew_bypass` is `pub` on `pub mod sig` (CRITICAL, api-surface-r7)
+### [R7-API1] (CLOSED at `0a271d2f`) `Verifier::verify_kind_skew_bypass` pub→pub(crate); `verify_signed_skew_bypass` already module-private
 - **File**: `crates/sandbox-agent/src/sig.rs:356`
 - **Symptom**: B22's skew-bypass verifier is public on a public module. Same anti-pattern R4-S1/R5-API1/R5-API2 just closed at `93348b91`, but this regressed across the crate boundary in sandbox-agent. Docstring asserts "only /_clock_resync uses it" but type system doesn't enforce.
 - **Action**: `pub(crate)`-restrict on sandbox-agent crate. Verify zero out-of-crate callers first.
@@ -434,3 +434,44 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **File**: `crates/sandbox/src/snapshot_store_gcs.rs:832`
 - **Symptom**: 1GB GCS PUT runs on a regular compio task, parking a runtime worker. While next snapshot's `ch.snapshot` writes the same SSD, the L2 PUT competes for both compio worker + SSD bandwidth.
 - **Action**: change `spawn(...)` → `spawn_blocking(...)`. Frees the compio worker; SSD still contends, but compio scheduler can serve `/livez` etc.
+
+---
+
+## NEW r8 ROUND FINDINGS (added by pilot cycle 2026-05-24)
+
+### [R8-DEPLOY1] `nomad-vm-wrapper.sh` does NOT inject `SANDBOX_AGENT_SANDBOX_ID` — cluster wakes BROKEN until landed (CRITICAL, security-r8)
+- **Source**: 2026-05-24 security-r8
+- **Files**: `crates/sandbox-agent/src/main.rs:97-102` (binds requirement) vs `crates/sandbox/scripts/nomad-vm-wrapper.sh` (does not write env or `/run/keys/sandbox-id`)
+- **Symptom**: R7-S1 added a fail-closed assertion that the agent must learn its sandbox_id at boot, but the wrapper that spawns the VM doesn't pass it. Boot exits 1; every cluster wake breaks.
+- **Action**: in the wrapper restore + cold-boot branches, after the tap-up sequence, add `--env "SANDBOX_AGENT_SANDBOX_ID=$ZSBX_SANDBOX_ID"` to the CH `--cmdline` (or write to `/run/keys/sandbox-id` via cloud-init). Upload updated wrapper to GCS. Rebake rootfs v5. Rebuild controller v18.
+
+### [R8-A4] Sandbox-agent has ~34 wire-emission sites, ZERO A4-compliant (CRITICAL, api-surface-r8)
+- **Source**: 2026-05-24 api-surface-r8 (quantified)
+- **Files**: `crates/sandbox-agent/src/handlers.rs` (13× err, 11× unauthorized, 5× draining, 3× clock_resync from R7-S1), `crates/sandbox-agent/src/proxy.rs:98,115,194,201` (err + err_with_code, latter INVERTS A4 field order), `crates/sandbox-agent/src/main.rs:1×`
+- **Symptom**: A4 (§10.0 ErrorEnvelope) closed in sandbox crate at `2928d5ae` but never extended to sandbox-agent. All ~34 sites emit non-§10.0 shapes. R7-S1's `/_clock_resync` inherits the broken shape.
+- **Action**: extract `ErrorEnvelope` from `crates/sandbox/src/error_envelope.rs` into either `zeroship-core` (cross-crate) OR duplicate into `crates/sandbox-agent/src/error_envelope.rs`. Migrate all 34 sites. Add wire-shape tests (cap N per file).
+
+### [R8-API1] 3 new `pub` items in sandbox-agent from R7-S1 + B22 should be `pub(crate)` (IMPORTANT, api-surface-r8)
+- **Files**: `crates/sandbox-agent/src/handlers.rs:95` (`init_sandbox_id_from_env` — needed by `main.rs`, can stay pub if there's a reason, otherwise pub(crate)); `crates/sandbox-agent/src/sig.rs:119` (`ResyncBody` — used only inside `handlers::clock_resync`, can be pub(crate)). (Note R7-API1 was closed at `0a271d2f` for `verify_kind_skew_bypass`.)
+- **Action**: mechanical pub→pub(crate). Same anti-pattern carve-out as R4-S1/R5-API*/R7-API1.
+
+### [R8-A3-5] A3 slice 5: spawn_blocking on submit_restore_job + wait_for_livez (CRITICAL, performance-r8)
+- **Source**: 2026-05-24 performance-r8
+- **File**: `crates/sandbox/src/restore_handler.rs:460-467` (callers) + `:1378,1411` (the std::thread::sleep parking sites)
+- **Symptom**: `submit_restore_job` + `wait_for_livez` are sync internally (`std::thread::sleep` parking ntex worker 5-8s/wake). Single largest remaining wake-path target.
+- **Action**: wrap both in `compio::runtime::spawn_blocking`. Requires `Arc<dyn RestoreBackend: Send + Sync>` (or method-to-free-fn flip). Pattern: `cdd2e677` (R5-P1b). Estimated wake p50 reduction: **9235ms → 2500-4000ms**.
+
+### [R8-T1] `ChRemoteClient` trait missing `: Send + Sync` bound (IMPORTANT, performance-r8 + concurrency-r8)
+- **File**: `crates/sandbox/src/snapshot_handler.rs:92-105`
+- **Symptom**: R7-P1's spawn_blocking correctness rests on incidental impl auto-derivation. A future `Rc<_>`-bearing impl would silently break the spawn_blocking call site without trait-level compile error.
+- **Action**: add `: Send + Sync` to the trait declaration. One-line change.
+
+### [R8-CONC1] R7-P1 widened C3 a 5th time (CRITICAL, concurrency-r8)
+- **File**: `crates/sandbox/src/snapshot_handler.rs:355-407`
+- **Symptom**: snapshot path now has 4 awaits; drop after `ch.snapshot` Ok but before `store.put` wedges a paused VM + staged 2 GB artifact + `Snapshotting` pg row permanently (C1 sweep is dead).
+- **Action**: subsumed by R4-A2's `LeasedVmSlot` RAII guard (4 cycles open). The structural fix would close both snapshot-path AND restore-path C3 widenings.
+
+### [R8-CONC2] R7-S1 `RESYNC_CHALLENGE_CAPACITY = 4` fragile against future retry-on-transient (MINOR, concurrency-r8)
+- **File**: `crates/sandbox-agent/src/handlers.rs:76`
+- **Symptom**: LRU=4 not exploitable today (controller mints one challenge per restore), but any future retry-on-transient that pushes 3+ resyncs in seconds could evict the legit challenge.
+- **Action**: bump to 16-32. One-line const. Doc the chosen capacity.
