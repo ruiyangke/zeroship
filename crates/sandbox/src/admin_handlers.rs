@@ -1271,8 +1271,8 @@ pub async fn snapshot_sandbox(
     let vm_ops = ResolvedSourceVmOps { handle };
     let outcome = snapshot_handler::snapshot_sandbox(
         db.as_ref(),
-        store.as_ref(),
-        ch.as_ref(),
+        std::sync::Arc::clone(store),
+        std::sync::Arc::clone(ch),
         &vm_ops,
         sandbox_id,
         stage_dir,

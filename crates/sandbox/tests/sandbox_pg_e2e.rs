@@ -2258,9 +2258,9 @@ async fn idle_eligible_sandboxes_respects_opt_in_and_threshold() {
 // ════════════════════════════════════════════════════════════════════
 
 use zeroship_sandbox::snapshot_handler::{
-    snapshot_sandbox, MockChRemoteClient, SnapshotHandlerError, StubSourceVmOps,
+    snapshot_sandbox, ChRemoteClient, MockChRemoteClient, SnapshotHandlerError, StubSourceVmOps,
 };
-use zeroship_sandbox::snapshot_store::LocalDiskSnapshotStore;
+use zeroship_sandbox::snapshot_store::{LocalDiskSnapshotStore, SnapshotStore};
 
 fn fresh_temp(suffix: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
@@ -2285,14 +2285,24 @@ async fn snapshot_handler_happy_path_records_artifact_and_tears_down_source() {
 
     let stage_dir = fresh_temp("stage");
     let store_root = fresh_temp("store");
-    let store = LocalDiskSnapshotStore::new(&store_root);
-    let ch = MockChRemoteClient::default();
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
     let api_sock = fresh_temp("api").join("ch.sock");
     let vm_ops = StubSourceVmOps::new(api_sock, 7);
 
-    let outcome = snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir.clone(), true)
-        .await
-        .expect("happy-path snapshot");
+    let outcome = snapshot_sandbox(
+        &db,
+        std::sync::Arc::clone(&store),
+        std::sync::Arc::clone(&ch),
+        &vm_ops,
+        sid,
+        stage_dir.clone(),
+        true,
+    )
+    .await
+    .expect("happy-path snapshot");
     assert_eq!(outcome.vm_index, 7);
     assert_eq!(outcome.metadata.ch_version, "v51.1");
 
@@ -2331,11 +2341,13 @@ async fn snapshot_handler_refuses_non_running_state() {
 
     let stage_dir = fresh_temp("stage2");
     let store_root = fresh_temp("store2");
-    let store = LocalDiskSnapshotStore::new(&store_root);
-    let ch = MockChRemoteClient::default();
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
     let vm_ops = StubSourceVmOps::new(fresh_temp("a").join("s"), 1);
 
-    let err = snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir, true)
+    let err = snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir, true)
         .await
         .expect_err("must refuse");
     assert!(
@@ -2358,12 +2370,17 @@ async fn snapshot_handler_rolls_back_on_ch_remote_failure() {
 
     let stage_dir = fresh_temp("stage3");
     let store_root = fresh_temp("store3");
-    let store = LocalDiskSnapshotStore::new(&store_root);
-    let mut ch = MockChRemoteClient::default();
-    ch.fail_snapshot = true; // pause succeeds, snapshot fails
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch_inner = {
+        let mut c = MockChRemoteClient::default();
+        c.fail_snapshot = true; // pause succeeds, snapshot fails
+        c
+    };
+    let ch: std::sync::Arc<dyn ChRemoteClient> = std::sync::Arc::new(ch_inner);
     let vm_ops = StubSourceVmOps::new(fresh_temp("b").join("s"), 1);
 
-    let err = snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir, true)
+    let err = snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir, true)
         .await
         .expect_err("must fail");
     assert!(
@@ -2408,12 +2425,14 @@ async fn snapshot_handler_returns_feature_disabled_when_flag_off() {
 
     let stage_dir = fresh_temp("stage4");
     let store_root = fresh_temp("store4");
-    let store = LocalDiskSnapshotStore::new(&store_root);
-    let ch = MockChRemoteClient::default();
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
     let vm_ops = StubSourceVmOps::new(fresh_temp("c").join("s"), 1);
 
     let err =
-        snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir, /* enabled = */ false)
+        snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir, /* enabled = */ false)
             .await
             .expect_err("must refuse with flag off");
     assert!(
@@ -2445,7 +2464,6 @@ async fn seed_snapshotted_row(
     info: &SandboxInfo,
     store_root: &std::path::Path,
 ) -> ([u8; 32], i16, i64) {
-    use zeroship_sandbox::snapshot_store::SnapshotStore;
     let store = LocalDiskSnapshotStore::new(store_root);
     let host_id = db.host_id();
     db.insert_sandbox(info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
@@ -2805,8 +2823,10 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
     // Phase 1: snapshot. Drives running → snapshotting → snapshotted.
     let stage_dir = fresh_temp("phaseb-stage");
     let store_root = fresh_temp("phaseb-store");
-    let store = LocalDiskSnapshotStore::new(&store_root);
-    let ch = MockChRemoteClient::default();
+    let store: std::sync::Arc<dyn SnapshotStore> =
+        std::sync::Arc::new(LocalDiskSnapshotStore::new(&store_root));
+    let ch: std::sync::Arc<dyn ChRemoteClient> =
+        std::sync::Arc::new(MockChRemoteClient::default());
     // Use a path under stage so the artifact can be restored: the
     // mock ch-remote writes the three artifact files inside the temp
     // dir, and `LocalDiskSnapshotStore::put` migrates them to the
@@ -2819,7 +2839,7 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
     // (the production wiring uses ResolvedSourceVmOps which we exercise
     // via the lookup_source_vm_ops unit test below).
     let snapshot_outcome =
-        snapshot_sandbox(&db, &store, &ch, &vm_ops, sid, stage_dir.clone(), true)
+        snapshot_sandbox(&db, store, ch, &vm_ops, sid, stage_dir.clone(), true)
             .await
             .expect("phase 1 snapshot");
     assert_eq!(snapshot_outcome.vm_index, 7);
@@ -2853,7 +2873,6 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
     )
     .unwrap();
     // Re-stamp pg with the new sha256 so restore's verify passes.
-    use zeroship_sandbox::snapshot_store::SnapshotStore;
     let store2 = LocalDiskSnapshotStore::new(&store_root);
     let resnap_stage = fresh_temp("phaseb-resnap");
     // Read all three files back from the canonical path and re-stage

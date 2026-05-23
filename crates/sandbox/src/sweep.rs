@@ -38,10 +38,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::db::{Database, SandboxRow, SandboxStatus};
-use crate::snapshot_handler::{
-    self, snap_stage_dir, ChRemoteClient, SnapshotHandlerError, SourceVmOps,
-};
-use crate::snapshot_store::SnapshotStore;
+use crate::snapshot_handler::{self, snap_stage_dir, SnapshotHandlerError, SourceVmOps};
 use crate::AppState;
 
 /// `SANDBOX_IDLE_SNAPSHOT_SWEEP_SECS`. How often the idle-eviction
@@ -339,8 +336,8 @@ impl IdleSnapshotter for ControllerIdleSnapshotter {
 
             let outcome = snapshot_handler::snapshot_sandbox(
                 db.as_ref(),
-                store.as_ref() as &dyn SnapshotStore,
-                ch.as_ref() as &dyn ChRemoteClient,
+                Arc::clone(store),
+                Arc::clone(ch),
                 &vm_ops,
                 sandbox_id,
                 stage_dir,

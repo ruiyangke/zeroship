@@ -219,8 +219,8 @@ pub const DEFAULT_BACKING_VERSIONS: &str =
 /// tests use a process-unique temp dir.
 pub async fn snapshot_sandbox(
     db: &Database,
-    store: &dyn SnapshotStore,
-    ch: &dyn ChRemoteClient,
+    store: Arc<dyn SnapshotStore>,
+    ch: Arc<dyn ChRemoteClient>,
     vm_ops: &dyn SourceVmOps,
     sandbox_id: Uuid,
     temp_dir: PathBuf,
@@ -273,8 +273,18 @@ pub async fn snapshot_sandbox(
     // 4–7. From here on use a closure so we can run rollback once
     //      on any error.
     let result =
-        do_snapshot_inner(db, store, ch, vm_ops, sandbox_id, &api_socket, vm_index, &temp_dir, g1)
-            .await;
+        do_snapshot_inner(
+            db,
+            Arc::clone(&store),
+            Arc::clone(&ch),
+            vm_ops,
+            sandbox_id,
+            &api_socket,
+            vm_index,
+            &temp_dir,
+            g1,
+        )
+        .await;
 
     match result {
         Ok((meta, g2)) => Ok(SnapshotOutcome {
@@ -316,8 +326,8 @@ pub async fn snapshot_sandbox(
 #[allow(clippy::too_many_arguments)]
 async fn do_snapshot_inner(
     db: &Database,
-    store: &dyn SnapshotStore,
-    ch: &dyn ChRemoteClient,
+    store: Arc<dyn SnapshotStore>,
+    ch: Arc<dyn ChRemoteClient>,
     vm_ops: &dyn SourceVmOps,
     sandbox_id: Uuid,
     api_socket: &Path,
@@ -326,25 +336,75 @@ async fn do_snapshot_inner(
     expected_generation: i64,
 ) -> Result<(SnapshotMetadata, i64), SnapshotHandlerError> {
     // 4. ch-remote pause + snapshot.
+    //
+    // R7-P1 (perf-r7): both calls are synchronous — `pause` is a fast
+    // HTTP-on-unix-socket round-trip but `snapshot` is the ~2 GB
+    // memory dump (~40–50 MB/s per SSD stream). Running them on the
+    // async caller pegged a ntex worker for the duration; at c=4 four
+    // sync dumps contended on the SSD and snapshot p50 was ~50 s.
+    // Hop through `compio::runtime::spawn_blocking` so the worker can
+    // serve other RPCs while the dump runs. Pattern mirrors
+    // `persist::Persistence::unseal` at
+    // `crates/sandbox/src/persist.rs:677-687` and the R5-P1b wrap on
+    // `store.get` (commit cdd2e677).
+    //
+    // SEQUENCING: `ch.pause` MUST complete before `ch.snapshot`
+    // otherwise CH may capture a mid-write state. We `.await` the
+    // pause future before submitting the snapshot future; the two
+    // spawn_blocking calls are strictly sequential, not concurrent.
     std::fs::create_dir_all(temp_dir).map_err(|e| {
         SnapshotHandlerError::Internal(format!(
             "create snap-stage dir {}: {e}",
             temp_dir.display()
         ))
     })?;
-    ch.pause(api_socket)
+    {
+        let ch_clone = Arc::clone(&ch);
+        let api_socket_owned = api_socket.to_path_buf();
+        compio::runtime::spawn_blocking(move || ch_clone.pause(&api_socket_owned))
+            .await
+            .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
+            .map_err(SnapshotHandlerError::ChRemote)?;
+    }
+    {
+        let ch_clone = Arc::clone(&ch);
+        let api_socket_owned = api_socket.to_path_buf();
+        let temp_dir_owned = temp_dir.to_path_buf();
+        compio::runtime::spawn_blocking(move || {
+            ch_clone.snapshot(&api_socket_owned, &temp_dir_owned)
+        })
+        .await
+        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))
         .map_err(SnapshotHandlerError::ChRemote)?;
-    ch.snapshot(api_socket, temp_dir)
-        .map_err(SnapshotHandlerError::ChRemote)?;
+    }
 
     // 5. Move into the snapshot store + compute SHA-256.
+    //
+    // R7-P1 (perf-r7): `SnapshotStore::put` reads the staged ~2 GB
+    // artifact, SHA-256s it, and (for AeadSnapshotStore) seals it.
+    // Per the trait doc at `snapshot_store.rs:99`, callers MUST hop
+    // through `spawn_blocking`. Same pattern as `store.get` on the
+    // restore path (R5-P1b, commit cdd2e677).
     let sandbox_id_typed = format!(
         "sbx_{}",
         zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
     );
-    let meta = store
-        .put(&sandbox_id_typed, temp_dir, ch.version())
-        .map_err(SnapshotHandlerError::Store)?;
+    let meta = {
+        let store_clone = Arc::clone(&store);
+        let sid_clone = sandbox_id_typed.clone();
+        let temp_dir_owned = temp_dir.to_path_buf();
+        let ch_version = ch.version().to_string();
+        compio::runtime::spawn_blocking(move || {
+            store_clone.put(&sid_clone, &temp_dir_owned, &ch_version)
+        })
+        .await
+        .unwrap_or_else(|p| {
+            Err(crate::snapshot_store::SnapshotError::Io(
+                std::io::Error::other(format!("spawn_blocking panic: {p:?}")),
+            ))
+        })
+        .map_err(SnapshotHandlerError::Store)?
+    };
 
     // 6. CAS to snapshotted + record metadata.
     let g2 = db
