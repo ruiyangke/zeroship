@@ -2394,12 +2394,26 @@ impl Database {
     /// excluded — that's a `running`-row invariant violation
     /// (caught by the application-level invariant tests, not this
     /// query) or an in-flight new transient that hasn't bumped yet.
+    ///
+    /// C1-FOLLOWUP (concurrency-r9): the sweep targets OTHER
+    /// controllers' wedges, not our own. A row whose `host_id =
+    /// self.host_id()` is either legitimately in flight (handler is
+    /// bumping `lessee_updated_at` every 10s and would not be stale)
+    /// or our own process is wedged — neither case is recoverable by
+    /// the recovery CAS, which transfers ownership to `self.host_id()`
+    /// and would be a no-op against a row already owned by us. Filter
+    /// at the query level so the sweep work in `crate::sweep` doesn't
+    /// even consider these rows.
     pub async fn transient_state_lease_expired_sandboxes(
         &self,
         threshold_secs: i64,
     ) -> Result<Vec<SandboxRow>> {
         let pool = self.open_pool().await?;
         let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let my_host_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
         // Uses partial index `sandboxes_status_lessee_idx` (0007).
         let rows = client
             .query(
@@ -2413,8 +2427,9 @@ impl Database {
                   WHERE status IN ('snapshotting','restoring','restoring_cold') \
                     AND lessee_updated_at IS NOT NULL \
                     AND lessee_updated_at < now() - make_interval(secs => $1::BIGINT) \
+                    AND host_id <> $2::TEXT \
                     AND deleted_at IS NULL",
-                &[&threshold_secs],
+                &[&threshold_secs, &my_host_typed],
             )
             .await
             .map_err(DatabaseError::Pg)?;
@@ -2442,6 +2457,153 @@ impl Database {
             });
         }
         Ok(out)
+    }
+
+    /// C1-FOLLOWUP (concurrency-r9): atomic recovery CAS for an
+    /// abandoned transient-state row owned by a DIFFERENT controller.
+    ///
+    /// `update_sandbox_status` fences on `host_id = self.host_id()`
+    /// per the D-14 ownership invariant, so it cannot be used to
+    /// recover a crashed peer's wedge: the CAS predicate would never
+    /// match the crashed controller's stored host_id. This function
+    /// inverts the fence — it CASes against the row's *observed*
+    /// `(host_id, generation)` (as returned by
+    /// `transient_state_lease_expired_sandboxes`), and on a hit
+    /// atomically:
+    ///
+    ///   - transfers ownership to `self.host_id()`
+    ///   - bumps generation
+    ///   - flips status to the recovery target (caller computes via
+    ///     `sweep::recovery_target`)
+    ///   - clears `lessee_updated_at` (target is non-transient per
+    ///     §9.2: `snapshotting_aborted`, `snapshotted`,
+    ///     `snapshotted_suspect`)
+    ///
+    /// Belt-and-suspenders predicate elements:
+    ///
+    ///   - `host_id = $expected` — the crashed controller's id, NOT
+    ///     ours. Defensive guard refuses self-host_id at the call site
+    ///     too (sweep query already filters self-owned rows out of
+    ///     the candidate set, so this branch is unreachable in
+    ///     production; the guard makes a future misuse loud).
+    ///   - `generation = $expected_generation` — D-14 CAS counter
+    ///     fence; rejects if a peer recovery already landed.
+    ///   - `lessee_updated_at < now() - threshold_secs` — ABA fence;
+    ///     rejects if the original controller (or a peer) bumped the
+    ///     lease between the sweep's SELECT and this UPDATE.
+    ///   - `status IN ('snapshotting','restoring','restoring_cold')`
+    ///     — rejects if the row already moved out of the transient
+    ///     band (terminal CAS won the race).
+    ///
+    /// Returns the post-update generation on success; `CasLost` if
+    /// the predicate misses; `NotFound` if the row was tombstoned.
+    pub async fn claim_orphan_transient_for_recovery(
+        &self,
+        sandbox_id: Uuid,
+        target_status: SandboxStatus,
+        expected_generation: i64,
+        expected_host_id: &str,
+        threshold_secs: i64,
+    ) -> Result<i64> {
+        // Defensive: callers must filter self-owned rows before
+        // reaching here (the sweep query does this at the §6.1
+        // selection stage). If a caller passes our own host_id we
+        // refuse — recovering self-owned wedges via the ownership-
+        // transfer path is a no-op semantically (host_id stays the
+        // same) and signals a logic bug in the caller.
+        let my_host_typed = format!(
+            "hst_{}",
+            zeroship_core::typed_id::uuid_to_base62(&self.config.host_id)
+        );
+        if expected_host_id == my_host_typed {
+            return Err(DatabaseError::Validation(format!(
+                "claim_orphan_transient_for_recovery refused: expected_host_id \
+                 == self.host_id() ({my_host_typed}); recovery scope is OTHER \
+                 controllers' wedges (C1-FOLLOWUP, §6.1)"
+            )));
+        }
+        // Validate the expected_host_id shape — we're going to bind
+        // it into the WHERE clause, so an obviously-malformed value
+        // should fail loud rather than silently miss the CAS.
+        let _ = zeroship_core::typed_id::parse_with_prefix(expected_host_id, "hst")
+            .map_err(|e| DatabaseError::Validation(e.to_string()))?;
+
+        let pool = self.open_pool().await?;
+        let client = pool.get().await.map_err(DatabaseError::Pg)?;
+        let sandbox_id_typed = format!(
+            "sbx_{}",
+            zeroship_core::typed_id::uuid_to_base62(&sandbox_id)
+        );
+        // The recovery target is always non-transient per §9.2:
+        // snapshotting → snapshotting_aborted
+        // restoring    → snapshotted
+        // restoring_cold → snapshotted_suspect
+        // Sanity check at the boundary so a future caller bug doesn't
+        // leave us with `lessee_updated_at IS NOT NULL` on a non-
+        // transient row (violates the partial-index invariant).
+        if target_status.is_transient_snapshot_state() {
+            return Err(DatabaseError::Validation(format!(
+                "claim_orphan_transient_for_recovery refused: target_status \
+                 {} is itself transient; recovery must land in a non-transient \
+                 state (C1-FOLLOWUP, §9.2)",
+                target_status.as_str()
+            )));
+        }
+        let opt = client
+            .query_opt(
+                "UPDATE sandbox.sandboxes \
+                    SET status = $1::TEXT, \
+                        host_id = $2::TEXT, \
+                        generation = generation + 1, \
+                        last_used_at = now(), \
+                        lessee_updated_at = NULL \
+                  WHERE sandbox_id = $3::TEXT \
+                    AND host_id = $4::TEXT \
+                    AND generation = $5::BIGINT \
+                    AND status IN ('snapshotting','restoring','restoring_cold') \
+                    AND lessee_updated_at IS NOT NULL \
+                    AND lessee_updated_at < now() - make_interval(secs => $6::BIGINT) \
+                    AND deleted_at IS NULL \
+                  RETURNING generation",
+                &[
+                    &target_status.as_str().to_string(),
+                    &my_host_typed,
+                    &sandbox_id_typed,
+                    &expected_host_id.to_string(),
+                    &expected_generation,
+                    &threshold_secs,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if let Some(row) = opt {
+            return Ok(row.get::<_, i64>(0));
+        }
+        // CAS missed. Distinguish CasLost (row exists but the
+        // predicate failed — peer recovered first, status drifted,
+        // original controller bumped lessee back to alive) from
+        // NotFound (row tombstoned).
+        let lookup = client
+            .query_opt(
+                "SELECT generation, host_id FROM sandbox.sandboxes \
+                  WHERE sandbox_id = $1::TEXT \
+                    AND deleted_at IS NULL",
+                &[&sandbox_id_typed],
+            )
+            .await
+            .map_err(DatabaseError::Pg)?;
+        if let Some(row) = lookup {
+            Err(DatabaseError::CasLost {
+                sandbox_id: sandbox_id_typed,
+                expected_generation,
+                observed_generation: row.get::<_, i64>(0),
+                current_host_id: row.try_get::<_, String>(1).ok(),
+            })
+        } else {
+            Err(DatabaseError::NotFound {
+                sandbox_id: sandbox_id_typed,
+            })
+        }
     }
 
     /// Idle-eviction sweep query (§ 7). Returns running, opt-in

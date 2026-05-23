@@ -164,8 +164,28 @@ pub async fn run_transient_takeover_once(
                 continue;
             }
         };
+        // C1-FOLLOWUP (concurrency-r9): the recovery CAS must fence
+        // on the CRASHED controller's `host_id` (the value the sweep
+        // query just observed), not on `self.host_id()`. Using
+        // `update_sandbox_status` here was a bug: that path fences
+        // `host_id = self.host_id()`, which by definition never
+        // matches a row owned by a different (crashed) controller,
+        // so §6.1 found candidates but never claimed any of them.
+        //
+        // `claim_orphan_transient_for_recovery` inverts the fence:
+        // CAS predicate = `(host_id = row.host_id, generation =
+        // row.generation, lessee_updated_at still stale)` and on
+        // success atomically transfers ownership to `self.host_id()`,
+        // bumps generation, flips status to the recovery target, and
+        // clears `lessee_updated_at`.
         match db
-            .update_sandbox_status(sandbox_uuid, target, row.generation, None)
+            .claim_orphan_transient_for_recovery(
+                sandbox_uuid,
+                target,
+                row.generation,
+                &row.host_id,
+                threshold_secs,
+            )
             .await
         {
             Ok(_) => {
@@ -174,6 +194,7 @@ pub async fn run_transient_takeover_once(
                     sandbox_id = %row.sandbox_id,
                     from = row.status.as_str(),
                     to = target.as_str(),
+                    crashed_host_id = %row.host_id,
                     "sandbox transient-takeover: recovered abandoned transient"
                 );
             }

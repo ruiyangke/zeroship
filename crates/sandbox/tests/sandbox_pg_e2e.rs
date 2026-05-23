@@ -2837,25 +2837,42 @@ fn build_sweep_state(
 }
 
 #[compio::test]
-#[ignore = "needs Postgres; PR 3g transient takeover sweep"]
+#[ignore = "needs Postgres; PR 3g + C1-FOLLOWUP — sweep recovers CRASHED peer's wedge"]
 async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
+    // C1-FOLLOWUP (concurrency-r9): the sweep targets OTHER
+    // controllers' wedges, not our own. Insert the row owned by an
+    // injected "peer" host (different host_id) so the sweep query
+    // surfaces it and the ownership-transferring recovery CAS lands.
+    // Pre-C1-FOLLOWUP this test inserted with `fresh_host(&db)` ==
+    // our own host_id, which the sweep query now (correctly)
+    // excludes from the candidate set.
     let db = migrated_db().await;
-    let host_id = fresh_host(&db);
+    let url = test_url();
+    let (peer_host_id, peer_host_typed) = inject_extra_host(&url, "peer-crashed").await;
     let (info, sid) = fresh_info("alice");
-    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+    // Row owned by the (about-to-crash) peer controller.
+    db.insert_sandbox(&info, peer_host_id, &"a".repeat(32), Some("http://x"), Some(7))
         .await
         .unwrap();
 
-    // Drive into snapshotting and stamp a stale lessee_updated_at by
-    // direct UPDATE (bypassing update_lessee which stamps now()).
+    // Drive into snapshotting under the PEER's identity by going
+    // through the CAS with `host_id = peer_host_id`. Our own
+    // `update_sandbox_status` fences on `self.host_id()` so we use
+    // the `_with_host` variant directly.
     let g1 = db
-        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .update_sandbox_status_with_host(
+            sid,
+            SandboxStatus::Snapshotting,
+            0,
+            peer_host_id,
+            None,
+        )
         .await
         .unwrap();
     let _ = g1;
     // Backdate `lessee_updated_at` 600 seconds — well past the 120s
-    // threshold the sweep uses by default.
-    let url = test_url();
+    // threshold the sweep uses by default. Simulates the peer's
+    // 10s `update_lessee` heartbeat stopping when the peer crashed.
     let app_dsn = role_dsn(&url, "sandbox_app");
     let mut cfg = PoolConfig::default();
     cfg.max_size = 2;
@@ -2873,13 +2890,31 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
     assert_eq!(n, 1);
 
     let state = build_sweep_state(db, /*snapshot_enabled=*/true);
-    let (seen, recovered) = run_transient_takeover_once(&state, 120).await;
-    assert!(seen >= 1, "sweep should have seen at least our stale row; seen={seen}");
-    assert!(recovered >= 1, "sweep should have recovered at least our row; recovered={recovered}");
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&state.database().unwrap().host_id())
+    );
+    assert_ne!(
+        peer_host_typed, my_host_typed,
+        "test precondition: peer host must differ from sweep's controller \
+         host_id (otherwise the sweep query rightly excludes it)"
+    );
 
-    // Row must be in `snapshotting_aborted` per § 9.2.
-    // A6b: `database` field is `pub(crate)`; use the `database()`
-    // accessor instead of poking the field directly.
+    let (seen, recovered) = run_transient_takeover_once(&state, 120).await;
+    assert!(
+        seen >= 1,
+        "sweep should have seen at least our stale peer-owned row; seen={seen}",
+    );
+    assert!(
+        recovered >= 1,
+        "sweep should have recovered at least our row; recovered={recovered} \
+         (pre-C1-FOLLOWUP this was always 0 because the CAS fenced on \
+         self.host_id() != peer's stored host_id)",
+    );
+
+    // Row must be in `snapshotting_aborted` per § 9.2, ownership
+    // transferred to the recovering controller, and lessee_updated_at
+    // cleared (target state is non-transient).
     let row = state
         .database()
         .unwrap()
@@ -2888,6 +2923,222 @@ async fn sweep_transient_takeover_recovers_stale_snapshotting_row() {
         .unwrap()
         .expect("row");
     assert_eq!(row.status, SandboxStatus::SnapshottingAborted);
+    assert_eq!(
+        row.host_id, my_host_typed,
+        "recovery CAS must transfer ownership from crashed peer to \
+         self.host_id(); got {} expected {}",
+        row.host_id, my_host_typed,
+    );
+    let post_lessee: Option<std::time::SystemTime> = client
+        .query_one(
+            "SELECT lessee_updated_at FROM sandbox.sandboxes WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap()
+        .try_get(0)
+        .ok();
+    assert!(
+        post_lessee.is_none(),
+        "post-recovery (non-transient state) must have NULL lessee_updated_at; \
+         got {post_lessee:?}",
+    );
+}
+
+/// C1-FOLLOWUP regression #1: the recovery scope is OTHER controllers'
+/// wedges only. A row whose `host_id = self.host_id()` with a stale
+/// `lessee_updated_at` must NOT be touched by the sweep — either the
+/// handler is legitimately mid-flight (and is supposed to bump the
+/// lease itself) or our own process is hung in a way the sweep can't
+/// safely arbitrate. Pre-C1-FOLLOWUP the sweep query surfaced these
+/// rows, the CAS then bounced on `host_id = self.host_id()` (which
+/// trivially matched), and the row was "recovered" — destroying
+/// in-flight state that may still resolve normally.
+#[compio::test]
+#[ignore = "needs Postgres; C1-FOLLOWUP regression — sweep skips SELF-owned transients"]
+async fn sweep_transient_takeover_skips_self_owned_in_flight_row() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    // Drive into snapshotting as ourselves.
+    let _g1 = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    // Even at the tightest threshold, a self-owned row must be
+    // invisible to the sweep candidate query (we cap the scope to
+    // OTHER controllers' wedges at the SELECT level).
+    let url = test_url();
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    let n = client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "should have backdated exactly our row");
+
+    let state = build_sweep_state(db, /*snapshot_enabled=*/true);
+    let (seen, recovered) = run_transient_takeover_once(&state, 0).await;
+    // Sweep MUST NOT touch our self-owned row even though
+    // lessee_updated_at is stale. Other unrelated rows the fixture
+    // may have created could push `seen`/`recovered` up, but ours
+    // specifically must still be `snapshotting` afterwards.
+    let row = state
+        .database()
+        .unwrap()
+        .get_sandbox_row(sid)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        row.status,
+        SandboxStatus::Snapshotting,
+        "self-owned in-flight row must remain in snapshotting; got {:?} \
+         (seen={seen} recovered={recovered}); pre-C1-FOLLOWUP the sweep \
+         would have flipped this to snapshotting_aborted",
+        row.status,
+    );
+
+    // And directly: the lease-expired query must not list it.
+    let listed = state
+        .database()
+        .unwrap()
+        .transient_state_lease_expired_sandboxes(0)
+        .await
+        .unwrap();
+    assert!(
+        !listed.iter().any(|r| r.sandbox_id == info.sandbox_id),
+        "self-owned row must not appear in transient_state_lease_expired_sandboxes; \
+         got {:?}",
+        listed.iter().map(|r| &r.sandbox_id).collect::<Vec<_>>(),
+    );
+}
+
+/// C1-FOLLOWUP regression #2: the recovery CAS, called directly,
+/// refuses when `expected_host_id == self.host_id()`. Belt-and-
+/// suspenders against a future caller bug that bypasses the sweep
+/// query's self-host filter.
+#[compio::test]
+#[ignore = "needs Postgres; C1-FOLLOWUP — recovery CAS refuses self-host_id"]
+async fn claim_orphan_transient_for_recovery_refuses_self_host() {
+    let db = migrated_db().await;
+    let host_id = fresh_host(&db);
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let _ = db
+        .update_sandbox_status(sid, SandboxStatus::Snapshotting, 0, None)
+        .await
+        .unwrap();
+    let my_host_typed = format!(
+        "hst_{}",
+        zeroship_core::typed_id::uuid_to_base62(&db.host_id())
+    );
+    let err = db
+        .claim_orphan_transient_for_recovery(
+            sid,
+            SandboxStatus::SnapshottingAborted,
+            /*expected_generation=*/ 1,
+            &my_host_typed,
+            /*threshold_secs=*/ 0,
+        )
+        .await
+        .expect_err("must refuse self.host_id() as expected_host_id");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("expected_host_id") && msg.contains("OTHER"),
+        "expected validation error citing OTHER controllers' wedges; got: {msg}",
+    );
+    // Row untouched.
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotting);
+}
+
+/// C1-FOLLOWUP regression #3: ABA defense — if the original
+/// controller bumps `lessee_updated_at` between the sweep's SELECT
+/// and the recovery CAS, the CAS must lose (the row's "alive" again).
+/// Simulated by stamping a fresh `now()` after collecting the row.
+#[compio::test]
+#[ignore = "needs Postgres; C1-FOLLOWUP — recovery CAS ABA-safe on lessee bump"]
+async fn claim_orphan_transient_for_recovery_aba_safe_on_lessee_bump() {
+    let db = migrated_db().await;
+    let url = test_url();
+    let (peer_host_id, peer_host_typed) = inject_extra_host(&url, "peer-aba").await;
+    let (info, sid) = fresh_info("alice");
+    db.insert_sandbox(&info, peer_host_id, &"a".repeat(32), Some("http://x"), Some(7))
+        .await
+        .unwrap();
+    let g1 = db
+        .update_sandbox_status_with_host(
+            sid,
+            SandboxStatus::Snapshotting,
+            0,
+            peer_host_id,
+            None,
+        )
+        .await
+        .unwrap();
+    // Backdate so the row is sweep-eligible.
+    let app_dsn = role_dsn(&url, "sandbox_app");
+    let mut cfg = PoolConfig::default();
+    cfg.max_size = 2;
+    let pool = Pool::connect_with_config(&app_dsn, cfg).await.unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() - interval '10 minutes' \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    // Now simulate the original peer's lease-heartbeat landing
+    // between the SELECT and the CAS — bump lessee_updated_at back
+    // to now().
+    client
+        .execute(
+            "UPDATE sandbox.sandboxes \
+                SET lessee_updated_at = now() \
+              WHERE sandbox_id = $1::TEXT",
+            &[&info.sandbox_id],
+        )
+        .await
+        .unwrap();
+
+    // Recovery CAS must miss (CasLost): the lessee window check
+    // rejects.
+    let err = db
+        .claim_orphan_transient_for_recovery(
+            sid,
+            SandboxStatus::SnapshottingAborted,
+            g1,
+            &peer_host_typed,
+            /*threshold_secs=*/ 120,
+        )
+        .await
+        .expect_err("must lose CAS on fresh lessee bump");
+    assert!(
+        matches!(err, zeroship_sandbox::db::DatabaseError::CasLost { .. }),
+        "expected CasLost; got {err:?}",
+    );
+    // Row still in snapshotting under the peer.
+    let row = db.get_sandbox_row(sid).await.unwrap().expect("row");
+    assert_eq!(row.status, SandboxStatus::Snapshotting);
+    assert_eq!(row.host_id, peer_host_typed);
 }
 
 #[compio::test]
