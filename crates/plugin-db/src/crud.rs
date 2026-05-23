@@ -637,16 +637,18 @@ pub(crate) fn dispatch_search<'s>(
                 let backend = backend.ok_or_else(|| {
                     DbError::config("not_configured", "db: backend not initialized".to_string())
                 })?;
+                // **P4 PR 5** — SQLite arm routes through the FTS5
+                // vtable + bm25 ranking. We short-circuit BEFORE the
+                // PG path so a build with both arms compiled in
+                // dispatches based on which arm the runtime is bound
+                // to, not on Cargo-feature ordering.
                 #[cfg(feature = "sqlite")]
                 {
-                    if backend.as_sqlite().is_some() {
-                        return Err(DbError::Configuration {
-                            code: "fts_unsupported",
-                            message:
-                                "db: full-text search is not implemented on the SQLite backend yet"
-                                    .to_string(),
-                            hint: Some("SQLite FTS lands in P4 PR 5".to_string()),
-                        });
+                    if let Some(sq) = backend.as_sqlite() {
+                        use crate::backend::FullTextIndex as _;
+                        return sq
+                            .fts_search(&app, &coll, &text_query, &filter, limit)
+                            .await;
                     }
                 }
                 #[cfg(feature = "pg")]
@@ -944,16 +946,18 @@ pub(crate) fn dispatch_near<'s>(
             let backend = backend.ok_or_else(|| {
                 DbError::config("not_configured", "db: backend not initialized".to_string())
             })?;
+            // **P4 PR 5** — SQLite arm routes through the pure-Rust
+            // haversine flat-scan `SpatialIndex` impl on
+            // `SqliteBackend`. Short-circuit BEFORE the PG path so a
+            // build with both arms compiled in dispatches based on
+            // which arm the runtime is bound to.
             #[cfg(feature = "sqlite")]
             {
-                if backend.as_sqlite().is_some() {
-                    return Err(DbError::Configuration {
-                        code: "spatial_unsupported",
-                        message:
-                            "db: spatial search is not implemented on the SQLite backend yet"
-                                .to_string(),
-                        hint: Some("SQLite spatial lands in P4 PR 5".to_string()),
-                    });
+                if let Some(sq) = backend.as_sqlite() {
+                    use crate::backend::SpatialIndex as _;
+                    return sq
+                        .spatial_near(&app, &coll, &field, point, radius_m, &filter, limit)
+                        .await;
                 }
             }
             #[cfg(feature = "pg")]

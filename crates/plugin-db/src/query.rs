@@ -2277,7 +2277,14 @@ fn build_having_condition(
 
 /// Build a WHERE clause from a filter JSON value.
 /// Returns empty string if the filter is null/empty.
-fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
+///
+/// **Visibility (P4 PR 5)**: lifted from `fn` to `pub(crate)` so the
+/// SQLite-side `fts.rs` / `spatial.rs` helpers can compose a parametrised
+/// predicate fragment against pre-seeded params (`$1` = MATCH query, `$2`
+/// = LIMIT, etc.) without rebuilding the filter machinery. The body
+/// itself is unchanged — every existing call site keeps its
+/// behaviour byte-for-byte.
+pub(crate) fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
     match filter {
         Value::Null => Ok(String::new()),
         Value::Object(map) if map.is_empty() => Ok(String::new()),

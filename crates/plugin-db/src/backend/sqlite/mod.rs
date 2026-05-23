@@ -48,8 +48,21 @@ use crate::query::IndexSpec;
 pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
+// **P4 PR 5** — FTS5 vtable lifecycle + MATCH query composition. The
+// `impl FullTextIndex for SqliteBackend` block at the bottom of this
+// file orchestrates the five idempotent DDL statements + the search
+// path; the SQL primitives (`build_create_fts_table_sql`,
+// `build_insert_trigger_sql`, `build_fts_search_sql`, etc.) live in
+// `fts.rs` so the documented shapes stay unit-testable in isolation.
+pub(crate) mod fts;
 pub(crate) mod lock;
 pub(crate) mod session;
+// **P4 PR 5** — pure-Rust haversine + `(lat, lng)` BLOB round-trip.
+// The `impl SpatialIndex for SqliteBackend` block at the bottom of
+// this file routes the flat-scan path through this module; the math
+// (`haversine_m`) and the `point_to_blob` / `blob_to_point` helpers
+// stay unit-testable in `spatial.rs`.
+pub(crate) mod spatial;
 // **P4 PR 4** — pure-Rust vector primitives (`bytemuck` round-trip +
 // the three distance functions). The `impl VectorIndex for
 // SqliteBackend` block at the bottom of this file routes the
@@ -1421,6 +1434,346 @@ impl crate::backend::VectorIndex for SqliteBackend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// P4 PR 5 — `FullTextIndex` impl (FTS5 external-content vtables)
+// ---------------------------------------------------------------------------
+//
+// FTS5 ships in rusqlite's `bundled` feature by default (the SQLite
+// amalgamation we link in already carries `SQLITE_ENABLE_FTS5`). No
+// Cargo flag toggle, no runtime extension load.
+//
+// Two methods:
+//   * `ensure_fts_index` — runs five idempotent statements:
+//       1. CREATE VIRTUAL TABLE IF NOT EXISTS `<coll>__fts` USING fts5(...)
+//       2. Initial population INSERT INTO __fts SELECT FROM `<coll>`
+//          (guarded by a vtable-presence probe so we only seed once)
+//       3. AFTER INSERT trigger `<coll>__fts_ai`
+//       4. AFTER DELETE trigger `<coll>__fts_ad`
+//       5. AFTER UPDATE OF cols trigger `<coll>__fts_au`
+//     `language` is logged via `tracing::debug!` but otherwise ignored —
+//     FTS5's default tokeniser is language-agnostic Unicode.
+//   * `fts_search` — composes the JOIN + MATCH + filter + ORDER BY bm25
+//     SQL via `fts::build_fts_search_sql`, binds (query, limit, filter
+//     params) positionally, and re-emits each row as `serde_json::Value`
+//     with a synthetic `_rank: f64` field.
+//
+// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
+// BEFORE the row mutation; AFTER triggers fire after. Both run within
+// the same transaction — the broker sees the base-row event with the
+// FTS index already updated at COMMIT time. See `fts.rs` module
+// rustdoc for the canonical ordering walkthrough.
+
+impl crate::backend::FullTextIndex for SqliteBackend {
+    async fn ensure_fts_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        columns: &[String],
+        language: &str,
+    ) -> Result<(), DbError> {
+        if columns.is_empty() {
+            return Err(DbError::Configuration {
+                code: "fts_no_columns",
+                message: "db: ensure_fts_index requires at least one source column"
+                    .to_string(),
+                hint: Some(
+                    "mark at least one t.string() field with `.fts()` in the schema"
+                        .to_string(),
+                ),
+            });
+        }
+        // SQLite FTS5's default tokeniser is language-agnostic Unicode;
+        // `language` is honoured on the PG arm but ignored here. The
+        // SDK already validates the language token; log it so an
+        // operator wondering why an `es` tokeniser produces the same
+        // hits as `en` sees the cause in the structured log.
+        tracing::debug!(
+            app_id = %app_id,
+            collection = %collection,
+            language = %language,
+            "SqliteBackend::ensure_fts_index: `language` is ignored \
+             — FTS5 default tokeniser is language-agnostic Unicode"
+        );
+
+        // Probe whether the FTS vtable already exists. If it does, we
+        // skip the initial-population INSERT (which is NOT idempotent
+        // — running it twice doubles the index payload). The CREATE
+        // VIRTUAL TABLE / CREATE TRIGGER statements ARE idempotent via
+        // `IF NOT EXISTS`, so we re-run them unconditionally — cheap,
+        // and it picks up any column-list drift across `registerModel`
+        // calls (though changing the column list isn't supported on
+        // FTS5 in-place; that's a DROP + RECREATE path the diff engine
+        // handles in a future PR).
+        let probe_sql = format!(
+            "SELECT 1 FROM {qschema}.sqlite_master \
+             WHERE type = 'table' AND name = '{coll}__fts'",
+            qschema = SqliteDialect.quote_ident(app_id),
+            // The probe's `name = '<lit>'` is a single-quoted SQL
+            // literal — escape any embedded `'` by doubling. The
+            // collection name was validated at the SDK boundary.
+            coll = collection.replace('\'', "''"),
+        );
+        let existing = self.session.query(&probe_sql, &[]).await?;
+        let vtable_exists = !existing.is_empty();
+
+        // 1. CREATE VIRTUAL TABLE IF NOT EXISTS — emits the external-
+        //    content FTS5 vtable.
+        let create_sql =
+            fts::build_create_fts_table_sql(app_id, collection, columns);
+        self.session.exec(&create_sql, &[]).await?;
+
+        // 2. Initial population — only if the vtable did NOT exist
+        //    before this call. Skipping the re-population is the only
+        //    reason we needed the sqlite_master probe; the rest of
+        //    the DDL is idempotent.
+        if !vtable_exists {
+            let populate_sql =
+                fts::build_initial_population_sql(app_id, collection, columns);
+            self.session.exec(&populate_sql, &[]).await?;
+        }
+
+        // 3-5. AFTER triggers (idempotent via `IF NOT EXISTS`).
+        let insert_trg =
+            fts::build_insert_trigger_sql(app_id, collection, columns);
+        self.session.exec(&insert_trg, &[]).await?;
+        let delete_trg =
+            fts::build_delete_trigger_sql(app_id, collection, columns);
+        self.session.exec(&delete_trg, &[]).await?;
+        let update_trg =
+            fts::build_update_trigger_sql(app_id, collection, columns);
+        self.session.exec(&update_trg, &[]).await?;
+
+        Ok(())
+    }
+
+    async fn fts_search(
+        &self,
+        app_id: &str,
+        collection: &str,
+        query: &str,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        // Param layout: `[$1=query, $2=limit?, $3+...=filter_params]`.
+        // When `limit` is `None` we skip the `$2` slot — the filter
+        // params shift down to `$2+`. The builder is param-offset-
+        // aware (it counts `params.len() + 1` for each new placeholder)
+        // so seeding the pre-filter slots in order keeps the numbering
+        // consistent.
+        let mut params: Vec<String> = Vec::with_capacity(4);
+        params.push(query.to_string());
+        let has_limit = limit.is_some();
+        if let Some(l) = limit {
+            params.push(l.to_string());
+        }
+
+        let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
+            .map_err(DbError::from)?;
+        let sql = fts::build_fts_search_sql(app_id, collection, &filter_clause, has_limit);
+
+        let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+        let typed = self.session.query_typed(&sql, &param_refs).await?;
+
+        // Re-emit each row as a JSON object including a synthetic
+        // `_rank: f64` field. The bm25 column reaches us as a `Real`
+        // typed cell — promote it through `serde_json::Number::from_f64`.
+        let mut out: Vec<serde_json::Value> = Vec::with_capacity(typed.rows.len());
+        for row in &typed.rows {
+            let mut obj = serde_json::Map::with_capacity(typed.columns.len());
+            for (i, name) in typed.columns.iter().enumerate() {
+                let cell = row.get(i).ok_or_else(|| {
+                    DbError::internal("fts_search: typed row cell-count mismatch")
+                })?;
+                let val = match cell {
+                    session::TypedCell::Null => serde_json::Value::Null,
+                    session::TypedCell::Integer(n) => {
+                        serde_json::Value::Number(serde_json::Number::from(*n))
+                    }
+                    session::TypedCell::Real(f) => serde_json::Number::from_f64(*f)
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                    session::TypedCell::Text(s) => serde_json::Value::String(s.clone()),
+                    session::TypedCell::Blob(b) => {
+                        // BLOB columns (rare on FTS-source tables but
+                        // possible) surface as a byte array — same
+                        // convention the vector path uses. The `_rank`
+                        // column is a Real, never a Blob, so the
+                        // synthetic-column rename below is unaffected.
+                        serde_json::Value::Array(
+                            b.iter()
+                                .map(|byte| {
+                                    serde_json::Value::Number(serde_json::Number::from(*byte))
+                                })
+                                .collect(),
+                        )
+                    }
+                };
+                obj.insert(name.clone(), val);
+            }
+            out.push(serde_json::Value::Object(obj));
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P4 PR 5 — `SpatialIndex` impl (pure-Rust haversine + flat scan)
+// ---------------------------------------------------------------------------
+//
+// Pure-Rust over an R-tree (Q-P4-C, plan §4.3): same rationale as the
+// vector path's pure-Rust-over-`sqlite-vec` decision — bundling the
+// R-tree extension would require either forking the SQLite
+// amalgamation per CI platform or runtime-loading a `.so`, both of
+// which defeat the "no system libsqlite3" invariant. The haversine
+// flat scan is acceptable at dev scale; production spatial workloads
+// run on PostGIS via the PG arm.
+//
+// Two methods:
+//   * `ensure_spatial_index` — no-op. Flat scan needs no index; the
+//     CHECK constraint on the `geoPoint` BLOB column is emitted by
+//     [`spatial::sqlite_geopoint_column_ddl`] at column-DDL time.
+//   * `spatial_near` — SELECT all rows matching `filter` via the
+//     session actor's `query_typed`, decode each row's `column` blob
+//     via `spatial::blob_to_point`, compute `haversine_m(point, row_point)`,
+//     filter rows with `distance <= radius_m`, sort ASC, take top-
+//     `limit`, and re-emit as JSON with a synthetic `_distance_m: f64`
+//     field.
+
+impl crate::backend::SpatialIndex for SqliteBackend {
+    async fn ensure_spatial_index(
+        &self,
+        _app_id: &str,
+        _collection: &str,
+        _column: &str,
+    ) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn spatial_near(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        point: crate::backend::GeoPoint,
+        radius_m: f64,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        // Build the WHERE clause via the same machinery `dispatch_find`
+        // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
+        // positionally on rusqlite). No ORDER BY at the SQL layer —
+        // we sort in Rust by computed distance.
+        let bq = crate::query::build_find(
+            app_id,
+            collection,
+            filter,
+            /* limit  */ None,
+            /* offset */ None,
+            /* order_by */ None,
+            /* select   */ None,
+        )
+        .map_err(DbError::from)?;
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let typed = self.session.query_typed(&bq.sql, &param_refs).await?;
+
+        // Locate the BLOB column. Cache the index outside the row
+        // loop so we don't scan `columns` per row.
+        let col_idx = typed
+            .columns
+            .iter()
+            .position(|name| name == column)
+            .ok_or_else(|| {
+                DbError::validation(
+                    "invalid_geo_arg",
+                    format!(
+                        "db: geoPoint column '{column}' not found in result row \
+                         (have: {:?})",
+                        typed.columns
+                    ),
+                )
+            })?;
+
+        // Compute distances. `(f64, row_idx)` keeps the sort key + a
+        // back-pointer to the row; we only re-serialise rows that
+        // pass the radius filter.
+        let mut scored: Vec<(f64, usize)> = Vec::with_capacity(typed.rows.len());
+        for (idx, row) in typed.rows.iter().enumerate() {
+            let cell = row.get(col_idx).ok_or_else(|| {
+                DbError::internal("spatial_near: typed row cell-count mismatch")
+            })?;
+            let blob_bytes: &[u8] = match cell {
+                session::TypedCell::Blob(b) => b.as_slice(),
+                session::TypedCell::Null => {
+                    // NULL geoPoint — skip this row from the candidate
+                    // set (same convention as the vector path's NULL
+                    // skip). The `NOT NULL` CHECK in
+                    // `sqlite_geopoint_column_ddl` keeps NULLs from
+                    // landing in the column at all under canonical
+                    // emission, but a hand-crafted schema might
+                    // permit NULL — be defensive.
+                    continue;
+                }
+                other => {
+                    return Err(DbError::validation(
+                        "invalid_geo_arg",
+                        format!(
+                            "db: geoPoint column '{column}' is not a BLOB (saw {:?})",
+                            std::mem::discriminant(other)
+                        ),
+                    ));
+                }
+            };
+            let row_point = spatial::blob_to_point(blob_bytes)?;
+            let d = spatial::haversine_m(point, row_point);
+            if d <= radius_m {
+                scored.push((d, idx));
+            }
+        }
+        // Sort ASC by distance. `total_cmp` handles NaN deterministically
+        // (NaN sorts to the end) — haversine shouldn't produce NaN
+        // for valid lat/lng but stay total.
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some(l) = limit {
+            scored.truncate(l);
+        }
+
+        // Build the JSON rows. Each row carries every selected column
+        // PLUS a synthetic `_distance_m` field (per the `SpatialIndex`
+        // trait doc-comment).
+        let mut out: Vec<serde_json::Value> = Vec::with_capacity(scored.len());
+        for (d, idx) in scored {
+            let row = &typed.rows[idx];
+            let mut obj = serde_json::Map::with_capacity(typed.columns.len() + 1);
+            for (i, name) in typed.columns.iter().enumerate() {
+                let cell = &row[i];
+                let val = match cell {
+                    session::TypedCell::Null => serde_json::Value::Null,
+                    session::TypedCell::Integer(n) => {
+                        serde_json::Value::Number(serde_json::Number::from(*n))
+                    }
+                    session::TypedCell::Real(f) => serde_json::Number::from_f64(*f)
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                    session::TypedCell::Text(s) => serde_json::Value::String(s.clone()),
+                    session::TypedCell::Blob(b) => serde_json::Value::Array(
+                        b.iter()
+                            .map(|byte| {
+                                serde_json::Value::Number(serde_json::Number::from(*byte))
+                            })
+                            .collect(),
+                    ),
+                };
+                obj.insert(name.clone(), val);
+            }
+            obj.insert(
+                "_distance_m".to_string(),
+                serde_json::Number::from_f64(d)
+                    .map_or(serde_json::Value::Null, serde_json::Value::Number),
+            );
+            out.push(serde_json::Value::Object(obj));
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Compile-time trait-shape assertions, mirroring the PR-0 set
@@ -1505,6 +1858,22 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
+    /// P4 PR 5: `FullTextIndex` capability — pin the SQLite-arm impl
+    /// wire so the FTS5 vtable + AFTER-trigger path's trait composition
+    /// regresses at compile time if the impl block is detached.
+    fn assert_sqlite_backend_impls_full_text_index() {
+        fn assert_impl<T: crate::backend::FullTextIndex>() {}
+        assert_impl::<SqliteBackend>();
+    }
+
+    /// P4 PR 5: `SpatialIndex` capability — pin the SQLite-arm impl
+    /// wire so the haversine flat-scan path's trait composition
+    /// regresses at compile time if the impl block is detached.
+    fn assert_sqlite_backend_impls_spatial_index() {
+        fn assert_impl<T: crate::backend::SpatialIndex>() {}
+        assert_impl::<SqliteBackend>();
+    }
+
     /// P2 PR 1: pin the SQLite-arm [`ChangeStream`] adapter
     /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
     /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
@@ -1546,6 +1915,8 @@ mod tests {
         let _ = assert_sqlite_backend_impls_audit_writer as fn();
         let _ = assert_sqlite_backend_impls_session_minter as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
+        let _ = assert_sqlite_backend_impls_full_text_index as fn();
+        let _ = assert_sqlite_backend_impls_spatial_index as fn();
         let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();
         let _ = assert_sqlite_client_pinned_to_session_handle as fn();

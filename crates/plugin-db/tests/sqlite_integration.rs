@@ -2746,3 +2746,447 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// P4 PR 5 — SQLite FullTextIndex (FTS5) + SpatialIndex (haversine) gates
+// ---------------------------------------------------------------------------
+//
+// These tests target the new `FullTextIndex` / `SpatialIndex` impls on
+// `SqliteBackend`. The FTS path exercises the FTS5 vtable + AFTER
+// triggers (insert / update); the spatial path exercises the haversine
+// flat scan against `(lat, lng)` 16-byte BLOB payloads.
+//
+// Like the P4 PR 4 vector tests, we construct table DDL inline — the
+// orchestrator's column-DDL emitter is PG-flavoured today; a follow-up
+// PR will teach `register_model::apply` to dispatch by dialect via the
+// `sqlite_geopoint_column_ddl` / `sqlite_vector_column_ddl` helpers.
+
+use zeroship_plugin_db::backend::FullTextIndex;
+use zeroship_plugin_db::backend::SpatialIndex;
+use zeroship_plugin_db::backend::GeoPoint;
+
+/// **P4 PR 5 test gate** — `fts_search_matches_substring` (SQLite).
+///
+/// Inserts 5 rows whose `bio` column matches different keyword sets;
+/// asserts `fts_search("rust")` returns the membership set we expect
+/// (the rows containing "rust" anywhere). Set membership, not ordinal
+/// positions — bm25's ranking is FP-dependent and we don't pin the
+/// order across backends.
+#[test]
+fn fts_search_matches_substring() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("fts_substring")
+            .await
+            .expect("ensure_app_schema");
+
+        backend
+            .pool_exec(
+                "CREATE TABLE \"fts_substring\".\"people\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   bio TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE people");
+
+        // Wire the FTS index BEFORE inserting the seed rows so the
+        // AFTER INSERT trigger populates `__fts` — this exercises the
+        // trigger path rather than the initial-population SELECT.
+        backend
+            .ensure_fts_index(
+                "fts_substring",
+                "people",
+                &["bio".to_string()],
+                "english",
+            )
+            .await
+            .expect("ensure_fts_index");
+
+        let seeds = [
+            "Loves rust and systems programming",
+            "Building async services",
+            "rust async fan",
+            "Python developer",
+            "Ruby on Rails dev",
+        ];
+        for s in &seeds {
+            // Inline single-quoted literal — the seed values are safe
+            // (no `'`). For hostile input the integration tests would
+            // bind through the typed-text path; the FTS gates only
+            // need fixed seeds.
+            let sql = format!(
+                "INSERT INTO \"fts_substring\".\"people\" (bio) VALUES ('{s}')"
+            );
+            backend.pool_exec(&sql, &[]).await.expect("INSERT bio");
+        }
+
+        let rows = backend
+            .fts_search(
+                "fts_substring",
+                "people",
+                "rust",
+                &serde_json::Value::Null,
+                None,
+            )
+            .await
+            .expect("fts_search");
+
+        // FTS5's default tokeniser is case-insensitive Unicode; "rust"
+        // matches rows 1 + 3 ("rust and systems", "rust async fan").
+        let bios: Vec<String> = rows
+            .iter()
+            .filter_map(|r| {
+                r.get("bio")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected 2 rust-matching rows, got {} ({bios:?})",
+            rows.len()
+        );
+        assert!(
+            bios.iter().any(|b| b.contains("rust and systems")),
+            "expected the 'rust and systems' row in {bios:?}"
+        );
+        assert!(
+            bios.iter().any(|b| b.contains("rust async fan")),
+            "expected the 'rust async fan' row in {bios:?}"
+        );
+        // Every row carries the synthetic `_rank` column (bm25 score).
+        for r in &rows {
+            assert!(
+                r.get("_rank").is_some(),
+                "row missing _rank: {r}"
+            );
+        }
+    });
+}
+
+/// **P4 PR 5 test gate** — `fts_and_filter_compose` (SQLite).
+///
+/// FTS `MATCH` composed via `AND` with a regular column filter must
+/// intersect — assert the final set is exactly the rows matching both
+/// conditions.
+#[test]
+fn fts_and_filter_compose() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("fts_compose")
+            .await
+            .expect("ensure_app_schema");
+
+        backend
+            .pool_exec(
+                "CREATE TABLE \"fts_compose\".\"people\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   bio TEXT NOT NULL, \
+                   lang TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE people");
+
+        backend
+            .ensure_fts_index(
+                "fts_compose",
+                "people",
+                &["bio".to_string()],
+                "english",
+            )
+            .await
+            .expect("ensure_fts_index");
+
+        let seeds = [
+            ("Loves rust and systems programming", "en"),
+            ("rust async runtimes", "en"),
+            ("python developer", "en"),
+            ("rust fan", "de"),
+            ("rust crab", "de"),
+        ];
+        for (bio, lang) in &seeds {
+            let sql = format!(
+                "INSERT INTO \"fts_compose\".\"people\" (bio, lang) VALUES ('{bio}', '{lang}')"
+            );
+            backend.pool_exec(&sql, &[]).await.expect("INSERT");
+        }
+
+        let rows = backend
+            .fts_search(
+                "fts_compose",
+                "people",
+                "rust",
+                &serde_json::json!({ "lang": "en" }),
+                None,
+            )
+            .await
+            .expect("fts_search");
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected exactly 2 (rust intersect en) rows, got {}",
+            rows.len()
+        );
+        for r in &rows {
+            assert_eq!(
+                r.get("lang").and_then(serde_json::Value::as_str),
+                Some("en"),
+                "filter must restrict to lang=en: {r}"
+            );
+        }
+    });
+}
+
+/// **P4 PR 5 test gate** — `fts_trigger_keeps_index_in_sync_after_update`
+/// (SQLite).
+///
+/// Insert a row, search for token "alpha" — must hit. Update the row
+/// to replace "alpha" with "beta" and search for "alpha" again — must
+/// MISS, while a search for "beta" must hit. Exercises the AFTER
+/// UPDATE OF trigger (vs. just the initial population path).
+#[test]
+fn fts_trigger_keeps_index_in_sync_after_update() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("fts_trigger")
+            .await
+            .expect("ensure_app_schema");
+
+        backend
+            .pool_exec(
+                "CREATE TABLE \"fts_trigger\".\"docs\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   body TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE docs");
+
+        backend
+            .ensure_fts_index(
+                "fts_trigger",
+                "docs",
+                &["body".to_string()],
+                "english",
+            )
+            .await
+            .expect("ensure_fts_index");
+
+        backend
+            .pool_exec(
+                "INSERT INTO \"fts_trigger\".\"docs\" (body) VALUES ('alpha test content')",
+                &[],
+            )
+            .await
+            .expect("INSERT alpha row");
+
+        let hits = backend
+            .fts_search(
+                "fts_trigger",
+                "docs",
+                "alpha",
+                &serde_json::Value::Null,
+                None,
+            )
+            .await
+            .expect("alpha search");
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected 1 alpha hit pre-update, got {}",
+            hits.len()
+        );
+
+        // UPDATE replaces "alpha" with "beta" — the AFTER UPDATE OF
+        // body trigger must DELETE the old FTS row and INSERT the
+        // new one.
+        backend
+            .pool_exec(
+                "UPDATE \"fts_trigger\".\"docs\" SET body = 'beta different content' WHERE id = 1",
+                &[],
+            )
+            .await
+            .expect("UPDATE");
+
+        let alpha_hits = backend
+            .fts_search(
+                "fts_trigger",
+                "docs",
+                "alpha",
+                &serde_json::Value::Null,
+                None,
+            )
+            .await
+            .expect("alpha search post-update");
+        assert_eq!(
+            alpha_hits.len(),
+            0,
+            "trigger must invalidate alpha after UPDATE, got {} hits",
+            alpha_hits.len()
+        );
+
+        let beta_hits = backend
+            .fts_search(
+                "fts_trigger",
+                "docs",
+                "beta",
+                &serde_json::Value::Null,
+                None,
+            )
+            .await
+            .expect("beta search post-update");
+        assert_eq!(
+            beta_hits.len(),
+            1,
+            "trigger must surface beta after UPDATE, got {} hits",
+            beta_hits.len()
+        );
+    });
+}
+
+/// Encode a `GeoPoint` as a SQLite `x'<hex>'` blob literal — 2× LE
+/// f64 = 16 bytes. Mirrors `vec_to_hex_lit` for vectors. We use this
+/// because the session actor's text-param path can't carry raw bytes
+/// at the SQL boundary.
+fn point_to_hex_lit(p: GeoPoint) -> String {
+    let mut hex = String::with_capacity(16 * 2 + 4);
+    hex.push_str("x'");
+    for byte in p.lat.to_le_bytes() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    for byte in p.lng.to_le_bytes() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex.push('\'');
+    hex
+}
+
+/// **P4 PR 5 test gate** — `near_returns_within_radius` (SQLite).
+///
+/// 10 points around London at varying distances from the centre
+/// `(51.5074, -0.1278)`. `near()` with a 1km radius returns only the
+/// points actually within 1km — assert by membership set. No PostGIS
+/// dependency on this arm: the haversine math is pure Rust + the
+/// `geoPoint` column is a plain BLOB.
+#[test]
+fn near_returns_within_radius() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .ensure_app_schema("near_radius")
+            .await
+            .expect("ensure_app_schema");
+
+        // Inline DDL — the `sqlite_geopoint_column_ddl` helper emits
+        // the same CHECK shape; we hand-write it here to keep the
+        // test self-contained against the orchestrator's PG-flavoured
+        // emitter.
+        backend
+            .pool_exec(
+                "CREATE TABLE \"near_radius\".\"places\" (\
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                   location BLOB CHECK(length(location) = 16) NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE places");
+
+        let london = GeoPoint { lat: 51.5074, lng: -0.1278 };
+        // 10 points: 5 within ~1km (small lat/lng offsets) and 5
+        // well outside (several km away). One degree of latitude is
+        // ~111km, so 0.005 deg ≈ 555m and 0.05 deg ≈ 5.5km.
+        let offsets: Vec<(f64, f64, bool)> = vec![
+            (0.0, 0.0, true),     // dead-centre
+            (0.001, 0.001, true), // ~140m
+            (0.003, 0.003, true), // ~420m
+            (-0.005, 0.0, true),  // ~555m south
+            (0.0, 0.005, true),   // ~350m east at cos(51.5deg) ≈ 0.62
+            (0.05, 0.0, false),   // ~5.5km north
+            (-0.05, 0.0, false),  // ~5.5km south
+            (0.0, 0.05, false),   // ~3.5km east
+            (0.0, -0.05, false),  // ~3.5km west
+            (0.1, 0.1, false),    // ~11km NE
+        ];
+        let mut expected_within: Vec<i64> = Vec::new();
+        for (i, (dlat, dlng, within_1km)) in offsets.iter().enumerate() {
+            let p = GeoPoint {
+                lat: london.lat + dlat,
+                lng: london.lng + dlng,
+            };
+            let hex = point_to_hex_lit(p);
+            let sql = format!(
+                "INSERT INTO \"near_radius\".\"places\" (location) VALUES ({hex})"
+            );
+            backend.pool_exec(&sql, &[]).await.expect("INSERT location");
+            if *within_1km {
+                expected_within.push((i + 1) as i64);
+            }
+        }
+
+        let rows = backend
+            .spatial_near(
+                "near_radius",
+                "places",
+                "location",
+                london,
+                1000.0,
+                &serde_json::Value::Null,
+                None,
+            )
+            .await
+            .expect("spatial_near");
+
+        let returned_ids: std::collections::BTreeSet<i64> = rows
+            .iter()
+            .filter_map(|r| {
+                r.get("id").and_then(serde_json::Value::as_i64)
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<i64> =
+            expected_within.into_iter().collect();
+        assert_eq!(
+            returned_ids, expected,
+            "near(1km) membership mismatch: returned={returned_ids:?} expected={expected:?}"
+        );
+        // Every row carries the synthetic `_distance_m` column.
+        for r in &rows {
+            let d = r
+                .get("_distance_m")
+                .and_then(serde_json::Value::as_f64)
+                .expect("row must carry _distance_m");
+            assert!(d.is_finite(), "_distance_m must be finite, got {d}");
+            assert!(
+                d <= 1000.0 + 1e-6,
+                "_distance_m={d} must be within the 1km radius (FP slack)"
+            );
+        }
+        // The dead-centre row (id=1) is the closest.
+        let first_id = rows[0]
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .expect("first row id");
+        assert_eq!(
+            first_id, 1,
+            "dead-centre (offset (0,0)) row must be first by distance"
+        );
+        let first_d = rows[0]
+            .get("_distance_m")
+            .and_then(serde_json::Value::as_f64)
+            .expect("first row _distance_m");
+        assert!(
+            first_d < 1.0,
+            "dead-centre distance must be < 1m, got {first_d}"
+        );
+    });
+}
