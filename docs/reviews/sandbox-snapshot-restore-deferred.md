@@ -65,7 +65,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Cluster evidence**: c=4 smoke POST-WAKE EXEC went 0/9 → 7/7 (100%). Wake p50 9235 ms (vs 9729 ms pre-fix — resync overhead is negligible). See `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix F.
 - **Lib tests**: sandbox-agent 207 → 214; sandbox 280 → 283.
 
-### [#23] (NEW 2026-05-23 r7 B22-fixer cycle) `provision-gcp-cluster.sh` fails on SERVER_COUNT>1
+### [#23] (CLOSED at `0be352a2`) `provision-gcp-cluster.sh` SERVER_COUNT>1 fixed via --metadata-from-file
 - **Source**: B22-fixer cycle attempted to escalate to 3+5 cluster for B-SLO c=20 stress; provision failed.
 - **Symptom**: `ERROR: (gcloud.compute.instances.create) argument --metadata: Bad syntax for dict arg: [10.178.0.11]`. The server-IPs list is passed to the next-server's metadata without proper escaping/joining; gcloud parses the bracket-formatted Python repr as a dict key.
 - **Action shape**: fix the script's metadata-flag concatenation. Likely `--metadata server-ips=10.178.0.10,10.178.0.11,10.178.0.12` should use `--metadata-from-file` or a properly-escaped CSV; investigate `provision-gcp-cluster.sh` around the server-creation loop.
@@ -350,7 +350,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ### [R5-P1] (PARTIAL at `77ea717f` — BufReader landed; spawn_blocking deferred to R5-P1b) Next A3 slice: BufReader on SHA + spawn_blocking on store.get (IMPORTANT, perf-r5)
 
-### [R5-P1b] spawn_blocking on store.get requires `&dyn` → `Arc<dyn>` flip in restore_handler (IMPORTANT, R5-P1 carve-out)
+### [R5-P1b] (CLOSED at `cdd2e677`) `&dyn → Arc<dyn>` flip + `spawn_blocking` on store.get
 - **Source**: R5-P1 fixer at `77ea717f` documented the blocker.
 - **Files**: `crates/sandbox/src/restore_handler.rs:184,329` (`store: &dyn SnapshotStore` → needs `Arc<dyn SnapshotStore>`); `crates/sandbox/src/admin_handlers.rs:1355` (in-scope call site); `crates/sandbox/tests/sandbox_pg_e2e.rs:2504,2545,2570,2769,2882` (out-of-scope call sites that pass `&store`).
 - **Symptom**: `compio::runtime::spawn_blocking` requires `FnOnce + Send + 'static`. With `&dyn`, the borrow can't be moved into the closure. The trait shape (`fn get(&self, …)`) is fine — only the call-site borrow needs to flip to `Arc::clone` first.
@@ -390,3 +390,47 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### [R6-P1] (CLOSED at `4c090992`) detach teardown_source_for_snapshot into compio::runtime::spawn
 ### [R6-A1] (CLOSED at `2ead8692`) rename SANDBOX_PERSIST_NONE_OK → ZEROSHIP_SANDBOX_TEST_DISABLE_PERSIST_ASSERTION
 ### [R6-C1] (CLOSED at `e598c2dd`) reap ch-remote-resume background subshell via PID capture + cleanup trap
+
+---
+
+## NEW r7 ROUND FINDINGS (added by pilot cycle 2026-05-24)
+
+### [R7-S1] B22 `/_clock_resync` has replay-DoS risk — missing sandbox_id + per-restore challenge (CRITICAL, security-r7)
+- **Source**: 2026-05-24 security-r7
+- **Files**: `crates/sandbox-agent/src/sig.rs:348-355` (nonce LRU not pre-loaded for resync) + `crates/sandbox-agent/src/handlers.rs::clock_resync` (canonical body `{"ts": <unix_secs>}` lacks sandbox_id)
+- **Symptom**: `/_clock_resync` is authenticated by same per-sandbox signing key as other RPCs (in-VM forgery impossible) AND the skew-bypass verifier runs nonce LRU + signature gates. BUT: canonical body has no sandbox_id and no per-restore controller challenge. The nonce LRU is the only replay defense, and because resync arrives POST-restore, no resync nonce is ever in any snapshot's LRU. A network-adjacent attacker who captured a cycle-N resync can race the controller's cycle-N+1 POST to set CLOCK_REALTIME to stale T_old → sustained 401 DoS on all strict-skew RPCs.
+- **Action**: bind `sandbox_id` + a per-restore controller-issued challenge into the canonical body. Verifier checks the challenge matches the controller's pre-shared nonce for this restore.
+
+### [R7-S2] `derive_agent_url` trait default returns `http://127.0.0.1:0` silently (CRITICAL, security-r7 + api-surface-r7)
+- **File**: `crates/sandbox/src/restore_handler.rs:182-184`
+- **Symptom**: B22 added a trait method `derive_agent_url` with a Default impl that returns `http://127.0.0.1:0`. A bogus URL that resolves but answers nothing — silent fail-OPEN.
+- **Action**: change default to `panic!` or `Err`. Either way the implementor MUST provide a real URL.
+
+### [R7-API1] `Verifier::verify_kind_skew_bypass` is `pub` on `pub mod sig` (CRITICAL, api-surface-r7)
+- **File**: `crates/sandbox-agent/src/sig.rs:356`
+- **Symptom**: B22's skew-bypass verifier is public on a public module. Same anti-pattern R4-S1/R5-API1/R5-API2 just closed at `93348b91`, but this regressed across the crate boundary in sandbox-agent. Docstring asserts "only /_clock_resync uses it" but type system doesn't enforce.
+- **Action**: `pub(crate)`-restrict on sandbox-agent crate. Verify zero out-of-crate callers first.
+
+### [R7-API2] `clock.resync-v1` capability advertised but controller calls unconditionally (IMPORTANT, api-surface-r7)
+- **Files**: `crates/sandbox-agent/src/version.rs:49-52` (advertises capability) + `crates/sandbox/src/restore_handler.rs:485-498` (calls `clock_resync_post_restore` unconditionally — no version check)
+- **Symptom**: capability list says "feature-detectable for graceful fallback" but the consumer wires it as mandatory. Either wire the check in OR fix the misleading comment.
+
+### [R7-C1] R6-P1 `spawn(...).detach()` is unbounded — no cancellation/completion tracking (IMPORTANT, concurrency-r7)
+- **File**: `crates/sandbox/src/admin_handlers.rs:1310-1324`
+- **Symptom**: detached teardown task has no JoinHandle / cancellation signal. Under controller shutdown, the spawn is severed mid-await; the orphan-prune sweep at next-boot reclaims state. Not a functional bug — but no operational visibility.
+- **Action**: track outstanding detached teardowns via a per-AppState counter + log on shutdown if N > 0. Optional: replace detach with a structured task supervisor.
+
+### [R7-C2] C3 cancel-window widened a 4th time by B22's clock_resync (CRITICAL, concurrency-r7)
+- **File**: `crates/sandbox/src/restore_handler.rs:485-506`
+- **Symptom**: post-`wait_for_livez` Ok now includes (unseal + clock_resync up to 10s ureq + register_restored + 2 pg awaits) — all unguarded. Drop creates new wedge state.
+- **Action**: same as C3 — scope guard around the restore-Ok section. Covers all 4 C3 widenings.
+
+### [R7-P1] Snapshot p50=50s root cause RE-CHARACTERIZED: NOT teardown but synchronous CH-pause + memory-dump + L1 put (CRITICAL, performance-r7)
+- **File**: `crates/sandbox/src/snapshot_handler.rs:316-373,566-621`
+- **Symptom**: r6 root-causing was wrong — R6-P1 detach correctly removed the teardown wait but snapshot p50 stayed at 50s. Real cause: `ChRemoteClient::pause/snapshot` + `LocalDiskSnapshotStore::put` run synchronously on the async caller. Trait doc at `snapshot_store.rs:99` mandates `spawn_blocking`; no caller wraps. At c=4 on n2-standard-4, four sync 2GB-dumps contend on local SSD → ~40-50 MB/s per stream → matches observed 50s wall.
+- **Action**: wrap `ch.pause`, `ch.snapshot`, AND `LocalDiskSnapshotStore::put` in `compio::runtime::spawn_blocking`. Same shape as R5-P1b's spawn_blocking wrap on `store.get`. Estimated snapshot p50 reduction: 50s → 10-15s at c=4 (limited by SSD bandwidth at concurrency=4 × 2GB = 8GB).
+
+### [R7-P2] `TieredSnapshotStore::put` detaches L2 GCS via `compio::runtime::spawn` (not `spawn_blocking`) (IMPORTANT, performance-r7)
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:832`
+- **Symptom**: 1GB GCS PUT runs on a regular compio task, parking a runtime worker. While next snapshot's `ch.snapshot` writes the same SSD, the L2 PUT competes for both compio worker + SSD bandwidth.
+- **Action**: change `spawn(...)` → `spawn_blocking(...)`. Frees the compio worker; SSD still contends, but compio scheduler can serve `/livez` etc.
