@@ -10,6 +10,7 @@
 //! that already do the work. The point of this file is to *name the
 //! seam*, not to relocate every line of SQL.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::diff::LiveSchema;
@@ -17,7 +18,7 @@ use crate::error::DbError;
 
 use super::{
     AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
-    PgLockManager, PgSqlExecutor, SchemaIntrospect, SqlExecutor,
+    PgLockManager, PgSqlExecutor, SchemaIntrospect, SqlExecutor, VectorIndex, VectorMetric,
 };
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
@@ -32,6 +33,18 @@ pub struct PostgresBackend {
     /// `db.beginTransaction()` and `migrationBegin` paths that need a
     /// connection that survives across pool-return points).
     url: String,
+    /// **P4 PR 2** — cached pgvector extension presence probe.
+    ///
+    /// `None` before the first call to [`VectorIndex::ensure_vector_index`]
+    /// or [`VectorIndex::vector_search`]; `Some(true)` / `Some(false)`
+    /// after the first `SELECT 1 FROM pg_extension WHERE extname='vector'`
+    /// round-trip. The probe is per-backend (so per-isolate, since each
+    /// isolate carries its own `PostgresBackend` Rc) and stays cached
+    /// for the life of the backend — pgvector is provisioned at admin
+    /// time and never disappears mid-process. `RefCell` (not `Mutex`)
+    /// because every `PostgresBackend` is owned by a single
+    /// compio thread.
+    pgvector_available: RefCell<Option<bool>>,
 }
 
 impl std::fmt::Debug for PostgresBackend {
@@ -43,7 +56,11 @@ impl std::fmt::Debug for PostgresBackend {
 impl PostgresBackend {
     /// Build a backend handle around an already-initialised pool.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
-        Self { pool, url }
+        Self {
+            pool,
+            url,
+            pgvector_available: RefCell::new(None),
+        }
     }
 
     /// Borrow the inner pool. Provided for the few places that still
@@ -267,6 +284,163 @@ impl AuditWriter for PostgresBackend {
     ) -> Result<(), DbError> {
         crate::audit::write_audit_row(self.pool.as_ref(), app_id, row).await?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VectorIndex — P4 PR 2 (pgvector adapter)
+// ---------------------------------------------------------------------------
+//
+// Two methods:
+//   * `ensure_vector_index` — `CREATE INDEX CONCURRENTLY ... USING ivfflat`
+//      routed through the existing audited CIC retry loop so failures
+//      land in `__zeroship_migrations` like any other index build.
+//   * `vector_search` — `SELECT *, col <op> $1::vector AS _distance
+//      FROM ... ORDER BY col <op> $1::vector LIMIT $2` via `build_vector_search`.
+//
+// Both probe `pg_extension WHERE extname='vector'` on first call and
+// cache the result on `pgvector_available`. Probe absence surfaces as
+// `DbError::Configuration { code: "vector_extension_missing", ... }`.
+// ---------------------------------------------------------------------------
+
+impl PostgresBackend {
+    /// Check (and cache) whether the `vector` extension is installed on
+    /// the connected database. The probe runs at most once per backend
+    /// instance — pgvector is provisioned at admin time and stays present
+    /// for the life of the process.
+    ///
+    /// Returns `Ok(())` when present; `Err(DbError::Configuration)` with
+    /// code `vector_extension_missing` otherwise. Connection failures
+    /// during the probe surface as `DbError::Transient` so callers can
+    /// distinguish "extension missing" from "database unreachable".
+    async fn ensure_pgvector_available(&self) -> Result<(), DbError> {
+        // Fast path: cached result.
+        if let Some(present) = *self.pgvector_available.borrow() {
+            if present {
+                return Ok(());
+            }
+            return Err(DbError::config_hinted(
+                "vector_extension_missing",
+                "pgvector is not installed on this database",
+                "run `CREATE EXTENSION vector;` (Postgres superuser) or \
+                 swap the database image to `pgvector/pgvector:pg16` \
+                 (see docs/runbooks/docker-compose.md)",
+            ));
+        }
+
+        let empty: Vec<&str> = Vec::new();
+        let rows = self
+            .pool
+            .query_text_params("SELECT 1 FROM pg_extension WHERE extname='vector'", &empty)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        let present = !rows.is_empty();
+        *self.pgvector_available.borrow_mut() = Some(present);
+        if present {
+            Ok(())
+        } else {
+            Err(DbError::config_hinted(
+                "vector_extension_missing",
+                "pgvector is not installed on this database",
+                "run `CREATE EXTENSION vector;` (Postgres superuser) or \
+                 swap the database image to `pgvector/pgvector:pg16` \
+                 (see docs/runbooks/docker-compose.md)",
+            ))
+        }
+    }
+}
+
+impl VectorIndex for PostgresBackend {
+    async fn ensure_vector_index(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        dims: i32,
+        metric: VectorMetric,
+    ) -> Result<(), DbError> {
+        // Probe first — building an ivfflat index against a database
+        // without pgvector would fail with a less actionable SQLSTATE.
+        self.ensure_pgvector_available().await?;
+
+        // Opclass per metric — see `VectorMetric` rustdoc for the
+        // operator/opclass mapping.
+        let opclass = match metric {
+            VectorMetric::Cosine => "vector_cosine_ops",
+            VectorMetric::L2 => "vector_l2_ops",
+            VectorMetric::InnerProduct => "vector_ip_ops",
+        };
+
+        // Same naming convention as `crate::query::index_name(collection,
+        // &[col], false)` — we route through the existing audited CIC
+        // retry loop, so the spec we synthesise must follow the same
+        // identifier shape `apply.rs` and the audit log expect.
+        let idx_name = crate::query::index_name(collection, &[column], /* unique = */ false);
+        let sql = format!(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {}.{} USING ivfflat ({} {}) WITH (lists = 100)",
+            self.quote_ident(&idx_name),
+            self.quote_ident(app_id),
+            self.quote_ident(collection),
+            self.quote_ident(column),
+            opclass,
+        );
+
+        let spec = crate::query::IndexSpec {
+            name: idx_name,
+            columns: vec![column.to_string()],
+            unique: false,
+            sql,
+            kind: crate::query::IndexKind::Vector { dims, metric },
+        };
+
+        // Reuse the audited retry loop — pgvector index builds inherit
+        // the same INVALID-on-cancel / data-violation / transient
+        // classification machinery as every other CIC on the platform.
+        // `deploy_id` is `'p4_vector_index'` because `ensure_vector_index`
+        // can be called outside the deploy orchestrator (PR 2 wires it
+        // via `register_model::apply`, but the trait surface must stay
+        // callable from a standalone migration script too); the audit
+        // schema accepts arbitrary deploy ids and the `apply.rs` Pass-2
+        // caller overrides this when it routes through the trait.
+        create_index_with_recovery_audited(
+            &self.pool,
+            app_id,
+            collection,
+            &spec,
+            "p4_vector_index",
+            0,
+        )
+        .await
+    }
+
+    async fn vector_search(
+        &self,
+        app_id: &str,
+        collection: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        metric: VectorMetric,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        // Probe so a missing extension surfaces with the same typed
+        // error shape `ensure_vector_index` produces — the SDK branches
+        // on `e.code === "vector_extension_missing"` regardless of
+        // which entry point fired.
+        self.ensure_pgvector_available().await?;
+
+        let bq = crate::query::build_vector_search(
+            app_id, collection, column, query, k, metric, filter,
+        )
+        .map_err(DbError::from)?;
+
+        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        let rows = self
+            .pool
+            .query_text_params(&bq.sql, &param_refs)
+            .await
+            .map_err(|e| DbError::from_pg(&e))?;
+        Ok(crate::v8_bridge::rows_to_json_value(&rows))
     }
 }
 

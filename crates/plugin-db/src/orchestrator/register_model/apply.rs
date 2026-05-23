@@ -23,9 +23,10 @@ use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
-use crate::backend::{IndexBuilder, LockGuard, PgSqlExecutor};
+use crate::backend::{IndexBuilder, LockGuard, PgSqlExecutor, VectorIndex};
 use crate::diff::{ChangeClass, ChangeKind, DiffOp};
 use crate::error::DbError;
+use crate::query::IndexKind;
 
 /// Run stage 4.
 ///
@@ -41,7 +42,7 @@ use crate::error::DbError;
 /// `IndexBuilder` carries the `create_index_with_recovery` call used
 /// by Pass 2. See `docs/proposals/p0-implementation-plan.md` §"PR 2"
 /// and `docs/proposals/db-system-design.md` §7.
-pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder>(
+pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder + VectorIndex>(
     backend: &B,
     ctx: RegisterContext,
     lock_guard: LockGuard<'p>,
@@ -144,22 +145,69 @@ pub(crate) async fn apply<'p, B: PgSqlExecutor + IndexBuilder>(
                     })
                     .cloned();
                 if let Some(spec) = spec_owned {
-                    // `create_index_with_recovery` returns a typed
-                    // `DbError`. `SchemaRefused` carries the JSON
-                    // envelope the SDK already consumes via
-                    // `JSON.parse`, `UniqueViolation`/`Transient`/…
-                    // flow through the standard SQLSTATE classification,
-                    // and `Configuration` surfaces invariant breaches.
-                    // No wrapping or string-rail bridging required.
-                    backend
-                        .create_index_with_recovery(
-                            &app_id,
-                            &op.collection,
-                            &spec,
-                            &deploy_id,
-                            schema_version,
-                        )
-                        .await
+                    // **P4 PR 2** — dispatch on `IndexKind`. The default
+                    // BTree branch routes through the existing audited
+                    // CIC retry loop; the Vector branch calls into the
+                    // pgvector adapter, which builds its own
+                    // metric-appropriate DDL and reuses the same retry
+                    // machinery internally. Fts/Spatial land in PR 3.
+                    match &spec.kind {
+                        IndexKind::BTree => {
+                            // `create_index_with_recovery` returns a typed
+                            // `DbError`. `SchemaRefused` carries the JSON
+                            // envelope the SDK already consumes via
+                            // `JSON.parse`, `UniqueViolation`/`Transient`/…
+                            // flow through the standard SQLSTATE
+                            // classification, and `Configuration`
+                            // surfaces invariant breaches. No wrapping
+                            // or string-rail bridging required.
+                            backend
+                                .create_index_with_recovery(
+                                    &app_id,
+                                    &op.collection,
+                                    &spec,
+                                    &deploy_id,
+                                    schema_version,
+                                )
+                                .await
+                        }
+                        IndexKind::Vector { dims, metric } => {
+                            // The Vector branch calls into the pgvector
+                            // adapter, which builds the metric-specific
+                            // `USING ivfflat (col vector_<m>_ops)` DDL
+                            // itself. `column` is derivable from
+                            // `spec.columns[0]` (vector indexes are
+                            // always single-column).
+                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
+                            backend
+                                .ensure_vector_index(
+                                    &app_id,
+                                    &op.collection,
+                                    column,
+                                    *dims,
+                                    *metric,
+                                )
+                                .await
+                        }
+                        IndexKind::Fts { .. } | IndexKind::Spatial => {
+                            // FTS / Spatial dispatch lands in P4 PR 3.
+                            // Surface as a configuration error so a
+                            // build that emits one of these specs
+                            // today gets a clear refusal rather than
+                            // silently no-opping.
+                            Err(DbError::Configuration {
+                                code: "index_kind_pending",
+                                message: format!(
+                                    "db: {:?} index kind is not yet implemented (P4 PR 3+)",
+                                    spec.kind
+                                ),
+                                hint: Some(
+                                    "FTS/Spatial dispatch lands in P4 PR 3 (PG) / PR 5 (SQLite)"
+                                        .to_string(),
+                                ),
+                            })
+                        }
+                    }
                 } else {
                     Ok(())
                 }

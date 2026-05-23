@@ -535,6 +535,52 @@ pub fn build_create_indexes(
     let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
 
     for (field, def) in obj {
+        // **P4 PR 2** — vector fields always emit an `IndexKind::Vector`
+        // spec regardless of the `index`/`unique` markers; the SDK's
+        // `t.vector()` builder doesn't expose those modifiers (they
+        // would be meaningless on an ivfflat-indexed column). The
+        // builder dispatches to `VectorIndex::ensure_vector_index` in
+        // `register_model::apply` Pass 2 — the `sql` field stays empty
+        // because the impl builds the DDL itself (it needs the
+        // metric-specific opclass that isn't carried in the spec).
+        if def.get("type").and_then(|t| t.as_str()) == Some("vector") {
+            let dims = def
+                .get("vectorDims")
+                .and_then(serde_json::Value::as_i64)
+                .filter(|d| *d > 0 && *d <= 16000)
+                .map(|d| d as i32)
+                .unwrap_or(0);
+            if dims == 0 {
+                // Malformed — skip the index. The column DDL emitter
+                // will reject the table later (PG returns
+                // `type "vector" does not exist` if the extension is
+                // missing or `dims out of range` if dims is 0).
+                continue;
+            }
+            let metric_str = def
+                .get("vectorMetric")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("cosine");
+            let metric = match metric_str {
+                "l2" => crate::backend::VectorMetric::L2,
+                "innerProduct" | "ip" => crate::backend::VectorMetric::InnerProduct,
+                _ => crate::backend::VectorMetric::Cosine,
+            };
+            let name = index_name(collection, &[field.as_str()], /* unique = */ false);
+            out.push(IndexSpec {
+                name,
+                columns: vec![field.clone()],
+                unique: false,
+                // The impl builds the DDL with the metric-appropriate
+                // opclass; leave empty so an accidental BTree dispatch
+                // would be a recognisable no-op rather than a stray
+                // statement.
+                sql: String::new(),
+                kind: IndexKind::Vector { dims, metric },
+            });
+            continue;
+        }
+
         let wants_index = def.get("index").and_then(|v| v.as_bool()) == Some(true);
         let wants_unique = def.get("unique").and_then(|v| v.as_bool()) == Some(true);
 
@@ -772,7 +818,27 @@ fn short_hash_base32(input: &str) -> String {
 /// Validates the field name via [`validate_field_name`] before emitting DDL.
 fn field_to_column(field: &str, def: &serde_json::Value) -> Result<String, QueryError> {
     validate_field_name(field)?;
-    let pg_type = def_to_pg_type(def);
+    let pg_type_owned;
+    let pg_type: &str = if def.get("type").and_then(|t| t.as_str()) == Some("vector") {
+        // **P4 PR 2** — pgvector column type is parameterised by dims:
+        // `vector(768)`. The SDK validates `vectorDims` is `1..=16000`
+        // before sending; we treat a missing field as a schema bug and
+        // fall back to bare `vector` (PG will then reject the DDL with
+        // a typed error the SDK can surface).
+        let dims = def
+            .get("vectorDims")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|d| *d > 0 && *d <= 16000)
+            .unwrap_or(0);
+        if dims > 0 {
+            pg_type_owned = format!("vector({dims})");
+            &pg_type_owned
+        } else {
+            "vector"
+        }
+    } else {
+        def_to_pg_type(def)
+    };
     let constraints = def_to_constraints(field, def);
     Ok(format!("{} {} {}", quote_ident(field), pg_type, constraints).trim().to_string())
 }
@@ -926,6 +992,14 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
+        // **P4 PR 2** — `t.vector(dims)` maps to pgvector's `vector(N)`.
+        // Returning the bare `"vector"` token would lose the dims, so
+        // this arm is unused; column DDL composes the dims back in via
+        // [`def_to_pg_type_with_dims`]. Kept here to keep the
+        // enumeration exhaustive at the type-vocabulary level — a
+        // future caller that ignores dims (e.g. a generic introspection
+        // path) gets the un-parameterised type.
+        Some("vector") => "vector",
         // `t.number()` maps to DOUBLE PRECISION (FLOAT8). JS `number`
         // is an IEEE-754 double, so this is the exact 1:1 mapping.
         // NUMERIC would be more precise but compio-postgres' text-out
@@ -1763,6 +1837,98 @@ pub fn build_distinct(
         sql.push_str(&where_clause);
     }
     sql.push_str(&format!(" ORDER BY {col}"));
+
+    Ok(BuiltQuery { sql, params })
+}
+
+/// **P4 PR 2** — Build a pgvector nearest-neighbour search query.
+///
+/// Emits the canonical pgvector shape (plan §3.1):
+///
+/// ```sql
+/// SELECT *, "<col>" <op> $1::vector AS _distance
+///   FROM "<app>"."<coll>"
+///  [WHERE <filter-lowered>]
+///  ORDER BY "<col>" <op> $1::vector
+///  LIMIT $2
+/// ```
+///
+/// `<op>` is the pgvector operator per metric: `<->` L2, `<=>` Cosine,
+/// `<#>` InnerProduct (negated). The query vector is bound as a text
+/// literal `[1,2,3,...]` cast `::vector` — pgvector parses the text on
+/// cast, sidestepping the binary-protocol type-discovery handshake
+/// (the `vector` type's OID is allocated at extension-install time and
+/// not known to the driver at compile time).
+///
+/// `k` is bound as the second parameter (the LIMIT), keyed to JS-side
+/// validation; impls may want to clamp before calling, but this builder
+/// is permissive.
+///
+/// The filter is composed by the standard [`build_where`] helper — the
+/// same machinery `build_find` uses. `$1` is reserved for the query
+/// vector and `$2` for `k`; the filter's own placeholders start from
+/// `$3` because [`build_where`] always allocates fresh numbers from
+/// the `params` length.
+pub(crate) fn build_vector_search(
+    app_id: &str,
+    collection: &str,
+    column: &str,
+    query: &[f32],
+    k: usize,
+    metric: crate::backend::VectorMetric,
+    filter: &Value,
+) -> Result<BuiltQuery, QueryError> {
+    validate_collection(collection)?;
+    validate_schema(app_id)?;
+    validate_field_name(column)?;
+
+    let schema = quote_ident(app_id);
+    let table = quote_ident(collection);
+    let col = quote_ident(column);
+
+    // pgvector operator per metric — see `crate::backend::VectorMetric`
+    // doc-comment for the operator/opclass mapping.
+    let op = match metric {
+        crate::backend::VectorMetric::Cosine => "<=>",
+        crate::backend::VectorMetric::L2 => "<->",
+        crate::backend::VectorMetric::InnerProduct => "<#>",
+    };
+
+    // Render the query vector as a pgvector text literal: `[1,2,3,...]`.
+    // We bind it as `$1` and cast to `::vector` on both the SELECT and
+    // ORDER BY sides so pgvector parses once. Float formatting uses
+    // Rust's `{}` (shortest-round-trip) — pgvector's text parser
+    // accepts the same form Postgres' float8 input does.
+    let mut vec_lit = String::with_capacity(query.len() * 8 + 2);
+    vec_lit.push('[');
+    for (i, v) in query.iter().enumerate() {
+        if i > 0 {
+            vec_lit.push(',');
+        }
+        // Use shortest-round-trip f32 → string. f32 has 24 bits of
+        // mantissa, so 9 significant digits round-trip exactly; the
+        // default Display impl picks the shortest unambiguous form.
+        vec_lit.push_str(&v.to_string());
+    }
+    vec_lit.push(']');
+
+    // Param 1: vector literal. Param 2: k. The filter's own params
+    // (rendered into `build_where`'s `params` vec) start at $3 because
+    // we pre-push two entries before invoking the helper.
+    let mut params: Vec<String> = Vec::with_capacity(2 + 4);
+    params.push(vec_lit);
+    params.push(k.to_string());
+
+    let where_clause = build_where(filter, &mut params)?;
+
+    let mut sql = format!(
+        "SELECT *, {col} {op} $1::vector AS _distance FROM {schema}.{table}"
+    );
+    if !where_clause.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clause);
+    }
+    sql.push_str(&format!(" ORDER BY {col} {op} $1::vector LIMIT $2"));
 
     Ok(BuiltQuery { sql, params })
 }

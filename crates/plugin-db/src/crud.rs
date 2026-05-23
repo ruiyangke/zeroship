@@ -532,6 +532,230 @@ pub(crate) fn dispatch_upsert<'s>(
     promise
 }
 
+// ---------------------------------------------------------------------------
+// search — vector / FTS unified entry point (P4)
+// ---------------------------------------------------------------------------
+
+/// Shared dispatch for `collection.search(args)` — the P4 unified
+/// search entry. Inspects `args` for a discriminator key:
+///
+/// - `{ vector, k?, metric?, column?, filter? }` → pgvector
+///   `VectorIndex::vector_search` (PG); SQLite returns a typed
+///   `vector_unsupported` configuration error (PR 4 lands the SQLite
+///   impl).
+/// - `{ text, ... }` → reserved for P4 PR 3 FTS. PR 2 returns a typed
+///   `fts_unsupported` until PR 3 lands.
+///
+/// Resolves with a JSON array of rows; each row carries the
+/// `_distance` synthetic column from pgvector. Errors are coded
+/// (`vector_extension_missing` / `vector_unsupported` / standard
+/// SQLSTATE) so the SDK can branch on `e.code`.
+pub(crate) fn dispatch_search<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: &str,
+    collection: &str,
+    args: Value,
+) -> v8::Local<'s, v8::Promise> {
+    use zeroship_runtime::state::OpError;
+
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    // Discriminator: presence of `vector` selects the pgvector path.
+    let has_vector = args.get("vector").is_some();
+    let has_text = args.get("text").is_some();
+
+    if !has_vector && !has_text {
+        // Reject synchronously via the typed error path so the SDK sees
+        // a coded error rather than a hang. Use `Configuration` because
+        // the failure is shape-level, not data-level.
+        let err = DbError::Configuration {
+            code: "invalid_search_args",
+            message: "search: args must include `vector` (P4 PR 2) or `text` (P4 PR 3+)"
+                .to_string(),
+            hint: Some(
+                "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
+                    .to_string(),
+            ),
+        };
+        let op_err: OpError = err.to_op_error();
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            zeroship_runtime::state::OpResult::JsValue {
+                resolver,
+                value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                request_id,
+            }
+        }));
+        return promise;
+    }
+
+    if has_text && !has_vector {
+        // FTS path — PR 3.
+        let err = DbError::Configuration {
+            code: "fts_unsupported",
+            message: "search({text}) is not yet implemented (P4 PR 3+)".to_string(),
+            hint: Some("text search lands in P4 PR 3".to_string()),
+        };
+        let op_err: OpError = err.to_op_error();
+        state.borrow_mut().spawned_ops.push(Box::pin(async move {
+            zeroship_runtime::state::OpResult::JsValue {
+                resolver,
+                value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                request_id,
+            }
+        }));
+        return promise;
+    }
+
+    // Vector branch.
+    //
+    // Decode `vector` into `Vec<f32>`. Reject anything that's not a
+    // homogeneous number array at the boundary so the impl can stay
+    // typed.
+    let vector: Vec<f32> = match args.get("vector").and_then(Value::as_array) {
+        Some(arr) => {
+            let mut v: Vec<f32> = Vec::with_capacity(arr.len());
+            for elem in arr {
+                if let Some(n) = elem.as_f64() {
+                    v.push(n as f32);
+                } else {
+                    let err = DbError::Configuration {
+                        code: "invalid_vector_arg",
+                        message: "search: every element of `vector` must be a number"
+                            .to_string(),
+                        hint: None,
+                    };
+                    let op_err: OpError = err.to_op_error();
+                    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                        zeroship_runtime::state::OpResult::JsValue {
+                            resolver,
+                            value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                            request_id,
+                        }
+                    }));
+                    return promise;
+                }
+            }
+            v
+        }
+        None => {
+            let err = DbError::Configuration {
+                code: "invalid_vector_arg",
+                message: "search: `vector` must be an array of numbers".to_string(),
+                hint: None,
+            };
+            let op_err: OpError = err.to_op_error();
+            state.borrow_mut().spawned_ops.push(Box::pin(async move {
+                zeroship_runtime::state::OpResult::JsValue {
+                    resolver,
+                    value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
+                    request_id,
+                }
+            }));
+            return promise;
+        }
+    };
+
+    let k = args
+        .get("k")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or(10);
+    let metric_str = args
+        .get("metric")
+        .and_then(Value::as_str)
+        .unwrap_or("cosine");
+    let metric = match metric_str {
+        "l2" => crate::backend::VectorMetric::L2,
+        "innerProduct" | "ip" => crate::backend::VectorMetric::InnerProduct,
+        _ => crate::backend::VectorMetric::Cosine,
+    };
+    let column = args
+        .get("column")
+        .and_then(Value::as_str)
+        .unwrap_or("embedding")
+        .to_string();
+    let filter = args
+        .get("filter")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    let app = app_id.to_string();
+    let coll = collection.to_string();
+
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        // Reach the backend through the per-isolate context. The
+        // dispatch helper isn't generic over the backend; runtime
+        // wiring stashes a `BackendHandle` per isolate that we route
+        // through the existing `as_postgres()` accessor.
+        let backend = crate::context::with(|c| c.backend());
+        let result: Result<Vec<Value>, DbError> = async {
+            let backend = backend.ok_or_else(|| {
+                DbError::config("not_configured", "db: backend not initialized".to_string())
+            })?;
+            #[allow(unused_variables)]
+            let pg_path = || async {
+                #[cfg(feature = "pg")]
+                {
+                    let pg = backend
+                        .as_postgres()
+                        .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
+                    use crate::backend::VectorIndex as _;
+                    return pg
+                        .vector_search(&app, &coll, &column, &vector, k, metric, &filter)
+                        .await;
+                }
+                #[cfg(not(feature = "pg"))]
+                {
+                    Err(DbError::Configuration {
+                        code: "vector_unsupported",
+                        message:
+                            "db: vector search requires the `pg` Cargo feature on this build"
+                                .to_string(),
+                        hint: Some(
+                            "rebuild with `--features pg` or use the SQLite arm (P4 PR 4)"
+                                .to_string(),
+                        ),
+                    })
+                }
+            };
+            // SQLite arm — surface a typed error until P4 PR 4 lands
+            // the pure-Rust flat-scan impl.
+            #[cfg(feature = "sqlite")]
+            {
+                if backend.as_sqlite().is_some() {
+                    return Err(DbError::Configuration {
+                        code: "vector_unsupported",
+                        message:
+                            "db: vector search is not implemented on the SQLite backend yet"
+                                .to_string(),
+                        hint: Some("SQLite vector lands in P4 PR 4".to_string()),
+                    });
+                }
+            }
+            pg_path().await
+        }
+        .await;
+
+        match result {
+            Ok(rows) => zeroship_runtime::state::OpResult::JsValue {
+                resolver,
+                value: zeroship_runtime::state::ResolveValue::Json(
+                    Value::Array(rows).to_string(),
+                ),
+                request_id,
+            },
+            Err(e) => zeroship_runtime::state::OpResult::JsValue {
+                resolver,
+                value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
+                request_id,
+            },
+        }
+    }));
+
+    promise
+}
+
 /// Shared dispatch for `findOrCreate`. Same SQL shape as upsert except
 /// the ON CONFLICT branch is a no-op self-assignment (so RETURNING
 /// fires without mutating the row) and the RETURNING list appends

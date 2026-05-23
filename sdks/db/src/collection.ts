@@ -1136,4 +1136,103 @@ export class Collection<
     });
   }
 
+  /**
+   * **P4 PR 2** — vector-nearest-neighbour search. Returns the `k`
+   * closest rows (default 10) ordered by distance ascending; each row
+   * carries a synthetic `_distance` field carrying the metric-specific
+   * distance value.
+   *
+   * ```ts
+   * const { data } = await db.docs.search({
+   *   vector: queryEmbedding,   // number[] (length must match the
+   *                              //          column's declared dims)
+   *   k: 5,
+   *   metric: "cosine",         // default; "l2" / "innerProduct" also
+   *                              // supported
+   *   column: "embedding",      // default — the vector column name
+   *   filter: { language: "en" },// optional WHERE clause
+   * });
+   * ```
+   *
+   * Backend coverage:
+   * - **PG** — routes to pgvector via `VectorIndex::vector_search`.
+   *   Errors: `vector_extension_missing` when the database lacks the
+   *   `vector` extension (typed `Error.code`); standard SQLSTATE codes
+   *   for query-time failures.
+   * - **SQLite** — surfaces `vector_unsupported` until P4 PR 4 lands
+   *   the pure-Rust flat-scan impl.
+   *
+   * **FTS** (`{ text }`) lands in P4 PR 3.
+   */
+  async search(
+    args:
+      | {
+          vector: number[];
+          k?: number;
+          metric?: import("./types.js").VectorMetric;
+          column?: string;
+          filter?: Filter<S>;
+        }
+      | { text: string; k?: number; filter?: Filter<S> },
+  ): Promise<Result<(Row<S> & { _distance?: number; _rank?: number })[]>> {
+    trackCollectionAccess(this._name);
+    return this._run(async () => {
+      // Discriminator: presence of `vector` selects the pgvector path;
+      // `text` is reserved for FTS in PR 3. The native side does the
+      // real dispatch — we keep the SDK layer thin.
+      const nativeArgs: {
+        vector?: number[];
+        text?: string;
+        k?: number;
+        metric?: import("./types.js").VectorMetric;
+        column?: string;
+        filter?: ZeroshipDbFilter;
+      } = {};
+      if ("vector" in args && args.vector !== undefined) {
+        if (!Array.isArray(args.vector)) {
+          throw new ValidationError({
+            vector: { path: "vector", message: "search: `vector` must be a number[]" },
+          });
+        }
+        nativeArgs.vector = args.vector;
+        if (args.metric !== undefined) nativeArgs.metric = args.metric;
+        if (args.column !== undefined) {
+          // Map JS field name → DB column name so the native side sees
+          // the same identifier the DDL emitted.
+          nativeArgs.column = this._toColumn(args.column);
+        }
+      } else if ("text" in args && args.text !== undefined) {
+        nativeArgs.text = args.text;
+      } else {
+        throw new ValidationError({
+          args: {
+            path: "args",
+            message: "search: args must include `vector` (P4 PR 2) or `text` (P4 PR 3+)",
+          },
+        });
+      }
+      if (args.k !== undefined) nativeArgs.k = args.k;
+      if (args.filter !== undefined) {
+        const mapped = this._mergeFilter(
+          mapFilterOutbound(args.filter as ZeroshipDbFilter, this._toColumn),
+        );
+        nativeArgs.filter = mapped;
+      } else if (this._softDelete) {
+        // Even without an explicit filter, soft-deleted rows must stay
+        // hidden — mirror the read-path defaults.
+        nativeArgs.filter = this._mergeFilter({});
+      }
+      const results = await this._nativeCollection().search(nativeArgs);
+      // Map column names back to JS field names; `_distance` / `_rank`
+      // pass through because they aren't user fields and `_toField` is
+      // a pass-through for unknown columns.
+      return (results ?? []).map(
+        (d) => mapResultDoc(d as PlainObject, this._toField) as Row<S> & {
+          _distance?: number;
+          _rank?: number;
+        },
+      );
+    });
+  }
+
 }

@@ -16,8 +16,8 @@ use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8
 use crate::crud::{
     dispatch_aggregate, dispatch_count, dispatch_delete_many, dispatch_delete_one,
     dispatch_distinct, dispatch_find, dispatch_find_one, dispatch_find_or_create,
-    dispatch_insert, dispatch_insert_many, dispatch_update_many, dispatch_update_one,
-    dispatch_upsert,
+    dispatch_insert, dispatch_insert_many, dispatch_search, dispatch_update_many,
+    dispatch_update_one, dispatch_upsert,
 };
 use crate::v8_bridge::{read_json_arg, refuse_if_query_capability};
 
@@ -322,6 +322,27 @@ impl Collection {
     ) -> v8::Local<'s, v8::Value> {
         let pipeline_v = read_json_arg(scope, Some(pipeline));
         dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v).into()
+    }
+
+    /// `collection.search(args)` — **P4 PR 2** vector / FTS search.
+    ///
+    /// `args` is a discriminated union:
+    /// - `{ vector: number[], k?: number, metric?, column?, filter? }`
+    ///   — pgvector nearest-neighbour search. Resolves with a row
+    ///   array; each row carries a synthetic `_distance` field.
+    /// - `{ text, ... }` — reserved for P4 PR 3 FTS (rejects with
+    ///   `fts_unsupported` until that PR lands).
+    ///
+    /// Routes to [`dispatch_search`] which inspects the discriminator
+    /// and dispatches to the appropriate backend impl.
+    #[v8_method]
+    fn search<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        args: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        let args_v = read_json_arg(scope, Some(args));
+        dispatch_search(scope, &self.app_id, &self.name, args_v).into()
     }
 
     /// `collection.openSubscription()` — returns a

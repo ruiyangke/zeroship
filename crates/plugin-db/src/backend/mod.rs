@@ -1398,6 +1398,7 @@ pub trait RegisterBackend:
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
     + IndexBuilder
     + PgLockManager
+    + VectorIndex
 {
 }
 
@@ -1408,6 +1409,7 @@ impl<T> RegisterBackend for T where
         + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
         + IndexBuilder
         + PgLockManager
+        + VectorIndex
 {
 }
 

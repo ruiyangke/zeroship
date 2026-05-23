@@ -248,6 +248,21 @@ interface ZeroshipCollection {
   /** Run an aggregation pipeline. Returns the result rows. */
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<Record<string, unknown>[]>;
 
+  /**
+   * **P4 PR 2** — unified vector / FTS search entry. Discriminated by
+   * `args.vector` (pgvector path) or `args.text` (FTS — PR 3). Each
+   * returned row carries a synthetic `_distance` (vector) or `_rank`
+   * (FTS) column.
+   */
+  search(args: {
+    vector?: number[];
+    text?: string;
+    k?: number;
+    metric?: "cosine" | "l2" | "innerProduct";
+    column?: string;
+    filter?: ZeroshipDbFilter;
+  }): Promise<Record<string, unknown>[]>;
+
   /** Open a subscription bound to this collection. */
   openSubscription(): ZeroshipSubscription;
 }

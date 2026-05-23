@@ -346,7 +346,20 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  * "literal" (C2 discriminator constant), and "union" (C2 discriminated
  * union document shape — proposal §C2).
  */
-export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union";
+export type TypeName = PrimitiveTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector";
+
+/**
+ * **P4 PR 2** — distance metric for `t.vector(...)` fields. The three
+ * metrics map 1:1 to pgvector operator classes (`vector_cosine_ops`,
+ * `vector_l2_ops`, `vector_ip_ops`) and to the matching `VectorMetric`
+ * variants on the Rust side.
+ *
+ * - `cosine` — Cosine distance. Default for L2-normalised embeddings.
+ * - `l2` — Euclidean (L2) distance.
+ * - `innerProduct` — Negative inner product (negated so smaller-is-better
+ *   holds across all three metrics).
+ */
+export type VectorMetric = "cosine" | "l2" | "innerProduct";
 
 /** Union of all values that can serve as a field default. */
 export type FieldDefaultValue = string | number | boolean | Date | null | PlainObject | string[] | number[] | boolean[];
@@ -466,6 +479,20 @@ export interface FieldDef {
    *   shape map needed for CHECK emission".
    */
   discriminator?: string;
+  /**
+   * **P4 PR 2** — declared dimensionality of a `t.vector(...)` field.
+   * Present iff `type === "vector"`. The DDL emitter (PG arm) renders
+   * `vector(N)` with this value; the index emitter routes through
+   * `VectorIndex::ensure_vector_index`. Range: `1..=16000` (pgvector
+   * hard ceiling).
+   */
+  vectorDims?: number;
+  /**
+   * **P4 PR 2** — distance metric for a `t.vector(...)` field. Present
+   * iff `type === "vector"`. Selects the pgvector opclass for the
+   * ivfflat index and the operator for ORDER BY at search time.
+   */
+  vectorMetric?: VectorMetric;
 }
 
 /**
@@ -682,6 +709,52 @@ export const t = {
       nested[key] = { ...val.toFieldDef() };
     }
     return new TypeBuilder<InferSchema<S>>({ type: "object", shape: nested });
+  },
+  /**
+   * **P4 PR 2** — vector embedding field. Stored as pgvector's
+   * `vector(N)` column type on PG; the runtime materialises a matching
+   * ivfflat index per the chosen metric.
+   *
+   * ```ts
+   * embedding: t.vector(1536), // OpenAI text-embedding-3-small
+   * embedding: t.vector(768, { metric: "l2" }),
+   * ```
+   *
+   * **Dim range**: 1..=16000 (pgvector hard ceiling). Out-of-range
+   * values throw synchronously at schema-definition time with code
+   * `vector_invalid_dims`.
+   *
+   * **Default metric**: `"cosine"` — the convention for normalised
+   * embedding models (OpenAI, Cohere, …). Override via
+   * `{ metric: "l2" | "innerProduct" }`.
+   *
+   * At runtime the column is stored as a typed `number[]`; reads come
+   * back as the same shape. Use `collection.search({ vector, k })` for
+   * nearest-neighbour queries.
+   */
+  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[]> {
+    if (typeof dims !== "number" || !Number.isInteger(dims) || dims < 1 || dims > 16000) {
+      throw Object.assign(
+        new Error(
+          `t.vector(dims): dims must be an integer in 1..=16000 (pgvector hard ceiling), got ${dims}`,
+        ),
+        { code: "vector_invalid_dims" as const },
+      );
+    }
+    const metric: VectorMetric = opts?.metric ?? "cosine";
+    if (metric !== "cosine" && metric !== "l2" && metric !== "innerProduct") {
+      throw Object.assign(
+        new Error(
+          `t.vector(dims, { metric }): metric must be "cosine" | "l2" | "innerProduct", got "${String(metric)}"`,
+        ),
+        { code: "vector_invalid_metric" as const },
+      );
+    }
+    return new TypeBuilder<number[]>({
+      type: "vector",
+      vectorDims: dims,
+      vectorMetric: metric,
+    });
   },
   /**
    * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and
