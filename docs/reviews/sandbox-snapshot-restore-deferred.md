@@ -50,10 +50,6 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Source**: Phase A subagent report (deferred from initial impl)
 - **Scope**: v1 polls only unsigned `/livez`; the signed `/version` fingerprint requires plumbing the per-sandbox signing key out of the sealed record. Mitigates a hypothetical stale-tenant race on v2 cluster-wide restore. Defer until cross-worker restore is on the roadmap.
 
-### [T6] `spawn_idle_eviction_sweep` auto-spawn
-- **Source**: Phase A subagent report
-- **Scope**: function lives in `crates/sandbox/src/sweep.rs` but isn't auto-spawned in `AppState::from_config`. Wire it behind `SANDBOX_IDLE_SNAPSHOT_SECS > 0`. Transient-takeover sweep IS already auto-spawned.
-
 ---
 
 ## MINOR (defer to broader cleanup)

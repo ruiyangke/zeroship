@@ -437,17 +437,21 @@ impl AppState {
         if state.database.is_some() {
             sweep::spawn_transient_state_takeover(state.clone());
         }
-        // Idle eviction needs a real `IdleSnapshotter` to actually
-        // perform snapshots. Wiring the production handler chain
-        // (snapshot_handler::snapshot_sandbox + the worker's
-        // SnapshotStore + RealChRemoteClient + SourceVmOps) is
-        // deferred to the same v2 PR that lands `RealChRemoteClient`.
-        // For v1, leave the sweep dormant — the loop is in tree but
-        // not auto-spawned to avoid silently triggering a not-yet-
-        // implemented snapshot_one. Operators who want to exercise
-        // it call `sweep::spawn_idle_eviction_sweep` from a custom
-        // controller binary with a wrapper around their snapshot
-        // pipeline.
+        // T6: auto-spawn idle eviction sweep. Production now has all
+        // deps wired (snapshot_store + ch_remote + restore_backend
+        // populated above, Backend::lookup_source_vm_ops async lookup
+        // is in tree). `ControllerIdleSnapshotter` bridges the loop's
+        // `IdleSnapshotter` trait to `snapshot_handler::snapshot_sandbox`
+        // + post-snapshot teardown — same chain the admin endpoint
+        // drives. Gate: requires database + snapshot_enabled +
+        // SANDBOX_IDLE_SNAPSHOT_SECS > 0; `spawn_idle_eviction_sweep`
+        // re-checks all three internally and bails out cleanly.
+        if state.database.is_some() && state.config.snapshot_enabled {
+            let snapshotter: Arc<dyn sweep::IdleSnapshotter> = Arc::new(
+                sweep::ControllerIdleSnapshotter::new(state.clone()),
+            );
+            sweep::spawn_idle_eviction_sweep(state.clone(), snapshotter);
+        }
         Ok(state)
     }
 }

@@ -29,12 +29,18 @@
 //! defense-in-depth so a feature-flipped-on-then-off deploy still
 //! recovers any in-flight transients left behind.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use uuid::Uuid;
 
 use crate::db::{Database, SandboxRow, SandboxStatus};
+use crate::snapshot_handler::{
+    self, snap_stage_dir, ChRemoteClient, SnapshotHandlerError, SourceVmOps,
+};
+use crate::snapshot_store::SnapshotStore;
 use crate::AppState;
 
 /// `SANDBOX_IDLE_SNAPSHOT_SWEEP_SECS`. How often the idle-eviction
@@ -233,11 +239,18 @@ pub fn spawn_transient_state_takeover(state: Arc<AppState>) {
 /// row. Kept abstract so the pg-gated tests can substitute a
 /// recording stub without spinning up a fake CH backend.
 ///
-/// Production wires a closure that calls
+/// Production wires [`ControllerIdleSnapshotter`] which calls
 /// `snapshot_handler::snapshot_sandbox` with the controller's
-/// real `SnapshotStore` + `ChRemoteClient` + `SourceVmOps`.
+/// real `SnapshotStore` + `ChRemoteClient` + `SourceVmOps`. Async
+/// because the underlying pipeline is async — making the sweep
+/// loop itself async preserves per-iteration throttling and
+/// shutdown observability that a fire-and-forget sync method would
+/// lose.
 pub trait IdleSnapshotter: Send + Sync {
-    fn snapshot_one(&self, sandbox_id: Uuid) -> Result<(), String>;
+    fn snapshot_one<'a>(
+        &'a self,
+        sandbox_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>>;
 }
 
 /// Simplest fixture: a `Mutex<Vec<Uuid>>` that records the rows the
@@ -249,16 +262,147 @@ pub struct RecordingIdleSnapshotter {
     pub fail: std::sync::atomic::AtomicBool,
 }
 impl IdleSnapshotter for RecordingIdleSnapshotter {
-    fn snapshot_one(&self, sandbox_id: Uuid) -> Result<(), String> {
-        self.seen
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(sandbox_id);
-        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
-            Err("recorder: forced fail".into())
-        } else {
-            Ok(())
-        }
+    fn snapshot_one<'a>(
+        &'a self,
+        sandbox_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>> {
+        Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(sandbox_id);
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("recorder: forced fail".into())
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+/// Production [`IdleSnapshotter`]: bridges the sweep loop to the
+/// real `snapshot_handler::snapshot_sandbox` pipeline.
+///
+/// Holds an `Arc<AppState>` so it can read `backend`, `snapshot_store`,
+/// `ch_remote`, `database`, and `config.snapshot_l1_root` at call time.
+/// Cheap to clone (just bumps the Arc refcount). The sweep loop holds
+/// exactly one `Arc<ControllerIdleSnapshotter>`, plus its own
+/// `Arc<AppState>` — no cycle (the snapshotter never references itself).
+#[allow(missing_debug_implementations)]
+pub struct ControllerIdleSnapshotter {
+    state: Arc<AppState>,
+}
+
+impl ControllerIdleSnapshotter {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+impl IdleSnapshotter for ControllerIdleSnapshotter {
+    fn snapshot_one<'a>(
+        &'a self,
+        sandbox_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>> {
+        Box::pin(async move {
+            // Mirror admin_handlers::snapshot_sandbox preflight: refuse
+            // if the snapshot trio isn't wired. The sweep itself gates
+            // on `state.config.snapshot_enabled` and `database.is_some()`
+            // before spawning, but the store/ch_remote could still be
+            // None in tests that construct AppState directly.
+            let (store, ch, db) = match (
+                self.state.snapshot_store.as_ref(),
+                self.state.ch_remote.as_ref(),
+                self.state.database.as_ref(),
+            ) {
+                (Some(s), Some(c), Some(d)) => (s, c, d),
+                _ => return Err("snapshot wiring incomplete (store/ch/db None)".into()),
+            };
+
+            // Resolve the source VM identity. Mirrors admin handler
+            // pre-CAS lookup so a missing alloc / unreachable Nomad
+            // surfaces with the row still `running`.
+            let handle = match self.state.backend.lookup_source_vm_ops(sandbox_id).await {
+                Ok(h) => h,
+                Err(e) => return Err(format!("lookup_source_vm_ops: {e}")),
+            };
+
+            let stage_dir = snap_stage_dir(
+                &self.state.config.snapshot_l1_root,
+                sandbox_id,
+            );
+            let vm_ops = ResolvedSourceVmOps { handle };
+
+            let outcome = snapshot_handler::snapshot_sandbox(
+                db.as_ref(),
+                store.as_ref() as &dyn SnapshotStore,
+                ch.as_ref() as &dyn ChRemoteClient,
+                &vm_ops,
+                sandbox_id,
+                stage_dir,
+                self.state.config.snapshot_enabled,
+            )
+            .await;
+
+            match outcome {
+                Ok(_) => {
+                    // Best-effort source teardown post-snapshot — same
+                    // shape as the admin handler. A teardown failure
+                    // leaves a runtime-orphan that the next-boot orphan-
+                    // prune sweeps; the pg row is already `snapshotted`.
+                    if let Err(e) = self
+                        .state
+                        .backend
+                        .teardown_source_for_snapshot(sandbox_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            sandbox_id = %sandbox_id,
+                            error = %e,
+                            "sandbox idle-eviction: source teardown failed \
+                             (non-fatal; orphan-prune will reclaim)"
+                        );
+                    }
+                    Ok(())
+                }
+                Err(SnapshotHandlerError::StateMismatch { current }) => {
+                    // Row moved out from under us between idle-query
+                    // and CAS — perfectly normal under load. Not an
+                    // error worth alarming on.
+                    tracing::debug!(
+                        sandbox_id = %sandbox_id,
+                        current,
+                        "sandbox idle-eviction: state moved before CAS (peer raced)"
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(format!("snapshot_sandbox: {e}")),
+            }
+        })
+    }
+}
+
+/// Local adapter mirroring `admin_handlers::ResolvedSourceVmOps`.
+/// Kept private to this module — the admin-handler copy is also
+/// private; duplicating it avoids a pub-export churn for a 20-line
+/// type. The handle is resolved via the async `lookup_source_vm_ops`
+/// before snapshot, so `locate_*` ignore `sandbox_id`.
+struct ResolvedSourceVmOps {
+    handle: crate::backend::nomad_ch::SourceVmOpsHandle,
+}
+
+impl SourceVmOps for ResolvedSourceVmOps {
+    fn locate_api_socket(&self, _sandbox_id: Uuid) -> Option<std::path::PathBuf> {
+        Some(self.handle.api_socket.clone())
+    }
+    fn locate_vm_index(&self, _sandbox_id: Uuid) -> Option<i16> {
+        i16::try_from(self.handle.vm_index).ok()
+    }
+    fn teardown_source(&self, _sandbox_id: Uuid) -> Result<(), String> {
+        // No-op: the async teardown is invoked from `snapshot_one`
+        // after `snapshot_sandbox` returns Ok, mirroring the admin
+        // handler. Keeps the snapshot handler's sync interior pure.
+        Ok(())
     }
 }
 
@@ -314,7 +458,7 @@ pub async fn run_idle_eviction_once(
                     continue;
                 }
             };
-            if let Err(e) = snapshotter.snapshot_one(sid) {
+            if let Err(e) = snapshotter.snapshot_one(sid).await {
                 tracing::warn!(
                     sandbox_id = %r.sandbox_id,
                     error = %e,
