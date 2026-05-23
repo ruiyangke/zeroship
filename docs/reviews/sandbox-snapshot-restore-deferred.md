@@ -544,7 +544,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: when AEAD inactive (no KEK), pg still stamps `snapshot_aead_dek_id="v1"`. Operator audit trail says "encrypted" but artifact is plaintext.
 - **Action**: stamp the actual posture (`"none"` when no KEK; `"v1"` only when `AeadSnapshotStore` wrapped).
 
-### [R9-S4] KEK loader checks mode 0o400 but not owner uid — root controller will load any 0o400 file as KEK (IMPORTANT, security-r9)
+### [R9-S4] (CLOSED at cca1e74d) KEK loader uid check landed
 - **Source**: 2026-05-25 security-r9
 - **File**: KEK loader (locate via `grep -rn "AEAD_KEY_PATH" crates/sandbox/src/`)
 - **Symptom**: a non-root attacker who can pre-create a chmod-400 file at the KEK path before systemd starts can supply a known-key to the controller, breaking confidentiality of all future snapshots.
