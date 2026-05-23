@@ -639,7 +639,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: `crates/sandbox/src/restore_handler.rs::RealRestoreBackend::derive_agent_url` + `crates/sandbox/src/backend/nomad_ch.rs::NomadCHBackend::derive_agent_url`
 - **Action**: add a test that constructs both backends with same inputs + asserts the URLs are byte-equal. Closes the silent-drift risk.
 
-### [R9-T7] (CLOSED at `<R9-T7-COMMIT>`) `init_sandbox_id_from_env` has zero direct tests
+### [R9-T7] (CLOSED at `73a263a2`) `init_sandbox_id_from_env` has zero direct tests
 - **Source**: 2026-05-25 test-coverage-r9
 - **File**: `crates/sandbox-agent/src/handlers.rs`
 - **Resolution**: extracted the parsing slice into `read_sandbox_id_from_sources(fallback_path)` — pure helper, no OnceLock touch, behaviour-identical when called with the production fallback constant. 8 new lib tests pin: env-var happy-path (32-hex), empty-env rejected, arbitrary-string accepted (no shape guard — see R9-T7-FOLLOWUP below), hyphenated UUID accepted (no .simple() normalisation), file-fallback used when env absent (trailing newline trimmed), no-env + missing-file returns Err naming both sources, file-fallback empty-after-trim rejected, and an e2e `init_sandbox_id_from_env` call that asserts OnceLock wiring. Tests serialised via a module-local `Mutex` (`SANDBOX_ID_ENV_LOCK`) with an `EnvGuard` RAII so a panicking test restores the prior env. `cargo test -p zeroship-sandbox-agent --lib`: 231 → 239 (no regression, no flake across two runs).
