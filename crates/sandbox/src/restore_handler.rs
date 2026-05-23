@@ -2084,11 +2084,14 @@ mod real_backend_tests {
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
         let parsed: serde_json::Value = serde_json::from_str(&body_str)
             .unwrap_or_else(|e| panic!("body not valid JSON: {e}: body={body_str:?}"));
-        // R7-S1: sandbox_id field carries the UUID the caller passed.
+        // R7-S1 + B24-FOLLOWUP: sandbox_id field carries the .simple()
+        // form (32-hex, no hyphens) — same canonical form the wrapper
+        // env-injects as SANDBOX_AGENT_SANDBOX_ID and that the agent
+        // boots with. Hyphenated form would 401 the resync.
         assert_eq!(
             parsed["sandbox_id"].as_str().unwrap_or(""),
-            sandbox_id.to_string(),
-            "R7-S1: body must bind the caller-supplied sandbox_id"
+            sandbox_id.simple().to_string(),
+            "R7-S1+B24-FOLLOWUP: body must bind the canonical .simple() form"
         );
         // R7-S1: challenge is a 64-char lowercase hex string (32 random bytes).
         let challenge = parsed["challenge"].as_str().unwrap_or("");
