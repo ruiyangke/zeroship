@@ -137,13 +137,53 @@ pub trait RestoreBackend: Send + Sync {
     /// Best-effort teardown after restore failure: kill the alloc,
     /// release vm_index. Mirrors `SourceVmOps::teardown_source`.
     fn teardown_restore(&self, sandbox_id: Uuid, vm_index: i16);
+
+    /// B19 fix (cluster smoke 2026-05-23 r4): install the restored
+    /// sandbox into the backend's in-memory state map after
+    /// `wait_for_livez` succeeds, so subsequent `exec` / `stop` /
+    /// `delete` calls find it. Pre-B19 this step was missing, so
+    /// post-wake `exec` returned 500 "sandbox not found in nomad-ch
+    /// backend", `stop`/`delete` returned 404, and the vm_index slot
+    /// leaked across the controller's uptime.
+    ///
+    /// `signing_key_bytes` is the 32-byte per-sandbox signing seed
+    /// the handler has already unsealed from `Persistence` before
+    /// calling here. The agent_url is re-derived inside the impl
+    /// (it's a deterministic function of `vm_index` and the
+    /// backend's `subnet_second_octet` config — same shape as
+    /// `wait_for_livez`).
+    ///
+    /// **Default impl is a no-op `Ok(())`** so the in-crate
+    /// `StubRestoreBackend` (test scaffolding) doesn't need to
+    /// implement state-map registration just to keep the existing
+    /// pg-gated tests compiling. The real impl on
+    /// `RealRestoreBackend` performs the insert through a shared
+    /// `Arc<NomadCHBackend>` handle.
+    fn register_restored(
+        &self,
+        _sandbox_id: Uuid,
+        _vm_index: i16,
+        _signing_key_bytes: [u8; 32],
+        _user_id: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Restore a snapshotted sandbox. See module doc for the full flow.
+///
+/// `persist` is the sealed-record handle the controller built at
+/// startup; the wake path calls `persist.unseal(sandbox_id)` after
+/// `wait_for_livez` returns Ok to recover the per-sandbox signing
+/// key for the state-map insert (B19 fix). `None` makes the
+/// post-wake registration a no-op — appropriate for unit tests that
+/// drive `restore_sandbox` with a `StubRestoreBackend` (whose
+/// default `register_restored` impl is also a no-op).
 pub async fn restore_sandbox(
     db: &Database,
     store: &dyn SnapshotStore,
     backend: &dyn RestoreBackend,
+    persist: Option<&crate::persist::Persistence>,
     sandbox_id: Uuid,
     snapshot_enabled: bool,
 ) -> Result<RestoreOutcome, RestoreHandlerError> {
@@ -190,7 +230,8 @@ pub async fn restore_sandbox(
         .await?;
 
     // From here on use a closure + rollback semantics.
-    let result = do_restore_inner(db, store, backend, sandbox_id, &snap, g1).await;
+    let result =
+        do_restore_inner(db, store, backend, persist, sandbox_id, &snap, g1).await;
 
     match result {
         Ok((vm_index, g2)) => Ok(RestoreOutcome { sandbox_id, vm_index, generation: g2 }),
@@ -287,6 +328,7 @@ async fn do_restore_inner(
     db: &Database,
     store: &dyn SnapshotStore,
     backend: &dyn RestoreBackend,
+    persist: Option<&crate::persist::Persistence>,
     sandbox_id: Uuid,
     snap: &SnapshotRowMeta,
     expected_generation: i64,
@@ -388,6 +430,48 @@ async fn do_restore_inner(
     backend
         .wait_for_livez(sandbox_id, snap.vm_index)
         .map_err(RestoreHandlerError::Backend)?;
+
+    // 7b (B19 fix, cluster smoke 2026-05-23 r4). Install the restored
+    //    VM into the backend's in-memory state map. Without this step
+    //    every post-wake `exec`/`stop`/`delete` returned "sandbox not
+    //    found" and the vm_index slot leaked across the controller's
+    //    uptime (stop_inner's idempotent-Ok branch fired without
+    //    releasing the allocator). Unseal the per-sandbox signing key
+    //    from the persistence handle the controller built at startup,
+    //    then hand the bytes to the backend's `register_restored`
+    //    through the trait. The trait default impl is a no-op so
+    //    `StubRestoreBackend`-driven unit tests don't need to
+    //    implement state-map registration. A `None` persist or a
+    //    `NotFound` sealed record both surface as an Internal error
+    //    here — a live restored VM whose signing key is unreachable
+    //    cannot be safely registered (subsequent signed-RPC traffic
+    //    would fail on every call); fail loudly so the operator sees
+    //    the rollback rather than a silent wedge.
+    if let Some(p) = persist {
+        let sealed = p.unseal(sandbox_id).await.map_err(|e| {
+            RestoreHandlerError::Internal(format!(
+                "post-wake unseal sandbox {sandbox_id}: {e}"
+            ))
+        })?;
+        backend
+            .register_restored(
+                sandbox_id,
+                snap.vm_index,
+                sealed.signing_key_bytes,
+                &snap.user_id,
+            )
+            .map_err(RestoreHandlerError::Backend)?;
+    } else {
+        // Test path — `restore_sandbox` was called with persist=None
+        // (StubRestoreBackend driven). The trait default impl is a
+        // no-op; log so prod misconfiguration doesn't slip past.
+        tracing::warn!(
+            sandbox_id = %sandbox_id,
+            "restore: register_restored skipped — persist=None \
+             (expected only in tests; production wiring at \
+             AppState::from_config plumbs Some)"
+        );
+    }
 
     // 8. CAS restoring → running. We also clear the snapshot
     //    metadata: the artifact is no longer the canonical state
@@ -722,6 +806,19 @@ pub struct RealRestoreBackend {
     /// production this is bypassed entirely — `RealRestoreBackend::
     /// with_shared_allocator` wires through to the create-side pool.
     reservations: Arc<Mutex<VmIndexReservations>>,
+    /// **B19 fix (cluster smoke 2026-05-23 r4 post-fix)**: shared
+    /// `Arc<NomadCHBackend>` handle. When present, the trait's
+    /// `register_restored` call after `wait_for_livez` Ok delegates
+    /// to `NomadCHBackend::register_restored(...)`, which inserts
+    /// the per-sandbox record into the backend's state map. Without
+    /// the share, the restored VM stays invisible to the registry
+    /// and every post-wake `exec`/`stop`/`delete` hits the "sandbox
+    /// not found" branch + leaks the vm_index slot across controller
+    /// uptime. Wired by `crate::AppState::from_config` from
+    /// `Backend::nomad_ch_handle()`. `None` only for unit tests
+    /// that don't construct a `NomadCHBackend` (the default trait
+    /// impl returns `Ok(())` for those).
+    nomad_handle: Option<Arc<crate::backend::nomad_ch::NomadCHBackend>>,
 }
 
 impl std::fmt::Debug for RealRestoreBackend {
@@ -749,6 +846,7 @@ impl RealRestoreBackend {
             agent_livez_timeout,
             shared_allocator: None,
             reservations: Arc::new(Mutex::new(VmIndexReservations::new())),
+            nomad_handle: None,
         }
     }
 
@@ -766,6 +864,23 @@ impl RealRestoreBackend {
         allocator: Arc<Mutex<crate::backend::nomad_ch::VmIndexAllocator>>,
     ) -> Self {
         self.shared_allocator = Some(allocator);
+        self
+    }
+
+    /// **B19 fix**: install a shared `Arc<NomadCHBackend>` handle so
+    /// `register_restored(...)` can route the post-wake state-map
+    /// insert back into the backend. Without this, the restored VM
+    /// stays invisible to the registry — every post-wake
+    /// `exec`/`stop`/`delete` returns "sandbox not found" and the
+    /// vm_index slot leaks (cluster smoke 2026-05-23: ~10 wakes
+    /// per controller boot exhausted the allocator). Wired by
+    /// `crate::AppState::from_config` from
+    /// `Backend::nomad_ch_handle()`.
+    pub fn with_nomad_handle(
+        mut self,
+        handle: Arc<crate::backend::nomad_ch::NomadCHBackend>,
+    ) -> Self {
+        self.nomad_handle = Some(handle);
         self
     }
 }
@@ -888,6 +1003,47 @@ impl RestoreBackend for RealRestoreBackend {
         }
         // Always release the vm_index regardless of teardown outcome.
         self.release_vm_index(vm_index);
+    }
+
+    /// **B19 fix**: install the restored sandbox into
+    /// `NomadCHBackend::state` via the shared handle. The handler
+    /// has already unsealed the signing key from `Persistence` and
+    /// passes it in. The agent_url is re-derived here from
+    /// `vm_index` + the backend's `subnet_second_octet` — same
+    /// shape as `wait_for_livez`. Returns Err if the handle is
+    /// `None` (production wiring should always set it; if it's
+    /// missing we surface the misconfiguration loudly rather than
+    /// silently no-op'ing — a silent no-op would re-introduce the
+    /// pre-B19 "sandbox not found" + slot-leak symptoms).
+    fn register_restored(
+        &self,
+        sandbox_id: Uuid,
+        vm_index: i16,
+        signing_key_bytes: [u8; 32],
+        user_id: &str,
+    ) -> Result<(), String> {
+        let handle = self.nomad_handle.as_ref().ok_or_else(|| {
+            "register_restored: RealRestoreBackend has no shared NomadCHBackend \
+             handle (B19 wiring missing — check AppState::from_config)".to_string()
+        })?;
+        let vm_index_u16 = u16::try_from(vm_index).map_err(|_| {
+            format!("register_restored: vm_index {vm_index} out of u16 range")
+        })?;
+        // Same agent_url formula as `wait_for_livez` above. Keeps the
+        // shape that `wait_for_agent_livez` and `derive_agent_url`
+        // use — `http://10.<subnet_second_octet>.<100+idx>.2:7777`.
+        let agent_url = format!(
+            "http://10.{}.{}.2:7777",
+            self.cfg.subnet_second_octet,
+            100u16 + vm_index_u16
+        );
+        handle.register_restored(
+            sandbox_id,
+            vm_index_u16,
+            signing_key_bytes,
+            agent_url,
+            user_id.to_string(),
+        )
     }
 }
 

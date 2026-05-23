@@ -666,6 +666,26 @@ impl Persistence {
         })
     }
 
+    /// Per-sandbox unseal. **B19 fix (2026-05-23)**: the wake path's
+    /// `do_restore_inner` calls this after `wait_for_livez` Ok to
+    /// recover the `signing_key_bytes` it needs to install the
+    /// restored VM into the backend's in-memory state map. Returns
+    /// `NotFound` when the sealed record is absent (the restore path
+    /// will surface this as a 500 — a live restored VM whose sealed
+    /// record was reaped is a controller-bug, not a normal flow).
+    /// Other errors propagate the underlying `unseal_one` error.
+    pub async fn unseal(&self, sandbox_id: Uuid) -> std::io::Result<SealedAuth> {
+        let path = self.sealed_records_dir.join(seal_filename_for(sandbox_id));
+        let key = self.key.clone();
+        compio::runtime::spawn_blocking(move || unseal_one(&path, &key))
+            .await
+            .unwrap_or_else(|p| {
+                Err(std::io::Error::other(format!(
+                    "spawn_blocking panic: {p:?}"
+                )))
+            })
+    }
+
     /// List + unseal every record in the sealed-records dir. Returns
     /// the same shape [`unseal_dir`] does (per-file `Ok`/`Err`
     /// results) so callers can quarantine corrupt files individually

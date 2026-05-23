@@ -2501,7 +2501,7 @@ async fn restore_handler_happy_path_drives_snapshotted_to_running() {
     let backend_root = fresh_temp("rback");
     let backend = StubRestoreBackend::new(backend_root.clone());
 
-    let outcome = restore_sandbox(&db, &store, &backend, sid, true)
+    let outcome = restore_sandbox(&db, &store, &backend, None, sid, true)
         .await
         .expect("happy path restore");
     assert_eq!(outcome.vm_index, 7);
@@ -2542,7 +2542,7 @@ async fn restore_handler_checksum_mismatch_marks_suspect() {
     let backend_root = fresh_temp("rback_corrupt");
     let backend = StubRestoreBackend::new(backend_root.clone());
 
-    let err = restore_sandbox(&db, &store, &backend, sid, true)
+    let err = restore_sandbox(&db, &store, &backend, None, sid, true)
         .await
         .expect_err("must fail with corrupt artifact");
     assert!(matches!(err, RestoreHandlerError::SnapshotCorrupt), "{err:?}");
@@ -2567,7 +2567,7 @@ async fn restore_handler_vm_index_unavailable_when_cluster_exhausted() {
     let mut backend = StubRestoreBackend::new(backend_root.clone());
     backend.fail_reserve = true;
 
-    let err = restore_sandbox(&db, &store, &backend, sid, true)
+    let err = restore_sandbox(&db, &store, &backend, None, sid, true)
         .await
         .expect_err("must fail with cluster-exhausted");
     assert!(
@@ -2766,7 +2766,7 @@ async fn restore_handler_returns_feature_disabled_when_flag_off() {
     let backend_root = fresh_temp("rback_flag");
     let backend = StubRestoreBackend::new(backend_root.clone());
 
-    let err = restore_sandbox(&db, &store, &backend, sid, false)
+    let err = restore_sandbox(&db, &store, &backend, None, sid, false)
         .await
         .expect_err("must refuse with flag off");
     assert!(matches!(err, RestoreHandlerError::FeatureDisabled), "{err:?}");
@@ -2879,7 +2879,7 @@ async fn phase_b_snapshot_then_wake_cycles_row_back_to_running() {
         .await
         .unwrap();
 
-    let restore_outcome = restore_sandbox(&db, &store2, &restore_backend, sid, true)
+    let restore_outcome = restore_sandbox(&db, &store2, &restore_backend, None, sid, true)
         .await
         .expect("phase 2 wake");
     assert_eq!(restore_outcome.vm_index, 7);

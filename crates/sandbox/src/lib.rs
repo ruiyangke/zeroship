@@ -615,6 +615,7 @@ impl AppState {
             // 2026-05-24 r4: 11/16 c=4 cycles failed with a
             // stale-pubkey 401 once slots 1-6 had been used once.
             let shared_allocator = backend.vm_index_allocator();
+            let nomad_handle = backend.nomad_ch_handle();
             let rb_inner = RealRestoreBackend::new(
                 config.nomad_ch.clone(),
                 config.memory_mb,
@@ -633,6 +634,30 @@ impl AppState {
                         "snapshot wiring: backend has no vm_index allocator; \
                          RealRestoreBackend falls back to private reservations \
                          (B18 race possible if create + restore concurrent)"
+                    );
+                    rb_inner
+                }
+            };
+            // B19 fix: install the shared NomadCHBackend handle so the
+            // post-wake `register_restored` call lands the restored
+            // sandbox in the backend's in-memory state map. Without
+            // this, every post-wake exec/stop/delete returned "sandbox
+            // not found" and the vm_index slot leaked across the
+            // controller's uptime.
+            let rb_inner = match nomad_handle {
+                Some(h) => {
+                    tracing::info!(
+                        "snapshot wiring: shared NomadCHBackend handle for \
+                         register_restored (B19)"
+                    );
+                    rb_inner.with_nomad_handle(h)
+                }
+                None => {
+                    tracing::warn!(
+                        backend = %backend.name(),
+                        "snapshot wiring: backend has no NomadCHBackend \
+                         handle; register_restored will surface as a 500 on \
+                         every wake (B19 wiring missing)"
                     );
                     rb_inner
                 }

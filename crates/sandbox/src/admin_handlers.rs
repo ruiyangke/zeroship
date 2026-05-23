@@ -1288,6 +1288,7 @@ pub async fn wake_sandbox(
         db.as_ref(),
         store.as_ref(),
         rb.as_ref(),
+        state.persist.as_deref(),
         sandbox_id,
         state.config.snapshot_enabled,
     )

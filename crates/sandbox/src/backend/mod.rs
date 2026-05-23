@@ -162,11 +162,21 @@ pub struct SandboxInfo {
 }
 
 /// The Backend enum. Static dispatch at the call site.
+///
+/// **B19 fix (2026-05-23)**: the `NomadCh` variant wraps its inner
+/// backend in `Arc` so the snapshot/wake-path's `RealRestoreBackend`
+/// can hold a shared handle and call `register_restored` after
+/// `wait_for_livez` succeeds. Without that shared handle, the
+/// restored VM never landed in `NomadCHBackend::state`, and every
+/// post-wake `exec`/`stop`/`delete` hit the "sandbox not found"
+/// branch + leaked the vm_index slot. Wrapping is asymmetric
+/// (Docker/K8s stay by-value) because only nomad-ch hits the
+/// restore path in v1.
 #[derive(Debug)]
 pub enum Backend {
     Docker(docker::DockerBackend),
     K8s(k8s::K8sBackend),
-    NomadCh(nomad_ch::NomadCHBackend),
+    NomadCh(std::sync::Arc<nomad_ch::NomadCHBackend>),
 }
 
 impl Backend {
@@ -194,10 +204,9 @@ impl Backend {
                 persist,
             ))),
             "k8s" => Ok(Self::K8s(k8s::K8sBackend::new(cfg.clone(), persist)?)),
-            "nomad-ch" => Ok(Self::NomadCh(nomad_ch::NomadCHBackend::new(
-                cfg.clone(),
-                persist,
-            )?)),
+            "nomad-ch" => Ok(Self::NomadCh(std::sync::Arc::new(
+                nomad_ch::NomadCHBackend::new(cfg.clone(), persist)?,
+            ))),
             other => Err(format!(
                 "unknown SANDBOX_BACKEND={other:?}; expected \"docker\", \"k8s\", or \"nomad-ch\""
             )),
@@ -443,6 +452,55 @@ impl Backend {
         match self {
             Self::NomadCh(b) => Some(b.vm_index_allocator()),
             Self::Docker(_) | Self::K8s(_) => None,
+        }
+    }
+
+    /// Shared `Arc<NomadCHBackend>` handle when the backend is
+    /// nomad-ch. **B19 fix wiring**: `crate::restore_handler::
+    /// RealRestoreBackend::with_nomad_handle` consumes the result so
+    /// the wake path can call `register_restored(...)` after
+    /// `wait_for_livez` Ok — without that, the restored VM never
+    /// landed in `NomadCHBackend::state` and post-wake exec/stop/
+    /// delete all returned "sandbox not found" + leaked the slot.
+    /// Returns `None` for Docker/K8s (those backends don't expose
+    /// a restore registry surface today).
+    pub fn nomad_ch_handle(
+        &self,
+    ) -> Option<std::sync::Arc<nomad_ch::NomadCHBackend>> {
+        match self {
+            Self::NomadCh(b) => Some(std::sync::Arc::clone(b)),
+            Self::Docker(_) | Self::K8s(_) => None,
+        }
+    }
+
+    /// B19 fix: install a restored sandbox into the backend's in-memory
+    /// state map so post-wake `exec`/`stop`/`delete` find it. Called by
+    /// `restore_handler::do_restore_inner` after `wait_for_livez` Ok.
+    ///
+    /// Only `nomad-ch` implements it (the restore path is nomad-ch-only
+    /// in v1; Docker/K8s lack a deterministic agent_url + a slot pool,
+    /// so they return Err). Inputs are everything `NomadCHBackend::
+    /// create`'s state-map insert needs: the sandbox id, the source
+    /// vm_index, the per-sandbox signing key (already unsealed), the
+    /// agent URL (already derived), and the user id (from the snapshot
+    /// row).
+    pub fn register_restored(
+        &self,
+        sandbox_id: Uuid,
+        vm_index: u16,
+        signing_key_bytes: [u8; 32],
+        agent_url: String,
+        user_id: String,
+    ) -> Result<(), String> {
+        match self {
+            Self::NomadCh(b) => {
+                b.register_restored(sandbox_id, vm_index, signing_key_bytes, agent_url, user_id)
+            }
+            Self::Docker(_) | Self::K8s(_) => Err(format!(
+                "register_restored: backend {:?} doesn't support \
+                 snapshot/restore (Phase B nomad-ch-only)",
+                self.name()
+            )),
         }
     }
 

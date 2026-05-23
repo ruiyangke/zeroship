@@ -1624,6 +1624,62 @@ impl NomadCHBackend {
         })
     }
 
+    /// B19 fix (cluster smoke 2026-05-23 r4): install a restored
+    /// sandbox into the in-memory state map so `exec`/`stop`/
+    /// `delete`/`sandbox_keys` look-ups succeed after a wake. Mirrors
+    /// the state-map insert at the tail of [`Self::create`] +
+    /// [`Self::restore_from_pg_and_sealed`], but does NOT touch the
+    /// vm_index allocator (the restore handler already reserved the
+    /// slot before this is called) and does NOT issue any I/O — the
+    /// caller (`restore_handler::do_restore_inner` after
+    /// `wait_for_livez` Ok) has already brought the VM live and
+    /// unsealed the signing key.
+    ///
+    /// Returns `Err` if `sandbox_id` is already present in the state
+    /// map: the contract is "freshly restored entry", not "overwrite a
+    /// live one". The caller maps the error to a 500.
+    ///
+    /// **What this fixes**: pre-B19, `do_restore_inner` returned Ok
+    /// after `wait_for_livez` but never inserted the per-sandbox
+    /// record. Subsequent `exec` returned 500 "sandbox not found in
+    /// nomad-ch backend", `stop`/`delete` returned 404, and the
+    /// vm_index slot leaked across controller uptime (the
+    /// stop_inner's idempotent-Ok branch fired without releasing the
+    /// allocator). After ~10 successful wakes the allocator
+    /// exhausted (floor=1, ceil=12) and blocked new creates.
+    pub(crate) fn register_restored(
+        &self,
+        sandbox_id: Uuid,
+        vm_index: u16,
+        signing_key_bytes: [u8; 32],
+        agent_url: String,
+        user_id: String,
+    ) -> Result<(), String> {
+        let signing_key = Arc::new(SigningKey::from_bytes(&signing_key_bytes));
+        let host_dir = self.derive_host_dir(sandbox_id);
+        let job_id = Self::derive_job_id(sandbox_id);
+
+        let mut g = self.state.write().unwrap_or_else(|p| p.into_inner());
+        use std::collections::hash_map::Entry;
+        match g.entry(sandbox_id) {
+            Entry::Vacant(slot) => {
+                slot.insert(NomadChSandbox {
+                    user_id,
+                    job_id,
+                    vm_index,
+                    host_dir,
+                    agent_url,
+                    signing_key,
+                });
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(format!(
+                "register_restored: sandbox {sandbox_id} already present in \
+                 nomad-ch state map (would clobber live record); refusing"
+            )),
+        }
+    }
+
     /// Legacy v2-shape restore. Round-8 keeps this so existing tests
     /// in `tests/sandbox_persist_e2e.rs` still compile; new code goes
     /// through [`Self::restore_from_pg_and_sealed`].
@@ -4493,5 +4549,161 @@ mod tests {
         stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&host_dir);
         let _ = std::fs::remove_dir_all(&persist_root);
+    }
+
+    // ─── B19 regression: register_restored must install the
+    //     post-wake VM into the backend's state map so subsequent
+    //     exec/stop/delete find it (closing the cluster-smoke
+    //     2026-05-23 r4 "sandbox not found" + vm_index leak).
+    //     Source: docs/reviews/sandbox-snapshot-restore-deferred.md
+    //     B19.
+
+    #[compio::test]
+    async fn register_restored_inserts_into_state_map() {
+        // Construct a NomadCHBackend with no Persistence (this method
+        // never touches persist; only state.write().insert(...)).
+        // Call register_restored with synthetic values and assert the
+        // state map carries the matching NomadChSandbox.
+        let cfg = make_cfg();
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        let id = Uuid::now_v7();
+        let user_id = "usr_b19_register".to_string();
+        let vm_index: u16 = 5;
+        let signing_seed = [0x9eu8; 32];
+        let expected_pubkey_fp = sig::pubkey_fingerprint(
+            &SigningKey::from_bytes(&signing_seed).verifying_key(),
+        );
+        let agent_url = backend.derive_agent_url(vm_index);
+
+        backend
+            .register_restored(
+                id,
+                vm_index,
+                signing_seed,
+                agent_url.clone(),
+                user_id.clone(),
+            )
+            .expect("first register must succeed");
+
+        let guard = backend.state.read().unwrap();
+        let entry = guard
+            .get(&id)
+            .expect("B19 regression: register_restored did not insert into state map");
+        assert_eq!(entry.user_id, user_id);
+        assert_eq!(entry.vm_index, vm_index);
+        assert_eq!(entry.agent_url, agent_url);
+        // Job id matches the create-side derivation (zsbx-<simple>).
+        assert_eq!(entry.job_id, format!("zsbx-{}", id.simple()));
+        // signing_key is the same 32-byte seed we passed in.
+        let got_fp = sig::pubkey_fingerprint(&entry.signing_key.verifying_key());
+        assert_eq!(
+            got_fp, expected_pubkey_fp,
+            "B19 regression: register_restored stored a signing key \
+             whose pubkey fingerprint doesn't match the seed we handed in"
+        );
+        drop(guard);
+
+        // Second register against the same sandbox_id must Err: a
+        // live state-map entry MUST NOT be clobbered.
+        let err = backend
+            .register_restored(
+                id,
+                vm_index,
+                signing_seed,
+                agent_url,
+                user_id,
+            )
+            .expect_err("second register must reject (would clobber live record)");
+        assert!(
+            err.contains("already present"),
+            "B19 regression: clobber-refusal error did not surface 'already present'; got {err:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn restored_sandbox_is_stoppable_and_releases_vm_index() {
+        // Closes the second half of B19: the slot leak. Before the
+        // fix, stop_inner's idempotent-Ok branch fired without
+        // releasing the allocator because the post-wake sandbox was
+        // never in the state map. Register a restored sandbox via
+        // the new method, then stop it under favourable conditions,
+        // assert (a) the state-map entry is gone and (b) the
+        // vm_index is back in the allocator's free list (the
+        // create-side `alloc()` would hand it out again next).
+        let (port, stop_flag) = spawn_404_mock();
+        let nomad_addr = format!("http://127.0.0.1:{port}");
+
+        // Use a parent dir under temp so the backend derives a host_dir
+        // we can pre-materialise (stop_inner step 5 will rm it).
+        let host_state_parent = fresh_host_dir("b19-stop");
+
+        let mut cfg = make_cfg();
+        cfg.nomad_ch.nomad_addr = nomad_addr;
+        cfg.nomad_ch.host_fence_timeout_secs = 0;
+        cfg.nomad_ch.host_state_dir = host_state_parent.clone();
+        // Tight pool so we can assert the slot is reclaimed by index
+        // (after register/stop it should be the smallest free index).
+        cfg.nomad_ch.vm_index_floor = 4;
+        cfg.nomad_ch.vm_index_ceil = 6;
+
+        let backend = NomadCHBackend::new(cfg, None).expect("new");
+        // Pre-reserve slot 4 so the next alloc() would hand out 5 if
+        // the free-list was empty. We restore into slot 4 and prove
+        // it lands back in the free-list after stop.
+        let allocator = backend.vm_index_allocator();
+        allocator
+            .lock()
+            .unwrap()
+            .reserve(4)
+            .expect("pre-reserve slot 4");
+
+        let id = Uuid::now_v7();
+        // Materialise the per-sandbox host_dir the backend derives
+        // (`<host_state_dir>/<sandbox-id>/`) so step 5's rm has
+        // something to wipe.
+        let host_dir = host_state_parent.join(id.to_string());
+        std::fs::create_dir_all(&host_dir).expect("mkdir host_dir");
+        std::fs::write(host_dir.join("workspace.img"), b"WIPE-ME")
+            .expect("write sentinel");
+
+        backend
+            .register_restored(
+                id,
+                4u16,
+                [0xb1; 32],
+                "http://127.0.0.1:1".into(),
+                "usr_b19_stop".into(),
+            )
+            .expect("register restored");
+
+        // Sanity: state map carries the entry, and slot 4 is held by
+        // the allocator (we pre-reserved it; register_restored does
+        // not touch the allocator).
+        assert!(
+            backend.state.read().unwrap().get(&id).is_some(),
+            "test setup: register_restored must place an entry"
+        );
+
+        // Now stop. Under the favourable 404-mock + fence_secs=0
+        // setup, the stop path reaches step 6 (vm_index release).
+        let _ = backend.stop(id).await;
+
+        assert!(
+            backend.state.read().unwrap().get(&id).is_none(),
+            "B19 regression: stop on a registered-restored sandbox \
+             must remove the state-map entry"
+        );
+        // Slot 4 must be back in the allocator's free list. Round-
+        // trip via alloc(): it should hand out 4 first (freed slots
+        // win over `next`).
+        let reclaimed = allocator.lock().unwrap().alloc().expect("alloc");
+        assert_eq!(
+            reclaimed, 4,
+            "B19 regression: vm_index slot 4 not returned to allocator \
+             after stop; got {reclaimed} (pool=[4,6], pre-reserved slot 4)"
+        );
+
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&host_state_parent);
     }
 }
