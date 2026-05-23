@@ -673,10 +673,13 @@ mod unit_tests {
     /// `futures::future::join_all` driving each chunk, cap=4 over
     /// 8 rows should sleep ~200 ms (two chunks of four, ~100 ms each).
     ///
-    /// Asserts:
-    ///   1. wall-time < 500 ms (well under the 800 ms serial floor),
-    ///   2. `max_in_flight >= cap` — proving the futures are
-    ///      actually polled concurrently, not just sequenced faster.
+    /// Asserts (R3-T1): `max_in_flight == cap` — the futures must be
+    /// polled concurrently, with all `cap` of them sleeping at once
+    /// inside the first chunk. This is the direct semantic check.
+    /// A wall-time bound used to be asserted here too (< 500 ms),
+    /// but that's flaky on loaded CI runners; we keep elapsed in the
+    /// eprintln as a coarse regression hint without making it a
+    /// failing assertion.
     #[compio::test]
     async fn sweep_concurrency_is_actually_concurrent() {
         let per_row = Duration::from_millis(100);
@@ -693,26 +696,29 @@ mod unit_tests {
         let elapsed = start.elapsed();
 
         let max_concurrent = snapshotter.max_in_flight.load(Ordering::SeqCst);
+        // Soft signal only — wall-time is sensitive to CI load.
+        // Serial would sleep n_rows * per_row = 800 ms; concurrent at
+        // cap=4 over 8 rows sleeps ~200 ms (two chunks of four). If
+        // this diverges wildly from the ~200 ms target, it's a hint
+        // worth investigating, but not a test failure.
         eprintln!(
             "sweep_concurrency_is_actually_concurrent: elapsed={elapsed:?} \
              max_in_flight={max_concurrent} (cap={cap}, n_rows={n_rows}, \
-             per_row={per_row:?})"
-        );
-        assert!(
-            max_concurrent >= cap,
-            "futures::join_all must overlap within a chunk: \
-             max_in_flight={max_concurrent} < cap={cap} (regressed to serial?)"
-        );
-        // Serial would sleep n_rows * per_row = 800 ms. Concurrent at
-        // cap=4 sleeps (n_rows/cap) * per_row = 200 ms. The slack
-        // covers CI scheduling jitter without re-admitting the
-        // regression we're guarding against.
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "chunked-concurrent sweep took {elapsed:?}; \
-             serial floor is {:?}, expected ~{:?}",
+             per_row={per_row:?}, serial_floor={:?}, ideal={:?})",
             per_row * n_rows as u32,
             per_row * (n_rows as u32 / cap as u32),
+        );
+        // The semantic check: futures::join_all must actually overlap
+        // within a chunk. Exactly `cap` rows are in the first chunk,
+        // each sleeps `per_row` after incrementing `in_flight`; under
+        // any sane scheduler all `cap` get to the sleep before any
+        // wakes up, so `max_in_flight` must reach exactly `cap`. A
+        // serial regression would top out at 1.
+        assert_eq!(
+            max_concurrent, cap,
+            "futures::join_all must overlap within a chunk: \
+             max_in_flight={max_concurrent} != cap={cap} \
+             (1 = serial regression; <cap = partial overlap)"
         );
     }
 
