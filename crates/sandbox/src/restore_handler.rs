@@ -175,13 +175,16 @@ pub trait RestoreBackend: Send + Sync {
     /// `http://10.<subnet_second_octet>.<100+idx>.2:7777`. Exposed on
     /// the trait so `restore_sandbox` can issue the post-livez
     /// `/_clock_resync` handshake without reaching into backend
-    /// internals. The default impl returns a 127.0.0.1 sentinel that
-    /// fails any real network call — appropriate for the
-    /// `StubRestoreBackend` test scaffolding (the clock_resync step is
-    /// skipped on the `persist=None` test path anyway).
-    fn derive_agent_url(&self, _vm_index: i16) -> String {
-        "http://127.0.0.1:0".to_string()
-    }
+    /// internals.
+    ///
+    /// **No default impl.** R7-S2 fix: B22's initial sketch had a
+    /// `"http://127.0.0.1:0"` sentinel default — a bogus URL that
+    /// resolves but answers nothing, so any backend that forgot to
+    /// override would surface as transport error ("agent down") rather
+    /// than the real misconfiguration ("trait method not implemented").
+    /// Silent fail-OPEN. Removing the default forces every impl
+    /// (including test stubs) to provide a real URL at compile time.
+    fn derive_agent_url(&self, vm_index: i16) -> String;
 }
 
 /// Restore a snapshotted sandbox. See module doc for the full flow.
@@ -716,6 +719,23 @@ impl RestoreBackend for StubRestoreBackend {
         self.teardown_called
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.release_vm_index(vm_index);
+    }
+    /// R7-S2: deterministic test-friendly URL on loopback. Encodes
+    /// `vm_index` into the port so test assertions can pin the shape
+    /// without resolving the host. NOT the old `127.0.0.1:0` sentinel
+    /// — that was a fail-OPEN trap (resolves but nothing answers,
+    /// indistinguishable from a real backend whose agent is down).
+    /// `StubRestoreBackend` is used only on the `persist=None` test
+    /// path where `clock_resync_post_restore` is skipped, so this URL
+    /// is never dialled in current tests — but providing a real one
+    /// keeps the contract honest and gives future stub-driven tests
+    /// something they can actually bind to.
+    fn derive_agent_url(&self, vm_index: i16) -> String {
+        // Port in the IANA ephemeral-style range; offset by vm_index so
+        // each stub URL is unique. Bound to 127.0.0.1 so any accidental
+        // dial fails loudly with "connection refused" rather than
+        // hitting an unrelated host.
+        format!("http://127.0.0.1:{}", 17777u16 + (vm_index as u16))
     }
 }
 
