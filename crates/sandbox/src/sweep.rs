@@ -411,9 +411,11 @@ impl SourceVmOps for ResolvedSourceVmOps {
 }
 
 /// Run a single iteration of the idle-eviction sweep. Public so the
-/// pg-gated test can pin the selection logic. Returns the count of
-/// rows that *were attempted* (not necessarily snapshotted —
-/// `IdleSnapshotter::snapshot_one` may have failed).
+/// pg-gated test can pin the selection logic. Returns the rows that
+/// *were attempted* — rows whose `IdleSnapshotter::snapshot_one`
+/// was actually invoked (the call itself may have failed). Rows
+/// skipped because of graceful shutdown between chunks, or because
+/// their typed-id failed to parse, are NOT included.
 pub async fn run_idle_eviction_once(
     state: &Arc<AppState>,
     snapshotter: &dyn IdleSnapshotter,
@@ -440,10 +442,8 @@ pub async fn run_idle_eviction_once(
         return Vec::new();
     }
     let cap = per_iteration_concurrency.max(1);
-    let attempted: Vec<SandboxRow> = rows.clone();
     let shutdown_flag = || state.shutdown_requested();
-    snapshot_rows_chunked(&rows, snapshotter, cap, &shutdown_flag).await;
-    attempted
+    snapshot_rows_chunked(&rows, snapshotter, cap, &shutdown_flag).await
 }
 
 /// Snapshot a batch of rows in chunks of `cap`, running the
@@ -457,6 +457,13 @@ pub async fn run_idle_eviction_once(
 /// CPU work — wall-time on a 100-row sweep drops from ~210 s
 /// (serial) to ~210/cap s.
 ///
+/// Returns the rows for which `snapshot_one` was actually invoked.
+/// Rows skipped because of graceful shutdown between chunks, or
+/// because their typed-id failed to parse, are intentionally
+/// excluded — `run_idle_eviction_once` propagates this vector to
+/// callers as its `attempted` result so log lines and tests reflect
+/// what the sweep actually touched (R3-Q1).
+///
 /// Factored out of `run_idle_eviction_once` so the unit test can
 /// pin the actually-concurrent behaviour without needing a
 /// `Database` fixture.
@@ -465,7 +472,8 @@ async fn snapshot_rows_chunked(
     snapshotter: &dyn IdleSnapshotter,
     cap: usize,
     shutdown: &dyn Fn() -> bool,
-) {
+) -> Vec<SandboxRow> {
+    let mut attempted: Vec<SandboxRow> = Vec::with_capacity(rows.len());
     for chunk in rows.chunks(cap) {
         if shutdown() {
             break;
@@ -490,6 +498,14 @@ async fn snapshot_rows_chunked(
         if parsed.is_empty() {
             continue;
         }
+        // Record attempted rows *before* awaiting — these are the
+        // rows whose `snapshot_one` future is about to be polled.
+        // Doing this pre-await means a shutdown observed mid-chunk
+        // (between `await` resumes) still leaves the chunk's rows
+        // in `attempted`, since `snapshot_one` was already invoked.
+        for (row, _) in &parsed {
+            attempted.push((*row).clone());
+        }
         let results = futures::future::join_all(
             parsed.iter().map(|(_, uuid)| snapshotter.snapshot_one(*uuid)),
         )
@@ -504,6 +520,7 @@ async fn snapshot_rows_chunked(
             }
         }
     }
+    attempted
 }
 
 /// Spawn the idle-eviction loop on the compio runtime. Disabled if
@@ -697,6 +714,105 @@ mod unit_tests {
             per_row * n_rows as u32,
             per_row * (n_rows as u32 / cap as u32),
         );
+    }
+
+    /// R3-Q1: `run_idle_eviction_once` previously computed
+    /// `attempted = rows.clone()` *before* the chunk loop, so any
+    /// shutdown observed mid-loop silently lied about which rows it
+    /// actually touched. The fix populates `attempted` incrementally
+    /// inside `snapshot_rows_chunked` for rows whose `snapshot_one`
+    /// was actually invoked. This test drives 8 rows with cap=4 and
+    /// flips a manual shutdown flag once the first chunk has been
+    /// fully recorded by the snapshotter; the second chunk must be
+    /// skipped, and `attempted.len()` must equal `cap` — *not* 8.
+    #[compio::test]
+    async fn idle_sweep_attempted_reflects_partial_shutdown() {
+        use std::sync::atomic::AtomicBool;
+
+        /// Snapshotter that records every Uuid it sees and, once it
+        /// has seen `trigger_at` calls, flips the shared shutdown
+        /// flag. This simulates the production sweep observing a
+        /// shutdown between chunks (the flag is checked at the top
+        /// of each chunk iteration in `snapshot_rows_chunked`).
+        struct ShutdownTriggeringSnapshotter {
+            seen: std::sync::Mutex<Vec<Uuid>>,
+            shutdown: Arc<AtomicBool>,
+            trigger_at: usize,
+        }
+        impl IdleSnapshotter for ShutdownTriggeringSnapshotter {
+            fn snapshot_one<'a>(
+                &'a self,
+                sandbox_id: Uuid,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + 'a>>
+            {
+                Box::pin(async move {
+                    let mut seen = self
+                        .seen
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    seen.push(sandbox_id);
+                    if seen.len() >= self.trigger_at {
+                        self.shutdown.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+            }
+        }
+
+        let cap = 4usize;
+        let n_rows = 8usize;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let snapshotter = ShutdownTriggeringSnapshotter {
+            seen: std::sync::Mutex::new(Vec::new()),
+            shutdown: Arc::clone(&shutdown),
+            trigger_at: cap,
+        };
+        let rows: Vec<SandboxRow> = (0..n_rows)
+            .map(|_| row_with_id(zeroship_core::typed_id::generate("sbx")))
+            .collect();
+
+        let shutdown_flag_for_closure = Arc::clone(&shutdown);
+        let shutdown_fn: &dyn Fn() -> bool =
+            &move || shutdown_flag_for_closure.load(Ordering::SeqCst);
+
+        let attempted =
+            snapshot_rows_chunked(&rows, &snapshotter, cap, shutdown_fn).await;
+
+        // Only the first chunk's rows had `snapshot_one` invoked.
+        // Pre-fix this assertion would fail at the call site in
+        // `run_idle_eviction_once` (attempted == rows.clone() == 8);
+        // here we pin the chunk-level helper that owns the truth.
+        assert_eq!(
+            attempted.len(),
+            cap,
+            "attempted must reflect only the rows actually polled \
+             before shutdown took effect; got {} attempted rows \
+             (cap={cap}, n_rows={n_rows})",
+            attempted.len(),
+        );
+        let seen = snapshotter.seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            cap,
+            "snapshotter should have been called exactly cap times; \
+             got seen.len()={} (cap={cap})",
+            seen.len(),
+        );
+        // The recorded rows must be a prefix of the input — order
+        // within a chunk is implementation-defined under join_all,
+        // but the set must equal the first chunk's rows.
+        let first_chunk_ids: std::collections::HashSet<&str> = rows
+            .iter()
+            .take(cap)
+            .map(|r| r.sandbox_id.as_str())
+            .collect();
+        for row in &attempted {
+            assert!(
+                first_chunk_ids.contains(row.sandbox_id.as_str()),
+                "attempted row {} not in first chunk",
+                row.sandbox_id,
+            );
+        }
     }
 
     #[test]
