@@ -168,6 +168,18 @@ async fn run() -> Result<(), String> {
             )
             .service(web::resource("/tree").route(web::get().to(handlers::file_tree)))
             .service(web::resource("/shutdown").route(web::post().to(handlers::shutdown)))
+            // Bug #22 fix: POST /_clock_resync — controller calls
+            // this once after CH `--restore` to repair the guest's
+            // frozen-at-snapshot `CLOCK_REALTIME`. The handler
+            // verifies the signature WITHOUT applying the strict
+            // 5-second skew window (the very window that the broken
+            // clock would otherwise blow through). Body is a tiny
+            // JSON `{"ts": <unix_secs>}`; cap at the small_limit
+            // generic budget.
+            .service(
+                web::resource("/_clock_resync")
+                    .route(web::post().to(handlers::clock_resync)),
+            )
             .service(
                 web::resource("/files/{path}*")
                     .state(web::types::PayloadConfig::default().limit(files_limit))

@@ -218,6 +218,68 @@ pub(crate) fn verify_signed_pub(req: &HttpRequest, body: &[u8], state: &AppState
     verify_signed(req, body, state)
 }
 
+/// Bug #22 fix: variant of [`verify_signed`] that uses
+/// [`sig::Verifier::verify_kind_skew_bypass`] so a controller-signed
+/// request whose timestamp is far from the agent's frozen-at-snapshot
+/// `CLOCK_REALTIME` still validates. ONLY used by the
+/// [`clock_resync`] handler — every other auth-gated endpoint must
+/// keep using the strict-skew [`verify_signed`]. Returns true iff
+/// every check except wall-clock skew passes.
+fn verify_signed_skew_bypass(req: &HttpRequest, body: &[u8], state: &AppState) -> bool {
+    let method = req.method().as_str();
+    let path = req.path();
+    // /_clock_resync is a v1-canonical endpoint: it's NOT under
+    // `/proxy/`, never carries a query string, and `canonical_kind_for`
+    // would dispatch it as V1 anyway. Spell out V1 here so future
+    // dispatcher edits can't accidentally upgrade the resync surface.
+    let kind = CanonicalKind::V1;
+    if req.uri().query().is_some() {
+        audit::record(
+            audit::events::AUTH_FAIL,
+            &format!("method={method} path={path} reason=query-not-allowed-resync"),
+        );
+        crate::metrics::inc_auth_fail("query-not-allowed");
+        return false;
+    }
+    let h = req.headers();
+    let ts_hdr = h
+        .get("x-sbx-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let nonce_hdr = h
+        .get("x-sbx-nonce")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let sig_hdr = h
+        .get("x-sbx-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    match state.verifier.verify_kind_skew_bypass(
+        kind,
+        method,
+        path,
+        body,
+        ts_hdr,
+        nonce_hdr,
+        sig_hdr,
+    ) {
+        Ok(()) => true,
+        Err(reason) => {
+            let event = match reason {
+                AuthFail::ReplayedNonce => audit::events::AUTH_REPLAY,
+                _ => audit::events::AUTH_FAIL,
+            };
+            let r = reason.as_str();
+            audit::record(
+                event,
+                &format!("method={method} path={path} reason={r}-resync"),
+            );
+            crate::metrics::inc_auth_fail(r);
+            false
+        }
+    }
+}
+
 fn content_type(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("");
     match ext.to_ascii_lowercase().as_str() {
@@ -480,6 +542,100 @@ pub async fn delete_file(
     }
 }
 
+// ─── /_clock_resync — bug #22: post-CH-restore wall-clock fixup ──
+//
+// The controller calls this once, immediately after `wait_for_livez`
+// returns Ok during a snapshot wake. CH `--restore` brings the VM
+// back with `CLOCK_REALTIME` frozen at the snapshot-time value, so
+// every subsequent strict-skew auth-gated endpoint would 401 until
+// something resynchronises the guest's wall clock.
+//
+// The handler:
+//   1. Verifies the request signature WITHOUT applying the 5-second
+//      skew window (`verify_signed_skew_bypass`).
+//   2. Parses the body `{"ts": <unix_secs>}`.
+//   3. Calls `settimeofday(2)` to set `CLOCK_REALTIME` to the
+//      controller's signed ts.
+//   4. Returns 200.
+//
+// Security: the signature requires the controller's private key, so
+// an in-VM attacker cannot push the clock. The nonce LRU prevents
+// replay. The endpoint is the ONLY path that bypasses the skew gate;
+// every other endpoint uses `verify_signed`.
+//
+// Idempotency: a re-call with a fresh ts/nonce simply re-sets the
+// clock; no state in the agent depends on "we already resynced" beyond
+// the LRU's per-nonce uniqueness. The controller can retry on transient
+// network errors without harm.
+
+#[derive(Debug, Deserialize)]
+pub struct ClockResyncBody {
+    /// Unix seconds the controller wants the guest's `CLOCK_REALTIME`
+    /// set to. The canonical body-hash binds this number to the
+    /// signature, so an attacker can't substitute a different value.
+    pub ts: u64,
+}
+
+pub async fn clock_resync(
+    req: HttpRequest,
+    state: State,
+    body: Bytes,
+) -> HttpResponse {
+    // Verify with the skew-bypass surface BEFORE deserializing —
+    // tampered payload would fail the body-hash gate.
+    if !verify_signed_skew_bypass(&req, &body, &state) {
+        return unauthorized();
+    }
+    // Even during drain the resync is harmless and lets the
+    // controller's final teardown talk to the agent. Allow.
+
+    let parsed: ClockResyncBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return err(400, format!("invalid JSON body: {e}")),
+    };
+
+    // i64::try_from is the cleanest "is this representable as a
+    // timeval.tv_sec?" gate. ~292 billion years of headroom on 64-bit
+    // systems; nothing real will trip this.
+    let tv_sec = match libc::time_t::try_from(parsed.ts) {
+        Ok(n) => n,
+        Err(_) => return err(400, format!("ts out of range: {}", parsed.ts)),
+    };
+    // settimeofday(2) requires CAP_SYS_TIME. PID 1 in the VM has the
+    // full bounding set. The microsecond field is always 0 — we don't
+    // need sub-second precision from a controller→agent handshake,
+    // and a zero μs keeps the canonical body shape minimal.
+    // SAFETY: tv is a fully-initialised C struct; the pointer points
+    // at a stack local that outlives the syscall. settimeofday is
+    // POSIX and thread-safe.
+    let tv = libc::timeval { tv_sec, tv_usec: 0 };
+    // SAFETY: `tv` is a fully-initialised C struct on the stack with
+    // a lifetime that strictly outlives the syscall; we pass `NULL`
+    // for the optional timezone argument (POSIX-deprecated). The
+    // syscall is thread-safe and side-effect-free aside from
+    // mutating the system wall clock. Wrapping libc time-set on the
+    // resync endpoint is the controlled scope where unsafe is
+    // unavoidable; the crate-wide `unsafe-code = "deny"` lint stays
+    // on for every other call site.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::settimeofday(&tv, std::ptr::null()) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        tracing::error!(
+            errno = %errno,
+            ts = parsed.ts,
+            "clock_resync: settimeofday failed",
+        );
+        return err(500, format!("settimeofday failed: {errno}"));
+    }
+    tracing::info!(
+        ts = parsed.ts,
+        "clock_resync: CLOCK_REALTIME set from controller ts (bug #22 post-restore fixup)",
+    );
+    crate::metrics::inc_clock_resync();
+    HttpResponse::Ok().json(&json!({"resynced": true, "ts": parsed.ts}))
+}
+
 #[cfg(test)]
 mod tests {
     //! HTTP-level handler tests using `ntex::web::test`. Each test
@@ -567,6 +723,10 @@ mod tests {
                     .service(web::resource("/exec").route(web::post().to(exec_cmd)))
                     .service(web::resource("/tree").route(web::get().to(file_tree)))
                     .service(web::resource("/shutdown").route(web::post().to(shutdown)))
+                    .service(
+                        web::resource("/_clock_resync")
+                            .route(web::post().to(clock_resync)),
+                    )
                     .service(
                         web::resource("/files/{path}*")
                             .route(web::get().to(read_file))
@@ -1109,5 +1269,203 @@ mod tests {
     fn fs_error_response_other_yields_400() {
         let r = fs_error_response("read", "x", "read x: some other I/O error".into(), None);
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── Bug #22 fix: /_clock_resync ─────────────────────────────
+    //
+    // The endpoint MUST:
+    //   1. Reject unsigned / wrong-key requests with 401.
+    //   2. Reject tampered body with 401 (canonical hash mismatch).
+    //   3. ACCEPT signed requests whose ts is far outside the normal
+    //      5-second skew window — that's the entire point.
+    //   4. Reject malformed bodies with 400 (not 401).
+    //
+    // Test 3 is the load-bearing regression assertion: the cluster
+    // smoke (Appendix E) saw 9/9 wakes 401 on /exec because the
+    // strict-skew gate rejected every controller-signed RPC after CH
+    // `--restore`. The skew-bypass path on /_clock_resync is the
+    // recovery handshake; if it stops accepting far-future ts the
+    // wake path immediately re-breaks.
+
+    /// Sign a `/_clock_resync` request with a CALLER-supplied ts so
+    /// the test can vary it freely. The default `sign()` helper above
+    /// always uses `SystemTime::now()` which can't simulate the
+    /// snapshot→wake gap.
+    fn sign_with_ts(
+        method: &str,
+        path: &str,
+        body: &[u8],
+        ts: u64,
+        nonce: &str,
+    ) -> (String, String, String) {
+        let sig = crate::sig::sign(&test_signing_key(), method, path, body, ts, nonce);
+        (ts.to_string(), nonce.to_string(), sig)
+    }
+
+    fn clock_resync_req(ts: u64, nonce: &str, body: &str) -> test::TestRequest {
+        let (ts_hdr, nonce_hdr, sig) =
+            sign_with_ts("POST", "/_clock_resync", body.as_bytes(), ts, nonce);
+        test::TestRequest::post()
+            .uri("/_clock_resync")
+            .header("content-type", "application/json")
+            .header("x-sbx-timestamp", ts_hdr)
+            .header("x-sbx-nonce", nonce_hdr)
+            .header("x-sbx-signature", sig)
+            .set_payload(body.to_string())
+    }
+
+    /// Unauthenticated request → 401. The drop-through-to-400 case
+    /// (missing JSON body) MUST NOT fire before the signature check.
+    #[ntex::test]
+    async fn clock_resync_without_signature_returns_401() {
+        let (state, _d) = make_state("resync-noauth");
+        let app = make_app!(state);
+        let req = test::TestRequest::post()
+            .uri("/_clock_resync")
+            .header("content-type", "application/json")
+            .set_payload(r#"{"ts":1700000000}"#)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// **CRITICAL**: a signed request whose ts is well outside the
+    /// 5-second skew window MUST validate. This is the whole reason
+    /// the endpoint exists; if the skew-bypass code path regresses,
+    /// every cluster wake breaks on the first /exec.
+    #[ntex::test]
+    async fn clock_resync_accepts_far_future_ts() {
+        let (state, _d) = make_state("resync-far");
+        let app = make_app!(state);
+        // We do NOT actually settimeofday in the test (the test
+        // process isn't PID 1 + CAP_SYS_TIME), so this test ONLY
+        // verifies the auth-gate behaves correctly: if the canonical
+        // verifies under the skew-bypass path, the handler dispatches
+        // to settimeofday. The test runs as a non-privileged user so
+        // settimeofday returns EPERM → handler returns 500.
+        //
+        // What we assert here:
+        //   - status code is NOT 401 (the bug we're fixing — auth
+        //     was rejecting the call). Either 200 (test ran as root,
+        //     unlikely in CI) or 500 (auth passed, settimeofday
+        //     returned EPERM) is acceptable evidence the bypass
+        //     works.
+        let body = r#"{"ts":1900000000}"#;
+        // 1900000000 is ~year 2030 — guaranteed > 5s skew at any
+        // real wall-clock the test process will see.
+        let req = clock_resync_req(1_900_000_000, "resync-far-test", body).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Bug #22 regression: skew-bypass rejected a far-future signed ts. \
+             Auth path is wrong — every cluster wake will 401 on first /exec."
+        );
+        // Accept 200 (root) or 500 (non-root EPERM). Either proves
+        // auth passed; what we forbid is 401.
+        assert!(
+            matches!(
+                resp.status(),
+                StatusCode::OK | StatusCode::INTERNAL_SERVER_ERROR
+            ),
+            "expected 200 or 500 post-auth; got {}",
+            resp.status()
+        );
+    }
+
+    /// Same shape, far-past ts. The skew check is `|now - ts| >
+    /// SKEW_S`, so far-past values are equally rejected by the
+    /// strict-skew gate — and equally must be accepted by the
+    /// bypass.
+    #[ntex::test]
+    async fn clock_resync_accepts_far_past_ts() {
+        let (state, _d) = make_state("resync-past");
+        let app = make_app!(state);
+        let body = r#"{"ts":1500000000}"#;
+        let req = clock_resync_req(1_500_000_000, "resync-past-test", body).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Tampered body (canonical hash mismatch) → 401. The skew-bypass
+    /// path does NOT weaken any other check.
+    #[ntex::test]
+    async fn clock_resync_with_tampered_body_returns_401() {
+        let (state, _d) = make_state("resync-tamper");
+        let app = make_app!(state);
+        // Sign for body A, send body B.
+        let signed_body = r#"{"ts":1700000000}"#;
+        let sent_body = r#"{"ts":1800000000}"#;
+        let ts: u64 = 1_700_000_000;
+        let nonce = "resync-tamper-test";
+        let (ts_hdr, nonce_hdr, sig) =
+            sign_with_ts("POST", "/_clock_resync", signed_body.as_bytes(), ts, nonce);
+        let req = test::TestRequest::post()
+            .uri("/_clock_resync")
+            .header("content-type", "application/json")
+            .header("x-sbx-timestamp", ts_hdr)
+            .header("x-sbx-nonce", nonce_hdr)
+            .header("x-sbx-signature", sig)
+            .set_payload(sent_body.to_string())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Request signed with a non-controller key → 401. Wrong-key
+    /// rejection MUST still fire under the skew-bypass path.
+    #[ntex::test]
+    async fn clock_resync_with_wrong_key_returns_401() {
+        let (state, _d) = make_state("resync-wrongkey");
+        let app = make_app!(state);
+        // Sign with a key the agent's verifier does NOT trust.
+        let other_sk = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
+        let ts: u64 = 1_900_000_000;
+        let nonce = "resync-wrongkey-test";
+        let body = r#"{"ts":1900000000}"#;
+        let sig = crate::sig::sign(&other_sk, "POST", "/_clock_resync", body.as_bytes(), ts, nonce);
+        let req = test::TestRequest::post()
+            .uri("/_clock_resync")
+            .header("content-type", "application/json")
+            .header("x-sbx-timestamp", ts.to_string())
+            .header("x-sbx-nonce", nonce)
+            .header("x-sbx-signature", sig)
+            .set_payload(body.to_string())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Malformed JSON body → 400 (not 401). The signature check
+    /// fires BEFORE serde_json, so this only happens when the bytes
+    /// are signed correctly but the JSON is junk — a server bug, not
+    /// an attack.
+    #[ntex::test]
+    async fn clock_resync_with_malformed_json_returns_400() {
+        let (state, _d) = make_state("resync-badjson");
+        let app = make_app!(state);
+        let body = "not json at all";
+        let req = clock_resync_req(1_900_000_000, "resync-badjson-test", body).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Replayed nonce → 401 (`ReplayedNonce` audit reason). The
+    /// skew-bypass path does NOT weaken the LRU defense.
+    #[ntex::test]
+    async fn clock_resync_replay_returns_401() {
+        let (state, _d) = make_state("resync-replay");
+        let app = make_app!(state);
+        let body = r#"{"ts":1900000000}"#;
+        let ts: u64 = 1_900_000_000;
+        let nonce = "resync-replay-test";
+        let req1 = clock_resync_req(ts, nonce, body).to_request();
+        let resp1 = test::call_service(&app, req1).await;
+        // First call: not 401 (200 or 500 — see far-future test).
+        assert_ne!(resp1.status(), StatusCode::UNAUTHORIZED);
+        // Replay with the SAME nonce + ts + body must 401.
+        let req2 = clock_resync_req(ts, nonce, body).to_request();
+        let resp2 = test::call_service(&app, req2).await;
+        assert_eq!(resp2.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -308,10 +308,85 @@ impl Verifier {
         nonce_hdr: &str,
         sig_hdr: &str,
     ) -> Result<(), AuthFail> {
+        self.verify_kind_inner(
+            kind, method, path_query, body, ts_hdr, nonce_hdr, sig_hdr, false,
+        )
+    }
+
+    /// **Bug #22 fix (2026-05-23 cluster smoke r6+B22-fixer).** Verify
+    /// a request under the same Ed25519 contract as
+    /// [`Self::verify_kind`], but **skip the wall-clock skew check**
+    /// (step 1) so a controller can recover from a guest whose
+    /// `CLOCK_REALTIME` is frozen at snapshot-time after a CH
+    /// `--restore`. Every other check is unchanged: signature must
+    /// verify under the controller's pubkey, nonce shape must be
+    /// well-formed, nonce must not be in the replay LRU. Calling this
+    /// is therefore equivalent to running with `SKEW_S = u64::MAX` for
+    /// one request — the signature still requires possession of the
+    /// controller's private key, so an in-VM attacker cannot use it
+    /// to forge anything.
+    ///
+    /// **Why this is needed:** Cloud Hypervisor `--restore` brings
+    /// the VM back with the wall clock frozen at the snapshot-time
+    /// value. The agent's `unix_now()` therefore lags the controller's
+    /// `unix_now()` by however long the snapshot→wake gap was
+    /// (typically minutes to days). Without a clock-resync handshake
+    /// every subsequent signed RPC fails `|now-ts|<=SKEW_S=5s`,
+    /// surfacing as `401 unauthorized` on the controller's `/exec`.
+    /// The dedicated `/_clock_resync` endpoint uses this verifier
+    /// path: the controller signs the call with the per-sandbox
+    /// signing key (so the call is unforgeable), the agent verifies
+    /// the signature without applying skew, then sets
+    /// `CLOCK_REALTIME` via `settimeofday(2)` to the request's
+    /// signed timestamp. Subsequent requests run under the normal
+    /// strict-skew path.
+    ///
+    /// **Replay defense:** the nonce is recorded in the LRU at the
+    /// tail of this function (same as [`Self::verify_kind`]) so a
+    /// captured clock-resync request cannot be replayed against the
+    /// same agent. The nonce LRU is process-local and survives
+    /// indefinitely across restores (it lives in the agent's heap
+    /// inside the snapshot); a captured-and-replayed call within a
+    /// `NONCE_TTL_S` window of the first use is rejected as
+    /// `ReplayedNonce`. Outside that window the captured ts itself
+    /// (which the canonical binds) would normally trip
+    /// `SkewTooLarge` — but since the whole point of this verifier
+    /// path is to bypass skew, the protection there comes solely
+    /// from the nonce LRU.
+    pub fn verify_kind_skew_bypass(
+        &self,
+        kind: CanonicalKind,
+        method: &str,
+        path_query: &str,
+        body: &[u8],
+        ts_hdr: &str,
+        nonce_hdr: &str,
+        sig_hdr: &str,
+    ) -> Result<(), AuthFail> {
+        self.verify_kind_inner(
+            kind, method, path_query, body, ts_hdr, nonce_hdr, sig_hdr, true,
+        )
+    }
+
+    fn verify_kind_inner(
+        &self,
+        kind: CanonicalKind,
+        method: &str,
+        path_query: &str,
+        body: &[u8],
+        ts_hdr: &str,
+        nonce_hdr: &str,
+        sig_hdr: &str,
+        skip_skew_check: bool,
+    ) -> Result<(), AuthFail> {
         // 1. Timestamp parse + skew check.
+        //    The `skip_skew_check` arm exists ONLY for the
+        //    `/_clock_resync` endpoint (bug #22 — post-restore
+        //    `CLOCK_REALTIME` lag). Every other code path passes
+        //    `false` and gets the normal 5-second strict window.
         let ts: u64 = ts_hdr.parse().map_err(|_| AuthFail::BadTimestamp)?;
         let now = unix_now();
-        if abs_diff(now, ts) > SKEW_S {
+        if !skip_skew_check && abs_diff(now, ts) > SKEW_S {
             return Err(AuthFail::SkewTooLarge);
         }
 
@@ -1278,6 +1353,174 @@ mod tests {
                 &sig2,
             ),
             Err(AuthFail::BadSignature)
+        );
+    }
+
+    // ─── bug #22 fix: verify_kind_skew_bypass ─────────────────────
+    //
+    // The `/_clock_resync` endpoint uses this verifier to accept a
+    // controller-signed request that carries an arbitrarily-stale
+    // timestamp (because the guest's `CLOCK_REALTIME` is frozen at
+    // snapshot-time after CH `--restore`). Every check OTHER than
+    // the wall-clock skew gate must still fire.
+
+    #[test]
+    fn verify_kind_skew_bypass_accepts_far_future_ts() {
+        // Controller's "now" is 1 day ahead of the guest's clock —
+        // mimics the snapshot→wake gap. Normal verify_kind would
+        // reject `SkewTooLarge`; skew-bypass must accept.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let far_future_ts = ts_now() + 86_400;
+        let nonce = "resync-far";
+        let path = "/_clock_resync";
+        let body = br#"{"ts":86400}"#.to_vec();
+        let sig = sign(&sk, "POST", path, &body, far_future_ts, nonce);
+        assert!(v
+            .verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                &body,
+                &far_future_ts.to_string(),
+                nonce,
+                &sig,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_kind_skew_bypass_accepts_far_past_ts() {
+        // Symmetric: a captured ts well in the past (e.g., a sandbox
+        // restored from a snapshot taken last week — guest clock
+        // thinks `now` is one week ahead of the controller's signed
+        // ts in the inverse direction). Skew-bypass must still
+        // accept.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let far_past_ts = ts_now().saturating_sub(86_400);
+        let nonce = "resync-past";
+        let path = "/_clock_resync";
+        let sig = sign(&sk, "POST", path, b"", far_past_ts, nonce);
+        assert!(v
+            .verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                b"",
+                &far_past_ts.to_string(),
+                nonce,
+                &sig,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_kind_skew_bypass_still_rejects_bad_signature() {
+        // Wrong key → BadSignature, even with skew bypass.
+        let (_, pk) = keypair();
+        let v = Verifier::new(pk);
+        let other_sk = SigningKey::from_bytes(&[99u8; 32]);
+        let ts = ts_now();
+        let nonce = "resync-badkey";
+        let path = "/_clock_resync";
+        let sig = sign(&other_sk, "POST", path, b"", ts, nonce);
+        assert_eq!(
+            v.verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn verify_kind_skew_bypass_still_rejects_tampered_body() {
+        // Body tampering after signing → BadSignature.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now();
+        let nonce = "resync-tamper";
+        let path = "/_clock_resync";
+        let signed_body = br#"{"ts":1700000000}"#;
+        let sent_body = br#"{"ts":2700000000}"#;
+        let sig = sign(&sk, "POST", path, signed_body, ts, nonce);
+        assert_eq!(
+            v.verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                sent_body,
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::BadSignature)
+        );
+    }
+
+    #[test]
+    fn verify_kind_skew_bypass_still_records_nonce_for_replay_defense() {
+        // First call succeeds; immediate replay with the same nonce
+        // must fail `ReplayedNonce`. The skew-bypass surface does
+        // NOT weaken the LRU defense — it weakens ONLY the wall-
+        // clock skew gate.
+        let (sk, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now() + 86_400;
+        let nonce = "resync-replay";
+        let path = "/_clock_resync";
+        let sig = sign(&sk, "POST", path, b"", ts, nonce);
+        assert!(v
+            .verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            )
+            .is_ok());
+        assert_eq!(
+            v.verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                path,
+                b"",
+                &ts.to_string(),
+                nonce,
+                &sig,
+            ),
+            Err(AuthFail::ReplayedNonce)
+        );
+    }
+
+    #[test]
+    fn verify_kind_skew_bypass_rejects_malformed_signature_encoding() {
+        // Defense-in-depth: skew-bypass surface still rejects junk
+        // sig bytes at the encoding gate (3 raw bytes — not a 64-byte
+        // Ed25519 sig).
+        let (_, pk) = keypair();
+        let v = Verifier::new(pk);
+        let ts = ts_now() + 86_400;
+        let nonce = "resync-malformed";
+        assert_eq!(
+            v.verify_kind_skew_bypass(
+                CanonicalKind::V1,
+                "POST",
+                "/_clock_resync",
+                b"",
+                &ts.to_string(),
+                nonce,
+                "AAAA",
+            ),
+            Err(AuthFail::BadSignatureEncoding)
         );
     }
 }

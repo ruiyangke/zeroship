@@ -8,11 +8,14 @@
 #   1. apt deps: nomad, kvm, dnsmasq, virtiofsd build deps, python3
 #   2. pull binaries from GCS:
 #        - cloud-hypervisor (v51.1), ch-remote, virtiofsd
-#        - vmlinuz, rootfs-slim.img.virtio-blk-v3 → rootfs-slim.img
+#        - vmlinuz, rootfs-slim.img.virtio-blk-v4 → rootfs-slim.img
 #          (per the virtio-blk pivot — bug #20 cluster smoke 2026-05-23
 #          showed v15 failures because the worker startup still pulled
 #          the pre-pivot rootfs-slim.img.fp32, whose in-VM /sbin/init
-#          mounts virtio-fs shares the wrapper no longer provides.)
+#          mounts virtio-fs shares the wrapper no longer provides.
+#          Bumped v3 → v4 for bug #22 fix: the new agent baked into v4
+#          adds POST /_clock_resync so the controller can repair the
+#          guest's frozen-at-snapshot CLOCK_REALTIME post-CH-restore.)
 #        - zeroship-sandbox (controller, from metadata `controller-object`)
 #        - nomad-vm-wrapper.sh
 #        - stress harness (stress_one.py, snapshot_stress.py, typed_id.py)
@@ -144,7 +147,7 @@ gs_pull cloud-hypervisor.v51.1     /usr/local/bin/cloud-hypervisor 0755
 gs_pull ch-remote.v51.1            /usr/local/bin/ch-remote        0755
 gs_pull virtiofsd                  /usr/local/bin/virtiofsd        0755
 gs_pull vmlinuz                    "$ART/vmlinuz"                  0644
-gs_pull rootfs-slim.img.virtio-blk-v3 "$ART/rootfs-slim.img"          0644
+gs_pull rootfs-slim.img.virtio-blk-v4 "$ART/rootfs-slim.img"          0644
 gs_pull nomad-vm-wrapper.sh        "$ART/nomad-vm-wrapper.sh"      0755
 gs_pull "$CONTROLLER_OBJECT"       /usr/local/bin/zeroship-sandbox 0755
 

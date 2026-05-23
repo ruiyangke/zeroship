@@ -168,6 +168,20 @@ pub trait RestoreBackend: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Bug #22 fix: re-derive the in-VM agent URL for a given
+    /// `vm_index`. Same formula `RealRestoreBackend::wait_for_livez`
+    /// + `NomadCHBackend::derive_agent_url` use —
+    /// `http://10.<subnet_second_octet>.<100+idx>.2:7777`. Exposed on
+    /// the trait so `restore_sandbox` can issue the post-livez
+    /// `/_clock_resync` handshake without reaching into backend
+    /// internals. The default impl returns a 127.0.0.1 sentinel that
+    /// fails any real network call — appropriate for the
+    /// `StubRestoreBackend` test scaffolding (the clock_resync step is
+    /// skipped on the `persist=None` test path anyway).
+    fn derive_agent_url(&self, _vm_index: i16) -> String {
+        "http://127.0.0.1:0".to_string()
+    }
 }
 
 /// Restore a snapshotted sandbox. See module doc for the full flow.
@@ -447,12 +461,41 @@ async fn do_restore_inner(
     //    cannot be safely registered (subsequent signed-RPC traffic
     //    would fail on every call); fail loudly so the operator sees
     //    the rollback rather than a silent wedge.
+    //
+    // **Bug #22 fix (cluster smoke 2026-05-23 r6+B22-fixer).** After
+    //    unseal, BEFORE register_restored, issue a one-shot signed
+    //    `/_clock_resync` to the restored agent. CH `--restore`
+    //    brings the VM back with `CLOCK_REALTIME` frozen at the
+    //    snapshot-time value, so without this handshake every
+    //    subsequent signed RPC fails the agent's strict 5-second
+    //    skew check (surface: 401 unauthorized on every post-wake
+    //    `/exec`). The resync uses the same Ed25519 signing key the
+    //    agent already trusts — same `signing_key_bytes` we are
+    //    about to install into the state map — and the agent's
+    //    `verify_kind_skew_bypass` path accepts the call without
+    //    applying the skew window. After it returns Ok the agent's
+    //    wall clock matches the controller's; the state-map insert
+    //    + subsequent `/exec` traffic runs under the normal strict
+    //    path. We sequence resync BEFORE register_restored so an
+    //    `/exec` racing with this code path either (a) precedes the
+    //    state-map insert and gets the existing "sandbox not found"
+    //    surface, or (b) follows both and runs on a healthy clock.
+    //    There is no window where the state map says "ready" but
+    //    the clock is still broken.
     if let Some(p) = persist {
         let sealed = p.unseal(sandbox_id).await.map_err(|e| {
             RestoreHandlerError::Internal(format!(
                 "post-wake unseal sandbox {sandbox_id}: {e}"
             ))
         })?;
+        let agent_url = backend.derive_agent_url(snap.vm_index);
+        clock_resync_post_restore(&agent_url, &sealed.signing_key_bytes)
+            .await
+            .map_err(|e| {
+                RestoreHandlerError::Backend(format!(
+                    "post-wake clock_resync to {agent_url}: {e}"
+                ))
+            })?;
         backend
             .register_restored(
                 sandbox_id,
@@ -980,12 +1023,20 @@ impl RestoreBackend for RealRestoreBackend {
         _sandbox_id: Uuid,
         vm_index: i16,
     ) -> Result<(), String> {
-        let agent_url = format!(
+        let agent_url = self.derive_agent_url(vm_index);
+        wait_for_livez_blocking(&agent_url, self.agent_livez_timeout)
+    }
+
+    fn derive_agent_url(&self, vm_index: i16) -> String {
+        // Same formula `NomadCHBackend::derive_agent_url` uses
+        // (lines ~1521 of nomad_ch.rs); centralised here so the
+        // RealRestoreBackend doesn't need to thread an Arc<NomadCH>
+        // just to compute the URL.
+        format!(
             "http://10.{}.{}.2:7777",
             self.cfg.subnet_second_octet,
             100u16 + (vm_index as u16)
-        );
-        wait_for_livez_blocking(&agent_url, self.agent_livez_timeout)
+        )
     }
 
     fn teardown_restore(&self, sandbox_id: Uuid, vm_index: i16) {
@@ -1340,6 +1391,115 @@ fn wait_for_livez_blocking(
     ))
 }
 
+/// Bug #22 fix (cluster smoke 2026-05-23 r6+B22-fixer). After CH
+/// `--restore` brings the VM back, the guest's `CLOCK_REALTIME` is
+/// frozen at the snapshot-time value, so the agent's strict 5-second
+/// skew check rejects every subsequent signed RPC with 401
+/// unauthorized. This helper issues a single signed `POST
+/// /_clock_resync` with the current controller timestamp; the agent
+/// verifies the signature WITHOUT applying the skew gate
+/// (`verify_kind_skew_bypass`) and `settimeofday(2)`s
+/// `CLOCK_REALTIME` to the request's signed ts. After it returns Ok
+/// the agent's wall clock matches the controller's and subsequent
+/// `/exec`, `/files`, etc. work under the normal strict-skew path.
+///
+/// **Signing:** uses [`zeroship_sandbox_agent::sig::sign`] with the
+/// per-sandbox Ed25519 signing key the caller has just unsealed from
+/// [`crate::persist::Persistence`]. Same canonical/header format every
+/// other controller→agent RPC uses; the only difference is the agent
+/// dispatches `/_clock_resync` through the skew-bypass verifier.
+///
+/// **Security:** the controller's private key is the trust anchor —
+/// an in-VM attacker can't forge this call. The nonce LRU prevents a
+/// captured resync from being replayed. The endpoint is the ONLY one
+/// that bypasses the skew window; every other agent endpoint stays on
+/// strict 5-second skew.
+///
+/// **Failure mode:** any non-200 response (including the agent's
+/// genuine 401 if signing-key bytes are wrong) surfaces as `Err`. The
+/// caller (`do_restore_inner`) maps this to a `Backend(...)` error so
+/// the wake path rolls back to `Snapshotted` rather than wedging the
+/// row at `Restoring` with a broken VM.
+async fn clock_resync_post_restore(
+    agent_url: &str,
+    signing_key_bytes: &[u8; 32],
+) -> Result<(), String> {
+    use ed25519_dalek::SigningKey;
+    use zeroship_sandbox_agent::sig;
+
+    let signing_key = SigningKey::from_bytes(signing_key_bytes);
+    let url = format!("{agent_url}/_clock_resync");
+    let path = "/_clock_resync".to_string();
+    let url_for_blocking = url.clone();
+    compio::runtime::spawn_blocking(move || {
+        // Use std::time directly here (mirror of `unix_now` in
+        // nomad_ch.rs) — clock_resync targets `CLOCK_REALTIME` so
+        // we want CLOCK_REALTIME bytes too, matching whatever the
+        // controller's wall clock thinks "now" is.
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Bind the new wall-clock value into the body so the agent's
+        // body-hash check covers it and an in-VM attacker can't
+        // substitute a different ts.
+        let body = serde_json::json!({ "ts": ts }).to_string();
+        let body_bytes = body.as_bytes();
+        let nonce = match clock_resync_nonce() {
+            Ok(n) => n,
+            Err(e) => return Err(format!("nonce gen: {e}")),
+        };
+        let signature = sig::sign(&signing_key, "POST", &path, body_bytes, ts, &nonce);
+        let resp = ureq::post(&url_for_blocking)
+            .timeout(Duration::from_secs(10))
+            .set("content-type", "application/json")
+            .set("x-sbx-timestamp", &ts.to_string())
+            .set("x-sbx-nonce", &nonce)
+            .set("x-sbx-signature", &signature)
+            .send_bytes(body_bytes);
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                if status == 200 {
+                    return Ok(());
+                }
+                let body_excerpt = r.into_string().unwrap_or_default();
+                Err(format!(
+                    "/_clock_resync status {status}: {}",
+                    body_excerpt.chars().take(256).collect::<String>()
+                ))
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let body_excerpt = r.into_string().unwrap_or_default();
+                Err(format!(
+                    "/_clock_resync status {code}: {}",
+                    body_excerpt.chars().take(256).collect::<String>()
+                ))
+            }
+            Err(e) => Err(format!("/_clock_resync transport: {e}")),
+        }
+    })
+    .await
+    .unwrap_or_else(|p| Err(format!("clock_resync spawn_blocking panic: {p:?}")))
+}
+
+/// Random hex nonce for `/_clock_resync`. Matches the agent's
+/// `MAX_NONCE_LEN=64` ceiling with plenty of margin (32 hex chars
+/// over 128 bits of entropy). Same `/dev/urandom`-backed shape as
+/// `random_hex` in `crates/sandbox/src/restore.rs`; kept local so
+/// the restore module doesn't reach into backend internals — bug
+/// #22's surgical scope is fully contained to (a) restore_handler,
+/// (b) the agent crate.
+fn clock_resync_nonce() -> Result<String, String> {
+    use std::io::Read as _;
+    let mut buf = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("open /dev/urandom: {e}"))?
+        .read_exact(&mut buf)
+        .map_err(|e| format!("read /dev/urandom: {e}"))?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod real_backend_tests {
     use super::*;
@@ -1576,6 +1736,107 @@ mod real_backend_tests {
             "{err}"
         );
         let _ = std::fs::remove_dir_all(&host_state);
+    }
+
+    // ─── Bug #22 fix: /_clock_resync handshake ─────────────────────
+    //
+    // The wake path's `clock_resync_post_restore` issues a single
+    // signed POST /_clock_resync to repair the guest's frozen-at-
+    // snapshot CLOCK_REALTIME (CH `--restore` preserves the wall
+    // clock; the agent's strict 5-second skew would otherwise 401
+    // every subsequent /exec). These tests pin:
+    //   - happy path: 200 from the agent → `Ok(())`,
+    //   - 401 from the agent → `Err(... status 401 ...)`,
+    //   - transport failure (closed listener) → `Err(... transport ...)`.
+
+    /// Tiny fake-agent that serves a configurable HTTP response shape.
+    /// Mirrors `spawn_fake_nomad` above (we keep it separate so a
+    /// future fake-nomad change can't accidentally break the
+    /// clock-resync tests).
+    fn spawn_fake_agent<F>(handler: F) -> (String, Arc<AtomicU32>)
+    where
+        F: Fn(u32, &[u8]) -> (u16, String) + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicU32::new(0));
+        let c2 = counter.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut s = match stream {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let n = c2.fetch_add(1, AOrdering::SeqCst);
+                use std::io::{Read, Write};
+                let mut buf = vec![0u8; 8192];
+                let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                let n_read = s.read(&mut buf).unwrap_or(0);
+                buf.truncate(n_read);
+                let (status, body) = handler(n, &buf);
+                let response = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(response.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        (format!("http://{addr}"), counter)
+    }
+
+    /// Happy path: agent returns 200 → resync succeeds.
+    #[ntex::test]
+    async fn clock_resync_post_restore_happy_path() {
+        let (agent_url, calls) = spawn_fake_agent(|_, _req| {
+            (200, r#"{"resynced":true,"ts":1700000000}"#.to_string())
+        });
+        let signing_key_bytes = [0xabu8; 32];
+        let r = clock_resync_post_restore(&agent_url, &signing_key_bytes).await;
+        assert!(r.is_ok(), "happy path must Ok; got {r:?}");
+        assert_eq!(
+            calls.load(AOrdering::SeqCst),
+            1,
+            "expected exactly one POST to /_clock_resync"
+        );
+    }
+
+    /// Agent 401 (e.g., wrong signing-key bytes) → Err carries the
+    /// status code so the wake path can roll back with diagnostic text.
+    #[ntex::test]
+    async fn clock_resync_post_restore_surfaces_agent_401() {
+        let (agent_url, _calls) = spawn_fake_agent(|_, _req| {
+            (401, r#"{"error":"unauthorized"}"#.to_string())
+        });
+        let signing_key_bytes = [0xcdu8; 32];
+        let err = clock_resync_post_restore(&agent_url, &signing_key_bytes)
+            .await
+            .expect_err("401 must error");
+        assert!(
+            err.contains("/_clock_resync status 401"),
+            "error text must surface the 401: {err}"
+        );
+    }
+
+    /// Transport failure (port not listening) → Err. Uses a port we
+    /// know nothing will be listening on.
+    #[ntex::test]
+    async fn clock_resync_post_restore_transport_error() {
+        // Bind + immediately drop so the port is closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let agent_url = format!("http://{addr}");
+        let r =
+            clock_resync_post_restore(&agent_url, &[0u8; 32]).await;
+        let err = r.expect_err("closed port must error");
+        // ureq surfaces this as a transport error; the wrapper text
+        // distinguishes from the status-code variant so an operator
+        // can grep the right shape out of the controller log.
+        assert!(
+            err.contains("transport"),
+            "expected transport error wrapper text; got: {err}"
+        );
     }
 }
 

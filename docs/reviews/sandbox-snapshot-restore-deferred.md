@@ -3,7 +3,7 @@
 Auto-managed by the pilot-cron-worker on `feat/sandbox-snapshot-restore`. Each cron fire reads this file, picks 1-2 actionable items, lands a fix per logical commit, and removes the entry in the same commit. Findings whose blocker still stands stay listed with an updated "last considered" line.
 
 Last seeded: 2026-05-22 (post bug-#13 cluster smoke; cluster torn down).
-Last updated: 2026-05-23 (cycle r6+B21-fixer: B21 closed via SANDBOX_PERSIST_AUTH=1 + AEAD key provisioning in gcp-worker-startup.sh; R5-S1 closed via boot-time fail-CLOSED assertion in AppState::from_config; cluster c=4 confirms `register_restored skipped` log line is gone, exec/stop pre-flight working; bug #22 NEW — post-wake agent `/exec` returns 401 unauthorized on all 9 wakes, gating B19 full closure).
+Last updated: 2026-05-23 (cycle r7+B22-fixer: bug #22 CLOSED — root cause was CH `--restore` preserving `CLOCK_REALTIME` from snapshot-time; fix is signed `/_clock_resync` handshake on agent + controller-side call in `do_restore_inner` between `wait_for_livez` and `register_restored`. v17 controller + v4 rootfs pushed; cluster c=4 confirms POST-WAKE EXEC 7/7 = 100% (was 0/9). B19 also FULLY CLOSED. B-SLO escalation blocked on NEW bug #23 — provision script fails on SERVER_COUNT>1).
 Branch HEAD at seed: `fce3e208`.
 Branch HEAD at last update: B20 fixer cycle on `3e8bfad5` parent (B20 + Appendix D commit forthcoming). Prior commits: `4fd92bef` (S4); `0aa93a0f` (A3-partial); `15b4f9a8` (B19 in-code); `4e6c70c1` (R4-T1); `28f60d73` (R3-Q3); `2928d5ae` (A4 closed); `b4ddb98b` (B18). Lib tests at parent HEAD: **275 passed**.
 Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
@@ -35,14 +35,15 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: **CLOSED**. Root cause was NOT in-VM stickiness; the init.sh path was already correct. Actual bug: two separate `vm_index` allocators (NomadCHBackend's `vm_index_allocator` vs RealRestoreBackend's private `VmIndexReservations`) — the wake path reserved slots into a private map invisible to the create-side allocator, so a subsequent create handed the same tap/IP to a fresh sandbox that collided with the live restored VM on that slot. The 401 surfaced because `/version` was answered by the **old** (restored) agent verifying a different signing-pubkey. Fix: share the `Arc<Mutex<VmIndexAllocator>>` between both backends. Two regression tests added. Cluster c=4 verification: 11/16 stale-pubkey 401s pre-fix → **0/16 post-fix**.
 - **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix B.
 
-### [B19] (FIX LANDED in code; cluster PARTIALLY VERIFIED — register_restored now exercised; full closure gated on NEW bug #22) Wake path doesn't register restored VM in backend state map (CRITICAL, partially closed)
-- **Status (2026-05-23 r6 B21-fixer)**: With B21 closed (Appendix E), the wake path now reaches the `register_restored` trait call on every wake (9/9 in c=4 smoke). Controller log no longer carries `register_restored skipped — persist=None`. Post-wake `exec_post` returns 500 NOT with `sandbox_not_found` (the bug B19 was meant to fix) but with `agent /exec status 401: unauthorized` — bug #22. The B19 plumbing is correct and exercised; full B19 cluster closure (exec_post 200, stop OK, slot release) is gated on bug #22.
-- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix C (pre-B20-fix, untested) + Appendix D (post-B20-fix; wake works, register_restored gated on #21) + Appendix E (post-B21-fix; register_restored now invoked, exec_post gated on #22).
-- **Files changed**:
+### [B19] (CLOSED 2026-05-23 r7 B22-fixer) Wake path doesn't register restored VM in backend state map (CRITICAL)
+- **Status**: **FULLY CLOSED**. With bug #22 fixed in this cycle, the wake path runs end-to-end. Cluster c=4 confirms wake 7/7 → exec_post 7/7 (was 0/9 in Appendix E pre-#22) → stop 7/7 (slot released). The B19 trait-dispatch fires on every successful wake; the post-wake state-map insert + signing-key install both work as designed. The "sandbox not found in nomad-ch backend" surface is gone.
+- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix F (B22 fix + B19 full closure).
+- **Files changed (cumulative across B19 + B21 + B22)**:
   - `crates/sandbox/src/backend/{nomad_ch.rs,mod.rs}` — `NomadCh(Arc<…>)` wrap + `register_restored` on both NomadCHBackend and Backend.
-  - `crates/sandbox/src/restore_handler.rs` — trait + impl + `with_nomad_handle` + `do_restore_inner` post-livez call.
+  - `crates/sandbox/src/restore_handler.rs` — trait + impl + `with_nomad_handle` + `do_restore_inner` post-livez chain (unseal + resync + register_restored).
   - `crates/sandbox/src/persist.rs` — `Persistence::unseal(sandbox_id)`.
   - `crates/sandbox/src/{admin_handlers.rs,lib.rs}` — wiring at `from_config` + `wake_sandbox`.
+  - `crates/sandbox-agent/src/{sig.rs,handlers.rs,main.rs,metrics.rs,version.rs}` — `/_clock_resync` + skew-bypass verifier surface (bug #22).
 
 ### [B20] (CLOSED 2026-05-23 r5 B20-fixer) Cold-boot /livez never 200 — root cause: `gcp-worker-startup.sh` pulled pre-virtio-blk rootfs
 - **Status**: **CLOSED**. Root cause: `crates/sandbox/scripts/gcp-worker-startup.sh:143` hard-coded `gs_pull rootfs-slim.img.fp32` (2026-05-06 pre-virtio-blk artifact), but the wrapper's cold-boot `--disk` block passes virtio-blk paths and the new init.sh expects `/dev/vdb`/`/dev/vdc`. The fp32 rootfs's in-VM init.sh can't mount the virtio-blk disks (or has the bug-#12/#13-era broken pubkey decoder), so `sandbox-agent` never binds `:7777` and the tap stays `<NO-CARRIER>`. B18-fixer's c=4 v14 PASS depended on a local stash (`stash@{0}` swaps the line to `rootfs-slim.img.virtio-blk-v3`) that never landed; B19-fixer's fresh worktree reverted to the committed line, producing the 0/16 failure shape. Fix: bulk-bump to `virtio-blk-v3` + comment updates. Cluster c=4 post-fix: 11/16 cold-boot creates PASS (was 0/16); 9/9 wakes PASS; remaining 5 create failures are downstream of bug #21's slot leak. No controller / wrapper / rootfs rebuild needed.
@@ -52,12 +53,24 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: **CLOSED**. Fix in `crates/sandbox/scripts/gcp-worker-startup.sh`: provisions a 32-byte mode-0o400 AEAD key at `/etc/zeroship/sandbox-aead-key` (idempotent), then exports the triplet `SANDBOX_PERSIST_AUTH=1` + `SANDBOX_AEAD_KEY_PATH=...` + `SANDBOX_PERSIST_DIR=/var/lib/zeroship/sandbox` in the controller systemd unit. Paired with R5-S1's boot-time fail-CLOSED assertion in `AppState::from_config` (now refuses to start when `snapshot_enabled=true && persist=None`). v16 controller binary uploaded to `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v16`. Cluster c=4 smoke confirms `register_restored skipped — persist=None` log line is gone on all 9 wakes; the wake path executes the unseal + register chain end-to-end. Full B19 cluster closure (exec_post 200) is now gated on NEW bug #22 (post-wake agent `/exec` 401), not on persist=None. Lib tests 275 → 280 (+5 for the new assertion truth-table).
 - **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix E.
 
-### [#22] (NEW 2026-05-23 r6 B21-fixer) Post-wake agent `/exec` returns 401 unauthorized on every wake (CRITICAL)
-- **Source**: cluster smoke 2026-05-23 (Appendix E); B21-fix exposes a previously-masked failure mode.
-- **Symptom**: 9/9 wakes return 200, `register_restored` is invoked (no more `persist=None` warn), but every subsequent agent `/exec` call returns `500 backend_exec_failed: agent /exec status 401: {"error":"unauthorized"}`. Controller's signed-RPC reaches the agent over the per-VM tap, the agent responds with HTTP 401 — the failure is at the agent's sig-verify, not at controller-side auth.
-- **Hypothesis**: the signing key the controller installs via `register_restored` does NOT match the verifying key the restored agent uses post-wake. Likely culprits: (a) the agent in-VM regenerates a keypair on every fresh boot inside the CH `--restore`-ed kernel — sealed record's signing_key_bytes are stale; (b) CH snapshot captures the agent's in-process state but the resume path effectively re-initializes the agent (init.sh re-runs); (c) `boot_id` field on the sealed record fails to survive the snapshot→wake cycle. The agent's `/livez` is unsigned (always 200), masking this until `/exec` lands.
-- **Action shape**: diff the agent's runtime keypair across snapshot/wake by SSH-ing into a worker, dumping `/etc/zeroship-agent/...` before and after. Inspect `crates/sandbox-agent/src/sig.rs` for any on-boot keypair regen logic. Also consider T5 (signed `/version` fingerprint check during wait_for_livez) — that test would have caught the mismatch at wake-time instead of at first exec.
-- **Cluster evidence**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix E; controller log `"op":"exec","status":401,"body":"\"{\\\"error\\\":\\\"unauthorized\\\"}\""` on every post-wake exec.
+### [#22] (CLOSED 2026-05-23 r7 B22-fixer) Post-wake agent `/exec` returns 401 unauthorized on every wake
+- **Status**: **CLOSED**. ROOT CAUSE: CH `--restore` preserves the guest's `CLOCK_REALTIME` from snapshot time. The agent's `unix_now()` lags the controller's by the snapshot→wake gap, blowing through the strict 5-second skew window in `Verifier::verify_kind`. NOT a stale signing key — the sealed bytes match the agent's pubkey perfectly; the failure is purely the wall-clock gate.
+- **Fix shape** (16 new tests; agent + controller):
+  - **Agent** `crates/sandbox-agent/src/sig.rs`: new `Verifier::verify_kind_skew_bypass(...)` — identical to `verify_kind` but skips the skew check. Refactor extracts a private `verify_kind_inner(..., skip_skew_check: bool)` so the strict path stays default. +6 tests.
+  - **Agent** `crates/sandbox-agent/src/handlers.rs`: new `POST /_clock_resync` handler. Verifies signature with skew-bypass, parses body `{"ts":<unix_secs>}`, calls `libc::settimeofday(2)` to set `CLOCK_REALTIME` to the signed ts. +7 tests.
+  - **Agent** `crates/sandbox-agent/src/{main.rs,metrics.rs,version.rs}`: register route, add `sbx_agent_clock_resyncs_total` counter, advertise `clock.resync-v1` capability.
+  - **Controller** `crates/sandbox/src/restore_handler.rs`: new `clock_resync_post_restore(...)` free fn. `do_restore_inner` calls it between `wait_for_livez` Ok and `register_restored`. `RestoreBackend` trait gains `derive_agent_url(vm_index)`. +3 tests.
+- **Security**: skew-bypass is signature-bound; an in-VM attacker cannot forge. Nonce LRU prevents replay. Only the `/_clock_resync` path uses the bypass; every other endpoint stays on strict 5-second skew.
+- **Deploy**: v17 controller + v4 rootfs both pushed to GCS; `gcp-worker-startup.sh` bumped `virtio-blk-v3` → `virtio-blk-v4`.
+- **Cluster evidence**: c=4 smoke POST-WAKE EXEC went 0/9 → 7/7 (100%). Wake p50 9235 ms (vs 9729 ms pre-fix — resync overhead is negligible). See `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-24-r2.md` Appendix F.
+- **Lib tests**: sandbox-agent 207 → 214; sandbox 280 → 283.
+
+### [#23] (NEW 2026-05-23 r7 B22-fixer cycle) `provision-gcp-cluster.sh` fails on SERVER_COUNT>1
+- **Source**: B22-fixer cycle attempted to escalate to 3+5 cluster for B-SLO c=20 stress; provision failed.
+- **Symptom**: `ERROR: (gcloud.compute.instances.create) argument --metadata: Bad syntax for dict arg: [10.178.0.11]`. The server-IPs list is passed to the next-server's metadata without proper escaping/joining; gcloud parses the bracket-formatted Python repr as a dict key.
+- **Action shape**: fix the script's metadata-flag concatenation. Likely `--metadata server-ips=10.178.0.10,10.178.0.11,10.178.0.12` should use `--metadata-from-file` or a properly-escaped CSV; investigate `provision-gcp-cluster.sh` around the server-creation loop.
+- **Captured, not fixed** per brief constraint (NEW bug → capture verbatim).
+- **Blocked**: B-SLO empirical validation at c=20 scale (deferred until #23 is fixed).
 
 ### [A1] AEAD never wraps prod snapshot store (CRITICAL, security-r1)
 - **Source**: 2026-05-24 security review (also flagged by arch-r1)
@@ -202,8 +215,8 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ## IMPORTANT (Phase B follow-ups; blocked on #14 closing)
 
 ### [B-SLO] 5-worker × 20-cycle SLO empirical validation
-- **Blocked-by**: **bug #22** (post-wake agent /exec returns 401 unauthorized; sealed-record signing key doesn't match the in-VM agent's verifying key after wake; full exec cycle broken on cluster). B14a/B14b/B17/B18/B20/B21/R5-S1 all closed.
-- **Action**: close #22 first (likely agent-side keypair-on-boot regen, or controller-side sealed-record/agent-key sync gap). Then scale to 3+5 + run cluster stress; capture create / snapshot / wake / post-exec / stop p50/p95/p99/max; compare wake p50 (Appendix E measured 9.7s p50, 13.4s p99 on c=4) to 4243ms cold-boot baseline (§ 10.2 SLO targets: p50 ≤ 1.0s; p95 ≤ 1.5s; p99 ≤ 2.0s; p99.9 ≤ 6.0s). Note: 9.7s p50 is FAR worse than the 1.0s target — likely improvable once A3 (sync I/O on compio worker) closes; document the gap when stress lands.
+- **Blocked-by**: **bug #23** (provision script can't bring up SERVER_COUNT>1 cluster). Bug #22 CLOSED in r7. Single-worker c=4 baseline captured: wake p50 9235 ms (target ≤1000ms → MISS 9.2×); snapshot p50 50573 ms (target ≤2000ms → MISS 25×); both attributable to OPEN A3 (sync I/O on compio worker).
+- **Action**: close #23 (1-2 LOC fix in `provision-gcp-cluster.sh` metadata escaping). Then scale to 3+5 + c=20 stress. The SLO misses won't move materially with bug #22's resync overhead (sub-100ms LAN round-trip) — they're A3-gated. R5-P1b's BufReader + spawn_blocking refactor on `store.get` is the SLO mover.
 
 ---
 
