@@ -128,7 +128,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: bool flags accumulate (B15 added `remove_host_dir`, C2 reused it; future may add `cleanup_metrics`, `cancel_alloc`, etc.). Bool-soup signature.
 - **Action**: introduce `enum StopDisposition { TearDown, PreserveForSnapshotWake }` (or similar). Methods take the enum; the boolean knobs become exhaustive match arms.
 
-### [R3-Q2] A6 added infallible `Result<Self, String>` builder signatures (MINOR, code-quality-r3)
+### [R3-Q2] (CLOSED at `ac6a6bf2`) `with_persistence` returns `Self`; only A6's was infallible
 - **File**: `crates/sandbox/src/lib.rs:272` (`with_persistence -> Result<Self, String>`)
 - **Symptom**: `Result<Self, String>` that cannot fail forces in-crate callers to `.expect()` on an infallible operation. Signature smell.
 - **Action**: change to `pub fn with_persistence(self, p: Arc<Persistence>) -> Self`. Future invariants can switch to `Result` when they actually need it. Same shape applies to A6b's 5 new builders — review them.
@@ -316,4 +316,38 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Status**: R4-T1's shellcheck integration test covers syntax-half of R3-T3. Behavioral wrapper-logic coverage (start vs restore branch divergence, path-rewriting, etc.) is still open. Future fixer could add `bats` smoke tests that mock CH spawn.
 
 ### [R5-S4] (CLOSED at `4fd92bef`) A4 admin sites leaked raw driver-error strings — sanitized via `err_safe()` helper
+
+### [R5-API1] `Backend::register_restored` is `pub` + accepts raw `[u8; 32]` SK bytes (CRITICAL, api-surface-r5)
+- **File**: `crates/sandbox/src/backend/mod.rs:487-505`
+- **Symptom**: B19 added `register_restored` to the public Backend enum surface. It takes raw `[u8; 32]` signing-key bytes by value — bypasses the create-path key-minting + sealed-record contract. Zero out-of-crate callers; pub leak.
+- **Action**: `pub(crate)`-restrict the method on Backend. Verify no out-of-crate uses first. Pair with R4-S1 (same pattern for `vm_index_allocator()`).
+
+### [R5-API2] `Backend::nomad_ch_handle()` returns `Arc<NomadCHBackend>` on pub surface (CRITICAL, api-surface-r5)
+- **File**: `crates/sandbox/src/backend/mod.rs:467-474`
+- **Symptom**: B19 added escape hatch to lift the Arc-wrapped backend internals out of the enum. Voids the "enum dispatch is the only contract" module promise (l. 34-40).
+- **Action**: `pub(crate)`-restrict. The shared-allocator + register-restored use sites are all in-crate.
+
+### [R5-C1] C3 widened a THIRD time by B19's `unseal+register_restored` (CRITICAL, concurrency-r5)
+- **File**: `crates/sandbox/src/restore_handler.rs:450-463` (between `wait_for_livez` Ok and `update_sandbox_status(Running)`)
+- **Symptom**: cancel-unsafe restore window now includes 2 more awaits (Persistence::unseal + Backend::register_restored). Drop creates a new wedge state: live VM + missing state-map + `Restoring` pg row + leaked vm_index.
+- **Action**: same shape as C3 — scope-guard around the restore-Ok section. Covers all C3 widenings (r2 original + r4 `clear_snapshot_metadata` + r5 unseal/register).
+
+### [R5-P1] Next A3 slice: BufReader on SHA + spawn_blocking on store.get (IMPORTANT, perf-r5)
+- **Files**: `crates/sandbox/src/snapshot_store.rs:153-185` (SHA loop) + `crates/sandbox/src/restore_handler.rs:365` (store.get await site)
+- **Symptom**: post-A3-partial (hard_link), the SHA loop reads at 64 KiB unbuffered (16× syscall amplification) and the whole store.get blocks the ntex worker.
+- **Action**: 2-line change: `BufReader::with_capacity(1 << 20, f)` at the SHA loop site + wrap `store.get` in `compio::runtime::spawn_blocking`. Estimated reduction: 1.5-2.5s on c=1 wake; 3-5s on c=4 wake.
+
+### [R5-S1] B19 fail-OPEN: `register_restored` silently no-ops when persist=None (CRITICAL, security-r5)
+- **Files**: `crates/sandbox/src/restore_handler.rs:450-474` + `crates/sandbox/src/admin_handlers.rs:1357`
+- **Symptom**: prod hands `state.persist.as_deref()`. With `SANDBOX_SNAPSHOT_ENABLED=1` + `SANDBOX_PERSIST_AUTH≠1`, every wake returns 200 but state-map gets no entry — EXEC/STOP/DELETE return `sandbox_not_found`. **Fail-OPEN, silently.** This is exactly what bug B21 surfaces on cluster.
+- **Action**: at boot time, assert `if snapshot_enabled && persist.is_none() { panic!("snapshot_enabled requires PERSIST_AUTH") }` in `AppState::from_config`. Or refuse to call `register_restored` if persist=None and surface the failure properly.
+
+### [R5-S5] A3-partial hard_link aliases canonical L1 (CRITICAL, security-r5)
+- **File**: `crates/sandbox/src/snapshot_store.rs:259-273`
+- **Symptom**: hard_link aliases canonical L1 memory-ranges + state.json to writable alloc dir. CH `MAP_SHARED` writeback or alloc-dir chmod by raw_exec silently widens canonical L1 in place. config.json is safe (sed -i renames break the link); memory-ranges is the worst case.
+- **Action**: `chmod 0444` on the alloc-side hard links right after creation; or use reflink/CoW when available (`copy_file_range`); or accept that L1 is mutable and document the threat model in the L1 store's doc comment.
+
+### [R5-S3] F2 unsigned `wait_for_livez_blocking` now closable in 3 lines (IMPORTANT, security-r5)
+- **File**: `crates/sandbox/src/restore_handler.rs:1322-1341` (unsigned probe) vs `crates/sandbox/src/backend/nomad_ch.rs:2767+` (signed `wait_for_agent_livez`)
+- **Note**: post-B19, `signing_key_bytes` is in scope at `restore_handler.rs:451`. Use it to call `wait_for_agent_livez` instead of the unsigned variant.
 - **Status**: 39 production callsites sanitized; 5 new tests pin no-leak invariant; raw errors now log via tracing::error! for operator debug, never on wire.
