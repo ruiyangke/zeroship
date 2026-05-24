@@ -794,7 +794,7 @@ pub async fn stop_sandbox(
 // ─── POST /sandboxes/:id/exec ─────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct ExecBody {
+pub(crate) struct ExecBody {
     pub cmd: String,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
@@ -804,15 +804,22 @@ pub async fn exec(
     req: HttpRequest,
     state: State,
     path: web::types::Path<String>,
-    body: web::types::Json<ExecBody>,
+    body: Bytes,
 ) -> HttpResponse {
     if !auth::check(&req, &state) { return unauthorized(); }
     let id = match require_owner(&req, &state, &path) { Ok(u) => u, Err(r) => return r };
 
-    let timeout_ms = body.timeout_ms.unwrap_or(60_000).min(600_000);
-    let cwd = body.cwd.as_deref();
+    // Parse the body internally so `ExecBody` can stay `pub(crate)`
+    // (it's a deserialise-only wire-shape struct with no out-of-crate
+    // consumer; only the bin's route table needs `exec` to be `pub`).
+    let parsed: ExecBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return err(400, "invalid_input", format!("invalid JSON body: {e}")),
+    };
+    let timeout_ms = parsed.timeout_ms.unwrap_or(60_000).min(600_000);
+    let cwd = parsed.cwd.as_deref();
 
-    match state.backend.exec(id, &body.cmd, cwd, Some(timeout_ms)).await {
+    match state.backend.exec(id, &parsed.cmd, cwd, Some(timeout_ms)).await {
         Ok(out) => HttpResponse::Ok().json(&serde_json::json!({
             "status": out.status,
             "stdout": out.stdout,

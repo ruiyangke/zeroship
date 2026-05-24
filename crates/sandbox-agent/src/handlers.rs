@@ -565,7 +565,7 @@ pub async fn shutdown(req: HttpRequest, state: State) -> HttpResponse {
 // ─── /exec ───────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct ExecBody {
+pub(crate) struct ExecBody {
     pub cmd: String,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
