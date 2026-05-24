@@ -2329,6 +2329,7 @@ mod tests {
             WakeErrorCode::ClockResyncFailed,
             WakeErrorCode::RegisterFailed,
             WakeErrorCode::Internal,
+            WakeErrorCode::WakeWorkerAborted,
         ] {
             let mut row = make_wake_row(WakeJobState::Failed);
             row.error_code = Some(code);
@@ -2338,6 +2339,14 @@ mod tests {
             assert_eq!(
                 body["error"], code.wire_code(),
                 "wire code drift for {:?}", code
+            );
+            assert_eq!(
+                body["state"], "failed",
+                "state must be 'failed' for {:?}", code
+            );
+            assert!(
+                body["message"].is_string(),
+                "message must be present for {:?}", code
             );
         }
     }
