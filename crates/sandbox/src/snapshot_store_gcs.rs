@@ -1083,6 +1083,30 @@ where
         // l2_upload_pending / l2_upload_failed_total so operators
         // see the L2-lag during a worker drain.
         //
+        // ## C-3 (T-8b-smoke-r4): why `std::thread::spawn`, not
+        // `compio::runtime::spawn_blocking`
+        //
+        // `SnapshotStore::put` is a sync trait method and the
+        // snapshot handler at `snapshot_handler.rs:397` already
+        // hops through `compio::runtime::spawn_blocking` before
+        // calling `store.put(...)`. That means the body of *this*
+        // method runs on a `spawn_blocking` worker thread which
+        // has no compio runtime in thread-local storage; calling
+        // `compio::runtime::spawn_blocking` from inside would hit
+        // `Runtime::with_current` and panic at
+        // `compio-runtime-0.11.0/src/runtime/mod.rs:119` ("not in
+        // a compio runtime").
+        //
+        // `GcsSnapshotStore::put` (and the mock L2 used in tests)
+        // is purely synchronous (ureq HTTPS + std::fs) and does
+        // NOT need a compio runtime, so a plain `std::thread::
+        // spawn` is sufficient. It also keeps `Tiered::put`
+        // callable from *any* context — compio task, spawn_
+        // blocking worker, or a unit test on a non-compio thread —
+        // which is the whole point of declaring the trait method
+        // sync. The detached compio Task primitive bought us
+        // nothing here because we never await its handle.
+        //
         // We can't `clone` arbitrary L2; require Arc-shareable above.
         let l2 = self.l2.clone();
         let sandbox_id = sandbox_id.to_string();
@@ -1093,7 +1117,19 @@ where
         let artifact_path = std::path::PathBuf::from(meta.artifact_path.clone());
         let ch_version_owned = ch_version.to_string();
         let sha256 = meta.sha256;
-        compio::runtime::spawn_blocking(move || {
+        // Name the thread so `gdb`/`top -H` can identify a stuck
+        // L2 upload. `spawn` only fails on the very rare ENOMEM /
+        // EAGAIN — if we can't allocate a thread the controller
+        // has bigger problems; log + drop the upload (fire-and-
+        // forget contract).
+        let builder = std::thread::Builder::new().name(format!(
+            "snap-l2-upload-{}",
+            // Keep the thread name within Linux's 15-char cap by
+            // taking the trailing 8 base62 chars of the sandbox id
+            // (the entropy bits, not the prefix).
+            sandbox_id.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()
+        ));
+        let spawn_res = builder.spawn(move || {
             match l2.put(&sandbox_id, &artifact_path, &ch_version_owned) {
                 Ok(m) => {
                     if m.sha256 != sha256 {
@@ -1116,8 +1152,13 @@ where
                     );
                 }
             }
-        })
-        .detach();
+        });
+        if let Err(e) = spawn_res {
+            tracing::warn!(
+                error = %e,
+                "tiered: could not spawn L2 upload thread; dropping (fire-and-forget)"
+            );
+        }
 
         Ok(meta)
     }
@@ -1343,6 +1384,56 @@ mod tests {
         write_fake_artifact(&src);
         let meta = tier.put("sbx_l2_fails", &src, "v51.1").unwrap();
         assert!(meta.bytes > 0);
+
+        cleanup(&root);
+    }
+
+    /// C-3 regression (T-8b-smoke-r4): `Tiered::put` MUST be callable
+    /// from a non-compio thread. The snapshot_handler hops through
+    /// `compio::runtime::spawn_blocking` before calling `store.put`,
+    /// which means `put` runs on a worker thread with no compio TLS.
+    /// Before the C-3 fix, the inline `compio::runtime::spawn_blocking`
+    /// inside `put` would hit `Runtime::with_current` and panic at
+    /// `compio-runtime-0.11.0/src/runtime/mod.rs:119` ("not in a
+    /// compio runtime"). Now we use `std::thread::spawn` for the
+    /// fire-and-forget L2 upload, so `put` is context-agnostic.
+    ///
+    /// This test invokes `put` from a plain `std::thread::spawn` —
+    /// i.e. NOT a compio task and NOT a compio spawn_blocking
+    /// worker. Pre-fix, this panics; post-fix, it succeeds.
+    #[test]
+    fn c3_put_callable_from_non_compio_thread() {
+        let root = fresh_root();
+        let l1 = LocalDiskSnapshotStore::new(root.join("store"));
+        let l2 = MockL2::default();
+        let tier = TieredSnapshotStore::new(l1, l2);
+
+        let src = root.join("src");
+        write_fake_artifact(&src);
+
+        // Run `put` on a plain OS thread to mirror what
+        // `compio::runtime::spawn_blocking` does — give the closure
+        // a worker thread with no compio runtime in TLS.
+        let tier_arc = std::sync::Arc::new(tier);
+        let tier_clone = std::sync::Arc::clone(&tier_arc);
+        let src_owned = src.clone();
+        let handle = std::thread::spawn(move || {
+            tier_clone.put("sbx_c3_repro", &src_owned, "v51.1")
+        });
+        let meta = handle
+            .join()
+            .expect("worker thread should not panic — C-3 regression if it does")
+            .expect("Tiered::put should succeed on a non-compio thread");
+        assert!(meta.bytes > 0);
+
+        // Give the detached L2 upload thread a moment to run so we
+        // can assert it didn't panic either.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let put_calls = *tier_arc.l2.put_calls.lock().unwrap();
+        assert!(
+            put_calls <= 1,
+            "L2 put_calls={put_calls}; expected 0 or 1 (fire-and-forget)"
+        );
 
         cleanup(&root);
     }
