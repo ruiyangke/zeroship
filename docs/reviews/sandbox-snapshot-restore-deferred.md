@@ -1167,3 +1167,60 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Sibling audit**: walked every other `spawn_blocking` site in `crates/sandbox/src/` (`snapshot_handler.rs`, `restore_handler.rs`, `persist.rs`, `backend/{nomad_ch,k8s,docker}.rs`, `preview.rs`). All closures use pure-sync APIs only (`ureq`, `std::process::Command`, `std::fs`, AEAD); no other site reaches into compio internals. C-3 was unique to the L2 detach.
 - **Files changed**: `crates/sandbox/src/snapshot_store_gcs.rs`.
 - **Next**: T-8b-smoke-retry-r5 with controller built off `c890c015` (driver v4 unchanged — C-3 is controller-side). r4 review flagged WAKE/RESTORE/STOP as the next likely failure surfaces.
+
+---
+
+## NEW r12/r13 ROUND FINDINGS (added by pilot cycle 2026-05-25 r10 — security r12, test-coverage r13, performance r13)
+
+### [R12-S1] (IMPORTANT, security-r12) Test-only env mutation race — 3 unsynchronized module locks → Rust 2024 unsafe UB risk
+- **Source**: 2026-05-25 security-r12
+- **Files**: `crates/sandbox/src/db.rs::tests::ENV_LOCK`, `crates/sandbox/src/backend/nomad_ch.rs::tests::T7_ENV_LOCK` (now `TASK_DRIVER_ENV_LOCK` post c5b9cb9d), `crates/sandbox/src/restore_handler.rs::r12_i1_tests::R12_I1_ENV_LOCK` (DELETED post c5b9cb9d)
+- **Symptom**: Rust 2024 `std::env::set_var` is unsafe because the env-table itself isn't thread-safe (not per-key). The 3 module-local mutexes don't serialise across each other — a `db::tests` test holding `ENV_LOCK` can race a `nomad_ch::tests` test holding `T7_ENV_LOCK` even on disjoint env keys → stdlib UB.
+- **Status**: TASK_DRIVER_ENV_LOCK unification (c5b9cb9d) reduced 3 → 2 locks. db.rs's ENV_LOCK still independent.
+- **Action**: lift db.rs's ENV_LOCK to a crate-level test helper that ALL env-mutating tests use. Single mutex per test binary. Subsumed by future test-fixture refactor.
+
+### [R12-S2] (MINOR posture, security-r12) R9-S5 partially closed by R12-I1
+- **Source**: 2026-05-25 security-r12
+- **Action**: R12-I1's ChPlugin Config block at restore_handler.rs:1403 adds typed sandbox_id, partially closing R9-S5. raw_exec arm still lacks ZSBX_SANDBOX_ID in restore env — vestigial.
+
+### [R13-T1] (CRITICAL, test-coverage-r13) C-3 regression test reproduction fidelity concern
+- **Source**: 2026-05-25 test-coverage-r13
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs::tests::c3_put_callable_from_non_compio_thread` (added at `c890c015`)
+- **Symptom**: test-coverage r13 reviewer reported the test PASSES against HEAD pre-fix (i.e., would NOT have caught C-3). C-3 fixer disputes this and reports the test reliably reproduces the compio-runtime panic when reverted. **Verification pending** — would need a `git stash` of the fix code while keeping the test to confirm definitively.
+- **Action**: when next touching snapshot_store_gcs.rs, verify the test by: (1) keep test code, (2) revert just the production fix at line 1096 (compio::runtime::spawn_blocking instead of std::thread::Builder), (3) run test, (4) confirm panic. If false-negative confirmed, replace with a `#[compio::test]`-async test that invokes Tiered::put from inside compio's spawn_blocking — that mirrors snapshot_handler.rs:392-407 exactly.
+
+### [R13-T2] (CRITICAL, 5TH-ROUND, test-coverage-r13) R10-T1/R11-T1/R12-T1 + R10-T2/R11-T2/R12-T2 untouched
+- **Source**: 2026-05-25 test-coverage-r13 (5th cycle)
+- **Symptom**: StubRestoreBackend::fail_submit/fail_livez flags declared-but-unused 5 cycles. Every restore_sandbox callsite in tests/sandbox_pg_e2e.rs passes `persist=None`. Integration coverage gap is structural — per-finding fixes can't close it.
+- **Action**: dedicated integration-test sprint required. Stop refiling — escalate to user.
+
+### [R13-T3] (IMPORTANT, NEW, test-coverage-r13) R9-S4 uid-check family diverged on 2 axes — extract blocker
+- **Source**: 2026-05-25 test-coverage-r13
+- **Symptom**: 5 sites now diverge on (a) file placement per R12-T5 and (b) error-envelope assertion shape (3 use Result<_, String> + err.contains; 2 use Result<_, DatabaseError> + match). Plus only R11-S2 has mode-only-rejection arm; 4 of 5 lack it.
+- **Action**: blocks R11-A1 helper extract (R13-Q2 + this). Before extract, harmonize: pick one error envelope (Result<_, SecretFileError> new enum?) + ensure all 5 test suites have the same 3-arm coverage matrix.
+
+### [R12-T4 → R13-T-derive_url] (6TH ROUND, test-coverage-r13) derive_agent_url drift still 3 hardcoded 7777 sites
+- **Source**: 2026-05-25 test-coverage-r13 (6th cycle)
+- **Files**: `restore_handler.rs:1162`, `restore_handler.rs:1241`, `nomad_ch.rs:1532`
+- **Action**: extract `const AGENT_PORT: u16 = 7777` to a shared location; use at all 3 sites; add parity test. 4-line fix.
+
+### [R13-P-cluster-data] (informational) Cluster CREATE baseline +23% on Go-driver
+- **Source**: 2026-05-25 performance-r13 against cluster-r4 cluster review
+- **Data point**: cluster-r4 CREATE 6494 ms vs wrapper baselines 5239-5339 ms (+23%, ~+1199 ms). Driver-side rootfs materialization contributes ~200-400 ms; rest is sample noise or driver-overhead investigation candidate.
+- **Action**: re-measure post-C-3 fix at smoke-retry-r5 with N≥4 samples to attribute the delta properly.
+
+### [R13-P-wake-budget-calibrated]
+- Wake-path budget calibrated against cluster-r4 single-sample CREATE 6.5s:
+  - submit_restore_job: ~2.0-3.5 s
+  - wait_for_livez: ~1.0-3.0 s
+  - store.get (AEAD off, L1 hit): ~0.5-1.0 s
+  - clock_resync: ~0.05-0.2 s LAN
+  - register_restored: ~0.05-0.2 s
+  - Total: AEAD-off ~7.5-10.5 s; AEAD-on ~8.5-12.5 s. R9-P1 (AEAD wake hard_link copy discard) remains the single largest p50-mover.
+
+### Closures this cycle
+- [C-3] CLOSED at `c890c015` — `TieredSnapshotStore::put` L2 detach switched from `compio::runtime::spawn_blocking` (panic when called from sync caller already inside spawn_blocking) to `std::thread::Builder::new().spawn()`. +1 regression test (R13-T1 disputes reproduction fidelity — verify later).
+- [R10-API5] CLOSED at `8ed9aa90` — sig.rs:120 hyphenated UUID example → .simple() 32-hex form with B24-FOLLOWUP back-ref.
+- [R10-API6] CLOSED at `8ed9aa90` — db.rs:2917 comment clarified: refers to host_id (genuinely hyphenated, distinct from sandbox_id which uses .simple()).
+- [R13-Q1 / R13-C1] CLOSED at `c5b9cb9d` — TASK_DRIVER_ENV_LOCK unified across nomad_ch + restore_handler. Reduced 3 ENV_LOCK statics to 2; db.rs::ENV_LOCK still separate (R12-S1 carry).
+- [R12-API2] CLOSED at `8ed9aa90` — same db.rs:2917 stale comment fix.
