@@ -984,11 +984,8 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: theoretical env-Mutex micro-contention + footgun if env mutates mid-flight. Not a load-bearing perf bug, but the right pattern is read-at-startup.
 - **Action**: store TaskDriverMode in NomadCHBackend struct, read once at construction. T-7's tests already use a `T7_ENV_LOCK` mutex — adapt to set the field, not the env, in tests.
 
-### [R12-Q1] (MAJOR, code-quality-r12) `Database::open_pool` TODO is 20 days stale (since 2026-05-05)
-- **Source**: 2026-05-25 code-quality-r12
-- **File**: `crates/sandbox/src/db.rs:494-507`
-- **Symptom**: TODO comment claims "next round picks it up" — no commit has touched it since landing at `27e1a8b2` 2026-05-05. Misleads new readers.
-- **Action**: either implement R11-P1 (thread-local pool — per architecture-r11 sketch) OR drop the imminent-action promise from the comment and move to a tracking issue.
+### [R12-Q1] (CLOSED at `46e0fa2a`) `Database::open_pool` TODO refreshed
+- **Status**: **CLOSED**. R12-Q1 fixer rewrote the comment at `crates/sandbox/src/db.rs:492-508` (post-edit line range). The stale "next round picks it up" promise is gone; the comment now points to R11-P1 in this file as the tracking entry and names the actual blocker (`compio_postgres::Pool` is `!Send` + `!Sync`, so the cache must be a per-compio-worker `thread_local!`, not an `Arc`/`OnceLock`). Comment-only change; no test impact (327 passed / 0 failed). R11-P1 itself remains OPEN — the actual pool-cache refactor is its scope.
 
 ### [R12-Q2] (MINOR, code-quality-r12) T-7 magic strings unextracted
 - **Source**: 2026-05-25 code-quality-r12
@@ -1013,3 +1010,88 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R11-T3] CLOSED at `eb26db31` — capability presence pins for proxy.ws-v1 + auth.ed25519-v1.1
 - [R11-S2] CLOSED at `85e4f2f9` — host_id reader mode+uid check (with defense-in-depth bonus: original silently regenerated on any read failure; new path surfaces permission errors as Validation)
 - [R12-I1] CLOSED at `b3bf741c` — wake-path SANDBOX_TASK_DRIVER feature flag (T-8 blocker; split-brain CREATE-vs-RESTOREs eliminated)
+
+---
+
+## NEW r12 ROUND 2 FINDINGS (added by pilot cycle 2026-05-25 r8 — architecture r12, test-coverage r12, performance r12)
+
+### [R12-A1] (CRITICAL, architecture-r12) R12-I1 approach (b) produced byte-for-byte builder duplication + UNSYNCHRONIZED env-mutex
+- **Source**: 2026-05-25 architecture-r12
+- **Files**: `crates/sandbox/src/restore_handler.rs:1276-1457` (R12-I1 wake-path builder) vs `crates/sandbox/src/backend/nomad_ch.rs:2311-2502` (T-7 cold-boot builder). PLUS: `R12_I1_ENV_LOCK` in restore_handler tests + `T7_ENV_LOCK` in nomad_ch tests — both serialize the SAME env var `SANDBOX_TASK_DRIVER` but don't share — cross-module test race possible.
+- **Symptom**: near-byte-for-byte dual jobspec builders; future schema changes need to land in BOTH. Env mutex is silently buggy under cargo test default parallelism.
+- **Action**: refactor to a shared `build_nomad_job_json_for(JobspecRequest { restore_from: Option<&Path>, mode: TaskDriverMode, ... })` in `nomad_ch.rs`. Or — better — accept R12-A3's suggestion of "TaskDriverMode as backend struct field at construction" and make the env-read disappear at runtime entirely (tests construct backend with explicit mode; no env mutation needed). Consolidate to ONE env mutex (or eliminate via the struct-field approach).
+
+### [R12-A2] (IMPORTANT, architecture-r12) R11-A1 helper extraction now MANDATORY — fifth secret-loader site exists
+- **Source**: 2026-05-25 architecture-r12
+- **File**: `crates/sandbox/src/db.rs:1161` `enforce_host_id_file_mode` (R11-S2 closure at `85e4f2f9`)
+- **Symptom**: r11 said "4 sites" — actually 5 now. The 5th (`enforce_host_id_file_mode`) uses 0o600 not 0o400 (different mode constant). 8+ tests across 4 files.
+- **Action**: extract `read_root_owned_secret_file(path, mode: u32, expected_len: usize)` helper. Take mode as arg to handle the 0o400 vs 0o600 split. Migrate all 5 callers. Consolidate tests.
+
+### [R12-A3] (IMPORTANT, architecture-r12, subsumes R12-M2) TaskDriverMode should be a backend struct field
+- **Source**: 2026-05-25 architecture-r12
+- **Files**: `crates/sandbox/src/backend/nomad_ch.rs::NomadCHBackend`, `crates/sandbox/src/restore_handler.rs::RealRestoreBackend`
+- **Symptom**: `task_driver_mode_from_env()` is called per-CREATE and per-RESTORE; both call sites pass to a freshly-rebuilt jobspec. Should be read once at backend construction.
+- **Action**: add a `task_driver_mode: TaskDriverMode` field to both backend structs. Populate in `AppState::from_config` (resolve-at-boot, like every other config field). Tests construct backend with explicit mode (no env mutation, no race). Closes R12-M2, R12-A1's env-mutex problem, and removes one of the dual env locks.
+
+### [R12-A4] (IMPORTANT, architecture-r12) nomad_ch.rs crossed 5000 LOC — split is T-8 PREREQUISITE
+- **Source**: 2026-05-25 architecture-r12
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs` (5371 LOC, +448 since r11)
+- **Symptom**: post-R12-A1, T-8b-cutover (bash wrapper removal + RawExec branch deletion) spans 8 zones across 3 modules (nomad_ch.rs, restore_handler.rs, scripts).
+- **Action**: split nomad_ch.rs into the sketched module structure (see architecture r11). MUST land before T-8b-cutover to keep the deletion surgical instead of error-prone.
+
+### [R12-A5] (MINOR, architecture-r12) Recovery layer scattered; host_id reader belongs in recovery.rs
+- **Source**: 2026-05-25 architecture-r12
+- **Files**: db.rs::{claim_orphan_transient_for_recovery, enforce_host_id_file_mode, load_or_generate_host_id} + sweep.rs + restore_handler.rs
+- **Action**: extract recovery.rs.
+
+### Module size table (cycle r8 measurement)
+| File | r11 LOC | r12 LOC | Δ |
+|---|---|---|---|
+| nomad_ch.rs | 4923 | 5371 | +448 |
+| db.rs | 3108 | 3298 | +190 |
+| restore_handler.rs | 2367 | 2680 | +313 |
+| lib.rs | 2267 | 2412 | +145 |
+| 3 files >2500 LOC (was 1); 1 file >5000 LOC (was 0) |||
+
+### [R12-T1] (CRITICAL, 4th-round, test-coverage-r12) restore_sandbox end-to-end through CasLost rollback still untested
+- **Source**: 2026-05-25 test-coverage-r12 (4th cycle)
+- **File**: `crates/sandbox/src/restore_handler.rs:263-313` (rollback closure)
+- **Symptom**: R12-I1's +5 tests are builder-shape only (call `build_restore_nomad_job_json(...)` directly + assert returned `serde_json::Value`). None constructs a Database, none calls restore_sandbox, none reaches the rollback closure at line 294. The R10-C2 spawn_blocking discarded JoinHandle is still test-unreachable.
+- **Action**: refile of R10-T1/R11-T1. Use the `spawn_fake_nomad` harness from R10-C1 + a `StubRestoreBackend::fail_submit`/`fail_livez` mode to drive the rollback.
+
+### [R12-T2] (CRITICAL, 4th-round, test-coverage-r12) Persist(Some(_)) chain at restore_handler.rs:581-617 still 100% uncovered
+- **Source**: 2026-05-25 test-coverage-r12 (4th cycle)
+- **Action**: refile of R9-T1/R10-T2/R11-T2. Integration test with persist=Some + sealed record fixture + assertions on unseal + clock_resync + register_restored call order.
+
+### [R12-T3] (IMPORTANT, NEW, test-coverage-r12) submit_restore_job callsite integration untested
+- **Source**: 2026-05-25 test-coverage-r12
+- **Symptom**: R12-I1 added the wake-path env→mode→jobspec wiring but no integration test drives the full chain (env→build jobspec→POST→fake nomad→state-map assertion).
+- **Action**: ~50 LOC extension of `spawn_fake_nomad` harness from R10-C1.
+
+### [R12-T4] (IMPORTANT, 5TH-round, test-coverage-r12) derive_agent_url drift now THREE hardcoded 7777 sites — getting worse
+- **Source**: 2026-05-25 test-coverage-r12 (5th cycle)
+- **Files**: `crates/sandbox/src/restore_handler.rs:1153, 1162, 1241` (was 1 site in r11, now 3)
+- **Action**: extract a const `AGENT_PORT: u16 = 7777` to a shared location (e.g., a `consts` module); use everywhere. Parity test asserts every derived agent URL uses the const.
+
+### [R12-T5] (MINOR, test-coverage-r12) R12-I1 tests in restore_handler.rs would orphan post-R10-A4 split
+- **Source**: 2026-05-25 test-coverage-r12
+- **Action**: after R10-A4 nomad_ch.rs split, move R12-I1's tests (mod r12_i1_tests) to the new jobspec module.
+
+### Test trajectory: integration test files unchanged for 3 consecutive cycles
+- 100% of sandbox lib test growth (+31 over r9→r12) was unit-level in `src/`
+- `crates/sandbox/tests/` and `crates/sandbox-agent/tests/` saw ZERO new tests in r10, r11, r12
+- The integration gap is structural debt the per-finding pattern can't close
+
+### [R12-P1] (IMPORTANT, performance-r12) R11-P2 BufWriter wrapped WRITE side only; READ side still 8 KiB
+- **Source**: 2026-05-25 performance-r12
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs:438-458` (`download_to_disk`)
+- **Symptom**: R11-P2 (3d5c527f) wrapped the destination File in BufWriter (1 MiB). But std lib's `io::copy(reader, writer)` uses BufferedCopySpec when one side is buffered — reader side falls back to 8 KiB scratch buffer. 1 GB download = ~131072 read(2) calls + 1024 write(2) calls. Half the win was unrealized.
+- **Action**: symmetric 1-line fix — wrap the source reader: `BufReader::with_capacity(1 << 20, r.into_reader())`.
+
+### [R11-P1 thread-local feasibility CONFIRMED]
+- **Source**: 2026-05-25 performance-r12 verification
+- **Verified**: `crates/compio-postgres/src/pool.rs:14-17,341` — Pool is `!Send + !Sync` by design (Rc<TcpStream>). Per-worker `thread_local!<RefCell<Option<Rc<Pool>>>>` is the only viable cache shape. Matches architecture r11's sketch.
+
+### Closures this cycle
+- [R10-Q5] CLOSED at `0cc7af52` — sandbox-agent/proxy.rs dead _ref_imports deletion (3-round carry)
+- [R12-Q1] CLOSED at `46e0fa2a` — db.rs::Database::open_pool TODO refresh pointing to R11-P1
