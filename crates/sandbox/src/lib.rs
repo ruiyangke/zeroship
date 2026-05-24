@@ -18,7 +18,11 @@ pub(crate) mod error_envelope;
 pub mod files;
 pub mod handlers;
 pub mod metrics;
-pub mod metrics_export;
+// Composite-r1 #2: sole production consumer is
+// `admin_handlers::metrics_endpoint` (same crate); sole test consumer
+// is the module's own unit tests. No integration test reaches in via
+// `zeroship_sandbox::metrics_export::*`, so the surface stays internal.
+pub(crate) mod metrics_export;
 pub mod persist;
 pub mod preview;
 pub mod preview_share;
