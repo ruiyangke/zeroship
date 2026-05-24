@@ -149,6 +149,20 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Out of scope for these PRs (per scope guard)**: scripts (smoke harness untouched), `crates/sandbox/src/backend/nomad_ch.rs` (R19-I1 wait_for_agent_livez fix queued separately as `82478a6b`), all non-sandbox crates.
 - **Architectural note**: this closes the LAST load-bearing wake-path concurrency gap. The wake-side R14-C1-mirror pattern (lessee_updated_at + takeover sweep) is now fully assembled — write side (R17-A1 / `96678eaa`) + read side (R19-C1 / this entry). Future cluster-stress runs that include controller-kill-during-wake fault injection will exercise the sweep end-to-end; smoke-r14+ should reach for `kill -9 controller && curl POST wake` as a deliberate test.
 
+### [R19-T1] (CLOSED) Admin-handler poll renderer not pinned for `WakeWorkerAborted` wire code
+- **Source**: test-coverage-r19 (`docs/reviews/sandbox-snapshot-restore-test-coverage-2026-05-25-r19.md` § "[R19-T1] Admin-handler poll renderer not pinned for WakeWorkerAborted wire code"). The finding noted that `r16_api1_failed_state_renders_every_wake_error_code` enumerated only the 6 pre-R19-C1 variants; `WakeWorkerAborted` — added by R19-C1 PR1 — was absent from the loop.
+- **Fix**: added `WakeErrorCode::WakeWorkerAborted` to the loop in `r16_api1_failed_state_renders_every_wake_error_code`. Also added inline `state == "failed"` and `message.is_string()` assertions covering all loop iterations so the full §10.0 envelope shape is pinned, not just the `error` field.
+- **Files**: `crates/sandbox/src/admin_handlers.rs`.
+- **Tests**: 425 passed (variant now exercised within the existing test; no new `#[compio::test]` function needed — the loop expansion is the coverage addition).
+- **Verify**: `cargo test -p zeroship-sandbox --lib` 425/0/1-ignored clean.
+
+### [R19-API1] (CLOSED) `error_message` body leaks internal review ID + lessee term
+- **Source**: api-surface-r19 (`docs/reviews/sandbox-snapshot-restore-api-surface-2026-05-25-r19.md` § "R19-API1 — error_message body leaks internal review ID + lessee term"). The SQL literal `'controller lessee abandoned this wake (R19-C1 takeover sweep)'` embedded two internal-only terms: "R19-C1" (review ID) and "lessee" (internal lease vocabulary not part of the public API contract). Either could appear verbatim in a 4xx/5xx JSON body seen by API consumers.
+- **Fix (db.rs)**: rewrote the SQL literal to `'wake worker aborted: controller did not complete the wake within the timeout (see operator runbook)'` — operator-facing, no internal jargon.
+- **Fix (sweep.rs)**: moved the R19-C1 lineage breadcrumb into the `tracing::warn!` structured log in `run_wake_jobs_takeover_once` as `closure_ref = "R19-C1"`. The field travels only to the log pipeline (Loki/CloudLogging), never to the wire.
+- **Files**: `crates/sandbox/src/db.rs`, `crates/sandbox/src/sweep.rs`.
+- **Tests**: existing `claim_orphan_wake_for_recovery` pg-gated tests remain valid (they assert on state/error_code, not the message literal). Build clean.
+
 ### [C-7-LT-1] (CLOSED at HEAD) `VmIndexRetryPolicy::from_host_fence_timeout` still applied the sync-era deadline cap under async mode
 - **Source**: T-8b-smoke-r12 cluster review (`docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-smoke-r12.md`).
 - **Symptom**: Smoke-r12 confirmed the C-7-LT async contract worked end-to-end (POST 202 + 97 polls + clean terminal envelope). But WAKE still 0/1 at +50 s with `vm_index_unavailable`. The source-teardown wall-time was 60.166 s (reproducible from r10/r11); the retry policy capped budget at `CLIENT_DEADLINE_SECS − HEADROOM = 60 − 10 = 50 s`. In sync mode that cap was correct (ntex would cancel the future at the 60 s client deadline). In async mode the wake state machine runs on a `detach_isolated` thread with no client deadline binding the retry loop — the 50 s cap became a vestige producing a 10 s deficit against the empirical 60.166 s teardown.

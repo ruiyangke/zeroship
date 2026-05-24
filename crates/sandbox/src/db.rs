@@ -3279,7 +3279,7 @@ impl Database {
     /// them to:
     ///   - `state = 'failed'`
     ///   - `error_code = 'wake_worker_aborted'`
-    ///   - `error_message = '...controller lessee abandoned this wake...'`
+    ///   - `error_message = 'wake worker aborted: controller did not complete the wake within the timeout (see operator runbook)'`
     ///   - `updated_at = NOW()`
     ///   - `lessee_updated_at = NOW()`
     ///
@@ -3332,8 +3332,9 @@ impl Database {
                     SET state = 'failed', \
                         error_code = 'wake_worker_aborted', \
                         error_message = \
-                            'controller lessee abandoned this wake \
-                             (R19-C1 takeover sweep)', \
+                            'wake worker aborted: controller did not \
+                             complete the wake within the timeout \
+                             (see operator runbook)', \
                         updated_at = now(), \
                         lessee_updated_at = now() \
                   WHERE state NOT IN ('ok', 'failed') \

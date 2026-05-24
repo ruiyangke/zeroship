@@ -398,8 +398,9 @@ pub async fn run_wake_jobs_takeover_once(state: &Arc<AppState>) -> u64 {
                     target: "sandbox::wake::takeover",
                     claimed = n,
                     threshold_secs,
+                    closure_ref = "R19-C1",
                     "sandbox wake_jobs takeover: claimed orphan rows \
-                     (controller lessee abandoned mid-wake; rows \
+                     (wake worker aborted mid-wake; rows \
                      transitioned to failed/wake_worker_aborted)"
                 );
             } else {
