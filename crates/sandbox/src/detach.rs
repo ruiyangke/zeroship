@@ -175,7 +175,7 @@ mod tests {
         // Main thread is still alive — schedule a normal one and wait.
         let flag = Arc::new(AtomicBool::new(false));
         let flag_for_fut = Arc::clone(&flag);
-        detach_isolated("test-after-panic", move || async move {
+        detach_isolated("test-after-pnc", move || async move {
             flag_for_fut.store(true, Ordering::SeqCst);
         });
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -213,6 +213,69 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(counter.load(Ordering::SeqCst), n);
+    }
+
+    /// R17-I1: every known thread name (or format-string prefix for
+    /// dynamic names) in this crate MUST fit Linux's `pr_set_name`
+    /// 15-byte (`TASK_COMM_LEN - 1`) limit. Names longer than that
+    /// truncate silently — visible in `ps`/`top -H` only as their
+    /// leading 15 chars — defeating the operator-debugging
+    /// rationale for naming the thread in the first place.
+    ///
+    /// Enumeration is by-hand: grep for `detach_isolated\(` across
+    /// `crates/sandbox/src/`, extract the literal / format-prefix,
+    /// and add it here. If a new site lands with an over-limit
+    /// name this test catches it; if a site is added without
+    /// extending this list, code review should — there is no
+    /// reflection over call sites in Rust.
+    #[test]
+    fn all_known_thread_names_fit_kernel_limit() {
+        // Static literal names.
+        const STATIC_NAMES: &[&str] = &[
+            "snap-health",   // lib.rs::start_health_loop (R17-I1: was snap-health-loop)
+            "snap-heartbeat",// lib.rs::spawn_heartbeat_task
+            "snap-takeover", // lib.rs::spawn_takeover_task
+            "snap-transient",// sweep.rs::spawn_transient_takeover_loop
+            "wake-gc",       // sweep.rs::spawn_wake_jobs_gc
+            "snap-idle-evict", // sweep.rs::spawn_idle_eviction_loop
+            "snap-idle-gc",  // registry.rs::spawn_idle_gc_loop
+            "create-rollbk", // backend/nomad_ch.rs::CreateGuard::drop
+            // Test-fixture names (kept in-list so they're never
+            // accidentally lengthened beyond the limit by future
+            // refactors).
+            "test-happy",
+            "test-immediate",
+            "test-panicker",
+            "test-after-pnc",
+        ];
+        // Dynamic / format-string prefixes. Each entry is the prefix
+        // that lands at byte 0 of the OS-level name; the tail (a
+        // typed-id suffix, sandbox-id tail, or numeric counter) is
+        // appended at runtime. The prefix MUST fit on its own so
+        // operators still see meaningful identifying text.
+        const FORMAT_PREFIXES: &[&str] = &[
+            "snap-l2-upload-", // snapshot_store_gcs.rs (15B — exactly fits, tail truncates)
+            "snap-teardown-",  // admin_handlers.rs (14B — 1B of tail remains)
+            "wake-",           // admin_handlers.rs::wake_sandbox_async_inner (5B — plenty of tail room)
+            "test-many-",      // detach.rs tests (10B)
+        ];
+        for name in STATIC_NAMES {
+            assert!(
+                name.len() <= 15,
+                "static thread name {name:?} = {} bytes > 15 \
+                 (Linux pr_set_name will truncate; rename to fit)",
+                name.len()
+            );
+        }
+        for prefix in FORMAT_PREFIXES {
+            assert!(
+                prefix.len() <= 15,
+                "thread-name prefix {prefix:?} = {} bytes > 15 \
+                 (kernel will truncate before the tail even lands; \
+                 shorten the prefix)",
+                prefix.len()
+            );
+        }
     }
 
     /// Thread name is reflected in `std::thread::current().name()` from

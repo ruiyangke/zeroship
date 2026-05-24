@@ -1144,7 +1144,13 @@ pub(crate) fn load_admin_token(
 /// task dies and re-probes stop; that's a real bug worth crashing
 /// loudly rather than papering over.
 fn start_health_loop(state: Arc<AppState>) {
-    crate::detach::detach_isolated("snap-health-loop", move || async move {
+    // Thread name MUST be ≤ 15 bytes — Linux `pr_set_name` truncates
+    // anything longer, so the OS-level name visible in `ps`/`top -H`
+    // gets clipped. Earlier draft `snap-health-loop` (16 B) silently
+    // became `snap-health-loo` (R17-I1). The
+    // `detach::tests::all_known_thread_names_fit_kernel_limit`
+    // regression test pins this contract.
+    crate::detach::detach_isolated("snap-health", move || async move {
         loop {
             // Round-1 fixer / IMPORTANT #8: top-of-loop shutdown
             // check. The previous iteration's sleep will have
