@@ -84,13 +84,18 @@ const MIGRATIONS: &[Migration] = &[
         description: "hosts.region CHECK accepts GCP-zone-suffixed shapes",
         sql: include_str!("../migrations/0008_relax_hosts_region_regex.sql"),
     },
+    Migration {
+        version: 9,
+        description: "wake_jobs table (C-7-LT-PR1 async wake-response state machine)",
+        sql: include_str!("../migrations/0009_wake_jobs.sql"),
+    },
 ];
 
 /// The latest migration version this binary was built against. Boot
 /// path passes this as `target_version` to
 /// [`Database::ensure_schema_at_version`]; non-migrator controllers
 /// poll until the schema reaches at least this version.
-pub const LATEST_MIGRATION_VERSION: i64 = 8;
+pub const LATEST_MIGRATION_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, Copy)]
 struct Migration {
