@@ -879,11 +879,30 @@ pub(crate) const HOST_DIR_GC_POLL_SECS: u64 = 300;
 pub(crate) const HOST_DIR_GC_POLL_FLOOR_SECS: u64 = 60;
 
 /// `SANDBOX_HOST_DIR_GC_GRACE_SECS`. Minimum mtime age before a
-/// host_dir is eligible for GC, in seconds. Default 3600 (1 hour).
+/// host_dir is eligible for GC, in seconds. Default 600 (10 min).
+///
+/// R24-A1 (perf-r24 review): the prior 1-hour default stranded
+/// significant on-disk state under load. Steady-state math at the
+/// 10 creates/min mandate target:
+///
+///   prior default  3600 s →  10/min × 60 min × ~50-200 MB/dir
+///                          ≈ 30-120 GB stranded (peak ~130 GB
+///                            observed in perf-r24 instrumented run)
+///   new   default   600 s →  10/min × 10 min × ~50-200 MB/dir
+///                          ≈  5-20  GB stranded — well under the
+///                            disk-pressure threshold, 6× cut.
+///
+/// The grace window exists to protect a freshly-created host_dir from
+/// being reaped before a retry-CREATE's `StartTask` lands. The retry
+/// race window is dominated by the alloc-start wall (typically <10 s,
+/// upper bound ~30 s under back-pressure); 600 s is 20-60× that, so
+/// the new default still preserves the safety margin while reclaiming
+/// the steady-state storage.
+///
 /// Operators can shorten this for dev / test (env minimum 60 s — see
 /// `HOST_DIR_GC_GRACE_FLOOR_SECS`) or lengthen for forensic-friendly
-/// production fleets.
-pub(crate) const HOST_DIR_GC_GRACE_SECS: u64 = 3600;
+/// production fleets via `SANDBOX_HOST_DIR_GC_GRACE_SECS`.
+pub(crate) const HOST_DIR_GC_GRACE_SECS: u64 = 600;
 
 /// Minimum grace floor. 60 s is the absolute minimum: short enough for
 /// test fixtures to drive the sweeper to completion, long enough that
@@ -1802,14 +1821,25 @@ mod unit_tests {
         assert!(!host_dir_eligible_by_db(Some(&stopped), true));
     }
 
-    /// Invariant: the floor must never exceed the default — operators
-    /// reading the env-tunable should never set a value that
-    /// `from_env`'s `.max(floor)` clamps back up to a different
-    /// number. (The actual default + floor values are pinned in their
-    /// own commit alongside any tuning change; here we just enforce
-    /// the relationship between them.)
+    /// R24-A1: pin the host_dir-GC grace default at 600 s (10 min)
+    /// and the floor at 60 s. The 1-hour default ran by perf-r24
+    /// stranded ~130 GB steady-state at 10 creates/min; 600 s reclaims
+    /// 6× of that while keeping a 20-60× margin over the retry-CREATE
+    /// race window. A future bump back up — or a careless drop below
+    /// the 60 s floor — has to update this test in lockstep with the
+    /// R24-A1 reasoning recorded above `HOST_DIR_GC_GRACE_SECS`.
     #[test]
-    fn host_dir_gc_grace_default_at_least_floor() {
+    fn host_dir_gc_grace_default_and_floor_pinned() {
+        assert_eq!(
+            HOST_DIR_GC_GRACE_SECS, 600,
+            "R24-A1 default grace drift — review the steady-state \
+             storage math (perf-r24) before changing"
+        );
+        assert_eq!(
+            HOST_DIR_GC_GRACE_FLOOR_SECS, 60,
+            "R24-A1 floor drift — sub-minute grace risks a fresh \
+             CREATE's StartTask losing the race against the sweep"
+        );
         assert!(
             HOST_DIR_GC_GRACE_SECS >= HOST_DIR_GC_GRACE_FLOOR_SECS,
             "default must satisfy the minimum it enforces \
