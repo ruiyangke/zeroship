@@ -113,6 +113,34 @@ type TaskConfig struct {
 	// Wrapper env: ZSBX_USER_HOME_IMG.
 	UserHomeImg string `codec:"user_home_img"`
 
+	// RootfsSource is the absolute host path to the source rootfs image
+	// the driver hardlinks (or copies on EXDEV fallback) into runDir
+	// during the restore branch. C-7-LT-12a (smoke-r22).
+	//
+	// Background: the snapshot's config.json records `disks[0].path =
+	// /opt/nomad/data/alloc/<OLD>/ch/local/rootfs.img` — an alloc-scoped
+	// path that gets GC'd alongside the source alloc. The driver's
+	// path-rewriter retargets the field to `<NEW-runDir>/rootfs.img` and
+	// validates against the task_dir allow-list (C-7-LT-6), but pre-fix
+	// NOTHING staged a real file at that destination — CH then aborted
+	// at `VM Restore failed: DeviceManager(Disk(NotFound))`. workspace.img
+	// and home.img survive the source-alloc teardown because they live at
+	// stable persistent paths (`/var/zeroship/ch/<sbx>/workspace.img` and
+	// `/var/zeroship/ch/users/<usr>/home.img`); rootfs.img is the only
+	// disk that needs explicit staging on the restore branch.
+	//
+	// The controller emits this as `runtime_dir/rootfs-slim.img` — the
+	// same source the cold-boot's materializeRootfs copies from. On the
+	// restore branch the driver tries `os.Link` first (hardlink, O(1)
+	// regardless of image size); falls back to a stdlib copy on EXDEV
+	// (cross-device, e.g. runtime_dir on a separate filesystem from the
+	// nomad alloc dir).
+	//
+	// Empty on cold-boot — only the restore branch consumes this. An
+	// empty value on the restore branch surfaces as a clear error
+	// (`rootfs_source is empty`) rather than the cryptic CH NotFound.
+	RootfsSource string `codec:"rootfs_source"`
+
 	// PubkeyHex is the lowercase-hex controller signing pubkey, no `0x`
 	// prefix. Embedded in the cmdline as `zsbx_pubkey=<hex>`; the guest
 	// /sbin/init decodes + writes /keys/controller-pubkey. Wrapper env:
@@ -166,6 +194,7 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	"user_id":           hclspec.NewAttr("user_id", "string", false),
 	"workspace_img":     hclspec.NewAttr("workspace_img", "string", false),
 	"user_home_img":     hclspec.NewAttr("user_home_img", "string", false),
+	"rootfs_source":     hclspec.NewAttr("rootfs_source", "string", false),
 	"pubkey_hex":        hclspec.NewAttr("pubkey_hex", "string", false),
 	"subnet_base_octet": hclspec.NewAttr("subnet_base_octet", "number", false),
 
