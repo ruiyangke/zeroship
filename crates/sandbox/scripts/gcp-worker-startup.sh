@@ -418,6 +418,26 @@ else
   chmod 0400 "$AEAD_KEY_PATH"
   echo "[startup] reusing AEAD key at $AEAD_KEY_PATH"
 fi
+
+# Snapshot AEAD root KEK (arch-r9 fail-CLOSED, R10-A1). Controller
+# refuses to boot when `SNAPSHOT_ENABLED=true` + `SNAPSHOT_USE_GCS=true`
+# but `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` is unset — without it, guest RAM
+# pages land in GCS in clear while the pg audit row stamps
+# `snapshot_aead_dek_id="v1"`, an audit-trail-vs-reality gap. The KEK
+# must be exactly 32 raw bytes, mode 0o400, owned by uid 0. Generated
+# once at startup and reused idempotently across reboots so any DEKs
+# previously wrapped under it stay decryptable. DO NOT log or echo
+# the contents.
+ROOT_KEK_PATH="$ART/snapshot-root-kek"
+if [ ! -s "$ROOT_KEK_PATH" ]; then
+  ( umask 077; head -c 32 /dev/urandom > "$ROOT_KEK_PATH" )
+  chmod 0400 "$ROOT_KEK_PATH"
+  echo "[startup] generated snapshot root KEK at $ROOT_KEK_PATH (32 bytes, 0400)"
+else
+  chmod 0400 "$ROOT_KEK_PATH"
+  echo "[startup] reusing snapshot root KEK at $ROOT_KEK_PATH"
+fi
+
 mkdir -p /var/lib/zeroship/sandbox/sealed-records
 umask 022
 
@@ -500,6 +520,9 @@ Environment=SANDBOX_SNAPSHOT_GCS_BUCKET=$SNAPSHOT_BUCKET
 Environment=SANDBOX_PERSIST_AUTH=1
 Environment=SANDBOX_AEAD_KEY_PATH=$AEAD_KEY_PATH
 Environment=SANDBOX_PERSIST_DIR=/var/lib/zeroship/sandbox
+# Snapshot root KEK (32 bytes, mode 0o400). Required by the fail-CLOSED
+# boot assertion when SNAPSHOT_ENABLED + SNAPSHOT_USE_GCS are both true.
+Environment=SANDBOX_SNAPSHOT_ROOT_KEK_PATH=$ROOT_KEK_PATH
 
 # Admin token file
 Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
