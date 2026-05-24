@@ -3418,9 +3418,63 @@ fn validate_typed_id(
         .map_err(|e| format!("{what}: {e}"))
 }
 
+// ─── SANDBOX_TASK_DRIVER env-mutex (shared with restore_handler tests) ──
+//
+// Two test modules in this crate exercise the `SANDBOX_TASK_DRIVER`
+// feature flag: the cold-boot builder here in `nomad_ch.rs::tests` and
+// the wake-path builder in `restore_handler.rs::r12_i1_tests`. Both
+// mutate the SAME process-global env var, and `cargo test` shares a
+// single test binary at default parallelism — so without a SHARED
+// mutex the two test mods could race silently (assertion failures,
+// not panics).
+//
+// We expose ONE `pub(crate) static TASK_DRIVER_ENV_LOCK` plus a single
+// `with_task_driver_env` helper, co-located with the canonical
+// `task_driver_mode_from_env()` reader (line ~2240 above). Restore-path
+// tests import this module rather than minting their own lock.
+//
+// R13-Q1 / R13-C1: prior to unification, this file held `T7_ENV_LOCK`
+// and `restore_handler.rs` held a separate `R12_I1_ENV_LOCK`. Same env
+// var, two locks — broken serialisation across modules. Unified here.
+#[cfg(test)]
+pub(crate) mod test_env_lock {
+    /// Serialises every test in the crate that mutates
+    /// `SANDBOX_TASK_DRIVER` via `std::env::{set_var, remove_var}`.
+    /// New env-touching tests (this module OR `restore_handler` OR any
+    /// future sibling) MUST acquire this lock first.
+    pub(crate) static TASK_DRIVER_ENV_LOCK: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
+
+    // SAFETY: env mutation is process-global; the lock above
+    // serialises every test in the crate that reaches for the same
+    // var. No other crate touches SANDBOX_TASK_DRIVER at test time.
+    // The crate doesn't deny unsafe_code globally, but env::set_var
+    // / remove_var are unsafe in the 2024 stdlib regardless, so we
+    // mark the helper accordingly.
+    #[allow(unsafe_code)]
+    pub(crate) fn with_task_driver_env<R>(
+        value: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _g = TASK_DRIVER_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match value {
+            Some(v) => unsafe { std::env::set_var("SANDBOX_TASK_DRIVER", v) },
+            None => unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") },
+        }
+        let out = f();
+        // Restore the var to unset on the way out so subsequent tests
+        // that don't take this lock still see the default.
+        unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") };
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_env_lock::with_task_driver_env;
 
     // ─── VmIndexAllocator ────────────────────────────────────
 
@@ -4061,36 +4115,10 @@ mod tests {
     // ─── SANDBOX_TASK_DRIVER feature flag (T-7) ──────────────
     //
     // The two env-touching tests below mutate process-global state.
-    // `cargo test` runs lib tests in parallel, and another test that
-    // happens to call `task_driver_mode_from_env()` (or anything that
-    // reads `SANDBOX_TASK_DRIVER`) could race with these. We serialise
-    // env-touching tests with a Mutex — same pattern as
-    // `crates/sandbox/src/db.rs::tests::ENV_LOCK`.
-
-    /// Serialises every test in this submodule that mutates
-    /// `SANDBOX_TASK_DRIVER` via `std::env::{set_var, remove_var}`.
-    /// New env-touching tests MUST acquire this lock first.
-    static T7_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // SAFETY: env mutation is process-global; the lock above
-    // serialises every test in this module that reaches for the
-    // same var. No other crate touches SANDBOX_TASK_DRIVER at test
-    // time. The crate-level `#![deny(unsafe_code)]` forces us to opt
-    // in explicitly here — matching `db.rs::tests` which carries
-    // `#[allow(unsafe_code)]` on the module for the same reason.
-    #[allow(unsafe_code)]
-    fn with_task_driver_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _g = T7_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        match value {
-            Some(v) => unsafe { std::env::set_var("SANDBOX_TASK_DRIVER", v) },
-            None => unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") },
-        }
-        let out = f();
-        // Restore the var to unset on the way out so subsequent tests
-        // that don't take this lock still see the default.
-        unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") };
-        out
-    }
+    // The shared `with_task_driver_env` helper (in the sibling
+    // `test_env_lock` module) serialises against ANY test in this
+    // crate that touches `SANDBOX_TASK_DRIVER`, including the wake-path
+    // `r12_i1_tests` in `restore_handler.rs`. Same env var → ONE lock.
 
     /// Default (env unset) keeps the existing raw_exec transport —
     /// the controller MUST NOT silently opt a fleet into the Go

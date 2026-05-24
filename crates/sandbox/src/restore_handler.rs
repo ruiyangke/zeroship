@@ -2451,6 +2451,13 @@ mod real_backend_tests {
 mod r12_i1_tests {
     use super::*;
     use crate::backend::nomad_ch::TaskDriverMode;
+    // R13-Q1: share the SANDBOX_TASK_DRIVER env-mutex with the
+    // cold-boot tests in `backend::nomad_ch::tests`. Both modules
+    // mutate the SAME process-global env var; using two separate
+    // `Mutex<()>` statics (the prior `R12_I1_ENV_LOCK` here +
+    // `T7_ENV_LOCK` there) failed to serialise across modules in the
+    // shared test binary. See `backend::nomad_ch::test_env_lock`.
+    use crate::backend::nomad_ch::test_env_lock::with_task_driver_env;
 
     fn fixture_cfg() -> NomadCHConfig {
         NomadCHConfig {
@@ -2468,31 +2475,6 @@ mod r12_i1_tests {
             startup_orphan_cleanup: false,
             subnet_second_octet: 99,
         }
-    }
-
-    /// Re-use the T-7 env-mutex pattern. We don't share the same
-    /// mutex symbol across crates (`nomad_ch::tests::T7_ENV_LOCK` is
-    /// `pub(crate)`-scoped to that test mod), but we DO need
-    /// serialisation against tests in this module — define a
-    /// module-local mirror.
-    static R12_I1_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // SAFETY: env mutation is process-global. The lock above
-    // serialises every test in this module that reaches for the same
-    // var. The crate-level `#![deny(unsafe_code)]` forces us to opt
-    // in here — same pattern as `nomad_ch::tests::with_task_driver_env`.
-    #[allow(unsafe_code)]
-    fn with_task_driver_env<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-        let _g = R12_I1_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        match value {
-            Some(v) => unsafe { std::env::set_var("SANDBOX_TASK_DRIVER", v) },
-            None => unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") },
-        }
-        let out = f();
-        unsafe { std::env::remove_var("SANDBOX_TASK_DRIVER") };
-        out
     }
 
     /// `SANDBOX_TASK_DRIVER` unset (default) → wake-path emits the
