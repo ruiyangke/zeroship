@@ -441,6 +441,208 @@ func TestSignalTask_UnknownTaskReturnsErrTaskNotFound(t *testing.T) {
 	}
 }
 
+// ─── T-8b-stress-r2 driver v14: defensive tap cleanup hook ──────────
+//
+// Per the v14 design (closes Bug 2's "stranded-tap" residue):
+// DestroyTask must clean the tap keyed off h.vmIndex even when h.tap
+// is empty — a half-initialised handle or an external orphan still
+// gets its `zsbx-nm-<idx>` interface removed. Tests verify:
+//
+//   1. h.tap empty + vmIndex set → defensive cleanup deletes the
+//      computed name and the orphan counter increments by 1.
+//   2. h.tap == computed name → defensive cleanup does NOT fire (no
+//      double-delete; the orphan counter stays put).
+//   3. h.tap != computed name → both deletes happen; orphan counter
+//      bumps once (the unrecorded computed name IS an orphan).
+//   4. vmIndex out of range (0 or > 155) → defensive cleanup skipped;
+//      orphan counter unchanged (defends against a corrupted handle).
+
+// TestDestroyTask_DefensiveTapCleanup_FiresWhenHandleTapEmpty pins the
+// driver v14 contract: a handle that reached p.tasks with h.tap == ""
+// still gets the per-VMIndex tap cleaned. Without this, the
+// T-8b-stress 9-stranded-tap residue persists across cluster cycles.
+func TestDestroyTask_DefensiveTapCleanup_FiresWhenHandleTapEmpty(t *testing.T) {
+	ch.ResetTapsOrphanedForTest()
+	t.Cleanup(ch.ResetTapsOrphanedForTest)
+
+	f := newStopFixture(t, nil)
+	// Surgically force h.tap == "" via the test API. The fixture's
+	// NetSpec puts "test-tap-7" on the handle; clearing it simulates
+	// the partial-init failure mode where setupTapForVM created the
+	// device but SetDriverState wrote the field as empty (or never
+	// reached the assignment line). The vmIndex echo on the handle
+	// (from TaskConfig.VMIndex=7) remains untouched.
+	if err := ch.SetHandleTapForTest(f.plugin, f.taskCfg.ID, ""); err != nil {
+		t.Fatalf("SetHandleTapForTest: %v", err)
+	}
+
+	// Let the runner exit so DestroyTask doesn't block.
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.TapsOrphanedTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// The defensive path must have invoked removeTapFn with the
+	// vm_index-derived name (zsbx-nm-7 for VMIndex=7).
+	got := f.removedTap.Load()
+	if got == nil || *got != "zsbx-nm-7" {
+		var v string
+		if got != nil {
+			v = *got
+		}
+		t.Errorf("defensive cleanup did not target zsbx-nm-7; removed=%q", v)
+	}
+	if post := ch.TapsOrphanedTotal(); post != pre+1 {
+		t.Errorf("orphan counter: pre=%d post=%d, want +1", pre, post)
+	}
+}
+
+// TestDestroyTask_DefensiveTapCleanup_SkipsWhenHandleTapMatches pins
+// the no-double-delete branch: when h.tap == zsbx-nm-<idx> (the
+// happy-path lifecycle), the defensive pass is suppressed so the
+// orphan counter doesn't fire spuriously on every clean shutdown.
+//
+// Uses the standard fixture but mutates h.tap to "zsbx-nm-7" — the
+// same name the defensive pass would compute — so the != guard
+// suppresses the redundant second delete. (The fixture's NetSpec
+// supplies "test-tap-7", which gets overwritten here. SetHandleTapForTest
+// already exists for the partial-init test; reused.)
+func TestDestroyTask_DefensiveTapCleanup_SkipsWhenHandleTapMatches(t *testing.T) {
+	ch.ResetTapsOrphanedForTest()
+	t.Cleanup(ch.ResetTapsOrphanedForTest)
+
+	// Override the fixture's per-call removedTap (single-slot) with
+	// a multi-call accumulator so we can count exactly how many
+	// removeTapFn invocations DestroyTask emits. The fixture's seam
+	// is installed in newStopFixture; we swap it AFTER the fixture
+	// build so our accumulator wins.
+	f := newStopFixture(t, nil)
+	removedTaps := &atomicStringSlice{}
+	prevRemove := ch.SetRemoveTapForTest(func(tap string) error {
+		removedTaps.Append(tap)
+		return nil
+	})
+	t.Cleanup(func() { ch.SetRemoveTapForTest(prevRemove) })
+
+	// Force h.tap to the defensive-computed name so the != guard
+	// suppresses the second invocation.
+	if err := ch.SetHandleTapForTest(f.plugin, f.taskCfg.ID, "zsbx-nm-7"); err != nil {
+		t.Fatalf("SetHandleTapForTest: %v", err)
+	}
+
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.TapsOrphanedTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// Only ONE delete should have happened — the happy-path
+	// removeTapFn("zsbx-nm-7"). The defensive pass's != guard
+	// suppresses the second call when both names match.
+	if got := removedTaps.Len(); got != 1 {
+		t.Errorf("expected exactly 1 tap delete (happy-path only); got %d: %v", got, removedTaps.Snapshot())
+	}
+	if got := removedTaps.At(0); got != "zsbx-nm-7" {
+		t.Errorf("expected delete of zsbx-nm-7; got %q", got)
+	}
+	if post := ch.TapsOrphanedTotal(); post != pre {
+		t.Errorf("orphan counter spuriously bumped on happy path: pre=%d post=%d", pre, post)
+	}
+}
+
+// TestDestroyTask_DefensiveTapCleanup_BothFireWhenNamesDiffer pins
+// the operator-supplied-NetSpec failure mode: h.tap = "test-tap-7"
+// (from cfg.Net[0]) and the defensive name "zsbx-nm-7" disagree —
+// both deletes run, and the orphan counter increments once.
+func TestDestroyTask_DefensiveTapCleanup_BothFireWhenNamesDiffer(t *testing.T) {
+	ch.ResetTapsOrphanedForTest()
+	t.Cleanup(ch.ResetTapsOrphanedForTest)
+
+	f := newStopFixture(t, nil) // cfg.Net[0].Tap = "test-tap-7", VMIndex=7
+	removedTaps := &atomicStringSlice{}
+	prevRemove := ch.SetRemoveTapForTest(func(tap string) error {
+		removedTaps.Append(tap)
+		return nil
+	})
+	t.Cleanup(func() { ch.SetRemoveTapForTest(prevRemove) })
+
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.TapsOrphanedTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// Both deletes ran — happy-path on "test-tap-7" then defensive
+	// on "zsbx-nm-7" (derived from VMIndex=7).
+	snap := removedTaps.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("expected 2 tap deletes; got %d: %v", len(snap), snap)
+	}
+	if snap[0] != "test-tap-7" {
+		t.Errorf("first delete: got %q want test-tap-7 (happy path)", snap[0])
+	}
+	if snap[1] != "zsbx-nm-7" {
+		t.Errorf("second delete: got %q want zsbx-nm-7 (defensive)", snap[1])
+	}
+	if post := ch.TapsOrphanedTotal(); post != pre+1 {
+		t.Errorf("orphan counter: pre=%d post=%d, want +1", pre, post)
+	}
+}
+
+// atomicStringSlice is a minimal goroutine-safe accumulator the new
+// defensive-cleanup tests use to observe the ORDER of removeTapFn
+// calls (the existing fixture only stores the LAST tap). Kept local
+// to this file to avoid bloating helpers_test.go.
+type atomicStringSlice struct {
+	mu sync.Mutex
+	s  []string
+}
+
+func (a *atomicStringSlice) Append(s string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.s = append(a.s, s)
+}
+
+func (a *atomicStringSlice) Len() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.s)
+}
+
+func (a *atomicStringSlice) At(i int) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if i < 0 || i >= len(a.s) {
+		return ""
+	}
+	return a.s[i]
+}
+
+func (a *atomicStringSlice) Snapshot() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]string, len(a.s))
+	copy(out, a.s)
+	return out
+}
+
 // -- helpers ----------------------------------------------------------
 
 // signalSent reports whether `sig` was recorded by the fake runner. The

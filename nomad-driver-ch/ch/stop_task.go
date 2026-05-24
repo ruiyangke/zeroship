@@ -249,7 +249,11 @@ func (p *Plugin) waitForExit(h *taskHandle, d time.Duration) bool {
 //     future WaitTask monitors) exit.
 //  5. Best-effort tap removal — failure is logged, not surfaced; the tap
 //     may already be gone (CH crashed) or owned by an external systemd
-//     unit (T-3 territory).
+//     unit (T-3 territory). Two passes: first keyed off h.tap (the
+//     happy-path lifecycle), then a DEFENSIVE pass keyed off h.vmIndex
+//     so a half-initialised handle (h.tap == "") or an external orphan
+//     still gets cleaned (T-8b-stress-r2 driver v14 — see in-body
+//     comment for the failure modes the defensive pass covers).
 //  6. Best-effort API socket removal — file may already be gone (CH
 //     unlinks on clean exit).
 //  7. Delete the in-memory handle from p.tasks.
@@ -283,10 +287,76 @@ func (p *Plugin) DestroyTask(taskID string, force bool) error {
 	// Cleanup tail — best-effort, errors only logged. The bash wrapper
 	// also runs these unconditionally; failures (e.g. tap already gone)
 	// are expected on the crash-recovery path.
+	//
+	// T-8b-stress-r2 driver v14: DEFENSIVE tap cleanup keyed off VMIndex.
+	//
+	// Pre-v14 the only call site was `if h.tap != "" { removeTapFn(h.tap) }` —
+	// which is correct for a happy-path lifecycle (StartTask sets h.tap,
+	// DestroyTask removes it). But two failure modes leave taps stranded:
+	//
+	//   1. **Partial StartTask** — setupTapForVM creates the tap, then a
+	//      later step (decode validation, runDir mkdir, processRunner
+	//      spawn) fails. We unwind via `tapRollback` in start_task.go
+	//      (G4) BUT only when the handle was never registered in p.tasks.
+	//      Once the handle is registered, DestroyTask owns the cleanup —
+	//      and if a *different* failure path reaches DestroyTask via a
+	//      handle that didn't reach the SetDriverState line where h.tap
+	//      is assigned, `h.tap == ""` and the cleanup is skipped.
+	//   2. **External orphan** — a prior alloc's DestroyTask never ran
+	//      (Nomad client SIGKILL'd, controller-driven force-purge before
+	//      DestroyTask fires, etc.). The next alloc on the same VMIndex
+	//      hits the EEXIST in setupTapForVM and recovers via the v13
+	//      pre-delete; but if THIS alloc later destroys and the tap was
+	//      created by a peer process / external script, h.tap == "" and
+	//      again the cleanup is skipped.
+	//
+	// Fix: in addition to the conditional removal keyed off h.tap (which
+	// still runs first so an attached test seam observes both paths),
+	// derive the deterministic tap name `zsbx-nm-<vmIndex>` from
+	// h.vmIndex and `ip link delete` it. `realTeardownTap` already
+	// tolerates `Cannot find device` (line :215 of net.go), so a fresh-
+	// from-StartTask handle that already cleaned up via h.tap takes the
+	// no-op branch on the second call. Only count this as an "orphan"
+	// when h.tap was empty (otherwise it's the normal lifecycle delete,
+	// just done twice — the second call is a free idempotency check).
 	if h.tap != "" {
 		if err := removeTapFn(h.tap); err != nil {
 			p.logger.Warn("ch: DestroyTask: tap removal failed (best-effort)",
 				"task_id", taskID, "tap", h.tap, "err", err)
+		}
+	}
+	if h.vmIndex >= 1 && h.vmIndex <= 155 {
+		// Use computeTapAddresses for the deterministic name so the
+		// defense-in-depth uses the same arithmetic as setupTapForVM
+		// (single source of truth — a drift between the two would
+		// silently disable this hook).
+		defensiveTap, _, _, _, err := computeTapAddresses(h.vmIndex, defaultSubnetBaseOctet)
+		if err == nil {
+			// Skip the second delete when h.tap already covered the
+			// same name (avoid double-logging the noop).
+			//
+			// Goes through removeTapFn (the T-2 alias for
+			// teardownTapFn) so an existing test that swaps
+			// SetRemoveTapForTest sees the second call too. The seam
+			// names are split for historical reasons (ch_client.go:
+			// 369-371) but funnel into the same impl in production —
+			// using removeTapFn here keeps the test ergonomics
+			// uniform.
+			if h.tap != defensiveTap {
+				if delErr := removeTapFn(defensiveTap); delErr != nil {
+					p.logger.Warn("ch: DestroyTask: defensive tap removal failed (best-effort)",
+						"task_id", taskID, "tap", defensiveTap, "vm_index", h.vmIndex, "err", delErr)
+				} else {
+					// Successful defensive cleanup — count as orphan
+					// observability. Skip the bump when h.tap was the
+					// SAME name and just ran above (no orphan, just
+					// happy-path); the != guard above already gates that.
+					incTapsOrphaned()
+					p.logger.Info("ch: DestroyTask: defensive tap cleanup fired (vm_index keyed)",
+						"task_id", taskID, "tap", defensiveTap, "vm_index", h.vmIndex,
+						"taps_orphaned_total", TapsOrphanedTotal())
+				}
+			}
 		}
 	}
 	if h.apiSocket != "" {

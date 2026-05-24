@@ -274,6 +274,24 @@ func CopyRootfsForRestoreTest(src, dst string) error {
 	return out.Close()
 }
 
+// SetHandleTapForTest mutates the in-memory taskHandle's `tap` field
+// so tests can simulate the partial-init failure mode the driver v14
+// defensive tap cleanup hook covers (StartTask reached SetDriverState
+// but h.tap was either never assigned or cleared by a subsequent
+// failure unwind). Returns an error if `taskID` isn't registered —
+// signals a test setup bug rather than silently no-op'ing.
+//
+// Not for production use: the production lifecycle never mutates
+// h.tap after the StartTask assignment line.
+func SetHandleTapForTest(p *Plugin, taskID, tap string) error {
+	h, ok := p.tasks.Get(taskID)
+	if !ok {
+		return ErrTaskNotFound
+	}
+	h.tap = tap
+	return nil
+}
+
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing
 // to spawn a real CH process. Mirrors the minimal shape RecoverTask
