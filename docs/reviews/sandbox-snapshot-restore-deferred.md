@@ -935,11 +935,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ### [R11-S1] (CRITICAL, security-r11, elevation of R9-S4d) — CLOSED at b4c3ef27 — admin token uid check landed
 
-### [R11-S2] (MINOR, security-r11) `host_id` file at db.rs:1094-1105 reads with no mode/uid/shape validation
+### [R11-S2] (MINOR, security-r11) `host_id` file at db.rs:1094-1105 reads with no mode/uid/shape validation — CLOSED at 85e4f2f9
 - **Source**: 2026-05-25 security-r11
 - **File**: `crates/sandbox/src/db.rs:1094-1105` (reader) + `:1129-1138` (writer emits 0o600)
 - **Symptom**: writer is correct (0o600 mode); reader is symmetric-free. HA peer-identity spoofing → bypass of `claim_orphan_transient_for_recovery` self-host_id fence.
 - **Action**: add a mode + uid check on the reader. Mode 0o600 (matches writer); uid==0 (or relax to euid since the controller writes its own — match the writer's authority).
+- **Fix (85e4f2f9)**: `enforce_host_id_file_mode` helper added in db.rs (mirrors `enforce_password_file_mode` shape at db.rs:812); reader path gated on `metadata().mode() == 0o600` + `metadata().uid() == 0`. 3 new tests mirror R9-S4c naming: `host_id_read_rejects_loose_permissions`, `host_id_read_rejects_non_root_owned_file`, `host_id_read_accepts_root_owned_0o600_file_when_running_as_root`. Two existing positive-arm tests (`from_env_generates_host_id_when_absent`, `from_env_loads_host_id_from_persistent_file`) gated to skip when non-root, matching the R9-S4 family idiom. Sandbox lib tests: 319 → 322.
 
 ### [R11-S3] (MINOR, security-r11, posture) chunk_aad missing sandbox_id + snapshot_taken_at
 - **Source**: 2026-05-25 security-r11
