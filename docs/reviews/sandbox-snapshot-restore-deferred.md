@@ -13,6 +13,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 
 ## CRITICAL (open blockers on Phase B cluster validation)
 
+### [STRESS-R9-RETRY] T-8b-stress-r9 cluster validation pending budget reset
+- **Status**: BLOCKED on `/tmp/zsbx-cluster-budget-20260524` (24 entries ≥ 10/24h cap). v19 staging fully verified GREEN at pre-flight (HEAD `086971d2`, GCS SHA `1d42b4ab...`, MD5 round-trip `3e4349744f994f8dc58e2d82d6168e59`, pin `gcp-worker-startup.sh:188` = `nomad-driver-ch.v19`).
+- **Block paperwork**: `docs/reviews/sandbox-snapshot-restore-cluster-2026-05-25-T8b-stress-r9.md` + commit `2468ab96`.
+- **Retry after**: 2026-05-25 00:00 UTC (fresh `/tmp/zsbx-cluster-budget-20260525` marker).
+- **Validates**: r24-A2-S2 sync `ip tuntap del` + ENODEV verify (`cd118547`) + r24-A2-S3 VmIndexAllocator 5s release delay (`c969b94d`) closes the stress-r8 cycle-1-19 EEXIST `Tap zsbx-nm-N already exists` wedge. Driver v19 + controller v36 + r7-B file exporter for counter visibility.
+- **Shape**: SERVER_COUNT=3 WORKER_COUNT=3 × 20 cycles (same as r1-r8). Capture `nomad_driver_ch_destroy_task_tap_stuck_total` increment per cycle from `/var/lib/zsbx/driver-metrics.prom`.
+
 ### [B16] (RESOLVED 2026-05-24 r2) NixOS-built controller binary unrunnable on GCE Ubuntu workers
 - **Status**: **CLOSED**. Verified fix via Docker cross-build (Option A from the action plan) in `rust:slim-bookworm` (note: brief said `rust:bookworm-slim`; correct Docker Hub tag is `slim-bookworm`). v13 binary uploaded to `gs://suger-dev-zsbx-artifacts/zeroship-sandbox.snapshot-v13` with portable interp `/lib64/ld-linux-x86-64.so.2`. Controller starts and serves `/livez` on GCE Ubuntu. See cluster review Appendix A for full transcript.
 - **Original symptom**: `zsbx-ctl.service` exits 203/EXEC immediately; `/usr/local/bin/zeroship-sandbox: cannot execute: required file not found` (kernel's misleading text for missing PT_INTERP).
