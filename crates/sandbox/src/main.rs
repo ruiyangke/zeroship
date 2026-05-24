@@ -229,6 +229,15 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/admin/sandboxes/{id}/wake")
                     .route(web::post().to(admin_handlers::wake_sandbox)),
             )
+            // C-7-LT-PR2: GET /wake/{wake_id} polling endpoint paired
+            // with the POST above. Registered as a sibling resource so
+            // ntex's path-matcher routes both shapes correctly (the
+            // 1-param `{id}/wake` POST vs the 2-param
+            // `{id}/wake/{wake_id}` GET).
+            .service(
+                web::resource("/admin/sandboxes/{id}/wake/{wake_id}")
+                    .route(web::get().to(admin_handlers::poll_wake)),
+            )
             .service(
                 web::resource("/admin/sandboxes/{id}/cold-boot")
                     .route(web::post().to(admin_handlers::cold_boot_sandbox)),

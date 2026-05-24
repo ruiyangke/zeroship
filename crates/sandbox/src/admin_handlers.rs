@@ -1393,10 +1393,40 @@ pub async fn snapshot_sandbox(
     }
 }
 
+/// Query-string for `POST /admin/sandboxes/{id}/wake`. The `?sync=1`
+/// override forces the legacy synchronous path even when the
+/// controller's default `WakeResponseMode` is `Async`. Deprecated
+/// per C-7-LT proposal § 4; tracked by the
+/// `sandbox_wake_sync_uses_total` counter (R16-API1 #5).
+#[derive(Debug, Deserialize, Default)]
+pub struct WakeQuery {
+    /// Operator override: when `1`, force the legacy 200-OK
+    /// synchronous response. Any other value (or absence) defers to
+    /// the controller's `SANDBOX_WAKE_RESPONSE_MODE` env-resolved
+    /// default.
+    pub sync: Option<u8>,
+}
+
+/// `POST /admin/sandboxes/{id}/wake` — C-7-LT-PR2 dual-mode entry.
+///
+/// Two response shapes:
+///
+/// - Sync (legacy; default until C-7-LT phase 4): 200 OK with the
+///   full wake outcome `{sandbox_id, vm_index, generation}`. Subject
+///   to the ntex client-deadline ceiling that motivated the
+///   redesign. Selected when `WakeResponseMode::Sync` (the env
+///   default) OR `?sync=1` override.
+/// - Async (C-7-LT contract): 202 Accepted with
+///   `{wake_id, poll_url, state}`. The state machine runs on a
+///   private compio runtime in [`crate::wake_machine::WakeMachine`];
+///   the client polls `GET /admin/sandboxes/{id}/wake/{wake_id}` for
+///   the terminal outcome. Idempotent: a duplicate POST while a wake
+///   is in flight returns the existing `wake_id` with `replay: true`.
 pub async fn wake_sandbox(
     req: HttpRequest,
     state: State,
     path: web::types::Path<String>,
+    query: web::types::Query<WakeQuery>,
 ) -> HttpResponse {
     if let Err(r) = admin_check(&req, &state) {
         return r;
@@ -1409,6 +1439,43 @@ pub async fn wake_sandbox(
         Ok(u) => u,
         Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
     };
+
+    let q = query.into_inner();
+    let force_sync = matches!(q.sync, Some(1));
+    let mode = state.wake_response_mode;
+    let take_sync_path = force_sync || matches!(mode, crate::config::WakeResponseMode::Sync);
+
+    if take_sync_path {
+        // Deprecation telemetry: bump on EVERY sync use so Phase 5's
+        // "zero sync uses for one minor" gate has data. The warn log
+        // dedups in the operator's eyes by client_ua + sandbox_id;
+        // the counter is the source-of-truth for the gate.
+        crate::metrics::inc_wake_sync_deprecated();
+        let client_ua = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        tracing::warn!(
+            sandbox_id = %sandbox_id,
+            force_sync,
+            mode = mode.as_str(),
+            client_ua,
+            "admin/wake: sync mode used (deprecated; migrate to async polling per C-7-LT)"
+        );
+        return wake_sandbox_sync_inner(&state, sandbox_id).await;
+    }
+
+    wake_sandbox_async_inner(&state, &raw, sandbox_id).await
+}
+
+/// Legacy synchronous wake path. Drives `restore_handler::restore_sandbox`
+/// inline and emits the existing flat `{sandbox_id, vm_index, generation}`
+/// 200-OK body or the §10.0-shaped error envelope from `map_restore_error`.
+///
+/// Preserved verbatim (modulo the function-boundary extraction) through
+/// C-7-LT phase 4; phase 5 deletes it along with `do_restore_inner`.
+async fn wake_sandbox_sync_inner(state: &AppState, sandbox_id: uuid::Uuid) -> HttpResponse {
     let (Some(store), Some(rb), Some(db)) = (
         state.snapshot_store.as_ref(),
         state.restore_backend.as_ref(),
@@ -1446,6 +1513,331 @@ pub async fn wake_sandbox(
             );
             map_restore_error(e)
         }
+    }
+}
+
+/// Async (202 Accepted + polling) wake path per C-7-LT proposal § 2.
+///
+/// Idempotency / status matrix (R16-API1 #3):
+///
+/// | precondition                                       | response                                                 |
+/// |----------------------------------------------------|----------------------------------------------------------|
+/// | no in-flight wake for sandbox                      | 202 with newly minted `wake_id`                          |
+/// | in-flight wake exists                              | 202 with existing `wake_id` + `replay: true`             |
+/// | terminal wake within `T_KEEP`                      | (handled by `GET /wake/{wake_id}`, not this POST)        |
+/// | terminal wake evicted (>T_KEEP)                    | 202 with newly minted `wake_id` (caller retried POST)    |
+///
+/// Note: a fresh POST after a terminal wake (still in pg) is a
+/// distinct semantic from a duplicate in-flight POST — we treat
+/// "in-flight only" as the replay case. A terminal-state replay is
+/// surfaced through the GET endpoint, not the POST.
+async fn wake_sandbox_async_inner(
+    state: &AppState,
+    sandbox_id_typed: &str,
+    sandbox_id: uuid::Uuid,
+) -> HttpResponse {
+    let (Some(store), Some(rb), Some(db)) = (
+        state.snapshot_store.as_ref(),
+        state.restore_backend.as_ref(),
+        state.database.as_ref(),
+    ) else {
+        return err(
+            503,
+            "wake_wiring_unavailable",
+            "wake wiring not initialized (database/store/restore_backend None)",
+        );
+    };
+
+    // Idempotency: short-circuit duplicate in-flight wakes. The
+    // `find_pending_wake_for_sandbox` query has a partial index
+    // (`wake_jobs_state_idx WHERE state NOT IN ('ok', 'failed')`) so
+    // this is a cheap lookup even at fleet scale.
+    let typed_sandbox_id = sandbox_id_typed.to_string();
+    match db.find_pending_wake_for_sandbox(&typed_sandbox_id).await {
+        Ok(Some(existing)) => {
+            return HttpResponse::Accepted().json(&serde_json::json!({
+                "wake_id": existing.wake_id,
+                "sandbox_id": typed_sandbox_id,
+                "poll_url": format!(
+                    "/admin/sandboxes/{typed_sandbox_id}/wake/{wake_id}",
+                    wake_id = existing.wake_id,
+                ),
+                "state": existing.state.as_str(),
+                "replay": true,
+            }));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "wake idempotency lookup failed",
+                e,
+            );
+        }
+    }
+
+    // Pre-flight: refuse if the sandbox row isn't a valid wake
+    // candidate. Mirrors `restore_sandbox`'s first two checks
+    // (NotFound + StateMismatch) so the client gets the same 404/409
+    // it would have gotten on the sync path; we only spawn the
+    // machine when the wake actually has work to do.
+    let row = match db.get_sandbox_row(sandbox_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ErrorEnvelope::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "sandbox not found",
+            )
+            .with_extra(serde_json::json!({"sandbox_id": typed_sandbox_id}))
+            .into_response();
+        }
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "sandbox row lookup failed",
+                e,
+            );
+        }
+    };
+    if !matches!(
+        row.status,
+        crate::db::SandboxStatus::Snapshotted
+            | crate::db::SandboxStatus::SnapshottedSuspect
+    ) {
+        return ErrorEnvelope::new(
+            StatusCode::CONFLICT,
+            "state_mismatch",
+            format!(
+                "sandbox is in state {:?}; wake requires \"snapshotted\"",
+                row.status
+            ),
+        )
+        .with_extra(serde_json::json!({
+            "current": row.status.as_str(),
+            "expected": "snapshotted",
+        }))
+        .into_response();
+    }
+
+    // Mint wake_id (typed-id with wak_ prefix per R16-API2) and
+    // INSERT the pending row.
+    let wake_id = zeroship_core::typed_id::new_wake_id();
+    let lessee = db.host_id().to_string();
+    let new_row = crate::db::WakeJobRow {
+        wake_id: wake_id.clone(),
+        sandbox_id: typed_sandbox_id.clone(),
+        state: crate::db::WakeJobState::Pending,
+        error_code: None,
+        error_message: None,
+        started_at_secs: 0, // server-side default
+        updated_at_secs: 0,
+        ready_at_secs: None,
+        agent_url: None,
+        lessee: lessee.clone(),
+        lessee_updated_at_secs: 0,
+    };
+    if let Err(e) = db.insert_wake_job(&new_row).await {
+        return err_safe(
+            500,
+            "database_failed",
+            "wake job insert failed",
+            e,
+        );
+    }
+
+    // Spawn the state machine on a dedicated OS thread with a
+    // private compio runtime. The wake_id parameter is moved into
+    // the closure; ntex can't reach it after the 202 is sent.
+    let machine = crate::wake_machine::WakeMachine {
+        database: Arc::clone(db),
+        backend: Arc::clone(rb),
+        snapshot_store: Arc::clone(store),
+        persist: state.persist.clone(),
+        sandbox_id,
+        wake_id: wake_id.clone(),
+        lessee,
+    };
+    // Linux truncates thread names to 15 chars; prefix with "wake-"
+    // and a short suffix of the wake_id so dashboards / `ps -L` show
+    // a stable, debug-friendly tag without overflowing TASK_COMM_LEN.
+    let short_tail: String = wake_id
+        .as_bytes()
+        .iter()
+        .rev()
+        .take(8)
+        .rev()
+        .map(|b| *b as char)
+        .collect();
+    let thread_name = format!("wake-{short_tail}");
+    crate::detach::detach_isolated(thread_name, move || machine.drive());
+
+    HttpResponse::Accepted().json(&serde_json::json!({
+        "wake_id": wake_id,
+        "sandbox_id": typed_sandbox_id,
+        "poll_url": format!(
+            "/admin/sandboxes/{typed_sandbox_id}/wake/{wake_id}"
+        ),
+        "state": "pending",
+        "replay": false,
+    }))
+}
+
+/// `GET /admin/sandboxes/{id}/wake/{wake_id}` — C-7-LT-PR2 polling
+/// endpoint per proposal § 2.
+///
+/// Response matrix:
+///
+/// | row state                  | code | body                                                           |
+/// |----------------------------|------|----------------------------------------------------------------|
+/// | not found / GC'd           | 404  | §10.0 envelope `{error: "wake_not_found", message}`            |
+/// | sandbox_id mismatch        | 404  | §10.0 envelope `{error: "wake_not_found", message}`            |
+/// | terminal `ok`              | 200  | flat `{state: "ok", ready_at, agent_url}`                       |
+/// | terminal `failed`          | 200  | §10.0 + wake extras `{error, message, state: "failed", …}`      |
+/// | intermediate (any other)   | 202  | flat `{state, started_at}`                                      |
+///
+/// Per R16-API1 #1: the failed-state body uses the `error`/`message`
+/// keys (NOT `error_code`/`error_message`) so it's an §10.0 envelope
+/// plus a `state: "failed"` extra. Success bodies stay flat per the
+/// existing convention (success bodies in the crate's HTTP surface
+/// are flat; only error bodies wear the envelope).
+pub async fn poll_wake(
+    req: HttpRequest,
+    state: State,
+    path: web::types::Path<(String, String)>,
+) -> HttpResponse {
+    if let Err(r) = admin_check(&req, &state) {
+        return r;
+    }
+    if !state.config.snapshot_enabled {
+        return feature_disabled();
+    }
+    let (sandbox_raw, wake_raw) = path.into_inner();
+    let _sandbox_id = match zeroship_core::typed_id::parse_with_prefix(&sandbox_raw, "sbx") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid_sandbox_id", "invalid sandbox_id"),
+    };
+    let wake_uuid = match zeroship_core::typed_id::parse_with_prefix(&wake_raw, "wak") {
+        Ok(u) => u,
+        Err(_) => return err(400, "invalid_wake_id", "invalid wake_id"),
+    };
+    // The typed_id parse rejects malformed shapes / wrong prefixes
+    // but lets through any valid `wak_<base62>` — even one we never
+    // minted. The pg lookup below distinguishes "valid shape, never
+    // existed" from "valid, evicted by GC sweep" by always 404'ing
+    // both: see § 2.cleanup of the proposal.
+    let _ = wake_uuid;
+
+    let Some(db) = state.database.as_ref() else {
+        return err(
+            503,
+            "wake_wiring_unavailable",
+            "wake wiring not initialized (database None)",
+        );
+    };
+
+    let row = match db.get_wake_job(&wake_raw).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ErrorEnvelope::new(
+                StatusCode::NOT_FOUND,
+                "wake_not_found",
+                "wake_id not found (may have been evicted by the GC sweep)",
+            )
+            .with_extra(serde_json::json!({"wake_id": wake_raw}))
+            .into_response();
+        }
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "wake job lookup failed",
+                e,
+            );
+        }
+    };
+
+    // Path mismatch: a wake_id valid for a different sandbox MUST
+    // 404 (not 200) so a client can't probe other tenants' wake
+    // outcomes via guessed wake_ids. Constant-time comparison is
+    // overkill (wake_ids are 22-char base62, the attacker can't
+    // narrow the search), but the path is admin-bearer-gated so
+    // narrowness isn't a primary defense — symmetric 404 is enough.
+    if row.sandbox_id != sandbox_raw {
+        return ErrorEnvelope::new(
+            StatusCode::NOT_FOUND,
+            "wake_not_found",
+            "wake_id does not belong to the requested sandbox",
+        )
+        .with_extra(serde_json::json!({"wake_id": wake_raw}))
+        .into_response();
+    }
+
+    render_wake_poll_response(&row)
+}
+
+/// Render the wake-job row into the polling-response shape per
+/// R16-API1. Extracted from [`poll_wake`] so the wire-format tests
+/// can pin §10.0 parity without a Postgres-backed AppState.
+///
+/// - intermediate states → 202 with flat `{state, wake_id, sandbox_id,
+///   started_at, updated_at}`
+/// - terminal `ok` → 200 with flat `{state: "ok", wake_id, sandbox_id,
+///   ready_at, agent_url}`
+/// - terminal `failed` → 200 with §10.0 envelope
+///   `{error: <wire_code>, message, state: "failed", wake_id,
+///   sandbox_id, updated_at}` per R16-API1 #1: field names match the
+///   envelope at `error_envelope.rs:88-110`, NOT the proposal's
+///   pre-review `error_code`/`error_message`.
+pub(crate) fn render_wake_poll_response(row: &crate::db::WakeJobRow) -> HttpResponse {
+    if !row.state.is_terminal() {
+        return HttpResponse::Accepted().json(&serde_json::json!({
+            "state": row.state.as_str(),
+            "wake_id": row.wake_id,
+            "sandbox_id": row.sandbox_id,
+            "started_at": row.started_at_secs,
+            "updated_at": row.updated_at_secs,
+        }));
+    }
+
+    match row.state {
+        crate::db::WakeJobState::Ok => HttpResponse::Ok().json(&serde_json::json!({
+            "state": "ok",
+            "wake_id": row.wake_id,
+            "sandbox_id": row.sandbox_id,
+            "ready_at": row.ready_at_secs,
+            "agent_url": row.agent_url,
+        })),
+        crate::db::WakeJobState::Failed => {
+            // §10.0 envelope on the body, plus the wake extras.
+            let code = row
+                .error_code
+                .unwrap_or(crate::db::WakeErrorCode::Internal)
+                .wire_code();
+            let message = row
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "wake failed (no message recorded)".to_string());
+            ErrorEnvelope::new(StatusCode::OK, code, message)
+                .with_extra(serde_json::json!({
+                    "state": "failed",
+                    "wake_id": row.wake_id,
+                    "sandbox_id": row.sandbox_id,
+                    "updated_at": row.updated_at_secs,
+                }))
+                .into_response()
+        }
+        // Unreachable: `is_terminal()` only matches Ok / Failed; the
+        // match-all branch is defense-in-depth in case the discriminant
+        // domain is widened in a future migration without updating
+        // this code path.
+        other => err(
+            500,
+            "internal_error",
+            format!("unexpected terminal state: {}", other.as_str()),
+        ),
     }
 }
 
@@ -1821,6 +2213,200 @@ mod tests {
         });
         let body = body_json(resp).await;
         assert_eq!(body["requested"], 42, "structural extras must survive");
+    }
+
+    // ─── C-7-LT-PR2 wake handler wire-format tests ───────────────
+    //
+    // Each test calls `render_wake_poll_response` directly with a
+    // hand-rolled `WakeJobRow` (pure pg-free fixture). The function
+    // is extracted from `poll_wake` for this purpose. End-to-end
+    // ntex integration is the cluster-smoke gate; these pin the
+    // wire shape so a refactor that drops `message` or renames
+    // `error` to `error_code` fails CI before the cluster cycle.
+
+    use crate::db::{WakeErrorCode, WakeJobRow, WakeJobState};
+
+    fn make_wake_row(state: WakeJobState) -> WakeJobRow {
+        WakeJobRow {
+            wake_id: "wak_0Bk3Np4qR5sT7uV8wYz1A2".to_string(),
+            sandbox_id: "sbx_AbCdEfGhIjKlMnOpQrStUv".to_string(),
+            state,
+            error_code: None,
+            error_message: None,
+            started_at_secs: 1_700_000_000,
+            updated_at_secs: 1_700_000_007,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: "host_id_xyz".to_string(),
+            lessee_updated_at_secs: 1_700_000_007,
+        }
+    }
+
+    #[compio::test]
+    async fn r16_api1_failed_state_body_uses_error_and_message_keys() {
+        // R16-API1 #1: the failed-state body uses §10.0
+        // `error`/`message` keys, NOT the proposal's pre-review
+        // `error_code`/`error_message`. This is the single highest-
+        // value test of the PR — if it regresses, the wire format
+        // diverges from every other endpoint in the crate.
+        let mut row = make_wake_row(WakeJobState::Failed);
+        row.error_code = Some(WakeErrorCode::LivezTimeout);
+        row.error_message = Some("/livez never returned 200".to_string());
+
+        let resp = render_wake_poll_response(&row);
+        assert_eq!(resp.status().as_u16(), 200, "failed-state is HTTP 200 OK");
+        let body = body_json(resp).await;
+
+        // §10.0 envelope fields — REQUIRED.
+        assert_eq!(body["error"], "livez_timeout", "wire code per R16-API1 #3");
+        assert_eq!(body["message"], "/livez never returned 200");
+
+        // Wake-specific extras — flat at the top level.
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["wake_id"], row.wake_id);
+        assert_eq!(body["sandbox_id"], row.sandbox_id);
+
+        // Anti-test: the proposal's pre-review field names MUST NOT
+        // appear. (Belt-and-suspenders against a regression that
+        // copies the proposal text verbatim.)
+        assert!(
+            body.get("error_code").is_none(),
+            "deprecated `error_code` key must NOT be on the wire (R16-API1 #1)"
+        );
+        assert!(
+            body.get("error_message").is_none(),
+            "deprecated `error_message` key must NOT be on the wire (R16-API1 #1)"
+        );
+    }
+
+    #[compio::test]
+    async fn r16_api1_failed_state_renders_every_wake_error_code() {
+        // Every variant of WakeErrorCode must render with the
+        // wire_code() string, not the as_str() pg form. Drift between
+        // the two is exactly the bug R16-API1 #3 forbids.
+        for code in [
+            WakeErrorCode::SlotUnavailable,
+            WakeErrorCode::SourceTeardownTimeout,
+            WakeErrorCode::RestoreFailed,
+            WakeErrorCode::LivezTimeout,
+            WakeErrorCode::ClockResyncFailed,
+            WakeErrorCode::RegisterFailed,
+            WakeErrorCode::Internal,
+        ] {
+            let mut row = make_wake_row(WakeJobState::Failed);
+            row.error_code = Some(code);
+            row.error_message = Some("explanation".to_string());
+            let resp = render_wake_poll_response(&row);
+            let body = body_json(resp).await;
+            assert_eq!(
+                body["error"], code.wire_code(),
+                "wire code drift for {:?}", code
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn poll_wake_intermediate_state_returns_202_with_state() {
+        // Every non-terminal state → 202 + state + timestamps.
+        for state in [
+            WakeJobState::Pending,
+            WakeJobState::ReservingSlot,
+            WakeJobState::Restoring,
+            WakeJobState::LivezPolling,
+            WakeJobState::ClockResyncing,
+            WakeJobState::Registering,
+        ] {
+            let row = make_wake_row(state);
+            let resp = render_wake_poll_response(&row);
+            assert_eq!(
+                resp.status().as_u16(),
+                202,
+                "intermediate state {:?} must be 202", state
+            );
+            let body = body_json(resp).await;
+            assert_eq!(body["state"], state.as_str());
+            assert_eq!(body["wake_id"], row.wake_id);
+            assert_eq!(body["sandbox_id"], row.sandbox_id);
+            assert_eq!(body["started_at"], row.started_at_secs);
+        }
+    }
+
+    #[compio::test]
+    async fn poll_wake_terminal_ok_returns_200_with_agent_url() {
+        let mut row = make_wake_row(WakeJobState::Ok);
+        row.ready_at_secs = Some(1_700_000_009);
+        row.agent_url = Some("http://10.0.100.2:7777".to_string());
+
+        let resp = render_wake_poll_response(&row);
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["state"], "ok");
+        assert_eq!(body["agent_url"], "http://10.0.100.2:7777");
+        assert_eq!(body["ready_at"], 1_700_000_009);
+    }
+
+    #[compio::test]
+    async fn poll_wake_failed_with_missing_message_falls_back() {
+        // Defensive: a row with state=failed but error_message=NULL
+        // (shouldn't happen post-PR2, but pg could regress) must still
+        // emit a well-formed §10.0 envelope. The message is opaque
+        // fallback prose.
+        let mut row = make_wake_row(WakeJobState::Failed);
+        row.error_code = Some(WakeErrorCode::Internal);
+        row.error_message = None;
+
+        let resp = render_wake_poll_response(&row);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "internal_error");
+        assert!(body["message"].is_string());
+        assert!(
+            !body["message"].as_str().unwrap().is_empty(),
+            "fallback message must be non-empty so clients have a string to display"
+        );
+    }
+
+    #[compio::test]
+    async fn poll_wake_failed_with_missing_error_code_defaults_to_internal() {
+        // Defense-in-depth: state=failed but error_code=NULL maps to
+        // `internal_error` on the wire. Migration-tolerance: future
+        // CHECK domain expansion + downgrade path mustn't crash the
+        // reader.
+        let mut row = make_wake_row(WakeJobState::Failed);
+        row.error_code = None;
+        row.error_message = Some("opaque".to_string());
+
+        let resp = render_wake_poll_response(&row);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "internal_error");
+        assert_eq!(body["state"], "failed");
+    }
+
+    #[test]
+    fn wake_query_default_is_no_override() {
+        // The default shape MUST resolve `sync=None` so the handler
+        // routes to the wake_response_mode-driven default branch. Any
+        // regression that gives `Some(0)` would also still route async
+        // (the predicate is `matches!(q.sync, Some(1))`); covered as a
+        // contract test rather than a behavior test.
+        let q = WakeQuery::default();
+        assert!(q.sync.is_none());
+    }
+
+    #[test]
+    fn wake_query_sync_one_triggers_sync_branch() {
+        // Predicate the handler uses: `matches!(q.sync, Some(1))`.
+        // Pin the only literal that flips to the legacy path. Other
+        // values (`sync=0`, `sync=2`, …) are treated as "no override"
+        // so a typo doesn't accidentally lock the operator into
+        // legacy.
+        let q = WakeQuery { sync: Some(1) };
+        assert!(matches!(q.sync, Some(1)));
+        let q = WakeQuery { sync: Some(0) };
+        assert!(!matches!(q.sync, Some(1)));
+        let q = WakeQuery { sync: Some(2) };
+        assert!(!matches!(q.sync, Some(1)));
+        let q = WakeQuery { sync: None };
+        assert!(!matches!(q.sync, Some(1)));
     }
 }
 
