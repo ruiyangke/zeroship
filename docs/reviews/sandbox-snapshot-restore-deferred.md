@@ -227,10 +227,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### [R16-A1] (DOCUMENTED in C-8c entry) C-8b 2× factor is a numeric coincidence, not a model
 - See C-8c entry above. Architecture-r16 critical finding.
 
-### [R15-S2] (OPEN) Path-injection in wrapper rewriter (IMPORTANT, security-r15)
+### [R15-S2] (CLOSED at 801ae449) Path-injection in wrapper rewriter (IMPORTANT, security-r15)
 - **Location**: `crates/sandbox/scripts/nomad-vm-wrapper.sh:476-498` (Python rewriter)
 - **Symptom**: Non-alloc-prefix absolute paths in `config.json` `disks[].path` pass through verbatim. With AEAD ON (post-A1-FOLLOWUP), the snapshot is authenticated — so a malicious snapshot can't substitute paths cross-tenant unless the AEAD KEK is compromised. But IF AEAD is bypassed (or under R15-S1 fail-OPEN, which is NOW closed), an attacker with bucket-write access could substitute `disks[].path = "/etc/shadow"` etc.
 - **Action**: add an allow-list / prefix-guard in the wrapper's Python rewriter that rejects any `disks[].path` not under the alloc dir.
+- **Resolution (2026-05-23, 801ae449)**: added `assert_under_task_dir(...)` to the Python heredoc that runs after every rewrite of `disks[].path` / `serial.file` / `console.file` / `fs[].socket`. The guard rejects empty/non-string values, non-absolute paths, any `..` component, and any path whose `realpath` doesn't equal task_dir or start with `task_dir + os.sep`. Rejections exit 1 with a `[wrapper] FATAL: R15-S2 reject:` log line naming the field + offending value + resolved path + expected prefix. Test sketch (manual repro recipe, six cases) lives as a comment block immediately after the heredoc; no automated harness yet — adding one means a new Rust integration test under `crates/sandbox/tests/` and was out of scope for this fixer.
 
 ### [R3-A1] Backend enum masquerades as trait — 4 methods return Err for 2/3 variants (IMPORTANT, arch-r3)
 - **File**: `crates/sandbox/src/backend/mod.rs:166-497`
