@@ -2,29 +2,40 @@
 
 **Status**: design proposal.
 **Lands**: between P5 (encryption baseline) and P6 (hardening). Modifies P5's read semantics — see §10 migration.
-**Affects**: SDK `Row<S>` types, every read-path crud method, every encrypted column declaration, the V8 ↔ Rust boundary for column values.
+**Affects**: SDK `Row<S>` types, every read-path crud method, every encrypted column declaration, the V8 ↔ Rust boundary for column values, the platform's CREATE TABLE emission (adds a sibling masked column per masked field).
 **Replaces**: P5's "transparent decrypt on read" default.
+
+**Storage strategy resolved 2026-05-24 — Path B (dedicated masked column).** The masked representation is **pre-computed at write time and stored as a sibling column** alongside the ciphertext. Default reads `SELECT <col>_masked` (no decrypt, no key access); unmask `SELECT <col>` (ciphertext) + decrypt + audit. See §9 for the implementation, §13 for the trade-off analysis (Path A — compute on read — was rejected in favour of Path B's key-scope reduction + PCI-3.4 alignment + DB-layer role-separation enablement).
 
 ---
 
 ## 1. The pivot
 
-**P5 as currently implemented**: encrypted columns are decrypted server-side and returned as plaintext to V8.
+**P5 as currently implemented**: encrypted columns are decrypted server-side on every read and returned as plaintext to V8.
 
-**This proposal**: encrypted columns are **never decrypted automatically**. Reads return a `MaskedValue<T>` wrapper that carries the *masked representation* of the field; obtaining the plaintext requires an explicit `.unmask(...)` call that:
+**This proposal**: encrypted columns are **never decrypted automatically**. Reads serve a pre-computed masked representation from a sibling column; obtaining the plaintext requires an explicit `.unmask(...)` call that:
 
 1. Round-trips to the Rust crud layer.
 2. Verifies the calling actor's authorization against the column's classification.
 3. Emits an audit row (`__zeroship_audit_unmask`).
-4. Returns the plaintext to V8 if (and only if) authorization passed.
+4. SELECTs the ciphertext column, decrypts, and returns plaintext to V8 if (and only if) authorization passed.
 
 This is the **"safe by default, explicit reveal"** model. Inspired by:
 - **Tink's** explicit `Aead.decrypt()` call (no transparent magic).
 - **AWS Secrets Manager**'s `GetSecretValue` audit boundary.
 - **HashiCorp Vault**'s lease-based reveal pattern.
 - **Salesforce Shield**'s field-level audit on decryption.
+- **Stripe**'s storage of `card.last4` alongside the encrypted PAN.
 
 The motivation: zeroship hosts AI-generated app code. The default behaviour where `console.log(user)` prints plaintext SSNs is structurally unsafe — the platform cannot rely on AI-generated code to remember to redact. Moving the default to "masked unless explicitly unmasked" closes this leak class cryptographically — the plaintext **never crosses the V8 boundary** unless the app code asks for it via an audited call.
+
+**Why dedicated columns (Path B)** instead of computing the mask on read (Path A):
+
+1. **Key-access scope reduction** — Path A requires the worker process to hold the column key in memory for every read (to decrypt → compute mask). Path B holds the key ONLY during the rare `unmask` RPC. A worker not currently handling an unmask call has no key material in scope.
+2. **PCI DSS 3.4 alignment** — "Render PAN unreadable anywhere it is stored." The masked column IS the rendered representation, stored as such. A PCI auditor can inspect the schema directly.
+3. **DB-layer role separation** — `GRANT SELECT (id, name, ssn_masked) ON users` to one PG role; `SELECT (id, name, ssn) ON users` to another. Pure PG primitive; the DB enforces the distinction without platform-code involvement.
+4. **Audit signal sharpens** — only unmask events touch the decrypt path; every audit row corresponds to a real reveal, not a noisy "served a masked read" event.
+5. **Backup/restore inspection** — operators can spot-check snapshots via the masked column without holding the key.
 
 ---
 
@@ -229,7 +240,60 @@ If `t.encrypted()` is declared without classification, defaults to `"pii"`. Expl
 
 ## 6. Wire flow
 
-### Read (no unmask)
+### Storage shape (Path B)
+
+For every masked column declared in the schema, the platform emits **two physical columns**:
+
+```sql
+-- Creator declares:
+--   users: { ssn: t.encrypted({ mode: "randomised" }).mask({ kind: "last4" }) }
+-- Platform emits:
+CREATE TABLE "app_xyz"."users" (
+  id          TEXT PRIMARY KEY,
+  ssn         BYTEA NOT NULL,    -- ciphertext (the P5 wire format: 0x01||nonce||ct||tag)
+  ssn_masked  TEXT NOT NULL,      -- pre-computed mask: "***-**-6789"
+  ...
+);
+CREATE INDEX "users__ssn_masked_idx" ON "app_xyz"."users" ("ssn_masked");
+-- ↑ optional index; enables analytics queries on the masked representation
+--   ("show users whose card ends in 1234" pattern). Auto-emitted only when the
+--   column is also marked .index() or .uniqueIndex(); otherwise omitted.
+```
+
+Naming convention: the sibling column is `<col>_masked` (TEXT for string/number masks, BYTEA for bytes-mask). Reserved by `validate_field_name` — creators cannot declare `<col>_masked` themselves when `<col>` carries a `.mask()` modifier.
+
+### Write (INSERT / UPDATE)
+
+```
+JS:    db.users.insert({ ssn: "123-45-6789", ... })
+        │
+        ▼  RPC dispatch
+        │
+Rust:  crud::dispatch_insert
+        ├─ validate_row → row.id minted via typed_id
+        │
+        ├─ crud::encryption_pass::encrypt_row_on_write(...):
+        │    for each column with encryption metadata:
+        │      ① resolve_key(app_id, key_id) → AeadKey
+        │      ② aad = canonical_aad(coll, col, Some(row_pk_bytes))  // Camp A
+        │      ③ ciphertext = encrypt(key, plaintext, aad)
+        │      ④ row[col] = base64(ciphertext)
+        │
+        ├─ crud::mask_pass::apply_mask_on_write(...):       ← NEW (PR 2)
+        │    for each column with mask metadata:
+        │      ⑤ masked = mask_transform(plaintext, kind)   // "123-45-6789" → "***-**-6789"
+        │      ⑥ row["ssn_masked"] = masked
+        │
+        ├─ build_insert sees TWO columns to bind: ssn (BYTEA) + ssn_masked (TEXT)
+        ├─ Single INSERT INTO users (id, ssn, ssn_masked, ...) VALUES ($1, $2, $3, ...);
+        │   ↑ atomic per-row write of both columns
+        │
+        ▼   row inserted with both ciphertext + masked stored
+```
+
+The mask transform consumes plaintext, NOT ciphertext. Plaintext is in scope during the encryption pass; the mask pass runs alongside, then both columns are bound in a single INSERT.
+
+### Default read (no unmask)
 
 ```
 JS:    db.users.findOne({ id: "usr_xyz" })
@@ -237,29 +301,37 @@ JS:    db.users.findOne({ id: "usr_xyz" })
         ▼  RPC dispatch
         │
 Rust:  crud::dispatch_find_one
-        ├─ build SELECT * FROM users WHERE id = $1
-        ├─ run query → row with ciphertext bytes for ssn, plaintext for other cols
+        ├─ build_select_for_read:                                 ← MODIFIED (PR 2)
+        │    for each column in schema:
+        │      • non-masked column → SELECT "col"
+        │      • masked column     → SELECT "col_masked" (NOT "col")
+        │   So the SELECT NEVER touches the ciphertext column.
+        │   Generated SQL:
+        │      SELECT id, ssn_masked AS ssn, name, ... FROM users WHERE id = $1
+        │      ↑ alias rename so the row's JSON shape uses the schema-declared name
         │
-        ├─ crud::mask_pass::apply_mask_on_read(...):
+        ├─ run query → ssn = "***-**-6789" (plain TEXT bytes from PG)
+        │
+        ├─ crud::mask_pass::wrap_row_on_read(...):                 ← NEW (PR 2)
         │    for each column with mask metadata:
-        │      ① if column is encrypted → decrypt (need plaintext to apply mask)
-        │      ② apply mask transform (last4, full, email, ...)
-        │      ③ replace row[col] = MaskedValueRepr {
-        │            masked: "***-**-6789",
-        │            classification: "spi",
-        │            // server NEVER includes plaintext here
-        │          }
+        │      row[col] = MaskedValueRepr {
+        │        masked: "***-**-6789",
+        │        classification: "spi",
+        │      }
         │
-        ▼   row returned to V8: ssn is { masked, classification }
+        ▼   row returned to V8
         │
 JS:     user.ssn instanceof MaskedValue
         user.ssn.toString() === "***-**-6789"
-        // Plaintext doesn't exist in V8 memory.
+        // ✓ No decryption happened.
+        // ✓ The column key was never resolved.
+        // ✓ Plaintext never crossed the V8 boundary.
+        // ✓ The ciphertext column wasn't even READ from disk.
 ```
 
-The Rust layer briefly held plaintext (step ①) to compute the mask, then discarded it. V8 never sees plaintext.
+The wrap step is trivial (just attaches metadata); no key access, no decryption.
 
-### Read + explicit unmask
+### Explicit unmask
 
 ```
 JS:    await user.ssn.unmask({ reason: "admin view" })
@@ -273,17 +345,20 @@ JS:    await user.ssn.unmask({ reason: "admin view" })
         │     }
         │
 Rust:  crud::dispatch_unmask
-        ├─ Authorization check:
-        │    classification = "spi" (from schema)
+        ├─ Authorization check (from policy):
+        │    classification = "spi"
         │    actor.role = "admin"
         │    policy["admin"] includes "spi" → ALLOWED
+        │    (denied path: write audit row with outcome="denied", return Forbidden)
         │
-        ├─ Re-fetch the row (or use a short-lived plaintext cache — see §9)
-        ├─ Decrypt (for encrypted columns)
+        ├─ Now (and only now) resolve_key + load ciphertext:
+        │    SELECT "ssn" FROM users WHERE id = $1     ← ciphertext fetched HERE
+        │    plaintext = decrypt(key, ciphertext, aad) ← key loaded into scope
+        │
         ├─ Emit audit row:
         │    __zeroship_audit_unmask {
         │      ts, actor_id, app_id, collection, row_pk, column,
-        │      classification, reason, request_id
+        │      classification, reason, request_id, outcome: "granted"
         │    }
         │
         ▼   return plaintext to V8
@@ -293,7 +368,9 @@ JS:     const ssn = await user.ssn.unmask(...)
         // Plaintext is now in V8 — app code is responsible from here.
 ```
 
-### Read + per-query unmask hint
+Key observation: the key was loaded ONLY for this unmask call. Default reads never load it.
+
+### Per-query unmask hint
 
 ```
 JS:    db.users.findOne({ id }, { unmask: ["ssn"], actor })
@@ -301,11 +378,15 @@ JS:    db.users.findOne({ id }, { unmask: ["ssn"], actor })
         ▼  RPC dispatch with unmask hint
         │
 Rust:  crud::dispatch_find_one
-        ├─ Authorization check upfront (before decrypt):
+        ├─ Authorization check upfront (before query):
         │    for col in unmask list: verify actor.role can unmask col's classification
         │    if any fails → return Forbidden BEFORE running query
         │
-        ├─ run query, decrypt, mask other cols, leave unmask-listed cols as plaintext
+        ├─ build_select_for_read with unmask hint:
+        │    SELECT id, ssn, ssn_masked AS __ssn_masked, name, ... FROM users WHERE id = $1
+        │    ↑ pull BOTH columns; we'll decrypt ssn and return plaintext, ignore masked
+        │
+        ├─ decrypt ssn → plaintext; row[col] = plaintext (NOT MaskedValueRepr)
         ├─ emit audit row per unmasked column
         │
         ▼   return row to V8 with mixed shape:
@@ -349,30 +430,62 @@ Retention: 6 years by default (HIPAA requirement). Configurable per app via `def
 
 ## 8. Composition with other features
 
-### With encryption (P5)
+### With encryption (P5) — dual-column atomic writes
 
-- Encrypted column without explicit mask → default mask "full".
-- Encrypted column with explicit mask → mask is applied to decrypted plaintext.
-- Unmask round-trip decrypts AGAIN (or uses cache — see §9) and returns plaintext.
+The encryption pass and the mask pass run **side by side at INSERT/UPDATE**. Both write to the same row in a single SQL statement:
+
+- Encryption pass: `row["ssn"] = base64(encrypt(plaintext))`
+- Mask pass: `row["ssn_masked"] = mask_transform(plaintext, kind)`
+- Single `INSERT INTO users (id, ssn, ssn_masked, ...) VALUES ($1, $2, $3, ...);`
+
+Both columns are bound in one statement → atomic per-row. **Drift prevention** lives at this layer: there's no code path that updates one without the other.
+
+For UPDATE: when the encrypted column's plaintext changes, BOTH columns rewrite. When the plaintext doesn't change (e.g., updating a sibling column), neither rewrites.
+
+Default reads `SELECT ssn_masked AS ssn FROM users` — the ciphertext column is not touched. Unmask reads `SELECT ssn FROM users` — the masked column is not touched.
 
 ### With deterministic-mode encryption
 
-`db.users.find({ email_hash: "alice@..." })` still works:
-- The filter value is plaintext (the SDK encrypts it deterministically before binding).
-- The B-tree index hits.
+`db.users.find({ email_hash: "alice@..." })` still works the same way as P5:
+- Deterministic mode: the filter value is encrypted client-side using the deterministic AEAD; the B-tree index on the `email_hash` ciphertext column hits.
 - Returned rows have `email_hash` as `MaskedValue<string>` by default; explicit `.unmask()` reveals.
 
-The filter-time encryption is unaffected by masking. Masking is purely about read-time presentation.
+The filter targets the **ciphertext** column (where the B-tree index lives); the read returns the **masked** column. Two separate columns; both accessed within a single SELECT (`SELECT email_hash_masked AS email_hash, ... WHERE email_hash = $1::bytea`).
 
 ### With CDC (P2)
 
-`ChangeEvent` carries ciphertext for encrypted columns (per P5; not plaintext). For non-encrypted-but-masked columns, the CDC event currently carries plaintext.
+`ChangeEvent` carries ciphertext for encrypted columns (per P5; not plaintext). With dedicated masked columns, CDC events naturally include **both** columns in the row image — subscribers see ciphertext + masked, never plaintext. This matches the "no automatic plaintext escape" rule:
 
-**Decision**: CDC events for masked columns carry **the masked representation**, not plaintext. Rationale: CDC subscribers are app code, subject to the same "no automatic plaintext escape" rule as direct reads. Subscribers that need plaintext call `.unmask()` on the value (which round-trips back to the platform with their actor).
+- Default CDC subscriber receives the masked representation as the user-visible value.
+- A subscriber that needs plaintext calls `.unmask()` on the value (which round-trips back to the platform with their actor's credentials, hits the same authorization + audit path).
 
-### With backup/restore (P5 PR 4+5)
+The masked column makes CDC subscribers SIMPLER — they don't need to know they're seeing a masked value; they just see the schema-declared name with safe content.
 
-Snapshot files carry ciphertext for encrypted columns + plaintext for non-encrypted columns. Masking is not a storage-layer concern. After restore, the same mask metadata applies (mask is re-derived from schema, not stored per row).
+### With backup/restore (P5 PR 4-5)
+
+Snapshot files carry **both** columns: `ssn` (ciphertext) AND `ssn_masked` (plaintext). The masked column survives backup/restore round-trips unchanged. Operators inspecting a backup file can spot-check `ssn_masked` content without holding the key — useful for compliance audits and incident triage.
+
+Restore reinstalls both columns; mask metadata is re-derived from schema (not stored per row beyond the column itself).
+
+### With schema introspection (`diff.rs`)
+
+`ColumnInfo` already has `encryption: Option<EncryptionMeta>` (P5 PR 1). Mask metadata folds into it:
+
+```rust
+pub struct ColumnInfo {
+    // ... existing ...
+    pub encryption: Option<EncryptionMeta>,
+    pub mask: Option<MaskMeta>,           // ← NEW
+}
+
+pub struct MaskMeta {
+    pub kind: MaskKind,
+    pub classification: Classification,
+    pub sibling_column: String,           // e.g., "ssn_masked"
+}
+```
+
+The schema diff classifier treats `mask: Some` as additive (adding a sibling column + computing initial values is `Recoverable` change class). Removing a mask is destructive (drops the sibling column, can't be rolled back without re-encryption).
 
 ### With aggregations
 
@@ -394,13 +507,29 @@ await db.users.aggregate([{ $group: { _id: null, total: { $sum: "$salary" } } }]
 
 ## 9. Implementation considerations
 
-### Where the mask is applied
+### Where the dual write/read happens
 
-Rust crud layer, right after `decrypt_row_on_read` and before the row returns to V8. New module `crud/mask_pass.rs`.
+Rust crud layer. New module `crud/mask_pass.rs` for the transform; SQL builder modifications in `query.rs` for the SELECT/INSERT/UPDATE column-list rewriting (alias the masked column back to the schema-declared name; bind the ciphertext column under its raw name).
+
+### Sibling-column visibility — hide from the SDK surface
+
+The `<col>_masked` column is a **platform implementation detail**, not part of the creator-facing API. Specifically:
+
+- Schema introspection on the creator's end (e.g., type generation in `sdks/vite-plugin`) sees only the original `ssn` field, NOT a `ssn_masked` sibling.
+- `Row<S>` type inference produces `{ ssn: MaskedValue<string> }`, NOT `{ ssn: MaskedValue<string>, ssn_masked: string }`.
+- Filter expressions like `db.users.find({ ssn_masked: "..." })` are refused with `reserved_field_name`-style error.
+- The SDK's response transform aliases `ssn_masked` back to `ssn` (via SQL `AS` clause in the SELECT) so the JS-side value comes through under the user-declared field name.
+- Schema diff classifier excludes the `_masked` siblings from the "what changed" output — these columns are derived; their presence/absence is implicit from the parent column's `.mask()` modifier.
+
+In other words: the masked column is **how** the platform stores the masked representation, not a thing the creator can declare, query, or see. From the JS side, the only knob is the parent column's `.mask({...})` declaration; everything else is invisible.
+
+This keeps the SDK API surface identical to the Path A version (`user.ssn` is a `MaskedValue<string>`; `.unmask()` for plaintext). The only thing that changes is **where the mask comes from at read time** — Path B reads from disk; Path A computes it. From the creator's perspective the difference is invisible.
+
+The auto-emitted `users__ssn_masked_idx` index is similarly internal — visible only via introspection of the live PG schema, never surfaced through the SDK schema introspection API. This is OK because indexes are operational metadata, not part of the schema contract.
 
 ### Cache for unmask round-trips
 
-A naive `unmask` re-fetches the row and re-decrypts. For a UI that lists 50 users and the admin clicks "reveal SSN" on one, that's a single round-trip — fine.
+A naive `unmask` re-fetches the row's ciphertext column and re-decrypts. For a UI that lists 50 users and the admin clicks "reveal SSN" on one, that's a single round-trip — fine.
 
 But if the admin clicks "reveal all", we'd do 50 round-trips. Two mitigations:
 
@@ -408,6 +537,21 @@ But if the admin clicks "reveal all", we'd do 50 round-trips. Two mitigations:
 2. **Per-request plaintext cache**: hold decrypted plaintexts in a `RefCell<HashMap<(coll, pk, col), String>>` keyed by request. Cleared at request end. Subsequent `.unmask()` calls in the same request hit the cache instead of re-decrypting.
 
 Recommend (1) for the common pattern; (2) as an internal performance optimisation.
+
+### Drift detection (background job)
+
+Even with atomic dual-writes, drift between ciphertext and masked column is theoretically possible via:
+- Direct SQL by an operator (DBA bypasses the platform write path).
+- Bug in the CRUD pass that updates one without the other.
+- Backup/restore mishap.
+
+A periodic drift-detection cron job samples N random rows per app per masked column:
+1. Decrypt the ciphertext column.
+2. Recompute the mask transform.
+3. Compare to the stored masked column.
+4. Alarm on mismatch (`tracing::error!` + audit row with `outcome: "drift_detected"`).
+
+Frequency: weekly per app, 1% sample rate. Costs negligible. Catches drift quickly without re-encrypting every row.
 
 ### Per-app config storage
 
@@ -473,51 +617,104 @@ Reasons:
 
 ---
 
-## 11. Commit sequence — 7 PRs
+## 11. Commit sequence — 8 PRs (Path B; sibling-column-based)
 
-### PR 1 — Schema DSL + `MaskedValue` types + mask kinds
+All 6 must-have capabilities (sibling-column emission, alias SELECT, backfill, rewrite-on-mask-change, drift detection, reserved-name validation) are mandatory deliverables — none optional. Path B is incomplete without the full set; partial implementations risk drift or surface leaks.
 
-- `sdks/db/src/types.ts`: `t.string().mask(opts)` / `t.encrypted(opts).mask(opts)`; `MaskedValue<T>` class.
-- `FieldDef.mask: { kind: MaskKind; classification?: string }`.
-- TypeScript inference: `Row<S>` automatically wraps masked fields in `MaskedValue<T>`.
-- Built-in mask kinds: "full", "last4", "first4", "email", "name", "date-year", "date-decade", "none".
-- Default mask = "full" when `t.encrypted()` declared without explicit mask.
+### PR 1 — Schema DSL + `MaskedValue` types + reserved-name validator + sibling-column metadata
 
-### PR 2 — Rust mask transforms + crud mask pass
+- `sdks/db/src/types.ts`: `t.string().mask(opts)` / `t.encrypted(opts).mask(opts)`; `MaskedValue<T>` class with `.toString()` / `.toJSON()` / `.unmask()` shape.
+- `FieldDef.mask: { kind: MaskKind; classification?: Classification }`.
+- TypeScript inference: `Row<S>` automatically wraps masked fields in `MaskedValue<T>`. **The `<col>_masked` sibling is NEVER part of `Row<S>` — invisible to creator code (§9).**
+- Built-in mask kinds: "full", "last4", "first4", "email", "name", "date-year", "date-decade", "none". Built-in classifications: "public" / "pii" / "spi" / "phi" / "pci" / "internal".
+- Default mask = `"full"` + classification = `"pii"` when `t.encrypted()` declared without explicit mask.
+- **Reserved-name validator** (`validate_field_name`): refuse creator-defined fields ending in `_masked` (whether or not a parent column exists with that prefix). Reserve the `_masked` suffix globally on encrypted apps. Reserve all six default classifications as reserved column names (`pii`, `spi`, `phi`, `pci`, `internal`, `public`). Both fence the namespace.
+- `crates/plugin-db/src/diff.rs::ColumnInfo`: add `mask: Option<MaskMeta>` field alongside the existing `encryption` field. `MaskMeta` carries `{ kind, classification, sibling_column: String }`.
 
-- `crates/plugin-db/src/crud/mask_pass.rs`: 8 mask transforms (one per kind) + classification metadata.
-- Insertion point in `crud::dispatch_find/find_one/find_one_returning`: after `decrypt_row_on_read`, apply mask per column.
-- Change wire format: returned row carries `{ masked: string, classification: string }` for masked columns instead of plaintext.
-- **P5 PR 2/3.5's CRUD encryption pass is unchanged**; this PR layers ON TOP of it.
+### PR 2 — DDL emission for sibling column + Path B INSERT/UPDATE rewrite
 
-### PR 3 — `unmask()` RPC + authorization + audit
+- `query.rs::build_create_table_with_fks`: when a column has `def.mask = Some(_)`, emit TWO physical columns: the parent (BYTEA if encrypted, TEXT/INT/BYTEA otherwise) + the sibling `<col>_masked` (TEXT or BYTEA depending on mask kind).
+- Auto-emit `CREATE INDEX <coll>__<col>_masked_idx ON <coll>(<col>_masked)` ONLY when the parent column is declared with `.index()` or `.uniqueIndex()`. Avoid auto-indexing every masked column — would balloon storage on collections with many masked columns.
+- New `crates/plugin-db/src/crud/mask_pass.rs`:
+  - `apply_mask_on_write(schema, row)`: walks schema, for every field with `mask`, computes the masked representation from the plaintext value and writes `row["<col>_masked"]`.
+  - 8 mask transforms (one per `MaskKind`).
+- `query.rs::build_insert` + `build_update_one`: bind BOTH columns. Single-row atomic write.
+- Bypass `_masked` from SDK-visible schema introspection — the SDK's introspection layer (`@zeroship/db` schema reflection) walks `FieldDef`s, not the live PG schema, so the sibling columns never appear in creator-visible output.
 
-- New native op: `zeroship.db.unmaskField { collection, row_pk, column, actor, reason }`.
-- New `dispatch_unmask` in `crud/mod.rs`.
-- Authorization helper: load policy from `__zeroship_admin.mask_policies`, check `policy[actor.role]`.
-- `__zeroship_audit_unmask` table in `auth/bootstrap.rs` (PG) / `<db_dir>/audit_unmask.sqlite` (SQLite).
-- SDK `MaskedValue.unmask()` method.
+### PR 3 — Aliased SELECT for default reads + `MaskedValue` wire shape
 
-### PR 4 — `defineMaskPolicy()` SDK + platform-config storage
+- `query.rs::build_select_for_read`: when a column has `def.mask = Some(_)`, the SELECT clause emits `<col>_masked AS <col>` (alias back to schema-declared name). The ciphertext column is **NOT** touched in the default read path.
+- New `crud::mask_pass::wrap_row_on_read`: attach `MaskedValueRepr { masked, classification }` metadata to each masked field in the returned row.
+- V8 wrapper materialises `MaskedValueRepr` → `MaskedValue<T>` instance with `.unmask()` method.
+- `dispatch_find/find_one/find_one_returning` route through the new SELECT shape.
+- Tests: assert default read SQL contains `<col>_masked AS <col>` and NOT `<col>` for masked fields.
 
-- `sdks/db/src/policy.ts`: `defineMaskPolicy(opts)`.
-- Rust-side: read at app bootstrap into `IsolateDbContext::mask_policy`.
-- Storage: `__zeroship_admin.mask_policies` table (PG, gated `hardening`); sidecar JSON file on SQLite.
+### PR 4 — Unmask RPC + authorization + audit (`__zeroship_audit_unmask`)
 
-### PR 5 — Bulk unmask + per-query unmask hint
+- New native op `zeroship.db.unmaskField { collection, row_pk, column, actor, reason }`.
+- New `crud::dispatch_unmask`:
+  1. Authorization check against policy.
+  2. SELECT ciphertext column for the target row.
+  3. Decrypt under the column key.
+  4. Write audit row (granted OR denied; both logged).
+  5. Return plaintext if granted; `Forbidden { code: "unmask_not_permitted" }` if denied.
+- `auth/bootstrap.rs`: emit `__zeroship_audit_unmask` table (PG) per the schema in §7. SQLite equivalent: sidecar table in the per-app SQLite file (same schema).
+- SDK `MaskedValue.unmask({ actor?, reason? })` method routes to the new RPC.
 
-- SDK: `user.unmask([cols])`, `db.users.findOne({}, { unmask: [...] })`.
-- Rust: extend `dispatch_find` to accept an `unmask_hint` parameter; pre-authorize, then decrypt+return plaintext for unmask-listed cols.
+### PR 5 — `defineMaskPolicy()` SDK + platform-config storage
 
-### PR 6 — Migration tooling + creator-facing docs
+- `sdks/db/src/policy.ts`: `defineMaskPolicy({ admin: [...], support: [...], user: [...] })`.
+- Storage:
+  - PG: `__zeroship_admin.mask_policies` table (gated `hardening`); one row per app, JSON blob.
+  - SQLite: sidecar JSON file `<db_dir>/mask_policies.json`.
+- Read at `IsolateDbContext` boot; cached.
+- Authorization helper in Rust: `MaskPolicy::can_unmask(actor_role, classification) -> bool`.
+- Default policy when none declared: only `auto` actor kind can unmask anything.
 
-- `zeroship migrate scan-mask-usage` CLI subcommand: walks the app's source code, flags places where `user.encrypted_field` is read as plaintext (likely candidates for `.unmask()`).
-- `docs/reference/migration/p5-to-masked-decrypt.md`.
-- `docs/reference/db.md` Masking section.
+### PR 6 — Backfill on first-mask-declaration + rewrite on mask-kind-change
 
-### PR 7 — Test gates + polish
+This PR makes mask metadata changes safe to apply to existing data. **Two paths**:
 
-- Test gates per design §7 P5 + new mask tests:
+**6a — First-time mask declaration on an existing column**:
+- Schema diff detects: column EXISTS, but `mask: None` → `mask: Some(...)`.
+- Classification: `Additive` for the sibling column add; `Recoverable` for the backfill operation.
+- DDL: `ALTER TABLE <coll> ADD COLUMN <col>_masked TEXT/BYTEA NULL` (nullable so the ALTER doesn't fail on existing rows).
+- Backfill job (background; uses the existing `__zeroship_migrations` audit table):
+  1. SELECT all rows with `<col>_masked IS NULL`.
+  2. For each row: decrypt `<col>` ciphertext → compute mask → UPDATE `<col>_masked`.
+  3. Track progress in `__zeroship_migrations`.
+  4. On completion: `ALTER TABLE <coll> ALTER COLUMN <col>_masked SET NOT NULL`.
+
+**6b — Mask-kind change**:
+- Schema diff detects: column has `mask: Some(old_kind)` → `mask: Some(new_kind)`.
+- Classification: `Recoverable` (can roll back to old kind by re-rewriting).
+- Rewrite job (background): SELECT all rows; for each, decrypt ciphertext → compute mask with NEW kind → UPDATE `<col>_masked` with new value.
+- Track in `__zeroship_migrations`; resumable on worker restart.
+
+**6c — Mask removal** (`t.encrypted()` → `t.encrypted()` without `.mask()`, or `.mask({ kind: "none" })`):
+- Schema diff detects mask removal.
+- Classification: `Destructive` (data loss from the operator's perspective; the sibling column gets dropped).
+- Under `strictness="strict"`: refuse; require operator opt-in via the existing P0 deploy strictness mechanism.
+- Under `strictness="lenient"` or `"off"`: drop the `<col>_masked` column.
+
+### PR 7 — Drift detection cron + bulk unmask + per-query unmask hint
+
+- **Drift detection** (the must-have):
+  - New background job `crud::mask_drift::run_drift_check_for_app(app_id)`.
+  - Schedule: weekly per app, 1% row sample per masked column.
+  - For each sampled row: decrypt ciphertext → compute mask with current kind → compare to stored `<col>_masked` column.
+  - On mismatch: write audit row with `outcome: "drift_detected"`, `tracing::error!`, increment a per-app drift counter; future P6+ surface to a dashboard.
+  - The cron lives in the existing maintenance-cron infrastructure (whichever pattern the F1 sweeper-half uses in P6a — share the scheduler).
+- **Bulk unmask**: SDK `user.unmask(["ssn", "email"])` and `db.users.bulkUnmask([{id, columns}, ...])`. Single RPC; authorization atomic (first unauthorized fails the whole call).
+- **Per-query unmask hint**: `db.users.findOne({ id }, { unmask: ["ssn"], actor })`. Authorization upfront before query; row carries plaintext for unmask-listed columns, `MaskedValue` for the rest.
+
+### PR 8 — Migration tooling + creator-facing docs + design amendment → P5.5 COMPLETE
+
+- `zeroship migrate scan-mask-usage` CLI: walks the creator's source for patterns that would have worked under P5 transparent-decrypt (`user.encrypted_field` as string) and flags them as candidates for `.unmask()`.
+- `docs/reference/migration/p5-to-masked-decrypt.md`: migration walkthrough.
+- `docs/reference/db.md`: Masking section + worked examples.
+- `docs/proposals/db-system-design.md`: amendment block dated 2026-05-24 recording the read-semantic flip + Path B sibling-column strategy.
+- Closeout test gates (from §12 + new):
   - `encrypted_column_default_mask_full`
   - `mask_last4_redacts_correctly`
   - `unmask_with_authorized_actor_returns_plaintext`
@@ -526,9 +723,15 @@ Reasons:
   - `bulk_unmask_atomic_first_unauthorized_fails_all`
   - `cdc_event_carries_masked_value_for_masked_columns`
   - `per_query_unmask_hint_works`
-  - `mask_policy_per_app_isolated` (cross-tenant: app A's policy doesn't affect app B)
-- Snapshot tests for SDK type inference (`Row<S>` shape with masked fields).
-- Closeout: design doc amendment + P5 PR 2/3/3.5 docstring updates noting the read semantic shift.
+  - `mask_policy_per_app_isolated`
+  - `default_read_does_not_touch_ciphertext_column` (Path B fence: assert the SQL EXPLAIN doesn't include the ciphertext column)
+  - `default_read_does_not_load_column_key` (Path B fence: assert the key-store cache lookup count is zero on default reads; non-zero on unmask reads)
+  - `sibling_masked_column_not_visible_in_sdk_introspection` (the hide-from-SDK invariant)
+  - `creator_cannot_query_by_masked_sibling` (validate_field_name refuses `_masked` suffix in filter clauses)
+  - `mask_kind_change_rewrites_sibling_column` (PR 6b path)
+  - `mask_addition_backfills_existing_rows` (PR 6a path)
+  - `drift_detection_catches_diverged_sibling` (PR 7 cron path)
+- Snapshot tests for SDK type inference (`Row<S>` shape with `MaskedValue` fields; `_masked` sibling absent).
 
 ---
 
