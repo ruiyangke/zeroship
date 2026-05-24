@@ -300,6 +300,49 @@ let aad = canonical_aad(
 
 **Wire format**: ciphertext → base64 in JSON `Value` (Value cannot carry raw bytes). The bind layer in `query.rs` recognises encrypted columns and base64-decodes back to BYTEA/BLOB at the parameter site.
 
+### 8.1 AAD upgrade — version binding (unblocked 2026-05-24)
+
+**Status**: pending — tracked as **P7.5** in the implementation queue.
+
+P7 PR 4 (`8a296728`) landed `version` as a platform-managed column
+on every table the platform creates, and the UPDATE dispatch
+auto-bumps it on every call. The AAD-with-`version` upgrade described
+in §3 (`aad.rs` "Future extension") and §8 of
+`docs/proposals/platform-system-fields.md` is therefore **unblocked**:
+every row that the platform encrypts also carries a `version`
+column the encryption pass can read at INSERT / UPDATE / decrypt
+verify time.
+
+This is the **highest-leverage encryption hardening remaining**.
+Concretely:
+
+1. Extend `canonical_aad(collection, column, row_pk_bytes,
+   version_bytes)`. Signature is already sketched out in §3.
+2. Bump the ciphertext wire-format flag from `0x01` to `0x02`. The
+   P5 wire layout already reserved this flag byte for the upgrade.
+3. Decrypt path inspects the flag and reconstructs AAD accordingly —
+   `0x01` keeps the row-PK-only shape, `0x02` adds the version
+   block. Both shapes co-exist during the cutover.
+4. Rolling re-encrypt-on-write: every UPDATE on a row whose
+   ciphertext is `0x01` re-encrypts to `0x02` using the row's
+   current `version`. Read-only rows can stay `0x01` indefinitely
+   without operational impact.
+
+**Pre-launch posture (2026-05-24)** simplifies step 3 considerably:
+zeroship has never been published, so no `0x01` ciphertext exists in
+production. The backward-compat read path is only there for dev/test
+fixtures created during P5–P7 development. Operators can flip a
+config flag to refuse `0x01` immediately post-cutover without waiting
+for a deprecation window — a clean rolling re-encrypt during the
+launch window is feasible.
+
+**The defence-in-depth benefit**: an attacker who captures
+ciphertext at `version=5` and replays it after a legitimate
+`version=6` update gets `encryption_aead_failed`. The
+"ciphertext-rollback-within-the-same-row" attack — possible under
+the P5-baseline `0x01` AAD shape — is blocked once `0x02` is the
+default.
+
 ---
 
 ## 9. Commit sequence — 6 PRs

@@ -357,3 +357,59 @@ This is a behaviour change for existing creators. Three options:
 **Recommendation: (C)**. Smooth migration path, no breaking change for existing apps until the platform-wide migration completes. The `tracing::warn!` for legacy hard-delete-via-`delete()` becomes a soft-fail in the deprecation window, then a hard error in a future major version.
 
 The risk if reviewers reject (C): we either ship a breaking change (A) or split the API surface (B). (C) is the engineering-clean path.
+
+---
+
+## Status: SHIPPED (partial) — 2026-05-24
+
+| PR | Commit     | Status                              | Scope                                                                  |
+|----|------------|-------------------------------------|------------------------------------------------------------------------|
+| 1  | `8ec76868` | Landed                              | Schema DSL + reserved-name validator for the 7 platform system fields. |
+| 2  | `8f9f1e6e` | Landed                              | CREATE TABLE prepends 7 system fields + 3 auto-indexes (PG + SQLite).  |
+| 3  | `bf1cce58` | Landed                              | INSERT auto-populates system fields + `id:string` cascade + FK type fix. |
+| 4  | `8a296728` | Landed                              | UPDATE auto-bumps `version` + `updated_at` + optimistic concurrency.   |
+| 5  | `c38ff4de` | Landed (Path C detect-and-warn)     | `delete()` becomes soft-delete; add `purge()` + `restore()`; `find()` auto-filters `deleted_at`. |
+| 6  | —          | **Deferred to post-launch**         | Existing-table migration. See below.                                   |
+| 7  | this PR    | Landed                              | Docs (`db.md` system-fields section) + design-doc amendment.           |
+
+### PR 6 — deferred to post-launch
+
+The platform is **pre-launch as of 2026-05-24**: never published, no
+production users, no production tables. PR 6 was the one-time
+`ALTER TABLE … ADD COLUMN` migration for tables created before PR 2
+landed — but there are no such tables in production to migrate. The
+PR is therefore deferred indefinitely.
+
+Path C (detect-and-warn for tables without `deleted_at`) shipped with
+PR 5 and remains the safety net for any pre-PR-2 tables that
+materialise in dev/test environments. A real PR 6 — designed against
+real schema-evolution data — lands when there are production schemas
+to evolve against.
+
+### P7.5 — AAD upgrade (pending)
+
+The AAD-with-`version` upgrade described in §8 is **unblocked but
+not yet shipped**. PR 4 put `version` on every row that exists (every
+table created after PR 2 carries it; PR 6's existing-table backfill is
+moot per the pre-launch deferral above). The remaining work is:
+
+1. Extend `canonical_aad(collection, column, row_pk_bytes,
+   version_bytes)` — the signature is already documented in §8.
+2. Bump the ciphertext wire-format flag from `0x01` → `0x02`.
+3. Land rolling re-encrypt-on-write: new writes use `0x02`; reads
+   accept both `0x01` and `0x02` during the cutover window.
+
+Pre-launch posture means no `0x01` production ciphertext exists, so
+step 3's backward-compat read path can ship as a same-PR cutover (no
+extended deprecation window required). This PR is tracked in the queue
+as **P7.5** and is the highest-leverage encryption hardening remaining
+before P6a / P6b.
+
+### Pre-launch simplification (open question, deferred)
+
+PR 5's Path C legacy-warn arm and P5.5 PR 8's `scan-mask-usage` CLI
+are **dead-code-in-practice** given the pre-launch posture: no creator
+code exists to scan, no pre-system-fields tables exist to warn about.
+A future "pre-launch simplification" PR can rip them out, simplifying
+the dispatch path. **Not in scope for this PR** — user did not request
+it in the current cycle.

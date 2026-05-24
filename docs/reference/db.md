@@ -167,15 +167,22 @@ All chainable on any field:
 
 ### Auto-generated columns
 
-You never declare these; every collection has them:
+You never declare these; every collection has them. They're the
+platform "system fields" — full documentation lives in the
+[System fields](#system-fields) section below:
 
-- `id: number` — `BIGINT PRIMARY KEY`, auto-assigned on insert.
-- `createdAt: number` — Unix-ms set on insert.
-- `updatedAt: number` — Unix-ms set on every update.
+- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62>`), minted SDK-side.
+- `created_at: Date` — server `NOW()` at INSERT.
+- `updated_at: Date` — server `NOW()` at INSERT; bumped on every UPDATE.
+- `created_by: string | null` — session actor at INSERT (`null` for system writes).
+- `updated_by: string | null` — session actor at every UPDATE.
+- `version: number` — `1` at INSERT; auto-bumped on every UPDATE; supports optimistic concurrency.
+- `deleted_at: Date | null` — `null` (live) by default; `delete()` stamps `NOW()`.
 
-When `softDelete: true` is enabled (see below), a fourth column is added:
-
-- `deletedAt: number | null` — Unix-ms when soft-deleted; default null.
+These seven columns are added by the platform on every table created
+through the schema DSL — `softDelete()` / `withVersioning()` are no
+longer opt-in (the equivalent behaviour is on by default). See
+[System fields](#system-fields) for the full semantics.
 
 ### Per-collection options via `schema()`
 
@@ -192,13 +199,17 @@ export default {
 };
 ```
 
-- `schema({...}).softDelete()` — `delete()` / `deleteMany()` set `deletedAt`
-  instead of removing the row. Reads filter `deletedAt IS NULL` automatically.
-  Pass `{ hard: true }` to bypass.
-- `schema({...}).withVersioning()` — adds a `version` column. `update()`
-  with `{ version: N }` in the filter is a CAS guard: on mismatch the call
-  rejects with `OptimisticLockError`; on success `version` is incremented
-  atomically.
+- `schema({...}).softDelete()` — soft-delete is now **on by default** for
+  every table via the [System fields](#system-fields) layer. This builder
+  is retained for backward compatibility but does not need to be called;
+  `delete()` always soft-deletes against `deleted_at`, and hard-delete
+  moves under `purge()`. `find()` and friends auto-filter
+  `WHERE deleted_at IS NULL` regardless of this opt-in.
+- `schema({...}).withVersioning()` — optimistic concurrency on `version`
+  is now **on by default** for every table via the [System fields](#system-fields)
+  layer. This builder is retained for backward compatibility but does not
+  need to be called; `update({ id, version: N }, …)` is a CAS guard on
+  every collection.
 - `schema({...}).strictness("strict" | "lenient" | "off")` — deploy-time
   data-validation policy.
 
@@ -974,6 +985,165 @@ SELECT * FROM "<app-uuid>"."users" WHERE ...
 
 The `app_id` is injected by the runtime from `env_vars`; user code can
 neither read nor override it. `env.db` is frozen.
+
+## System fields
+
+Every table the platform creates carries seven platform-managed
+columns. You never declare them — they're prepended to every
+`CREATE TABLE` and populated automatically on INSERT / UPDATE / DELETE.
+Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
+`created_by`) to keep the hot paths cheap.
+
+| Column        | Type (PG)       | Default            | Set by             |
+|---------------|-----------------|--------------------|--------------------|
+| `id`          | `TEXT` PK       | minted SDK-side    | typed_id (`<prefix>_<base62>`) |
+| `created_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT  | DB default         |
+| `updated_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT, bumped on every UPDATE | runtime UPDATE builder |
+| `created_by`  | `TEXT` NULL     | `null` if no actor | session actor at INSERT |
+| `updated_by`  | `TEXT` NULL     | `null` if no actor | session actor at every UPDATE |
+| `version`     | `INTEGER`       | `1` at INSERT      | runtime UPDATE builder bumps by 1 |
+| `deleted_at`  | `TIMESTAMPTZ` NULL | `null` (live)   | `delete()` stamps `NOW()` |
+
+The field names are **reserved**. Declaring a user field named `id`,
+`created_at`, `updated_at`, `created_by`, `updated_by`, `version`, or
+`deleted_at` rejects at deploy time with `code: "reserved_field_name"`
+and a hint listing the reserved set.
+
+### Reading system fields
+
+`Row<S>` includes the system fields automatically — you don't have to
+declare them, and they show up on every row you read:
+
+```ts
+const { data: user } = await db.users.get(userId);
+user.id;          // string ("usr_…")
+user.created_at;  // Date
+user.updated_at;  // Date
+user.created_by;  // string | null
+user.updated_by;  // string | null
+user.version;     // number  (1 on a freshly-inserted row)
+user.deleted_at;  // Date | null  (null = live)
+```
+
+`created_by` / `updated_by` are nullable. The platform stamps them from
+the request's session actor, but background writes and migrations may
+have no actor in scope — in those cases the columns stay `null`.
+
+### Optimistic concurrency via `version`
+
+Every UPDATE auto-bumps `version` by 1 and stamps `updated_at = NOW()`.
+Add `version: N` to the update filter to turn the call into an
+optimistic-concurrency check:
+
+```ts
+const { data: post } = await db.posts.get(postId);
+// post.version === 5
+
+// CAS update — succeeds only if the row's stored version is still 5:
+const { data, error } = await db.posts.update(
+  { id: postId, version: 5 },
+  { title: "edited" },
+);
+if (error instanceof OptimisticLockError) {
+  // Someone else updated the row between our read and our write.
+  // Re-read and retry.
+}
+```
+
+The native dispatch composes `UPDATE … SET title = $1, version =
+version + 1, updated_at = NOW() WHERE id = $id AND version = 5`.
+Affected-rows = 0 surfaces as the Rust error `version_mismatch`, which
+the SDK rethrows as `OptimisticLockError` (`code:
+"optimistic_lock_failure"`, `retryable: true`) so the standard
+`instanceof OptimisticLockError` check keeps working.
+
+Omitting `version` from the filter is last-writer-wins — the UPDATE
+still bumps `version` by 1 but doesn't refuse on a concurrent edit.
+Use the [`withRetry`](#retrying-cas-updates-with-withretry) helper to
+wrap the read-compute-update loop.
+
+### Soft delete: `delete` / `purge` / `restore`
+
+`delete()` is a soft-delete. Calling it sets `deleted_at = NOW()`,
+bumps `version`, and leaves the row in storage:
+
+```ts
+await db.posts.delete(postId);
+// row.deleted_at is now a timestamp; row is no longer returned by find()
+```
+
+`find()` / `findOne()` / `count()` / `exists()` / `distinct()` /
+`aggregate()` all auto-filter `WHERE deleted_at IS NULL`. To include
+soft-deleted rows, thread `{ include_deleted: true }` through the
+native query opts.
+
+To remove a row from storage permanently (GDPR-erase, compliance), use
+`purge()`:
+
+```ts
+await db.posts.purge(postId);       // single row, returns the row that was removed
+await db.posts.purgeMany({ … });    // bulk; returns { purgedCount: N }
+```
+
+To bring a soft-deleted row back, use `restore()`:
+
+```ts
+await db.posts.restore(postId);     // clears deleted_at, bumps version + updated_at
+await db.posts.restoreMany({ … });  // bulk; returns { restoredCount: N }
+```
+
+`purge()` and `restore()` are CDC events too — subscribers see a
+`delete` event from `purge()` and an `update` event (with `deleted_at`
+flipping back to null) from `restore()`.
+
+#### Legacy tables (Path C detect-and-warn)
+
+Tables created before the platform's system-field layer landed don't
+carry `deleted_at`. The native dispatch detects this at runtime,
+hard-deletes (the only thing it can do), and emits a `tracing::warn!`
+naming the collection. The detect-and-warn path is a safety net for
+test/dev databases — production has no pre-system-fields tables (the
+platform is pre-launch as of 2026-05-24).
+
+### Lifecycle worked example
+
+```ts
+// 1. Create a row. id is minted SDK-side; the rest is server-side.
+const { data: post } = await db.posts.insert({
+  title: "First post",
+  body:  "…",
+});
+// post.id         === "post_01HXY…"
+// post.created_at === <now>
+// post.updated_at === <now>
+// post.created_by === <session actor id> | null
+// post.version    === 1
+// post.deleted_at === null
+
+// 2. Update with optimistic concurrency.
+const { data: edited } = await db.posts.update(
+  { id: post.id, version: post.version },
+  { title: "Renamed" },
+);
+// edited.updated_at >  post.updated_at
+// edited.updated_by === <session actor id> | null
+// edited.version    === 2
+
+// 3. Soft-delete. The row stays in storage; find() hides it.
+await db.posts.delete(post.id);
+const { data: visible } = await db.posts.get(post.id);
+// visible === null  (filtered out)
+
+// 4. Restore. deleted_at clears; version + updated_at bump again.
+const { data: restored } = await db.posts.restore(post.id);
+// restored.deleted_at === null
+// restored.version    === 4   (delete bumped to 3; restore bumped to 4)
+
+// 5. Purge. Row gone from storage. No restore is possible after this.
+await db.posts.purge(post.id);
+```
+
+The full design lives in `docs/proposals/platform-system-fields.md`.
 
 ## Masking
 

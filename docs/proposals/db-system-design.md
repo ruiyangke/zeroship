@@ -1659,3 +1659,77 @@ For creator docs see the new "Masking" section in
   lands with the P6 control-plane drift surface.
 - **Per-collection mask policies** (Q-MASK-H): app-level is
   default; per-collection is a refinement deferred to P9+.
+
+---
+
+## Amendment 2026-05-24 — Platform system fields (P7)
+
+Append-only amendment. Does not alter any text above this block.
+
+### What landed
+
+Every creator table is now prepended with seven platform-managed
+columns at CREATE TABLE time: `id`, `created_at`, `updated_at`,
+`created_by`, `updated_by`, `version`, `deleted_at`. The names are
+reserved (`code: "reserved_field_name"` at deploy time if a creator
+declares one). Three auto-indexes ride along: `deleted_at` (the
+soft-delete hot path), `updated_at` (CDC subscriber resume), and
+`created_by` ("my items" queries). `delete()` shifts from hard-delete
+to soft-delete (sets `deleted_at = NOW()`, bumps `version`); the
+hard-delete escape is the new `purge()` method; `restore()` clears
+`deleted_at` for previously soft-deleted rows. `find()` and every
+other read-side method auto-filter `WHERE deleted_at IS NULL` unless
+the native opt `include_deleted: true` is threaded through. UPDATE
+auto-bumps `version` by 1 and stamps `updated_at = NOW()` on every
+call; passing `version: N` in the update filter turns the call into
+an optimistic-concurrency check (`code: "version_mismatch"` from the
+runtime, rethrown as `OptimisticLockError` by the SDK).
+
+### Shipped PRs
+
+| PR | Commit     | Scope                                                                      |
+|----|------------|----------------------------------------------------------------------------|
+| 1  | `8ec76868` | Schema DSL + reserved-name validator for the 7 platform system fields.     |
+| 2  | `8f9f1e6e` | CREATE TABLE prepends 7 system fields + 3 auto-indexes (PG + SQLite).      |
+| 3  | `bf1cce58` | INSERT auto-populates system fields + `id:string` cascade + FK type fix.   |
+| 4  | `8a296728` | UPDATE auto-bumps `version` + `updated_at` + optimistic concurrency.       |
+| 5  | `c38ff4de` | `delete()` becomes soft-delete; add `purge()` + `restore()`; `find()` auto-filters `deleted_at`. |
+| 6  | —          | **Deferred (pre-launch).** Existing-table migration cancelled mid-flight; see below. |
+| 7  | _this PR_  | Docs (`db.md` system-fields section) + this amendment block.               |
+
+### Read this next
+
+For the full proposal — motivation, field-by-field semantics,
+Q-SF-A through Q-SF-J, the riskiest-decision analysis on `delete()`
+behaviour — see `docs/proposals/platform-system-fields.md`. The
+creator-facing surface is documented in the new "System fields"
+section in `docs/reference/db.md`.
+
+### Pre-launch reality check (2026-05-24)
+
+PR 6 (the one-time `ALTER TABLE … ADD COLUMN` pass for legacy
+tables that existed before PR 2 landed) is **deferred indefinitely**.
+The platform is pre-launch as of 2026-05-24: never published, no
+production users, no production tables. There is no population for
+the migration to migrate. PR 5's Path C (detect-and-warn for tables
+without `deleted_at`) is the safety net for legacy tables that
+materialise in dev/test environments. A real PR 6 designed against
+real schema-evolution data lands when there are production schemas
+to evolve against.
+
+### Deferred follow-ups
+
+- **P7.5 — AAD version binding (wire flag 0x01 → 0x02)**: pending.
+  Now unblocked — every row carries `version` (PR 2 + PR 4), and
+  the P5 wire format already reserved `0x02` for this upgrade. The
+  P7.5 PR extends `canonical_aad` to bind `version_bytes`, bumps the
+  ciphertext header flag to `0x02`, and lands rolling re-encrypt-on-
+  write. Pre-launch posture means no `0x01` production ciphertext
+  exists, so the cutover can ship without a backward-compat read
+  path (operator decision, post-launch).
+- **PR 6 (existing-table migration)**: deferred indefinitely (above).
+- **Pre-launch simplification**: PR 5's Path C legacy-warn arm and
+  P5.5 PR 8's `scan-mask-usage` CLI are dead-code-in-practice given
+  the pre-launch posture (no creator code to scan, no legacy tables
+  to warn about). A future "pre-launch simplification" PR can rip
+  them out; not in scope for the current cycle.
