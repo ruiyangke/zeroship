@@ -1331,45 +1331,29 @@ pub async fn snapshot_sandbox(
             // the worker runtime is insufficient because the teardown
             // future itself (between blocking calls) runs on the worker.
             //
-            // `std::thread::spawn` only fails on ENOMEM / EAGAIN — if we
-            // can't allocate a thread the controller has bigger problems;
-            // log + drop the teardown (the contract is already best-effort
-            // / fire-and-forget). Orphan-prune at next boot reclaims the
-            // vm_index.
-            let state_for_teardown = Arc::clone(&state);
-            // Name the thread for log/grep correlation with the
-            // teardown's sandbox id. NOTE: Linux's `pr_set_name`
-            // truncates thread names at 15 bytes (TASK_COMM_LEN-1),
-            // so the tail is NOT visible in `ps`/`top -H` — only the
-            // leading `snap-teardown-` prefix fits. The tail is
-            // preserved for the Rust-side name (which `tracing` /
-            // log lines that include `std::thread::current().name()`
-            // will pick up).
+            // R14-A1 (C-7-LT-PR1 commit 1, 3d8acc23): the open-coded
+            // OS-thread + private compio runtime pattern is now extracted
+            // into `crate::detach::detach_isolated`. This call site is the
+            // canonical C-6 fix; the helper preserves identical semantics
+            // (fire-and-forget, log-and-drop on thread/runtime spawn
+            // failure, kernel-truncated thread name).
             //
+            // Byte-slice tail naming preserved for log/grep correlation:
+            // Linux's `pr_set_name` truncates thread names at 15 bytes
+            // (TASK_COMM_LEN-1), so only `snap-teardown-` fits in
+            // `ps`/`top -H`; the tail is preserved at the Rust thread-name
+            // level for `tracing` / `std::thread::current().name()`.
             // Byte-slice is ASCII-safe: `uuid_to_base62` emits base62
-            // characters (0-9, a-z, A-Z) which are all single-byte
-            // UTF-8, so `s.len() - 8` lands on a char boundary.
-            // Matches the form used at `snapshot_store_gcs.rs`
-            // (R14-Q3, commit 9afd0986).
+            // characters (0-9, a-z, A-Z) which are all single-byte UTF-8,
+            // so `s.len() - 8` lands on a char boundary.
+            let state_for_teardown = Arc::clone(&state);
             let sandbox_id_base62 = zeroship_core::typed_id::uuid_to_base62(&sandbox_id);
             let tail = sandbox_id_base62
                 .get(sandbox_id_base62.len().saturating_sub(8)..)
                 .unwrap_or(&sandbox_id_base62);
-            let teardown_thread =
-                std::thread::Builder::new().name(format!("snap-teardown-{tail}"));
-            let spawn_res = teardown_thread.spawn(move || {
-                let rt = match compio::runtime::Runtime::new() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!(
-                            sandbox_id = %sandbox_id,
-                            error = %e,
-                            "admin/snapshot: detached teardown could not mint compio runtime (orphan-prune will reclaim)"
-                        );
-                        return;
-                    }
-                };
-                rt.block_on(async move {
+            crate::detach::detach_isolated(
+                format!("snap-teardown-{tail}"),
+                move || async move {
                     if let Err(e) = state_for_teardown
                         .backend
                         .teardown_source_for_snapshot(sandbox_id)
@@ -1381,15 +1365,8 @@ pub async fn snapshot_sandbox(
                             "admin/snapshot: detached teardown_source_for_snapshot failed (non-fatal; orphan-prune will reclaim)"
                         );
                     }
-                });
-            });
-            if let Err(e) = spawn_res {
-                tracing::error!(
-                    sandbox_id = %sandbox_id,
-                    error = %e,
-                    "admin/snapshot: could not spawn detached teardown thread; vm_index will leak until orphan-prune"
-                );
-            }
+                },
+            );
             HttpResponse::Ok().json(&serde_json::json!({
                 "sandbox_id": format!(
                     "sbx_{}",
