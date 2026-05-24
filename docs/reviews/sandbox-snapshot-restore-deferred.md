@@ -824,11 +824,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: 7th-round carry; be246395's `unregister_restored` makes the silent fail-OPEN more consequential — if a future `RestoreBackend` impl forgets to override, the recovery state-map invariant breaks silently.
 - **Action**: remove the default impl; make `register_restored` required. Or have the default `panic!()` so a missing impl fails loudly.
 
-### [R11-API1] (MINOR, api-surface-r11) Orphan `#[doc(hidden)] pub fn` test accessors in metrics.rs
-- **Source**: 2026-05-25 api-surface-r11
-- **File**: `crates/sandbox-agent/src/metrics.rs:223,229` (`takeover_corrupt_value`, `sandbox_corrupt_id_value`)
+### [R11-API1] (CLOSED at `370fdbba`, api-surface-r11 → r14 expansion) Orphan `#[doc(hidden)] pub fn` test accessors in metrics.rs
+- **Source**: 2026-05-25 api-surface-r11; r14 expansion added a 3rd site
+- **File**: `crates/sandbox/src/metrics.rs:217,223,229` (`takeover_unreachable_value`, `takeover_corrupt_value`, `sandbox_corrupt_id_value`)
 - **Symptom**: zero callers anywhere. Same flavor as R10-API1's `_test_build_auth_from_sealed`.
-- **Action**: delete or move to `#[cfg(test)]`. Cluster with R10-API1 in a single sweep.
+- **Resolution**: all 3 fns deleted (18 LOC). Zero-caller grep across the worktree confirmed orphan status pre-deletion. Sandbox lib tests 332/332 unchanged post-deletion. Note: deferred-doc originally said `crates/sandbox-agent/src/metrics.rs` but the actual file is `crates/sandbox/src/metrics.rs` (typo in original entry — corrected here).
 
 ### [R10-API3 PARTIALLY INVALIDATED — only 3 of 5 `persist::*` pub fns are safely demotable] (CLOSED at `f50c95da`)
 - **Source**: 2026-05-25 api-surface-r11 audit re-verified r10's claim
@@ -1303,9 +1303,9 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Files**: docstring at `restore_handler.rs:58` documents `(Retry-After)` on 503 vm_index_unavailable; builder at `admin_handlers.rs:1157-1163` doesn't emit it.
 - **Action**: either emit the header (~5-line change) or fix the docstring. With C-4 in production, clients reading the docstring will believe they can drive backoff off the header.
 
-### [R11-API1] expansion: 3 orphan metrics.rs test accessors (was 2)
-- **New site**: `crates/sandbox-agent/src/metrics.rs:217` `takeover_unreachable_value`
-- **Action**: bundle all 3 (with `takeover_corrupt_value` + `sandbox_corrupt_id_value`) into a single mechanical fix.
+### [R11-API1] expansion: 3 orphan metrics.rs test accessors (was 2) (CLOSED at `370fdbba`)
+- **New site**: `crates/sandbox/src/metrics.rs:217` `takeover_unreachable_value` (note: original entry said sandbox-agent, actual path is sandbox)
+- **Resolution**: bundled all 3 (with `takeover_corrupt_value` + `sandbox_corrupt_id_value`) into a single mechanical 18-LOC deletion. See R11-API1 closure above.
 
 ### Closures this cycle (1 fixer + cluster-side):
 - [R13-API1 + R10-API2] CLOSED at `af4678ac` — ExecBody pub→pub(crate) in both sandbox + sandbox-agent. Sandbox-side required refactoring `exec` to take `Bytes` + parse internally (private-in-public rule).
