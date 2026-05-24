@@ -52,6 +52,19 @@ fn make_state_with_admin_token(
     database: Option<Arc<Database>>,
     admin_token: Option<String>,
 ) -> Arc<zeroship_sandbox::AppState> {
+    make_state_with_admin_tokens(database, admin_token, None)
+}
+
+/// T1: build an AppState with both the full and the read-only admin
+/// bearers populated. Either argument may be `None` to leave the
+/// corresponding field at its `new_fixture` default. Mirrors the
+/// shape of [`make_state_with_admin_token`] (which delegates here
+/// with `admin_ro_token = None`).
+fn make_state_with_admin_tokens(
+    database: Option<Arc<Database>>,
+    admin_token: Option<String>,
+    admin_ro_token: Option<String>,
+) -> Arc<zeroship_sandbox::AppState> {
     let cfg = make_cfg("ignored-creator-token");
     let backend = Backend::from_config(&cfg).expect("backend");
     // A5: `admin_token` is `pub(crate)`; out-of-crate construction
@@ -61,6 +74,7 @@ fn make_state_with_admin_token(
     // A6b: `database` is `pub(crate)`; set via `with_database` instead
     // of struct-field assignment. `None` skips the builder entirely
     // so the field stays at its `new_fixture` default.
+    // T1: `admin_ro_token` is `pub(crate)`; set via `with_admin_ro_token`.
     let mut state = zeroship_sandbox::AppState::new_fixture(cfg, backend);
     if let Some(db) = database {
         state = state.with_database(db);
@@ -68,6 +82,9 @@ fn make_state_with_admin_token(
     let state = state
         .with_admin_token(admin_token)
         .expect("admin_token must be non-empty when Some");
+    let state = state
+        .with_admin_ro_token(admin_ro_token)
+        .expect("admin_ro_token must be non-empty when Some");
     Arc::new(state)
 }
 
@@ -825,4 +842,317 @@ async fn snapshot_endpoint_returns_501_when_disabled() {
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// T1: sandbox_admin_ro role — per-endpoint role gate.
+//
+// The role-gate authorization matrix (see `admin_handlers::AdminRole`):
+//
+//   - GET endpoints accept either bearer (Full ⊇ ReadOnly).
+//   - POST/DELETE/snapshot/wake/cold-boot REQUIRE Full; the RO bearer
+//     returns 403 `insufficient_role` (distinct from 401 so operator
+//     tooling can branch on the difference).
+//   - GET endpoints 503 `admin_api_disabled` when BOTH bearers are
+//     None; POST endpoints 503 when ONLY Full is missing (RO alone
+//     can't authorize a destructive call).
+//
+// These tests pin every cell. The pg-gated round-trip tests stay
+// unchanged — they assert response shape post-auth, not auth itself.
+// ────────────────────────────────────────────────────────────────────
+
+const T1_FULL_BEARER: &str = "t1-full-bearer-aaaaaaaaaaaaaaaaaaaa";
+const T1_RO_BEARER: &str = "t1-ro-bearer-bbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[ntex::test]
+async fn admin_ro_bearer_rejected_on_write_endpoint_with_403() {
+    // POST .../snapshot is a destructive endpoint. The RO bearer is a
+    // valid admin credential but not authorized for writes — must
+    // 403 `insufficient_role`, NOT 401 (which would imply unknown
+    // bearer). The 403/401 split lets operator tooling distinguish
+    // "wrong token" from "right token, wrong role".
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "RO bearer on write endpoint must yield 403 (not 401, not 200)"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "insufficient_role");
+    assert!(
+        v["message"].is_string(),
+        "§10.0 envelope must carry a message field"
+    );
+}
+
+#[ntex::test]
+async fn admin_ro_bearer_accepted_on_read_endpoint() {
+    // GET /admin/sandboxes is a read endpoint. The RO bearer is
+    // accepted; with `database = None` the handler returns 503
+    // `pg_disabled` (a post-auth concern, NOT 401/403/admin_api_disabled).
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    // Auth passed — handler reached the pg-pool-open step which
+    // 503's with `pg_disabled` (distinguishable on the wire from
+    // 401 / 403 / `admin_api_disabled` 503).
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RO bearer on read endpoint must pass auth; got {}",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"], "pg_disabled",
+        "503 here is the post-auth pg-disabled shape, not admin_api_disabled"
+    );
+}
+
+#[ntex::test]
+async fn admin_full_bearer_accepted_on_read_endpoint() {
+    // Full ⊇ ReadOnly — the full bearer also satisfies a read
+    // endpoint's gate. Same post-auth 503 `pg_disabled` shape.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {T1_FULL_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "pg_disabled");
+}
+
+#[ntex::test]
+async fn admin_full_bearer_accepted_on_write_endpoint() {
+    // Full bearer on a destructive endpoint passes auth. Without
+    // snapshot_enabled the handler returns 501 `feature_disabled`
+    // post-auth (distinguishable from 401/403).
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {T1_FULL_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_IMPLEMENTED,
+        "Full bearer on write endpoint must pass auth (snapshot_enabled=false → 501); got {}",
+        resp.status()
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "feature_disabled");
+}
+
+#[ntex::test]
+async fn admin_unknown_bearer_rejected_with_401() {
+    // A bearer matching NEITHER configured token must 401 — same
+    // contract as the legacy `admin_check`. We test against both
+    // endpoint kinds (read + write) to confirm symmetry.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", "Bearer unknown-bearer-cccccccccc")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown bearer on read endpoint must yield 401"
+    );
+
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", "Bearer unknown-bearer-cccccccccc")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown bearer on write endpoint must yield 401 (not 403)"
+    );
+}
+
+#[ntex::test]
+async fn admin_read_endpoint_503_when_no_tokens_configured() {
+    // Both bearers `None` → read endpoint 503's `admin_api_disabled`.
+    // Distinct from `pg_disabled` because the role gate fires before
+    // the pg-pool open.
+    let state = make_state_with_admin_tokens(None, None, None);
+    let svc = make_app!(state);
+
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", "Bearer anything-at-all-aaaaaaaaaa")
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["error"], "admin_api_disabled",
+        "no tokens configured → admin_api_disabled (not pg_disabled)"
+    );
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("SANDBOX_ADMIN_TOKEN_PATH"),
+        "503 message must point operators at the env var; got {}",
+        v["message"]
+    );
+}
+
+#[ntex::test]
+async fn admin_write_endpoint_503_when_only_ro_configured() {
+    // RO configured but Full is None → POST/destructive endpoints
+    // 503 `admin_api_disabled`. The RO bearer can authorize reads
+    // but the destructive endpoints have no candidate token to
+    // accept, so the role gate fires BEFORE the bearer compare.
+    let state = make_state_with_admin_tokens(
+        None,
+        None,
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    // Sanity: the RO bearer DOES authorize reads in this shape.
+    let req = test::TestRequest::default()
+        .uri("/admin/sandboxes")
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RO-only deploy: read endpoint must pass auth (post-auth 503 pg_disabled)"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "pg_disabled", "read endpoint reached post-auth");
+
+    // Destructive endpoint with the SAME RO bearer must 503
+    // admin_api_disabled — the Full slot is empty so even a
+    // matching presented bearer can't authorize a write.
+    let sid = zeroship_core::typed_id::generate("sbx");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::POST)
+        .uri(&format!("/admin/sandboxes/{sid}/snapshot"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "RO-only deploy: write endpoint must 503 admin_api_disabled"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "admin_api_disabled");
+}
+
+#[ntex::test]
+async fn admin_ro_bearer_rejected_on_delete_user_with_403() {
+    // Belt-and-suspenders: DELETE /admin/users/{id} is the other
+    // canonical destructive endpoint. Same 403 contract as snapshot.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let uid = zeroship_core::typed_id::generate("usr");
+    let req = test::TestRequest::default()
+        .method(ntex::http::Method::DELETE)
+        .uri(&format!("/admin/users/{uid}"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "RO bearer on DELETE must yield 403"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "insufficient_role");
+}
+
+#[ntex::test]
+async fn admin_ro_bearer_rejected_on_export_with_403() {
+    // T1 reclassification: GET /admin/users/{id}/export is `Full`
+    // (NOT `ReadOnly`) because it surfaces every event ever recorded
+    // for the user — same blast radius as a leak. Verifies the
+    // promotion sticks: RO bearer 403's.
+    let state = make_state_with_admin_tokens(
+        None,
+        Some(T1_FULL_BEARER.to_string()),
+        Some(T1_RO_BEARER.to_string()),
+    );
+    let svc = make_app!(state);
+
+    let uid = zeroship_core::typed_id::generate("usr");
+    let req = test::TestRequest::default()
+        .uri(&format!("/admin/users/{uid}/export"))
+        .header("authorization", &format!("Bearer {T1_RO_BEARER}"))
+        .to_request();
+    let resp = test::call_service(&svc, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "GDPR export is reclassified Full (T1); RO bearer must 403"
+    );
+    let body = test::read_body(resp).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"], "insufficient_role");
 }

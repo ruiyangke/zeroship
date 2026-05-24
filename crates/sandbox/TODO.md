@@ -2,22 +2,35 @@
 
 ## P1 (next-after-Phase-3)
 
-### Read-only `sandbox_admin_ro` role for the read endpoints
+### ~~Read-only `sandbox_admin_ro` role for the read endpoints~~ — CLOSED 2026-05-25 (T1)
 
-Round-4 admin-API review IMPORTANT #7 (deferred). Today every `/admin/*` GET
-runs as the `sandbox_app` role (full SELECT/INSERT/UPDATE/DELETE on the
-non-events tables). The destructive `DELETE /admin/users/{user_id}` runs as
-`sandbox_gdpr`, which is correctly scoped, but the read endpoints would
-benefit from defense-in-depth: a fifth role with only `SELECT` on the
-admin-visible tables and zero write grants. Operator-tooling bugs (a stray
-UPDATE in a future detail handler) then fail at the pg layer, not at the
-controller.
+T1 fixer (2026-05-25) implemented the controller-side half of this entry:
+HTTP-layer `AdminRole::{Full, ReadOnly}` role gate at every `/admin/*`
+handler, `SANDBOX_ADMIN_RO_TOKEN_PATH` env var mirroring the existing
+admin-token path, `AppState::with_admin_ro_token` builder + boot-time
+two-distinct-tokens guard, 9 e2e tests + 11 lib unit tests pinning the
+authorization matrix.
 
-Out-of-scope for Phase 3 because it requires (a) a new migration to create
-the role + grants, (b) a new env var (`SANDBOX_DATABASE_URL_ADMIN_RO`)
-falling back to `SANDBOX_DATABASE_URL`, (c) a per-handler routing decision
-(`open_app_pool` → `open_admin_ro_pool`). Schema work + a wider blast radius
-than fits Phase 3's freeze.
+Routes classified READ (accept `AdminRole::ReadOnly`): `GET /admin/sandboxes`,
+`GET /admin/sandboxes/{id}`, `GET /admin/users/{user_id}/sandboxes`,
+`GET /admin/users/{user_id}/shares`, `GET /admin/hosts`,
+`GET /admin/sandboxes/{id}/wake/{wake_id}`. Routes classified WRITE
+(`AdminRole::Full` required, RO bearer → 403 `insufficient_role`):
+`POST /admin/sandboxes/{id}/snapshot`, `POST /admin/sandboxes/{id}/wake`,
+`POST /admin/sandboxes/{id}/cold-boot`, `DELETE /admin/users/{user_id}`,
+`GET /admin/users/{user_id}/export` (the export endpoint is `Full` despite
+being a GET — GDPR-cascade aggregation has write-class blast radius).
+
+What's still **deferred** to Phase 5 (the database-layer half): a fifth
+`sandbox_admin_ro` pg role with `SELECT`-only grants on the admin-visible
+tables, plus a `Database::pool_admin_ro()` helper that the read endpoints
+route through. Today every endpoint still runs as `sandbox_app`; if a future
+read handler accidentally executes a `DELETE`, the controller-side gate
+won't catch it. Defense-in-depth at the pg-role layer remains valuable, but
+the HTTP-layer role gate is the higher-impact half (it stops every WRITE
+endpoint from being callable by RO operators, full stop). Schema work
+follows in the same Phase-5 sweep as the JWT migration; both touch
+admin-side state.
 
 ### Rate-limit on heavyweight admin endpoints
 
