@@ -497,17 +497,23 @@ pub async fn livez() -> HttpResponse {
 
 pub async fn readyz(state: State) -> HttpResponse {
     if state.is_draining() {
-        return HttpResponse::ServiceUnavailable()
-            .json(&json!({"status": "draining"}));
+        return crate::error_envelope::error_response(
+            ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+            "draining",
+            "agent is draining for shutdown",
+        );
     }
     if !crate::reap::is_healthy() {
         // The PID 1 reaper failed to install. Inside a libkrun VM
         // this means zombies pile up unbounded — so we report
         // not-ready rather than silently degrade.
-        return HttpResponse::ServiceUnavailable()
-            .json(&json!({"status": "reaper-down"}));
+        return crate::error_envelope::error_response(
+            ntex::http::StatusCode::SERVICE_UNAVAILABLE,
+            "reaper_down",
+            "PID 1 reaper is not healthy; agent running without zombie reaping",
+        );
     }
-    HttpResponse::Ok().json(&json!({"status": "ready"}))
+    HttpResponse::Ok().json(&json!({"status": "ok"}))
 }
 
 /// `GET /metrics` — Prometheus text exposition. **Unauthenticated**;
@@ -1096,6 +1102,64 @@ mod tests {
         let req = test::TestRequest::get().uri("/readyz").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        crate::reap::test_set_healthy(true); // restore for other tests
+    }
+
+    // ─── R10-API4 wire-shape tests (readyz §10.0 envelope) ──────────
+    //
+    // R10-API4 (actual fix): the readyz handler previously emitted
+    // pre-§10.0 bare-status bodies (`{"status":"draining"}`,
+    // `{"status":"reaper-down"}`, `{"status":"ready"}`).  These pin
+    // the corrected §10.0 envelope shape so a regression is caught
+    // immediately.
+
+    #[ntex::test]
+    async fn readyz_200_body_is_status_ok() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(true);
+        let (state, _d) = make_state("r10a4_ok");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        // §10.0 200 shape: `{"status":"ok"}`.
+        assert_eq!(body["status"], "ok", "readyz 200 body must be {{status:ok}}");
+    }
+
+    #[ntex::test]
+    async fn readyz_503_draining_body_is_envelope_compliant() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(true);
+        let (state, _d) = make_state("r10a4_drain");
+        state.mark_draining();
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        // §10.0 error envelope: `error` = machine code, `message` = prose.
+        assert_eq!(body["error"], "draining");
+        assert!(body["message"].is_string(), "message field must be present");
+        // Must NOT contain the old bare-status shape.
+        assert!(body.get("status").is_none(), "old {{status:...}} field must be absent");
+    }
+
+    #[ntex::test]
+    async fn readyz_503_reaper_down_body_is_envelope_compliant() {
+        let _lock = REAPER_STATE_LOCK.lock().unwrap();
+        crate::reap::test_set_healthy(false);
+        let (state, _d) = make_state("r10a4_reaper");
+        let app = make_app!(state);
+        let req = test::TestRequest::get().uri("/readyz").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        // §10.0 error envelope: `error` = machine code, `message` = prose.
+        assert_eq!(body["error"], "reaper_down");
+        assert!(body["message"].is_string(), "message field must be present");
+        // Must NOT contain the old bare-status shape.
+        assert!(body.get("status").is_none(), "old {{status:...}} field must be absent");
         crate::reap::test_set_healthy(true); // restore for other tests
     }
 
