@@ -125,7 +125,7 @@ impl WakeMachine {
                     agent_url = %agent_url,
                     "wake_machine: terminal ok"
                 );
-                if let Err(e) = self
+                match self
                     .database
                     .update_wake_job_state(
                         &self.wake_id,
@@ -136,11 +136,23 @@ impl WakeMachine {
                     )
                     .await
                 {
-                    tracing::error!(
-                        wake_id = %self.wake_id,
-                        error = %e,
-                        "wake_machine: failed to persist terminal=ok; poll will reflect last in-flight state until GC sweep"
-                    );
+                    Ok(rows_affected) if rows_affected == 0 => {
+                        tracing::warn!(
+                            target: "sandbox::wake::terminal_overwrite_blocked",
+                            wake_id = %self.wake_id,
+                            attempted_state = ?WakeJobState::Ok,
+                            "update_wake_job_state no-op: row already terminal (R20-C1 guard tripped)"
+                        );
+                        crate::metrics::inc_wake_terminal_overwrite_blocked();
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            wake_id = %self.wake_id,
+                            error = %e,
+                            "wake_machine: failed to persist terminal=ok; poll will reflect last in-flight state until GC sweep"
+                        );
+                    }
                 }
             }
             Phase::Failed { code, message } => {
@@ -158,7 +170,7 @@ impl WakeMachine {
                     error_message = %message,
                     "wake_machine: terminal failed"
                 );
-                if let Err(e) = self
+                match self
                     .database
                     .update_wake_job_state(
                         &self.wake_id,
@@ -169,11 +181,23 @@ impl WakeMachine {
                     )
                     .await
                 {
-                    tracing::error!(
-                        wake_id = %self.wake_id,
-                        error = %e,
-                        "wake_machine: failed to persist terminal=failed; poll will reflect last in-flight state until GC sweep"
-                    );
+                    Ok(rows_affected) if rows_affected == 0 => {
+                        tracing::warn!(
+                            target: "sandbox::wake::terminal_overwrite_blocked",
+                            wake_id = %self.wake_id,
+                            attempted_state = ?WakeJobState::Failed,
+                            "update_wake_job_state no-op: row already terminal (R20-C1 guard tripped)"
+                        );
+                        crate::metrics::inc_wake_terminal_overwrite_blocked();
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            wake_id = %self.wake_id,
+                            error = %e,
+                            "wake_machine: failed to persist terminal=failed; poll will reflect last in-flight state until GC sweep"
+                        );
+                    }
                 }
             }
         }
@@ -484,18 +508,34 @@ impl WakeMachine {
     /// intermediate transition is not fatal (the next phase or the
     /// terminal write will eventually rewrite the row), and aborting
     /// the wake mid-flight on a pg blip would be worse than racing on.
+    ///
+    /// R22-I1: if `rows_affected == 0` the R20-C1 guard fired — the row
+    /// is already terminal and this in-flight transition silently no-oped.
+    /// Emit a WARN + bump the counter so the guard-fire is visible.
     async fn set_state(&self, state: WakeJobState) {
-        if let Err(e) = self
+        match self
             .database
             .update_wake_job_state(&self.wake_id, state, None, None, None)
             .await
         {
-            tracing::warn!(
-                wake_id = %self.wake_id,
-                state = state.as_str(),
-                error = %e,
-                "wake_machine: intermediate state write failed; continuing"
-            );
+            Ok(rows_affected) if rows_affected == 0 => {
+                tracing::warn!(
+                    target: "sandbox::wake::terminal_overwrite_blocked",
+                    wake_id = %self.wake_id,
+                    attempted_state = ?state,
+                    "update_wake_job_state no-op: row already terminal (R20-C1 guard tripped)"
+                );
+                crate::metrics::inc_wake_terminal_overwrite_blocked();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    wake_id = %self.wake_id,
+                    state = state.as_str(),
+                    error = %e,
+                    "wake_machine: intermediate state write failed; continuing"
+                );
+            }
         }
     }
 
