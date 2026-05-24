@@ -2733,6 +2733,7 @@ async fn wait_for_alloc_running(
 ///       "Failed": true,
 ///       "Events": [
 ///         {"Type": "Driver Failure", "DisplayMessage": "...verbatim...", "Time": ...},
+///         {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"},
 ///         ...
 ///       ]
 ///     }
@@ -2741,9 +2742,9 @@ async fn wait_for_alloc_running(
 /// ```
 ///
 /// Returns a deduplicated, ordered list of `"<task>=<msg>"` strings
-/// from the FIRST event of each failed task whose DisplayMessage is
-/// non-empty. Multiple failed tasks (rare — a Nomad alloc typically
-/// has one) are joined by `wait_for_alloc_running` with ` | `.
+/// from one diagnostic event per failed task. Multiple failed tasks
+/// (rare — a Nomad alloc typically has one) are joined by
+/// `wait_for_alloc_running` with ` | `.
 ///
 /// Empty list if the alloc has no `TaskStates` or no failed tasks.
 /// Pure function, no I/O — pinned by unit tests below.
@@ -2753,6 +2754,25 @@ async fn wait_for_alloc_running(
 /// the implementations in lockstep is the whole point of the v34
 /// verbatim-msg propagation — divergence would silently re-introduce
 /// the observability gap on the wake path.
+///
+/// ### T-8b-stress-r3 fix: event-type preference
+///
+/// Pre-r3 logic walked `Events[]` in REVERSE and took the first non-
+/// empty DisplayMessage. That selects the LAST event, which on a
+/// failed alloc is almost always Nomad's `Alloc Unhealthy` event with
+/// the useless generic message `"Unhealthy because of failed task"`.
+/// The actionable driver-emitted message (`Driver Failure` with the
+/// `StartTask: disk[1] workspace.img does not exist ...` text) appears
+/// EARLIER in the array and was silently masked.
+///
+/// Stress-r3 verbatim: 47/47 CREATE failures surfaced as `... Failed
+/// tasks: ch: Unhealthy because of failed task` — confirming the
+/// regression. The fix walks the Events array and prefers any event
+/// whose `Type` is in [`DIAGNOSTIC_EVENT_TYPES`] (Driver Failure, Task
+/// Setup Failure, etc.) over the generic Nomad-emitted `Alloc
+/// Unhealthy` / `Restart Signaled` etc. If no diagnostic event is
+/// present, falls back to the last non-empty DisplayMessage (the
+/// pre-r3 behaviour) so we never lose information.
 pub(crate) fn extract_failed_task_event_msgs(alloc: &serde_json::Value) -> Vec<String> {
     let task_states = match alloc["TaskStates"].as_object() {
         Some(o) => o,
@@ -2764,38 +2784,87 @@ pub(crate) fn extract_failed_task_event_msgs(alloc: &serde_json::Value) -> Vec<S
         if !failed {
             continue;
         }
-        // Walk events newest-last (Nomad emits in temporal order).
-        // For an alloc failure, the LAST event usually carries the
-        // most actionable message — but we surface the FIRST non-
-        // empty DisplayMessage found while walking in REVERSE so
-        // operators see the terminal cause first. If no DisplayMessage
-        // is set on any event we silently skip the task (the alloc-
-        // level ClientDescription is the fallback the caller already
-        // emits).
         let events = match ts["Events"].as_array() {
             Some(e) => e,
             None => continue,
         };
-        for ev in events.iter().rev() {
+        // Two-pass selection:
+        //   pass 1: prefer an event whose Type is in the diagnostic
+        //           allow-list (Driver Failure et al.). Walk forward so
+        //           the FIRST diagnostic event wins (drivers typically
+        //           emit only one Driver Failure event per alloc; if
+        //           multiple appear, the first one is the root cause
+        //           and subsequent ones are restart-retry side effects).
+        //   pass 2: fall back to the LAST non-empty DisplayMessage —
+        //           previous behaviour, retained so we never lose
+        //           information when the driver omits a typed event.
+        let mut picked: Option<&str> = None;
+        for ev in events.iter() {
+            let ty = ev["Type"].as_str().unwrap_or("");
+            if !is_diagnostic_event_type(ty) {
+                continue;
+            }
             if let Some(msg) = ev["DisplayMessage"].as_str() {
                 let trimmed = msg.trim();
                 if !trimmed.is_empty() {
-                    // Cap each task's message at 2 KiB so a pathological
-                    // driver that emits a multi-MB error doesn't bloat
-                    // the wire envelope. Truncation is rare but bounded.
-                    const PER_TASK_CAP: usize = 2048;
-                    let bounded: String = if trimmed.len() > PER_TASK_CAP {
-                        format!("{}…(truncated)", &trimmed[..PER_TASK_CAP])
-                    } else {
-                        trimmed.to_string()
-                    };
-                    out.push(format!("{task_name}: {bounded}"));
+                    picked = Some(trimmed);
                     break;
                 }
             }
         }
+        if picked.is_none() {
+            for ev in events.iter().rev() {
+                if let Some(msg) = ev["DisplayMessage"].as_str() {
+                    let trimmed = msg.trim();
+                    if !trimmed.is_empty() {
+                        picked = Some(trimmed);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(trimmed) = picked {
+            // Cap each task's message at 2 KiB so a pathological
+            // driver that emits a multi-MB error doesn't bloat
+            // the wire envelope. Truncation is rare but bounded.
+            const PER_TASK_CAP: usize = 2048;
+            let bounded: String = if trimmed.len() > PER_TASK_CAP {
+                format!("{}…(truncated)", &trimmed[..PER_TASK_CAP])
+            } else {
+                trimmed.to_string()
+            };
+            out.push(format!("{task_name}: {bounded}"));
+        }
     }
     out
+}
+
+/// Nomad TaskEvent `Type` strings that carry the load-bearing driver-
+/// side or scheduler-side failure cause. Source-of-truth is Nomad's
+/// `nomad/structs/structs.go::TaskEvent*` constants; this list pins
+/// the subset where DisplayMessage is the actionable error rather
+/// than a generic rollup. Match is case-insensitive on full string
+/// equality to avoid substring false-positives ("Driver" alone is a
+/// healthy event type for happy-path "downloading artifacts" lines).
+///
+/// `Alloc Unhealthy`, `Restart Signaled`, `Terminated`, `Killing`,
+/// `Killed` are deliberately EXCLUDED: they're emitted by Nomad's
+/// alloc/task state machine AFTER the underlying failure and their
+/// DisplayMessage is the generic envelope ("Unhealthy because of
+/// failed task" etc.). The diagnostic-source event always precedes
+/// these in the Events array.
+fn is_diagnostic_event_type(ty: &str) -> bool {
+    // Lower-case once; full-string equality on each candidate.
+    let t = ty.trim().to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "driver failure"
+            | "task setup failure"
+            | "setup failure"
+            | "failed validating task"
+            | "failed artifact download"
+            | "exec plugin"
+    )
 }
 
 /// True when every alloc in the array has a terminal client status.
@@ -4356,6 +4425,148 @@ mod tests {
             "truncation cap not enforced; got len={}",
             m.len()
         );
+    }
+
+    // ─── T-8b-stress-r3: Driver Failure preferred over Alloc Unhealthy ──
+    //
+    // The r3 regression: 47/47 CREATE failures surfaced as the generic
+    // "Unhealthy because of failed task" envelope despite the v34 commit
+    // having added `extract_failed_task_event_msgs`. The root cause: the
+    // extractor walked Events[] in REVERSE and took the first non-empty
+    // DisplayMessage — which is the LAST event in the array. Nomad emits
+    // `Alloc Unhealthy` AFTER `Driver Failure` in the temporal ordering;
+    // reverse-walk picked the useless Nomad-side `Alloc Unhealthy` event
+    // and masked the load-bearing driver-emitted `StartTask: workspace.img
+    // does not exist ...` text.
+    //
+    // The fix prefers events whose Type is in the diagnostic allow-list
+    // (Driver Failure, Task Setup Failure, ...) and falls back to the
+    // reverse-walk only if none are present.
+
+    #[test]
+    fn extract_failed_task_event_msgs_prefers_driver_failure_over_alloc_unhealthy() {
+        // VERBATIM CLUSTER SHAPE from T-8b-stress-r3 (review: docs/reviews/
+        // sandbox-snapshot-restore-cluster-2026-05-25-T8b-stress-r3.md).
+        // Nomad emits Events[] in temporal order: Driver Failure first,
+        // Alloc Unhealthy last. Pre-r3 reverse-walk picked Alloc Unhealthy
+        // and the cluster envelope was useless.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "ClientDescription": "Failed tasks",
+            "TaskStates": {
+                "ch": {
+                    "State": "dead",
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Received", "DisplayMessage": "Task received by client"},
+                        {"Type": "Task Setup", "DisplayMessage": "Building Task Directory"},
+                        {
+                            "Type": "Driver Failure",
+                            "DisplayMessage": "rpc error: code = Unknown desc = ch: StartTask: disk[1] /var/zeroship/ch/019e5a6bf7e67280953fc425c2fc3487/workspace.img does not exist (controller must stage before spawn)"
+                        },
+                        {"Type": "Restart Signaled", "DisplayMessage": "Policy allows no restarts"},
+                        {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1, "single failed task → one entry; got {msgs:?}");
+        let m = &msgs[0];
+        assert!(
+            m.contains("workspace.img does not exist"),
+            "verbatim driver msg lost — reverse-walk picked Alloc Unhealthy instead of Driver Failure: {m:?}"
+        );
+        assert!(
+            m.contains("controller must stage before spawn"),
+            "verbatim driver msg lost — reverse-walk picked Alloc Unhealthy instead of Driver Failure: {m:?}"
+        );
+        // Negative assertion: the generic Nomad envelope MUST NOT be
+        // the chosen message; if it is, we've regressed back to the
+        // r2/r3 silent no-op.
+        assert!(
+            !m.contains("Unhealthy because of failed task"),
+            "the diagnostic preference is silently no-op — picked Alloc Unhealthy instead of Driver Failure: {m:?}"
+        );
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_falls_back_to_last_event_when_no_diagnostic_type() {
+        // Defensive: if Nomad's event chain has no Driver Failure /
+        // Task Setup Failure event (e.g., the driver crashed without
+        // emitting a typed event), the pre-r3 behaviour of taking the
+        // last non-empty DisplayMessage is the correct fallback. We
+        // must not return empty.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Received", "DisplayMessage": "Task received by client"},
+                        {"Type": "Restart Signaled", "DisplayMessage": "Policy allows no restarts"},
+                        {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1, "fallback path lost the entry; got {msgs:?}");
+        assert!(
+            msgs[0].contains("Unhealthy because of failed task"),
+            "fallback path didn't pick the last non-empty event; got {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn extract_failed_task_event_msgs_picks_first_driver_failure_when_multiple() {
+        // Edge case: if the driver emits MULTIPLE Driver Failure events
+        // (e.g., retry budget > 1; not currently configured for the ch
+        // driver but defensive), the FIRST one is the root cause and
+        // subsequent ones are retry-cascade side effects. Pin this.
+        let alloc = serde_json::json!({
+            "ClientStatus": "failed",
+            "TaskStates": {
+                "ch": {
+                    "Failed": true,
+                    "Events": [
+                        {"Type": "Driver Failure", "DisplayMessage": "root cause: tap collision EBUSY"},
+                        {"Type": "Restart Signaled", "DisplayMessage": "Restarting"},
+                        {"Type": "Driver Failure", "DisplayMessage": "cascade: tap still busy"},
+                        {"Type": "Alloc Unhealthy", "DisplayMessage": "Unhealthy because of failed task"}
+                    ]
+                }
+            }
+        });
+        let msgs = extract_failed_task_event_msgs(&alloc);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].contains("root cause"),
+            "must pick FIRST Driver Failure (root cause), got: {msgs:?}"
+        );
+        assert!(
+            !msgs[0].contains("cascade"),
+            "must NOT pick the cascade Driver Failure, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn is_diagnostic_event_type_matches_known_types() {
+        // Positive cases — these must surface the driver-side error.
+        assert!(is_diagnostic_event_type("Driver Failure"));
+        assert!(is_diagnostic_event_type("Task Setup Failure"));
+        assert!(is_diagnostic_event_type("driver failure")); // case-insensitive
+        assert!(is_diagnostic_event_type("  Driver Failure  ")); // trim
+        // Negative cases — these are envelope/orchestration events.
+        assert!(!is_diagnostic_event_type("Alloc Unhealthy"));
+        assert!(!is_diagnostic_event_type("Restart Signaled"));
+        assert!(!is_diagnostic_event_type("Terminated"));
+        assert!(!is_diagnostic_event_type("Killing"));
+        assert!(!is_diagnostic_event_type("Killed"));
+        assert!(!is_diagnostic_event_type("Started"));
+        assert!(!is_diagnostic_event_type("Task Setup")); // happy-path setup, NOT failure
+        assert!(!is_diagnostic_event_type("Received"));
+        assert!(!is_diagnostic_event_type(""));
     }
 
     // ─── C3: HTTP error tracked in poll-loop timeout messages ──
