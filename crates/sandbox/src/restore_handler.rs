@@ -745,15 +745,24 @@ pub async fn restore_sandbox(
     }
 }
 
+/// Focused pg read of a sandbox row's `snapshot_*` + `user_id`
+/// columns at `snapshotted` / `snapshotted_suspect` state.
+///
+/// **Visibility**: `pub(crate)` so `wake_machine` can call
+/// [`read_snapshot_row`] directly instead of mirroring the SELECT
+/// against the same columns. The wake-path consumer ignores
+/// `artifact_path` (it only needs sha + vm_index + user_id); leaving
+/// the field on the unified type costs one `String` per wake but
+/// preserves the cold-boot caller's contract (R26-I1 collapse).
 #[derive(Debug, Clone)]
-struct SnapshotRowMeta {
-    artifact_path: String,
-    sha256: [u8; 32],
-    vm_index: i16,
+pub(crate) struct SnapshotRowMeta {
+    pub(crate) artifact_path: String,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) vm_index: i16,
     /// Source sandbox's `user_id` (typed-id form `usr_<base62>`).
     /// Needed by `submit_restore_job` to derive `ZSBX_USER_HOME_IMG`
     /// per the cold-boot env contract (Phase B fix #6).
-    user_id: String,
+    pub(crate) user_id: String,
 }
 
 /// Focused pg read for the snapshot_* columns. Returns
@@ -761,7 +770,15 @@ struct SnapshotRowMeta {
 /// the 0007 CHECK should make that impossible for a `snapshotted` /
 /// `snapshotted_suspect` row, but we surface a clear error rather
 /// than panic.
-async fn read_snapshot_row(
+///
+/// **Visibility**: `pub(crate)` so the async wake machine in
+/// `wake_machine.rs` shares this single reader (R26-I1 collapse,
+/// closing the r21-A1-era duplicate carried through r22-A4 / r24-A4 /
+/// r25 / r26-I1). Pre-collapse `wake_machine` mirrored the SELECT
+/// against a `WakeSnapshotMeta` clone; that drifted by one column
+/// (`artifact_path`) and the proposal's "phase 5 will fix" promise
+/// never landed. Sync and async restore paths now share this entry.
+pub(crate) async fn read_snapshot_row(
     db: &Database,
     sandbox_id: Uuid,
 ) -> Result<SnapshotRowMeta, RestoreHandlerError> {
