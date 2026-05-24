@@ -751,20 +751,46 @@ impl NomadCHBackend {
         //    (mostly the mkfs.ext4 metadata write); per-user reuse
         //    means the cost amortizes to ~0 after the user's first
         //    sandbox.
-        std::fs::create_dir_all(host_dir)
-            .map_err(|e| format!("mkdir {}: {}", host_dir.display(), e))?;
-        if let Some(parent) = user_home_img.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
-        }
-        guard.host_dir_created = true;
-
-        let workspace_img = workspace_image_path(host_dir);
+        //
+        //    R26-I2 / R25-I1 / R23-A2: the bundle of sync-IO ops below
+        //    (`create_dir_all` ×2, `mkfs.ext4` subprocess ×2 via
+        //    `create_ext4_image_if_missing`, plus the inner `fsync_dir`
+        //    on the image parents) is moved off the ntex worker via
+        //    `compio::runtime::spawn_blocking`. Without this, cold-boot
+        //    first-sandbox-per-user pegged a ntex worker for ~3-5s on
+        //    the mkfs metadata writes; at c=20 stress (post r3-A node-
+        //    pin where all CREATEs land on one controller's pool of
+        //    4-8 ntex workers) sibling requests added ~9-15s to their
+        //    p99. The wrap unblocks the worker; per-CREATE wall time
+        //    is unchanged.
+        //
+        //    CreateGuard handling: `host_dir_created` is set on the
+        //    calling thread AFTER spawn_blocking returns Ok, mirroring
+        //    the pre-wrap behaviour. The guard reference stays on the
+        //    ntex worker; only owned clones of `host_dir` and
+        //    `user_home_img` cross the spawn_blocking boundary. This
+        //    keeps guard ownership trivial — no Send/Sync threading
+        //    through the closure required.
+        let host_dir_owned = host_dir.to_path_buf();
+        let user_home_img_owned = user_home_img.to_path_buf();
         let workspace_img_size_gb = self.cfg.workspace_image_size_gb;
-        create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
-            .map_err(|e| format!("workspace.img: {e}"))?;
-        create_ext4_image_if_missing(user_home_img, workspace_img_size_gb)
-            .map_err(|e| format!("home.img: {e}"))?;
+        let workspace_img = compio::runtime::spawn_blocking(move || -> Result<PathBuf, String> {
+            std::fs::create_dir_all(&host_dir_owned)
+                .map_err(|e| format!("mkdir {}: {}", host_dir_owned.display(), e))?;
+            if let Some(parent) = user_home_img_owned.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+            }
+            let workspace_img = workspace_image_path(&host_dir_owned);
+            create_ext4_image_if_missing(&workspace_img, workspace_img_size_gb)
+                .map_err(|e| format!("workspace.img: {e}"))?;
+            create_ext4_image_if_missing(&user_home_img_owned, workspace_img_size_gb)
+                .map_err(|e| format!("home.img: {e}"))?;
+            Ok(workspace_img)
+        })
+        .await
+        .unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))?;
+        guard.host_dir_created = true;
 
         // 4. (was: write pubkey file — now baked into the cmdline by
         //    the wrapper, see step 5's ZSBX_PUBKEY_HEX env var.)
