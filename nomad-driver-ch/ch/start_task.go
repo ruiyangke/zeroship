@@ -154,6 +154,19 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	// behind doesn't fail StartTask. Operator-supplied Net entries
 	// short-circuit to the legacy "operator owns the tap, we just bring
 	// it up" path so an externally-managed network config still works.
+	//
+	// tapRollback toggles to false once StartTask reaches its success
+	// path (after handle.SetDriverState persists the task). While true,
+	// the deferred rollback below tears down the tap setupTapForVM
+	// created. Closes G4 from the nomad-driver-virt comparison review:
+	// without this, any error return between setupTapForVM and the
+	// success path leaked the tap on the host — DestroyTask never fires
+	// for a task that was never registered in p.tasks.
+	//
+	// Only armed on the synthesised-net branch; the operator-supplied
+	// Net branch trusts the host to own tap lifecycle, so we leave it
+	// alone (mirrors the pre-T-3 cleanup contract).
+	tapRollback := false
 	if len(driverConfig.Net) > 0 {
 		// Operator provided an explicit Net entry — trust them. Best-
 		// effort up-the-link (the tap may already be up; ip link set is
@@ -171,6 +184,17 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		if _, err := setupTapForVM(driverConfig.VMIndex, base); err != nil {
 			return nil, nil, fmt.Errorf("ch: StartTask: setup tap for vm_index=%d: %w", driverConfig.VMIndex, err)
 		}
+		tapRollback = true
+		defer func() {
+			if tapRollback {
+				// Best-effort: log nothing on success of teardown, and
+				// don't escalate teardown errors (the StartTask error
+				// the caller will see is already shaped by whichever
+				// step triggered the rollback). teardownTap itself
+				// tolerates "Cannot find device" idempotently.
+				_ = teardownTap(tapName)
+			}
+		}()
 	}
 
 	// Build the kernel cmdline. If the operator already supplied one,
@@ -282,6 +306,10 @@ func (p *Plugin) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		cancelFn:     cancel,
 	}
 	p.tasks.Set(cfg.ID, h)
+
+	// G4: success path reached — disarm the tap rollback. From here the
+	// tap is owned by the persisted task; DestroyTask handles teardown.
+	tapRollback = false
 
 	// Supervisor goroutine: blocks on runner.Wait, records the result on
 	// the handle, then closes exitDone so any WaitTask call (now or

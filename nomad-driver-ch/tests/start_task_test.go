@@ -12,14 +12,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/zeroship/nomad-driver-ch/ch"
 )
@@ -540,6 +543,157 @@ func TestStartTask_DuplicateID(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "already running") {
 			t.Errorf("second StartTask: got %v, want ErrExistingTask", err)
 		}
+	}
+}
+
+// TestStartTask_RollsBackTapOnSpawnFailure pins the G4 fix: when CH
+// spawn fails (fakeRunner.Start returns an error) AFTER setupTapForVM
+// has created the tap, StartTask must call teardownTap exactly once
+// with the same tap name, AND must not register the task in p.tasks
+// (otherwise DestroyTask would try to tear it down a second time).
+//
+// Without the deferred rollback the tap would leak: the task is never
+// persisted to p.tasks → DestroyTask never fires → the tap survives
+// until the next cold-boot at the same vm_index re-creates it
+// (which is idempotent today, but a defense-in-depth hole nonetheless).
+func TestStartTask_RollsBackTapOnSpawnFailure(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	// Fake the tap setup so we don't need CAP_NET_ADMIN AND so we can
+	// observe whether teardown is called against the tap setup returned.
+	var (
+		setupCalls    atomic.Int32
+		teardownCalls atomic.Int32
+		setupTap      string
+		teardownTap   string
+		mu            sync.Mutex
+	)
+	prevSetup := ch.SetSetupTapForTest(func(idx uint16, base uint8) (string, error) {
+		setupCalls.Add(1)
+		name := fmt.Sprintf("zsbx-nm-%d", idx)
+		mu.Lock()
+		setupTap = name
+		mu.Unlock()
+		return name, nil
+	})
+	t.Cleanup(func() { ch.SetSetupTapForTest(prevSetup) })
+
+	prevTeardown := ch.SetTeardownTapForTest(func(name string) error {
+		teardownCalls.Add(1)
+		mu.Lock()
+		teardownTap = name
+		mu.Unlock()
+		return nil
+	})
+	t.Cleanup(func() { ch.SetTeardownTapForTest(prevTeardown) })
+
+	cfg := validColdBootConfig()
+	cfg.VMIndex = 7
+	// CRUCIAL: leave cfg.Net unset so StartTask routes through
+	// setupTapForVM (the rollback-armed branch).
+
+	// Factory returns a fake runner whose Start() fails — this is the
+	// most likely real-world trigger for the leak (CH binary present
+	// but execve fails for env reasons, ENOMEM, EACCES on a referenced
+	// file, etc).
+	spawnErr := errors.New("synthetic spawn failure")
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		r := newFakeRunner(cmd)
+		r.startErr = spawnErr
+		return r
+	}
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatal("expected StartTask to fail when runner.Start errors, got nil")
+	}
+	if !errors.Is(err, spawnErr) {
+		t.Errorf("err = %v, want wrap of spawnErr", err)
+	}
+
+	if got := setupCalls.Load(); got != 1 {
+		t.Errorf("setupTap call count = %d, want 1", got)
+	}
+	if got := teardownCalls.Load(); got != 1 {
+		t.Errorf("teardownTap call count = %d, want 1 (rollback should fire on spawn failure)", got)
+	}
+	mu.Lock()
+	if teardownTap != setupTap {
+		t.Errorf("teardown called with %q, want %q (the tap setupTapForVM returned)", teardownTap, setupTap)
+	}
+	mu.Unlock()
+
+	// Task must NOT be registered (StartTask failed). InspectTask
+	// surfaces drivers.ErrTaskNotFound in that case.
+	if _, err := p.InspectTask(taskCfg.ID); !errors.Is(err, drivers.ErrTaskNotFound) {
+		t.Errorf("InspectTask after failed StartTask = %v, want ErrTaskNotFound", err)
+	}
+}
+
+// TestStartTask_DoesNotRollBackOnSuccess is the negative half of the
+// rollback contract: on a happy-path StartTask, teardownTap must NOT
+// be called. The deferred rollback fires only when tapRollback is
+// still true at function return — once handle.SetDriverState succeeds
+// and the task is registered, the toggle flips to false.
+func TestStartTask_DoesNotRollBackOnSuccess(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	var (
+		setupCalls    atomic.Int32
+		teardownCalls atomic.Int32
+	)
+	prevSetup := ch.SetSetupTapForTest(func(idx uint16, _ uint8) (string, error) {
+		setupCalls.Add(1)
+		return fmt.Sprintf("zsbx-nm-%d", idx), nil
+	})
+	t.Cleanup(func() { ch.SetSetupTapForTest(prevSetup) })
+
+	prevTeardown := ch.SetTeardownTapForTest(func(string) error {
+		teardownCalls.Add(1)
+		return nil
+	})
+	t.Cleanup(func() { ch.SetTeardownTapForTest(prevTeardown) })
+
+	cfg := validColdBootConfig()
+	cfg.VMIndex = 7
+	// Leave Net unset → routes through setupTapForVM.
+
+	var runner *fakeRunner
+	factory := func(cmd *exec.Cmd) ch.ProcessRunnerSeam {
+		runner = newFakeRunner(cmd)
+		return runner
+	}
+
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, t.TempDir(), factory)
+
+	handle, _, err := p.StartTask(taskCfg)
+	if err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	if handle == nil {
+		t.Fatal("nil handle on happy path")
+	}
+
+	if got := setupCalls.Load(); got != 1 {
+		t.Errorf("setupTap call count = %d, want 1", got)
+	}
+	if got := teardownCalls.Load(); got != 0 {
+		t.Errorf("teardownTap call count = %d, want 0 on happy path (rollback must NOT fire)", got)
+	}
+
+	// Sanity: the task IS registered.
+	if _, err := p.InspectTask(taskCfg.ID); err != nil {
+		t.Errorf("InspectTask after successful StartTask: %v", err)
+	}
+
+	// Unblock the fake runner's Wait so the supervisor goroutine
+	// doesn't hang the test process.
+	if runner != nil {
+		close(runner.waitCh)
 	}
 }
 
