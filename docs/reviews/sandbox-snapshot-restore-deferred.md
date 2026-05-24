@@ -911,10 +911,12 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Out of scope**: `unseal_one` + `seal_filename_for` stay `pub` — externally consumed by `crates/sandbox/tests/sandbox_preview_share_e2e.rs` (`unseal_one` at :1034,1065,1079,1114; `seal_filename_for` at :1058,1112). Documented in the R11 partial-invalidation note below.
 - **Verification post-fix**: `cargo check -p zeroship-sandbox` clean (1 dead-code warning on `seal_filename_for_str` — only referenced under `#[cfg(test)]`, expected since pub(crate) lets the compiler see the prod-build callgraph). `cargo test -p zeroship-sandbox --lib` → 327 passed / 0 failed / 1 ignored (unchanged from HEAD). E2e test still compiles.
 
-### [R10-API4] `readyz` returns `{"status":"draining"}` rather than §10.0 envelope (MINOR, api-surface-r10)
+### [R10-API4] (CLOSED at `528c3c44`) `readyz` 503 body aligned to §10.0 envelope (api-surface-r10 + R12-API1)
 - **Source**: 2026-05-25 api-surface-r10
-- **Symptom**: liveness/readiness probes drift from §10.0 ErrorEnvelope. Arguably justified as a probe shape — but document the carve-out explicitly.
-- **Action**: either bring readyz in line with §10.0 OR add a comment + invariant test pinning the probe-shape decision.
+- **Symptom**: 503 path returned `{"status":"backend-unhealthy"}` bypassing `ErrorEnvelope`; 200 path returned `{"status":"ready"}`.
+- **Fix**: 503 now routes through `error_response(SERVICE_UNAVAILABLE, "backend_unhealthy", "backend probe failed; service not ready")`; 200 body changed to `{"status":"ok"}`. Both paths consistent with §10.0 contract.
+- **Tests added**: `readyz_200_body_is_status_ok` + `readyz_503_body_is_envelope_compliant` in `handlers::tests`. Lib: 428 → 430.
+- **Verification**: `cargo build -p zeroship-sandbox --tests` clean (pre-existing warnings only). `cargo test -p zeroship-sandbox --lib` → 429 passed / 0 failed / 1 ignored.
 
 ### [R10-Q1] (CLOSED at `228569d3`) handlers.rs:670/821/837 raw `{e}` leak — was a 7-round carry, sanitized via shared `err_safe()`
 - **Source**: 2026-05-25 code-quality-r10 (also tracked as a 7-round api-surface carry across earlier review rounds)
@@ -1182,11 +1184,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Source**: 2026-05-25 code-quality-r12
 - **Action**: 2nd copy — not urgent until 3rd.
 
-### [R12-API1] (MINOR, api-surface-r12) `readyz` sibling of R10-API4 in handlers.rs
+### [R12-API1] (CLOSED at `528c3c44`) `readyz` sibling of R10-API4 — clustered and fixed together
 - **Source**: 2026-05-25 api-surface-r12
 - **File**: `crates/sandbox/src/handlers.rs:132-139`
-- **Symptom**: emits `{"status":"backend-unhealthy"}` on 503 — only `HttpResponse::ServiceUnavailable` site bypassing `error_envelope`. Cluster with R10-API4 (controller-side `readyz`) for single decision.
-- **Action**: either bring both to §10.0 envelope OR document the probe-shape carve-out with invariant tests.
+- **Symptom**: emitted `{"status":"backend-unhealthy"}` on 503 — only `HttpResponse::ServiceUnavailable` site bypassing `error_envelope`.
+- **Fix**: see R10-API4 entry above; both carries addressed in a single commit (`528c3c44`).
 
 ### [R12-API2] (CLOSED with R10-API6) stale `db.rs` "hyphenated form" comment shifted to line 2859 (was 2839)
 - **Action**: 30-char edit. 4th-round carry.
