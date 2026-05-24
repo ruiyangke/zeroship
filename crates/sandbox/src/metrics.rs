@@ -212,24 +212,6 @@ pub fn takeover_mismatched_value() -> u64 {
     TAKEOVER_MISMATCHED.load(Ordering::Relaxed)
 }
 
-/// Test-only accessor for the takeover-unreachable counter.
-#[doc(hidden)]
-pub fn takeover_unreachable_value() -> u64 {
-    TAKEOVER_UNREACHABLE.load(Ordering::Relaxed)
-}
-
-/// Test-only accessor for the takeover-corrupt counter.
-#[doc(hidden)]
-pub fn takeover_corrupt_value() -> u64 {
-    TAKEOVER_CORRUPT.load(Ordering::Relaxed)
-}
-
-/// Test-only accessor for the sandbox-corrupt-id counter.
-#[doc(hidden)]
-pub fn sandbox_corrupt_id_value() -> u64 {
-    SANDBOX_CORRUPT_ID.load(Ordering::Relaxed)
-}
-
 /// Set `sandbox_ha_heartbeat_lag_seconds` to `secs`. NaN-safe; an
 /// f64 with a negative value triggers the clock-rewind detector
 /// inside the caller (the takeover task) — this setter only stores.
