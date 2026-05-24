@@ -551,7 +551,7 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Fix shape (landed)**: (1) `db.rs::transient_state_lease_expired_sandboxes` now also filters `host_id <> self.host_id()` at the SELECT level; (2) new `db.rs::claim_orphan_transient_for_recovery` does the recovery CAS with fences on the row's observed `(host_id, generation)` AND `lessee_updated_at < now() - threshold` (ABA-safe), then on hit transfers ownership to `self.host_id()`, bumps generation, flips to recovery target, clears lessee; (3) `sweep.rs::run_transient_takeover_once` calls the new fn instead of `update_sandbox_status`.
 - **A1 follow-up flag**: split out as its own [A1-FOLLOWUP] entry below — DO NOT lose track.
 
-### [A1-FOLLOWUP] (CLOSED at `<pending-hash>`) Boot warns vs panics when `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` missing in tiered+GCS mode (CRITICAL, arch-r9 fail-CLOSED gap)
+### [A1-FOLLOWUP] (CLOSED at `da951dd9`) Boot warns vs panics when `SANDBOX_SNAPSHOT_ROOT_KEK_PATH` missing in tiered+GCS mode (CRITICAL, arch-r9 fail-CLOSED gap)
 - **Source**: 2026-05-25 (split from C1-FOLLOWUP's tracking note; originally arch-r9)
 - **File**: `crates/sandbox/src/lib.rs` (AppState boot path that composes the snapshot store stack — search for the wrap point closed in A1 commit `18e2034b`)
 - **Symptom**: A1 added the `AeadSnapshotStore` wrap when the KEK env var is set. But when `SANDBOX_SNAPSHOT_BACKEND=tiered` (L1 local + L2 GCS) and the operator FORGETS to set the KEK path, boot logs a warning and continues with bare plaintext-to-GCS — exactly the audit-trail-vs-reality gap A1 was meant to close. Per arch-r9's fail-CLOSED principle, a missing KEK in any mode that writes to remote object storage MUST panic at boot.
