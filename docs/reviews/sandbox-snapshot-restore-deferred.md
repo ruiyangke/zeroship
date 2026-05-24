@@ -951,3 +951,55 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 ### [R11-Q2 / R11-A1] (UNIFIED) Extract `read_root_owned_secret_file` helper — closes 4 sites' duplication + 8+ tests' fragmentation
 
 ### [R11-P2 + R11-P3] (CLOSED at 3d5c527f) BufReader/BufWriter on GCS download + SHA helpers
+
+---
+
+## NEW r12 ROUND FINDINGS (added by pilot cycle 2026-05-25 r7 — code-quality r12, api-surface r12, concurrency r12)
+
+### [R12-I1] (CRITICAL — T-8 blocker, concurrency-r12) Wake path hardcodes `Driver: "raw_exec"` — split-brain on T-8 cutover
+- **Source**: 2026-05-25 concurrency-r12
+- **File**: `crates/sandbox/src/restore_handler.rs:1323` (`build_restore_nomad_job_json` hardcodes `"Driver": "raw_exec"`); does NOT call `task_driver_mode_from_env()` like the cold-boot builder at `nomad_ch.rs::build_nomad_job_json_with`.
+- **Symptom**: under T-8's `SANDBOX_TASK_DRIVER=ch_plugin` cutover + bash-wrapper removal, CREATEs go through the Go plugin but RESTOREs still try `raw_exec` → split-brain on the same `vm_index` slot. With the wrapper removed, every wake fails with "no such driver: raw_exec" or "wrapper not found".
+- **Action**: collapse the two builders into a single `build_nomad_job_json_with(... restore_from: Option<&Path>, mode: TaskDriverMode)` that T-7 already designed for; or add the env consultation + ChPlugin branch to `build_restore_nomad_job_json`. The merge approach is cleaner and closes the R10-A4 nomad_ch.rs split for free.
+- **Blocks**: T-8b-cutover. T-8b-stress should also be done with this fix in place, otherwise stress results are invalid.
+
+### [R12-M1] (MINOR, concurrency-r12) Rollback closure 3-layer silent-fail compounded (R10-S2 + R11-C1 + R11-C2 + R12-M1)
+- **Source**: 2026-05-25 concurrency-r12
+- **File**: `crates/sandbox/src/restore_handler.rs:294-298` (R10-C2 spawn_blocking)
+- **Symptom**: 3 other spawn_blocking sites in the same file use `unwrap_or_else(|p| Err(format!("spawn_blocking panic: {p:?}")))`. The rollback path uses `let _ = …await` — JoinError on panic silently discarded. Compounds R10-S2 + R11-C1 (silent-fail-OPEN footgun) + R11-C2 (new 2-await drop window) into a three-layer silent-fail stack.
+- **Action**: match the other 3 sites' pattern. 4-line edit.
+
+### [R12-M2] (MINOR, concurrency-r12) task_driver_mode_from_env called per-CREATE — should cache at NomadCHBackend construction
+- **Source**: 2026-05-25 concurrency-r12
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs` (T-7 call site)
+- **Symptom**: theoretical env-Mutex micro-contention + footgun if env mutates mid-flight. Not a load-bearing perf bug, but the right pattern is read-at-startup.
+- **Action**: store TaskDriverMode in NomadCHBackend struct, read once at construction. T-7's tests already use a `T7_ENV_LOCK` mutex — adapt to set the field, not the env, in tests.
+
+### [R12-Q1] (MAJOR, code-quality-r12) `Database::open_pool` TODO is 20 days stale (since 2026-05-05)
+- **Source**: 2026-05-25 code-quality-r12
+- **File**: `crates/sandbox/src/db.rs:494-507`
+- **Symptom**: TODO comment claims "next round picks it up" — no commit has touched it since landing at `27e1a8b2` 2026-05-05. Misleads new readers.
+- **Action**: either implement R11-P1 (thread-local pool — per architecture-r11 sketch) OR drop the imminent-action promise from the comment and move to a tracking issue.
+
+### [R12-Q2] (MINOR, code-quality-r12) T-7 magic strings unextracted
+- **Source**: 2026-05-25 code-quality-r12
+- **File**: `crates/sandbox/src/backend/nomad_ch.rs` (T-7 additions)
+- **Symptom**: `"raw_exec"`, `"ch"`, `"ch_plugin"`, `"SANDBOX_TASK_DRIVER"` literals not extracted to consts. Env-value match arm silently fallible on typo (defaults to RawExec).
+- **Action**: extract to module-level consts. 4-line addition.
+
+### [R12-Q3] (MINOR, code-quality-r12) ENV_LOCK pattern duplicated (T-7 vs db.rs::tests)
+- **Source**: 2026-05-25 code-quality-r12
+- **Action**: 2nd copy — not urgent until 3rd.
+
+### [R12-API1] (MINOR, api-surface-r12) `readyz` sibling of R10-API4 in handlers.rs
+- **Source**: 2026-05-25 api-surface-r12
+- **File**: `crates/sandbox/src/handlers.rs:132-139`
+- **Symptom**: emits `{"status":"backend-unhealthy"}` on 503 — only `HttpResponse::ServiceUnavailable` site bypassing `error_envelope`. Cluster with R10-API4 (controller-side `readyz`) for single decision.
+- **Action**: either bring both to §10.0 envelope OR document the probe-shape carve-out with invariant tests.
+
+### [R12-API2] (TRIVIAL, api-surface-r12) stale `db.rs` "hyphenated form" comment shifted to line 2859 (was 2839)
+- **Action**: 30-char edit. 4th-round carry.
+
+### Closed this cycle:
+- [R11-T3] CLOSED at `eb26db31` — capability presence pins for proxy.ws-v1 + auth.ed25519-v1.1
+- [R11-S2] CLOSED at `85e4f2f9` — host_id reader mode+uid check (with defense-in-depth bonus: original silently regenerated on any read failure; new path surfaces permission errors as Validation)
