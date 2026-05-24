@@ -122,9 +122,24 @@ pub enum RestoreHandlerError {
 ///   tenant; releasing the slot before the fence clears reopens that
 ///   race for any concurrent CREATE.
 ///
-/// Default budget: 60 attempts × 2 s interval = **~120 s total**,
-/// which envelopes the worst observed teardown wall-time (90 s) plus
-/// a margin for fence p99 in busy clusters.
+/// Default budget: **25 attempts × 2 s interval = ~50 s total**.
+///
+/// **C-7 fix (T-8b-smoke-r8 cluster review)**: the original v1 default
+/// was 60×2s=120s, sized to envelope the worst observed teardown
+/// wall-time (host_fence ~60 s + Nomad purge ~30 s ≈ 90 s). That
+/// budget exceeded the stress client's 60 s deadline. When the client
+/// disconnected at 60 s, ntex dropped the wake handler future
+/// mid-`compio::time::sleep.await`, leaving no success/exhausted log
+/// — a silent failure with the row wedged at `restoring`.
+///
+/// Trade-off: under sustained `host_fence` races where the source
+/// slot does not vacate within 50 s, wake now surfaces a clean 503
+/// `vm_index_unavailable` (with the exhausted-budget warn log)
+/// instead of silently hanging until the client times out. An
+/// observable failure mode is strictly better than a silent stall.
+/// The long-term fix is async response with polling (return 202 +
+/// status URL, client polls until ready) — out of scope for the
+/// cluster-smoke unblock.
 #[derive(Debug, Clone, Copy)]
 pub struct VmIndexRetryPolicy {
     /// Maximum number of reserve attempts before giving up and
@@ -140,7 +155,10 @@ pub struct VmIndexRetryPolicy {
 
 impl Default for VmIndexRetryPolicy {
     fn default() -> Self {
-        Self { max_attempts: 60, interval: Duration::from_secs(2) }
+        // C-7 fix: 25 × 2 s = 50 s budget. Keep ≥10 s headroom under
+        // the 60 s ntex/stress-client deadline so the exhausted-budget
+        // log fires before the client disconnect cancels the future.
+        Self { max_attempts: 25, interval: Duration::from_secs(2) }
     }
 }
 
@@ -242,10 +260,13 @@ pub trait RestoreBackend: Send + Sync {
 
     /// C-4 fix (T-8b-smoke-r5 cluster review): policy the wake path
     /// uses to retry [`Self::reserve_vm_index`] while the source's
-    /// detached teardown still holds the slot. Default budget is
-    /// ~120 s, which envelopes the worst observed source-teardown
-    /// wall-time (host_fence ~60 s + Nomad purge ~30 s). Backends with
-    /// a different teardown profile (test stubs, k8s) override.
+    /// detached teardown still holds the slot. Default budget (after
+    /// the C-7 fix at T-8b-smoke-r8) is ~50 s — sized to stay strictly
+    /// below the 60 s ntex/stress-client deadline so the
+    /// exhausted-budget log fires before the client disconnect drops
+    /// the wake future. Backends with a different teardown profile
+    /// (test stubs, k8s) override. See [`VmIndexRetryPolicy`] for the
+    /// trade-off rationale.
     fn vm_index_retry_policy(&self) -> VmIndexRetryPolicy {
         VmIndexRetryPolicy::default()
     }
@@ -271,6 +292,23 @@ pub(crate) async fn reserve_vm_index_with_retry(
     let attempts = retry.max_attempts.max(1);
     let mut last_err: Option<String> = None;
     for attempt in 1..=attempts {
+        // C-7 fix: per-attempt INFO marker. Smoke-r8 falsified the
+        // C-6 runtime-starvation hypothesis: the wake handler was
+        // silently canceled by ntex when the stress client's 60 s
+        // deadline elapsed, before either the success-after-retry
+        // or exhausted-budget branch fired. Emitting before each
+        // reserve attempt lets the next smoke see which attempt-N
+        // the loop is on when the cancellation lands (or that it
+        // never entered the loop at all). Volume is bounded by the
+        // policy's `max_attempts` per wake — fine at c=20.
+        tracing::info!(
+            target: "zeroship_sandbox::restore_handler",
+            sandbox_id = %sandbox_id,
+            attempt = attempt,
+            max_attempts = attempts,
+            vm_index = vm_index,
+            "restore/wake: reserve_vm_index_with_retry attempt"
+        );
         match backend.reserve_vm_index(vm_index) {
             Ok(()) => {
                 if attempt > 1 {
@@ -547,8 +585,10 @@ async fn do_restore_inner(
     // retry the reserve on a bounded budget (see
     // [`VmIndexRetryPolicy`]); the slot frees as soon as the
     // detached teardown's `release()` fires. Total budget defaults
-    // to ~120 s; exhaustion still surfaces as 503 with the same
-    // wire shape.
+    // to ~50 s post-C-7 (was ~120 s pre-C-7 — that exceeded the
+    // ntex/stress-client 60 s deadline and the wake future was
+    // canceled mid-sleep before any exhaustion log fired);
+    // exhaustion still surfaces as 503 with the same wire shape.
     tracing::info!(
         sandbox_id = %sandbox_id,
         phase = "pre_reserve_vm_index",
@@ -1291,20 +1331,41 @@ mod unit_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// C-4 #4: the default `VmIndexRetryPolicy` envelopes the worst
-    /// observed source-teardown wall time (host_fence ~60 s + Nomad
-    /// purge ~30 s = 90 s) reported in T-8b-smoke-r5. If somebody
-    /// shrinks the default below the observed teardown profile the
-    /// production race re-opens; this test guards the envelope.
+    /// C-7 #1 (supersedes C-4 #4): the default `VmIndexRetryPolicy`
+    /// budget must sit STRICTLY BELOW the 60 s ntex/stress-client
+    /// deadline. The original C-4 default (60×2 s = 120 s) exceeded
+    /// the client deadline and the wake handler future was dropped
+    /// by ntex on client disconnect mid-`compio::time::sleep.await`
+    /// — leaving no observable success or exhausted-budget log
+    /// (silent wedge at `pre_reserve_vm_index`, T-8b-smoke-r8).
+    ///
+    /// Concretely: total budget = `(max_attempts - 1) * interval`
+    /// must be ≤55 s so the exhausted-budget warn fires with ≥5 s of
+    /// headroom before the 60 s deadline closes the connection. The
+    /// trade-off is documented on `VmIndexRetryPolicy` and on the
+    /// C-7 review entry: if the source slot is held past 50 s by a
+    /// host_fence race, wake returns a clean 503 instead of hanging
+    /// silently. Observable failure mode > silent timeout.
+    ///
+    /// If a future refactor needs a longer retry window (e.g., to
+    /// re-envelope a slower teardown profile), the correct fix is
+    /// async response with polling (C-7-LT) — NOT bumping this
+    /// budget back above the client deadline.
     #[test]
-    fn c4_default_policy_envelopes_observed_teardown() {
+    fn c7_retry_budget_default_is_under_client_deadline() {
+        const NTEX_CLIENT_DEADLINE_MS: u64 = 60_000;
+        const REQUIRED_HEADROOM_MS: u64 = 5_000;
         let p = VmIndexRetryPolicy::default();
         let total_ms = p.interval.as_millis() as u64
             * u64::from(p.max_attempts.saturating_sub(1));
         assert!(
-            total_ms >= 90_000,
-            "default retry budget must envelope the 90 s teardown profile; \
-             current = {} ms (attempts={}, interval={:?})",
+            total_ms + REQUIRED_HEADROOM_MS <= NTEX_CLIENT_DEADLINE_MS,
+            "default retry budget must leave ≥{} ms headroom under the \
+             {} ms ntex/stress-client deadline; current budget = {} ms \
+             (attempts={}, interval={:?}). See C-7 in \
+             docs/reviews/sandbox-snapshot-restore-deferred.md.",
+            REQUIRED_HEADROOM_MS,
+            NTEX_CLIENT_DEADLINE_MS,
             total_ms,
             p.max_attempts,
             p.interval
