@@ -894,6 +894,92 @@ pub(crate) const HOST_DIR_GC_GRACE_SECS: u64 = 3600;
 /// env value (`=0`) can't disable the safety entirely.
 pub(crate) const HOST_DIR_GC_GRACE_FLOOR_SECS: u64 = 60;
 
+/// Classification of a single readdir entry under `host_state_dir`,
+/// computed from filesystem-only signals (name + dir-bit + mtime).
+/// Pure helper extracted so the unit test suite can drive the
+/// non-DB gates without spinning up a `Database`.
+///
+/// `Skip`   — entry is not a host_dir we own (users subdir, non-UUID
+///            name, non-directory, non-UTF8). Caller continues silently.
+/// `UnderGrace` — entry is a UUID-named directory but its mtime is
+///            younger than `grace_secs`. Caller logs + continues.
+/// `Candidate(uuid)` — entry passes all filesystem gates; caller
+///            proceeds to DB-eligibility check + reap.
+///
+/// R25-T4: extracting this lets the test fixture pin every FS gate
+/// (the destructive `rm -rf` path branches on the result) without
+/// needing a mock `Database`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HostDirEntryDecision {
+    Skip,
+    UnderGrace { uuid: Uuid, age_secs: u64 },
+    Candidate { uuid: Uuid, age_secs: u64 },
+}
+
+/// Pure helper: classify a single readdir entry name + metadata
+/// against the FS gates. Returns the decision; the caller is
+/// responsible for DB lookups + rm -rf on `Candidate`.
+///
+/// Gates checked here (in order):
+///   1. literal name "users" → `Skip` (per-user lifecycle, never reap)
+///   2. name does not parse as `Uuid::simple` → `Skip`
+///   3. `is_dir == false` → `Skip` (operator artefact / stray file)
+///   4. mtime within `grace_secs` of `now_secs` → `UnderGrace`
+///   5. all FS gates pass → `Candidate(uuid)`
+pub(crate) fn classify_host_dir_entry(
+    name: &str,
+    is_dir: bool,
+    mtime_secs: u64,
+    now_secs: u64,
+    grace_secs: u64,
+) -> HostDirEntryDecision {
+    // Gate 1: per-user home tree — never reap.
+    if name == "users" {
+        return HostDirEntryDecision::Skip;
+    }
+    // Gate 2: must parse as Uuid::simple (the host_dir layout).
+    let uuid = match Uuid::parse_str(name) {
+        Ok(u) => u,
+        Err(_) => return HostDirEntryDecision::Skip,
+    };
+    // Gate 3: must be a directory.
+    if !is_dir {
+        return HostDirEntryDecision::Skip;
+    }
+    // Gate 4: mtime grace.
+    let age_secs = now_secs.saturating_sub(mtime_secs);
+    if age_secs < grace_secs {
+        return HostDirEntryDecision::UnderGrace { uuid, age_secs };
+    }
+    HostDirEntryDecision::Candidate { uuid, age_secs }
+}
+
+/// Pure helper: eligibility-by-DB-state. Returns `true` iff:
+///   - the sandbox row is absent (orphan), OR
+///   - the sandbox row is in a terminal state
+///     (`stopped` / `lost` / `orphan`)
+/// AND there is no pending wake_jobs row.
+///
+/// R25-T4: extracted so the table-test fixture pins the exact set of
+/// terminal states without round-tripping through pg. A future bump
+/// of "what counts as terminal" must edit both this fn and the
+/// adjacent table-test in lockstep.
+pub(crate) fn host_dir_eligible_by_db(
+    row: Option<&SandboxRow>,
+    has_pending_wake: bool,
+) -> bool {
+    if has_pending_wake {
+        return false;
+    }
+    match row {
+        None => true, // orphan
+        Some(r) => matches!(
+            r.status,
+            SandboxStatus::Stopped | SandboxStatus::Lost | SandboxStatus::Orphan
+        ),
+    }
+}
+
 /// One iteration of the host_dir GC sweep. Public for the pg-gated
 /// test suite. Returns `(scanned, reaped)` — `scanned` is the count of
 /// candidate `<uuid>`-shaped subdirs the iter found, `reaped` is the
@@ -966,23 +1052,6 @@ pub async fn run_host_dir_gc_once(
             None => continue, // non-UTF8 name — skip silently
         };
 
-        // The per-user home dir tree lives at `<host_state_dir>/users/`
-        // — owned by the user lifecycle, not the sandbox lifecycle.
-        // Never reap. Defence-in-depth: any non-UUID directory name
-        // is also skipped (operator artefacts are safe).
-        if name == "users" {
-            continue;
-        }
-
-        // Try to parse the entry name as a Uuid::simple — the layout
-        // convention is `<sandbox-id-simple>/...` (see
-        // `NomadCHBackend::create` line ~552). Anything that doesn't
-        // parse is not a host_dir we own.
-        let sandbox_uuid = match Uuid::parse_str(name) {
-            Ok(u) => u,
-            Err(_) => continue,
-        };
-
         let metadata = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {
@@ -995,35 +1064,42 @@ pub async fn run_host_dir_gc_once(
                 continue;
             }
         };
-        if !metadata.is_dir() {
-            // Not a dir — operator may have planted a regular file under
-            // host_state_dir. Skip.
-            continue;
-        }
-
-        scanned += 1;
-
-        // Grace check: dir mtime must be older than `grace_secs`.
-        // A young dir is still in the "may be racing a CREATE / retry"
-        // window — leave it alone.
         let mtime_secs = metadata
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if now_secs.saturating_sub(mtime_secs) < grace_secs {
-            tracing::debug!(
-                target: "sandbox::host_dir_gc",
-                name,
-                age_secs = now_secs.saturating_sub(mtime_secs),
-                grace_secs,
-                "sandbox host_dir GC: dir under grace, skipping"
-            );
-            continue;
-        }
 
-        // Eligibility gate 1: sandbox state.
+        // FS gates (pure classifier — see `classify_host_dir_entry`):
+        // skip the users subdir, non-UUID names, non-directories; bail
+        // early on `UnderGrace`. Only `Candidate` proceeds to DB checks.
+        let sandbox_uuid = match classify_host_dir_entry(
+            name,
+            metadata.is_dir(),
+            mtime_secs,
+            now_secs,
+            grace_secs,
+        ) {
+            HostDirEntryDecision::Skip => continue,
+            HostDirEntryDecision::UnderGrace { age_secs, .. } => {
+                scanned += 1;
+                tracing::debug!(
+                    target: "sandbox::host_dir_gc",
+                    name,
+                    age_secs,
+                    grace_secs,
+                    "sandbox host_dir GC: dir under grace, skipping"
+                );
+                continue;
+            }
+            HostDirEntryDecision::Candidate { uuid, .. } => {
+                scanned += 1;
+                uuid
+            }
+        };
+
+        // DB gate 1: sandbox state.
         //
         //   - Row absent → orphan from a deleted sandbox (or pre-v34
         //     leak); reap is safe.
@@ -1047,24 +1123,8 @@ pub async fn run_host_dir_gc_once(
                 continue;
             }
         };
-        let eligible_by_state = match row.as_ref() {
-            None => true, // no row → orphan
-            Some(r) => matches!(
-                r.status,
-                SandboxStatus::Stopped | SandboxStatus::Lost | SandboxStatus::Orphan
-            ),
-        };
-        if !eligible_by_state {
-            tracing::debug!(
-                target: "sandbox::host_dir_gc",
-                name,
-                status = ?row.as_ref().map(|r| r.status.as_str()),
-                "sandbox host_dir GC: sandbox not in terminal state, skipping"
-            );
-            continue;
-        }
 
-        // Eligibility gate 2: no pending wake_jobs row.
+        // DB gate 2: no pending wake_jobs row.
         //
         // A non-terminal wake_jobs row means restore_handler.rs is in
         // flight and needs `<host_dir>/restore/` + `workspace.img`. Even
@@ -1092,12 +1152,25 @@ pub async fn run_host_dir_gc_once(
                 continue;
             }
         };
-        if pending.is_some() {
-            tracing::debug!(
-                target: "sandbox::host_dir_gc",
-                name,
-                "sandbox host_dir GC: pending wake_jobs row present, skipping"
-            );
+
+        // Eligibility decided by the pure helper (see
+        // `host_dir_eligible_by_db`). Logging stays here so the
+        // structured fields still capture the row status.
+        if !host_dir_eligible_by_db(row.as_ref(), pending.is_some()) {
+            if pending.is_some() {
+                tracing::debug!(
+                    target: "sandbox::host_dir_gc",
+                    name,
+                    "sandbox host_dir GC: pending wake_jobs row present, skipping"
+                );
+            } else {
+                tracing::debug!(
+                    target: "sandbox::host_dir_gc",
+                    name,
+                    status = ?row.as_ref().map(|r| r.status.as_str()),
+                    "sandbox host_dir GC: sandbox not in terminal state, skipping"
+                );
+            }
             continue;
         }
 
@@ -1482,6 +1555,265 @@ mod unit_tests {
             WakeLifecycleConfig::DEFAULT_TAKEOVER_THRESHOLD_SECS
                 >= WakeLifecycleConfig::MIN_TAKEOVER_THRESHOLD_SECS,
             "default must satisfy the minimum it enforces"
+        );
+    }
+
+    // ─── R25-T4: host_dir GC eligibility matrix ────────────────────
+    //
+    // The host_dir GC sweeper at `run_host_dir_gc_once` is destructive
+    // (rm -rf <host_state_dir>/<sandbox_id>) and gates the action on
+    // six checks:
+    //   FS1  name == "users"       → skip (per-user lifecycle)
+    //   FS2  name is not a Uuid    → skip
+    //   FS3  is_dir == false       → skip
+    //   FS4  mtime within grace    → skip (under grace)
+    //   DB1  sandbox row state     → reap iff terminal / absent
+    //   DB2  pending wake_jobs row → skip if present
+    //
+    // The bundle commit `e82bffd7` explicitly deferred this matrix to
+    // a follow-up. The DB layer (`Database`) is a 4 KLOC concrete
+    // struct holding a real pg pool, so we can't easily mock it for
+    // lib-tests. Instead the gate logic is split into two pure
+    // helpers (`classify_host_dir_entry` for FS gates 1-4 and
+    // `host_dir_eligible_by_db` for gates 1-2 on the DB side) and the
+    // tests below pin each gate in isolation. The pg-gated tests in
+    // `tests/sandbox_pg_e2e.rs` already cover the end-to-end SQL path.
+
+    /// Helper: build a `SandboxRow` in the given status. The other
+    /// columns are filler — `host_dir_eligible_by_db` only inspects
+    /// `status`.
+    fn row_in_status(status: SandboxStatus) -> SandboxRow {
+        let mut r = row_with_id("sbx_filler_for_status_check".into());
+        r.status = status;
+        r
+    }
+
+    /// FS1 — the literal "users" subdir is the per-user home tree,
+    /// owned by the user lifecycle, not the sandbox lifecycle. The
+    /// classifier MUST skip it even when its mtime is older than the
+    /// grace window. A misfire here would silently delete every
+    /// user's `home.img` on the host.
+    #[test]
+    fn classify_skips_users_subdir() {
+        // "users" with ancient mtime + is_dir + huge grace → still skip.
+        let d = classify_host_dir_entry("users", true, 0, 1_000_000_000, 60);
+        assert_eq!(d, HostDirEntryDecision::Skip);
+    }
+
+    /// FS2 — only `Uuid::simple` names belong to the sandbox host_dir
+    /// layout. Anything else (operator artefact, README, stale tag) is
+    /// not ours; skip.
+    #[test]
+    fn classify_skips_non_uuid_names() {
+        let d = classify_host_dir_entry("not_a_typed_id", true, 0, 1_000_000_000, 60);
+        assert_eq!(d, HostDirEntryDecision::Skip);
+        // Empty string, prefixed forms, hex with hyphens — all skip.
+        for bad in [
+            "",
+            "sbx_aaaaaaaaaaaaaaaaaaaa",
+            "README.md",
+            "00000000-0000-0000-0000-000000000000.bak",
+        ] {
+            assert_eq!(
+                classify_host_dir_entry(bad, true, 0, 1_000_000_000, 60),
+                HostDirEntryDecision::Skip,
+                "expected Skip for {bad:?}"
+            );
+        }
+    }
+
+    /// FS3 — a regular file or symlink under `host_state_dir` is
+    /// operator-planted; skip regardless of name.
+    #[test]
+    fn classify_skips_non_directory_entries() {
+        let uuid = Uuid::now_v7();
+        let name = uuid.simple().to_string();
+        // Same name + same mtime + same grace, but is_dir=false → Skip.
+        let d = classify_host_dir_entry(&name, false, 0, 1_000_000_000, 60);
+        assert_eq!(d, HostDirEntryDecision::Skip);
+    }
+
+    /// FS4 — a UUID-named directory younger than the grace window is
+    /// `UnderGrace`, not `Candidate`. The grace window protects
+    /// freshly-created host_dirs from being reaped before the
+    /// retry-CREATE's `StartTask` has a chance to land.
+    #[test]
+    fn classify_respects_mtime_grace() {
+        let uuid = Uuid::now_v7();
+        let name = uuid.simple().to_string();
+        let now = 1_000_000_000u64;
+        let grace = 3600u64; // 1 hour
+        // mtime = now - 30 min, grace = 1 hour → UnderGrace.
+        let mtime = now - 1800;
+        let d = classify_host_dir_entry(&name, true, mtime, now, grace);
+        assert_eq!(
+            d,
+            HostDirEntryDecision::UnderGrace {
+                uuid,
+                age_secs: 1800
+            }
+        );
+    }
+
+    /// FS-pass — UUID-named directory beyond the grace window
+    /// surfaces as `Candidate(uuid)`. Caller proceeds to DB checks.
+    #[test]
+    fn classify_emits_candidate_beyond_grace() {
+        let uuid = Uuid::now_v7();
+        let name = uuid.simple().to_string();
+        let now = 1_000_000_000u64;
+        let grace = 600u64; // 10 min (post-R24-A1 default)
+        // mtime = now - 1 hour, grace = 10 min → Candidate.
+        let mtime = now - 3600;
+        let d = classify_host_dir_entry(&name, true, mtime, now, grace);
+        assert_eq!(
+            d,
+            HostDirEntryDecision::Candidate {
+                uuid,
+                age_secs: 3600
+            }
+        );
+    }
+
+    /// FS4 boundary — `age_secs < grace_secs` skips; `age_secs ==
+    /// grace_secs` reaps. The < (strict) inequality is intentional:
+    /// at exactly `grace`, the dir has waited its full window.
+    #[test]
+    fn classify_grace_boundary_is_inclusive() {
+        let uuid = Uuid::now_v7();
+        let name = uuid.simple().to_string();
+        let now = 1_000_000_000u64;
+        let grace = 600u64;
+        // age == grace → Candidate (boundary inclusive on reap side).
+        let mtime = now - grace;
+        let d = classify_host_dir_entry(&name, true, mtime, now, grace);
+        assert!(
+            matches!(d, HostDirEntryDecision::Candidate { .. }),
+            "age == grace should be Candidate, got {d:?}"
+        );
+        // age == grace - 1 → UnderGrace.
+        let mtime = now - (grace - 1);
+        let d = classify_host_dir_entry(&name, true, mtime, now, grace);
+        assert!(
+            matches!(d, HostDirEntryDecision::UnderGrace { .. }),
+            "age < grace should be UnderGrace, got {d:?}"
+        );
+    }
+
+    /// FS-clock-skew — if `now < mtime` (clock went backwards or fs
+    /// metadata is from the future), `saturating_sub` clamps `age` to
+    /// 0 and the dir is treated as under grace. This is the
+    /// conservative answer — never reap a dir whose mtime we don't
+    /// understand.
+    #[test]
+    fn classify_clock_skew_is_conservative() {
+        let uuid = Uuid::now_v7();
+        let name = uuid.simple().to_string();
+        let now = 1_000u64;
+        let mtime = 2_000u64; // mtime in the future
+        let d = classify_host_dir_entry(&name, true, mtime, now, 60);
+        // age = saturating_sub(now, mtime) = 0; 0 < 60 → UnderGrace.
+        assert_eq!(
+            d,
+            HostDirEntryDecision::UnderGrace { uuid, age_secs: 0 }
+        );
+    }
+
+    /// DB1.A — sandbox row absent (orphan from a deleted sandbox or
+    /// pre-v34 leak) is eligible. The dir has no live owner, the
+    /// grace already elapsed → safe to reap.
+    #[test]
+    fn db_eligible_when_row_absent() {
+        assert!(host_dir_eligible_by_db(None, false));
+    }
+
+    /// DB1.B — terminal states (`stopped` / `lost` / `orphan`) are
+    /// eligible. The controller is done with the sandbox; the dir is
+    /// leaked work product.
+    #[test]
+    fn db_eligible_for_terminal_states() {
+        for st in [
+            SandboxStatus::Stopped,
+            SandboxStatus::Lost,
+            SandboxStatus::Orphan,
+        ] {
+            let row = row_in_status(st);
+            assert!(
+                host_dir_eligible_by_db(Some(&row), false),
+                "expected eligible for status={:?}",
+                st.as_str()
+            );
+        }
+    }
+
+    /// DB1.C — non-terminal states (`running` / `starting` /
+    /// `restoring` / `restoring_cold` / `snapshotting`) preserve the
+    /// dir. A live or in-flight VM depends on `workspace.img`.
+    #[test]
+    fn db_skips_non_terminal_states() {
+        for st in [
+            SandboxStatus::Starting,
+            SandboxStatus::Running,
+            SandboxStatus::Stopping,
+            SandboxStatus::Recreating,
+            SandboxStatus::Unreachable,
+            SandboxStatus::Snapshotting,
+            SandboxStatus::Restoring,
+            SandboxStatus::RestoringCold,
+            SandboxStatus::SnapshottingAborted,
+        ] {
+            let row = row_in_status(st);
+            assert!(
+                !host_dir_eligible_by_db(Some(&row), false),
+                "non-terminal status={:?} must NOT be eligible",
+                st.as_str()
+            );
+        }
+    }
+
+    /// DB1.D — `snapshotted` / `snapshotted_suspect` are SKIP (NOT
+    /// terminal for host_dir-purposes): the `workspace.img` is
+    /// durable state needed by the next wake. Reaping would silently
+    /// break wake.
+    #[test]
+    fn db_preserves_snapshotted_states() {
+        for st in [SandboxStatus::Snapshotted, SandboxStatus::SnapshottedSuspect] {
+            let row = row_in_status(st);
+            assert!(
+                !host_dir_eligible_by_db(Some(&row), false),
+                "snapshotted-family status={:?} must preserve host_dir \
+                 (workspace.img is durable wake state)",
+                st.as_str()
+            );
+        }
+    }
+
+    /// DB2 — a pending wake_jobs row vetoes the reap, even when the
+    /// sandbox row is in a terminal state. The wake_jobs row is the
+    /// immediate-truth source for an in-flight wake; the sandbox row
+    /// may still read `stopped` if the wake-machine hasn't flipped
+    /// it to `restoring` yet.
+    #[test]
+    fn db_skips_when_pending_wake_present() {
+        // Orphan + pending wake → skip.
+        assert!(!host_dir_eligible_by_db(None, true));
+        // Terminal row + pending wake → skip.
+        let stopped = row_in_status(SandboxStatus::Stopped);
+        assert!(!host_dir_eligible_by_db(Some(&stopped), true));
+    }
+
+    /// Invariant: the floor must never exceed the default — operators
+    /// reading the env-tunable should never set a value that
+    /// `from_env`'s `.max(floor)` clamps back up to a different
+    /// number. (The actual default + floor values are pinned in their
+    /// own commit alongside any tuning change; here we just enforce
+    /// the relationship between them.)
+    #[test]
+    fn host_dir_gc_grace_default_at_least_floor() {
+        assert!(
+            HOST_DIR_GC_GRACE_SECS >= HOST_DIR_GC_GRACE_FLOOR_SECS,
+            "default must satisfy the minimum it enforces \
+             (default={HOST_DIR_GC_GRACE_SECS}, floor={HOST_DIR_GC_GRACE_FLOOR_SECS})"
         );
     }
 }
