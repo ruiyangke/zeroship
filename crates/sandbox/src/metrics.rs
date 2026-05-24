@@ -258,8 +258,8 @@ pub fn inc_wake_sync_deprecated() {
     WAKE_SYNC_DEPRECATED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Test-only accessor for the wake-sync deprecation counter.
-#[doc(hidden)]
+/// Read-side accessor for the wake-sync deprecation counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn wake_sync_deprecated_value() -> u64 {
     WAKE_SYNC_DEPRECATED.load(Ordering::Relaxed)
 }
@@ -291,9 +291,8 @@ pub fn inc_vm_index_leak(reason: &'static str) {
     }
 }
 
-/// Test-only accessor for the per-reason vm_index leak counter.
-/// Unknown labels return 0.
-#[doc(hidden)]
+/// Read-side accessor for the per-reason vm_index leak counter. Used
+/// by `metrics_export::render()` and by tests. Unknown labels return 0.
 pub fn vm_index_leak_value(reason: &'static str) -> u64 {
     match reason {
         "host_fence_timeout" => {
@@ -312,8 +311,8 @@ pub fn inc_wake_terminal_overwrite_blocked() {
     WAKE_TERMINAL_OVERWRITE_BLOCKED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Test-only accessor for the terminal-overwrite-blocked counter.
-#[doc(hidden)]
+/// Read-side accessor for the terminal-overwrite-blocked counter. Used
+/// by `metrics_export::render()` and by tests.
 pub fn wake_terminal_overwrite_blocked_value() -> u64 {
     WAKE_TERMINAL_OVERWRITE_BLOCKED.load(Ordering::Relaxed)
 }
@@ -329,20 +328,20 @@ pub fn inc_nomad_node_id_lookup_failure() {
     NOMAD_NODE_ID_LOOKUP_FAILURES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Test-only accessor for the nomad-node-id-lookup-failures counter.
-#[doc(hidden)]
+/// Read-side accessor for the nomad-node-id-lookup-failures counter.
+/// Used by `metrics_export::render()` and by tests.
 pub fn nomad_node_id_lookup_failures_value() -> u64 {
     NOMAD_NODE_ID_LOOKUP_FAILURES.load(Ordering::Relaxed)
 }
 
-/// Test-only accessor for the takeover-orphan counter.
-#[doc(hidden)]
+/// Read-side accessor for the takeover-orphan counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn takeover_orphan_value() -> u64 {
     TAKEOVER_ORPHAN.load(Ordering::Relaxed)
 }
 
-/// Test-only accessor for the takeover-mismatched counter.
-#[doc(hidden)]
+/// Read-side accessor for the takeover-mismatched counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn takeover_mismatched_value() -> u64 {
     TAKEOVER_MISMATCHED.load(Ordering::Relaxed)
 }
@@ -378,24 +377,25 @@ pub fn set_heartbeat_lag(secs: f64) {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Read-side (tests + future /metrics exporter)
+// Read-side (consumed by `metrics_export::render` + tests)
 // ────────────────────────────────────────────────────────────────────
 
-/// Test-only accessor for the takeover counter.
-#[doc(hidden)]
+/// Read-side accessor for the takeover counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn takeover_lease_expiration_value() -> u64 {
     TAKEOVER_LEASE_EXPIRATION.load(Ordering::Relaxed)
 }
 
-/// Test-only accessor for the lost-leadership counter.
-#[doc(hidden)]
+/// Read-side accessor for the lost-leadership counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn lost_leadership_value() -> u64 {
     LOST_LEADERSHIP.load(Ordering::Relaxed)
 }
 
-/// Test-only / future-exporter accessor for the per-op breakdown.
-/// Returns 0 for an op label that has never been incremented.
-#[doc(hidden)]
+/// Accessor for the per-op breakdown; returns 0 for an op label that
+/// has never been incremented. Tests pin specific ops with this; the
+/// Prometheus exporter consumes [`lost_leadership_snapshot_by_op`]
+/// (which materialises the full label set in one call) instead.
 pub fn lost_leadership_value_for_op(op: &'static str) -> u64 {
     let map = lost_leadership_by_op();
     let Ok(g) = map.lock() else { return 0 };
@@ -425,21 +425,21 @@ pub fn lost_leadership_snapshot_by_op() -> Vec<(&'static str, u64)> {
     out
 }
 
-/// Test-only accessor for the dead-hosts-observed counter.
-#[doc(hidden)]
+/// Read-side accessor for the dead-hosts-observed counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn dead_hosts_observed_value() -> u64 {
     DEAD_HOSTS_OBSERVED.load(Ordering::Relaxed)
 }
 
-/// Test-only accessor for the clock-rewind counter.
-#[doc(hidden)]
+/// Read-side accessor for the clock-rewind counter. Used by
+/// `metrics_export::render()` and by tests.
 pub fn clock_rewind_value() -> u64 {
     CLOCK_REWIND.load(Ordering::Relaxed)
 }
 
-/// Test-only accessor for the heartbeat-lag gauge. Returns NaN if
-/// no successful read has happened yet.
-#[doc(hidden)]
+/// Read-side accessor for the heartbeat-lag gauge. Used by
+/// `metrics_export::render()` and by tests. Returns NaN if no
+/// successful read has happened yet.
 pub fn heartbeat_lag_value() -> f64 {
     f64::from_bits(HEARTBEAT_LAG_BITS.load(Ordering::Relaxed))
 }
