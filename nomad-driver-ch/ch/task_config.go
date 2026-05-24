@@ -152,6 +152,31 @@ type TaskConfig struct {
 	// with VMIndex to derive the guest IP / host IP. Wrapper env:
 	// ZSBX_SUBNET_BASE_OCTET. Bounded to u8 (0..255).
 	SubnetBaseOctet uint16 `codec:"subnet_base_octet"`
+
+	// StageDiskImages, when true, tells the driver to materialize the
+	// per-alloc disk images (workspace.img and per-user home.img)
+	// itself BEFORE spawning Cloud Hypervisor. This is the Option C
+	// pivot from the 2026-05-25 staging-locality ADR (Phase 2): the
+	// controller no longer stages disks on its local filesystem when
+	// this flag is set — instead it emits the `WorkspaceImg` and
+	// `UserHomeImg` paths declaratively, and the driver creates the
+	// sparse files + mkfs.ext4 inside StartTask on the same node the
+	// alloc lands on.
+	//
+	// When false (default), the legacy controller-side staging path
+	// applies and the driver consumes pre-staged paths verbatim (the
+	// `preflightDiskPaths` stat-check then catches a controller bug
+	// before the spawn). Phase 4 flips the default to true after
+	// stress-validating that driver-side staging collapses the
+	// cross-alloc kernel-state retention surface the layer-peel rounds
+	// 1-5 chased.
+	//
+	// Cold-boot only — the restore branch stages rootfs via its own
+	// `RootfsSource` hardlink/copy (C-7-LT-12a) and consumes the
+	// persistent `WorkspaceImg` / `UserHomeImg` from snapshot artifacts
+	// per the ADR Phase 3 plan; the StageDiskImages flag has no effect
+	// on the restore branch in Phase 2.
+	StageDiskImages bool `codec:"stage_disk_images"`
 }
 
 // DiskSpec is one virtio-blk disk.
@@ -196,7 +221,8 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	"user_home_img":     hclspec.NewAttr("user_home_img", "string", false),
 	"rootfs_source":     hclspec.NewAttr("rootfs_source", "string", false),
 	"pubkey_hex":        hclspec.NewAttr("pubkey_hex", "string", false),
-	"subnet_base_octet": hclspec.NewAttr("subnet_base_octet", "number", false),
+	"subnet_base_octet":  hclspec.NewAttr("subnet_base_octet", "number", false),
+	"stage_disk_images":  hclspec.NewAttr("stage_disk_images", "bool", false),
 
 	"disks": hclspec.NewBlockList("disks", hclspec.NewObject(map[string]*hclspec.Spec{
 		"path":     hclspec.NewAttr("path", "string", true),
