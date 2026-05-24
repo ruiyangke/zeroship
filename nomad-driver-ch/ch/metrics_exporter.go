@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -199,6 +200,46 @@ func renderDriverMetricsProm() string {
 		b.WriteString(e.name)
 		b.WriteString(" ")
 		b.WriteString(fmt.Sprintf("%d", e.value))
+		b.WriteString("\n")
+	}
+
+	// T-8b-stress-r9-retry-4 NEXT-LAYER: labelled per-stage restore
+	// failure counter. One HELP/TYPE pair (the labelled family shares
+	// metadata across samples per the Prometheus text spec), then one
+	// sample per observed stage. Stages are sorted alphabetically so
+	// the rendered output is deterministic across exporter ticks
+	// (deterministic output makes a textfile diff actionable for
+	// operators).
+	//
+	// Zero-cardinality (no failures yet) is still a valid Prometheus
+	// family — we emit the HELP/TYPE pair even without samples so a
+	// scraper observes the metric family on every snapshot rather
+	// than only after the first failure (helps "is the driver
+	// reporting at all?" gauge alerts trigger correctly).
+	const restoreFailuresName = "nomad_driver_ch_start_task_restore_failures_total"
+	b.WriteString("# HELP ")
+	b.WriteString(restoreFailuresName)
+	b.WriteString(" ")
+	b.WriteString("Times startTaskRestoreBranch returned a non-nil error, labelled by failing stage (T-8b-stress-r9-retry-4 NEXT-LAYER).")
+	b.WriteString("\n# TYPE ")
+	b.WriteString(restoreFailuresName)
+	b.WriteString(" counter\n")
+	failures := StartTaskRestoreFailuresSnapshot()
+	stages := make([]string, 0, len(failures))
+	for s := range failures {
+		stages = append(stages, s)
+	}
+	sort.Strings(stages)
+	for _, stage := range stages {
+		b.WriteString(restoreFailuresName)
+		b.WriteString(`{stage="`)
+		// Stage labels are static constants from restore_task.go (no
+		// quotes / backslashes / newlines today), but apply the
+		// Prometheus label-value escape rules anyway as future-proofing.
+		esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(stage)
+		b.WriteString(esc)
+		b.WriteString(`"} `)
+		b.WriteString(fmt.Sprintf("%d", failures[stage]))
 		b.WriteString("\n")
 	}
 	return b.String()

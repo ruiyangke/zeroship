@@ -56,7 +56,10 @@
 
 package ch
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // tapsOrphanedTotal is the process-global counter behind
 // `nomad_driver_ch_taps_orphaned_total`. Bumped on the defensive
@@ -252,4 +255,93 @@ func DestroyTaskTapStuckTotal() int64 {
 // pin its own baseline without depending on sibling-test ordering.
 func ResetDestroyTaskTapStuckForTest() {
 	destroyTaskTapStuckTotal.Store(0)
+}
+
+// -- StartTaskRestoreFailures: per-stage restore failure counter ----
+//
+// T-8b-stress-r9-retry-4 NEXT-LAYER: stress-r9-retry-4 surfaced 5/6
+// wake failures terminating with a generic
+// `restore_backend_failed: ch: startTaskRestoreBran[truncated]`
+// message — the controller's wake_jobs error_message column and the
+// harness's 180-char display both clip the verbatim driver error
+// before any stage detail surfaces.
+//
+// This counter family complements the per-stage error-string
+// enrichment in `restore_task.go`: every named stage that returns a
+// non-nil error from `startTaskRestoreBranch` bumps
+// `nomad_driver_ch_start_task_restore_failures_total{stage="<stage>"}`
+// by one. Operators rate-graph the family to see WHICH stage is
+// dominating in the failure mix — e.g. a spike in
+// `stage="restore_spawn"` localises the regression to CH process
+// spawn (likely binary missing / EACCES), whereas
+// `stage="livez_probe"` localises it to CH-internal restore-time
+// (likely memory-image deserialisation or page-fault-in).
+//
+// Storage shape: a sync.Map keyed by stage string. The map is
+// process-global; entries are created on first observation of a
+// given stage (so a fleet that never sees `stage="resume"` failures
+// won't carry a useless zero sample). Reads use Range to iterate
+// entries in arbitrary order — the metrics exporter sorts them
+// before rendering for stable output.
+//
+// Why a map and not a fixed struct: stages are listed in
+// `restore_task.go` as untyped string constants; adding a new stage
+// later (or splitting an existing one) should not require touching
+// `metrics.go`. The map shape mirrors the labelled-counter pattern
+// the Prometheus client library uses, kept dependency-free.
+//
+// Stage label cardinality is bounded by the number of named return
+// sites in `startTaskRestoreBranch` (~15 today); no risk of unbounded
+// cardinality.
+var startTaskRestoreFailuresTotal sync.Map // map[string]*atomic.Int64
+
+// incStartTaskRestoreFailures bumps the per-stage counter by one.
+// Goroutine-safe: sync.Map.LoadOrStore returns the existing entry on
+// concurrent first-touch so we never lose a sample. Empty stage is
+// rejected (caller bug — pin via the named stage constants below
+// rather than constructing strings at the call site).
+func incStartTaskRestoreFailures(stage string) {
+	if stage == "" {
+		return
+	}
+	v, _ := startTaskRestoreFailuresTotal.LoadOrStore(stage, new(atomic.Int64))
+	v.(*atomic.Int64).Add(1)
+}
+
+// StartTaskRestoreFailuresTotal returns the current value for a given
+// stage. Returns 0 if the stage was never observed (i.e. no failures
+// of that kind have occurred). Exported for tests; a future
+// /metrics exporter would also use this read path.
+func StartTaskRestoreFailuresTotal(stage string) int64 {
+	v, ok := startTaskRestoreFailuresTotal.Load(stage)
+	if !ok {
+		return 0
+	}
+	return v.(*atomic.Int64).Load()
+}
+
+// StartTaskRestoreFailuresSnapshot returns a copy of the entire
+// per-stage counter map. Used by the Prometheus textfile exporter to
+// render one sample per observed stage. Caller must not mutate the
+// returned map (it's a fresh copy, but the convention keeps the API
+// shape consistent with the other Total accessors).
+func StartTaskRestoreFailuresSnapshot() map[string]int64 {
+	out := make(map[string]int64)
+	startTaskRestoreFailuresTotal.Range(func(k, v any) bool {
+		out[k.(string)] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return out
+}
+
+// ResetStartTaskRestoreFailuresForTest zeroes every per-stage counter
+// so a test can pin its own baseline without depending on sibling-
+// test ordering. Removes entries entirely (next read returns 0 via
+// the not-found branch) so a test asserting on a fresh-process state
+// sees the expected zero-cardinality snapshot.
+func ResetStartTaskRestoreFailuresForTest() {
+	startTaskRestoreFailuresTotal.Range(func(k, _ any) bool {
+		startTaskRestoreFailuresTotal.Delete(k)
+		return true
+	})
 }
