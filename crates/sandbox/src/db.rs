@@ -626,6 +626,18 @@ impl Database {
                 .await
                 .map_err(DatabaseError::Pg)?,
         );
+        // r7-C-followup: spawn the housekeeper so idle conns get
+        // reaped early. Without this the thread-local `Rc<Pool>`
+        // retains conns unbounded up to `max_size` per compio worker
+        // — see `compio-postgres/src/pool.rs:220-223` ("Without the
+        // housekeeper, the pool still works but connections are
+        // never proactively evicted"). Detached fire-and-forget; the
+        // housekeeper holds `Weak<Pool>` and self-terminates when
+        // the last strong `Rc` drops. Called on the locally-built
+        // pool before `install_pool` so the (rare) race-loser pool
+        // also gets a housekeeper — its `Weak` upgrades to None next
+        // tick once the Rc drops, and it exits cleanly.
+        pool.start_housekeeper();
         Ok(install_pool(&POOL_APP_CELL, dsn.clone(), pool))
     }
 
@@ -654,6 +666,8 @@ impl Database {
                 .await
                 .map_err(DatabaseError::Pg)?,
         );
+        // r7-C-followup: see `open_pool` for the rationale.
+        pool.start_housekeeper();
         Ok(install_pool(&POOL_AUDIT_CELL, dsn.clone(), pool))
     }
 
