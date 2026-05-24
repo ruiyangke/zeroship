@@ -507,10 +507,13 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: B18 added `vm_index_allocator()` accessor exposing the worker slot-pool `Arc<Mutex<VmIndexAllocator>>` externally. Zero out-of-crate callers; downstream code could `.lock()` it and deadlock create/restore.
 - **Action**: `pub(crate)`-restrict the accessor on Backend. Verify no out-of-crate uses first.
 
-### [R4-S2] `ErrorEnvelope::with_extra()` silently discards non-object Values (IMPORTANT, api-surface-r4)
-- **File**: `crates/sandbox/src/error_envelope.rs:93-104`
-- **Symptom**: `with_extra()` takes `serde_json::Value` but silently no-ops on non-object input. Should take `serde_json::Map<String, Value>` so the type forbids the misuse at compile-time.
-- **Action**: change signature; migrate the 4-5 in-crate call sites.
+### [R4-S2] (CLOSED at `425a5522`) `ErrorEnvelope::with_extra()` silently discards non-object Values
+- **File**: `crates/sandbox/src/error_envelope.rs:74-94` (post-fix)
+- **Symptom**: `with_extra()` took `serde_json::Value` but silently no-oped on non-object input — the §10.0 envelope contract (extras flatten into top-level) is meaningful only when the input IS an object.
+- **Fix**: chose Option A from the task brief (panic on non-object) over Option C (`fn with_extra(Map)`). Every existing caller passes `json!({...})` which produces `Value::Object`; the panic never fires in practice but turns future caller bugs into loud failures at the first failing test. Internal storage flipped from `Option<Value>` to `Option<Map<String, Value>>`, so the type enforces the contract at storage time. Bonus: chained `with_extra` calls now merge rather than the second silently replacing the first (`with_extra_called_twice_merges` pin-test added).
+- **Caller migration**: zero — all 16 in-crate sites use `json!({...})` literals which return `Value::Object`. The `Value`-accepting outer surface is preserved for ergonomics.
+- **Lib test delta**: +6 in `error_envelope::tests` (5 panic-variant `#[should_panic]` tests covering Array/String/Number/Bool/Null + 1 merge-twice happy-path). 518 → 528 envelope-runner total includes other unrelated test growth landed since the baseline snapshot; the precise envelope-module count is 5 → 11.
+- **API exposure**: `with_extra` is `pub(crate)` — no cross-crate wire-contract risk.
 
 ### [R5-A1] B19 worsens enum-as-trait (5th `Err("backend X doesn't support…")` method) (CRITICAL, arch-r5)
 - **Files**: `crates/sandbox/src/backend/mod.rs:175-180,449-505`
