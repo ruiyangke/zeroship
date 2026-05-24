@@ -13,9 +13,9 @@
 // source-of-truth DB. Durable idempotency / locks / config / tokens
 // belong in env.db. See docs/reference/kv.md for the full guidance.
 //
-// Backends (selected by the runtime, identical wire contract): InMemory
-// (dev/test), redb (single-process persistent, ZEROSHIP_KV_PATH), Redis
-// (distributed, ZEROSHIP_KV_URL).
+// Backends (selected by the runtime, identical wire contract): redb
+// (single-process persistent — the default; ZEROSHIP_KV_PATH) and Redis
+// (distributed; ZEROSHIP_KV_URL).
 
 import { env } from "zeroship";
 
