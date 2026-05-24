@@ -1049,19 +1049,50 @@ fn strip_ipv6_link_local(msg: &str) -> String {
 /// NOT touched so operator-debuggable error text (e.g. "ch-remote
 /// at /usr/local/bin/ch-remote exited 1") still reads cleanly.
 ///
-/// Match shape: `/(var/zeroship|opt/nomad|etc/zeroship)` followed
-/// by any non-whitespace / non-quote character. The path body is
-/// consumed greedily so an embedded typed-id segment doesn't get
-/// double-redacted by the later `strip_typed_ids` pass.
+/// Match shape: `/(var/zeroship|var/lib/zeroship|opt/nomad|etc/zeroship|run/zeroship)`
+/// followed by any non-whitespace / non-quote character. The path
+/// body is consumed greedily so an embedded typed-id segment
+/// doesn't get double-redacted by the later `strip_typed_ids` pass.
 ///
 /// Path roots:
 /// - `/var/zeroship/` — controller-owned state: `ch/<sbx>/workspace.img`,
 ///   `ch/users/<usr>/home.img`, snapshot artifacts.
+/// - `/var/lib/zeroship/` — r27-M1: default `runtime_dir` per
+///   `NomadCHConfig::runtime_dir` (vmlinuz / rootfs source / kernel
+///   blobs); a driver-emitted "open /var/lib/zeroship/ch/vmlinuz"
+///   error would have leaked the runtime layout pre-fix.
 /// - `/opt/nomad/` — Nomad client alloc dirs:
 ///   `data/alloc/<alloc-id>/ch/local/rootfs.img`, task_dir, secrets.
 /// - `/etc/zeroship/` — controller config: keys/, certs/, TLS material.
+/// - `/run/zeroship/` — r27-M1: CH api-socket location (per-VM
+///   `<sandbox-id>.sock` lives here on the host); a CH-side
+///   "connect /run/zeroship/<sbx>.sock: ECONNREFUSED" error would
+///   have leaked the socket path + typed-id pre-fix.
+///
+/// **Operator-overridden `host_state_dir`**: when `SANDBOX_NOMAD_CH_HOST_STATE_DIR`
+/// is set to a non-default value (anything outside the whitelist
+/// roots above), driver-emitted path strings still leak. This is
+/// documented as a known limitation; closing it requires plumbing
+/// the runtime config through the sanitizer, which is structurally
+/// larger than the r27-M1 line-item. Operators on a non-default
+/// `host_state_dir` should either (a) keep the override under one
+/// of the whitelist roots or (b) accept the residual leak until
+/// the operator-aware sanitizer ships.
 fn strip_filesystem_paths(msg: &str) -> String {
-    const ROOTS: &[&[u8]] = &[b"/var/zeroship/", b"/opt/nomad/", b"/etc/zeroship/"];
+    // r27-M1: order matters — `/var/lib/zeroship/` must come BEFORE
+    // `/var/zeroship/` is even ATTEMPTED, otherwise a substring
+    // match on `/var/zeroship/` would never run (it doesn't share a
+    // prefix with `/var/lib/zeroship/`, so order is actually safe
+    // either way here, but we keep the longest-prefix-first
+    // discipline so a future operator-prefix addition that DOES
+    // share a prefix lands correctly).
+    const ROOTS: &[&[u8]] = &[
+        b"/var/lib/zeroship/",
+        b"/var/zeroship/",
+        b"/opt/nomad/",
+        b"/etc/zeroship/",
+        b"/run/zeroship/",
+    ];
     const REDACT_PATH: &str = "<redacted-path>";
     let bytes = msg.as_bytes();
     let n = bytes.len();
@@ -1102,19 +1133,30 @@ fn strip_filesystem_paths(msg: &str) -> String {
     out
 }
 
-/// R22-S1 Mode A: strip canonical typed-IDs to prevent tenant /
-/// sandbox / wake enumeration via repeat polling. Matches the
-/// global `^[a-z]{3}_[A-Za-z0-9]{18,32}$` shape from
-/// `crates/core/src/typed_id.rs` — three lowercase ASCII letters,
-/// underscore, then 18-32 base62 chars. The canonical length is
-/// 22 (pinned by `wake_prefix_is_three_chars` etc.); 18-32 is
-/// deliberate drift-tolerance.
+/// R22-S1 Mode A + r27-M1 extension: strip canonical typed-IDs AND
+/// standard hyphenated UUIDs to prevent tenant / sandbox / wake
+/// enumeration via repeat polling. Two patterns:
 ///
-/// Word-boundary semantics: the prefix MUST start at a non-alnum
-/// boundary (or string start), so `_sbx_<base62>` and `Xsbx_<base62>`
-/// do NOT match — substring matches inside larger identifiers are
-/// excluded. The trailing base62 run stops at the first non-alnum
-/// char, so trailing punctuation is preserved.
+/// 1. **Typed-ID** — global `^[a-z]{3}_[A-Za-z0-9]{18,32}$` shape
+///    from `crates/core/src/typed_id.rs`: three lowercase ASCII
+///    letters, underscore, then 18-32 base62 chars. Canonical
+///    length is 22 (pinned by `wake_prefix_is_three_chars` etc.);
+///    18-32 is deliberate drift-tolerance.
+/// 2. **Hyphenated UUID** (r27-M1) — RFC 4122 textual form
+///    `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12 hex chars,
+///    36 chars total). Surfaces in error messages that quote a
+///    Nomad `alloc_id` verbatim (e.g.
+///    `alloc 550e8400-e29b-41d4-a716-446655440000 failed`). Without
+///    a strip pass, an RO admin reading `wake_jobs.error_message`
+///    can enumerate alloc IDs across tenants. Both upper- and
+///    lower-case hex accepted; the redaction token is shared with
+///    typed-IDs (`<redacted-typed-id>`) because the privacy
+///    rationale is identical.
+///
+/// Word-boundary semantics (both patterns): the match MUST start at
+/// a non-alnum-and-non-`_` boundary (or string start) and end at a
+/// non-alnum-and-non-`_` boundary (or string end), so embedded
+/// substring matches inside larger identifiers are excluded.
 fn strip_typed_ids(msg: &str) -> String {
     const REDACT_ID: &str = "<redacted-typed-id>";
     let bytes = msg.as_bytes();
@@ -1127,6 +1169,28 @@ fn strip_typed_ids(msg: &str) -> String {
                 let p = bytes[i - 1];
                 !p.is_ascii_alphanumeric() && p != b'_'
             };
+        if at_boundary {
+            // r27-M1: hyphenated UUID first (its alphabet is
+            // [0-9a-fA-F-], strict subset of the typed-id
+            // alphabet's hex-relevant slice, but the leading char
+            // is a hex digit OR letter so prefix-ambiguity with
+            // typed-IDs (which require `_` at position 3) is nil).
+            if let Some(end) = match_hyphenated_uuid_at(bytes, i) {
+                // Trailing boundary check — `01h00000-1234-...-xxxxxxxxxxxx`
+                // followed by alnum/underscore would be a longer
+                // identifier, not a UUID. Refuse to redact then.
+                let trailing_boundary = end >= n
+                    || {
+                        let p = bytes[end];
+                        !p.is_ascii_alphanumeric() && p != b'_'
+                    };
+                if trailing_boundary {
+                    out.push_str(REDACT_ID);
+                    i = end;
+                    continue;
+                }
+            }
+        }
         if at_boundary
             && i + 4 < n
             && bytes[i].is_ascii_lowercase()
@@ -1158,6 +1222,36 @@ fn strip_typed_ids(msg: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// r27-M1: match a hyphenated UUID (RFC 4122 textual form) starting
+/// at byte offset `i`. Returns the past-end byte offset on a match,
+/// `None` otherwise. Pattern: `[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-
+/// [0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}` (36 chars total).
+/// Caller is responsible for the leading-boundary check; this
+/// function does only the literal pattern match. Trailing-boundary
+/// check is the caller's job too (so a Nomad `alloc_id` followed
+/// by a slash terminator validates, but a UUID followed by `_extra`
+/// chars stays a longer identifier and doesn't redact).
+fn match_hyphenated_uuid_at(s: &[u8], i: usize) -> Option<usize> {
+    const UUID_LEN: usize = 36;
+    if i + UUID_LEN > s.len() {
+        return None;
+    }
+    // Hyphen positions per RFC 4122: indices 8, 13, 18, 23.
+    const HYPHEN_POSITIONS: [usize; 4] = [8, 13, 18, 23];
+    for off in 0..UUID_LEN {
+        let b = s[i + off];
+        let is_hyphen_slot = HYPHEN_POSITIONS.contains(&off);
+        if is_hyphen_slot {
+            if b != b'-' {
+                return None;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return None;
+        }
+    }
+    Some(i + UUID_LEN)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -1445,6 +1539,91 @@ mod tests {
             "open /etc/zeroship/keys/ed25519.pub failed",
         );
         assert_eq!(s, "open <redacted-path> failed");
+    }
+
+    /// r27-M1: `/var/lib/zeroship/` is the default `runtime_dir`
+    /// (vmlinuz + rootfs source + kernel blobs). Pre-fix, a driver
+    /// error like "open /var/lib/zeroship/ch/vmlinuz failed" would
+    /// have escaped the strip pass and leaked the runtime layout.
+    /// (Path body consumption uses whitespace as the terminator
+    /// per the existing strip semantics; trailing punctuation like
+    /// `:` is consumed into the path span — that's pre-existing
+    /// behavior and is documented by the unchanged path-strip
+    /// tests above.)
+    #[test]
+    fn sanitize_strips_var_lib_zeroship_path() {
+        let s = sanitize_error_message(
+            "open /var/lib/zeroship/ch/vmlinuz failed",
+        );
+        assert_eq!(s, "open <redacted-path> failed");
+    }
+
+    /// r27-M1: `/run/zeroship/` is the per-VM CH api-socket location.
+    /// A CH-side connect failure would leak the socket path + the
+    /// embedded sandbox-id, doubly bad: enumerable + correlatable
+    /// with a wake_job.
+    #[test]
+    fn sanitize_strips_run_zeroship_path() {
+        let s = sanitize_error_message(
+            "connect /run/zeroship/sock.s ECONNREFUSED",
+        );
+        assert_eq!(s, "connect <redacted-path> ECONNREFUSED");
+    }
+
+    /// r27-M1: hyphenated UUID (RFC 4122 textual form) surfaces in
+    /// Nomad `alloc_id` strings quoted verbatim into error messages.
+    /// Both lowercase and uppercase hex must redact; trailing prose
+    /// must stay intact via word-boundary handling.
+    #[test]
+    fn sanitize_strips_hyphenated_uuid_id() {
+        // Lowercase hex.
+        let s = sanitize_error_message(
+            "alloc 550e8400-e29b-41d4-a716-446655440000 failed",
+        );
+        assert_eq!(s, "alloc <redacted-typed-id> failed");
+        // Uppercase hex.
+        let s = sanitize_error_message(
+            "alloc 550E8400-E29B-41D4-A716-446655440000 failed",
+        );
+        assert_eq!(s, "alloc <redacted-typed-id> failed");
+        // Mixed case.
+        let s = sanitize_error_message(
+            "alloc 550e8400-E29B-41d4-A716-446655440000 failed",
+        );
+        assert_eq!(s, "alloc <redacted-typed-id> failed");
+    }
+
+    /// r27-M1: a hyphenated UUID followed by an alnum char (i.e. a
+    /// longer identifier that happens to start with a UUID-shaped
+    /// prefix) must NOT redact — the trailing-boundary rule applies
+    /// equally to UUIDs and typed-IDs.
+    #[test]
+    fn sanitize_preserves_uuid_substring_inside_longer_identifier() {
+        // No space or punctuation between UUID and `extra`; this is
+        // a single 41-char identifier, not a UUID.
+        let s = sanitize_error_message(
+            "match 550e8400-e29b-41d4-a716-446655440000extra here",
+        );
+        // Whole thing left intact (no redaction).
+        assert_eq!(
+            s, "match 550e8400-e29b-41d4-a716-446655440000extra here",
+        );
+    }
+
+    /// r27-M1: a UUID-shaped substring with the wrong character at
+    /// a hyphen position (an extra hex digit) must NOT match — the
+    /// pattern is strict on the 8-4-4-4-12 group widths.
+    #[test]
+    fn sanitize_preserves_uuid_with_wrong_group_widths() {
+        // 9-4-4-4-12 instead of 8-4-4-4-12 — one extra digit in the
+        // first group. The strict matcher must reject the whole
+        // shape so this passes through verbatim.
+        let s = sanitize_error_message(
+            "look 550e84000-e29b-41d4-a716-446655440000 here",
+        );
+        assert_eq!(
+            s, "look 550e84000-e29b-41d4-a716-446655440000 here",
+        );
     }
 
     /// Typed-IDs across all five canonical prefixes
