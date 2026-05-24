@@ -1339,11 +1339,11 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Symptom**: all 3 callers are `#[cfg(test)]`. R10-API3 demoted to pub(crate) but never followed through to either delete or `#[cfg(test)]`-gate. `cargo build` (default profile) emits `warning: function seal_filename_for_str is never used`.
 - **Action**: either `#[cfg(test)] pub(crate) fn` OR delete (R10-Q5 precedent for orphan delete). Mechanical 1-line decision.
 
-### [R14-Q3] (MINOR) C-3 thread name builder over-engineered + misleading
+### [R14-Q3] (CLOSED at `9afd0986`) C-3 thread name builder over-engineered + misleading
 - **Source**: 2026-05-25 code-quality-r14
-- **File**: `crates/sandbox/src/snapshot_store_gcs.rs::tier_l2_upload_thread_name` (introduced by c890c015)
+- **File**: `crates/sandbox/src/snapshot_store_gcs.rs` (introduced by c890c015)
 - **Symptom**: chars/rev/take/rev dance for last-8-chars + Linux `pr_set_name` truncates at 15 chars (the tail is invisible anyway). Doc comment misleads.
-- **Action**: 1-line fix: `&s[s.len().saturating_sub(8)..]`. Drop misleading doc.
+- **Fix**: replaced the 4-pass char-walk + 2 fresh `String` allocs with `&s[s.len().saturating_sub(8)..]` (ASCII-safe — sandbox_id is hex per B24-FOLLOWUP). Doc comment now explicitly notes the 15-char `pr_set_name` truncation: the tail is grep-correlatable in logs but NOT visible in `ps`/`top -H`. 332/332 tests unchanged.
 
 ### [R14-Q4] (MINOR) C-4 `VmIndexRetryPolicy::default` doc off-by-one
 - **Source**: 2026-05-25 code-quality-r14
@@ -1356,8 +1356,8 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - **Budget update**: c=1 no-contention = ~10 s; c=1 max-contention ~100 s (cluster-r6 observed); c=20 with sync teardown races ~100-120 s; some 503s expected when host_fence extends >118 s.
 - **Action**: track in cluster-r7+ data. No code change.
 
-### [R14-P2] (MINOR, performance-r14, dup of R14-Q3) snap-l2-upload thread name allocation
-- Same finding via code-quality. Single fix.
+### [R14-P2] (CLOSED at `9afd0986`, performance-r14, dup of R14-Q3) snap-l2-upload thread name allocation
+- Same finding via code-quality. Single fix landed in R14-Q3 commit.
 
 ### [R14-P3] (INFO, performance-r14) std::thread::Builder::spawn unbounded vs compio::spawn_blocking
 - **Source**: 2026-05-25 performance-r14
@@ -1384,3 +1384,4 @@ Worktree: `/home/ruiyang/Projects/appbase/.worktrees/sandbox-snapshot-restore`.
 - [R14-API1] CLOSED at `00161cea` — with_nomad_handle + with_shared_allocator pub→pub(crate)
 - [R11-API1 expanded] CLOSED at `370fdbba` — 3 orphan #[doc(hidden)] pub fns deleted from sandbox/src/metrics.rs (path correction: were in sandbox not sandbox-agent)
 - [C-6] CLOSED at `91ce9be5` — detached teardown moved off ntex-worker compio runtime onto a dedicated OS thread + short-lived compio runtime (mirrors C-3 pattern). Root cause: runtime starvation by the detached teardown's 60s `/shutdown` ureq blocker (whose `spawn_blocking` wrap inside was insufficient — the outer future itself was on the worker runtime). +75 / −14 LOC. 332 pass unchanged.
+- [R14-Q3 + R14-P2] CLOSED at `9afd0986` — snap-l2-upload thread-name builder simplified from 4-pass char-walk + 2 String allocs to single byte-slice (`&s[s.len().saturating_sub(8)..]`, ASCII-safe per B24-FOLLOWUP). Doc comment now calls out the 15-char `pr_set_name` truncation explicitly (tail is grep-correlatable in logs but NOT visible in `ps`/`top -H`). +19 / −12 LOC. 332 pass unchanged.
