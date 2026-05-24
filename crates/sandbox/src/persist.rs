@@ -278,7 +278,7 @@ pub fn seal_filename_for(sandbox_id: Uuid) -> String {
 /// doesn't parse as a UUID — the call sites already type sandbox_id
 /// as `Uuid`, so this is belt-and-suspenders for any future caller
 /// that takes a string.
-pub fn seal_filename_for_str(sandbox_id_str: &str) -> Result<String, String> {
+pub(crate) fn seal_filename_for_str(sandbox_id_str: &str) -> Result<String, String> {
     // Parse-then-canonicalize; we hash the canonical form so two
     // alternate UUID encodings (hyphenated vs. simple) collide to the
     // same file. Unparseable inputs surface a clean error rather than
@@ -381,7 +381,7 @@ impl AeadKey {
 /// `Uuid` so the type system precludes a stringly-typed bypass.
 ///
 /// Returns the absolute path written, on success.
-pub fn seal(
+pub(crate) fn seal(
     sandbox_id: Uuid,
     auth: &SealedAuth,
     dir: &Path,
@@ -518,7 +518,7 @@ pub fn unseal_one(path: &Path, key: &AeadKey) -> std::io::Result<SealedAuth> {
 /// quarantine a corrupt record and proceed (the boot path mustn't
 /// fail-closed on a single bad file). `dir` not existing is treated
 /// as "no records yet" and returns an empty Vec.
-pub fn unseal_dir(dir: &Path, key: &AeadKey) -> std::io::Result<Vec<UnsealedRecord>> {
+pub(crate) fn unseal_dir(dir: &Path, key: &AeadKey) -> std::io::Result<Vec<UnsealedRecord>> {
     let mut out = Vec::new();
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
