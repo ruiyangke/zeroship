@@ -3875,4 +3875,72 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         TempDir(path)
     }
+
+    // ─── GATE-C2 (R17-C2) ─────────────────────────────────────────
+    // Pure-Rust shape tests for InsertWakeJobOutcome. The actual
+    // race semantics need a live Postgres + UNIQUE INDEX 0011 and
+    // live in tests/sandbox_pg_e2e.rs::wake_jobs_crud — these
+    // smoke-test the enum surface so a future refactor that
+    // collapses the variants is caught without pg.
+
+    fn sample_wake_row(wake_id: &str, sandbox_id: &str) -> WakeJobRow {
+        WakeJobRow {
+            wake_id: wake_id.to_string(),
+            sandbox_id: sandbox_id.to_string(),
+            state: WakeJobState::Pending,
+            error_code: None,
+            error_message: None,
+            started_at_secs: 17_280_000_000,
+            updated_at_secs: 17_280_000_000,
+            ready_at_secs: None,
+            agent_url: None,
+            lessee: "hst_unit".to_string(),
+            lessee_updated_at_secs: 17_280_000_000,
+        }
+    }
+
+    #[test]
+    fn insert_wake_job_outcome_inserted_variant_constructs() {
+        // Smoke: the Inserted variant exists and matches by pattern.
+        // If a future refactor renames it, this fails at compile time
+        // and forces the deferred-doc / GATE-C2 reviewer to re-check
+        // the handler-side replay branch in admin_handlers.rs.
+        let out = InsertWakeJobOutcome::Inserted;
+        assert!(matches!(out, InsertWakeJobOutcome::Inserted));
+    }
+
+    #[test]
+    fn insert_wake_job_outcome_replay_carries_row() {
+        // The Replay variant MUST carry the winner's row. The handler
+        // serialises `existing.wake_id` straight into the 202 body, so
+        // this is the load-bearing field. We pin it explicitly.
+        let row = sample_wake_row("wak_replay_a", "sbx_replay_a");
+        let out = InsertWakeJobOutcome::Replay(row);
+        match out {
+            InsertWakeJobOutcome::Replay(r) => {
+                assert_eq!(r.wake_id, "wak_replay_a");
+                assert_eq!(r.sandbox_id, "sbx_replay_a");
+                assert_eq!(r.state, WakeJobState::Pending);
+            }
+            InsertWakeJobOutcome::Inserted => {
+                panic!("Replay variant must not match Inserted");
+            }
+        }
+    }
+
+    #[test]
+    fn insert_wake_job_outcome_variants_are_distinguishable_by_match() {
+        // Belt-and-braces: the enum's two variants are
+        // discriminator-distinct, so the admin_handlers `if let
+        // Replay(existing) = outcome` branch is exhaustive against
+        // Inserted (the spawn-machine path).
+        let inserted = InsertWakeJobOutcome::Inserted;
+        let replay = InsertWakeJobOutcome::Replay(sample_wake_row(
+            "wak_distinguish",
+            "sbx_distinguish",
+        ));
+        // Each must NOT match the other's discriminator.
+        assert!(!matches!(inserted, InsertWakeJobOutcome::Replay(_)));
+        assert!(!matches!(replay, InsertWakeJobOutcome::Inserted));
+    }
 }

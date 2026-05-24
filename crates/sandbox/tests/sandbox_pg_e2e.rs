@@ -3656,7 +3656,7 @@ mod wake_jobs_crud {
     use super::*;
     use std::time::Duration as StdDuration;
     use zeroship_sandbox::db::{
-        Database, WakeErrorCode, WakeJobRow, WakeJobState,
+        Database, InsertWakeJobOutcome, WakeErrorCode, WakeJobRow, WakeJobState,
     };
 
     fn sample_row(wake_id: &str, sandbox_id: &str, lessee: &str) -> WakeJobRow {
@@ -4347,6 +4347,232 @@ mod wake_jobs_crud {
         assert!(
             res.is_err(),
             "INSERT with junk state must violate the CHECK constraint"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // GATE-C2 (R17-C2): partial UNIQUE INDEX on (sandbox_id) WHERE
+    // non-terminal closes the TOCTOU between
+    // `find_pending_wake_for_sandbox` and `insert_wake_job`. Three
+    // tests pin the contract:
+    //
+    //   1. happy path → Inserted; the row carries this caller's data.
+    //   2. concurrent insert from two callers for the SAME sandbox →
+    //      one Inserted + one Replay; the Replay carries the winner's
+    //      row.
+    //   3. UNIQUE INDEX scopes to non-terminal: after the winner
+    //      transitions to `failed`, a second INSERT for the same
+    //      sandbox MUST succeed (the index doesn't see the terminal
+    //      row).
+    // ────────────────────────────────────────────────────────────────
+
+    /// GATE-C2: a fresh INSERT (no prior row for the sandbox) returns
+    /// `InsertWakeJobOutcome::Inserted` and the row is visible via
+    /// `get_wake_job`.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_insert_returns_inserted_on_fresh_sandbox() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let row = sample_row("wak_c2_fresh", "sbx_c2_fresh", "hst_c2_owner");
+        let outcome = db.insert_wake_job(&row).await.expect("insert");
+        assert!(
+            matches!(outcome, InsertWakeJobOutcome::Inserted),
+            "fresh INSERT must report Inserted; got {outcome:?}"
+        );
+        // Row is observable.
+        let loaded = db.get_wake_job("wak_c2_fresh").await.unwrap().unwrap();
+        assert_eq!(loaded.wake_id, "wak_c2_fresh");
+        assert_eq!(loaded.sandbox_id, "sbx_c2_fresh");
+        assert_eq!(loaded.state, WakeJobState::Pending);
+    }
+
+    /// GATE-C2 PRIMARY TEST: two concurrent INSERTs for the same
+    /// `sandbox_id` collide on the partial UNIQUE INDEX. One returns
+    /// `Inserted`; the other returns `Replay(winner)` carrying the
+    /// winner's `wake_id`. The two callers agree on which row is the
+    /// winner.
+    ///
+    /// This is the precise race shape R17-C2 was filed against. The
+    /// concurrency is simulated by issuing two `insert_wake_job` calls
+    /// back-to-back on the same Database handle — Postgres's
+    /// row-locking ensures the second INSERT sees the first's row and
+    /// the partial UNIQUE INDEX rejects the duplicate via
+    /// ON CONFLICT DO NOTHING.
+    ///
+    /// Stronger forms of this (two callers on separate compio runtimes
+    /// with a barrier in between) would prove the same property but
+    /// require multi-runtime test scaffolding. The post-INSERT state
+    /// (one row in pg, both outcomes agree on its wake_id) is the
+    /// load-bearing invariant.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_insert_collapses_concurrent_race_via_unique_index() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let sid = "sbx_c2_race";
+        let row_a = sample_row("wak_c2_winner", sid, "hst_c2_a");
+        let row_b = sample_row("wak_c2_loser", sid, "hst_c2_b");
+
+        let out_a = db.insert_wake_job(&row_a).await.expect("first insert");
+        let out_b = db.insert_wake_job(&row_b).await.expect("second insert");
+
+        // Caller A wins outright.
+        assert!(
+            matches!(out_a, InsertWakeJobOutcome::Inserted),
+            "first INSERT must be Inserted; got {out_a:?}"
+        );
+        // Caller B sees the conflict and gets the winner's row back.
+        let winner = match out_b {
+            InsertWakeJobOutcome::Replay(w) => w,
+            other => panic!(
+                "second INSERT must be Replay; got {other:?} \
+                 — UNIQUE INDEX may be absent or ON CONFLICT broken"
+            ),
+        };
+        assert_eq!(
+            winner.wake_id, "wak_c2_winner",
+            "Replay must carry the winner's wake_id, not the loser's"
+        );
+        assert_eq!(winner.sandbox_id, sid);
+        assert_eq!(winner.state, WakeJobState::Pending);
+        // Loser's wake_id MUST NOT appear in pg — the row was never
+        // inserted. This is the "no duplicate WakeMachine" guarantee
+        // the handler depends on.
+        let absent = db.get_wake_job("wak_c2_loser").await.unwrap();
+        assert!(
+            absent.is_none(),
+            "loser's wake_id MUST NOT land in pg; got {absent:?}"
+        );
+    }
+
+    /// GATE-C2: the partial UNIQUE INDEX scopes to non-terminal states.
+    /// After the winner transitions to `failed`, a second INSERT for
+    /// the SAME sandbox must succeed (terminal rows are outside the
+    /// index's predicate). Same after `ok`.
+    ///
+    /// This is what lets a client retry a failed wake against the
+    /// same sandbox without the UNIQUE INDEX permanently blocking the
+    /// sandbox from being woken again.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_unique_index_releases_after_terminal_transition() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url, true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let sid = "sbx_c2_terminal";
+
+        // Insert + fail the first wake.
+        let first = sample_row("wak_c2_first", sid, "hst_c2_owner");
+        let out_first = db.insert_wake_job(&first).await.expect("first insert");
+        assert!(matches!(out_first, InsertWakeJobOutcome::Inserted));
+        db.update_wake_job_state(
+            "wak_c2_first",
+            WakeJobState::Failed,
+            Some(WakeErrorCode::Internal),
+            Some("synth"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // A second INSERT for the same sandbox now MUST succeed — the
+        // terminal row dropped out of the partial UNIQUE INDEX.
+        let second = sample_row("wak_c2_second", sid, "hst_c2_owner");
+        let out_second = db
+            .insert_wake_job(&second)
+            .await
+            .expect("second insert after terminal");
+        assert!(
+            matches!(out_second, InsertWakeJobOutcome::Inserted),
+            "INSERT after terminal must be Inserted; got {out_second:?} \
+             — UNIQUE INDEX predicate may be wrong"
+        );
+
+        // The pending row for this sandbox is now the second one.
+        let found = db
+            .find_pending_wake_for_sandbox(sid)
+            .await
+            .unwrap()
+            .expect("second row must be findable");
+        assert_eq!(found.wake_id, "wak_c2_second");
+
+        // Same again after `ok`: fail second, terminal, then a third
+        // succeeds.
+        db.update_wake_job_state(
+            "wak_c2_second",
+            WakeJobState::Ok,
+            None,
+            None,
+            Some("http://10.0.0.1:7000"),
+        )
+        .await
+        .unwrap();
+        let third = sample_row("wak_c2_third", sid, "hst_c2_owner");
+        let out_third = db
+            .insert_wake_job(&third)
+            .await
+            .expect("third insert after ok");
+        assert!(
+            matches!(out_third, InsertWakeJobOutcome::Inserted),
+            "INSERT after ok must be Inserted; got {out_third:?}"
+        );
+    }
+
+    /// GATE-C2 schema pin: the `wake_jobs_sandbox_pending_uniq`
+    /// partial UNIQUE INDEX must exist after migration 0011. Without
+    /// this index, the ON CONFLICT clause in `insert_wake_job` is a
+    /// no-op (Postgres needs a matching arbiter index to use the
+    /// conflict target). This test catches the case where 0011
+    /// silently fails to apply.
+    #[compio::test]
+    #[ignore = "needs Postgres"]
+    async fn wake_jobs_sandbox_pending_uniq_index_present() {
+        let url = test_url();
+        reset_schema(&url).await;
+        let db = Database::from_test_config(url.clone(), true, 30).await.unwrap();
+        db.run_pending_migrations().await.unwrap();
+
+        let mut cfg = compio_postgres::PoolConfig::default();
+        cfg.max_size = 2;
+        let pool = compio_postgres::Pool::connect_with_config(&url, cfg)
+            .await
+            .unwrap();
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE schemaname = 'sandbox' \
+                   AND tablename = 'wake_jobs' \
+                   AND indexname = 'wake_jobs_sandbox_pending_uniq'",
+                &[],
+            )
+            .await
+            .expect("wake_jobs_sandbox_pending_uniq must exist after migration 0011");
+        let indexdef: String = row.get("indexdef");
+        // Sanity: the index is UNIQUE and filtered to non-terminal.
+        // Postgres's `pg_indexes.indexdef` normalises `NOT IN (...)`
+        // to `<> ALL (ARRAY[...])`, so we match on the canonical form.
+        assert!(
+            indexdef.contains("UNIQUE"),
+            "index must be UNIQUE; got {indexdef}"
+        );
+        let lower = indexdef.to_lowercase();
+        assert!(
+            lower.contains("'ok'") && lower.contains("'failed'"),
+            "index predicate must reference both terminal states; got {indexdef}"
+        );
+        assert!(
+            lower.contains("<> all") || lower.contains("not in"),
+            "index predicate must be a negative match on terminal states; got {indexdef}"
         );
     }
 }

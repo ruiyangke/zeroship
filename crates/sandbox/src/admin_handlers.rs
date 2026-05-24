@@ -1548,10 +1548,19 @@ async fn wake_sandbox_async_inner(
         );
     };
 
-    // Idempotency: short-circuit duplicate in-flight wakes. The
-    // `find_pending_wake_for_sandbox` query has a partial index
+    // Idempotency fast-path: short-circuit duplicate in-flight wakes
+    // BEFORE the pre-flight + INSERT. The
+    // `find_pending_wake_for_sandbox` query rides the partial index
     // (`wake_jobs_state_idx WHERE state NOT IN ('ok', 'failed')`) so
-    // this is a cheap lookup even at fleet scale.
+    // this is a cheap lookup even at fleet scale. This precheck is
+    // **only** an optimisation — the GATE-C2 fix is at the INSERT
+    // site, where the migration-0011 UNIQUE INDEX
+    // `wake_jobs_sandbox_pending_uniq` enforces at-most-one
+    // non-terminal row per sandbox atomically. Two concurrent POSTs
+    // that both miss this precheck still race deterministically:
+    // one's INSERT lands, the other's `ON CONFLICT … DO NOTHING`
+    // returns 0 rows affected and the handler surfaces the winner's
+    // wake_id via [`InsertWakeJobOutcome::Replay`].
     let typed_sandbox_id = sandbox_id_typed.to_string();
     match db.find_pending_wake_for_sandbox(&typed_sandbox_id).await {
         Ok(Some(existing)) => {
@@ -1623,7 +1632,13 @@ async fn wake_sandbox_async_inner(
     }
 
     // Mint wake_id (typed-id with wak_ prefix per R16-API2) and
-    // INSERT the pending row.
+    // attempt the INSERT. The DB layer enforces GATE-C2 via the
+    // migration-0011 partial UNIQUE INDEX
+    // `wake_jobs_sandbox_pending_uniq` + ON CONFLICT DO NOTHING. The
+    // outcome tells us whether THIS caller's row landed (spawn the
+    // machine) or whether a concurrent POST won the race (return the
+    // winner's wake_id with `replay: true` — DO NOT spawn a second
+    // machine).
     let wake_id = zeroship_core::typed_id::new_wake_id();
     let lessee = db.host_id().to_string();
     let new_row = crate::db::WakeJobRow {
@@ -1639,13 +1654,35 @@ async fn wake_sandbox_async_inner(
         lessee: lessee.clone(),
         lessee_updated_at_secs: 0,
     };
-    if let Err(e) = db.insert_wake_job(&new_row).await {
-        return err_safe(
-            500,
-            "database_failed",
-            "wake job insert failed",
-            e,
-        );
+    let outcome = match db.insert_wake_job(&new_row).await {
+        Ok(o) => o,
+        Err(e) => {
+            return err_safe(
+                500,
+                "database_failed",
+                "wake job insert failed",
+                e,
+            );
+        }
+    };
+    // GATE-C2: race-loser branch. A concurrent POST won the
+    // partial-UNIQUE-INDEX conflict and its WakeMachine is already
+    // driving the wake. Return the winner's wake_id with
+    // `replay: true` and DO NOT spawn a duplicate machine — if we
+    // did, the loser machine's `rollback_with` would call
+    // `teardown_restore` and release the winner's vm_index
+    // (R10-C1-shape race; the fingerprint R17-C2 was filed against).
+    if let crate::db::InsertWakeJobOutcome::Replay(existing) = outcome {
+        return HttpResponse::Accepted().json(&serde_json::json!({
+            "wake_id": existing.wake_id,
+            "sandbox_id": typed_sandbox_id,
+            "poll_url": format!(
+                "/admin/sandboxes/{typed_sandbox_id}/wake/{wake_id}",
+                wake_id = existing.wake_id,
+            ),
+            "state": existing.state.as_str(),
+            "replay": true,
+        }));
     }
 
     // Spawn the state machine on a dedicated OS thread with a
