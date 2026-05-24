@@ -95,6 +95,18 @@ func newDriversTaskConfig(t *testing.T, driverCfg *ch.TaskConfig, taskDir string
 	// controller would emit under ChPlugin mode.
 	artifactDir := stageArtifactDir(t)
 
+	// C-7-LT-12a: on the restore branch the driver hardlinks (or
+	// copies on EXDEV) `RootfsSource` into runDir/rootfs.img. Auto-
+	// populate the field with the staged artifact dir's stub so
+	// existing restore-branch tests don't have to thread the value
+	// explicitly. Tests that exercise the missing/empty-source
+	// negative paths can pass a non-empty RootfsSource themselves
+	// (e.g. point at "/tmp/missing-on-purpose.img") which we leave
+	// alone here.
+	if driverCfg.RestoreFrom != "" && driverCfg.RootfsSource == "" {
+		driverCfg.RootfsSource = filepath.Join(artifactDir, ch.ChRootfsSourceName)
+	}
+
 	cfg := &drivers.TaskConfig{
 		ID:       "test-task-" + name,
 		Name:     name,

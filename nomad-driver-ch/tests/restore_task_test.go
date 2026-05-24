@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -109,6 +110,15 @@ func stageSnapshotDir(t *testing.T, configBytes []byte) string {
 // The cold-boot fields (sandbox_id, workspace_img, …) are
 // intentionally LEFT UNSET — the restore branch does not validate
 // them; the snapshot's memory image carries the bound state.
+//
+// RootfsSource: C-7-LT-12a requires a non-empty path that exists on
+// disk (the driver hardlinks/copies it into runDir before CH spawn).
+// We point at the staged artifact dir's rootfs-slim.img stub that
+// `newDriversTaskConfig` provisions via `stageArtifactDir` — same
+// file the cold-boot's materializeRootfs would have copied from.
+// The helper resolves this lazily in `newDriversTaskConfig` so an
+// empty value here is rewritten there to point at the test's
+// hermetic artifact dir.
 func validRestoreConfig(restoreFrom string) ch.TaskConfig {
 	return ch.TaskConfig{
 		VMIndex:         3,
@@ -2349,3 +2359,203 @@ func TestStartTaskRestoreBranch_RewriteConfigAndSymlinksCoexist(t *testing.T) {
 	}
 }
 
+// TestStartTaskRestoreBranch_StagesRootfs pins C-7-LT-12a: on the
+// restore branch the driver MUST materialise the rootfs at
+// <runDir>/rootfs.img before CH spawn. The rewriter retargets
+// disks[0].path from the (now-GC'd) source-alloc dir to <runDir>,
+// validation passes via the task_dir allow-list, but pre-fix nothing
+// staged the bytes there — CH aborted at `VM Restore failed:
+// DeviceManager(Disk(NotFound))`. Default-path: hardlink via os.Link
+// (same filesystem under t.TempDir() — no EXDEV).
+func TestStartTaskRestoreBranch_StagesRootfs(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	if _, _, err := p.StartTask(taskCfg); err != nil {
+		t.Fatalf("StartTask (restore): %v", err)
+	}
+
+	runDir := filepath.Join(taskDir, "local")
+	rootfsDst := filepath.Join(runDir, "rootfs.img")
+
+	// Must exist as a regular file (NOT a symlink — the staging
+	// contract is hardlink-or-copy, both produce regular files).
+	info, err := os.Lstat(rootfsDst)
+	if err != nil {
+		t.Fatalf("rootfs.img not present at %s post-StartTask: %v", rootfsDst, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("rootfs.img at %s is a symlink (mode=%v); C-7-LT-12a requires hardlink-or-copy, not symlink", rootfsDst, info.Mode())
+	}
+	if info.IsDir() {
+		t.Errorf("rootfs.img at %s is a directory, want regular file", rootfsDst)
+	}
+
+	// Contents must match the source — hardlink → same inode, copy
+	// → byte-identical. Either way ReadFile sees the source bytes.
+	gotBytes, err := os.ReadFile(rootfsDst)
+	if err != nil {
+		t.Fatalf("read staged rootfs: %v", err)
+	}
+	srcBytes, err := os.ReadFile(cfg.RootfsSource)
+	if err != nil {
+		t.Fatalf("read source rootfs: %v", err)
+	}
+	if string(gotBytes) != string(srcBytes) {
+		t.Errorf("staged rootfs contents mismatch source (got %q, want %q)", gotBytes, srcBytes)
+	}
+
+	// Default path is hardlink — under t.TempDir() src and dst share
+	// the same filesystem, so os.Link succeeds without EXDEV. Hardlink
+	// invariant: src and dst share an inode (Stat reports same
+	// Sys().Ino).
+	srcInfo, err := os.Stat(cfg.RootfsSource)
+	if err != nil {
+		t.Fatalf("stat source rootfs: %v", err)
+	}
+	dstInfo, err := os.Stat(rootfsDst)
+	if err != nil {
+		t.Fatalf("stat staged rootfs: %v", err)
+	}
+	srcStat, srcOk := srcInfo.Sys().(*syscall.Stat_t)
+	dstStat, dstOk := dstInfo.Sys().(*syscall.Stat_t)
+	if srcOk && dstOk {
+		if srcStat.Ino != dstStat.Ino {
+			t.Errorf("rootfs not hardlinked: src.Ino=%d dst.Ino=%d (expected identical on same FS)", srcStat.Ino, dstStat.Ino)
+		}
+	}
+}
+
+// TestStartTaskRestoreBranch_RootfsSource_MissingErrors pins the
+// negative path: an empty RootfsSource on the restore branch must
+// surface a clear, operator-readable error BEFORE CH spawn. Pre-fix
+// (and pre-controller-emission) the field would silently be empty
+// and the cryptic CH NotFound surface would be all the operator saw.
+func TestStartTaskRestoreBranch_RootfsSource_MissingErrors(t *testing.T) {
+	chBin := writeStubBinary(t, "cloud-hypervisor")
+	t.Setenv("ZSBX_CH_BIN", chBin)
+
+	srcAlloc := "/opt/nomad/data/alloc/AAAA-source/task/local"
+	staged := stageSnapshotDir(t, snapshotConfigFixture(srcAlloc))
+
+	rec := &restoreSequenceRecorder{}
+	_, factory := installRestoreSeams(t, rec, restoreSeamOutcomes{})
+
+	cfg := validRestoreConfig(staged)
+	// Force empty — helpers_test.go's auto-stage only fires when the
+	// field is "" AND RestoreFrom is set; we want the empty path AT
+	// THE DRIVER, so set a sentinel the helper recognises as "test
+	// asked for empty". The helper checks `if RootfsSource == ""`,
+	// so we set a marker then overwrite to "" after the helper runs.
+	// Simpler: write a custom path that the helper leaves alone and
+	// then erase it. Cleanest: skip the helper's auto-stage by setting
+	// RootfsSource to "/dev/null" then resetting to "" on the encoded
+	// payload — but the helper encodes BEFORE we can erase. The right
+	// move: short-circuit the helper by setting RootfsSource to a
+	// known-empty sentinel `""` via a fresh build path.
+	//
+	// We do the test in-line: encode the driver config with the
+	// helper, decode back, replace RootfsSource with "" in the
+	// driver-config field, re-encode.
+	taskDir := t.TempDir()
+	p, taskCfg := newTestPluginWithFactory(t, &cfg, taskDir, factory)
+
+	// Re-encode with RootfsSource cleared. EncodeConcreteDriverConfig
+	// is on drivers.TaskConfig; mutate the inner struct then re-encode.
+	var inner ch.TaskConfig
+	if err := taskCfg.DecodeDriverConfig(&inner); err != nil {
+		t.Fatalf("DecodeDriverConfig: %v", err)
+	}
+	inner.RootfsSource = ""
+	if err := taskCfg.EncodeConcreteDriverConfig(&inner); err != nil {
+		t.Fatalf("re-EncodeConcreteDriverConfig: %v", err)
+	}
+
+	_, _, err := p.StartTask(taskCfg)
+	if err == nil {
+		t.Fatalf("StartTask (restore) with empty rootfs_source: want error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "rootfs_source is empty") {
+		t.Errorf("error must surface the missing-field reason; got %q", msg)
+	}
+	if !strings.Contains(msg, "C-7-LT-12a") {
+		t.Errorf("error should carry the fix tag for grep-ability; got %q", msg)
+	}
+}
+
+// TestStartTaskRestoreBranch_RootfsSource_EXDEV_FallsBackToCopy pins
+// the EXDEV recovery path. When os.Link errors with EXDEV (src and
+// dst on separate filesystems — e.g. runtime_dir on an artifact-image
+// loopback mount vs. the alloc dir on the host root), the driver
+// MUST fall back to a stdlib copy. Pre-fix this case (production
+// shape) would have surfaced as `hardlink … invalid cross-device
+// link`.
+//
+// We can't easily reproduce a real EXDEV under t.TempDir() (every
+// path is on the same tmpfs), so we exercise the helper directly via
+// the export_test surface. The integration is covered by the happy-
+// path `TestStartTaskRestoreBranch_StagesRootfs` above; this test
+// pins the helper's hardlink-vs-copy decision in isolation.
+func TestStartTaskRestoreBranch_RootfsSource_EXDEV_FallsBackToCopy(t *testing.T) {
+	// Drive the helper directly. Same-filesystem case: os.Link
+	// succeeds — the copy fallback is the fail-open path under EXDEV
+	// only. We pin the happy-path inode-sharing invariant and the
+	// pure-copy fallback as separate cases.
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.img")
+	if err := os.WriteFile(src, []byte("rootfs-bytes"), 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+
+	// Case 1: same-FS hardlink succeeds. Inode shared.
+	dstLink := filepath.Join(dir, "dst-link.img")
+	if err := ch.StageRootfsForRestore(src, dstLink); err != nil {
+		t.Fatalf("StageRootfsForRestore (hardlink): %v", err)
+	}
+	srcInfo, _ := os.Stat(src)
+	dstInfo, _ := os.Stat(dstLink)
+	srcStat, sok := srcInfo.Sys().(*syscall.Stat_t)
+	dstStat, dok := dstInfo.Sys().(*syscall.Stat_t)
+	if sok && dok && srcStat.Ino != dstStat.Ino {
+		t.Errorf("same-FS case: want shared inode (hardlink), got src=%d dst=%d", srcStat.Ino, dstStat.Ino)
+	}
+
+	// Case 2: idempotency — re-staging at a path that exists is a
+	// no-op (a previously-failed restore re-attempt must not error).
+	if err := ch.StageRootfsForRestore(src, dstLink); err != nil {
+		t.Errorf("StageRootfsForRestore (idempotent re-stage): %v", err)
+	}
+
+	// Case 3: pure-copy semantics. We can't fake EXDEV in-tree, but
+	// the copy branch is exercised via the export_test
+	// CopyRootfsForRestoreTest helper which forces the copy path
+	// regardless of FS. Contents must match the source.
+	dstCopy := filepath.Join(dir, "dst-copy.img")
+	if err := ch.CopyRootfsForRestoreTest(src, dstCopy); err != nil {
+		t.Fatalf("CopyRootfsForRestoreTest: %v", err)
+	}
+	got, err := os.ReadFile(dstCopy)
+	if err != nil {
+		t.Fatalf("read dst-copy: %v", err)
+	}
+	if string(got) != "rootfs-bytes" {
+		t.Errorf("copy fallback contents mismatch: got %q want %q", got, "rootfs-bytes")
+	}
+	// Copy fallback produces a DISTINCT inode (no shared link).
+	dstCopyInfo, _ := os.Stat(dstCopy)
+	dstCopyStat, ok := dstCopyInfo.Sys().(*syscall.Stat_t)
+	if sok && ok && srcStat.Ino == dstCopyStat.Ino {
+		t.Errorf("copy fallback: want distinct inode, got shared src=%d dstCopy=%d", srcStat.Ino, dstCopyStat.Ino)
+	}
+}

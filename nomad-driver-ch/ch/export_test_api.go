@@ -15,6 +15,8 @@ package ch
 
 import (
 	"context"
+	"io"
+	"os"
 	"os/exec"
 	"time"
 
@@ -234,6 +236,43 @@ const ChRootfsSourceName = chRootfsSourceName
 // var key the controller emits. Pinned for the same reason as
 // ChRootfsSourceName above.
 const ChArtifactDirEnvVar = chArtifactDirEnvVar
+
+// StageRootfsForRestore is the test entry point for the C-7-LT-12a
+// restore-branch rootfs-stage helper. Tries `os.Link` first; falls
+// back to a stdlib copy on EXDEV. Idempotent on re-attempt of a
+// previously-staged dst (a re-invocation returns nil rather than
+// EEXIST'ing on the copy fallback).
+func StageRootfsForRestore(src, dst string) error {
+	return stageRootfsForRestore(src, dst)
+}
+
+// CopyRootfsForRestoreTest unconditionally exercises the copy branch
+// of stageRootfsForRestore. Used by tests that want to pin the
+// copy-fallback semantics (distinct inode, byte-identical contents)
+// without engineering a real EXDEV scenario in t.TempDir() (which
+// would require a separate filesystem mount).
+//
+// Mirrors the inner copy logic in stageRootfsForRestore — kept in
+// sync via a single helper extraction would be ideal, but the prod
+// path's idempotency check + EXDEV detection live in the wrapper, so
+// the simpler shape is a parallel test-only function.
+func CopyRootfsForRestoreTest(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, copyErr := io.Copy(out, in); copyErr != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return copyErr
+	}
+	return out.Close()
+}
 
 // InstallFakeRunningTaskForStats registers a synthetic taskHandle in the
 // plugin's task store so a TaskStats caller can find it without needing

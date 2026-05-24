@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -248,6 +249,81 @@ func SetResumeForTest(fn func(c *Client, socketPath string) error) func(*Client,
 	return prev
 }
 
+// stageRootfsForRestore materialises the source rootfs at the
+// destination path. Tries `os.Link` first (hardlink, O(1) regardless
+// of image size); falls back to a stdlib copy when the link errors
+// with EXDEV (cross-device — runtime_dir and the alloc dir live on
+// separate filesystems).
+//
+// Idempotent: if the destination already exists, returns nil — a
+// re-attempt of a previously-failed restore should not error here.
+// (The rewriter validates the destination's path; the file's mere
+// presence is the invariant CH cares about.)
+//
+// Permissions on the copy fallback: 0o600 (rw owner only), matching
+// materializeRootfs on the cold-boot path. The hardlink path
+// inherits the source's mode by definition.
+func stageRootfsForRestore(src, dst string) error {
+	if src == "" {
+		return errors.New("stageRootfsForRestore: empty src")
+	}
+	if dst == "" {
+		return errors.New("stageRootfsForRestore: empty dst")
+	}
+	// Idempotency: a prior attempt may have already staged the
+	// rootfs. Re-staging would either be a no-op (hardlink to the
+	// same inode) or fail with EEXIST on the copy fallback — neither
+	// reflects a real error.
+	if _, err := os.Stat(dst); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat dst %s: %w", dst, err)
+	}
+	// Hardlink first. EXDEV is the only error class we recover
+	// from — everything else (EACCES, EPERM, ENOENT on src) reflects
+	// a genuine config issue we want surfaced.
+	linkErr := os.Link(src, dst)
+	if linkErr == nil {
+		return nil
+	}
+	if !isCrossDeviceLinkErr(linkErr) {
+		return fmt.Errorf("hardlink %s -> %s: %w", src, dst, linkErr)
+	}
+	// EXDEV fallback: stdlib copy. Matches materializeRootfs on the
+	// cold-boot path (same O_EXCL atomicity, same partial-cleanup
+	// shape).
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open src %s: %w", src, err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create dst %s: %w", dst, err)
+	}
+	if _, copyErr := io.Copy(out, in); copyErr != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("copy %s -> %s (EXDEV fallback): %w", src, dst, copyErr)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("close dst %s: %w", dst, err)
+	}
+	return nil
+}
+
+// isCrossDeviceLinkErr returns true when err is a *os.LinkError
+// wrapping EXDEV (cross-device link). Used by stageRootfsForRestore
+// to decide between hardlink + copy-fallback.
+func isCrossDeviceLinkErr(err error) bool {
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		return false
+	}
+	return errors.Is(linkErr.Err, syscall.EXDEV)
+}
+
 // startTaskRestoreBranch is the wake-from-snapshot StartTask flow.
 // Invoked from StartTask when cfg.RestoreFrom != "" (see start_task.go).
 // Mirrors the bash wrapper's restore branch line-for-line; see
@@ -402,6 +478,42 @@ func (p *Plugin) startTaskRestoreBranch(cfg *drivers.TaskConfig, driverConfig *T
 		if err := os.Symlink(src, dst); err != nil && !errors.Is(err, fs.ErrExist) {
 			return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: symlink %s -> %s: %w", src, dst, err)
 		}
+	}
+
+	// C-7-LT-12a (smoke-r22): stage rootfs.img into runDir so the
+	// rewriter's retarget of disks[0].path → <runDir>/rootfs.img
+	// resolves to a real file. Pre-fix the rewriter retargeted the
+	// path and validation passed (task_dir allow-list, C-7-LT-6),
+	// but nothing materialised the bytes at the new destination —
+	// CH then aborted at `VM Restore failed: DeviceManager(Disk(
+	// NotFound))` (smoke-r22 verbatim stderr).
+	//
+	// Why rootfs needs explicit staging but workspace.img / home.img
+	// don't: the latter two live at stable persistent paths
+	// (`/var/zeroship/ch/<sbx>/workspace.img`,
+	// `/var/zeroship/ch/users/<usr>/home.img`) outside the alloc
+	// dir, so they survive the source-alloc GC. rootfs.img is
+	// alloc-scoped on the source side (the cold-boot's
+	// materializeRootfs copied it INTO the alloc task_dir) and gets
+	// GC'd alongside the source alloc — its bytes have nowhere to
+	// live across the snapshot/restore boundary unless the driver
+	// re-stages them from the source artifact.
+	//
+	// Source: the controller emits `rootfs_source = runtime_dir/
+	// rootfs-slim.img` in the ChPlugin restore-path Config — the
+	// same path the cold-boot's materializeRootfs copies from. The
+	// driver hardlinks first (O_1 regardless of image size) and
+	// falls back to a stdlib copy on EXDEV (cross-device — runtime
+	// dir on a separate filesystem from the alloc dir).
+	if driverConfig.RootfsSource == "" {
+		return nil, nil, errors.New("ch: startTaskRestoreBranch: rootfs_source is empty; controller must emit ChPlugin Config.rootfs_source on the restore branch (C-7-LT-12a)")
+	}
+	if _, err := os.Stat(driverConfig.RootfsSource); err != nil {
+		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: rootfs_source %s not readable: %w", driverConfig.RootfsSource, err)
+	}
+	rootfsDst := filepath.Join(runDir, chRootfsName)
+	if err := stageRootfsForRestore(driverConfig.RootfsSource, rootfsDst); err != nil {
+		return nil, nil, fmt.Errorf("ch: startTaskRestoreBranch: stage rootfs %s -> %s: %w", driverConfig.RootfsSource, rootfsDst, err)
 	}
 
 	// C-7-LT-9 (smoke-r19): pre-create each runtime file the rewriter
