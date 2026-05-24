@@ -734,12 +734,15 @@ pub(crate) fn sanitize_error_message(msg: &str) -> String {
     s[..end].to_string()
 }
 
-/// Scan for the start of an RFC1918 IPv4 literal. Returns the byte
-/// length of the match (including optional `:port`) at the given
+/// Scan for the start of a private/reserved IPv4 literal. Returns the
+/// byte length of the match (including optional `:port`) at the given
 /// offset, or 0 if no match starts there. Match shapes:
-/// - `10.\d{1,3}.\d{1,3}.\d{1,3}`
-/// - `172.(1[6-9]|2\d|3[01]).\d{1,3}.\d{1,3}`
-/// - `192.168.\d{1,3}.\d{1,3}`
+/// - `10.\d{1,3}.\d{1,3}.\d{1,3}`            (RFC 1918 10/8)
+/// - `172.(1[6-9]|2\d|3[01]).\d{1,3}.\d{1,3}` (RFC 1918 172.16/12)
+/// - `192.168.\d{1,3}.\d{1,3}`               (RFC 1918 192.168/16)
+/// - `169.254.\d{1,3}.\d{1,3}`               (RFC 3927 link-local / IMDS)
+/// - `100.(6[4-9]|[7-9]\d|1[01]\d|12[0-7]).\d{1,3}.\d{1,3}`
+///   (RFC 6598 CGNAT 100.64/10)
 /// followed by optional `:\d{1,5}`. The function deliberately
 /// over-accepts (e.g. `10.999.0.0` would match) — the goal is
 /// redaction, not validation. A non-RFC1918 IP that happens to share
@@ -755,6 +758,27 @@ fn match_rfc1918_at(s: &[u8], i: usize) -> usize {
         (3, 3)
     } else if s[i..].starts_with(b"192.168.") {
         (8, 2)
+    } else if s[i..].starts_with(b"169.254.") {
+        // RFC 3927 IPv4 link-local — includes 169.254.169.254 IMDS.
+        (8, 2)
+    } else if s[i..].starts_with(b"100.") {
+        // RFC 6598 CGNAT: second octet must be 64-127.
+        let mut j = i + 4;
+        let start = j;
+        while j < n && s[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j - start == 0 || j - start > 3 || j >= n || s[j] != b'.' {
+            return 0;
+        }
+        let octet: u32 = std::str::from_utf8(&s[start..j])
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+        if !(64..=127).contains(&octet) {
+            return 0;
+        }
+        (j + 1 - i, 2) // through the `.`, then 2 octets remain
     } else if s[i..].starts_with(b"172.") {
         // Second octet must be 16-31. Parse it.
         let mut j = i + 4;
@@ -1104,5 +1128,53 @@ mod tests {
             s,
             "primary [redacted] / fallback [redacted] / link [redacted]"
         );
+    }
+
+    // ─── R17-S1: 169.254/16 (link-local / IMDS) + 100.64/10 (CGNAT) ──
+
+    /// 169.254.169.254 is the AWS/GCP/Azure IMDS address — must be
+    /// redacted if it leaks into an error message.
+    #[test]
+    fn sanitize_strips_169_254_link_local_imds() {
+        let s = sanitize_error_message(
+            "IMDS probe failed: GET http://169.254.169.254/latest/meta-data timed out",
+        );
+        assert_eq!(s, "IMDS probe failed: GET [redacted] timed out");
+    }
+
+    /// Bare 169.254.x.y without a URL scheme (e.g. appears in a
+    /// ureq error body like "connect to 169.254.0.1:80").
+    #[test]
+    fn sanitize_strips_169_254_bare_with_port() {
+        let s = sanitize_error_message("connect to 169.254.0.1:80 refused");
+        assert_eq!(s, "connect to [redacted] refused");
+    }
+
+    /// 100.64.0.0/10 CGNAT range — lower edge.
+    #[test]
+    fn sanitize_strips_cgnat_100_64_lower_edge() {
+        let s = sanitize_error_message("peer 100.64.0.1:443 reset connection");
+        assert_eq!(s, "peer [redacted] reset connection");
+    }
+
+    /// 100.127.255.254 — upper edge of CGNAT range (second octet 127).
+    #[test]
+    fn sanitize_strips_cgnat_100_127_upper_edge() {
+        let s = sanitize_error_message("route via 100.127.255.254 unreachable");
+        assert_eq!(s, "route via [redacted] unreachable");
+    }
+
+    /// 100.63.x.y is below the CGNAT range — must NOT be redacted.
+    #[test]
+    fn sanitize_preserves_100_63_below_cgnat() {
+        let s = sanitize_error_message("host 100.63.0.1 is public");
+        assert_eq!(s, "host 100.63.0.1 is public");
+    }
+
+    /// 100.128.x.y is above the CGNAT range — must NOT be redacted.
+    #[test]
+    fn sanitize_preserves_100_128_above_cgnat() {
+        let s = sanitize_error_message("host 100.128.0.1 is public");
+        assert_eq!(s, "host 100.128.0.1 is public");
     }
 }
