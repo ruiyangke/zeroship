@@ -182,122 +182,19 @@ impl Default for VmIndexRetryPolicy {
 }
 
 impl VmIndexRetryPolicy {
-    /// **R14-A6 fix (architecture-r14)**: derive the wake-retry budget
-    /// from the operator-tuned `cfg.host_fence_timeout_secs` rather
-    /// than from a second hard-coded constant. The source vm_index
-    /// is released only after the host-fence clears + the Nomad job
-    /// purges, so the wake budget must envelope the fence timeout
-    /// (plus the ~30 s Nomad purge tail). Tying the two prevents
-    /// silent drift if a future stress run bumps `host_fence_timeout_secs`
-    /// (the way `cad098e6` already did 30 → 120) and forgets to
-    /// re-tune the wake budget separately.
+    /// Derive the vm-index wake-retry budget from `host_fence_timeout_secs`
+    /// so a future fence-config bump scales the budget automatically (R14-A6).
     ///
-    /// Formula: `max_attempts = (teardown_estimate.saturating_sub(CLIENT_HEADROOM_SECS)) / INTERVAL_SECS + 1`
-    /// where `teardown_estimate = 2 * host_fence_timeout_secs` (see
-    /// C-8b note below). The `+ 1` accounts for the first (zero-sleep)
-    /// attempt, so the wall-time `(max_attempts - 1) * INTERVAL_SECS`
-    /// lands exactly at `(teardown_estimate - HEADROOM)` seconds.
+    /// In `Sync` mode: `budget = MIN(2×fence − 10, 50)` s — the tighter of
+    /// the fence-derived and ntex-client-deadline ceilings (C-8a/C-8b).
+    /// In `Async` mode: `budget = 2×fence + 10` s — the deadline cap is
+    /// dropped because the loop runs on `detach_isolated` with no client
+    /// cancellation (C-7-LT-1).
     ///
-    /// Constants:
-    /// - `CLIENT_HEADROOM_SECS = 10` — leaves ≥10 s headroom under
-    ///   the 60 s ntex client deadline.
-    /// - `CLIENT_DEADLINE_SECS = 60` — the ntex/stress-client wall
-    ///   deadline we cannot exceed. Caps the budget regardless of how
-    ///   conservative `host_fence_timeout_secs` is set.
-    /// - `INTERVAL_SECS = 2` — matches the C-7 cadence; the slot
-    ///   frees on a ~deterministic ~90 s timeline so exponential
-    ///   backoff would mostly miss the release window.
-    /// - `MIN_ATTEMPTS = 1` — `host_fence_timeout_secs == 0`
-    ///   (operators who explicitly disabled the fence — NOT
-    ///   recommended) still gets one decisive reserve attempt.
-    ///
-    /// **C-8a fix (T-8b-smoke-r9 cluster review)**: the prior
-    /// derivation took only the fence into account, so a production
-    /// `host_fence_timeout_secs=120` produced a 110 s budget — 50 s
-    /// past the 60 s ntex client deadline, re-introducing the
-    /// C-7-class silent cancellation. We now compute TWO ceilings
-    /// and take the MIN:
-    ///   - fence-derived: `teardown_estimate - HEADROOM` — the IDEAL
-    ///     ceiling (envelopes the worst observed source teardown so
-    ///     a wake racing a fence-clear has a non-trivial chance of
-    ///     catching the release).
-    ///   - deadline-derived: `CLIENT_DEADLINE - HEADROOM = 50 s` —
-    ///     the HARD ceiling (anything past this is silently dropped
-    ///     by ntex when the client disconnects).
-    /// The hard ceiling wins when the operator runs a conservative
-    /// fence; the ideal ceiling wins for tight per-cluster overrides
-    /// (e.g. cluster-smoke at 30 s).
-    ///
-    /// **C-8b fix (T-8b-smoke-r10 cluster review)**: the fence-derived
-    /// ceiling originally used `host_fence_timeout_secs` directly,
-    /// implicitly assuming `teardown_wall_time ≈ fence_timeout`. Smoke-r10
-    /// empirically measured the *full* `stop()` pipeline at
-    /// **60.164 s for `host_fence=30 s`** — exactly 2× the fence.
-    ///
-    /// **NON-NORMATIVE teardown model (see smoke-r13 retrospective for
-    /// empirical ground truth)**: the 2× ratio at fence=30 s turned out
-    /// to be a numeric coincidence, not a compositional model. The actual
-    /// teardown semantics have two distinct paths:
-    ///   - **Agent-dies path**: agent socket closes → `wait_for_agent_silent`
-    ///     fires on 2 consecutive connect-misses (fast) → `fence_passed=true`
-    ///     → slot released promptly.
-    ///   - **Agent-hangs path**: `wait_for_agent_silent` probes time out
-    ///     for the full `host_fence_timeout` (hard-coded 30 s at
-    ///     `nomad_ch.rs`) → `fence_passed=true` → slot released; any
-    ///     residual hang past that leaks the slot (now tracked via
-    ///     `sandbox_vm_index_leaks_total`).
-    /// The Nomad purge tail is NOT a significant second contributor at
-    /// production fence values; the 2× factor was a coincidence. We
-    /// retain `teardown_estimate = 2 * host_fence_timeout_secs` as a
-    /// conservative safety margin, not as a model. The MIN-of-two
-    /// design from C-8a still structurally prevents the C-7 silent
-    /// cancellation regardless of how this estimate is tuned.
-    ///
-    /// Examples (post-C-8b):
-    /// - `host_fence_timeout_secs = 30` → teardown_est=60 s,
-    ///   fence-ceil=50 s, deadline-ceil=50 s, MIN=50 s → 26 attempts ×
-    ///   2 s = 50 s budget. (Was 11 attempts / 20 s pre-C-8b — that
-    ///   exhausted ~40 s before the actual vm_index release.)
-    /// - `host_fence_timeout_secs = 60` → teardown_est=120 s,
-    ///   fence-ceil=110 s, deadline-ceil=50 s, MIN=50 s → 26 attempts ×
-    ///   2 s = 50 s budget (unchanged).
-    /// - `host_fence_timeout_secs = 120` → teardown_est=240 s,
-    ///   fence-ceil=230 s, deadline-ceil=50 s, MIN=50 s → 26 attempts ×
-    ///   2 s = 50 s budget (unchanged — deadline-ceil still binds).
-    /// - `host_fence_timeout_secs = 20` → teardown_est=40 s,
-    ///   fence-ceil=30 s, deadline-ceil=50 s, MIN=30 s → 16 attempts ×
-    ///   2 s = 30 s budget. (Was 6/10 s pre-C-8b.)
-    ///
-    /// **Long-term:** C-8b is defense-in-depth; the structural fix
-    /// is C-7-LT (async wake response + polling, R15-A1).
-    ///
-    /// **C-7-LT-1 (T-8b-smoke-r12 cluster review)**: in `WakeResponseMode::Sync`
-    /// the budget is bound by both the fence-derived ceiling AND the
-    /// ntex client deadline — the tighter wins. In `WakeResponseMode::Async`
-    /// the wake state machine runs on a `detach_isolated` thread with
-    /// no client-side cancellation, so the deadline ceiling no longer
-    /// applies. The budget becomes `2 × host_fence + HEADROOM` — a
-    /// safety margin past the empirical 2× source-teardown wall-time
-    /// (smoke-r10/r11/r12 measured 60.166 s at fence=30 s; the +10 s
-    /// margin envelopes the long tail without bumping into a client
-    /// deadline that no longer exists).
-    ///
-    /// Examples by mode (post-C-7-LT-1):
-    /// (wall-time = (attempts − 1) × interval; first attempt has no
-    /// preceding sleep)
-    /// - fence=30, Sync   → MIN(2*30-10, 60-10) = MIN(50, 50) = 50 s
-    ///   → 26 attempts (25 sleeps × 2 s) = 50 s budget (unchanged).
-    /// - fence=30, Async  → 2*30 + 10 = 70 s
-    ///   → 36 attempts (35 sleeps × 2 s) = 70 s budget (envelopes
-    ///     smoke-r12's 60.166 s teardown with ~10 s slack).
-    /// - fence=20, Sync   → MIN(2*20-10, 50) = MIN(30, 50) = 30 s
-    ///   → 16 attempts (15 sleeps × 2 s) = 30 s.
-    /// - fence=20, Async  → 2*20 + 10 = 50 s
-    ///   → 26 attempts (25 sleeps × 2 s) = 50 s.
-    /// - fence=120, Sync  → MIN(230, 50) = 50 s
-    ///   → 26 attempts (25 sleeps × 2 s) = 50 s.
-    /// - fence=120, Async → 2*120 + 10 = 250 s
-    ///   → 126 attempts (125 sleeps × 2 s) = 250 s.
+    /// See `docs/decisions/2026-05-25-vm-index-retry-policy.md` for the full
+    /// C-8/C-8a/C-8b/C-7-LT-1 tuning history and the smoke-r13 retrospective
+    /// explaining why the 2× factor is a conservative safety margin, not a
+    /// compositional model.
     pub fn from_host_fence_timeout(
         host_fence_timeout_secs: u64,
         wake_mode: crate::config::WakeResponseMode,
