@@ -3206,12 +3206,27 @@ async fn wait_for_agent_silent(
     base_url: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
+    // R16-A2 / R16-I2 phase instrumentation. Log target lets
+    // smoke-r12 (and future cluster runs) `RUST_LOG` just this
+    // module: `sandbox::teardown::fence=debug`. Threshold (2) is
+    // the structural invariant the smoke-r10 LEAK case violates;
+    // it's logged on entry so a future tuning is immediately
+    // visible in the trace.
+    const MISS_THRESHOLD: u32 = 2;
+    let fn_started = Instant::now();
+    let deadline = fn_started + timeout;
     let livez_url = format!("{base_url}/livez");
     let mut consecutive_misses = 0u32;
     // Keep enough state to produce a useful timeout error.
     let mut last_status: Option<u16> = None;
     let mut probe_count: u32 = 0;
+    tracing::debug!(
+        target: "sandbox::teardown::fence",
+        base_url = %base_url,
+        timeout_ms = %timeout.as_millis(),
+        miss_threshold = MISS_THRESHOLD,
+        "host_fence: entered"
+    );
     loop {
         if Instant::now() >= deadline {
             break;
@@ -3220,6 +3235,13 @@ async fn wait_for_agent_silent(
         // Same compio::spawn_blocking + ureq pattern the rest of the
         // file uses (see `wait_for_agent_livez`); blocking the runtime
         // worker on a TCP probe would tank concurrent stop()s.
+        tracing::debug!(
+            target: "sandbox::teardown::fence",
+            base_url = %base_url,
+            probe = probe_count + 1,
+            elapsed_ms = %fn_started.elapsed().as_millis(),
+            "host_fence: poll start"
+        );
         let outcome = compio::runtime::spawn_blocking(move || {
             ureq::get(&probe_url)
                 .timeout(Duration::from_millis(500))
@@ -3250,10 +3272,49 @@ async fn wait_for_agent_silent(
         };
         if is_miss {
             consecutive_misses += 1;
-            if consecutive_misses >= 2 {
+            tracing::debug!(
+                target: "sandbox::teardown::fence",
+                base_url = %base_url,
+                probe = probe_count,
+                consecutive_misses,
+                miss_threshold = MISS_THRESHOLD,
+                last_status = ?last_status,
+                "host_fence: miss"
+            );
+            if consecutive_misses >= MISS_THRESHOLD {
+                tracing::info!(
+                    target: "sandbox::teardown::fence",
+                    base_url = %base_url,
+                    probes = probe_count,
+                    consecutive_misses,
+                    elapsed_ms = %fn_started.elapsed().as_millis(),
+                    "host_fence: threshold reached — agent silent fence cleared"
+                );
                 return Ok(());
             }
         } else {
+            // R16-I2 diagnostic surface: a non-zero -> 0 transition
+            // here is the alternating-answer LEAK pathology.
+            // Logged at info so smoke-r12 catches it without a
+            // verbose subscriber.
+            if consecutive_misses > 0 {
+                tracing::info!(
+                    target: "sandbox::teardown::fence",
+                    base_url = %base_url,
+                    probe = probe_count,
+                    prev_consecutive_misses = consecutive_misses,
+                    last_status = ?last_status,
+                    "host_fence: agent reachable mid-fence — consecutive_misses counter reset (R16-I2 LEAK signal)"
+                );
+            } else {
+                tracing::debug!(
+                    target: "sandbox::teardown::fence",
+                    base_url = %base_url,
+                    probe = probe_count,
+                    last_status = ?last_status,
+                    "host_fence: agent reachable"
+                );
+            }
             consecutive_misses = 0;
         }
         // 100 ms cadence — tight enough that a 0.5 s tail is caught
@@ -3264,6 +3325,16 @@ async fn wait_for_agent_silent(
         // index as fast as is safe.)
         compio::time::sleep(Duration::from_millis(100)).await;
     }
+    tracing::warn!(
+        target: "sandbox::teardown::fence",
+        base_url = %base_url,
+        probes = probe_count,
+        consecutive_misses,
+        last_status = ?last_status,
+        elapsed_ms = %fn_started.elapsed().as_millis(),
+        fence_passed = false,
+        "host_fence: deadline reached — agent still answering (R16-I2 final consecutive_misses)"
+    );
     Err(format!(
         "agent at {base_url} still answering at fence deadline \
          (probes={probe_count}, last_http_status={:?}, consecutive_misses={consecutive_misses}); \
@@ -4753,6 +4824,147 @@ mod tests {
             elapsed < Duration::from_millis(800),
             "FM-F: fence took {elapsed:?} for two-in-a-row misses on a \
              refused port; expected well under 800ms — cadence regression?"
+        );
+    }
+
+    /// R16-A2 / R16-I2 LEAK-case pin. The alternating-answer
+    /// pathology (smoke-r10 log: "consecutive_misses=1 at the 30 s
+    /// deadline") is what the phase tracing in `wait_for_agent_silent`
+    /// needs to surface for smoke-r12. This test forces that exact
+    /// shape: a mock that listens half the time and refuses half the
+    /// time, so `consecutive_misses` cycles 0→1→0→1→… and never hits
+    /// the 2-threshold. The fence MUST time out, and the error text
+    /// MUST surface `consecutive_misses=1` so an operator (and the
+    /// log line) can distinguish LEAK from TIMEOUT.
+    #[compio::test]
+    async fn host_fence_leak_case_alternating_answers_times_out_with_misses_one()
+    {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        // Mini listener that alternates between accepting + 200ing
+        // (counter % 2 == 0) and outright closing the socket
+        // (counter % 2 == 1). Closing without writing a reply
+        // surfaces as a transport error → miss. The next probe gets
+        // a 200 → counter reset to 0. consecutive_misses thus pins
+        // at 1 across the entire budget.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop2 = stop.clone();
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut s, _)) => {
+                        use std::io::{Read, Write};
+                        let mut buf = [0u8; 1024];
+                        let _ = s.set_read_timeout(Some(
+                            Duration::from_millis(200),
+                        ));
+                        let _ = s.read(&mut buf);
+                        let n = counter.fetch_add(1, Ordering::Relaxed);
+                        if n % 2 == 0 {
+                            // Answer with a 200 → reachable.
+                            let _ = s.write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+                            );
+                        } else {
+                            // Drop the socket without a reply → ureq
+                            // surfaces this as a transport error → miss.
+                            drop(s);
+                        }
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}");
+        let res =
+            wait_for_agent_silent(&url, Duration::from_millis(800)).await;
+        stop.store(true, Ordering::Relaxed);
+        let err = res.expect_err("LEAK case must time out");
+        // The diagnostic invariant R16-I2 wants on the timeout line:
+        // final consecutive_misses pinned at 1 (= alternating, not
+        // 0 = persistent-answer TIMEOUT).
+        assert!(
+            err.contains("consecutive_misses=1"),
+            "R16-I2 LEAK signal lost: timeout error must report \
+             consecutive_misses=1 so smoke-r12 can distinguish LEAK \
+             (alternating-answer pathology) from TIMEOUT (persistent \
+             answer); got {err:?}"
+        );
+        assert!(
+            err.contains("still answering"),
+            "fence-timeout text invariant; got {err:?}"
+        );
+    }
+
+    /// R16-A2 / R16-I2 TIMEOUT-case pin. Persistent 200 means
+    /// `consecutive_misses` never increments past 0 — that's the
+    /// observable difference from the LEAK case above. The final
+    /// counter value MUST land in the error string so the
+    /// `host_fence: deadline reached` log + the propagated `errs`
+    /// vector both carry the disambiguator.
+    #[compio::test]
+    async fn host_fence_timeout_case_persistent_answer_reports_misses_zero() {
+        let body = r#"{"agent_version":"x","pubkey_fingerprint":"deadbeef00112233"}"#
+            .to_string();
+        let (port, stop) = spawn_mock_agent(body, 200);
+        let url = format!("http://127.0.0.1:{port}");
+        let res =
+            wait_for_agent_silent(&url, Duration::from_millis(500)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let err = res.expect_err("persistent-200 must time out");
+        // Persistent answer → counter resets every probe → final 0.
+        // This is the discriminator from the LEAK case (=1).
+        assert!(
+            err.contains("consecutive_misses=0"),
+            "TIMEOUT case must report consecutive_misses=0 in the \
+             error string (vs LEAK's =1); got {err:?}"
+        );
+    }
+
+    /// R16-A2 cadence + 2-in-a-row contract pin. Locks the two
+    /// load-bearing magic numbers in `wait_for_agent_silent` so a
+    /// future "tune the cadence" PR can't silently break the
+    /// smoke-r12 phase-log latency assumptions:
+    ///   • 100 ms sleep between polls (lower bound: 2 misses → ≥ 100 ms)
+    ///   • 2-consecutive-misses threshold (upper bound: ≤ 800 ms for
+    ///     a refused port).
+    /// If either constant changes, this test fires.
+    #[compio::test]
+    async fn host_fence_cadence_and_threshold_pin() {
+        let started = Instant::now();
+        let res = wait_for_agent_silent(
+            "http://127.0.0.1:1",
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(res.is_ok());
+        let elapsed = started.elapsed();
+        // Lower bound: 2 misses at 100 ms cadence → first miss is
+        // immediate, second is after >= 100 ms of sleep. If someone
+        // shrinks the cadence below 50 ms the OK case becomes too
+        // tight for the smoke phase-log heuristics; this fires.
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "R16-A2 cadence floor: 2-miss path returned in {elapsed:?}; \
+             expected >= 50ms (100ms cadence between miss #1 and miss #2). \
+             Did the inter-probe sleep change?"
+        );
+        // Upper bound: the existing 800ms cap, kept for redundancy
+        // with `host_fence_clears_quickly_after_two_consecutive_misses`
+        // so a regression flips both tests.
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "R16-A2 threshold pin: 2-in-a-row took {elapsed:?}; if the \
+             threshold moved from 2 the smoke-r12 phase-log latency \
+             window needs to follow."
         );
     }
 
