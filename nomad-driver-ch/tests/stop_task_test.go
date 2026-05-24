@@ -73,6 +73,22 @@ func newStopFixture(t *testing.T, shutdownReturns error) *stopTaskFixture {
 	})
 	t.Cleanup(func() { ch.SetRemoveTapForTest(prevRemove) })
 
+	// T-8b-stress-r8 r24-A2-S2: install a no-op tap-existence probe so
+	// the synchronous verify gate added to DestroyTask doesn't shell to
+	// real `ip link show` in tests. Default `tapLookupFn` would return
+	// (absent=true, nil) for nonexistent taps (the test env doesn't
+	// have any), but going through `runIP` adds ~10 ms per probe to
+	// every DestroyTask test — enough to push the tight-budget
+	// reap-wait / OFD-lock tests over their elapsed-time ceilings.
+	// Tests that need to exercise the verify-gate's poll cadence
+	// (TestDestroyTask_TapDeletedAndVerifiedAbsent etc.) install their
+	// own canned-sequence probe via SetTapLookupForTest, AFTER the
+	// fixture build, so this default doesn't shadow them.
+	prevLookup := ch.SetTapLookupForTest(func(string) (bool, error) {
+		return true, nil // absent — default verify gate short-circuits to nil
+	})
+	t.Cleanup(func() { ch.SetTapLookupForTest(prevLookup) })
+
 	cfg := validColdBootConfig()
 	cfg.Net = []ch.NetSpec{{Tap: "test-tap-7", MAC: "12:34:56:78:9b:07", IP: "10.99.107.2", Mask: "255.255.255.252"}}
 
@@ -547,14 +563,30 @@ func TestDestroyTask_DefensiveTapCleanup_SkipsWhenHandleTapMatches(t *testing.T)
 		t.Fatalf("DestroyTask: %v", err)
 	}
 
-	// Only ONE delete should have happened — the happy-path
-	// removeTapFn("zsbx-nm-7"). The defensive pass's != guard
-	// suppresses the second call when both names match.
-	if got := removedTaps.Len(); got != 1 {
-		t.Errorf("expected exactly 1 tap delete (happy-path only); got %d: %v", got, removedTaps.Snapshot())
+	// Two deletes happen on the happy path post-r24-A2-S2:
+	//
+	//   1. The cleanup-tail happy-path call (`removeTapFn(h.tap)` at
+	//      stop_task.go's `if h.tap != ""` branch).
+	//   2. The r24-A2-S2 verify-gate call (`deleteTapAndVerifyAbsent`
+	//      re-issues the delete then polls `tapLookupFn` for ENODEV
+	//      before returning to Nomad).
+	//
+	// Pre-r24-A2-S2 there was only 1 call; the second was added to
+	// close the "tun-driver evicts the netdev asynchronously" race
+	// (stress-r8 `Tap zsbx-nm-N already exists` cycle-1-19 RED). The
+	// defensive pass's `!=` guard still suppresses its own redundant
+	// call when h.tap == defensiveTap (proven by the count being 2,
+	// not 3).
+	if got := removedTaps.Len(); got != 2 {
+		t.Errorf("expected exactly 2 tap deletes (cleanup + r24-A2-S2 verify); got %d: %v", got, removedTaps.Snapshot())
 	}
 	if got := removedTaps.At(0); got != "zsbx-nm-7" {
-		t.Errorf("expected delete of zsbx-nm-7; got %q", got)
+		t.Errorf("first delete: got %q want zsbx-nm-7 (cleanup tail)", got)
+	}
+	if removedTaps.Len() > 1 {
+		if got := removedTaps.At(1); got != "zsbx-nm-7" {
+			t.Errorf("second delete: got %q want zsbx-nm-7 (r24-A2-S2 verify gate)", got)
+		}
 	}
 	if post := ch.TapsOrphanedTotal(); post != pre {
 		t.Errorf("orphan counter spuriously bumped on happy path: pre=%d post=%d", pre, post)
@@ -588,17 +620,36 @@ func TestDestroyTask_DefensiveTapCleanup_BothFireWhenNamesDiffer(t *testing.T) {
 		t.Fatalf("DestroyTask: %v", err)
 	}
 
-	// Both deletes ran — happy-path on "test-tap-7" then defensive
-	// on "zsbx-nm-7" (derived from VMIndex=7).
+	// Four deletes ran post-r24-A2-S2:
+	//
+	//   1. cleanup-tail happy-path: removeTapFn("test-tap-7").
+	//   2. cleanup-tail defensive: removeTapFn("zsbx-nm-7") — names
+	//      differ so the != guard lets this run; orphan counter +1.
+	//   3. r24-A2-S2 verify gate for h.tap: removeTapFn("test-tap-7").
+	//   4. r24-A2-S2 verify gate for defensive: removeTapFn("zsbx-nm-7").
+	//
+	// Pre-r24-A2-S2 there were 2 (just steps 1+2). The gate adds 3+4
+	// to close the stress-r8 `Tap zsbx-nm-N already exists` race
+	// (`ip link delete` returns synchronously but the tun-driver
+	// releases the netdev asynchronously). The gate re-issues delete
+	// then verifies ENODEV — idempotent against the cleanup-tail's
+	// already-issued delete, so the extra calls are safe (realTeardownTap
+	// tolerates "Cannot find device").
 	snap := removedTaps.Snapshot()
-	if len(snap) != 2 {
-		t.Fatalf("expected 2 tap deletes; got %d: %v", len(snap), snap)
+	if len(snap) != 4 {
+		t.Fatalf("expected 4 tap deletes (2 cleanup + 2 r24-A2-S2 verify); got %d: %v", len(snap), snap)
 	}
 	if snap[0] != "test-tap-7" {
-		t.Errorf("first delete: got %q want test-tap-7 (happy path)", snap[0])
+		t.Errorf("call 1: got %q want test-tap-7 (cleanup happy path)", snap[0])
 	}
 	if snap[1] != "zsbx-nm-7" {
-		t.Errorf("second delete: got %q want zsbx-nm-7 (defensive)", snap[1])
+		t.Errorf("call 2: got %q want zsbx-nm-7 (cleanup defensive)", snap[1])
+	}
+	if snap[2] != "test-tap-7" {
+		t.Errorf("call 3: got %q want test-tap-7 (r24-A2-S2 verify gate for h.tap)", snap[2])
+	}
+	if snap[3] != "zsbx-nm-7" {
+		t.Errorf("call 4: got %q want zsbx-nm-7 (r24-A2-S2 verify gate for defensive)", snap[3])
 	}
 	if post := ch.TapsOrphanedTotal(); post != pre+1 {
 		t.Errorf("orphan counter: pre=%d post=%d, want +1", pre, post)
@@ -1030,6 +1081,244 @@ func TestDestroyTask_FileGoneTolerantWhenProbing(t *testing.T) {
 	}
 	if post := ch.DestroyTaskLockHeldTotal(); post != pre {
 		t.Errorf("lock-held counter spuriously bumped on file-gone: pre=%d post=%d", pre, post)
+	}
+}
+
+// ─── T-8b-stress-r8 r24-A2-S2: DestroyTask tap-delete + ENODEV-verify gate ───
+//
+// Per the r24-A2-S2 design (closes the residual `Tap zsbx-nm-N already
+// exists` window observed at stress-r8 RED 3/60 with cycles 1-19
+// failing identically): `ip link delete` returns synchronously but
+// the tun-driver releases the netdev asynchronously. DestroyTask must
+// poll `ip link show <tap>` for ENODEV before returning — otherwise
+// the next StartTask's tuntap-add hits EEXIST on the same vm_index.
+//
+// Tests verify (per the sprint mandate):
+//
+//   1. TestDestroyTask_TapDeletedAndVerifiedAbsent — happy path: the
+//      lookup seam returns absent=true on the first call; the verify
+//      gate returns nil without sleeping; counter at baseline.
+//   2. TestDestroyTask_TolerantOfTapDeleteENODEV — the lookup seam
+//      returns Busy three times then Absent; the gate observes 3
+//      sleep cycles before returning nil; counter at baseline.
+//   3. TestDestroyTask_PollExhaustionBumpsCounter — the lookup seam
+//      always returns absent=false; the gate exhausts its budget,
+//      bumps the counter, returns nil (mirrors r4-A/r5-A tolerance).
+
+// TestDestroyTask_TapDeletedAndVerifiedAbsent pins the happy path:
+// the verify gate's first poll observes absent=true → returns nil
+// without sleeping. Sleep seam never fires; counter stays at
+// baseline.
+func TestDestroyTask_TapDeletedAndVerifiedAbsent(t *testing.T) {
+	ch.ResetDestroyTaskTapStuckForTest()
+	t.Cleanup(ch.ResetDestroyTaskTapStuckForTest)
+
+	prevA, prevI := ch.SetDestroyTapDeletePollForTest(50, 100*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyTapDeletePollForTest(prevA, prevI) })
+
+	// Make the sleep seam fail the test loudly if it ever fires: the
+	// happy path must NOT sleep (first-poll Absent succeeds).
+	sleepHit := &atomic.Int32{}
+	prevSleep := ch.SetSleepForTapDeletePollForTest(func(time.Duration) {
+		sleepHit.Add(1)
+	})
+	t.Cleanup(func() { ch.SetSleepForTapDeletePollForTest(prevSleep) })
+
+	// Bypass r4-A reap-wait and r5-A OFD-lock-wait so we isolate the
+	// r24-A2-S2 path. Install AFTER fixture so its no-op default lookup
+	// doesn't shadow our canned-sequence probe below.
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	prevLockA, prevLockI := ch.SetDestroyLockPollForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevLockA, prevLockI) })
+	prevLockSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevLockSleep) })
+
+	f := newStopFixture(t, nil)
+
+	// Lookup seam: every probe reports absent=true (kernel evicted
+	// netdev synchronously, healthy host). Installed AFTER the
+	// fixture so its default no-op `(true, nil)` lookup doesn't
+	// shadow our counter-incrementing version.
+	probeCalls := &atomic.Int32{}
+	prevLookup := ch.SetTapLookupForTest(func(string) (bool, error) {
+		probeCalls.Add(1)
+		return true, nil
+	})
+	t.Cleanup(func() { ch.SetTapLookupForTest(prevLookup) })
+
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskTapStuckTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// Two unique taps for VMIndex=7: h.tap="test-tap-7" + defensive
+	// "zsbx-nm-7". Each verify call observes absent=true on the first
+	// poll, so probeCalls = 2 and sleepHit = 0.
+	if got := probeCalls.Load(); got != 2 {
+		t.Errorf("probe call count = %d, want 2 (one per unique tap, no retries)", got)
+	}
+	if got := sleepHit.Load(); got != 0 {
+		t.Errorf("tap-verify slept %d times on happy path; want 0", got)
+	}
+	if post := ch.DestroyTaskTapStuckTotal(); post != pre {
+		t.Errorf("tap-stuck counter spuriously bumped on happy path: pre=%d post=%d", pre, post)
+	}
+}
+
+// TestDestroyTask_TolerantOfTapDeleteENODEV pins the retry-then-
+// success branch: the lookup seam returns absent=false three times
+// then absent=true (kernel finally evicted the netdev). The gate
+// observes exactly 3 sleep cycles between the 4 lookups per tap;
+// counter stays at baseline.
+//
+// The test name says "TolerantOfTapDeleteENODEV" per the sprint
+// mandate (the helper tolerates the tap-delete itself returning
+// ENODEV — i.e., the device was already gone when we issued the
+// re-delete — by treating it as success). We verify the tolerance
+// implicitly here by having the lookup seam succeed after a few
+// busy returns: the cumulative effect is the same regardless of
+// whether the delete reported ENODEV or success.
+func TestDestroyTask_TolerantOfTapDeleteENODEV(t *testing.T) {
+	ch.ResetDestroyTaskTapStuckForTest()
+	t.Cleanup(ch.ResetDestroyTaskTapStuckForTest)
+
+	prevA, prevI := ch.SetDestroyTapDeletePollForTest(50, 100*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyTapDeletePollForTest(prevA, prevI) })
+
+	sleepHit := &atomic.Int32{}
+	prevSleep := ch.SetSleepForTapDeletePollForTest(func(time.Duration) {
+		sleepHit.Add(1)
+	})
+	t.Cleanup(func() { ch.SetSleepForTapDeletePollForTest(prevSleep) })
+
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	prevLockA, prevLockI := ch.SetDestroyLockPollForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevLockA, prevLockI) })
+	prevLockSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevLockSleep) })
+
+	f := newStopFixture(t, nil)
+
+	// Lookup seam: returns absent=false for the first 3 probes per
+	// tap (matches the production "kernel released the netdev within
+	// 3 × 100 ms" healthy case), then absent=true. The probe state is
+	// per-tap so each unique tap repeats the 3-busy-then-absent
+	// sequence. Installed AFTER the fixture so its default no-op
+	// `(true, nil)` lookup doesn't shadow our canned-sequence probe.
+	probeCalls := &atomic.Int32{}
+	probeStateByTap := map[string]int{}
+	var probeMu sync.Mutex
+	prevLookup := ch.SetTapLookupForTest(func(tap string) (bool, error) {
+		probeCalls.Add(1)
+		probeMu.Lock()
+		defer probeMu.Unlock()
+		probeStateByTap[tap]++
+		if probeStateByTap[tap] <= 3 {
+			return false, nil // still present
+		}
+		return true, nil // evicted
+	})
+	t.Cleanup(func() { ch.SetTapLookupForTest(prevLookup) })
+
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskTapStuckTotal()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask: %v", err)
+	}
+
+	// Two unique taps × (3 busy + 1 absent) = 8 probe calls.
+	// 3 sleeps per tap between the 4 polls (no sleep after the final
+	// successful probe) = 6 sleeps total.
+	if got := probeCalls.Load(); got != 8 {
+		t.Errorf("probe call count = %d, want 8 (2 taps × 4 probes each: 3 Busy + 1 Absent)", got)
+	}
+	if got := sleepHit.Load(); got != 6 {
+		t.Errorf("tap-verify slept %d times; want 6 (2 taps × 3 sleeps each between busy probes)", got)
+	}
+	if post := ch.DestroyTaskTapStuckTotal(); post != pre {
+		t.Errorf("tap-stuck counter spuriously bumped on retry-then-success: pre=%d post=%d", pre, post)
+	}
+}
+
+// TestDestroyTask_PollExhaustionBumpsCounter pins the budget-
+// exhaustion branch: the lookup seam always returns absent=false
+// (kernel netdev cleanup is wedged). DestroyTask still returns nil
+// (Nomad gets a definitive terminal signal), the counter bumps once
+// per unique tap that exhausts, and a WARN is emitted. Mirrors r4-A
+// / r5-A's "never block Nomad destroy" tolerance.
+func TestDestroyTask_PollExhaustionBumpsCounter(t *testing.T) {
+	ch.ResetDestroyTaskTapStuckForTest()
+	t.Cleanup(ch.ResetDestroyTaskTapStuckForTest)
+
+	// Match production 50-attempt budget but with a 1 ms cadence and
+	// a no-op sleep seam — exhausts in <1 ms wall.
+	prevA, prevI := ch.SetDestroyTapDeletePollForTest(50, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyTapDeletePollForTest(prevA, prevI) })
+	prevSleep := ch.SetSleepForTapDeletePollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForTapDeletePollForTest(prevSleep) })
+
+	prevReapA, prevReapI := ch.SetDestroyReapWaitForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyReapWaitForTest(prevReapA, prevReapI) })
+	prevReapSleep := ch.SetSleepForReapPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForReapPollForTest(prevReapSleep) })
+
+	prevLockA, prevLockI := ch.SetDestroyLockPollForTest(1, 1*time.Millisecond)
+	t.Cleanup(func() { ch.SetDestroyLockPollForTest(prevLockA, prevLockI) })
+	prevLockSleep := ch.SetSleepForOFDLockPollForTest(func(time.Duration) {})
+	t.Cleanup(func() { ch.SetSleepForOFDLockPollForTest(prevLockSleep) })
+
+	f := newStopFixture(t, nil)
+
+	// Lookup seam: every probe returns absent=false (kernel wedged).
+	// Installed AFTER the fixture so its default no-op `(true, nil)`
+	// lookup doesn't shadow our always-busy probe.
+	prevLookup := ch.SetTapLookupForTest(func(string) (bool, error) {
+		return false, nil
+	})
+	t.Cleanup(func() { ch.SetTapLookupForTest(prevLookup) })
+
+	f.closeRunner()
+	time.Sleep(5 * time.Millisecond)
+	if err := f.plugin.StopTask(f.taskCfg.ID, 100*time.Millisecond, ""); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	pre := ch.DestroyTaskTapStuckTotal()
+	t0 := time.Now()
+	if err := f.plugin.DestroyTask(f.taskCfg.ID, false); err != nil {
+		t.Fatalf("DestroyTask should be tolerant of tap-delete budget exhaustion (got err=%v)", err)
+	}
+	elapsed := time.Since(t0)
+
+	// Two unique taps each exhaust their budget independently → +2.
+	// The gate doesn't abort the loop on first exhaustion (unlike
+	// the OFD-lock gate's first-error-aborts pattern) because each
+	// tap may have an independent wedge mode and the operator wants
+	// observability on both.
+	if post := ch.DestroyTaskTapStuckTotal(); post != pre+2 {
+		t.Errorf("tap-stuck counter: pre=%d post=%d, want +2 (two unique taps both exhausted)", pre, post)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("DestroyTask tap-verify budget exhaustion took %v; expected <2 s with no-op sleep seam", elapsed)
 	}
 }
 

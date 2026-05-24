@@ -99,6 +99,32 @@ var (
 	// surfaces in operator logs within one stress-loop iteration.
 	destroyLockPollAttempts = 25
 	destroyLockPollInterval = 200 * time.Millisecond
+
+	// T-8b-stress-r8 r24-A2-S2: DestroyTask tap-deletion-verify budget.
+	// Stress-r8 RED 3/60 showed cycles 1-19 failing identically with
+	// `Tap zsbx-nm-N already exists`: the kernel hadn't finished
+	// evicting the tap netdev between DestroyTask's best-effort
+	// removeTapFn call and the next StartTask's tuntap-add.
+	// `ip link delete` returns synchronously but the tun-driver
+	// releases the netdev asynchronously (same mechanism as the v15
+	// r3-B collision-replace race, but on the destroy side this time).
+	//
+	// The strictly-stronger predicate: after issuing `ip link delete`,
+	// poll `ip link show <tap>` until ENODEV before declaring the
+	// task terminal. If the netdev is still listed, the next alloc's
+	// tuntap-add WILL collide; the existing v13 pre-delete recovers
+	// the EEXIST but adds a second tuntap-add cycle that's
+	// load-bearing on a healthy kernel. Closing the window here is
+	// the better fix.
+	//
+	// Budget: 5 s wall at 100 ms cadence (50 attempts). Generous
+	// against a wedged tun-driver but short enough that a stuck
+	// netdev surfaces in operator logs within one stress-loop
+	// iteration. Mirrors the r4-A/r5-A 5 s ceiling, with a finer
+	// cadence because `ip link show` is a single netlink RPC (not
+	// a workqueue wait) so polling more often is cheap.
+	destroyTapDeletePollAttempts = 50
+	destroyTapDeletePollInterval = 100 * time.Millisecond
 )
 
 // SetDestroyReapWaitForTest overrides the reap-wait poll budget so tests
@@ -120,6 +146,20 @@ func SetDestroyLockPollForTest(attempts int, interval time.Duration) (int, time.
 	prevI := destroyLockPollInterval
 	destroyLockPollAttempts = attempts
 	destroyLockPollInterval = interval
+	return prevA, prevI
+}
+
+// SetDestroyTapDeletePollForTest overrides the tap-deletion-verify poll
+// budget so tests don't sleep 5 s. Returns the previous (attempts,
+// interval) pair so the caller can restore them on cleanup. Mirrors
+// SetDestroyReapWaitForTest / SetDestroyLockPollForTest.
+//
+// T-8b-stress-r8 r24-A2-S2.
+func SetDestroyTapDeletePollForTest(attempts int, interval time.Duration) (int, time.Duration) {
+	prevA := destroyTapDeletePollAttempts
+	prevI := destroyTapDeletePollInterval
+	destroyTapDeletePollAttempts = attempts
+	destroyTapDeletePollInterval = interval
 	return prevA, prevI
 }
 
@@ -545,6 +585,37 @@ func taskDiskPathsForLockProbe(h *taskHandle, runDir string) []string {
 	return paths
 }
 
+// uniqueTapsForVerify enumerates the distinct tap names this handle
+// owns, for the r24-A2-S2 synchronous verify gate. The rule:
+//
+//   - If h.tap is non-empty, include it.
+//   - If h.vmIndex is in range and the derived name differs from
+//     h.tap, include the VMIndex-derived defensive name.
+//
+// Returns 0, 1, or 2 entries. The caller iterates and verifies each.
+// Mirrors the pre-existing two-pass removeTapFn structure in
+// DestroyTask so we cover both the happy-path lifecycle and the
+// half-initialised / external-orphan failure modes the v14 defensive
+// cleanup pass added.
+//
+// T-8b-stress-r8 r24-A2-S2.
+func uniqueTapsForVerify(h *taskHandle) []string {
+	if h == nil {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	if h.tap != "" {
+		out = append(out, h.tap)
+	}
+	if h.vmIndex >= 1 && h.vmIndex <= 155 {
+		defensiveTap, _, _, _, err := computeTapAddresses(h.vmIndex, defaultSubnetBaseOctet)
+		if err == nil && defensiveTap != "" && defensiveTap != h.tap {
+			out = append(out, defensiveTap)
+		}
+	}
+	return out
+}
+
 // waitForOFDLockRelease iterates the task's disk paths and polls
 // F_OFD_SETLK acquisition on each one. Returns nil on success; on the
 // first probe budget exhaustion or unexpected syscall error, returns a
@@ -563,6 +634,151 @@ func waitForOFDLockRelease(diskPaths []string) error {
 		}
 	}
 	return nil
+}
+
+// sleepForTapDeletePoll is the package-level seam tests swap so the
+// DestroyTask tap-deletion-verify poll loop doesn't add real wall
+// time. Default is time.Sleep — production callers block while the
+// tun-driver evicts the netdev. Mirrors sleepForReapPoll /
+// sleepForOFDLockPoll seam shapes so the test ergonomics are uniform.
+//
+// T-8b-stress-r8 r24-A2-S2.
+var sleepForTapDeletePoll = func(d time.Duration) {
+	time.Sleep(d)
+}
+
+// SetSleepForTapDeletePollForTest swaps the tap-deletion-verify sleep
+// seam. Returns the previous fn so the caller can restore it on
+// cleanup. Tests typically install a no-op so the poll loop spins
+// through its budget instantly rather than waiting real wall time.
+//
+// T-8b-stress-r8 r24-A2-S2.
+func SetSleepForTapDeletePollForTest(fn func(d time.Duration)) func(d time.Duration) {
+	prev := sleepForTapDeletePoll
+	if fn != nil {
+		sleepForTapDeletePoll = fn
+	}
+	return prev
+}
+
+// tapLookupFn is the package-level seam tests swap to drive the
+// tap-existence probe in deleteTapAndVerifyAbsent. Default
+// (realTapLookup) shells to `ip link show <tap>` and classifies the
+// result. Returns (absent, err): absent=true means the kernel
+// reported ENODEV; err is non-nil only on unexpected syscall failure
+// (transient netlink errors are treated as "still present" so the
+// poll loop continues to retry).
+//
+// Tests swap this directly to drive the poll cadence without
+// engineering real netdev state — same shape as tryAcquireOFDLockFn.
+//
+// T-8b-stress-r8 r24-A2-S2.
+var tapLookupFn = realTapLookup
+
+// SetTapLookupForTest swaps the tap-existence probe seam. Returns
+// the previous fn so the caller can restore it on cleanup. Tests
+// drive the poll loop by returning a canned sequence of
+// (absent=false, …, absent=true) without engineering real netdev
+// state.
+//
+// T-8b-stress-r8 r24-A2-S2.
+func SetTapLookupForTest(fn func(tapName string) (bool, error)) func(string) (bool, error) {
+	prev := tapLookupFn
+	if fn != nil {
+		tapLookupFn = fn
+	}
+	return prev
+}
+
+// realTapLookup runs `ip link show <tap>` and returns (absent, err).
+// ENODEV (matched via isNoSuchDevice on the combined output) maps to
+// absent=true / nil err. A successful exec means the device is still
+// present → absent=false / nil err. A non-ENODEV exec error is
+// returned as-is to the caller (transient netlink, EPERM, etc.); the
+// poll loop treats it as "still present" and retries until budget
+// exhausts.
+//
+// T-8b-stress-r8 r24-A2-S2.
+func realTapLookup(tapName string) (bool, error) {
+	if tapName == "" {
+		return true, nil // never had a tap — trivially absent
+	}
+	out, err := runIP("link", "show", tapName)
+	if err != nil {
+		if isNoSuchDevice(out) {
+			return true, nil
+		}
+		// Unexpected error — surface to the caller. The poll loop
+		// retries; if every attempt fails the same way, budget
+		// exhausts and the counter bumps with the error in the WARN.
+		return false, fmt.Errorf("ip link show %s: %w (output=%q)", tapName, err, string(out))
+	}
+	// `ip link show` exited 0 → device exists.
+	return false, nil
+}
+
+// deleteTapAndVerifyAbsent is the r24-A2-S2 synchronous gate.
+// Issues `ip link delete <tap>` (tolerating ENODEV — already gone is
+// success), then polls `ip link show <tap>` until the kernel reports
+// ENODEV or the budget exhausts.
+//
+// Returns nil on observed ENODEV. Returns a descriptive error on
+// budget exhaustion or on an unexpected `ip link delete` failure.
+// The caller (DestroyTask) bumps the counter + WARN-logs on error
+// and proceeds — mirrors r4-A/r5-A's "never block Nomad destroy"
+// tolerance.
+//
+// Why this is in addition to the existing best-effort removeTapFn:
+// the prior call swallowed errors but didn't verify the kernel
+// observed the eviction. The next StartTask's tuntap-add can hit
+// EEXIST until the tun-driver's internal cleanup tick runs. The v15
+// r3-B collision-replace path absorbs this on the CREATE side, but
+// closing the window on the DESTROY side eliminates the second
+// tuntap-add cycle and the orphan-counter bump that comes with it.
+//
+// T-8b-stress-r8 r24-A2-S2.
+func deleteTapAndVerifyAbsent(tapName string) error {
+	if tapName == "" {
+		return nil // never had a tap — nothing to verify
+	}
+	// Issue the delete via removeTapFn so the existing test seams
+	// (SetRemoveTapForTest in stop_task_test.go) see this call too.
+	// realTeardownTap already tolerates ENODEV via isNoSuchDevice —
+	// so a fresh-from-removeTapFn-call-above handle takes the no-op
+	// branch here on the second call. We still need the issue-then-
+	// verify pair because the prior removeTapFn call site doesn't
+	// guarantee the device is gone before returning (the kernel
+	// release is async).
+	if err := removeTapFn(tapName); err != nil {
+		return fmt.Errorf("ip link delete %s: %w", tapName, err)
+	}
+	// Poll for ENODEV. The kernel release is dominated by the
+	// tun-driver's internal cleanup tick, not poll cadence — 100 ms
+	// is the same shape v15 r3-B uses for the symmetric race on the
+	// CREATE side.
+	attempts := destroyTapDeletePollAttempts
+	interval := destroyTapDeletePollInterval
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		absent, err := tapLookupFn(tapName)
+		if err != nil {
+			// Track the last transient error so a stuck netlink
+			// surfaces in the budget-exhaust message instead of
+			// being silently retried into oblivion.
+			lastErr = err
+		} else if absent {
+			return nil
+		}
+		if i+1 < attempts {
+			sleepForTapDeletePoll(interval)
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("tap %s still present after %d × %v poll budget (last lookup err: %v)",
+			tapName, attempts, interval, lastErr)
+	}
+	return fmt.Errorf("tap %s still present after %d × %v poll budget; kernel netdev cleanup may be stuck",
+		tapName, attempts, interval)
 }
 
 // waitForExit blocks up to `d` for the handle's supervisor goroutine to
@@ -790,6 +1006,41 @@ func (p *Plugin) DestroyTask(taskID string, force bool) error {
 			}
 		}
 	}
+
+	// T-8b-stress-r8 r24-A2-S2: synchronous tap-delete + ENODEV-verify
+	// gate. The two best-effort removeTapFn calls above swallow errors
+	// and don't verify the kernel observed the eviction. Stress-r8 RED
+	// 3/60 showed cycles 1-19 failing identically with
+	// `Tap zsbx-nm-N already exists`: `ip link delete` returns
+	// synchronously but the tun-driver releases the netdev
+	// asynchronously, so the next StartTask's tuntap-add can collide
+	// until the kernel's internal cleanup tick runs. The v13 collision-
+	// replace path absorbs the EEXIST on the CREATE side but adds a
+	// second tuntap-add cycle (and the orphan-counter bump that comes
+	// with it) — closing the window here is the better fix.
+	//
+	// Strategy: enumerate the unique tap names this handle owns (h.tap
+	// + the VMIndex-derived defensive name), then for each one run
+	// `deleteTapAndVerifyAbsent` which re-issues the delete (idempotent
+	// — realTeardownTap tolerates ENODEV) and polls `ip link show`
+	// until ENODEV or the budget exhausts.
+	//
+	// On budget exhaustion: bump `destroy_task_tap_stuck_total`,
+	// WARN-log, proceed. Mirrors r4-A/r5-A's "never block Nomad
+	// destroy" tolerance — the operator's diagnostic is the metric +
+	// WARN line, not a destroy-loop.
+	for _, tapName := range uniqueTapsForVerify(h) {
+		if err := deleteTapAndVerifyAbsent(tapName); err != nil {
+			incDestroyTaskTapStuck()
+			p.logger.Warn("ch: DestroyTask: tap netdev not evicted within budget; next StartTask on the same vm_index may hit EEXIST",
+				"task_id", taskID,
+				"tap", tapName,
+				"vm_index", h.vmIndex,
+				"err", err,
+				"destroy_task_tap_stuck_total", DestroyTaskTapStuckTotal())
+		}
+	}
+
 	if h.apiSocket != "" {
 		if err := os.Remove(h.apiSocket); err != nil && !os.IsNotExist(err) {
 			p.logger.Warn("ch: DestroyTask: api socket removal failed (best-effort)",
