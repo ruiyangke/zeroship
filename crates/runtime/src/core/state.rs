@@ -715,6 +715,12 @@ pub enum ResolveValue {
     I32(i32),
     /// Resolve with a JS Number from a 64-bit float.
     F64(f64),
+    /// Resolve with a JS `BigInt` from a signed 64-bit integer. Used by
+    /// callers (e.g. `env.kv.incr`) whose counter can exceed the
+    /// `Number.MAX_SAFE_INTEGER` (2^53) range an `f64` represents
+    /// exactly — beyond that, an `f64` silently loses precision, so the
+    /// value is handed back as a `BigInt` instead.
+    BigInt(i64),
     /// Reject with the given V8 value.
     Reject(v8::Global<v8::Value>),
     /// Reject with a typed Error (TypeError / RangeError / Error)

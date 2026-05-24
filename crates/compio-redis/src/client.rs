@@ -215,6 +215,30 @@ impl Client {
         expect_integer(frame)
     }
 
+    /// PERSIST key — remove the TTL so the key never expires. Returns
+    /// true when a TTL was removed, false when the key is missing or
+    /// already had no TTL.
+    pub async fn persist(&mut self, key: &str) -> Result<bool> {
+        let frame = self.send_recv(build_cmd(&[b"PERSIST", key.as_bytes()])).await?;
+        Ok(expect_integer(frame)? > 0)
+    }
+
+    /// EVAL a Lua script, returning the integer reply. `keys` are the
+    /// `KEYS[1..]` arguments (slot-routed by Redis) and `args` are the
+    /// `ARGV[1..]` arguments. Only the integer reply is decoded —
+    /// sufficient for the atomic incr-with-TTL script (see plugin-kv).
+    pub async fn eval(&mut self, script: &str, keys: &[&str], args: &[&str]) -> Result<i64> {
+        let nkeys = keys.len().to_string();
+        let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + keys.len() + args.len());
+        parts.push(b"EVAL");
+        parts.push(script.as_bytes());
+        parts.push(nkeys.as_bytes());
+        for k in keys { parts.push(k.as_bytes()); }
+        for a in args { parts.push(a.as_bytes()); }
+        let frame = self.send_recv(build_cmd(&parts)).await?;
+        expect_integer(frame)
+    }
+
     /// DECRBY — negative counterpart. `decr_by(k, n)` == `incr_by(k, -n)`
     /// but ships the idiomatic command the Redis tools expect in MONITOR
     /// output etc.

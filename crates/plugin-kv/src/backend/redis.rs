@@ -20,7 +20,50 @@ use std::cell::RefCell;
 
 use compio_redis::{ClusterClient, Pool};
 
-use super::{scope, Backend};
+use super::{classify_incr_error, scope, Backend, TtlState};
+use crate::error::{redact_url, KvError};
+use crate::limits::escape_glob;
+
+/// Lua for atomic incr-with-TTL-on-create. `KEYS[1]` is the scoped key,
+/// `ARGV[1]` the (string) delta, `ARGV[2]` the (string) ttl_ms — empty
+/// when no TTL. The script INCRBYs, then PEXPIREs **only when the key
+/// did not exist before the increment**, so an existing key's TTL is
+/// preserved (fixed-window rate-limit semantics). Returns the new value.
+const INCR_TTL_SCRIPT: &str = "local e=redis.call('EXISTS',KEYS[1]); \
+local v=redis.call('INCRBY',KEYS[1],ARGV[1]); \
+if e==0 and ARGV[2]~='' then redis.call('PEXPIRE',KEYS[1],ARGV[2]) end; \
+return v";
+
+/// Map a `compio_redis::Error` raised on the `incr` path into a typed
+/// [`KvError`] — server-side numeric complaints become `NonNumeric` /
+/// `Overflow`, everything else stays a backend/connection error.
+fn map_incr_err(e: compio_redis::Error) -> KvError {
+    match e {
+        compio_redis::Error::Server(msg) => classify_incr_error(&msg),
+        other => map_redis_err("incr", other, None),
+    }
+}
+
+/// Map a `compio_redis::Error` into a typed [`KvError`]. Connection /
+/// transport / pool failures become [`KvError::Connection`] with any
+/// URL credentials redacted from the message; the rest become
+/// [`KvError::Backend`].
+fn map_redis_err(op: &str, e: compio_redis::Error, url: Option<&str>) -> KvError {
+    use compio_redis::Error;
+    let redacted = |m: &str| match url {
+        Some(u) => format!("kv: {op}: {m} ({})", redact_url(u)),
+        None => format!("kv: {op}: {m}"),
+    };
+    match e {
+        Error::Io(_)
+        | Error::Pool(_)
+        | Error::Auth(_)
+        | Error::Config(_)
+        | Error::ClusterBootstrap(_)
+        | Error::NoRoute { .. } => KvError::connection(redacted(&e.to_string())),
+        other => KvError::backend(redacted(&other.to_string())),
+    }
+}
 
 #[derive(Debug)]
 pub struct Redis {
@@ -94,21 +137,23 @@ impl Redis {
         Self { url: url.into(), max_size }
     }
 
-    async fn pool(&self) -> Result<Pool, String> {
+    async fn pool(&self) -> Result<Pool, KvError> {
         // Fast path: already initialized on this thread.
         let cached = POOLS.with(|p| p.borrow().get(&self.url).cloned());
         if let Some(p) = cached {
             return Ok(p);
         }
-        // Slow path: open + cache.
+        // Slow path: open + cache. Connect failures redact credentials.
         let pool = Pool::connect(&self.url, self.max_size)
             .await
-            .map_err(|e| format!("kv: redis connect '{}': {e}", self.url))?;
+            .map_err(|e| KvError::connection(format!(
+                "kv: redis connect '{}': {e}", redact_url(&self.url)
+            )))?;
         POOLS.with(|p| { p.borrow_mut().insert(self.url.clone(), pool.clone()); });
         Ok(pool)
     }
 
-    async fn cluster(&self) -> Result<ClusterClient, String> {
+    async fn cluster(&self) -> Result<ClusterClient, KvError> {
         let seeds = seeds_from_url(&self.url);
         let cache_key = {
             let mut s = seeds.clone();
@@ -122,24 +167,35 @@ impl Redis {
         let seed_refs: Vec<&str> = seeds.iter().map(String::as_str).collect();
         let client = ClusterClient::connect(&seed_refs, self.max_size)
             .await
-            .map_err(|e| format!("kv: cluster connect '{}': {e}", self.url))?;
+            .map_err(|e| KvError::connection(format!(
+                "kv: cluster connect '{}': {e}", redact_url(&self.url)
+            )))?;
         CLUSTER_CLIENTS.with(|c| { c.borrow_mut().insert(cache_key, client.clone()); });
         Ok(client)
+    }
+
+    /// Acquire a single-node connection, mapping pool-acquire failures
+    /// to a typed connection error with credentials redacted.
+    async fn conn(&self) -> Result<compio_redis::pool::PooledConn, KvError> {
+        let pool = self.pool().await?;
+        pool.acquire()
+            .await
+            .map_err(|e| map_redis_err("acquire", e, Some(&self.url)))
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl Backend for Redis {
-    async fn get(&self, app_id: &str, key: &str) -> Result<Option<String>, String> {
+    async fn get(&self, app_id: &str, key: &str) -> Result<Option<String>, KvError> {
         let scoped = scope(app_id, key);
         let bytes = if is_cluster_url(&self.url) {
             self.cluster().await?
                 .get(&scoped).await
-                .map_err(|e| format!("kv: get: {e}"))?
+                .map_err(|e| map_redis_err("get", e, Some(&self.url)))?
         } else {
-            let pool = self.pool().await?;
-            let mut conn = pool.acquire().await.map_err(|e| format!("kv: {e}"))?;
-            conn.get(&scoped).await.map_err(|e| format!("kv: get: {e}"))?
+            self.conn().await?
+                .get(&scoped).await
+                .map_err(|e| map_redis_err("get", e, Some(&self.url)))?
         };
         Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
@@ -150,94 +206,163 @@ impl Backend for Redis {
         key: &str,
         value: &str,
         ttl_ms: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
             self.cluster().await?
                 .set(&scoped, value.as_bytes(), ttl_ms).await
-                .map_err(|e| format!("kv: set: {e}"))
+                .map_err(|e| map_redis_err("set", e, Some(&self.url)))
         } else {
-            let pool = self.pool().await?;
-            let mut conn = pool.acquire().await.map_err(|e| format!("kv: {e}"))?;
-            conn.set(&scoped, value.as_bytes(), ttl_ms).await
-                .map_err(|e| format!("kv: set: {e}"))
+            self.conn().await?
+                .set(&scoped, value.as_bytes(), ttl_ms).await
+                .map_err(|e| map_redis_err("set", e, Some(&self.url)))
         }
     }
 
-    async fn delete(&self, app_id: &str, key: &str) -> Result<bool, String> {
+    async fn delete(&self, app_id: &str, key: &str) -> Result<bool, KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
             self.cluster().await?
                 .del(&scoped).await
-                .map_err(|e| format!("kv: del: {e}"))
+                .map_err(|e| map_redis_err("del", e, Some(&self.url)))
         } else {
-            let pool = self.pool().await?;
-            let mut conn = pool.acquire().await.map_err(|e| format!("kv: {e}"))?;
-            conn.del(&scoped).await.map_err(|e| format!("kv: del: {e}"))
+            self.conn().await?
+                .del(&scoped).await
+                .map_err(|e| map_redis_err("del", e, Some(&self.url)))
         }
     }
 
-    async fn incr(&self, app_id: &str, key: &str, delta: i64) -> Result<i64, String> {
+    async fn incr(
+        &self,
+        app_id: &str,
+        key: &str,
+        delta: i64,
+        ttl_ms: Option<u64>,
+    ) -> Result<i64, KvError> {
+        let scoped = scope(app_id, key);
+        let delta_s = delta.to_string();
+        // ARGV[2] is the ttl_ms string, empty when no TTL — the script
+        // only PEXPIREs when the key was created this call.
+        let ttl_s = ttl_ms.map(|ms| ms.to_string()).unwrap_or_default();
+        let keys = [scoped.as_str()];
+        let args = [delta_s.as_str(), ttl_s.as_str()];
+        if is_cluster_url(&self.url) {
+            self.cluster().await?
+                .eval(INCR_TTL_SCRIPT, &keys, &args).await
+                .map_err(map_incr_err)
+        } else {
+            self.conn().await?
+                .eval(INCR_TTL_SCRIPT, &keys, &args).await
+                .map_err(map_incr_err)
+        }
+    }
+
+    async fn set_if_absent(
+        &self,
+        app_id: &str,
+        key: &str,
+        value: &str,
+        ttl_ms: Option<u64>,
+    ) -> Result<bool, KvError> {
         let scoped = scope(app_id, key);
         if is_cluster_url(&self.url) {
             self.cluster().await?
-                .incr_by(&scoped, delta).await
-                .map_err(|e| format!("kv: incr: {e}"))
+                .set_nx(&scoped, value.as_bytes(), ttl_ms).await
+                .map_err(|e| map_redis_err("setIfAbsent", e, Some(&self.url)))
         } else {
-            let pool = self.pool().await?;
-            let mut conn = pool.acquire().await.map_err(|e| format!("kv: {e}"))?;
-            conn.incr_by(&scoped, delta).await
-                .map_err(|e| format!("kv: incr: {e}"))
+            self.conn().await?
+                .set_nx(&scoped, value.as_bytes(), ttl_ms).await
+                .map_err(|e| map_redis_err("setIfAbsent", e, Some(&self.url)))
         }
     }
 
-    async fn list(&self, app_id: &str, prefix: &str) -> Result<Vec<String>, String> {
+    async fn expire(&self, app_id: &str, key: &str, ttl_ms: u64) -> Result<bool, KvError> {
+        let scoped = scope(app_id, key);
+        if is_cluster_url(&self.url) {
+            self.cluster().await?
+                .pexpire(&scoped, ttl_ms).await
+                .map_err(|e| map_redis_err("expire", e, Some(&self.url)))
+        } else {
+            self.conn().await?
+                .pexpire(&scoped, ttl_ms).await
+                .map_err(|e| map_redis_err("expire", e, Some(&self.url)))
+        }
+    }
+
+    async fn ttl(&self, app_id: &str, key: &str) -> Result<TtlState, KvError> {
+        let scoped = scope(app_id, key);
+        let raw = if is_cluster_url(&self.url) {
+            self.cluster().await?
+                .pttl(&scoped).await
+                .map_err(|e| map_redis_err("ttl", e, Some(&self.url)))?
+        } else {
+            self.conn().await?
+                .pttl(&scoped).await
+                .map_err(|e| map_redis_err("ttl", e, Some(&self.url)))?
+        };
+        // PTTL wire semantics: -2 missing, -1 no expiry, n>=0 ms remaining.
+        Ok(match raw {
+            -2 => TtlState::Missing,
+            -1 => TtlState::NoExpiry,
+            n => TtlState::ExpiresInMs(n.max(0) as u64),
+        })
+    }
+
+    async fn persist(&self, app_id: &str, key: &str) -> Result<bool, KvError> {
+        let scoped = scope(app_id, key);
+        if is_cluster_url(&self.url) {
+            self.cluster().await?
+                .persist(&scoped).await
+                .map_err(|e| map_redis_err("persist", e, Some(&self.url)))
+        } else {
+            self.conn().await?
+                .persist(&scoped).await
+                .map_err(|e| map_redis_err("persist", e, Some(&self.url)))
+        }
+    }
+
+    async fn list(
+        &self,
+        app_id: &str,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<String>, Option<String>), KvError> {
         // Hash-tag pattern targets exactly the slot that owns this app.
-        // In cluster mode, we pass the app_id as the routing key so SCAN
-        // hits that specific node; single-node mode just iterates the
-        // whole keyspace.
-        let pattern = format!("{{{app_id}}}:{prefix}*");
+        // The prefix is glob-escaped so metacharacters in a creator's
+        // key prefix can't widen the MATCH. In cluster mode we pass the
+        // app_id as the routing key so SCAN hits that specific node.
+        let pattern = format!("{{{app_id}}}:{}*", escape_glob(prefix));
         let app_prefix = format!("{{{app_id}}}:");
 
-        let mut cursor = String::from("0");
-        let mut acc: Vec<String> = Vec::new();
+        // The opaque cursor we hand back to the SDK is the Redis SCAN
+        // cursor verbatim; `None` starts a fresh scan at "0". We do ONE
+        // SCAN call per `list`, returning whatever batch Redis yields
+        // (bounded by COUNT≈limit) plus the next cursor — the SDK pages
+        // by passing it straight back. A returned cursor of "0" means
+        // the scan is complete (we map that to `None`).
+        let scan_cursor = cursor.unwrap_or("0");
+        // COUNT is a hint, not a hard cap — Redis may return slightly
+        // more or fewer. We pass `limit` as the hint and don't truncate
+        // (a truncate would desync the cursor).
+        let count = limit.min(u32::MAX as usize) as u32;
 
-        if is_cluster_url(&self.url) {
-            let client = self.cluster().await?;
-            loop {
-                let (next, batch) = client
-                    .scan(app_id, &cursor, &pattern, 500)
-                    .await
-                    .map_err(|e| format!("kv: scan: {e}"))?;
-                for k in batch {
-                    if let Some(stripped) = k.strip_prefix(&app_prefix) {
-                        acc.push(stripped.to_string());
-                    }
-                }
-                if next == "0" { break; }
-                cursor = next;
-            }
+        let (next, batch) = if is_cluster_url(&self.url) {
+            self.cluster().await?
+                .scan(app_id, scan_cursor, &pattern, count).await
+                .map_err(|e| map_redis_err("scan", e, Some(&self.url)))?
         } else {
-            let pool = self.pool().await?;
-            let mut conn = pool.acquire().await.map_err(|e| format!("kv: {e}"))?;
-            loop {
-                let (next, batch) = conn
-                    .scan(&cursor, &pattern, 500)
-                    .await
-                    .map_err(|e| format!("kv: scan: {e}"))?;
-                for k in batch {
-                    if let Some(stripped) = k.strip_prefix(&app_prefix) {
-                        acc.push(stripped.to_string());
-                    }
-                }
-                if next == "0" { break; }
-                cursor = next;
-            }
-        }
+            self.conn().await?
+                .scan(scan_cursor, &pattern, count).await
+                .map_err(|e| map_redis_err("scan", e, Some(&self.url)))?
+        };
 
-        acc.sort();
-        acc.dedup();
-        Ok(acc)
+        let keys: Vec<String> = batch
+            .into_iter()
+            .filter_map(|k| k.strip_prefix(&app_prefix).map(str::to_string))
+            .collect();
+        let next_cursor = if next == "0" { None } else { Some(next) };
+        Ok((keys, next_cursor))
     }
 }
 

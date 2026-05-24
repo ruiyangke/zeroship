@@ -2070,6 +2070,10 @@ impl RuntimeInner {
                             let v = v8::Number::new(scope, n);
                             r.resolve(scope, v.into());
                         }
+                        ResolveValue::BigInt(n) => {
+                            let v = v8::BigInt::new_from_i64(scope, n);
+                            r.resolve(scope, v.into());
+                        }
                         ResolveValue::RejectError(e) => {
                             // Materialise the typed exception per
                             // OpError::kind. Mirrors the sync-path
